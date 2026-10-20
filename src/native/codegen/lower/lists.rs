@@ -356,7 +356,7 @@ impl BodyLowering<'_, '_, '_> {
     ) -> Option<Result<Option<Value>, Unsupported>> {
         if !super::super::super::intrinsics::is_lazy_facade(signature.owner)
             || signature.name != "lazy"
-            || !matches!(signature.params, [Ty::Fun(_)])
+            || !matches!(signature.params, [parameter] if parameter.is_fun())
             || !signature.ret.is_reference()
         {
             return None;

@@ -50,6 +50,11 @@ pub(super) fn attach(file: &mut File, src: &str) {
                     })
             };
             let anchor = match expr {
+                // kotlinc anchors a binary-operator form `a foo b` at its left operand, like `a + b`,
+                // even when the name starts the next line inside parentheses.
+                Expr::Call { .. } if file.infix_calls.contains(&(index as u32)) => {
+                    file.expr_spans[index]
+                }
                 Expr::Call { callee, .. } => match &file.expr_arena[callee.0 as usize] {
                     Expr::Member { name, .. } | Expr::SafeCall { name, .. } => {
                         member_name_span(callee.0 as usize, name)

@@ -13,7 +13,7 @@ use crate::ir::{
     Callee, ClassId, CtorDelegateTarget, FunId, IrLocalPropertyLayout, IrSuperCallKind, IrTypeOp,
     IrVirtualTarget,
 };
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 use super::super::super::encode::{BlockType, Code, Function, HeapType, Module, ValType};
 use super::super::super::objects::REFERENCE;
@@ -34,15 +34,15 @@ impl Body<'_> {
     /// The class of this file a type names, if it names one.
     pub(super) fn class_of_type(&self, ty: Ty) -> Option<ClassId> {
         self.classes?;
-        match ty.non_null() {
-            Ty::Obj(name, _) => self.ir.class_id_by_name(name),
+        match ty.non_null().kind() {
+            TyKind::Obj(name, _) => self.ir.class_id_by_name(name),
             _ => None,
         }
     }
 
     /// The type `class`'s instances have.
     fn object_type(&self, class: ClassId) -> Ty {
-        Ty::Obj(self.ir.classes[class as usize].fq_name, &[])
+        Ty::obj_name(self.ir.classes[class as usize].fq_name)
     }
 
     /// Push `id`, a value of a class type, as `class`'s struct.
@@ -335,7 +335,7 @@ impl Body<'_> {
         if params.len() != args.len() {
             return Err("a call whose arguments do not match its parameters".into());
         }
-        self.value(receiver, Ty::Obj(owner, &[]))?;
+        self.value(receiver, Ty::obj_name(owner))?;
         for (arg, param) in args.iter().zip(params) {
             self.value(*arg, param)?;
         }
@@ -469,7 +469,7 @@ impl Body<'_> {
                 let receiver = receiver.ok_or_else(|| {
                     "a receiver-less read of a cross-file member property".to_string()
                 })?;
-                self.value(receiver, Ty::Obj(entry.owner, &[]))?;
+                self.value(receiver, Ty::obj_name(entry.owner))?;
                 self.code.call(entry.getter);
                 return Ok(());
             }
@@ -535,7 +535,7 @@ impl Body<'_> {
                 let setter = entry
                     .setter
                     .ok_or_else(|| "a read-only cross-file property was written".to_string())?;
-                self.value(receiver, Ty::Obj(entry.owner, &[]))?;
+                self.value(receiver, Ty::obj_name(entry.owner))?;
                 self.value(value, entry.ty)?;
                 self.code.call(setter);
                 return Ok(());
@@ -694,16 +694,16 @@ impl Body<'_> {
                 super::describe(self.type_of(arg)?.unwrap_or(Ty::Unit))
             ));
         }
-        let nullable = matches!(target, Ty::Nullable(_)) && op != IrTypeOp::SafeCast;
+        let nullable = matches!(target.kind(), TyKind::Nullable(_)) && op != IrTypeOp::SafeCast;
         let tested = target.non_null();
         let value = self.local(REFERENCE);
         self.value(arg, any())?;
         self.code.local_tee(value);
-        match tested {
-            Ty::String => {
+        match tested.kind() {
+            TyKind::STRING => {
                 self.code.ref_test(nullable, STRING_HEAP);
             }
-            Ty::Obj(name, _) if name == crate::types::wk::any() => {
+            TyKind::Obj(name, _) if name == crate::types::wk::any() => {
                 self.code.ref_test(nullable, HeapType::Eq);
             }
             _ => match self.class_of_type(tested) {
@@ -862,7 +862,7 @@ impl Body<'_> {
 
 /// `kotlin.Any`, the type every class value is read as before its class is tested.
 fn any() -> Ty {
-    Ty::Obj(crate::types::wk::any(), &[])
+    Ty::obj_name(crate::types::wk::any())
 }
 
 /// Push the default value of a `value` field.
@@ -888,7 +888,7 @@ pub(super) fn define_class_functions(
         let id = id as ClassId;
         let form = &classes.forms[id as usize];
         if let Some(constructor) = form.constructor {
-            let mut parameters = vec![Ty::Obj(class.fq_name, &[])];
+            let mut parameters = vec![Ty::obj_name(class.fq_name)];
             parameters.extend(class.ctor_args.iter().map(|arg| arg.ty));
             let mut declared = crate::fx_hash::HashMap::default();
             for &root in class
@@ -906,7 +906,7 @@ pub(super) fn define_class_functions(
         }
         for (ordinal, &constructor) in form.secondaries.iter().enumerate() {
             let secondary = &class.secondary_ctors[ordinal];
-            let mut parameters = vec![Ty::Obj(class.fq_name, &[])];
+            let mut parameters = vec![Ty::obj_name(class.fq_name)];
             parameters.extend(secondary.prefix_params.iter().copied());
             parameters.extend(secondary.params.iter().copied());
             let mut declared = crate::fx_hash::HashMap::default();

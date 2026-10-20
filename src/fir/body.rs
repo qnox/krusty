@@ -1280,12 +1280,15 @@ pub enum FirExprKind {
         rhs_primitive: ResolvedTy,
         comparison: ResolvedTy,
     },
+    /// `ends_inlined_call`: the selected range declaration is an inline function (`UInt.rangeTo`)
+    /// that this construction realizes in place of the body kotlinc inlines.
     Range {
         operation: FirRangeOperation,
         start: FirExprId,
         start_type: ResolvedTy,
         end: FirExprId,
         end_type: ResolvedTy,
+        ends_inlined_call: bool,
     },
     InRange {
         operation: FirRangeOperation,

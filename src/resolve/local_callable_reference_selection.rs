@@ -5,6 +5,7 @@
 //! candidates; only recording the selected local declaration is specific to this module.
 
 use super::*;
+use crate::types::TyKind;
 
 impl Checker<'_> {
     pub(super) fn select_receiverless_local_reference(
@@ -14,7 +15,7 @@ impl Checker<'_> {
         name: &str,
         expected: Option<Ty>,
     ) -> Option<Ty> {
-        if let Some(Ty::Fun(expected)) = expected {
+        if let Some(TyKind::Fun(expected)) = expected.map(Ty::kind) {
             if let Some(overloads) = self.lookup_local_fun_overloads(scope, name) {
                 let local_functions = overloads
                     .into_iter()
@@ -63,7 +64,7 @@ impl Checker<'_> {
                     expected.ret,
                 )?;
                 let call_sig = crate::libraries::CallSig {
-                    param_defaults: signature.param_defaults.clone(),
+                    param_defaults: signature.param_defaults,
                     required: signature.required,
                     vararg: signature.vararg(),
                     vararg_index: signature.vararg_index,

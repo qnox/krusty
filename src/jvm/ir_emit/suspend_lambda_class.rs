@@ -10,6 +10,7 @@
 use super::*;
 use crate::jvm::suspend::cps::SuspendLambdaMember;
 use crate::jvm::suspend::SuspendLambdaClass;
+use crate::types::TyKind;
 
 const SUSPEND_LAMBDA: &str = "kotlin/coroutines/jvm/internal/SuspendLambda";
 const CONTINUATION: &str = "kotlin/coroutines/Continuation";
@@ -151,7 +152,7 @@ impl Shape {
                 private: field.is_private(),
             }
         };
-        let Ty::Fun(signature) = lambda.function_type.non_null() else {
+        let TyKind::Fun(signature) = lambda.function_type.non_null().kind() else {
             unreachable!("a suspend lambda has a function type")
         };
         let parameters = lambda
@@ -486,7 +487,7 @@ fn lambda_metadata(
         lambda.function_type,
         &lambda.type_parameters,
     );
-    let Ty::Fun(signature) = function_type.non_null() else {
+    let TyKind::Fun(signature) = function_type.non_null().kind() else {
         unreachable!("a suspend lambda has a function type")
     };
     let own = &signature.params[signature.context_count..];

@@ -26,7 +26,7 @@ use crate::ir::{
     ClassId, ExprId, IrConst, IrCtorArg, IrExpr, IrField, IrFile, IrParameterRole, IrTypeOp,
 };
 use crate::jvm::lambda_classes::{site, Site};
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 const SUSPEND_LAMBDA: &str = "kotlin/coroutines/jvm/internal/SuspendLambda";
 
@@ -498,8 +498,8 @@ fn declare_class(
     let mut class = crate::ir::IrClass::synthetic(site.class);
     class.superclass = crate::types::type_name(SUSPEND_LAMBDA);
     class.enclosure = ir.callable_reference_enclosures.get(&site.node).copied();
-    let arity = match site.function_type.non_null() {
-        Ty::Fun(signature) => signature.params.len() + 1,
+    let arity = match site.function_type.non_null().kind() {
+        TyKind::Fun(signature) => signature.params.len() + 1,
         _ => unreachable!("a suspend lambda has a function type"),
     };
     class

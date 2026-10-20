@@ -25,6 +25,7 @@
 //! arguments, as kotlinc's `extractArgumentsTypeRefAndSource` does: a typealias reference whose
 //! expansion reorders or adds arguments reports at the nearest written reference that has one.
 
+use crate::types::TyKind;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -520,8 +521,8 @@ impl Checker<'_> {
             .unwrap_or(Ty::Error);
         if !vararg
             || !matches!(
-                element.non_null(),
-                Ty::Obj(..) | Ty::TyParam(..) | Ty::Fun(_)
+                element.non_null().kind(),
+                TyKind::Obj(..) | TyKind::TyParam(..) | TyKind::Fun(_)
             )
         {
             return Occurrence {
@@ -598,23 +599,25 @@ impl Checker<'_> {
         site: &Site<'_, '_>,
         conflicts: &mut Vec<Conflict>,
     ) {
-        match ty {
-            Ty::Nullable(inner) => self.walk_variance(walk, *inner, site, conflicts),
-            Ty::DefinitelyNotNull(inner) | Ty::PlatformNullable(inner) if walk.dnn_and_flexible => {
-                self.walk_variance(walk, *inner, site, conflicts)
+        match ty.kind() {
+            TyKind::Nullable(inner) => self.walk_variance(walk, inner, site, conflicts),
+            TyKind::DefinitelyNotNull(inner) | TyKind::PlatformNullable(inner)
+                if walk.dnn_and_flexible =>
+            {
+                self.walk_variance(walk, inner, site, conflicts)
             }
-            Ty::Intersection(parts) => {
+            TyKind::Intersection(parts) => {
                 for part in parts {
                     self.walk_variance(walk, *part, site, conflicts);
                 }
             }
-            Ty::TyParam(parameter, _) => {
+            TyKind::TyParam(parameter, _) => {
                 // A written `T & Any` resolves to the formal with its bound made non-null; it is
                 // still kotlinc's definitely-non-null type.
                 if written_definitely_non_null(site.origin) && !walk.dnn_and_flexible {
                     return;
                 }
-                let Some(declared) = walk.variances.get(parameter).copied() else {
+                let Some(declared) = walk.variances.get(parameter.as_str()).copied() else {
                     return;
                 };
                 if site.position.allows(declared)
@@ -624,13 +627,13 @@ impl Checker<'_> {
                 }
                 conflicts.push(Conflict {
                     span: site.span,
-                    parameter,
+                    parameter: parameter.as_str(),
                     declared,
                     position: site.position,
                     abbreviated: site.abbreviated,
                 });
             }
-            Ty::Obj(classifier, arguments) if !arguments.is_empty() => {
+            TyKind::Obj(classifier, arguments) if !arguments.is_empty() => {
                 let Some(record) = self.fed_source().classifier(classifier) else {
                     return;
                 };
@@ -639,11 +642,14 @@ impl Checker<'_> {
                     .iter()
                     .enumerate()
                     .filter_map(|(index, argument)| {
-                        let (projection, argument) = match *argument {
-                            Ty::StarProjection(_) => return None,
-                            Ty::InProjection(inner) => (TypeVariance::In, *inner),
-                            Ty::OutProjection(inner) => (TypeVariance::Out, *inner),
-                            argument => (TypeVariance::Invariant, argument),
+                        let (projection, argument) = {
+                            let argument = *argument;
+                            match argument.kind() {
+                                TyKind::StarProjection(_) => return None,
+                                TyKind::InProjection(inner) => (TypeVariance::In, inner),
+                                TyKind::OutProjection(inner) => (TypeVariance::Out, inner),
+                                _ => (TypeVariance::Invariant, argument),
+                            }
                         };
                         let position = site
                             .position
@@ -652,7 +658,7 @@ impl Checker<'_> {
                     });
                 self.walk_variance_arguments(walk, site, arguments.collect(), conflicts);
             }
-            Ty::Fun(signature) => {
+            TyKind::Fun(signature) => {
                 let components = signature
                     .params
                     .iter()
@@ -694,33 +700,36 @@ impl Checker<'_> {
     /// `ty` as kotlinc renders the declared type: a written `T & Any` is shown as the
     /// definitely-non-null type it declares.
     fn displayed_type(&self, walk: &Walk<'_, '_>, ty: Ty, origin: &Origin<'_>) -> Ty {
-        match ty {
-            Ty::TyParam(..) if written_definitely_non_null(origin) => {
-                Ty::DefinitelyNotNull(crate::types::intern_ty(ty))
+        match ty.kind() {
+            TyKind::TyParam(..) if written_definitely_non_null(origin) => {
+                Ty::from(TyKind::DefinitelyNotNull(ty))
             }
-            Ty::Nullable(inner) => Ty::nullable(self.displayed_type(walk, *inner, origin)),
-            Ty::Obj(classifier, arguments) if !arguments.is_empty() => {
+            TyKind::Nullable(inner) => Ty::nullable(self.displayed_type(walk, inner, origin)),
+            TyKind::Obj(classifier, arguments) if !arguments.is_empty() => {
                 let level = self.variance_level(walk, origin);
                 let arguments = arguments
                     .iter()
                     .enumerate()
                     .map(|(index, argument)| {
                         let origin = level.arguments.get(index).unwrap_or(&Origin::Inferred);
-                        match *argument {
-                            Ty::InProjection(inner) => {
-                                Ty::in_projection(self.displayed_type(walk, *inner, origin))
+                        {
+                            let argument = *argument;
+                            match argument.kind() {
+                                TyKind::InProjection(inner) => {
+                                    Ty::in_projection(self.displayed_type(walk, inner, origin))
+                                }
+                                TyKind::OutProjection(inner) => {
+                                    Ty::out_projection(self.displayed_type(walk, inner, origin))
+                                }
+                                TyKind::StarProjection(_) => argument,
+                                _ => self.displayed_type(walk, argument, origin),
                             }
-                            Ty::OutProjection(inner) => {
-                                Ty::out_projection(self.displayed_type(walk, *inner, origin))
-                            }
-                            Ty::StarProjection(_) => *argument,
-                            argument => self.displayed_type(walk, argument, origin),
                         }
                     })
                     .collect::<Vec<_>>();
                 Ty::obj_args_name(classifier, &arguments)
             }
-            Ty::Fun(signature) => {
+            TyKind::Fun(signature) => {
                 let level = self.variance_level(walk, origin);
                 let mut components = signature
                     .params
@@ -742,7 +751,7 @@ impl Checker<'_> {
                     signature.suspend,
                 )
             }
-            ty => ty,
+            _ => ty,
         }
     }
 
@@ -816,7 +825,7 @@ impl Checker<'_> {
 /// The written argument an alias right-hand-side level stands for, when the level is one of the
 /// alias's formals (`X`, `X?`, a projected `out X`).
 fn alias_formal<'a>(template: Ty, alias: &AliasUse<'a>) -> Option<&'a TypeRef> {
-    let Ty::TyParam(parameter, _) = unwrapped(template) else {
+    let TyKind::TyParam(parameter, _) = unwrapped(template).kind() else {
         return None;
     };
     let index = alias
@@ -833,9 +842,9 @@ fn expansion_level<'a>(
     spelling: &crate::spelling::Spelled,
     alias: &Rc<AliasUse<'a>>,
 ) -> Level<'a> {
-    let arguments = match unwrapped(template) {
-        Ty::Obj(_, arguments) => arguments.to_vec(),
-        Ty::Fun(signature) => signature
+    let arguments = match unwrapped(template).kind() {
+        TyKind::Obj(_, arguments) => arguments.to_vec(),
+        TyKind::Fun(signature) => signature
             .params
             .iter()
             .copied()
@@ -879,12 +888,12 @@ fn spelling_has_unsafe_variance(spelling: &crate::spelling::Spelled) -> bool {
 /// A right-hand-side level without its nullability and use-site projection, which are not levels
 /// of their own.
 fn unwrapped(ty: Ty) -> Ty {
-    match ty {
-        Ty::Nullable(inner)
-        | Ty::DefinitelyNotNull(inner)
-        | Ty::InProjection(inner)
-        | Ty::OutProjection(inner) => unwrapped(*inner),
-        ty => ty,
+    match ty.kind() {
+        TyKind::Nullable(inner)
+        | TyKind::DefinitelyNotNull(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner) => unwrapped(inner),
+        _ => ty,
     }
 }
 

@@ -12,27 +12,27 @@ use crate::fx_hash::HashMap;
 use super::receiver_hierarchy;
 use crate::libraries::function_classifiers::supertype_classifier;
 use crate::symbol_source::SymbolSource;
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 /// A type in the nominal form FIR compares: every function type is the `FunctionN` /
 /// `SuspendFunctionN` classifier it is an instance of, so function types and classifier spellings
 /// share one hierarchy (`KSuspendFunction1<A, R>` reaches `SuspendFunction1<A, R>`).
 pub(crate) fn nominal_type(ty: Ty) -> Ty {
-    match ty {
-        Ty::Fun(_) => nominal_type(supertype_classifier(ty)),
-        Ty::Obj(name, args) if !args.is_empty() => Ty::obj_args_name(
+    match ty.kind() {
+        TyKind::Fun(_) => nominal_type(supertype_classifier(ty)),
+        TyKind::Obj(name, args) if !args.is_empty() => Ty::obj_args_name(
             name,
             &args.iter().copied().map(nominal_type).collect::<Vec<_>>(),
         ),
-        Ty::Nullable(inner) => Ty::nullable(nominal_type(*inner)),
-        Ty::PlatformNullable(inner) => Ty::platform_nullable(nominal_type(*inner)),
-        Ty::InProjection(inner) => Ty::in_projection(nominal_type(*inner)),
-        Ty::OutProjection(inner) => Ty::out_projection(nominal_type(*inner)),
-        Ty::StarProjection(inner) => Ty::star_projection(nominal_type(*inner)),
-        Ty::Intersection(parts) => {
+        TyKind::Nullable(inner) => Ty::nullable(nominal_type(inner)),
+        TyKind::PlatformNullable(inner) => Ty::platform_nullable(nominal_type(inner)),
+        TyKind::InProjection(inner) => Ty::in_projection(nominal_type(inner)),
+        TyKind::OutProjection(inner) => Ty::out_projection(nominal_type(inner)),
+        TyKind::StarProjection(inner) => Ty::star_projection(nominal_type(inner)),
+        TyKind::Intersection(parts) => {
             Ty::intersection(&parts.iter().copied().map(nominal_type).collect::<Vec<_>>())
         }
-        other => other,
+        _ => ty,
     }
 }
 
@@ -45,7 +45,7 @@ pub(crate) fn statically_known_subtype(
     subtype_class: TypeName,
     is_subtype: &dyn Fn(Ty, Ty) -> bool,
 ) -> Option<Ty> {
-    if matches!(supertype, Ty::Obj(name, _) if name == subtype_class) {
+    if matches!(supertype.kind(), TyKind::Obj(name, _) if name == subtype_class) {
         return Some(supertype);
     }
     let classifier = source.classifier(subtype_class)?;
@@ -71,9 +71,9 @@ pub(crate) fn statically_known_subtype(
         .collect::<Vec<_>>();
     let symbolic = nominal_type(Ty::obj_args_name(subtype_class, &symbolic_args));
     let hierarchy = receiver_hierarchy(source, symbolic);
-    let normalized = match supertype {
-        Ty::Intersection(parts) => parts.to_vec(),
-        other => vec![other],
+    let normalized = match supertype.kind() {
+        TyKind::Intersection(parts) => parts.to_vec(),
+        _ => vec![supertype],
     };
     let mut substitution = HashMap::<&str, Ty>::default();
     for part in normalized {
@@ -96,12 +96,15 @@ pub(crate) fn statically_known_subtype(
         }
         for formal in &formals {
             if let Some(value) = result.get(*formal) {
-                let value = match *value {
-                    Ty::StarProjection(_) => {
-                        Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")))
+                let value = {
+                    let other = *value;
+                    match other.kind() {
+                        TyKind::StarProjection(_) => {
+                            Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")))
+                        }
+                        TyKind::InProjection(inner) | TyKind::OutProjection(inner) => inner,
+                        _ => other,
                     }
-                    Ty::InProjection(inner) | Ty::OutProjection(inner) => *inner,
-                    other => other,
                 };
                 substitution.insert(formal, value);
             }
@@ -132,31 +135,31 @@ enum ProjectionKind {
 }
 
 fn projection_kind(ty: Ty) -> ProjectionKind {
-    match ty {
-        Ty::InProjection(_) => ProjectionKind::In,
-        Ty::OutProjection(_) => ProjectionKind::Out,
-        Ty::StarProjection(_) => ProjectionKind::Star,
+    match ty.kind() {
+        TyKind::InProjection(_) => ProjectionKind::In,
+        TyKind::OutProjection(_) => ProjectionKind::Out,
+        TyKind::StarProjection(_) => ProjectionKind::Star,
         _ => ProjectionKind::Invariant,
     }
 }
 
 /// The projected type, at the lower bound of a flexible type. A star has none.
 fn projected_type(ty: Ty) -> Option<Ty> {
-    let inner = match ty {
-        Ty::StarProjection(_) => return None,
-        Ty::InProjection(inner) | Ty::OutProjection(inner) => *inner,
-        other => other,
+    let inner = match ty.kind() {
+        TyKind::StarProjection(_) => return None,
+        TyKind::InProjection(inner) | TyKind::OutProjection(inner) => inner,
+        _ => ty,
     };
-    Some(match inner {
-        Ty::PlatformNullable(lower) => *lower,
-        other => other,
+    Some(match inner.kind() {
+        TyKind::PlatformNullable(lower) => lower,
+        _ => inner,
     })
 }
 
 fn replace_projected(projection: Ty, ty: Ty) -> Ty {
-    match projection {
-        Ty::InProjection(_) => Ty::in_projection(ty),
-        Ty::OutProjection(_) => Ty::out_projection(ty),
+    match projection.kind() {
+        TyKind::InProjection(_) => Ty::in_projection(ty),
+        TyKind::OutProjection(_) => Ty::out_projection(ty),
         _ => ty,
     }
 }
@@ -168,7 +171,7 @@ impl Unification<'_> {
         if parameters_type == Some(Ty::Error) {
             return true;
         }
-        if let Some(Ty::Intersection(parts)) = original_type {
+        if let Some(TyKind::Intersection(parts)) = original_type.map(Ty::kind) {
             let mut merged = HashMap::<String, Ty>::default();
             for &part in parts {
                 let mut local = HashMap::default();
@@ -219,15 +222,18 @@ impl Unification<'_> {
         if original_kind != parameters_kind && parameters_kind != ProjectionKind::Invariant {
             return true;
         }
-        if let Some(Ty::DefinitelyNotNull(inner)) = parameters_type {
-            return self.unify(original, replace_projected(with_parameters, *inner), result);
+        if let Some(TyKind::DefinitelyNotNull(inner)) = parameters_type.map(Ty::kind) {
+            return self.unify(original, replace_projected(with_parameters, inner), result);
         }
         if original_kind != ProjectionKind::Star && !original_nullable && parameters_nullable {
             return true;
         }
-        if let Some(Ty::TyParam(name, _)) = parameters_type {
-            if self.variables.contains(&name) {
-                if result.get(name).is_some_and(|known| *known != original) {
+        if let Some(TyKind::TyParam(name, _)) = parameters_type.map(Ty::kind) {
+            if self.variables.contains(&name.as_str()) {
+                if result
+                    .get(name.as_str())
+                    .is_some_and(|known| *known != original)
+                {
                     return false;
                 }
                 result.insert(name.to_string(), original);
@@ -240,8 +246,13 @@ impl Unification<'_> {
         let (Some(original_type), Some(parameters_type)) = (original_type, parameters_type) else {
             return true;
         };
-        let (Ty::Obj(original_name, original_args), Ty::Obj(parameters_name, parameters_args)) =
-            (original_type.non_null(), parameters_type.non_null())
+        let (
+            TyKind::Obj(original_name, original_args),
+            TyKind::Obj(parameters_name, parameters_args),
+        ) = (
+            original_type.non_null().kind(),
+            parameters_type.non_null().kind(),
+        )
         else {
             return true;
         };

@@ -3,6 +3,7 @@
 //! with Kotlin's default mapping where the signature omits them.
 
 use super::*;
+use crate::types::TyKind;
 
 /// One `Property` decoded from a class's `@Metadata`: its source name, logical (Kotlin) return-type
 /// class, the REAL getter/setter JVM method names + descriptors (from the `JvmPropertySignature`
@@ -89,8 +90,8 @@ pub(super) fn decode_properties(
     class_tparam_bounds: &[Vec<Ty>],
 ) -> MetadataResult<Vec<MetaProp>> {
     let inline_underlying_property_name_id = inline_underlying_property_name_id(ctx.msg);
-    let declared_classifier = |ty: Ty| match ty.non_null() {
-        Ty::Obj(internal, _) => Some(internal),
+    let declared_classifier = |ty: Ty| match ty.non_null().kind() {
+        TyKind::Obj(internal, _) => Some(internal),
         _ => None,
     };
     let mut out = Vec::new();

@@ -13,7 +13,7 @@
 //! target, so only the argument seams consult the conversion.
 
 use crate::ast::{Expr, ExprId};
-use crate::types::{FnSig, Ty};
+use crate::types::{FnSig, Ty, TyKind};
 
 use super::{Checker, CheckerScope};
 
@@ -77,8 +77,8 @@ impl Checker<'_> {
         actual: Ty,
     ) -> bool {
         !matches!(self.file.expr(argument), Expr::CallableRef { .. })
-            && matches!(expected.non_null(), Ty::Fun(_))
-            && matches!(actual.non_null(), Ty::Fun(_))
+            && expected.non_null().is_fun()
+            && actual.non_null().is_fun()
             && self.member_argument_score(expected, actual).is_none()
     }
 
@@ -86,8 +86,8 @@ impl Checker<'_> {
     /// rest of the value's shape is compared, so a regular value reaching a suspend parameter is
     /// reported as the suspend function it converted to.
     pub(super) fn suspend_converted_argument(&self, expected: Ty, actual: Ty) -> Ty {
-        match (expected.non_null(), actual) {
-            (Ty::Fun(target), Ty::Fun(source)) if target.suspend && !source.suspend => {
+        match (expected.non_null().kind(), actual.kind()) {
+            (TyKind::Fun(target), TyKind::Fun(source)) if target.suspend && !source.suspend => {
                 Ty::fun_with_shape(
                     source.params.clone(),
                     source.ret,
@@ -114,7 +114,7 @@ impl Checker<'_> {
         nominal: Ty,
         expected: Ty,
     ) -> Option<Ty> {
-        let Ty::Fun(target) = expected.non_null() else {
+        let TyKind::Fun(target) = expected.non_null().kind() else {
             return None;
         };
         if nominal.is_nullable() {
@@ -130,7 +130,7 @@ impl Checker<'_> {
         self.expression_function_types(scope, expression, nominal)
             .into_iter()
             .find(|candidate| {
-                let Ty::Fun(source) = candidate else {
+                let TyKind::Fun(source) = candidate.kind() else {
                     return false;
                 };
                 // Kind conversion only adds suspension: a suspend value never reaches a regular

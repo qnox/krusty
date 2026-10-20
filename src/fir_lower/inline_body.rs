@@ -2,7 +2,7 @@
 
 use crate::fir::ResolvedTy;
 use crate::ir::{Callee, ExprId, IrCheckedArgument, IrConst, IrExpr};
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 use super::source_calls::{
     inline_argument_template, rehome_inline_body_values, SelectedDefaultMode, SelectedOperandMode,
@@ -1574,7 +1574,7 @@ impl BodyLowering<'_> {
         invocation_operands: &[(ExprId, Ty)],
         result_line: Option<u32>,
     ) -> Option<ExprId> {
-        let Ty::Fun(signature) = lambda_ty else {
+        let TyKind::Fun(signature) = lambda_ty.kind() else {
             return None;
         };
         if invocation_operands.len() != signature.params.len() {

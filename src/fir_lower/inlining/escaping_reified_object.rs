@@ -1,5 +1,5 @@
 use crate::ir::IrExpr;
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 fn lower(source: &str, stem: &str) -> crate::ir::IrFile {
     stdlib::lower(source, stem)
@@ -121,7 +121,7 @@ fn an_inlined_reified_anonymous_object_specializes_only_the_call_site_class() {
             (class.is_anonymous_object
                 && class_literals(&ir, index)
                     .iter()
-                    .any(|ty| matches!(ty.non_null(), Ty::TyParam(..))))
+                    .any(|ty| ty.non_null().is_ty_param()))
             .then_some(index)
         })
         .expect("the declaration class keeps the reified parameter");
@@ -137,7 +137,7 @@ fn an_inlined_reified_anonymous_object_specializes_only_the_call_site_class() {
     assert!(
         !class_literals(&ir, call)
             .iter()
-            .any(|ty| matches!(ty.non_null(), Ty::TyParam(..))),
+            .any(|ty| ty.non_null().is_ty_param()),
         "the call-site class does not keep the reified parameter"
     );
     assert!(ir.reified_anonymous_declarations.contains(&declaration));
@@ -328,13 +328,16 @@ fn reified_substitution_values(ir: &crate::ir::IrFile, class: u32) -> Vec<Ty> {
 }
 
 fn mentions_type_parameter(ty: Ty) -> bool {
-    match ty.non_null() {
-        Ty::TyParam(..) => true,
-        other => other
-            .type_args()
-            .iter()
-            .copied()
-            .any(mentions_type_parameter),
+    {
+        let other = ty.non_null();
+        match other.kind() {
+            TyKind::TyParam(..) => true,
+            _ => other
+                .type_args()
+                .iter()
+                .copied()
+                .any(mentions_type_parameter),
+        }
     }
 }
 

@@ -6,6 +6,7 @@
 //! source spelling or provider origin.
 
 use super::*;
+use crate::types::TyKind;
 
 pub(super) fn record_direct_lower_input(
     signature: Option<&crate::libraries::GenericSig>,
@@ -159,30 +160,30 @@ fn reified_provenance_of_ty_with_declaration(
     ty: Ty,
     declaration: &impl Fn(&str) -> Option<Ty>,
 ) -> ReifiedArgumentProvenance {
-    match ty {
-        Ty::DefinitelyNotNull(inner) => {
-            let mut provenance = reified_provenance_of_ty_with_declaration(*inner, declaration);
+    match ty.kind() {
+        TyKind::DefinitelyNotNull(inner) => {
+            let mut provenance = reified_provenance_of_ty_with_declaration(inner, declaration);
             provenance.through_definitely_non_null = true;
             provenance
         }
-        Ty::PlatformNullable(inner) => {
-            let mut provenance = reified_provenance_of_ty_with_declaration(*inner, declaration);
+        TyKind::PlatformNullable(inner) => {
+            let mut provenance = reified_provenance_of_ty_with_declaration(inner, declaration);
             provenance.through_flexible = true;
             provenance
         }
-        Ty::Nullable(inner)
-        | Ty::InProjection(inner)
-        | Ty::OutProjection(inner)
-        | Ty::StarProjection(inner) => {
-            reified_provenance_of_ty_with_declaration(*inner, declaration)
+        TyKind::Nullable(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner)
+        | TyKind::StarProjection(inner) => {
+            reified_provenance_of_ty_with_declaration(inner, declaration)
         }
-        Ty::TyParam(identity, occurrence_bound) => ReifiedArgumentProvenance {
-            through_definitely_non_null: declaration(identity)
-                .and_then(|declared| match declared.non_null() {
-                    Ty::TyParam(declared_identity, declared_bound)
+        TyKind::TyParam(identity, occurrence_bound) => ReifiedArgumentProvenance {
+            through_definitely_non_null: declaration(identity.as_str())
+                .and_then(|declared| match declared.non_null().kind() {
+                    TyKind::TyParam(declared_identity, declared_bound)
                         if declared_identity == identity =>
                     {
-                        Some(*declared_bound)
+                        Some(declared_bound)
                     }
                     _ => None,
                 })
@@ -192,7 +193,7 @@ fn reified_provenance_of_ty_with_declaration(
                 }),
             ..Default::default()
         },
-        Ty::Obj(_, arguments) => ReifiedArgumentProvenance {
+        TyKind::Obj(_, arguments) => ReifiedArgumentProvenance {
             arguments: arguments
                 .iter()
                 .copied()
@@ -200,7 +201,7 @@ fn reified_provenance_of_ty_with_declaration(
                 .collect(),
             ..Default::default()
         },
-        Ty::Fun(signature) => ReifiedArgumentProvenance {
+        TyKind::Fun(signature) => ReifiedArgumentProvenance {
             arguments: signature
                 .params
                 .iter()
@@ -221,7 +222,7 @@ fn constrain_reified_argument_provenance(
     provenance: &ReifiedArgumentProvenance,
     facts: &mut HashMap<String, Vec<ReifiedArgumentProvenance>>,
 ) {
-    if let Ty::TyParam(formal, _) = declared.non_null() {
+    if let TyKind::TyParam(formal, _) = declared.non_null().kind() {
         if formals.iter().any(|candidate| candidate == formal) {
             facts
                 .entry(formal.to_string())
@@ -230,8 +231,8 @@ fn constrain_reified_argument_provenance(
         }
         return;
     }
-    match (declared.non_null(), actual.non_null()) {
-        (Ty::Obj(declared_owner, declared_args), Ty::Obj(actual_owner, actual_args))
+    match (declared.non_null().kind(), actual.non_null().kind()) {
+        (TyKind::Obj(declared_owner, declared_args), TyKind::Obj(actual_owner, actual_args))
             if declared_owner == actual_owner && declared_args.len() == actual_args.len() =>
         {
             for (index, (&declared, &actual)) in declared_args.iter().zip(actual_args).enumerate() {
@@ -239,7 +240,7 @@ fn constrain_reified_argument_provenance(
                 constrain_reified_argument_provenance(formals, declared, actual, &nested, facts);
             }
         }
-        (Ty::Fun(declared), Ty::Fun(actual))
+        (TyKind::Fun(declared), TyKind::Fun(actual))
             if declared.suspend == actual.suspend
                 && declared.context_count == actual.context_count
                 && declared.has_receiver == actual.has_receiver
@@ -908,9 +909,9 @@ impl Checker<'_> {
             },
         );
 
-        let result_formal = match signature.ret {
-            Ty::TyParam(formal, _) => Some(formal),
-            Ty::Nullable(inner) | Ty::PlatformNullable(inner) => inner.ty_param_name(),
+        let result_formal = match signature.ret.kind() {
+            TyKind::TyParam(formal, _) => Some(formal.as_str()),
+            TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => inner.ty_param_name(),
             _ => None,
         };
         let Some(formal) = result_formal else {
@@ -927,8 +928,8 @@ impl Checker<'_> {
             InferredIntersection {
                 selected_result: final_result,
                 parts: parts.clone(),
-                through_flexible: matches!(final_result, Ty::PlatformNullable(_))
-                    || matches!(signature.ret, Ty::PlatformNullable(_))
+                through_flexible: final_result.is_platform_nullable()
+                    || signature.ret.is_platform_nullable()
                     || propagated
                         .get(formal)
                         .is_some_and(|fact| fact.through_flexible),

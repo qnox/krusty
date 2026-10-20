@@ -7,7 +7,7 @@
 //! that an earlier `as` produced therefore keeps both the declared type and the cast type.
 
 use crate::assignable::{is_subtype, TyCtx};
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 use super::{Checker, CheckerScope};
 use crate::ast::ExprId;
@@ -94,12 +94,11 @@ impl Checker<'_> {
     pub(super) fn is_cast_erased(&self, supertype: Ty, subtype: Ty, reified_target: bool) -> bool {
         let supertype = crate::symbol_resolver::nominal_type(supertype);
         let subtype = crate::symbol_resolver::nominal_type(subtype);
-        let target_parameter = match subtype {
-            Ty::Nullable(inner) => *inner,
-            other => other,
+        let target_parameter = match subtype.kind() {
+            TyKind::Nullable(inner) => inner,
+            _ => subtype,
         };
-        let is_non_reified_parameter =
-            matches!(target_parameter, Ty::TyParam(..)) && !reified_target;
+        let is_non_reified_parameter = target_parameter.is_ty_param() && !reified_target;
         let is_upcast = self.is_upcast(supertype, subtype);
         if is_non_reified_parameter && !is_upcast {
             // `x is T` for `x: T?` with a non-null `T` only checks for null.
@@ -121,13 +120,16 @@ impl Checker<'_> {
         if is_non_reified_parameter {
             return true;
         }
-        if matches!(subtype, Ty::TyParam(..)) {
+        if subtype.is_ty_param() {
             return false;
         }
-        let Ty::Obj(subtype_class, arguments) = subtype else {
+        let TyKind::Obj(subtype_class, arguments) = subtype.kind() else {
             // Scalars and `String` are classifiers without type parameters, so each is its own
             // statically known subtype; an intersection or `T & Any` has no classifier.
-            return matches!(subtype, Ty::Intersection(_) | Ty::DefinitelyNotNull(_));
+            return matches!(
+                subtype.kind(),
+                TyKind::Intersection(_) | TyKind::DefinitelyNotNull(_)
+            );
         };
         // A classifier without type arguments is its own statically known subtype.
         if arguments.is_empty() {
@@ -190,18 +192,18 @@ impl Checker<'_> {
 }
 
 fn same_type_parameter(left: Ty, right: Ty) -> bool {
-    matches!((left, right), (Ty::TyParam(a, _), Ty::TyParam(b, _)) if a == b)
+    matches!((left.kind(), right.kind()), (TyKind::TyParam(a, _), TyKind::TyParam(b, _)) if a == b)
 }
 
 fn direct_type_parameter(mut ty: Ty) -> Option<&'static str> {
     loop {
-        ty = match ty {
-            Ty::TyParam(parameter, _) => return Some(parameter),
-            Ty::Nullable(inner)
-            | Ty::PlatformNullable(inner)
-            | Ty::DefinitelyNotNull(inner)
-            | Ty::InProjection(inner)
-            | Ty::OutProjection(inner) => *inner,
+        ty = match ty.kind() {
+            TyKind::TyParam(parameter, _) => return Some(parameter.as_str()),
+            TyKind::Nullable(inner)
+            | TyKind::PlatformNullable(inner)
+            | TyKind::DefinitelyNotNull(inner)
+            | TyKind::InProjection(inner)
+            | TyKind::OutProjection(inner) => inner,
             _ => return None,
         };
     }

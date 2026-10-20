@@ -478,16 +478,19 @@ pub fn is_contract_intrinsic(
     callable: &crate::libraries::LibraryCallable,
     package: crate::types::TypeName,
 ) -> bool {
-    use crate::types::Ty;
+    use crate::types::{Ty, TyKind};
     let builder = Ty::obj("kotlin/contracts/ContractBuilder");
     let takes_builder = match callable.params.as_slice() {
-        [Ty::Fun(function)] => {
-            function.has_receiver
-                && function.context_count == 0
-                && !function.suspend
-                && function.params == [builder]
-                && function.ret == Ty::Unit
-        }
+        [parameter] => match parameter.kind() {
+            TyKind::Fun(function) => {
+                function.has_receiver
+                    && function.context_count == 0
+                    && !function.suspend
+                    && function.params == [builder]
+                    && function.ret == Ty::Unit
+            }
+            _ => false,
+        },
         _ => false,
     };
     callable.name == "contract"
@@ -498,7 +501,7 @@ pub fn is_contract_intrinsic(
 
 /// The contract-DSL member the selected declaration `callable` is, by its complete signature.
 pub fn dsl_member(callable: &SelectedDslCallable<'_>) -> Option<DslMember> {
-    use crate::types::Ty;
+    use crate::types::{Ty, TyKind};
     if !callable.dispatch_member || callable.context_parameters != 0 {
         return None;
     }
@@ -512,8 +515,10 @@ pub fn dsl_member(callable: &SelectedDslCallable<'_>) -> Option<DslMember> {
             ("returnsNotNull", []) => (DslMember::ReturnsNotNull, contracts("ReturnsNotNull")),
             // `fun <R> callsInPlace(lambda: Function<R>, kind: InvocationKind)`: the lambda's
             // `R` is the member's own type parameter, which selection may have specialized.
-            ("callsInPlace", [Ty::Obj(lambda, [_]), kind])
-                if lambda.matches("kotlin/Function") && *kind == contracts("InvocationKind") =>
+            ("callsInPlace", [lambda, kind])
+                if matches!(lambda.kind(), TyKind::Obj(lambda, lambda_args)
+                    if lambda_args.len() == 1 && lambda.matches("kotlin/Function"))
+                    && *kind == contracts("InvocationKind") =>
             {
                 (DslMember::CallsInPlace, contracts("CallsInPlace"))
             }

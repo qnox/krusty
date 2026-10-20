@@ -10,6 +10,7 @@
 
 use super::*;
 use crate::ir::TypeCheckRole;
+use crate::types::TyKind;
 use crate::types::TypeName;
 
 /// What an `is` against a type Kotlin settles by itself answers.
@@ -295,8 +296,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         // run time and exactly what kotlinc checks: `fun <T : CharSequence> f(x: Any?) = x as T`
         // rejects a non-`CharSequence` inside `f`, before the call site's own cast to the argument
         // it was given. An unbounded parameter bounds at `Any?`, where there is nothing to check.
-        let ty = match ty.non_null() {
-            Ty::TyParam(_, bound) => *bound,
+        let ty = match ty.non_null().kind() {
+            TyKind::TyParam(_, bound) => bound,
             _ => ty,
         };
         let target = ty.non_null();
@@ -418,7 +419,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             && op == IrTypeOp::ImplicitCoercion
             && self
                 .declared_call_result(arg)
-                .is_some_and(|declared| matches!(declared.non_null(), Ty::TyParam(..)))
+                .is_some_and(|declared| declared.non_null().is_ty_param())
         {
             if type_operand == Ty::Unit {
                 return self.coerce(arg, type_operand);
@@ -640,7 +641,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if !primitive.is_numeric()
             || !self
                 .declared_call_result(*arg)
-                .is_some_and(|declared| matches!(declared.non_null(), Ty::TyParam(..)))
+                .is_some_and(|declared| declared.non_null().is_ty_param())
         {
             return None;
         }

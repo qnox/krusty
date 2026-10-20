@@ -15,6 +15,8 @@ use super::*;
 /// One same-module inline function, compiled to the method kotlinc inlines.
 pub(in crate::jvm::ir_emit) struct CompiledInlineCallee {
     owner: String,
+    /// Whether the body is an instance method, whose slot 0 holds the call's dispatch receiver.
+    instance: bool,
     name: String,
     descriptor: String,
     body: crate::jvm::classreader::MethodCode,
@@ -104,15 +106,33 @@ fn visit_callee(
     ordered.push(function);
 }
 
-/// Whether `call` is a call of `function`: a same-file call names it, a call realized onto
-/// another file's facade names its checked module callable.
+/// Whether `call` is a call of `function`: a same-file call names it (a `companion { … }` block
+/// member as a static of its class), a member call names it among its class's methods, and a call
+/// realized onto another file's class names its checked module callable.
 fn names_compiled_callee(ir: &IrFile, call: u32, function: u32) -> bool {
     match ir.expr(call) {
         IrExpr::Call {
-            callee: Callee::Local(callee),
+            callee:
+                Callee::Local(callee)
+                | Callee::ClassStatic {
+                    function: callee, ..
+                },
             dispatch_receiver: None,
             ..
         } => *callee == function,
+        // A value-class member's call is realized as a static call of its `-impl`, which names
+        // the exact function it calls.
+        IrExpr::Call {
+            callee: Callee::Static { .. },
+            dispatch_receiver: None,
+            ..
+        } => ir.jvm_member_targets.get(&call) == Some(&function),
+        IrExpr::MethodCall { class, index, .. } => {
+            ir.classes
+                .get(*class as usize)
+                .and_then(|class| class.methods.get(*index as usize))
+                == Some(&function)
+        }
         IrExpr::Call {
             callee:
                 Callee::CrossFile {
@@ -121,6 +141,15 @@ fn names_compiled_callee(ir: &IrFile, call: u32, function: u32) -> bool {
                     ..
                 },
             dispatch_receiver: None,
+            ..
+        }
+        | IrExpr::Call {
+            callee:
+                Callee::Virtual {
+                    module_target: Some(target),
+                    ..
+                },
+            dispatch_receiver: Some(_),
             ..
         } => ir.checked_callable_functions.get(target) == Some(&function),
         _ => false,
@@ -136,25 +165,42 @@ fn compile_callee(
     env: &EmitEnv,
     opts: &EmitOptions,
 ) -> Result<CompiledInlineCallee, &'static str> {
-    // A same-file callee belongs to this file's facade; another file's template names the facade
-    // and source unit common lowering recorded for it.
-    let (source, owner) = if ir.foreign_inline_templates.contains(&function) {
-        let source = ir
-            .foreign_template_source(function)
+    // A member is compiled on its class as that class emits it: an instance method, or a static
+    // one (a value class's `-impl`) whose receiver is its first parameter. Another file's member
+    // template names the class that declares it. Any other same-file callee belongs to this
+    // file's facade, and another file's template names the facade and source unit common
+    // lowering recorded for it.
+    let declaring_class = ir
+        .classes
+        .iter()
+        .find(|class| class.methods.contains(&function))
+        .map(|class| class.fq_name)
+        .or_else(|| {
+            ir.foreign_inline_templates
+                .contains(&function)
+                .then(|| ir.functions[function as usize].dispatch_receiver)
+                .flatten()
+        });
+    let foreign = ir.foreign_inline_templates.contains(&function);
+    let source = if foreign {
+        ir.foreign_template_source(function)
             .ok_or("a compiled inline callee of another file has no recorded source file")?
-            .source;
-        let declaring = ir
-            .foreign_template_facade(function)
-            .ok_or("a compiled inline callee of another file has no resolved facade")?;
-        let owner = crate::jvm::names::classfile_internal_name_of(declaring).to_owned();
-        (source, owner)
+            .source
     } else {
-        let source = ir
-            .source_debug
+        ir.source_debug
             .current()
-            .ok_or("a compiled inline callee's file has no source unit")?;
-        (source, facade.to_owned())
+            .ok_or("a compiled inline callee's file has no source unit")?
     };
+    let owner = match declaring_class {
+        Some(class) => crate::jvm::names::classfile_internal_name_of(class).to_owned(),
+        None if foreign => crate::jvm::names::classfile_internal_name_of(
+            ir.foreign_template_facade(function)
+                .ok_or("a compiled inline callee of another file has no resolved facade")?,
+        )
+        .to_owned(),
+        None => facade.to_owned(),
+    };
+    let instance = declaring_class.is_some() && !ir.functions[function as usize].is_static;
     let file = ir
         .source_debug
         .file(source)
@@ -166,11 +212,11 @@ fn compile_callee(
     emit_method_inner(
         ir,
         function,
-        StaticOwner::Facade,
+        StaticOwner::of(declaring_class),
         &owner,
         facade,
         &mut cw,
-        false,
+        instance,
         env,
     );
     function_debug::attach_declared_function_debug(
@@ -185,6 +231,7 @@ fn compile_callee(
         .ok_or("a compiled inline callee's body does not read back as one method")?;
     Ok(CompiledInlineCallee {
         owner,
+        instance,
         name: method.name,
         descriptor: method.descriptor,
         body: method.body,
@@ -193,17 +240,20 @@ fn compile_callee(
 
 impl Emitter<'_> {
     /// Inline the call `call_expression`, which lowering routed to the compiled body of its
-    /// same-module callee, with the arguments `args`.
+    /// same-module callee. A member's dispatch receiver is the body's first operand, its `this`.
     pub(in crate::jvm::ir_emit) fn inline_compiled_module_call(
         &mut self,
         call_expression: u32,
-        args: &[u32],
         code: &mut CodeBuilder,
     ) {
         let function = self
             .ir
             .compiled_inline_call(call_expression)
             .expect("a call routed to a compiled inline body names its callee");
+        let operands = self
+            .ir
+            .compiled_inline_operands(call_expression)
+            .expect("a call routed to a compiled inline body has operands");
         let compiled = self
             .run
             .compiled_inline_callees
@@ -221,11 +271,28 @@ impl Emitter<'_> {
                 return;
             }
         };
+        if callee.instance != operands.receiver.is_some() {
+            self.run.set_inline_bail(
+                "a compiled inline callee's dispatch receiver does not match its call",
+            );
+            return;
+        }
+        // An instance body reads `this` from slot 0, so the receiver leads its operands.
+        let splice_descriptor = if callee.instance {
+            format!("(L{};{}", callee.owner, &callee.descriptor[1..])
+        } else {
+            callee.descriptor.clone()
+        };
+        let args = operands
+            .receiver
+            .into_iter()
+            .chain(operands.arguments.iter().copied())
+            .collect::<Vec<_>>();
         let target = super::super::inline_call::InlineStaticTarget {
             owner: &callee.owner,
             name: &callee.name,
             descriptor: &callee.descriptor,
-            splice_desc: &callee.descriptor,
+            splice_desc: &splice_descriptor,
             inline_only: false,
             allow_owner_bridge: true,
             for_inline_copy: false,
@@ -240,8 +307,8 @@ impl Emitter<'_> {
         let call = ClasspathInlineCall {
             call_expression,
             target: &target,
-            args,
-            leading_non_argument_operands: 0,
+            args: &args,
+            leading_non_argument_operands: usize::from(callee.instance),
             body: &callee.body,
             reified: &reified,
             defaults: None,

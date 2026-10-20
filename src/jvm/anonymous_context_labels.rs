@@ -4,7 +4,7 @@
 //! null assertions, and — prefixed with `$` — the field a local or anonymous class stores the
 //! captured receiver in. Repeated labels in one parameter list are numbered.
 
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 /// What separates a repeated anonymous context label from its ordinal: `$context-String$1` since
 /// Kotlin 2.4.20, `$context-String#1` before it.
@@ -17,15 +17,18 @@ fn ordinal_separator() -> char {
 }
 
 fn label(ty: Ty) -> String {
-    let stem = match ty.non_null() {
-        Ty::Obj(name, _) => name.nested_segment_ref(),
-        // A type parameter is labelled after its upper bound: `context(_: T)` is `$context-Any`,
-        // and with `T : CharSequence` it is `$context-CharSequence`.
-        Ty::TyParam(_, bound) => return label(*bound),
-        Ty::Unit => "Unit",
-        Ty::Fun(_) => "Function",
-        Ty::Nothing => "Nothing",
-        unexpected => panic!("anonymous context parameter has no JVM type label: {unexpected:?}"),
+    let stem = {
+        let unexpected = ty.non_null();
+        match unexpected.kind() {
+            TyKind::Obj(name, _) => name.nested_segment_ref(),
+            // A type parameter is labelled after its upper bound: `context(_: T)` is `$context-Any`,
+            // and with `T : CharSequence` it is `$context-CharSequence`.
+            TyKind::TyParam(_, bound) => return label(bound),
+            TyKind::Unit => "Unit",
+            TyKind::Fun(_) => "Function",
+            TyKind::Nothing => "Nothing",
+            _ => panic!("anonymous context parameter has no JVM type label: {unexpected:?}"),
+        }
     };
     format!("$context-{stem}")
 }

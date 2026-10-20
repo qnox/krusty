@@ -120,10 +120,10 @@ impl DataCopyShape {
             equality_bound: None,
             vararg_index: None,
             required: 0,
-            param_defaults: vec![true; arity],
-            exact_params: vec![false; arity],
-            no_infer_params: vec![false; arity],
-            implicit_integer_coercion: vec![false; arity],
+            param_defaults: vec![true; arity].into(),
+            exact_params: vec![false; arity].into(),
+            no_infer_params: vec![false; arity].into(),
+            implicit_integer_coercion: vec![false; arity].into(),
             param_default_values: Vec::new(),
             param_names: self
                 .properties
@@ -132,7 +132,7 @@ impl DataCopyShape {
                 .collect(),
             parameter_identities: Vec::new(),
             lambda_param_types: Vec::new(),
-            lambda_recv: Vec::new(),
+            lambda_recv: Vec::new().into(),
             inline_modifiers: Vec::new(),
             visibility: self.visibility,
             context_count: 0,

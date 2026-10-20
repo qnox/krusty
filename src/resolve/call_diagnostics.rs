@@ -563,7 +563,7 @@ impl Checker<'_> {
                 // A flexible Java bound exposes the written argument through that same platform
                 // view in diagnostics (`T : Number!`, `String!`). This is declaration metadata,
                 // not an origin branch: a non-flexible Kotlin bound keeps the written type exact.
-                let diagnostic_actual = if matches!(expected, Ty::PlatformNullable(_)) {
+                let diagnostic_actual = if expected.is_platform_nullable() {
                     expected.rewrap_nullability(actual.non_null())
                 } else {
                     actual

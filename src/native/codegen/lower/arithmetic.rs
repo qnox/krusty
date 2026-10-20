@@ -18,6 +18,7 @@
 //!   gives and what the machine's plain conversion does not.
 
 use super::*;
+use crate::types::TyKind;
 
 impl BodyLowering<'_, '_, '_> {
     /// Source `==`/`!=`, realized from the semantic mode fixed by checking.
@@ -365,7 +366,7 @@ impl BodyLowering<'_, '_, '_> {
             if let (Some(left), Some(right)) = (unboxed(lhs_checked), unboxed(rhs_checked)) {
                 // A class that declares its own `equals` answers by it, through its box below.
                 if left == right && !self.declares_its_own_equals(left) {
-                    let class = Ty::Obj(left, &[]);
+                    let class = Ty::obj_name(left);
                     let Some(lhs) = self.coerce(lhs, class)? else {
                         return Ok(None);
                     };
@@ -770,8 +771,8 @@ pub(super) fn scalar_bound(ty: Ty) -> Option<Ty> {
         if machine_carrier(at) != Carrier::Ref {
             return Some(at);
         }
-        match at {
-            Ty::TyParam(_, bound) => at = bound.non_null(),
+        match at.kind() {
+            TyKind::TyParam(_, bound) => at = bound.non_null(),
             _ => return None,
         }
     }
@@ -784,10 +785,10 @@ pub(super) fn scalar_bound(ty: Ty) -> Option<Ty> {
 /// A supertype is NOT one — `Any` holding a `Double` compares by `equals`, which is the total
 /// order — so the bound is followed only while it stays floating-point.
 fn is_ieee_operand(ty: Ty) -> bool {
-    match ty {
-        Ty::Double | Ty::Float => true,
-        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => is_ieee_operand(*inner),
-        Ty::TyParam(_, bound) => is_ieee_operand(*bound),
+    match ty.kind() {
+        TyKind::DOUBLE | TyKind::FLOAT => true,
+        TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => is_ieee_operand(inner),
+        TyKind::TyParam(_, bound) => is_ieee_operand(bound),
         _ => false,
     }
 }

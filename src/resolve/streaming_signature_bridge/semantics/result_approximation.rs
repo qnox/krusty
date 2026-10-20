@@ -1,6 +1,6 @@
 //! Projection of solver-local types into denotable declaration results.
 
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 /// Remove solver-local projection captures from an inferred declaration result. A capture is
 /// readable through its upper bound at the result root; inside a generic argument it is exposed as
@@ -15,45 +15,48 @@ pub(super) fn denotable_signature_result(
         denotable: &crate::fx_hash::HashSet<String>,
         visiting: &mut crate::fx_hash::HashSet<&'static str>,
     ) -> Ty {
-        match ty {
+        match ty.kind() {
             // `Null` is the solver's literal-only bottom marker. A declaration inferred from that
             // expression publishes Kotlin's denotable `Nothing?`; the marker must not escape.
-            Ty::Null => Ty::nullable(Ty::Nothing),
-            Ty::TyParam(name, bound) if !denotable.contains(name) => {
-                if !visiting.insert(name) {
+            TyKind::Null => Ty::nullable(Ty::Nothing),
+            TyKind::TyParam(name, bound) if !denotable.contains(name.as_str()) => {
+                if !visiting.insert(name.as_str()) {
                     return Ty::nullable(Ty::obj("kotlin/Any"));
                 }
                 let approximated = result(bound.projection_read_ty(), denotable, visiting);
-                visiting.remove(name);
+                visiting.remove(name.as_str());
                 approximated
             }
-            Ty::TyParam(..) => ty,
-            Ty::Obj(owner, arguments) if !arguments.is_empty() => Ty::obj_args_name(
+            TyKind::TyParam(..) => ty,
+            TyKind::Obj(owner, arguments) if !arguments.is_empty() => Ty::obj_args_name(
                 owner,
                 &arguments
                     .iter()
-                    .map(|argument| match *argument {
-                        Ty::TyParam(name, bound) if !denotable.contains(name) => {
-                            Ty::star_projection(result(
-                                bound.projection_read_ty(),
-                                denotable,
-                                visiting,
-                            ))
+                    .map(|argument| {
+                        let argument = *argument;
+                        match argument.kind() {
+                            TyKind::TyParam(name, bound) if !denotable.contains(name.as_str()) => {
+                                Ty::star_projection(result(
+                                    bound.projection_read_ty(),
+                                    denotable,
+                                    visiting,
+                                ))
+                            }
+                            TyKind::InProjection(inner) => {
+                                Ty::in_projection(result(inner, denotable, visiting))
+                            }
+                            TyKind::OutProjection(inner) => {
+                                Ty::out_projection(result(inner, denotable, visiting))
+                            }
+                            TyKind::StarProjection(inner) => {
+                                Ty::star_projection(result(inner, denotable, visiting))
+                            }
+                            _ => result(argument, denotable, visiting),
                         }
-                        Ty::InProjection(inner) => {
-                            Ty::in_projection(result(*inner, denotable, visiting))
-                        }
-                        Ty::OutProjection(inner) => {
-                            Ty::out_projection(result(*inner, denotable, visiting))
-                        }
-                        Ty::StarProjection(inner) => {
-                            Ty::star_projection(result(*inner, denotable, visiting))
-                        }
-                        argument => result(argument, denotable, visiting),
                     })
                     .collect::<Vec<_>>(),
             ),
-            Ty::Fun(signature) => Ty::fun_with_shape(
+            TyKind::Fun(signature) => Ty::fun_with_shape(
                 signature
                     .params
                     .iter()
@@ -64,13 +67,15 @@ pub(super) fn denotable_signature_result(
                 signature.has_receiver,
                 signature.suspend,
             ),
-            Ty::Nullable(inner) => Ty::nullable(result(*inner, denotable, visiting)),
-            Ty::PlatformNullable(inner) => {
-                Ty::platform_nullable(result(*inner, denotable, visiting))
+            TyKind::Nullable(inner) => Ty::nullable(result(inner, denotable, visiting)),
+            TyKind::PlatformNullable(inner) => {
+                Ty::platform_nullable(result(inner, denotable, visiting))
             }
-            Ty::InProjection(inner) => Ty::in_projection(result(*inner, denotable, visiting)),
-            Ty::OutProjection(inner) => Ty::out_projection(result(*inner, denotable, visiting)),
-            Ty::StarProjection(inner) => Ty::star_projection(result(*inner, denotable, visiting)),
+            TyKind::InProjection(inner) => Ty::in_projection(result(inner, denotable, visiting)),
+            TyKind::OutProjection(inner) => Ty::out_projection(result(inner, denotable, visiting)),
+            TyKind::StarProjection(inner) => {
+                Ty::star_projection(result(inner, denotable, visiting))
+            }
             _ => ty,
         }
     }

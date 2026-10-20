@@ -8,6 +8,7 @@
 //! declaration a reference names.
 
 use super::*;
+use crate::types::TyKind;
 
 /// The outcome of one associated rung in compact signature solving.
 pub(super) enum AssociatedSignatureCall {
@@ -281,8 +282,11 @@ impl ProductionSignatureSemantics<'_> {
         expected: Option<crate::fir::ResolvedTy>,
         demand: &mut Demand<'_>,
     ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
-        let expected_fun = match expected.map(|expected| expected.get().non_null()) {
-            Some(Ty::Fun(expected)) => Some(expected),
+        let expected_fun = match expected
+            .map(|expected| expected.get().non_null())
+            .map(Ty::kind)
+        {
+            Some(TyKind::Fun(expected)) => Some(expected),
             _ => None,
         };
         let (functions, statics, properties) = self
@@ -329,9 +333,11 @@ impl ProductionSignatureSemantics<'_> {
         expected: Option<crate::fir::ResolvedTy>,
         demand: &mut Demand<'_>,
     ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
-        if let (false, Some(Ty::Fun(expected))) = (
+        if let (false, Some(TyKind::Fun(expected))) = (
             functions.is_empty(),
-            expected.map(|expected| expected.get().non_null()),
+            expected
+                .map(|expected| expected.get().non_null())
+                .map(Ty::kind),
         ) {
             return self
                 .select_receiverless_function_reference(scope, functions, expected, demand)

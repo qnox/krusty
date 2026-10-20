@@ -25,7 +25,7 @@ use crate::metadata::declaration_flags::{
 use crate::metadata::local_classifiers;
 use crate::metadata::member_order::{self, MemberRanges};
 use crate::metadata::MetadataAnnotations;
-use crate::types::{Ty, TypeName, Visibility};
+use crate::types::{Ty, TyKind, TypeName, Visibility};
 
 /// Which declaration a property record describes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -520,16 +520,17 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
                 is_const: false,
                 modifiers: property.modifiers,
                 setter_visibility: property.setter_visibility,
-                tparam: match property.ty {
-                    Ty::TyParam(name, _) => Some(name),
-                    Ty::Nullable(inner) | Ty::PlatformNullable(inner) => match *inner {
-                        Ty::TyParam(name, _) => Some(name),
+                tparam: match property.ty.kind() {
+                    TyKind::TyParam(name, _) => Some(name),
+                    TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => match inner.kind()
+                    {
+                        TyKind::TyParam(name, _) => Some(name),
                         _ => None,
                     },
                     _ => None,
                 }
                 .and_then(|parameter| {
-                    let parameter = crate::types::type_parameter_source_name(parameter);
+                    let parameter = crate::types::type_parameter_source_name(parameter.as_str());
                     c.type_params
                         .iter()
                         .position(|candidate| candidate == parameter)
@@ -1473,7 +1474,7 @@ fn declared_supertypes(
     if superclass == any
         && supertypes
             .first()
-            .is_some_and(|first| matches!(first, Ty::Obj(n, _) if *n == any))
+            .is_some_and(|first| matches!(first.kind(), TyKind::Obj(n, _) if n == any))
     {
         supertypes.remove(0);
     }

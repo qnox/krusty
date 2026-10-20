@@ -42,10 +42,16 @@ pub use crate::context_parameters::{CapturedContextKind, ContextParameterKind};
 pub use crate::inline_parameter_modifier::{InlineExpansionMode, InlineParameterModifier};
 use crate::name_tree::{NameId, NameTree};
 use interning::ShardedInterner;
+mod primitive_arrays;
+mod thin_handles;
+mod ty_kind;
+pub use primitive_arrays::{prim_array_element, prim_array_name, primitive_array_creator_element};
 pub(crate) use spelling::type_name_from_multifile_facade;
 pub use spelling::{existing_type_name, existing_type_name_child, type_name, type_name_from};
 use std::fmt;
 use std::sync::OnceLock;
+pub use thin_handles::{TyList, TyParamName};
+pub use ty_kind::TyKind;
 pub(crate) use type_parameter_identity::{
     call_site_type_variable, constructor_type_parameter, declaration_type_parameter,
     generated_function_type_parameter, hidden_captured_type_parameter, metadata_type_parameter,
@@ -565,6 +571,17 @@ pub fn intern_tys(ts: &[Ty]) -> &'static [Ty] {
         .intern_ref_with(ts, |value| Box::leak(value.to_vec().into_boxed_slice()))
 }
 
+/// Intern a per-parameter flag list to a canonical `&'static [bool]`. A signature's flag lists
+/// repeat a handful of patterns across every declaration, so equal lists share one allocation.
+pub fn intern_bools(values: &[bool]) -> &'static [bool] {
+    if values.is_empty() {
+        return &[];
+    }
+    static I: OnceLock<ShardedInterner<[bool]>> = OnceLock::new();
+    I.get_or_init(ShardedInterner::default)
+        .intern_ref_with(values, |value| Box::leak(value.to_vec().into_boxed_slice()))
+}
+
 /// A function type's signature: parameter types and return type. Interned (`intern_fnsig`) so
 /// `Ty::Fun` stays `Copy`. Lets a `Fun`-typed call recover its real return type (not erased `Object`).
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
@@ -583,73 +600,6 @@ pub struct FnSig {
 pub fn intern_fnsig(s: FnSig) -> &'static FnSig {
     static I: OnceLock<ShardedInterner<FnSig>> = OnceLock::new();
     I.get_or_init(ShardedInterner::default).intern_owned(s)
-}
-
-/// Every primitive specialized array class and the element it holds — THE inventory, in one place.
-///
-/// An unsigned array keeps its unsigned element so its value-class identity survives; it still
-/// erases to the signed primitive array descriptor (`[I`), which is [`crate::jvm::names`]'s job and
-/// not this table's. Anything needing the set of these classes iterates here rather than writing the
-/// names out again: every copy that has existed eventually disagreed with this one, and the ones
-/// that omitted `UByteArray` and `UShortArray` emitted `int[]` for a `byte[]`.
-const PRIM_ARRAY_CLASSES: [(&str, Ty); 12] = [
-    ("kotlin/IntArray", Ty::Int),
-    ("kotlin/LongArray", Ty::Long),
-    ("kotlin/ShortArray", Ty::Short),
-    ("kotlin/ByteArray", Ty::Byte),
-    ("kotlin/BooleanArray", Ty::Boolean),
-    ("kotlin/CharArray", Ty::Char),
-    ("kotlin/FloatArray", Ty::Float),
-    ("kotlin/DoubleArray", Ty::Double),
-    ("kotlin/UByteArray", Ty::UByte),
-    ("kotlin/UShortArray", Ty::UShort),
-    ("kotlin/UIntArray", Ty::UInt),
-    ("kotlin/ULongArray", Ty::ULong),
-];
-
-/// The element type of a primitive specialized array class (`kotlin/IntArray` → `Int`), or `None`
-/// for a non-primitive-array name. A lookup in [`PRIM_ARRAY_CLASSES`], which is the canonical table
-/// — [`Ty::array_elem`], the constructor, and the backend descriptor logic all route through this
-/// rather than each carrying their own copy.
-pub fn prim_array_element(internal: impl InternalName) -> Option<Ty> {
-    // Every name in the table ends in `Array`; most names asked about are not arrays at all.
-    if !internal.final_segment().ends_with("Array") {
-        return None;
-    }
-    PRIM_ARRAY_CLASSES
-        .iter()
-        .find(|(name, _)| internal.internal_matches(name))
-        .map(|(_, element)| *element)
-}
-
-/// Element type fixed by a specialized primitive-array creator. Both the class-shaped size
-/// constructor (`IntArray`) and its vararg factory (`intArrayOf`) name the same semantic element.
-/// Resolution, signature inference, and intrinsic emission share this table.
-pub fn primitive_array_creator_element(name: &str) -> Option<Ty> {
-    Some(match name {
-        "IntArray" | "intArrayOf" => Ty::Int,
-        "LongArray" | "longArrayOf" => Ty::Long,
-        "ShortArray" | "shortArrayOf" => Ty::Short,
-        "ByteArray" | "byteArrayOf" => Ty::Byte,
-        "BooleanArray" | "booleanArrayOf" => Ty::Boolean,
-        "CharArray" | "charArrayOf" => Ty::Char,
-        "FloatArray" | "floatArrayOf" => Ty::Float,
-        "DoubleArray" | "doubleArrayOf" => Ty::Double,
-        "UByteArray" | "ubyteArrayOf" => Ty::UByte,
-        "UShortArray" | "ushortArrayOf" => Ty::UShort,
-        "UIntArray" | "uintArrayOf" => Ty::UInt,
-        "ULongArray" | "ulongArrayOf" => Ty::ULong,
-        _ => return None,
-    })
-}
-
-/// The primitive specialized array class name for a primitive element (`Int` → `kotlin/IntArray`), or
-/// `None` for a reference element (which lives in a boxed `Array<T>`). Inverse of [`prim_array_element`].
-pub fn prim_array_name(elem: Ty) -> Option<&'static str> {
-    PRIM_ARRAY_CLASSES
-        .iter()
-        .find(|(_, element)| *element == elem)
-        .map(|(name, _)| *name)
 }
 
 /// `java.lang.annotation.ElementType` constants in DECLARATION order. kotlinc projects a Kotlin
@@ -675,7 +625,7 @@ pub enum Ty {
     /// (`List<Int>` → `Obj("kotlin/collections/List", [Int])`). Arguments are interned (`intern_tys`)
     /// so equal instantiations share a pointer and the front end can recover element/member types.
     /// Empty for a non-generic class.
-    Obj(TypeName, &'static [Ty]),
+    Obj(TypeName, TyList),
     /// The type of the `null` literal — assignable only to nullable types.
     Null,
     /// The bottom type (`Nothing`): the type of `throw`/`return` expressions. Assignable to every
@@ -713,7 +663,7 @@ pub enum Ty {
     /// (`<T : CharSequence>` → bound `CharSequence`; unbounded `<T>` → bound `kotlin/Any`). The checker
     /// reasons about `T` as `T` (subtyping against the bound, substitution at instantiation); runtime
     /// erasure is a backend concern.
-    TyParam(&'static str, &'static Ty),
+    TyParam(TyParamName, &'static Ty),
     /// Kotlin's definitely-non-null type `T & Any`.
     ///
     /// The wrapped type is the original type parameter, including a bound that still admits null.
@@ -723,7 +673,7 @@ pub enum Ty {
     /// A denotable intersection `A & B & …` produced when a type variable's only constraints are
     /// incompatible upper bounds (`Int & String`). It is a subtype of each component and is not
     /// [`Ty::Nothing`]: the value still exists at run time.
-    Intersection(&'static [Ty]),
+    Intersection(TyList),
 }
 
 pub(crate) fn stored_value_ty(ty: Ty) -> Ty {
@@ -782,55 +732,63 @@ impl Ty {
     // Kotlin built-ins are ordinary classifiers. These associated constants preserve concise call
     // sites and const-pattern matching without creating scalar/string enum variants alongside `Obj`.
     #[allow(non_upper_case_globals)]
-    pub const Boolean: Ty = Ty::Obj(KOTLIN_BOOLEAN, &[]);
+    pub const Boolean: Ty = Ty::Obj(KOTLIN_BOOLEAN, crate::types::TyList::EMPTY);
     #[allow(non_upper_case_globals)]
-    pub const Byte: Ty = Ty::Obj(KOTLIN_BYTE, &[]);
+    pub const Byte: Ty = Ty::Obj(KOTLIN_BYTE, crate::types::TyList::EMPTY);
     #[allow(non_upper_case_globals)]
-    pub const Short: Ty = Ty::Obj(KOTLIN_SHORT, &[]);
+    pub const Short: Ty = Ty::Obj(KOTLIN_SHORT, crate::types::TyList::EMPTY);
     #[allow(non_upper_case_globals)]
-    pub const Int: Ty = Ty::Obj(KOTLIN_INT, &[]);
+    pub const Int: Ty = Ty::Obj(KOTLIN_INT, crate::types::TyList::EMPTY);
     #[allow(non_upper_case_globals)]
-    pub const Long: Ty = Ty::Obj(KOTLIN_LONG, &[]);
+    pub const Long: Ty = Ty::Obj(KOTLIN_LONG, crate::types::TyList::EMPTY);
     #[allow(non_upper_case_globals)]
-    pub const Char: Ty = Ty::Obj(KOTLIN_CHAR, &[]);
+    pub const Char: Ty = Ty::Obj(KOTLIN_CHAR, crate::types::TyList::EMPTY);
     #[allow(non_upper_case_globals)]
-    pub const Float: Ty = Ty::Obj(KOTLIN_FLOAT, &[]);
+    pub const Float: Ty = Ty::Obj(KOTLIN_FLOAT, crate::types::TyList::EMPTY);
     #[allow(non_upper_case_globals)]
-    pub const Double: Ty = Ty::Obj(KOTLIN_DOUBLE, &[]);
+    pub const Double: Ty = Ty::Obj(KOTLIN_DOUBLE, crate::types::TyList::EMPTY);
     #[allow(non_upper_case_globals)]
-    pub const UByte: Ty = Ty::Obj(KOTLIN_UBYTE, &[]);
+    pub const UByte: Ty = Ty::Obj(KOTLIN_UBYTE, crate::types::TyList::EMPTY);
     #[allow(non_upper_case_globals)]
-    pub const UShort: Ty = Ty::Obj(KOTLIN_USHORT, &[]);
+    pub const UShort: Ty = Ty::Obj(KOTLIN_USHORT, crate::types::TyList::EMPTY);
     #[allow(non_upper_case_globals)]
-    pub const UInt: Ty = Ty::Obj(KOTLIN_UINT, &[]);
+    pub const UInt: Ty = Ty::Obj(KOTLIN_UINT, crate::types::TyList::EMPTY);
     #[allow(non_upper_case_globals)]
-    pub const ULong: Ty = Ty::Obj(KOTLIN_ULONG, &[]);
+    pub const ULong: Ty = Ty::Obj(KOTLIN_ULONG, crate::types::TyList::EMPTY);
     #[allow(non_upper_case_globals)]
-    pub const String: Ty = Ty::Obj(KOTLIN_STRING, &[]);
+    pub const String: Ty = Ty::Obj(KOTLIN_STRING, crate::types::TyList::EMPTY);
 
     /// A class reference type from an internal name (no generic arguments).
     pub fn obj(internal: &str) -> Ty {
-        Ty::Obj(type_name(internal), &[])
+        Ty::Obj(type_name(internal), crate::types::TyList::EMPTY)
     }
 
     /// A class reference type from an existing tree-backed internal name.
     pub fn obj_name(internal: TypeName) -> Ty {
-        Ty::Obj(internal, &[])
+        Ty::Obj(internal, TyList::EMPTY)
     }
 
     /// A generic class reference type — `internal<args…>`.
     pub fn obj_args(internal: &str, args: &[Ty]) -> Ty {
-        Ty::Obj(type_name(internal), intern_tys(args))
+        Ty::Obj(type_name(internal), TyList::new(args))
     }
 
     pub fn obj_args_name(internal: TypeName, args: &[Ty]) -> Ty {
-        Ty::Obj(internal, intern_tys(args))
+        Ty::Obj(internal, TyList::new(args))
     }
 
     /// The generic type arguments of a reference type (empty for non-generic / non-`Obj`).
+    /// The classifier and type arguments of a reference type, for slice-pattern matching.
+    pub fn obj_parts(self) -> Option<(TypeName, &'static [Ty])> {
+        match self {
+            Ty::Obj(name, args) => Some((name, args.as_slice())),
+            _ => None,
+        }
+    }
+
     pub fn type_args(self) -> &'static [Ty] {
         match self {
-            Ty::Obj(_, args) => args,
+            Ty::Obj(_, args) => args.as_slice(),
             Ty::TyParam(_, b) | Ty::PlatformNullable(b) => b.type_args(),
             _ => &[],
         }
@@ -842,7 +800,7 @@ impl Ty {
     pub fn substitute_erased(self, bindings: &crate::fx_hash::HashMap<String, Ty>) -> Ty {
         match self {
             Ty::TyParam(name, bound) => bindings
-                .get(name)
+                .get(name.as_str())
                 .copied()
                 .map(|binding| {
                     if bound.upper_bound_admits_null() {
@@ -1058,7 +1016,7 @@ impl Ty {
         match self {
             Ty::Null => Ty::Nothing,
             Ty::DefinitelyNotNull(_) => self,
-            Ty::TyParam(name, bound) => Ty::ty_param(name, bound.definitely_non_null()),
+            Ty::TyParam(name, bound) => Ty::ty_param(name.as_str(), bound.definitely_non_null()),
             _ => self.non_null(),
         }
     }
@@ -1150,7 +1108,7 @@ impl Ty {
                     .unwrap_or_else(|| Ty::obj("kotlin/Any"));
                 Ty::obj_args_name(wk::array(), &[e.erased_recv()])
             }
-            Ty::Obj(n, _) => Ty::Obj(n, &[]),
+            Ty::Obj(n, _) => Ty::Obj(n, crate::types::TyList::EMPTY),
             // `null`/`Nothing` (and the error placeholder) are subtypes of every reference type, so a
             // receiver of one of these can invoke an `Any`/`Any?`-receiver extension — key them under
             // `Any` (`null.unsafeCast()` reaches `fun <T> Any?.unsafeCast()`).
@@ -1173,7 +1131,7 @@ impl Ty {
                     .unwrap_or_else(|| Ty::obj("kotlin/Any"));
                 Ty::obj_args_name(wk::array(), &[element.extension_recv_key()])
             }
-            Ty::Obj(n, _) => Ty::Obj(n, &[]),
+            Ty::Obj(n, _) => Ty::Obj(n, crate::types::TyList::EMPTY),
             _ => self,
         }
     }
@@ -1193,7 +1151,7 @@ impl Ty {
 
     /// A generic type-parameter type `T` with the given declared upper bound (`kotlin/Any` if unbounded).
     pub fn ty_param(name: &str, bound: Ty) -> Ty {
-        Ty::TyParam(intern(name), intern_ty(bound))
+        Ty::TyParam(TyParamName::new(name), intern_ty(bound))
     }
 
     /// Whether this is a generic type-parameter reference (`T`).
@@ -1271,7 +1229,7 @@ impl Ty {
     /// The name of a type-parameter type (`T`), else `None`.
     pub fn ty_param_name(self) -> Option<&'static str> {
         match self {
-            Ty::TyParam(n, _) => Some(n),
+            Ty::TyParam(n, _) => Some(n.as_str()),
             _ => None,
         }
     }
@@ -1432,7 +1390,7 @@ impl Ty {
                     .map(Ty::canonical_semantic)
                     .collect::<Vec<_>>(),
             ),
-            Ty::TyParam(name, bound) => Ty::ty_param(name, bound.canonical_semantic()),
+            Ty::TyParam(name, bound) => Ty::ty_param(name.as_str(), bound.canonical_semantic()),
             Ty::Fun(signature) => Ty::fun_with_shape(
                 signature
                     .params
@@ -1652,7 +1610,7 @@ impl Ty {
                 .map(|part| render(*part))
                 .collect::<Vec<_>>()
                 .join(" & "),
-            Ty::TyParam(n, _) => type_parameter(n),
+            Ty::TyParam(n, _) => type_parameter(n.as_str()),
             // Only reachable from a diagnostic rendered while the declaration is still being
             // resolved; it never names a real type.
             Ty::Pending => "<not determined>".to_string(),
@@ -2507,25 +2465,6 @@ pub const KFUNCTION_INTERNAL: &str = "kotlin/reflect/KFunction";
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn primitive_array_elements_are_found_by_every_name_spelling() {
-        for (name, element) in PRIM_ARRAY_CLASSES {
-            assert_eq!(prim_array_element(name), Some(element), "{name}");
-            assert_eq!(prim_array_element(&name.to_string()), Some(element));
-            assert_eq!(prim_array_element(type_name(name)), Some(element));
-        }
-        for name in [
-            "kotlin/Array",
-            "kotlin/Int",
-            "sample/IntArray",
-            "IntArray",
-            "kotlin/String",
-        ] {
-            assert_eq!(prim_array_element(name), None, "{name}");
-            assert_eq!(prim_array_element(type_name(name)), None, "{name}");
-        }
-    }
 
     #[test]
     fn array_read_element_approximates_use_site_projections() {

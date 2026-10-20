@@ -7,6 +7,7 @@
 
 use super::*;
 use crate::ir::{ExprId, IrExpr};
+use crate::types::TyKind;
 
 /// The JVM type of the slot a `Variable` declaration owns. A declaration always stores a value, so
 /// semantic `Unit` is the `kotlin/Unit` reference; only a callable's control-flow return is `V`.
@@ -31,7 +32,7 @@ pub(super) fn slot_type(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Ty {
 /// stays unboxed.
 fn erased_inline_parameter_slot(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Option<Ty> {
     let declared = ir.inline_declared_type(declaration)?;
-    if !matches!(declared.non_null(), Ty::TyParam(..)) {
+    if !declared.non_null().is_ty_param() {
         return None;
     }
     let erased = ir_ty_to_jvm(&stored_value_ty(declared));
@@ -102,7 +103,8 @@ impl Emitter<'_> {
 
         // A spilled local is declared twice with the same value identity. Reuse its slot when the
         // verifier types agree, or when both are references; never alias differing primitives.
-        let is_reference = |ty: Ty| matches!(ty, Ty::String | Ty::Obj(..)) || ty.is_array();
+        let is_reference =
+            |ty: Ty| matches!(ty.kind(), TyKind::STRING | TyKind::Obj(..)) || ty.is_array();
         let reused = self
             .slots
             .get(&index)

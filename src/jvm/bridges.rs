@@ -17,7 +17,7 @@ use crate::ir::{
 use crate::jvm::backend::SkipReason;
 use crate::jvm::names::method_descriptor;
 use crate::names::{property_getter_name, property_setter_name};
-use crate::types::{stored_value_ty, Ty};
+use crate::types::{stored_value_ty, Ty, TyKind};
 
 /// Every bridge family this class needs, appended to `IrClass::bridges`.
 pub(super) fn derive_bridges(
@@ -517,13 +517,7 @@ fn superclass_method_bridges(
         // arguments owned by different declarations (`Iterator<T-super>` vs `Iterator<T-class>`),
         // while erasure gives both methods the exact same descriptor. Comparing `Ty` structurally
         // in that case manufactured a same-name/same-descriptor bridge which could only call itself.
-        let value_class_return_difference = base_ret != own_ret
-            && [base_ret, own_ret].into_iter().any(|result| {
-                result
-                    .non_null()
-                    .obj_internal()
-                    .is_some_and(|name| crate::jvm::value_classes::is_boxed_value_class(ir, name))
-            });
+        let value_class_return_difference = value_class_result_difference(ir, base_ret, own_ret);
         if method_descriptor(&base_params, base_ret) == method_descriptor(&own_params, own_ret)
             && bridge_name == target_name
             && !value_class_return_difference
@@ -704,7 +698,14 @@ fn property_bridges(
         let declared_receiver = edge.declared_receiver.map(bridge_erasure);
         let implementation_receiver = edge.implementation_receiver.map(bridge_erasure);
         let getter_results = PropertyGetterResults::of(ir, callables, &edge, override_results)?;
+        // As for a function: `Z` over `Z?` shares a descriptor before value classes are erased,
+        // but each getter is named by its own value-class result (`getP-<hash>()I` beside the
+        // supertype's `getP-<other hash>()LZ;`), so the supertype's getter needs its bridge.
         if crate::jvm::names::same_type_descriptor(
+            getter_results.declared,
+            getter_results.implementation,
+        ) && !value_class_result_difference(
+            ir,
             getter_results.declared,
             getter_results.implementation,
         ) && match (declared_receiver, implementation_receiver) {
@@ -781,6 +782,21 @@ fn property_bridges(
         );
     }
     Ok(())
+}
+
+/// Whether an override's result differs from the overridden one's in a way that names the two
+/// apart once value classes are realized: either mentions a boxed value class, and they differ
+/// (`Z` over `Z?`, `Z` over `T`). kotlinc names each member by its own value-class result, so the
+/// override and the overridden member are distinct JVM methods even where the unerased
+/// descriptors agree.
+fn value_class_result_difference(ir: &IrFile, declared: Ty, implementation: Ty) -> bool {
+    declared != implementation
+        && [declared, implementation].into_iter().any(|result| {
+            result
+                .non_null()
+                .obj_internal()
+                .is_some_and(|name| crate::jvm::value_classes::is_boxed_value_class(ir, name))
+        })
 }
 
 /// A member-extension property's accessors are ordinary methods taking the receiver
@@ -1040,20 +1056,22 @@ pub(super) fn bridge_erasure(ty: Ty) -> Ty {
 }
 
 fn bridge_erasure_visiting(ty: Ty, visiting: &mut crate::fx_hash::HashSet<&'static str>) -> Ty {
-    match ty {
+    match ty.kind() {
         // `<T : S>` where `S : Entity` erases to `Entity`, whether `S` is declared on the method
         // or on the enclosing classifier. A cycle (`T : S`, `S : T`) has no class bound.
-        Ty::TyParam(name, bound) => {
-            if !visiting.insert(name) {
+        TyKind::TyParam(name, bound) => {
+            if !visiting.insert(name.as_str()) {
                 return Ty::obj("kotlin/Any");
             }
-            let erased = stored_value_ty(bridge_erasure_visiting(*bound, visiting));
-            visiting.remove(name);
+            let erased = stored_value_ty(bridge_erasure_visiting(bound, visiting));
+            visiting.remove(name.as_str());
             erased
         }
-        Ty::Nullable(inner) => Ty::nullable(bridge_erasure_visiting(*inner, visiting)),
-        Ty::Obj(internal, _) if internal == crate::types::TypeName::ROOT => Ty::obj("kotlin/Any"),
-        other => other,
+        TyKind::Nullable(inner) => Ty::nullable(bridge_erasure_visiting(inner, visiting)),
+        TyKind::Obj(internal, _) if internal == crate::types::TypeName::ROOT => {
+            Ty::obj("kotlin/Any")
+        }
+        _ => ty,
     }
 }
 

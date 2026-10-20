@@ -11,7 +11,7 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ir::{Callee, ExprId, IrCheckedOperation, IrCheckedSubstitution, IrExpr};
-use crate::types::{stored_value_ty, ty_subst_keep_unbound, Ty};
+use crate::types::{stored_value_ty, ty_subst_keep_unbound, Ty, TyKind};
 
 /// A mutation-free decision for every escaping implementation this expansion will regenerate.
 /// Applying the plan cannot decline, so no specialized function or retargeted arena node can be
@@ -1597,8 +1597,8 @@ fn function_mentions_anonymous_class(ir: &crate::ir::IrFile, function: u32) -> b
 }
 
 fn type_mentions_anonymous_class(ir: &crate::ir::IrFile, ty: Ty) -> bool {
-    match ty {
-        Ty::Obj(name, arguments) => {
+    match ty.kind() {
+        TyKind::Obj(name, arguments) => {
             ir.classes
                 .iter()
                 .any(|class| class.is_anonymous_object && class.fq_name == name)
@@ -1606,23 +1606,23 @@ fn type_mentions_anonymous_class(ir: &crate::ir::IrFile, ty: Ty) -> bool {
                     .iter()
                     .any(|argument| type_mentions_anonymous_class(ir, *argument))
         }
-        Ty::Fun(signature) => signature
+        TyKind::Fun(signature) => signature
             .params
             .iter()
             .copied()
             .chain(std::iter::once(signature.ret))
             .any(|part| type_mentions_anonymous_class(ir, part)),
-        Ty::Nullable(inner)
-        | Ty::PlatformNullable(inner)
-        | Ty::DefinitelyNotNull(inner)
-        | Ty::InProjection(inner)
-        | Ty::OutProjection(inner)
-        | Ty::StarProjection(inner)
-        | Ty::TyParam(_, inner) => type_mentions_anonymous_class(ir, *inner),
-        Ty::Intersection(parts) => parts
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::DefinitelyNotNull(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner)
+        | TyKind::StarProjection(inner)
+        | TyKind::TyParam(_, inner) => type_mentions_anonymous_class(ir, inner),
+        TyKind::Intersection(parts) => parts
             .iter()
             .any(|part| type_mentions_anonymous_class(ir, *part)),
-        Ty::Unit | Ty::Null | Ty::Nothing | Ty::Error | Ty::Pending => false,
+        TyKind::Unit | TyKind::Null | TyKind::Nothing | TyKind::Error | TyKind::Pending => false,
     }
 }
 

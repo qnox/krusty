@@ -33,7 +33,7 @@ use crate::libraries::{
     FnKind, FunctionInfo, GenericReturnPolicy, GenericSig, ImplicitClassifierCallable,
     LibraryMember, SourceMember,
 };
-use crate::types::{ty_mentions_param, ty_subst_keep_unbound, FnSig, Ty, TypeName};
+use crate::types::{ty_mentions_param, ty_subst_keep_unbound, FnSig, Ty, TyKind, TypeName};
 
 use super::{
     call_argument_parameter_indices, lambda_returns::ReturnTarget, ArgSlots, Checker, CheckerScope,
@@ -460,9 +460,12 @@ impl Checker<'_> {
         {
             return None;
         }
-        let function = match expected.non_null() {
-            Ty::Fun(function) => return Some(function),
-            interface => self.semantic_sam_signature(interface)?,
+        let function = {
+            let interface = expected.non_null();
+            match interface.kind() {
+                TyKind::Fun(function) => return Some(function),
+                _ => self.semantic_sam_signature(interface)?,
+            }
         };
         match Ty::fun_with_shape(
             function.params,
@@ -470,8 +473,10 @@ impl Checker<'_> {
             function.context_count,
             function.has_receiver,
             function.suspend,
-        ) {
-            Ty::Fun(function) => Some(function),
+        )
+        .kind()
+        {
+            TyKind::Fun(function) => Some(function),
             _ => None,
         }
     }

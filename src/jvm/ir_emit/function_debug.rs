@@ -92,10 +92,10 @@ pub(super) fn attach_declared_function_debug(
         }
         slot += slot_words(*ty);
     }
-    // A top-level `inline fun` stores `$i$f$` at this slot before any statement. That marker has
+    // An emitted `inline fun` stores `$i$f$` at this slot before any statement. That marker has
     // no line, so the declaration-line fallback must not land on it: `set_method_debug` would
     // otherwise insert the signature line at pc 0 whenever the body's own first entry is later.
-    if function.is_static && ir.top_level_inline_functions.contains(&fid) {
+    if opens_with_inline_depth_marker(ir, fid, !function.is_static) {
         body_pc += inline_depth_marker_width(slot);
     }
     cw.set_method_debug(
@@ -152,7 +152,17 @@ fn attach_property_annotation_marker_debug(ir: &IrFile, fid: u32, cw: &mut Class
     cw.set_method_debug(&function.name, &descriptor, None, &locals);
 }
 
-/// `iconst_0` plus `istore` of the `$i$f$` local an emitted top-level inline function opens with.
+/// Whether the method emitted for `fid` opens with kotlinc's inline-depth marker (`iconst_0;
+/// istore` into `$i$f$<name>`): every emitted `inline fun`, a top-level one or a member. A member's
+/// receiver is value 0, or its dispatch owner survives on a value class's static `-impl`.
+pub(super) fn opens_with_inline_depth_marker(ir: &IrFile, fid: u32, receiver_value: bool) -> bool {
+    ir.top_level_inline_functions.contains(&fid)
+        || (ir.inline_fns.contains(&fid)
+            && (receiver_value || ir.functions[fid as usize].dispatch_receiver.is_some()))
+}
+
+/// The width of the `iconst_0` plus `istore` of the `$i$f$` local an emitted inline function
+/// opens with.
 fn inline_depth_marker_width(slot: u16) -> u16 {
     let store = if slot <= 3 {
         1

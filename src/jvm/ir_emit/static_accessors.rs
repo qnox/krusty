@@ -228,9 +228,15 @@ pub(super) fn routes_through_accessor(
 /// published bytecode of every function in the set calls `access$` for a private callee and
 /// `access$get<X>$p` / `access$set<X>$p` for a private property, including the private inline
 /// function's own method: the splicer copies that method, and it copies the non-private
-/// `$default` stub. A private inline function that is expanded only into non-inline callers,
-/// and that declares no default, stays out of the set and keeps direct access.
-pub(super) fn inline_functions_exporting_private_access(ir: &IrFile) -> HashSet<u32> {
+/// `$default` stub. A private inline function whose compiled body another class of the file
+/// inlines (a nested class calling its outer class's private inline member) is seeded too, as
+/// kotlinc does: that body runs in the calling class. A private inline function that is
+/// expanded only into non-inline callers of its own class, and that declares no default, stays
+/// out of the set and keeps direct access.
+pub(super) fn inline_functions_exporting_private_access(
+    ir: &IrFile,
+    contexts: &[EmissionContext],
+) -> HashSet<u32> {
     let mut exporting = HashSet::default();
     let mut stack = Vec::new();
     for index in 0..ir.functions.len() {
@@ -239,6 +245,11 @@ pub(super) fn inline_functions_exporting_private_access(ir: &IrFile) -> HashSet<
             && (!ir.method_visibility(function).is_private() || ir.has_param_defaults(function))
         {
             exporting.insert(function);
+            stack.push(function);
+        }
+    }
+    for function in compiled_inline_callees_of_other_classes(ir, contexts) {
+        if exporting.insert(function) {
             stack.push(function);
         }
     }
@@ -253,6 +264,39 @@ pub(super) fn inline_functions_exporting_private_access(ir: &IrFile) -> HashSet<
         }
     }
     exporting
+}
+
+/// The inline functions of this file whose compiled body some other JVM class of the file
+/// inlines: a call recorded as inlined from a compiled body, in a context whose owner is not the
+/// context declaring the callee.
+fn compiled_inline_callees_of_other_classes(
+    ir: &IrFile,
+    contexts: &[EmissionContext],
+) -> HashSet<u32> {
+    let declaring_owner = |function: u32| {
+        let body = ir.functions.get(function as usize)?.body?;
+        contexts
+            .iter()
+            .find(|context| context.roots.contains(&body))
+            .map(|context| context.owner)
+    };
+    let mut callees = HashSet::default();
+    for context in contexts {
+        let mut stack = context.roots.clone();
+        let mut seen = HashSet::default();
+        while let Some(expression) = stack.pop() {
+            if !seen.insert(expression) {
+                continue;
+            }
+            if let Some(callee) = ir.compiled_inline_call(expression) {
+                if declaring_owner(callee).is_some_and(|owner| owner != context.owner) {
+                    callees.insert(callee);
+                }
+            }
+            crate::ir::for_each_child(&ir.exprs, expression, &mut |child| stack.push(child));
+        }
+    }
+    callees
 }
 
 /// Whether `root` is the body of a function in `exporting`.
@@ -355,7 +399,7 @@ pub(super) fn plan(
     class_member_fids: &HashSet<u32>,
     private_calls: &HashMap<crate::ir::ExprId, (u32, u32)>,
 ) -> StaticAccessorPlan {
-    let exporting_private_access = inline_functions_exporting_private_access(ir);
+    let exporting_private_access = inline_functions_exporting_private_access(ir, contexts);
     let protected_calls = env.run.protected_member_access_bridges.borrow();
     let private_member_bridges = env.run.private_member_access_bridges.borrow();
     let walk = Walk {
@@ -844,7 +888,12 @@ impl Walk<'_> {
             ) {
                 // A read with no access path is reported where the emitter meets it.
                 if let Ok(Some((owner, accessor))) =
-                    super::companion_field::companion_field_accessor(ir, context, &read)
+                    super::companion_field::companion_field_accessor(
+                        ir,
+                        context,
+                        export_private,
+                        &read,
+                    )
                 {
                     self.companion_fields
                         .borrow_mut()

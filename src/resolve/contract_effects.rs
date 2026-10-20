@@ -2,6 +2,7 @@
 //! `returns(…) implies …` effect proves.
 
 use super::*;
+use crate::types::TyKind;
 
 /// What supplies one parameter of a selected call.
 enum ContractArgument<'c> {
@@ -251,10 +252,12 @@ impl Checker<'_> {
             let recv = self
                 .contract_arg_expr(call, crate::contracts::ParamRef::Receiver)
                 .map(|e| self.expr_types[e.0 as usize]);
-            if let Some(Ty::Obj(_, actual_args)) = recv.map(|t| t.non_null()) {
+            if let Some(TyKind::Obj(_, actual_args)) = recv.map(|t| t.non_null()).map(Ty::kind) {
                 // Unify the DECLARED receiver's type-parameter arguments with the actual
                 // receiver's type arguments (`Refinement<T, R>` on `Refinement<Any, String>`).
-                if let Some(Ty::Obj(_, declared_args)) = gsig.and_then(|g| g.receiver) {
+                if let Some(TyKind::Obj(_, declared_args)) =
+                    gsig.and_then(|g| g.receiver).map(Ty::kind)
+                {
                     for (d, a) in declared_args.iter().zip(actual_args.iter()) {
                         if let Some(name) = d.ty_param_name() {
                             binds.entry(name.to_string()).or_insert(*a);

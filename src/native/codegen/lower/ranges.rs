@@ -15,6 +15,7 @@
 use super::classifier_shapes::IntegralRangeElement;
 use super::*;
 use crate::fir::FirRangeOperation;
+use crate::types::TyKind;
 use crate::types::TypeName;
 
 /// The element type of a runtime range, by the name of the type declaring the member.
@@ -88,7 +89,7 @@ fn range_to_owner(owner: super::super::super::intrinsics::DeclarationOwner) -> b
 /// that declares such an implementation is declined at every member asked of a type it implements
 /// itself, before this is reached.
 fn floating_range(ty: Ty) -> Option<(&'static str, Ty)> {
-    let Ty::Obj(internal, arguments) = ty.non_null() else {
+    let TyKind::Obj(internal, arguments) = ty.non_null().kind() else {
         return None;
     };
     if !super::classifier_shapes::is_closed_floating_range(internal)
@@ -133,7 +134,7 @@ fn floating_range_symbol(
 /// implementation is declined at every member asked of a type it implements itself, before this is
 /// reached — and nothing else in this runtime wears the interface over a machine element.
 fn closed_range_element(ty: Ty) -> Option<Ty> {
-    let Ty::Obj(internal, arguments) = ty.non_null() else {
+    let TyKind::Obj(internal, arguments) = ty.non_null().kind() else {
         return None;
     };
     if !super::classifier_shapes::is_closed_range(internal) {
@@ -157,14 +158,14 @@ fn closed_range_element(ty: Ty) -> Option<Ty> {
 /// ([`FunctionLowering::range_compare_function`]), so its members need nothing from the element's
 /// descriptor and answer for any element the construction could order.
 fn comparable_range_element(ty: Ty) -> Option<Ty> {
-    let Ty::Obj(internal, arguments) = ty.non_null() else {
+    let TyKind::Obj(internal, arguments) = ty.non_null().kind() else {
         return None;
     };
     if !super::classifier_shapes::is_closed_range(internal) {
         return None;
     }
     let argument = arguments.first()?.non_null();
-    (matches!(argument, Ty::Obj(..)) && machine_carrier(argument) == Carrier::Ref)
+    (matches!(argument.kind(), TyKind::Obj(..)) && machine_carrier(argument) == Carrier::Ref)
         .then_some(argument)
 }
 
@@ -557,7 +558,7 @@ impl BodyLowering<'_, '_, '_> {
     ///   and an element that could hold both a builtin and a program object has no single function
     ///   to pass.
     fn range_compare_function(&mut self, element: Ty) -> Result<Value, Unsupported> {
-        let Ty::Obj(name, _) = element.non_null() else {
+        let TyKind::Obj(name, _) = element.non_null().kind() else {
             return Err(declined!(
                 "a range of `{}`",
                 super::type_checks::type_name_of(element)
@@ -590,7 +591,7 @@ impl BodyLowering<'_, '_, '_> {
             function.name == "compareTo"
                 && function.dispatch_receiver.is_some()
                 && function.ret == Ty::Int
-                && matches!(function.params.as_slice(), [Ty::Obj(other, _)] if *other == name)
+                && matches!(function.params.as_slice(), [other] if other.obj_parts().is_some_and(|(other, _)| other == name))
         });
         let (true, Some(function)) = (is_final, own) else {
             return Err(declined!(
@@ -820,9 +821,9 @@ impl BodyLowering<'_, '_, '_> {
         };
         // A type parameter stands for whatever its bound admits, and `indices` is declared for the
         // bound: `fun <T : Collection<*>> f(c: T) = c.indices` asks the collection's question.
-        let ty = match ty {
-            Ty::TyParam(_, bound) => bound.non_null(),
-            other => other,
+        let ty = match ty.kind() {
+            TyKind::TyParam(_, bound) => bound.non_null(),
+            _ => ty,
         };
         let size = if ty.is_array() {
             self.array_size(receiver)?

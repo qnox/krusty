@@ -70,7 +70,7 @@ pub(super) fn compact_classifier_parents(
         .collect::<Option<Vec<_>>>()?;
 
     let parent_is_interface = |parent: Ty| {
-        if matches!(parent.non_null(), Ty::Fun(_)) {
+        if parent.non_null().is_fun() {
             return Some(true);
         }
         let owner = parent.non_null().kotlin_class_internal()?;
@@ -117,7 +117,7 @@ pub(super) fn compact_classifier_parents(
     // source shapes, but must not resurrect one of those rejected nominal edges merely because its
     // syntax still exists in the header inventory.
     let retained_parent = |parent: Ty| {
-        if matches!(parent.non_null(), Ty::Fun(_)) {
+        if parent.non_null().is_fun() {
             return true;
         }
         parent

@@ -6,7 +6,7 @@ use crate::jvm::classreader::ClassInfo;
 use crate::libraries::{
     AnnotationParameterPolicy, AnnotationPositionalPolicy, ParamList, Visibility,
 };
-use crate::types::{AnnotationTargets, Ty};
+use crate::types::{AnnotationTargets, Ty, TyKind};
 
 /// Normalize a constructor-less annotation declaration into the common application shape while
 /// JVM descriptors and `AnnotationDefault` are still provider-owned facts. Core never reparses a
@@ -17,11 +17,14 @@ pub(super) fn java_annotation_parameter_list(class: &ClassInfo) -> Option<ParamL
     // `Signature` attribute: dropping it would accept `String::class` for
     // `Class<? extends Runnable>`. The physical descriptor remains provider-owned and unchanged.
     let kotlin_class_element = |semantic: Ty| {
-        let arguments = match semantic.non_null() {
-            Ty::Obj(_, arguments) => arguments,
-            _ => &[],
+        let arguments = match semantic.non_null().kind() {
+            TyKind::Obj(_, arguments) => arguments,
+            _ => crate::types::TyList::EMPTY,
         };
-        Ty::obj_args_name(crate::types::type_name("kotlin/reflect/KClass"), arguments)
+        Ty::obj_args_name(
+            crate::types::type_name("kotlin/reflect/KClass"),
+            arguments.as_slice(),
+        )
     };
     let mut elements = class
         .methods
@@ -67,7 +70,7 @@ pub(super) fn java_annotation_parameter_list(class: &ClassInfo) -> Option<ParamL
         names: elements.iter().map(|(name, _, _)| name.clone()).collect(),
         defaults: elements.iter().map(|(_, _, default)| *default).collect(),
         types: elements.iter().map(|(_, ty, _)| *ty).collect(),
-        recv_fun: vec![false; elements.len()],
+        recv_fun: vec![false; elements.len()].into(),
         vararg: value_vararg.then_some(0),
         annotation: Some(AnnotationParameterPolicy {
             positional,

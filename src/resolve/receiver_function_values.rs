@@ -3,6 +3,7 @@
 //! the implicit receiver and context arguments, and recording the selected invoke.
 
 use super::*;
+use crate::types::TyKind;
 
 /// Result of trying the implicit `value()` spelling of a receiver-function value.
 pub(super) enum ImplicitReceiverFunctionInvoke {
@@ -32,8 +33,8 @@ impl Checker<'_> {
         name: &str,
     ) -> Option<(&'static crate::types::FnSig, ReceiverFnValueOrigin)> {
         if let Some((semantic, origin)) = self.local_callable_type(scope, name) {
-            return match semantic {
-                Ty::Fun(signature) if signature.has_receiver => {
+            return match semantic.kind() {
+                TyKind::Fun(signature) if signature.has_receiver => {
                     let origin = match origin {
                         ReceiverFnValueOrigin::DispatchProperty {
                             owner,
@@ -87,8 +88,8 @@ impl Checker<'_> {
                 .rev()
                 .find(|property| property.name == name)
             {
-                return match property.ty {
-                    Ty::Fun(signature) if signature.has_receiver => Some((
+                return match property.ty.kind() {
+                    TyKind::Fun(signature) if signature.has_receiver => Some((
                         signature,
                         ReceiverFnValueOrigin::DispatchProperty {
                             owner: property.owner,
@@ -103,9 +104,9 @@ impl Checker<'_> {
             }
         }
         match self.select_top_level_property(scope, name) {
-            TopLevelPropertySelection::Selected(property) if matches!(property.property.ty, Ty::Fun(signature) if signature.has_receiver) =>
+            TopLevelPropertySelection::Selected(property) if matches!(property.property.ty.kind(), TyKind::Fun(signature) if signature.has_receiver) =>
             {
-                let Ty::Fun(signature) = property.property.ty else {
+                let TyKind::Fun(signature) = property.property.ty.kind() else {
                     unreachable!("guard selected a function-typed property")
                 };
                 Some((signature, ReceiverFnValueOrigin::TopLevelProperty))

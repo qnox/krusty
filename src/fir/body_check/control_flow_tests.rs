@@ -4,6 +4,7 @@ use super::test_support::{
 };
 use super::*;
 use crate::types::EqualityMode;
+use crate::types::TyKind;
 
 #[test]
 fn elvis_mixed_numeric_branches_retain_their_number_supertype() {
@@ -103,10 +104,10 @@ fn definitely_non_null_reified_throwable_is_a_checked_catch_type() {
     let [catch] = catches.as_ref() else {
         panic!("try expression must retain its catch")
     };
-    let Ty::TyParam(_, bound) = catch.parameter_ty.get() else {
+    let TyKind::TyParam(_, bound) = catch.parameter_ty.get().kind() else {
         panic!("catch parameter must retain its declaration-owned reified identity")
     };
-    assert_eq!(*bound, Ty::obj("kotlin/Throwable"));
+    assert_eq!(bound, Ty::obj("kotlin/Throwable"));
 }
 
 #[test]

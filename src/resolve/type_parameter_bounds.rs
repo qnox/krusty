@@ -6,6 +6,7 @@
 //! needs all declared bounds by the declaration-scoped semantic identity, including during Pass 1
 //! before resolved headers exist.
 
+use crate::types::TyKind;
 use crate::{
     fx_hash::HashMap,
     libraries::GenericSig,
@@ -26,14 +27,14 @@ impl LexicalBoundsIndex {
     pub(super) fn record(&mut self, names: &[String], parameters: &TParams) {
         for source_name in names {
             let parameter = parameters.bound(source_name);
-            let Ty::TyParam(identity, first_bound) = parameter.non_null() else {
+            let TyKind::TyParam(identity, first_bound) = parameter.non_null().kind() else {
                 continue;
             };
             let extra = parameters.extra_bounds_of(source_name);
             if !extra.is_empty() {
                 self.by_parameter.insert(
                     identity.to_string(),
-                    std::iter::once(*first_bound).chain(extra).collect(),
+                    std::iter::once(first_bound).chain(extra).collect(),
                 );
             }
         }

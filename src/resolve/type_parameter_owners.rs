@@ -10,7 +10,7 @@ use crate::ast::{ClassDecl, ClassKind, DeclId, FunDecl, PropDecl, TypeRef};
 use crate::fx_hash::HashMap;
 use crate::libraries::LibraryType;
 use crate::symbol_source::SymbolSource;
-use crate::types::{Ty, TypeName, TypeVariance};
+use crate::types::{Ty, TyKind, TypeName, TypeVariance};
 
 /// kotlinc's disambiguation of same-named type parameters within one diagnostic: when two distinct
 /// parameters share a source name, each is written `T#N`, numbered in the order the diagnostic's
@@ -155,19 +155,19 @@ impl TypeParameterNumbering {
 
 /// Every type-parameter identity `ty` mentions, in the order a rendering of it writes them.
 pub(super) fn mentioned_type_parameters(ty: Ty, mentioned: &mut Vec<&'static str>) {
-    match ty {
-        Ty::TyParam(parameter, _) => mentioned.push(parameter),
-        Ty::Nullable(inner)
-        | Ty::PlatformNullable(inner)
-        | Ty::InProjection(inner)
-        | Ty::OutProjection(inner)
-        | Ty::DefinitelyNotNull(inner) => mentioned_type_parameters(*inner, mentioned),
-        Ty::Obj(_, arguments) | Ty::Intersection(arguments) => {
+    match ty.kind() {
+        TyKind::TyParam(parameter, _) => mentioned.push(parameter.as_str()),
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner)
+        | TyKind::DefinitelyNotNull(inner) => mentioned_type_parameters(inner, mentioned),
+        TyKind::Obj(_, arguments) | TyKind::Intersection(arguments) => {
             for argument in arguments {
                 mentioned_type_parameters(*argument, mentioned);
             }
         }
-        Ty::Fun(signature) => {
+        TyKind::Fun(signature) => {
             for parameter in signature.params.iter() {
                 mentioned_type_parameters(*parameter, mentioned);
             }
@@ -178,13 +178,13 @@ pub(super) fn mentioned_type_parameters(ty: Ty, mentioned: &mut Vec<&'static str
 }
 
 fn nullable_type_parameter(ty: Ty) -> Option<&'static str> {
-    let Ty::Nullable(inner) = ty else {
+    let TyKind::Nullable(inner) = ty.kind() else {
         return None;
     };
-    let Ty::TyParam(parameter, _) = *inner else {
+    let TyKind::TyParam(parameter, _) = inner.kind() else {
         return None;
     };
-    Some(parameter)
+    Some(parameter.as_str())
 }
 
 /// The owner wording of a classifier's own formals from its provider-normalized declaration,
@@ -335,7 +335,7 @@ impl Checker<'_> {
                     .formal_bounds
                     .get(index)
                     .and_then(|bounds| bounds.first())
-                    .is_some_and(|bound| matches!(bound, Ty::PlatformNullable(_)))
+                    .is_some_and(|bound| bound.is_platform_nullable())
             });
             scope.publish(
                 &mut self.type_parameter_owners,
@@ -371,7 +371,7 @@ impl Checker<'_> {
             };
             let platform = ty
                 .type_parameter_occurrence_bound(formal)
-                .is_some_and(|bound| matches!(bound, Ty::PlatformNullable(_)));
+                .is_some_and(|bound| bound.is_platform_nullable());
             published.publish(
                 &mut self.type_parameter_owners,
                 &mut self.uninferred_type_parameters,

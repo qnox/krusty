@@ -19,6 +19,7 @@
 //! non-null, and also follows its sole field through a nullable occurrence; nullable multi-field
 //! Full values end the path.
 
+use crate::types::TyKind;
 use std::collections::HashSet;
 
 use super::*;
@@ -234,8 +235,8 @@ impl Checker<'_> {
         ty: Ty,
         path: &mut HashSet<Ty>,
     ) -> Option<Recursion> {
-        let (classifier, expected) = match ty.non_null() {
-            Ty::Obj(name, _) => (name, Recursion::Plain),
+        let (classifier, expected) = match ty.non_null().kind() {
+            TyKind::Obj(name, _) => (name, Recursion::Plain),
             _ => (
                 single_upper_bound_classifier(owner, ty)?,
                 Recursion::ViaTypeParameters,
@@ -271,11 +272,11 @@ impl Checker<'_> {
         parameter: &PropParam,
         underlying: Ty,
     ) -> Option<String> {
-        let expanded = match underlying {
-            Ty::Unit => "kotlin/Unit",
-            Ty::Obj(name, _) if name == crate::types::wk::unit() => "kotlin/Unit",
-            Ty::Nothing => "kotlin/Nothing",
-            Ty::Obj(name, _) if name == crate::types::wk::nothing() => "kotlin/Nothing",
+        let expanded = match underlying.kind() {
+            TyKind::Unit => "kotlin/Unit",
+            TyKind::Obj(name, _) if name == crate::types::wk::unit() => "kotlin/Unit",
+            TyKind::Nothing => "kotlin/Nothing",
+            TyKind::Obj(name, _) if name == crate::types::wk::nothing() => "kotlin/Nothing",
             _ => return None,
         };
         let alias = self
@@ -295,13 +296,13 @@ impl Checker<'_> {
 fn single_upper_bound_classifier(owner: &LibraryType, ty: Ty) -> Option<TypeName> {
     let mut bounds = Vec::new();
     collect_upper_bounds(owner, ty, &mut HashSet::new(), &mut bounds);
-    let any = Ty::Obj(crate::types::wk::any(), &[]);
+    let any = Ty::obj_name(crate::types::wk::any());
     if bounds.len() > 1 {
         bounds.retain(|bound| bound.non_null() != any);
     }
     match bounds.as_slice() {
-        [bound] => match bound.non_null() {
-            Ty::Obj(name, _) => Some(name),
+        [bound] => match bound.non_null().kind() {
+            TyKind::Obj(name, _) => Some(name),
             _ => None,
         },
         _ => None,
@@ -317,31 +318,34 @@ fn collect_upper_bounds(
     seen: &mut HashSet<&'static str>,
     bounds: &mut Vec<Ty>,
 ) {
-    match ty.non_null() {
-        Ty::TyParam(name, bound) => {
-            if !seen.insert(name) {
-                return;
-            }
-            let declared = owner
-                .type_parameters
-                .type_params
-                .iter()
-                .position(|parameter| parameter == name)
-                .and_then(|index| owner.type_parameters.type_param_bounds.get(index))
-                .filter(|declared| !declared.is_empty());
-            match declared {
-                Some(declared) => {
-                    for bound in declared {
-                        collect_upper_bounds(owner, *bound, seen, bounds);
-                    }
+    {
+        let other = ty.non_null();
+        match other.kind() {
+            TyKind::TyParam(name, bound) => {
+                if !seen.insert(name.as_str()) {
+                    return;
                 }
-                None => collect_upper_bounds(owner, *bound, seen, bounds),
+                let declared = owner
+                    .type_parameters
+                    .type_params
+                    .iter()
+                    .position(|parameter| parameter == name)
+                    .and_then(|index| owner.type_parameters.type_param_bounds.get(index))
+                    .filter(|declared| !declared.is_empty());
+                match declared {
+                    Some(declared) => {
+                        for bound in declared {
+                            collect_upper_bounds(owner, *bound, seen, bounds);
+                        }
+                    }
+                    None => collect_upper_bounds(owner, bound, seen, bounds),
+                }
             }
-        }
-        Ty::DefinitelyNotNull(inner) => collect_upper_bounds(owner, *inner, seen, bounds),
-        other => {
-            if !bounds.contains(&other) {
-                bounds.push(other);
+            TyKind::DefinitelyNotNull(inner) => collect_upper_bounds(owner, inner, seen, bounds),
+            _ => {
+                if !bounds.contains(&other) {
+                    bounds.push(other);
+                }
             }
         }
     }

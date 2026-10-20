@@ -11,7 +11,7 @@ use crate::libraries::builtin_declaration::{
 use crate::libraries::{
     kotlin_array_factory_kind, CompilerIntrinsic, FnKind, FunctionInfo, PropKind, PropertyInfo,
 };
-use crate::types::{ArrayFactoryKind, Ty, TypeName};
+use crate::types::{ArrayFactoryKind, Ty, TyKind, TypeName};
 
 /// Attach every compiler-owned realization fact for one normalized top-level declaration.
 /// Providers call this only after constructing the complete semantic signature; consumers never
@@ -85,7 +85,7 @@ fn property_reference_receiver(receiver: Ty, mutable: bool) -> Option<(u8, &'sta
 fn property_reference_metadata_parameter(ty: Ty) -> bool {
     let ty = ty.non_null();
     ty.obj_internal() == Some(crate::types::type_name("kotlin/reflect/KProperty"))
-        && matches!(ty.type_args(), [Ty::StarProjection(_)])
+        && matches!(ty.type_args(), [argument] if argument.is_star_projection())
 }
 
 pub(crate) fn function_semantic_role(
@@ -165,7 +165,7 @@ fn plain(facts: &BuiltinFunctionDeclaration<'_>, kind: FnKind) -> bool {
 }
 
 fn function_shape(ty: Ty, arity: usize, suspend: bool) -> bool {
-    matches!(ty.non_null(), Ty::Fun(signature)
+    matches!(ty.non_null().kind(), TyKind::Fun(signature)
         if signature.params.len() == arity
             && signature.context_count == 0
             && !signature.has_receiver
@@ -224,14 +224,14 @@ fn array_factory(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntri
             let [elements] = facts.params else {
                 return None;
             };
-            let Some(Ty::OutProjection(element)) = elements.array_elem() else {
+            let Some(TyKind::OutProjection(element)) = elements.array_elem().map(Ty::kind) else {
                 return None;
             };
             facts.type_parameter_count == 1
                 && facts.vararg == Some(0)
                 && elements.is_reference_array()
                 && facts.ret.is_reference_array()
-                && facts.ret.array_elem() == Some(*element)
+                && facts.ret.array_elem() == Some(element)
         }
         ArrayFactoryKind::ReferenceSize => {
             let [Ty::Int, initializer] = facts.params else {
@@ -322,7 +322,7 @@ fn kotlin_function(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerInt
                 && facts
                     .ret
                     .array_elem()
-                    .is_some_and(|element| matches!(element, Ty::TyParam(_, _))) =>
+                    .is_some_and(|element| element.is_ty_param()) =>
         {
             Some(CompilerIntrinsic::EnumValues)
         }
@@ -330,7 +330,7 @@ fn kotlin_function(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerInt
             if facts.type_parameter_count == 1
                 && facts.vararg.is_none()
                 && !facts.is_operator
-                && matches!(facts.ret, Ty::TyParam(_, _)) =>
+                && facts.ret.is_ty_param() =>
         {
             Some(CompilerIntrinsic::EnumValueOf)
         }
@@ -445,10 +445,13 @@ fn with_index(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsi
     let class = receiver.obj_internal();
     let (element, container) = if facts.package == wk::kotlin_collections_package() {
         if receiver.is_reference_array() {
-            let [Ty::OutProjection(element)] = receiver.type_args() else {
+            let [argument] = receiver.type_args() else {
                 return None;
             };
-            (generic_element(**element)?, wk::iterable())
+            let TyKind::OutProjection(element) = argument.kind() else {
+                return None;
+            };
+            (generic_element(element)?, wk::iterable())
         } else if receiver.is_array() {
             if facts.type_parameter_count != 0 {
                 return None;
@@ -490,7 +493,7 @@ fn kotlin_test(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrins
         || facts.type_parameter_count != 1
         || facts.vararg.is_some()
         || facts.is_operator
-        || !matches!(facts.ret, Ty::TyParam(_, _))
+        || !facts.ret.is_ty_param()
     {
         return None;
     }
@@ -599,13 +602,13 @@ fn comparable_range_to(
     }
     let element = facts.receiver?;
     let bound = element.ty_param_bound()?;
-    let is_element = |ty: &Ty| match (*ty, element) {
-        (Ty::TyParam(name, _), Ty::TyParam(declared, _)) => name == declared,
+    let is_element = |ty: &Ty| match (ty.kind(), element.kind()) {
+        (TyKind::TyParam(name, _), TyKind::TyParam(declared, _)) => name == declared,
         _ => false,
     };
     let applied_to_element = |ty: Ty, class| {
-        ty.obj_internal() == Some(class)
-            && matches!(ty.type_args(), [argument] if is_element(argument))
+        matches!(ty.kind(), TyKind::Obj(name, arguments)
+            if name == class && matches!(arguments.as_slice(), [argument] if is_element(argument)))
     };
     (applied_to_element(bound, wk::comparable())
         && facts.params == [element]
@@ -647,7 +650,7 @@ fn coroutine(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic
             ("startCoroutine", FnKind::Extension, Some(receiver), parameters)
                 if facts.type_parameter_count >= 1
                     && !facts.is_suspend
-                    && matches!(receiver.non_null(), Ty::Fun(signature)
+                    && matches!(receiver.non_null().kind(), TyKind::Fun(signature)
                         if signature.context_count == 0
                             && signature.suspend
                             && parameters.len() == signature.params.len() + 1
@@ -1268,6 +1271,7 @@ mod tests {
         let other_params = [other];
         let concrete_params = [comparable_of("T")];
         let foreign_bound = Ty::ty_param("T", comparable_of("U"));
+        let indirect_bound = Ty::ty_param("T", Ty::ty_param("U", comparable_of("T")));
         for (near, why) in [
             (
                 BuiltinFunctionDeclaration {
@@ -1314,6 +1318,29 @@ mod tests {
                     ..declaration
                 },
                 "a nullable range",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    ret: Ty::ty_param("U", closed_range(element)),
+                    ..declaration
+                },
+                "another type parameter bounded by the range",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    ret: Ty::platform_nullable(closed_range(element)),
+                    ..declaration
+                },
+                "a platform range",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    receiver: Some(indirect_bound),
+                    params: &[indirect_bound],
+                    ret: closed_range(indirect_bound),
+                    ..declaration
+                },
+                "an indirect bound through another type parameter",
             ),
             (
                 BuiltinFunctionDeclaration {

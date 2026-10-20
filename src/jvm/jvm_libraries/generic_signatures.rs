@@ -6,6 +6,7 @@
 //! function's pre-CPS result, and a class's parameters with their bounds.
 
 use super::*;
+use crate::types::TyKind;
 use crate::types::TypeParameters;
 
 /// Decode the source type of a field while verifying that it erases to the classfile descriptor.
@@ -49,8 +50,11 @@ fn field_type_parameter_erasure(
     }
     let name = element.strip_prefix('T')?.strip_suffix(';')?;
     let mut bound = *class_bounds.get(name)?;
-    while let Ty::TyParam(_, inner) | Ty::PlatformNullable(inner) | Ty::Nullable(inner) = bound {
-        bound = *inner;
+    while let TyKind::TyParam(_, inner)
+    | TyKind::PlatformNullable(inner)
+    | TyKind::Nullable(inner) = bound.kind()
+    {
+        bound = inner;
     }
     Some(format!(
         "{}{}",
@@ -60,8 +64,8 @@ fn field_type_parameter_erasure(
 }
 
 pub(super) fn concrete_generic_ret(gsig: &GenericSig) -> Option<Ty> {
-    match gsig.ret {
-        Ty::Obj(_, args) if !args.is_empty() && !has_free_ty_params(gsig.ret) => {
+    match gsig.ret.kind() {
+        TyKind::Obj(_, args) if !args.is_empty() && !has_free_ty_params(gsig.ret) => {
             // Canonicalize the recovered type to Kotlin form (`java/util/List<java/lang/Integer>` →
             // `kotlin/collections/List<kotlin/Int>`), so a member/`for`/extension keyed on the Kotlin
             // collection + a primitive element resolves and unboxes — mirroring the suspend path. Without
@@ -82,36 +86,39 @@ pub(super) fn suspend_return_from_gsig(
     gsig: &GenericSig,
     binds: &crate::fx_hash::HashMap<String, Ty>,
 ) -> Option<Ty> {
-    match *gsig.params.last()? {
-        Ty::Obj(n, args) if crate::types::same(n, crate::types::wk::continuation()) => {
-            match *args.first()? {
-                // A bare class → its CANONICAL `Ty` (`kotlin/String` → `Ty::String`, `kotlin/Int` → `Ty::Int`,
-                // `kotlin/Unit` → `Ty::Unit`), so the recovered return unifies with the source-spelled type
-                // rather than a non-canonical `Obj("kotlin/String")`. A generic class (`List<Item>`) keeps its
-                // arguments via the general converter.
-                Ty::Obj(name, []) => {
-                    // Canonicalize a JVM built-in the generic signature spells in Java terms
-                    // (`java/lang/String` → `kotlin/String`, `java/lang/Object` → `kotlin/Any`) so the
-                    // recovered return unifies with the source-spelled type rather than a non-canonical
-                    // `Obj("java/lang/String")`. A boxed PRIMITIVE (`java/lang/Long`) stays an `Obj` here —
-                    // the call site unboxes it to the source primitive only when the return is non-nullable
-                    // (a `Long?` return must keep the boxed form).
-                    Some(
-                        Ty::obj_name(crate::jvm::jvm_class_map::to_kotlin_type_name(name))
-                            .canonical_semantic(),
-                    )
+    match (*gsig.params.last()?).kind() {
+        TyKind::Obj(n, args) if crate::types::same(n, crate::types::wk::continuation()) => {
+            {
+                let other = *args.first()?;
+                match other.kind() {
+                    // A bare class → its CANONICAL `Ty` (`kotlin/String` → `Ty::String`, `kotlin/Int` → `Ty::Int`,
+                    // `kotlin/Unit` → `Ty::Unit`), so the recovered return unifies with the source-spelled type
+                    // rather than a non-canonical `Obj("kotlin/String")`. A generic class (`List<Item>`) keeps its
+                    // arguments via the general converter.
+                    TyKind::Obj(name, args) if args.is_empty() => {
+                        // Canonicalize a JVM built-in the generic signature spells in Java terms
+                        // (`java/lang/String` → `kotlin/String`, `java/lang/Object` → `kotlin/Any`) so the
+                        // recovered return unifies with the source-spelled type rather than a non-canonical
+                        // `Obj("java/lang/String")`. A boxed PRIMITIVE (`java/lang/Long`) stays an `Obj` here —
+                        // the call site unboxes it to the source primitive only when the return is non-nullable
+                        // (a `Long?` return must keep the boxed form).
+                        Some(
+                            Ty::obj_name(crate::jvm::jvm_class_map::to_kotlin_type_name(name))
+                                .canonical_semantic(),
+                        )
+                    }
+                    // A generic class (`List<Item>`) keeps its arguments via the general converter, then any JVM
+                    // collection name the signature spelled in Java terms (`java/util/List`) is canonicalized to
+                    // its Kotlin type (`kotlin/collections/List`) so a `.map { … }` / `.first()` extension — keyed
+                    // on the Kotlin collection — resolves on the recovered suspend result (a member such as `.size`
+                    // already resolved on either form). A BARE type parameter (`Continuation<T>` from a generic
+                    // `suspend fun byId(): T` on a `Repo<Cfg>` receiver) is substituted under `binds` to the
+                    // receiver's concrete argument (`T` → `Cfg`) — otherwise it erases to `Any` and every member
+                    // access on the result fails ("member … on Any").
+                    _ => Some(canonicalize_jvm_collections(
+                        crate::symbol_resolver::ty_subst(other, binds),
+                    )),
                 }
-                // A generic class (`List<Item>`) keeps its arguments via the general converter, then any JVM
-                // collection name the signature spelled in Java terms (`java/util/List`) is canonicalized to
-                // its Kotlin type (`kotlin/collections/List`) so a `.map { … }` / `.first()` extension — keyed
-                // on the Kotlin collection — resolves on the recovered suspend result (a member such as `.size`
-                // already resolved on either form). A BARE type parameter (`Continuation<T>` from a generic
-                // `suspend fun byId(): T` on a `Repo<Cfg>` receiver) is substituted under `binds` to the
-                // receiver's concrete argument (`T` → `Cfg`) — otherwise it erases to `Any` and every member
-                // access on the result fails ("member … on Any").
-                other => Some(canonicalize_jvm_collections(
-                    crate::symbol_resolver::ty_subst(other, binds),
-                )),
             }
         }
         _ => None,
@@ -129,7 +136,9 @@ pub(super) fn mark_receiver_fun_params(gsig: &mut GenericSig, recv_fun: &[bool],
         return;
     }
     for (param, &receiver_fun) in gsig.params.iter_mut().take(source_params).zip(recv_fun) {
-        let Ty::Fun(sig) = *param else { continue };
+        let TyKind::Fun(sig) = param.kind() else {
+            continue;
+        };
         if !receiver_fun || sig.has_receiver || sig.params.is_empty() {
             continue;
         }
@@ -616,7 +625,7 @@ mod constructor_inference_signature_tests {
         assert_eq!(signature.ret.obj_internal(), Some(owner));
         assert!(matches!(
             signature.ret.type_args(),
-            [Ty::TyParam(name, _)] if *name == "V"
+            [argument] if argument.ty_param_name() == Some("V")
         ));
     }
 
@@ -639,12 +648,12 @@ mod constructor_inference_signature_tests {
         assert_eq!(signature.formals, vec!["E".to_string(), "U".to_string()]);
         assert!(matches!(
             signature.ret.type_args(),
-            [Ty::TyParam(name, _)] if *name == "E"
+            [argument] if argument.ty_param_name() == Some("E")
         ));
         assert!(matches!(
             signature.params.as_slice(),
-            [Ty::TyParam(value, _), Ty::TyParam(extra, _)]
-                if *value == "E" && *extra == "U"
+            [value, extra]
+                if value.ty_param_name() == Some("E") && extra.ty_param_name() == Some("U")
         ));
     }
 
@@ -663,11 +672,11 @@ mod constructor_inference_signature_tests {
         assert_ne!(signature.formals[1], "T");
         assert!(matches!(
             signature.ret.type_args(),
-            [Ty::TyParam(name, _)] if *name == "T"
+            [argument] if argument.ty_param_name() == Some("T")
         ));
         assert!(matches!(
             signature.params.as_slice(),
-            [Ty::TyParam(name, _)] if *name == signature.formals[1]
+            [parameter] if parameter.ty_param_name() == Some(signature.formals[1].as_str())
         ));
         assert_eq!(
             crate::types::type_parameter_source_name(&signature.formals[1]),

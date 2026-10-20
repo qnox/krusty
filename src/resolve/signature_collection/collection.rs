@@ -2808,10 +2808,10 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 equality_bound: (name == "equals").then(|| Ty::obj_name(internal)),
                                 vararg_index: None,
                                 required: parameter_count,
-                                param_defaults: vec![false; parameter_count],
-                                exact_params: vec![false; parameter_count],
-                                no_infer_params: vec![false; parameter_count],
-                                implicit_integer_coercion: vec![false; parameter_count],
+                                param_defaults: vec![false; parameter_count].into(),
+                                exact_params: vec![false; parameter_count].into(),
+                                no_infer_params: vec![false; parameter_count].into(),
+                                implicit_integer_coercion: vec![false; parameter_count].into(),
                                 param_default_values: vec![None; parameter_count],
                                 param_names: if name == "equals" {
                                     vec!["other".into()]
@@ -2820,7 +2820,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 },
                                 parameter_identities: Vec::new(),
                                 lambda_param_types: vec![Vec::new(); parameter_count],
-                                lambda_recv: vec![false; parameter_count],
+                                lambda_recv: vec![false; parameter_count].into(),
                                 inline_modifiers: Vec::new(),
                                 visibility: Visibility::Public,
                                 context_count: 0,
@@ -2888,15 +2888,15 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     equality_bound: None,
                                     vararg_index: None,
                                     required: 0,
-                                    param_defaults: Vec::new(),
-                                    exact_params: Vec::new(),
-                                    no_infer_params: Vec::new(),
-                                    implicit_integer_coercion: Vec::new(),
+                                    param_defaults: Vec::new().into(),
+                                    exact_params: Vec::new().into(),
+                                    no_infer_params: Vec::new().into(),
+                                    implicit_integer_coercion: Vec::new().into(),
                                     param_default_values: Vec::new(),
                                     param_names: Vec::new(),
                                     parameter_identities: Vec::new(),
                                     lambda_param_types: Vec::new(),
-                                    lambda_recv: Vec::new(),
+                                    lambda_recv: Vec::new().into(),
                                     inline_modifiers: Vec::new(),
                                     visibility: property.visibility,
                                     context_count: 0,
@@ -3094,15 +3094,15 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             equality_bound: None,
                             vararg_index: None,
                             required,
-                            param_defaults: vec![],
-                            exact_params: vec![],
-                            no_infer_params: vec![],
-                            implicit_integer_coercion: vec![],
+                            param_defaults: vec![].into(),
+                            exact_params: vec![].into(),
+                            no_infer_params: vec![].into(),
+                            implicit_integer_coercion: vec![].into(),
                             param_default_values: Vec::new(),
                             param_names: member.param_names,
                             parameter_identities: Vec::new(),
                             lambda_param_types: vec![],
-                            lambda_recv: vec![],
+                            lambda_recv: vec![].into(),
                             inline_modifiers: Vec::new(),
                             visibility: Visibility::Public,
                             context_count: 0,
@@ -3317,21 +3317,21 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 defaults,
                                 symbolic
                                     .iter()
-                                    .map(|parameter| match parameter.non_null() {
-                                        Ty::Fun(function) => function.params.clone(),
+                                    .map(|parameter| match parameter.non_null().kind() {
+                                        TyKind::Fun(function) => function.params.clone(),
                                         _ => Vec::new(),
                                     })
                                     .collect(),
                                 symbolic
                                     .iter()
                                     .map(|parameter| {
-                                        matches!(parameter.non_null(), Ty::Fun(function) if function.has_receiver)
+                                        matches!(parameter.non_null().kind(), TyKind::Fun(function) if function.has_receiver)
                                     })
-                                    .collect(),
+                                    .collect::<crate::libraries::ParamFlags>(),
                                 symbolic
                                     .iter()
-                                    .map(|parameter| match parameter.non_null() {
-                                        Ty::Fun(function) => function.context_count,
+                                    .map(|parameter| match parameter.non_null().kind() {
+                                        TyKind::Fun(function) => function.context_count,
                                         _ => 0,
                                     })
                                     .collect(),
@@ -3453,7 +3453,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         .supertypes
                         .iter()
                         .map(|supertype| ty_of_ref_silent(supertype, &class_names, &symbolic_ctp))
-                        .filter(|supertype| matches!(supertype, Ty::Fun(_)))
+                        .filter(|supertype| supertype.is_fun())
                         .collect::<Vec<_>>();
                     let callable_signature = callable_signatures.first().copied();
                     let super_internal_ref = super_internal

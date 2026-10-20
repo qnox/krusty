@@ -9,7 +9,7 @@ use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ast::TypeRef;
 use crate::diag::{DiagnosticIdentity, Span};
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 use super::{
     definitely_non_null_ty, function_type_ref_shape, inaccessible_classifier_message, Checker,
@@ -58,23 +58,25 @@ fn alias_target_star_bounds(
     ty: Ty,
     classifier: &mut dyn FnMut(TypeName) -> Option<std::sync::Arc<crate::libraries::LibraryType>>,
 ) -> Ty {
-    match ty {
-        Ty::Nullable(inner) => Ty::nullable(alias_target_star_bounds(*inner, classifier)),
-        Ty::PlatformNullable(inner) => {
-            Ty::platform_nullable(alias_target_star_bounds(*inner, classifier))
+    match ty.kind() {
+        TyKind::Nullable(inner) => Ty::nullable(alias_target_star_bounds(inner, classifier)),
+        TyKind::PlatformNullable(inner) => {
+            Ty::platform_nullable(alias_target_star_bounds(inner, classifier))
         }
-        Ty::DefinitelyNotNull(inner) => Ty::DefinitelyNotNull(crate::types::intern_ty(
-            alias_target_star_bounds(*inner, classifier),
+        TyKind::DefinitelyNotNull(inner) => Ty::from(TyKind::DefinitelyNotNull(
+            alias_target_star_bounds(inner, classifier),
         )),
-        Ty::InProjection(inner) => Ty::in_projection(alias_target_star_bounds(*inner, classifier)),
-        Ty::OutProjection(inner) => {
-            Ty::out_projection(alias_target_star_bounds(*inner, classifier))
+        TyKind::InProjection(inner) => {
+            Ty::in_projection(alias_target_star_bounds(inner, classifier))
+        }
+        TyKind::OutProjection(inner) => {
+            Ty::out_projection(alias_target_star_bounds(inner, classifier))
         }
         // A retained star already carries the bound of its owning classifier. Only a star in the
         // argument list below has that owner available; descending through the stored bound can
         // also revisit a recursive F-bound indefinitely.
-        Ty::StarProjection(_) => ty,
-        Ty::Obj(owner, arguments) if !arguments.is_empty() => {
+        TyKind::StarProjection(_) => ty,
+        TyKind::Obj(owner, arguments) if !arguments.is_empty() => {
             let parsed = arguments
                 .iter()
                 .map(|argument| {
@@ -116,7 +118,7 @@ fn alias_target_star_bounds(
             }
             Ty::obj_args_name(owner, &resolved)
         }
-        Ty::Fun(signature) => Ty::fun_with_shape(
+        TyKind::Fun(signature) => Ty::fun_with_shape(
             signature
                 .params
                 .iter()
@@ -127,7 +129,7 @@ fn alias_target_star_bounds(
             signature.has_receiver,
             signature.suspend,
         ),
-        Ty::Intersection(parts) => Ty::intersection(
+        TyKind::Intersection(parts) => Ty::intersection(
             &parts
                 .iter()
                 .map(|part| alias_target_star_bounds(*part, classifier))
@@ -136,8 +138,8 @@ fn alias_target_star_bounds(
         // Alias formals have already been substituted. Any remaining variable belongs to an
         // enclosing declaration and keeps its declaration-owned bound; following an F-bound here
         // would revisit the same variable.
-        Ty::TyParam(_, _) => ty,
-        other => other,
+        TyKind::TyParam(_, _) => ty,
+        _ => ty,
     }
 }
 
@@ -148,13 +150,13 @@ fn alias_target_star_bounds(
 /// in an alias application with omitted arguments, so it arises from the generated alias-formal
 /// binding rather than from an independently written target argument.
 fn generated_star_argument(ty: Ty) -> bool {
-    match ty {
-        Ty::StarProjection(_) => true,
-        Ty::Nullable(inner)
-        | Ty::PlatformNullable(inner)
-        | Ty::DefinitelyNotNull(inner)
-        | Ty::InProjection(inner)
-        | Ty::OutProjection(inner) => generated_star_argument(*inner),
+    match ty.kind() {
+        TyKind::StarProjection(_) => true,
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::DefinitelyNotNull(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner) => generated_star_argument(inner),
         _ => false,
     }
 }
@@ -531,64 +533,64 @@ fn note_template_conflicts(
     bindings: &HashMap<String, Ty>,
     conflicting: &mut HashSet<String>,
 ) {
-    match template {
-        Ty::OutProjection(inner) => {
+    match template.kind() {
+        TyKind::OutProjection(inner) => {
             if matches!(
-                crate::symbol_resolver::ty_subst(*inner, bindings),
-                Ty::InProjection(_)
+                crate::symbol_resolver::ty_subst(inner, bindings).kind(),
+                TyKind::InProjection(_)
             ) {
-                if let Some(formal) = projected_formal(*inner) {
+                if let Some(formal) = projected_formal(inner) {
                     if bindings.contains_key(&formal) {
                         conflicting.insert(formal);
                     }
                 }
             }
-            note_template_conflicts(*inner, bindings, conflicting);
+            note_template_conflicts(inner, bindings, conflicting);
         }
-        Ty::InProjection(inner) => {
+        TyKind::InProjection(inner) => {
             if matches!(
-                crate::symbol_resolver::ty_subst(*inner, bindings),
-                Ty::OutProjection(_)
+                crate::symbol_resolver::ty_subst(inner, bindings).kind(),
+                TyKind::OutProjection(_)
             ) {
-                if let Some(formal) = projected_formal(*inner) {
+                if let Some(formal) = projected_formal(inner) {
                     if bindings.contains_key(&formal) {
                         conflicting.insert(formal);
                     }
                 }
             }
-            note_template_conflicts(*inner, bindings, conflicting);
+            note_template_conflicts(inner, bindings, conflicting);
         }
-        Ty::Nullable(inner)
-        | Ty::PlatformNullable(inner)
-        | Ty::DefinitelyNotNull(inner)
-        | Ty::StarProjection(inner) => note_template_conflicts(*inner, bindings, conflicting),
-        Ty::Obj(_, arguments) => {
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::DefinitelyNotNull(inner)
+        | TyKind::StarProjection(inner) => note_template_conflicts(inner, bindings, conflicting),
+        TyKind::Obj(_, arguments) => {
             for argument in arguments {
                 note_template_conflicts(*argument, bindings, conflicting);
             }
         }
-        Ty::Fun(signature) => {
+        TyKind::Fun(signature) => {
             for parameter in &signature.params {
                 note_template_conflicts(*parameter, bindings, conflicting);
             }
             note_template_conflicts(signature.ret, bindings, conflicting);
         }
-        Ty::Intersection(parts) => {
+        TyKind::Intersection(parts) => {
             for part in parts {
                 note_template_conflicts(*part, bindings, conflicting);
             }
         }
-        Ty::TyParam(_, bound) => note_template_conflicts(*bound, bindings, conflicting),
-        Ty::Unit | Ty::Null | Ty::Nothing | Ty::Error | Ty::Pending => {}
+        TyKind::TyParam(_, bound) => note_template_conflicts(bound, bindings, conflicting),
+        TyKind::Unit | TyKind::Null | TyKind::Nothing | TyKind::Error | TyKind::Pending => {}
     }
 }
 
 fn projected_formal(inner: Ty) -> Option<String> {
-    match inner {
-        Ty::TyParam(name, _) => Some(name.to_string()),
-        Ty::Nullable(inner) | Ty::PlatformNullable(inner) | Ty::DefinitelyNotNull(inner) => {
-            projected_formal(*inner)
-        }
+    match inner.kind() {
+        TyKind::TyParam(name, _) => Some(name.to_string()),
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::DefinitelyNotNull(inner) => projected_formal(inner),
         _ => None,
     }
 }

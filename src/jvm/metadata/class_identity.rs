@@ -95,6 +95,7 @@ pub(super) fn companion_name(ctx: &MetaCtx) -> Option<String> {
 mod tests {
     use super::metadata_classifier_name;
     use crate::types::Ty;
+    use crate::types::TyKind;
 
     #[test]
     fn nested_metadata_classifier_retains_each_semantic_owner() {
@@ -107,12 +108,13 @@ mod tests {
         assert!(outer.matches("fixture/Outer"));
         assert_eq!(outer.nested_owner(), None);
 
-        let Ty::Obj(decoded, arguments) = super::super::gsig_from_kotlin_class(
+        let TyKind::Obj(decoded, arguments) = super::super::gsig_from_kotlin_class(
             "fixture/Outer.Inner.Deep",
             vec![Ty::Int, Ty::String],
             false,
             0,
-        ) else {
+        )
+        .kind() else {
             panic!("ordinary metadata classifier decodes to an object type");
         };
         assert_eq!(decoded, deep);

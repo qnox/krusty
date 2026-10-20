@@ -11,7 +11,7 @@ use crate::libraries::{
     PropKind, PropertyInfo, PropertySet, ResolvedSymbols,
 };
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
-use crate::types::{stored_value_ty, Ty, TypeName};
+use crate::types::{stored_value_ty, Ty, TyKind, TypeName};
 
 use super::{DeclarationFlags, DeclarationId, DeclarationKind, ResolvedModuleIndex, SourceFileId};
 
@@ -310,7 +310,7 @@ impl<'a> StreamedModuleSymbols<'a> {
         projected.callable_signatures = supertype_templates
             .iter()
             .copied()
-            .filter(|supertype| matches!(supertype.non_null(), Ty::Fun(_)))
+            .filter(|supertype| supertype.non_null().is_fun())
             .collect();
         projected.callable_signature = projected.callable_signatures.first().copied();
         // Beside its callable shape, a function supertype is an edge to the function classifier it
@@ -491,9 +491,9 @@ impl<'a> StreamedModuleSymbols<'a> {
             projected.named_parameter_lists.push(ParamList {
                 visibility: constructor.visibility,
                 names: call_sig.param_names.clone(),
-                defaults: call_sig.param_defaults.clone(),
+                defaults: call_sig.param_defaults,
                 types: parameters,
-                recv_fun: call_sig.lambda_receiver_params.clone(),
+                recv_fun: call_sig.lambda_receiver_params,
                 vararg: call_sig.vararg_index,
                 annotation: None,
             });
@@ -907,21 +907,21 @@ impl<'a> StreamedModuleSymbols<'a> {
         };
         let lambda_param_types = parameters
             .iter()
-            .map(|parameter| match parameter.non_null() {
-                Ty::Fun(signature) => signature.params.clone(),
+            .map(|parameter| match parameter.non_null().kind() {
+                TyKind::Fun(signature) => signature.params.clone(),
                 _ => Vec::new(),
             })
             .collect::<Vec<_>>();
         let lambda_receivers = parameters
             .iter()
             .map(|parameter| {
-                matches!(parameter.non_null(), Ty::Fun(signature) if signature.has_receiver)
+                matches!(parameter.non_null().kind(), TyKind::Fun(signature) if signature.has_receiver)
             })
             .collect::<Vec<_>>();
         let lambda_context_counts = parameters
             .iter()
-            .map(|parameter| match parameter.non_null() {
-                Ty::Fun(signature) => signature.context_count,
+            .map(|parameter| match parameter.non_null().kind() {
+                TyKind::Fun(signature) => signature.context_count,
                 _ => 0,
             })
             .collect::<Vec<_>>();
@@ -941,9 +941,9 @@ impl<'a> StreamedModuleSymbols<'a> {
                     .expect("a projected callable retains every typed parameter identity")
             })
             .collect();
-        shape.exact_params = exact;
-        shape.no_infer_params = no_infer;
-        shape.implicit_integer_coercion = implicit_integer_coercion;
+        shape.exact_params = exact.into();
+        shape.no_infer_params = no_infer.into();
+        shape.implicit_integer_coercion = implicit_integer_coercion.into();
         shape.inline_modifiers = inline_modifiers;
         let reified_type_parameter_ordinals = self
             .index
@@ -1431,7 +1431,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 function.kind = FnKind::TopLevel;
                 function.receiver = None;
             }
-            function.callable.singleton_dispatch = Some(Box::new(singleton.clone()));
+            function.callable.singleton_dispatch = Some(Box::new(singleton));
         }
         let mut properties = self.member_properties(companion_declaration, companion, false, name);
         for property in &mut properties {
@@ -1443,9 +1443,9 @@ impl<'a> StreamedModuleSymbols<'a> {
                 PropKind::MemberExtension => property.kind = PropKind::Extension,
                 PropKind::Extension | PropKind::TopLevel => {}
             }
-            property.getter.singleton_dispatch = Some(Box::new(singleton.clone()));
+            property.getter.singleton_dispatch = Some(Box::new(singleton));
             if let Some(setter) = &mut property.setter {
-                setter.singleton_dispatch = Some(Box::new(singleton.clone()));
+                setter.singleton_dispatch = Some(Box::new(singleton));
             }
         }
         (functions, properties)

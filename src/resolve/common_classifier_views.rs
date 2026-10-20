@@ -5,7 +5,7 @@
 //! variance-aware common-supertype solver so an early nested intersection is not erased.
 
 use crate::fx_hash::{HashMap, HashSet};
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 use super::{common_result_nullability, Checker};
 
@@ -65,7 +65,7 @@ impl Checker<'_> {
                 // one of its facets (`Source<A & B>`, then `Source<A>`). The inference solver owns
                 // this n-ary algebra and retains nested intersections explicitly.
                 let joined = crate::symbol_resolver::common_super_types(&source, &applications);
-                matches!(joined.non_null(), Ty::Obj(joined_owner, _) if joined_owner == owner)
+                matches!(joined.non_null().kind(), TyKind::Obj(joined_owner, _) if joined_owner == owner)
                     .then_some(joined)
             })
             .map(|joined| {

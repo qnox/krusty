@@ -5,7 +5,7 @@ use crate::ast::{Expr, ExprId, File};
 use crate::integer_constant::IntegerConstant;
 use crate::libraries::GenericSig;
 use crate::symbol_resolver::CallArgKind;
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 /// Return an outer expectation only when it is a fixed type in this lexical scope.
 ///
@@ -194,10 +194,11 @@ pub(super) fn try_branch_join(
     left: Ty,
     right: Ty,
 ) -> Ty {
-    match (left, right) {
+    match (left.kind(), right.kind()) {
         _ if left == right => left,
-        (Ty::Nothing, other) | (other, Ty::Nothing) => other,
-        (Ty::Obj(a, _), Ty::Obj(b, _)) if a == b => Ty::obj_name(a),
+        (TyKind::Nothing, _) => right,
+        (_, TyKind::Nothing) => left,
+        (TyKind::Obj(a, _), TyKind::Obj(b, _)) if a == b => Ty::obj_name(a),
         _ if value_required => Ty::Unit,
         _ => checker
             .semantic_common_supertype(left, right)
@@ -460,7 +461,8 @@ impl Checker<'_> {
             return;
         };
         let selected_shape = self.functional_parameter_shape(selected_parameter);
-        let Some(Ty::Fun(selected_shape)) = selected_shape.map(Ty::non_null) else {
+        let Some(TyKind::Fun(selected_shape)) = selected_shape.map(|ty| ty.non_null().kind())
+        else {
             debug_assert!(
                 false,
                 "call-owned lambda completion requires a selected functional parameter"
@@ -547,7 +549,7 @@ impl Checker<'_> {
             .is_some_and(|frame| frame.expression == conditional && frame.declared);
         usable_expected(scope, expected).filter(|ty| {
             declared
-                && !matches!(ty.non_null(), Ty::Obj(name, _)
+                && !matches!(ty.non_null().kind(), TyKind::Obj(name, _)
                     if crate::types::same(name, crate::types::wk::any()))
         })
     }

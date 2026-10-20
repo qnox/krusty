@@ -1,0 +1,165 @@
+A module that runs KSP processors: KSP runs first, in a JVM on the module's JDK, with the
+processors' runtime classpath and the processor options in the order written, then the module
+compiles against the classes KSP generated. A module that compiles against it gets its resources
+output, which holds KSP's generated resources, though it has no resources directory. The stand-in
+processor generates what `app/ksp-generates` holds: a class and a resource.
+--- task
+:consumer:compileJvm
+--- project.yaml
+modules:
+  - app
+  - consumer
+--- app/module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+settings:
+  kotlin:
+    ksp:
+      processors:
+        - org.example:processor:1.0
+      processorOptions:
+        zeta: last
+        alpha: first
+--- app/src/Model.kt
+class Model
+--- app/ksp-generates/classes/ksp/generated/Registry.class
+A stand-in for a generated class.
+--- app/ksp-generates/resources/ksp/META-INF/registry.txt
+generated.Registry
+--- consumer/module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+dependencies:
+  - ../app
+--- consumer/src/Use.kt
+fun use() = Model()
+--- m2/com/google/devtools/ksp/symbol-processing-api/2.3.12/symbol-processing-api-2.3.12.pom
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.google.devtools.ksp</groupId>
+  <artifactId>symbol-processing-api</artifactId>
+  <version>2.3.12</version>
+  <dependencies>
+    <dependency>
+      <groupId>org.jetbrains.kotlin</groupId>
+      <artifactId>kotlin-stdlib</artifactId>
+      <version>2.4.20</version>
+    </dependency>  </dependencies></project>
+--- m2/com/google/devtools/ksp/symbol-processing-api/2.3.12/symbol-processing-api-2.3.12.jar
+A stand-in for KSP's api.
+--- m2/com/google/devtools/ksp/symbol-processing-common-deps/2.3.12/symbol-processing-common-deps-2.3.12.pom
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.google.devtools.ksp</groupId>
+  <artifactId>symbol-processing-common-deps</artifactId>
+  <version>2.3.12</version>
+  <dependencies>
+    <dependency>
+      <groupId>org.jetbrains.kotlin</groupId>
+      <artifactId>kotlin-stdlib</artifactId>
+      <version>2.4.20</version>
+    </dependency>  </dependencies></project>
+--- m2/com/google/devtools/ksp/symbol-processing-common-deps/2.3.12/symbol-processing-common-deps-2.3.12.jar
+A stand-in for KSP's common-deps.
+--- m2/com/google/devtools/ksp/symbol-processing-aa-embeddable/2.3.12/symbol-processing-aa-embeddable-2.3.12.pom
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.google.devtools.ksp</groupId>
+  <artifactId>symbol-processing-aa-embeddable</artifactId>
+  <version>2.3.12</version>
+  <dependencies>
+    <dependency>
+      <groupId>org.jetbrains.kotlin</groupId>
+      <artifactId>kotlin-stdlib</artifactId>
+      <version>2.4.20</version>
+    </dependency>
+    <dependency>
+      <groupId>com.google.devtools.ksp</groupId>
+      <artifactId>symbol-processing-api</artifactId>
+      <version>2.3.12</version>
+    </dependency>
+    <dependency>
+      <groupId>com.google.devtools.ksp</groupId>
+      <artifactId>symbol-processing-common-deps</artifactId>
+      <version>2.3.12</version>
+    </dependency>  </dependencies></project>
+--- m2/com/google/devtools/ksp/symbol-processing-aa-embeddable/2.3.12/symbol-processing-aa-embeddable-2.3.12.jar
+A stand-in for KSP.
+--- m2/org/example/processor/1.0/processor-1.0.pom
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>processor</artifactId>
+  <version>1.0</version>
+  <dependencies>
+    <dependency>
+      <groupId>org.example</groupId>
+      <artifactId>processor-support</artifactId>
+      <version>1.0</version>
+    </dependency>  </dependencies></project>
+--- m2/org/example/processor/1.0/processor-1.0.jar
+A stand-in for a processor.
+--- m2/org/example/processor-support/1.0/processor-support-1.0.pom
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.example</groupId>
+  <artifactId>processor-support</artifactId>
+  <version>1.0</version>
+</project>
+--- m2/org/example/processor-support/1.0/processor-support-1.0.jar
+A stand-in for what the processor needs.
+--- krusty-argv
+-cp
+<directory>/home/.m2/repository/com/google/devtools/ksp/symbol-processing-api/2.3.12/symbol-processing-api-2.3.12.jar:<directory>/home/.m2/repository/com/google/devtools/ksp/symbol-processing-aa-embeddable/2.3.12/symbol-processing-aa-embeddable-2.3.12.jar:<directory>/home/.m2/repository/com/google/devtools/ksp/symbol-processing-common-deps/2.3.12/symbol-processing-common-deps-2.3.12.jar:<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.20/kotlin-stdlib-2.4.20.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
+-Djava.io.tmpdir=<directory>/project/build/tasks/_app_kspJvm/jvm-temp
+--enable-native-access=ALL-UNNAMED
+--sun-misc-unsafe-memory-access=allow
+com.google.devtools.ksp.cmdline.KSPJvmMain
+-module-name=app
+-source-roots=<directory>/project/app/src
+-libraries=<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.20/kotlin-stdlib-2.4.20.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
+-processor-options=zeta=last:alpha=first
+-language-version=2.4
+-api-version=2.4
+-all-warnings-as-errors=false
+-map-annotation-arguments-in-java=false
+-incremental=false
+-incremental-log=false
+-project-base-dir=<directory>/project/app
+-output-base-dir=<directory>/project/build/generated/app/main
+-caches-dir=<directory>/project/build/tasks/_app_kspJvm/ksp-cache
+-class-output-dir=<directory>/project/build/generated/app/main/classes/ksp
+-kotlin-output-dir=<directory>/project/build/generated/app/main/src/ksp/kotlin
+-resource-output-dir=<directory>/project/build/generated/app/main/resources/ksp
+-java-source-roots=<directory>/project/app/src
+-java-output-dir=<directory>/project/build/generated/app/main/src/ksp/java
+-jdk-home=<directory>/jdk
+-jvm-target=25
+-jvm-default-mode=disable
+<directory>/home/.m2/repository/org/example/processor/1.0/processor-1.0.jar:<directory>/home/.m2/repository/org/example/processor-support/1.0/processor-support-1.0.jar
+----
+-Xjdk-release=25
+-jdk-home=<directory>/jdk
+-classpath=<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.20/kotlin-stdlib-2.4.20.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar:<directory>/project/build/generated/app/main/classes/ksp
+-no-stdlib
+-module-name=app
+-Xkotlin-reference-version=2.4.20
+-d
+<directory>/project/build/artifacts/CompiledJvmArtifact/appjvm/kotlin-output
+<directory>/project/app/src/Model.kt
+----
+-Xjdk-release=25
+-jdk-home=<directory>/jdk
+-classpath=<directory>/project/build/artifacts/CompiledJvmArtifact/appjvm/kotlin-output:<directory>/project/build/artifacts/CompiledJvmArtifact/appjvm/resources-output:<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.20/kotlin-stdlib-2.4.20.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
+-no-stdlib
+-module-name=consumer
+-Xkotlin-reference-version=2.4.20
+-d
+<directory>/project/build/artifacts/CompiledJvmArtifact/consumerjvm/kotlin-output
+<directory>/project/consumer/src/Use.kt
+----
+--- outputs
+== appjvm/resources-output/META-INF/registry.txt
+generated.Registry

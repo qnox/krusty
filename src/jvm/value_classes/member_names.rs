@@ -7,7 +7,7 @@
 
 use super::Under;
 use crate::fx_hash::HashSet;
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 /// kotlinc's `erasedUpperBound`: the classifier a type stands for once erased. A type parameter
 /// stands for whatever its bound erases to, whatever the nullability along the way.
@@ -15,9 +15,9 @@ fn erased_upper_bound(t: &Ty) -> Option<TypeName> {
     let mut current = t.non_null();
     let mut seen = HashSet::default();
     loop {
-        match current {
-            Ty::Obj(fq_name, _) => return Some(fq_name),
-            Ty::TyParam(name, bound) if seen.insert(name) => current = bound.non_null(),
+        match current.kind() {
+            TyKind::Obj(fq_name, _) => return Some(fq_name),
+            TyKind::TyParam(name, bound) if seen.insert(name) => current = bound.non_null(),
             _ => return None,
         }
     }
@@ -28,19 +28,19 @@ fn erased_upper_bound(t: &Ty) -> Option<TypeName> {
 /// through a nullable bound along its chain). `T : IC?` is represented exactly as `IC?` is. Any
 /// other type is returned unchanged.
 pub(super) fn value_class_bound_occurrence(t: Ty, under: &Under) -> Ty {
-    if !matches!(t.non_null(), Ty::TyParam(..)) {
+    if !t.non_null().is_ty_param() {
         return t;
     }
     let mut bound = t.non_null();
     let mut seen = HashSet::default();
-    while let Ty::TyParam(name, next) = bound {
+    while let TyKind::TyParam(name, next) = bound.kind() {
         if !seen.insert(name) {
             return t;
         }
         bound = next.non_null();
     }
-    match bound {
-        Ty::Obj(fq_name, _) if under.contains_key(&fq_name) => {
+    match bound.kind() {
+        TyKind::Obj(fq_name, _) if under.contains_key(&fq_name) => {
             if t.is_nullable() || t.non_null().upper_bound_admits_null() {
                 Ty::nullable(bound)
             } else {
@@ -78,8 +78,7 @@ fn mangling_info(
     t: &Ty,
     value_classes: &(impl ValueClassNames + ?Sized),
 ) -> crate::jvm::inline_class::InfoForMangling {
-    let is_nullable =
-        t.is_nullable() || matches!(t, Ty::TyParam(..)) && t.upper_bound_admits_null();
+    let is_nullable = t.is_nullable() || t.is_ty_param() && t.upper_bound_admits_null();
     let (fq_name, is_value, is_nullable) = match erased_upper_bound(t) {
         Some(fq_name) => (
             fq_name.render(),
@@ -203,7 +202,9 @@ pub(super) fn module_call_jvm_name(
         .enumerate()
         .filter_map(|(index, (semantic, erased))| {
             let classifier = erased.non_null().kotlin_class_internal()?;
-            matches!(semantic.non_null(), Ty::TyParam(..))
+            semantic
+                .non_null()
+                .is_ty_param()
                 .then_some(())
                 .filter(|_| under.contains_key(&classifier))
                 .map(|_| (index, erased))
@@ -243,18 +244,8 @@ pub(super) fn vc_mangle(
     is_file_class: bool,
     is_suspend: bool,
 ) -> String {
-    // PARAM mangling (kotlinc `IrType.getRequiresMangling`) EXEMPTS `kotlin.Result`
-    // (`!isClassWithFqName(RESULT_FQ_NAME)`), so a `Result` parameter never triggers a mangle.
-    let mut pinfo: Vec<_> = params
-        .iter()
-        .map(|t| {
-            let mut info = mangling_info(t, under);
-            if info.fq_name == "kotlin.Result" {
-                info.is_value = false;
-            }
-            info
-        })
-        .collect();
+    let mut pinfo: Vec<_> = params.iter().map(|t| mangling_info(t, under)).collect();
+    let requires_param_mangling = params.iter().any(|t| requires_mangling(t, under));
     // kotlinc mangles the ORIGINAL (pre-CPS) signature, which for a suspend fun includes the trailing
     // `Continuation` value parameter — a non-inline type, so it contributes the `_` placeholder. Without
     // it a suspend `f(Id): Int` would hash identically to the non-suspend overload. (A lone non-value
@@ -270,7 +261,27 @@ pub(super) fn vc_mangle(
     // function is NOT in a file class (a top-level fn returning a value class keeps its plain name).
     let rinfo = mangling_info(ret, under);
     let ret_opt = (rinfo.is_value && !is_file_class).then_some(&rinfo);
-    crate::jvm::inline_class::mangled_name(base, &pinfo, ret_opt)
+    crate::jvm::inline_class::mangled_name(base, &pinfo, requires_param_mangling, ret_opt)
+}
+
+/// kotlinc's `IrType.getRequiresMangling` for a value parameter: its erased upper bound is a value
+/// class other than `kotlin.Result` (`!isClassWithFqName(RESULT_FQ_NAME)`). The exemption decides
+/// only whether the parameter TRIGGERS a mangle; once another parameter or the return does, a
+/// `Result` parameter is spelled `Lkotlin.Result;` in the hashed signature like any value class.
+/// The same predicate hides an ordinary class's constructor behind its `DefaultConstructorMarker`
+/// accessor (`hasMangledParameters`).
+pub(super) fn requires_mangling(t: &Ty, value_classes: &(impl ValueClassNames + ?Sized)) -> bool {
+    erased_upper_bound(t).is_some_and(|classifier| {
+        classifier != crate::types::type_name("kotlin/Result")
+            && value_classes.names_value_class(classifier)
+    })
+}
+
+/// Whether kotlinc mangles a property accessor over a property of type `t`: the property's type,
+/// read through its erased upper bound, is a value class. A type parameter bounded by a value class
+/// (`val z: T` with `T : Z?`) mangles its accessors exactly as the bound itself would.
+pub(super) fn accessor_type_is_value_class(t: &Ty, under: &Under) -> bool {
+    mangling_info(t, under).is_value
 }
 
 #[cfg(test)]

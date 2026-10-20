@@ -62,13 +62,18 @@ impl BodyLowering<'_> {
         // kotlinc folds an intrinsic-const operation over constants before any other lowering, so
         // the whole operation becomes its value.
         let folded = self.constants.fold(self.body, expression_id);
-        // A conversion that realizes an inline call in place ends that inlined call.
+        // A conversion or range construction that realizes an inline call in place ends that
+        // inlined call.
         let ends_inlined_call = folded.is_none()
-            && matches!(
-                expression.kind,
-                FirExprKind::ImplicitConversion { conversion, .. }
-                    if self.body.is_inlined_call_conversion(conversion.origin)
-            );
+            && match &expression.kind {
+                FirExprKind::ImplicitConversion { conversion, .. } => {
+                    self.body.is_inlined_call_conversion(conversion.origin)
+                }
+                FirExprKind::Range {
+                    ends_inlined_call, ..
+                } => *ends_inlined_call,
+                _ => false,
+            };
         // kotlinc then flattens nested concatenations into one, merging each run of constant
         // arguments into one `String` constant.
         let concatenation = folded
@@ -885,6 +890,7 @@ impl BodyLowering<'_> {
                 start_type,
                 end,
                 end_type,
+                ..
             } => self.range_expression(
                 *operation,
                 *start,
@@ -1406,8 +1412,8 @@ impl BodyLowering<'_> {
                 body,
             } => {
                 let suspend = matches!(
-                    expression.ty.get().non_null(),
-                    crate::types::Ty::Fun(signature) if signature.suspend
+                    expression.ty.get().non_null().kind(),
+                    crate::types::TyKind::Fun(signature) if signature.suspend
                 );
                 let unit_method = self.unit_method_lambda.take() == Some(expression_id);
                 let lambda = self.checked_lambda(*callable, body, suspend, unit_method)?;

@@ -5,14 +5,14 @@
 
 use crate::jvm::names::method_descriptor;
 use crate::jvm::physical_type::ir_ty_to_jvm;
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 pub(in crate::jvm) fn jvm_declared_ty(ty: &Ty) -> Ty {
     fn is_nothing(ty: &Ty) -> bool {
-        match ty {
-            Ty::Nothing => true,
-            Ty::Nullable(inner) | Ty::PlatformNullable(inner) => is_nothing(inner),
-            Ty::Obj(name, _) => name.matches("kotlin/Nothing"),
+        match ty.kind() {
+            TyKind::Nothing => true,
+            TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => is_nothing(&inner),
+            TyKind::Obj(name, _) => name.matches("kotlin/Nothing"),
             _ => false,
         }
     }

@@ -5,7 +5,7 @@ use std::cell::{Cell, RefCell};
 use crate::diag::{DiagSink, Span};
 use crate::features::LangFeatures;
 use crate::source::SourceInput;
-use crate::types::{Ty, Visibility};
+use crate::types::{Ty, TyKind, Visibility};
 
 fn anchor(source: SourceFileId, lo: u32, kind: DeclarationKind) -> DeclarationAnchor {
     DeclarationAnchor {
@@ -2564,7 +2564,7 @@ impl SignatureSemantics for TestSignatureSemantics {
         self.operations
             .borrow_mut()
             .push("invoke-expectations".into());
-        let Ty::Fun(signature) = callee.get().non_null() else {
+        let TyKind::Fun(signature) = callee.get().non_null().kind() else {
             return Ok(vec![None; arguments.len()].into_boxed_slice());
         };
         if signature.params.len() != arguments.len() {

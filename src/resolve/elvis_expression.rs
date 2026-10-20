@@ -1,6 +1,7 @@
 //! Elvis-expression typing, sibling completion, and checked result-value publication.
 
 use super::*;
+use crate::types::TyKind;
 
 impl Checker<'_> {
     pub(super) fn expr_inner_elvis(
@@ -69,14 +70,15 @@ impl Checker<'_> {
                 self.null_check_narrowings(scope, lhs, &mut proven, &mut declined);
                 proven.retain(|(_, ty)| !ty.is_unsigned());
                 self.apply_narrowings(scope, &proven, &declined, false);
-                let result = match lt0 {
-                    Ty::Nullable(inner) => *inner,
+                let result = match lt0.kind() {
+                    TyKind::Nullable(inner) => inner,
                     _ => lt,
                 };
                 self.record_flexible_alias(e, lhs, true);
                 self.publish_conditional_intersection(e, [(lhs, result)], result);
                 result
-            } else if lt == Ty::Null || matches!(lt0, Ty::Nullable(inner) if *inner == Ty::Nothing)
+            } else if lt == Ty::Null
+                || matches!(lt0.kind(), TyKind::Nullable(inner) if inner == Ty::Nothing)
             {
                 self.record_flexible_alias(e, rhs, false);
                 self.publish_conditional_intersection(e, [(rhs, rt)], rt);

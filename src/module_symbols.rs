@@ -19,7 +19,7 @@ use crate::libraries::{
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 #[cfg(test)]
 use crate::types::Visibility;
-use crate::types::{stored_value_ty, type_name, Ty, TypeName};
+use crate::types::{stored_value_ty, type_name, Ty, TyKind, TypeName};
 
 use classifier_member_signatures::{
     classifier_member_generic_signature, normalize_classifier_property_generic_signature,
@@ -289,21 +289,21 @@ impl<'a> ModuleSymbols<'a> {
                 param_defaults,
                 c.ctor_params
                     .iter()
-                    .map(|parameter| match parameter {
-                        Ty::Fun(function) => function.params.clone(),
+                    .map(|parameter| match parameter.kind() {
+                        TyKind::Fun(function) => function.params.clone(),
                         _ => Vec::new(),
                     })
                     .collect(),
                 c.ctor_params
                     .iter()
                     .map(
-                        |parameter| matches!(parameter, Ty::Fun(function) if function.has_receiver),
+                        |parameter| matches!(parameter.kind(), TyKind::Fun(function) if function.has_receiver),
                     )
-                    .collect(),
+                    .collect::<crate::libraries::ParamFlags>(),
                 c.ctor_params
                     .iter()
-                    .map(|parameter| match parameter {
-                        Ty::Fun(function) => function.context_count,
+                    .map(|parameter| match parameter.kind() {
+                        TyKind::Fun(function) => function.context_count,
                         _ => 0,
                     })
                     .collect(),
@@ -432,7 +432,7 @@ impl<'a> ModuleSymbols<'a> {
             recv_fun: c
                 .ctor_params
                 .iter()
-                .map(|parameter| matches!(parameter.non_null(), Ty::Fun(sig) if sig.has_receiver))
+                .map(|parameter| matches!(parameter.non_null().kind(), TyKind::Fun(sig) if sig.has_receiver))
                 .collect(),
             vararg: c.ctor_vararg,
             annotation: None,
@@ -1444,7 +1444,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                         function.receiver = None;
                     }
                     function.source_key = None;
-                    function.callable.singleton_dispatch = Some(Box::new(singleton.clone()));
+                    function.callable.singleton_dispatch = Some(Box::new(singleton));
                     overloads.push(function);
                 }
                 for mut property in imported_properties.overloads {
@@ -1456,9 +1456,9 @@ impl SymbolSource for ModuleSymbols<'_> {
                         PropKind::MemberExtension => property.kind = PropKind::Extension,
                         PropKind::Extension | PropKind::TopLevel => {}
                     }
-                    property.getter.singleton_dispatch = Some(Box::new(singleton.clone()));
+                    property.getter.singleton_dispatch = Some(Box::new(singleton));
                     if let Some(setter) = &mut property.setter {
-                        setter.singleton_dispatch = Some(Box::new(singleton.clone()));
+                        setter.singleton_dispatch = Some(Box::new(singleton));
                     }
                     properties.push(property);
                 }
@@ -1712,15 +1712,15 @@ mod tests {
             equality_bound: None,
             vararg_index: None,
             required: 0,
-            param_defaults: vec![],
-            exact_params: vec![],
-            no_infer_params: vec![],
-            implicit_integer_coercion: vec![],
+            param_defaults: vec![].into(),
+            exact_params: vec![].into(),
+            no_infer_params: vec![].into(),
+            implicit_integer_coercion: vec![].into(),
             param_default_values: vec![],
             param_names: vec![],
             parameter_identities: vec![],
             lambda_param_types: vec![],
-            lambda_recv: vec![],
+            lambda_recv: vec![].into(),
             inline_modifiers: vec![],
             visibility: crate::types::Visibility::Public,
             context_count: 0,
@@ -2200,7 +2200,7 @@ mod tests {
         let mut st = FrontendSymbols::default();
         let mut s = sig(vec![Ty::Int, Ty::Int], Ty::Int);
         s.required = 1;
-        s.param_defaults = vec![false, true];
+        s.param_defaults = vec![false, true].into();
         s.param_names = vec!["a".into(), "b".into()];
         s.set_vararg(false);
         st.funs.insert("f".into(), vec![s]);

@@ -2055,19 +2055,21 @@ class Box<out T : Any?> private constructor(private val value: Any?) {
     let [parameter] = parameters.as_slice() else {
         panic!("getOrDefault must retain one value parameter")
     };
-    let krusty::types::Ty::TyParam(parameter_identity, parameter_bound) = parameter else {
+    let krusty::types::TyKind::TyParam(parameter_identity, parameter_bound) = parameter.kind()
+    else {
         panic!("generic value parameter was erased: {parameter:?}")
     };
     assert_eq!(
-        **parameter_bound,
+        parameter_bound,
         krusty::types::Ty::nullable(krusty::types::Ty::obj("kotlin/Any"))
     );
     assert!(matches!(
-        receiver,
-        krusty::types::Ty::Obj(owner, arguments)
+        receiver.kind(),
+        krusty::types::TyKind::Obj(owner, arguments)
             if owner.matches("Box")
-                && matches!(arguments.as_ref(), [krusty::types::Ty::TyParam(receiver_identity, receiver_bound)]
-                    if receiver_identity == parameter_identity && *receiver_bound == *parameter_bound)
+                && matches!(arguments.as_ref(), [argument]
+                    if matches!(argument.kind(), krusty::types::TyKind::TyParam(receiver_identity, receiver_bound)
+                        if receiver_identity == parameter_identity && receiver_bound == parameter_bound))
     ));
 }
 

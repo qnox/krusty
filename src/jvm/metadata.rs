@@ -18,7 +18,7 @@ mod string_table;
 mod type_aliases;
 mod value_parameter;
 
-pub use function::MetaFn;
+pub use function::{MetaFn, MfnFlags};
 
 use property_declarations::decode_properties;
 use property_identity::{
@@ -49,7 +49,7 @@ use crate::metadata::decode::{
     packed_varints, parse_type_node, parse_type_param, parse_value_parameter, ParameterDecodeError,
     ParsedProjection, ParsedTypeArgument, ParsedTypeParam, ParsedValueParam, ParsedVariance, Pb,
 };
-use crate::types::{intern, type_name, Ty, TypeName, Visibility};
+use crate::types::{intern, type_name, Ty, TyKind, TypeName, Visibility};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MetadataDecodeError {
@@ -85,8 +85,10 @@ fn primary_erasure_bounds(formals: &[String], formal_bounds: &[Vec<Ty>]) -> Hash
             return Ty::obj("kotlin/Any");
         }
         let bound = match direct.get(name).copied() {
-            Some(Ty::TyParam(other, _)) => resolve(other, direct, resolved, visiting),
-            Some(bound) => bound,
+            Some(bound) => match bound.kind() {
+                TyKind::TyParam(other, _) => resolve(other.as_str(), direct, resolved, visiting),
+                _ => bound,
+            },
             None => Ty::nullable(Ty::obj("kotlin/Any")),
         };
         visiting.remove(name);
@@ -184,12 +186,12 @@ fn is_kotlin_function_classifier(internal: &str) -> bool {
 /// `Continuation<T>` and whose physical return is `Any?`, plus the suspend-type flag. The
 /// continuation is not a source parameter: its argument is the source return type.
 fn source_suspend_function_type(ty: Ty) -> Ty {
-    let Ty::Fun(signature) = ty else {
+    let TyKind::Fun(signature) = ty.kind() else {
         return ty;
     };
     let mut params = signature.params.clone();
-    let ret = match params.last().copied().map(Ty::non_null) {
-        Some(Ty::Obj(continuation, args))
+    let ret = match params.last().copied().map(|ty| ty.non_null().kind()) {
+        Some(TyKind::Obj(continuation, args))
             if continuation.matches("kotlin/coroutines/Continuation") =>
         {
             let ret = args
@@ -318,6 +320,7 @@ struct ParsedFunction {
     /// `Function.flags.MEMBER_KIND == SYNTHESIZED`. The enclosing declaration may attach implicit
     /// compiler semantics that kotlinc deliberately does not repeat on the value parameter.
     is_synthesized: bool,
+    annotations_on_realization: bool,
     is_operator: bool,
     is_infix: bool,
     /// Only the current `Function.flags` word (field 9) has the status bits; `old_flags` predates
@@ -518,6 +521,8 @@ fn parse_function(body: &[u8]) -> MetadataResult<ParsedFunction> {
         is_abstract: (flags >> 4) & 0x3 == 2,
         is_final: (flags >> 4) & 0x3 == 0,
         is_synthesized: (flags >> 6) & 0x3 == 3,
+        // `HAS_ANNOTATIONS` is bit 0 of both flag layouts.
+        annotations_on_realization: flags & 1 != 0 && annotation_bodies.is_empty(),
         is_operator: flags & IS_OPERATOR_BIT != 0,
         is_infix: flags & IS_INFIX_BIT != 0,
         return_value_status,
@@ -666,7 +671,7 @@ fn vararg_element_type<'a>(
 /// type-table, and nested generic decoding in [`decode_metadata_type`] instead of maintaining a
 /// second protobuf walk that can lose a table-backed or parameterized receiver.
 fn receiver_function_shape(ty: Option<Ty>) -> (bool, Option<TypeName>) {
-    let Some(Ty::Fun(signature)) = ty.map(Ty::non_null) else {
+    let Some(TyKind::Fun(signature)) = ty.map(|ty| ty.non_null().kind()) else {
         return (false, None);
     };
     if !signature.has_receiver {
@@ -676,8 +681,8 @@ fn receiver_function_shape(ty: Option<Ty>) -> (bool, Option<TypeName>) {
         signature
             .params
             .get(signature.context_count)
-            .and_then(|receiver| match receiver.non_null() {
-                Ty::Obj(name, _) => Some(name),
+            .and_then(|receiver| match receiver.non_null().kind() {
+                TyKind::Obj(name, _) => Some(name),
                 _ => None,
             });
     (true, receiver)
@@ -1063,88 +1068,6 @@ fn build_property_generic_sig(
         ret,
         return_policy: Default::default(),
     })
-}
-
-/// Bit-packed boolean flags for a [`MetaFn`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct MfnFlags(u16);
-
-impl MfnFlags {
-    pub(super) const IS_INLINE: u16 = 1 << 0;
-    pub(super) const IS_SUSPEND: u16 = 1 << 1;
-    pub(super) const IS_EXTENSION: u16 = 1 << 2;
-    pub(super) const RET_NULLABLE: u16 = 1 << 3;
-    pub(super) const IS_OPERATOR: u16 = 1 << 4;
-    pub(super) const IS_INFIX: u16 = 1 << 5;
-    pub(super) const HAS_REIFIED_TYPE_PARAMS: u16 = 1 << 6;
-    pub(super) const DEPRECATED_HIDDEN: u16 = 1 << 7;
-    pub(super) const IS_ABSTRACT: u16 = 1 << 8;
-    pub(super) const IS_FINAL: u16 = 1 << 9;
-    pub(super) const IS_COMPANION_BLOCK_MEMBER: u16 = 1 << 10;
-    pub(super) const IS_SYNTHESIZED: u16 = 1 << 11;
-
-    #[inline]
-    const fn with(mut self, mask: u16, on: bool) -> Self {
-        if on {
-            self.0 |= mask;
-        } else {
-            self.0 &= !mask;
-        }
-        self
-    }
-    #[inline]
-    pub(super) const fn has(self, mask: u16) -> bool {
-        self.0 & mask != 0
-    }
-
-    #[inline]
-    pub const fn with_is_inline(self, on: bool) -> Self {
-        self.with(Self::IS_INLINE, on)
-    }
-    #[inline]
-    pub const fn with_is_suspend(self, on: bool) -> Self {
-        self.with(Self::IS_SUSPEND, on)
-    }
-    #[inline]
-    pub const fn with_is_extension(self, on: bool) -> Self {
-        self.with(Self::IS_EXTENSION, on)
-    }
-    #[inline]
-    pub const fn with_ret_nullable(self, on: bool) -> Self {
-        self.with(Self::RET_NULLABLE, on)
-    }
-    #[inline]
-    pub const fn with_is_operator(self, on: bool) -> Self {
-        self.with(Self::IS_OPERATOR, on)
-    }
-    #[inline]
-    pub const fn with_is_infix(self, on: bool) -> Self {
-        self.with(Self::IS_INFIX, on)
-    }
-    #[inline]
-    pub const fn with_has_reified_type_params(self, on: bool) -> Self {
-        self.with(Self::HAS_REIFIED_TYPE_PARAMS, on)
-    }
-    #[inline]
-    pub const fn with_deprecated_hidden(self, on: bool) -> Self {
-        self.with(Self::DEPRECATED_HIDDEN, on)
-    }
-    #[inline]
-    pub const fn with_is_abstract(self, on: bool) -> Self {
-        self.with(Self::IS_ABSTRACT, on)
-    }
-    #[inline]
-    pub const fn with_is_final(self, on: bool) -> Self {
-        self.with(Self::IS_FINAL, on)
-    }
-    #[inline]
-    pub const fn with_is_companion_block_member(self, on: bool) -> Self {
-        self.with(Self::IS_COMPANION_BLOCK_MEMBER, on)
-    }
-    #[inline]
-    pub const fn with_is_synthesized(self, on: bool) -> Self {
-        self.with(Self::IS_SYNTHESIZED, on)
-    }
 }
 
 /// A JVM method signature carried by Kotlin metadata: method name + descriptor as one fact.
@@ -1689,10 +1612,10 @@ fn decode_metadata_type(
         (None, None) => None,
     };
     if let Some(outer) = outer {
-        let Ty::Obj(_, outer_arguments) = outer.non_null() else {
+        let TyKind::Obj(_, outer_arguments) = outer.non_null().kind() else {
             return None;
         };
-        args.extend_from_slice(outer_arguments);
+        args.extend_from_slice(outer_arguments.as_slice());
     }
     let flexible_upper_bound = node.flexible_upper_bound;
     let flexible_upper_bound_id = node.flexible_upper_bound_id;
@@ -1800,8 +1723,8 @@ fn decode_functions(
     class_tparam_bounds: &[Vec<Ty>],
     data_equality_bound: Option<Ty>,
 ) -> MetadataResult<Vec<MetaFn>> {
-    let declared_classifier = |ty: Ty| match ty.non_null() {
-        Ty::Obj(internal, _) => Some(internal),
+    let declared_classifier = |ty: Ty| match ty.non_null().kind() {
+        TyKind::Obj(internal, _) => Some(internal),
         _ => None,
     };
     let mut out = Vec::new();
@@ -2120,6 +2043,7 @@ fn decode_functions(
                             .with_is_infix(pf.is_infix)
                             .with_is_companion_block_member(pf.is_companion && !pf.has_receiver)
                             .with_is_synthesized(pf.is_synthesized)
+                            .with_annotations_on_realization(pf.annotations_on_realization)
                             .with_has_reified_type_params(
                                 pf.type_params.iter().any(|parameter| parameter.reified),
                             ),
@@ -2344,9 +2268,9 @@ fn ctor_params(ctx: &MetaCtx) -> MetadataResult<Vec<MetaConstructor>> {
                 let params = ParamList {
                     visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
                     names,
-                    defaults,
+                    defaults: defaults.into(),
                     types,
-                    recv_fun,
+                    recv_fun: recv_fun.into(),
                     vararg,
                     annotation: None,
                 };
@@ -2882,66 +2806,7 @@ fn parse_package_parts(body: &[u8], jvm_pkgs: &[String]) -> Option<(String, Vec<
 }
 
 #[cfg(test)]
-mod builtin_class_access_tests {
-    use super::builtin_class_access;
-
-    /// A `.kotlin_builtins` `Class.flags` word, assembled from the field positions the decoder reads.
-    fn flags(visibility: u64, modality: u64, kind: u64, is_inner: bool) -> u64 {
-        visibility << 1 | modality << 4 | kind << 6 | u64::from(is_inner) << 9
-    }
-
-    /// Every arm has to land on the flags the compiler that produced the mapped `java.*` class file
-    /// emitted, since the recovered `InnerClasses` entry is compared byte-for-byte against that one.
-    /// The nested INTERFACE case is the one a JDK-less compile actually hits today
-    /// (`kotlin/collections/Map.Entry` ⇒ the `0x0609` `java/util/Map$Entry` carries); the rest pin the
-    /// mapping so a later builtin of another shape cannot silently pick up wrong flags.
-    #[test]
-    fn builtin_class_flags_map_to_jvm_access() {
-        // public abstract interface, nested (not `inner`) — public static interface abstract.
-        assert_eq!(builtin_class_access(flags(3, 2, 1, false)), 0x0609);
-        // public final class, nested — public static final (what `MethodHandles$Lookup` carries).
-        assert_eq!(builtin_class_access(flags(3, 0, 0, false)), 0x0019);
-        // The same class declared `inner`: an inner class is not static.
-        assert_eq!(builtin_class_access(flags(3, 0, 0, true)), 0x0011);
-        // public abstract class — abstract survives, final does not appear.
-        assert_eq!(builtin_class_access(flags(3, 2, 0, false)), 0x0409);
-        // `sealed` is abstract on the JVM.
-        assert_eq!(builtin_class_access(flags(3, 3, 0, false)), 0x0409);
-        // public enum class — public static final enum.
-        assert_eq!(builtin_class_access(flags(3, 0, 2, false)), 0x4019);
-        // public annotation class — an annotation interface.
-        assert_eq!(builtin_class_access(flags(3, 2, 4, false)), 0x2609);
-        // private and protected keep their own bit; `internal` is PUBLIC on the JVM (kotlinc mangles
-        // the NAME instead of narrowing the flag), so it must not come out package-private.
-        assert_eq!(builtin_class_access(flags(1, 0, 0, false)), 0x001a);
-        assert_eq!(builtin_class_access(flags(2, 0, 0, false)), 0x001c);
-        assert_eq!(builtin_class_access(flags(0, 0, 0, false)), 0x0019);
-        // `open` is neither final nor abstract.
-        assert_eq!(builtin_class_access(flags(3, 1, 0, false)), 0x0009);
-    }
-
-    /// The arm assertions above assemble the flag word with the very shifts the decoder reads back, so
-    /// they pin the MAPPING but say nothing about the OFFSETS — moving `IS_INNER` a bit over would keep
-    /// them all green. These are `Class.flags` words as they actually appear in the stdlib's shipped
-    /// `.kotlin_builtins` fragments, so they pin the layout itself.
-    #[test]
-    fn real_builtins_flag_words_decode_to_jvm_access() {
-        // `kotlin/collections/Map.Entry` — public abstract interface, not `inner`. Anchors VISIBILITY
-        // and CLASS_KIND, and is the one word a JDK-less compile actually decodes today; the entry it
-        // produces is compared byte-for-byte against `java/util/Map$Entry`'s in
-        // `tests/no_jdk_builtin_emit_e2e.rs`.
-        assert_eq!(builtin_class_access(0x0066), 0x0609);
-        // `kotlin/Any` — public OPEN class. Its modality is the one that pins MODALITY at bits 4..6:
-        // read one bit over and it would decode as ABSTRACT or FINAL.
-        assert_eq!(builtin_class_access(0x0016), 0x0009);
-        // The protobuf default for an omitted `Class.flags` field is PUBLIC FINAL (`6`). The parser
-        // supplies that word before this decoder runs; it must land on public static final.
-        assert_eq!(builtin_class_access(6), 0x0019);
-        // An EXPLICIT zero is INTERNAL FINAL. Internal classes are public in JVM bytecode because
-        // Kotlin enforces the visibility through metadata/name mangling rather than the ACC bits.
-        assert_eq!(builtin_class_access(0), 0x0019);
-    }
-}
+mod builtin_class_access_tests;
 
 #[cfg(test)]
 mod module_reader_tests {
@@ -3072,6 +2937,19 @@ mod module_reader_tests {
         let ordinary = parse_function(&[]).expect("default function message");
         assert!(operator.is_operator);
         assert!(!ordinary.is_operator);
+    }
+
+    #[test]
+    fn annotations_live_on_the_realization_only_when_flagged_without_records() {
+        // Function.flags is field 9 (tag 0x48): the default 6 plus HAS_ANNOTATIONS (bit 0) is 7,
+        // and 6 alone states no annotations. Function.annotation is field 12 (tag 0x62); a record
+        // keeps metadata authoritative even when its body decodes to no identity.
+        let external = parse_function(&[0x48, 0x07]).expect("flagged function");
+        let unannotated = parse_function(&[0x48, 0x06]).expect("unannotated function");
+        let recorded = parse_function(&[0x48, 0x07, 0x62, 0x00]).expect("recorded function");
+        assert!(external.annotations_on_realization);
+        assert!(!unannotated.annotations_on_realization);
+        assert!(!recorded.annotations_on_realization);
     }
 
     #[test]

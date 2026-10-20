@@ -6,6 +6,7 @@
 
 use crate::diag::{DiagSink, Span};
 use crate::ir::{FunId, IrFile};
+use crate::types::TyKind;
 
 mod local_function_diagnostics;
 mod package_method_diagnostics;
@@ -1429,8 +1430,8 @@ fn rendered_callable_name(name: &str) -> String {
 }
 
 fn is_default_bound(bound: crate::types::Ty) -> bool {
-    matches!(bound, crate::types::Ty::Nullable(inner)
-        if matches!(*inner, crate::types::Ty::Obj(name, arguments)
+    matches!(bound.kind(), crate::types::TyKind::Nullable(inner)
+        if matches!(inner.kind(), crate::types::TyKind::Obj(name, arguments)
             if arguments.is_empty() && name == crate::types::wk::any()))
 }
 
@@ -1474,29 +1475,28 @@ fn source_type_name(ty: crate::types::Ty) -> Result<String, UndeterminedDiagnost
 }
 
 fn ensure_determined_type(ty: crate::types::Ty) -> Result<(), UndeterminedDiagnosticType> {
-    use crate::types::Ty;
-    match ty {
-        Ty::Error => Err(UndeterminedDiagnosticType::Error),
-        Ty::Pending => Err(UndeterminedDiagnosticType::Pending),
-        Ty::Obj(_, arguments) => {
+    match ty.kind() {
+        TyKind::Error => Err(UndeterminedDiagnosticType::Error),
+        TyKind::Pending => Err(UndeterminedDiagnosticType::Pending),
+        TyKind::Obj(_, arguments) => {
             for &argument in arguments {
                 ensure_determined_type(argument)?;
             }
             Ok(())
         }
-        Ty::Fun(signature) => {
+        TyKind::Fun(signature) => {
             for &parameter in &signature.params {
                 ensure_determined_type(parameter)?;
             }
             ensure_determined_type(signature.ret)
         }
-        Ty::Nullable(inner)
-        | Ty::PlatformNullable(inner)
-        | Ty::InProjection(inner)
-        | Ty::OutProjection(inner)
-        | Ty::StarProjection(inner)
-        | Ty::TyParam(_, inner) => ensure_determined_type(*inner),
-        Ty::Intersection(parts) => {
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner)
+        | TyKind::StarProjection(inner)
+        | TyKind::TyParam(_, inner) => ensure_determined_type(inner),
+        TyKind::Intersection(parts) => {
             for &part in parts {
                 ensure_determined_type(part)?;
             }
@@ -1507,25 +1507,24 @@ fn ensure_determined_type(ty: crate::types::Ty) -> Result<(), UndeterminedDiagno
 }
 
 fn qualified_type_name(ty: crate::types::Ty) -> Result<String, UndeterminedDiagnosticType> {
-    use crate::types::Ty;
-    Ok(match ty {
-        Ty::Int => "kotlin.Int".to_string(),
-        Ty::Byte => "kotlin.Byte".to_string(),
-        Ty::Short => "kotlin.Short".to_string(),
-        Ty::Long => "kotlin.Long".to_string(),
-        Ty::Float => "kotlin.Float".to_string(),
-        Ty::Double => "kotlin.Double".to_string(),
-        Ty::Boolean => "kotlin.Boolean".to_string(),
-        Ty::Char => "kotlin.Char".to_string(),
-        Ty::UByte => "kotlin.UByte".to_string(),
-        Ty::UShort => "kotlin.UShort".to_string(),
-        Ty::UInt => "kotlin.UInt".to_string(),
-        Ty::ULong => "kotlin.ULong".to_string(),
-        Ty::String => "kotlin.String".to_string(),
-        Ty::Unit => "kotlin.Unit".to_string(),
-        Ty::Nothing => "kotlin.Nothing".to_string(),
-        Ty::Null => "null".to_string(),
-        Ty::Obj(name, arguments) => {
+    Ok(match ty.kind() {
+        TyKind::INT => "kotlin.Int".to_string(),
+        TyKind::BYTE => "kotlin.Byte".to_string(),
+        TyKind::SHORT => "kotlin.Short".to_string(),
+        TyKind::LONG => "kotlin.Long".to_string(),
+        TyKind::FLOAT => "kotlin.Float".to_string(),
+        TyKind::DOUBLE => "kotlin.Double".to_string(),
+        TyKind::BOOLEAN => "kotlin.Boolean".to_string(),
+        TyKind::CHAR => "kotlin.Char".to_string(),
+        TyKind::UBYTE => "kotlin.UByte".to_string(),
+        TyKind::USHORT => "kotlin.UShort".to_string(),
+        TyKind::UINT => "kotlin.UInt".to_string(),
+        TyKind::ULONG => "kotlin.ULong".to_string(),
+        TyKind::STRING => "kotlin.String".to_string(),
+        TyKind::Unit => "kotlin.Unit".to_string(),
+        TyKind::Nothing => "kotlin.Nothing".to_string(),
+        TyKind::Null => "null".to_string(),
+        TyKind::Obj(name, arguments) => {
             let base = name.render().replace(['/', '$'], ".");
             if arguments.is_empty() {
                 base
@@ -1538,25 +1537,27 @@ fn qualified_type_name(ty: crate::types::Ty) -> Result<String, UndeterminedDiagn
                 format!("{base}<{arguments}>")
             }
         }
-        Ty::Nullable(inner) => {
-            let rendered = qualified_type_name(*inner)?;
-            if matches!(*inner, Ty::Fun(_)) {
+        TyKind::Nullable(inner) => {
+            let rendered = qualified_type_name(inner)?;
+            if inner.is_fun() {
                 format!("({rendered})?")
             } else {
                 format!("{rendered}?")
             }
         }
-        Ty::PlatformNullable(inner) => format!("{}!", qualified_type_name(*inner)?),
-        Ty::DefinitelyNotNull(inner) => {
-            format!("{} & Any", qualified_type_name(*inner)?)
+        TyKind::PlatformNullable(inner) => format!("{}!", qualified_type_name(inner)?),
+        TyKind::DefinitelyNotNull(inner) => {
+            format!("{} & Any", qualified_type_name(inner)?)
         }
-        Ty::Intersection(parts) => parts
+        TyKind::Intersection(parts) => parts
             .iter()
             .map(|part| qualified_type_name(*part))
             .collect::<Result<Vec<_>, _>>()?
             .join(" & "),
-        Ty::TyParam(name, _) => crate::types::type_parameter_source_name(name).to_string(),
-        Ty::Fun(signature) => {
+        TyKind::TyParam(name, _) => {
+            crate::types::type_parameter_source_name(name.as_str()).to_string()
+        }
+        TyKind::Fun(signature) => {
             let parameters = signature
                 .params
                 .iter()
@@ -1569,11 +1570,11 @@ fn qualified_type_name(ty: crate::types::Ty) -> Result<String, UndeterminedDiagn
                 qualified_type_name(signature.ret)?
             )
         }
-        Ty::InProjection(inner) => format!("in {}", qualified_type_name(*inner)?),
-        Ty::OutProjection(inner) => format!("out {}", qualified_type_name(*inner)?),
-        Ty::StarProjection(_) => "*".to_string(),
-        Ty::Error => return Err(UndeterminedDiagnosticType::Error),
-        Ty::Pending => return Err(UndeterminedDiagnosticType::Pending),
+        TyKind::InProjection(inner) => format!("in {}", qualified_type_name(inner)?),
+        TyKind::OutProjection(inner) => format!("out {}", qualified_type_name(inner)?),
+        TyKind::StarProjection(_) => "*".to_string(),
+        TyKind::Error => return Err(UndeterminedDiagnosticType::Error),
+        TyKind::Pending => return Err(UndeterminedDiagnosticType::Pending),
     })
 }
 

@@ -8,7 +8,7 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ir::{ClassId, ExprId, IrExpr, IrFile, IrTypeOp};
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 const OBJECT_REF: &str = "kotlin/jvm/internal/Ref$ObjectRef";
 
@@ -17,35 +17,37 @@ pub(super) fn holder_class(elem: &Ty) -> (&'static str, &'static str) {
     if elem.is_nullable() {
         return ("kotlin/jvm/internal/Ref$ObjectRef", "Ljava/lang/Object;");
     }
-    match elem.non_null() {
-        Ty::Int | Ty::UInt => ("kotlin/jvm/internal/Ref$IntRef", "I"),
-        Ty::Long | Ty::ULong => ("kotlin/jvm/internal/Ref$LongRef", "J"),
-        Ty::Float => ("kotlin/jvm/internal/Ref$FloatRef", "F"),
-        Ty::Double => ("kotlin/jvm/internal/Ref$DoubleRef", "D"),
-        Ty::Boolean => ("kotlin/jvm/internal/Ref$BooleanRef", "Z"),
-        Ty::Char => ("kotlin/jvm/internal/Ref$CharRef", "C"),
-        Ty::Byte | Ty::UByte => ("kotlin/jvm/internal/Ref$ByteRef", "B"),
-        Ty::Short | Ty::UShort => ("kotlin/jvm/internal/Ref$ShortRef", "S"),
-        Ty::Obj(name, _) if name.matches("kotlin/Int") || name.matches("kotlin/UInt") => {
+    match elem.non_null().kind() {
+        TyKind::INT | TyKind::UINT => ("kotlin/jvm/internal/Ref$IntRef", "I"),
+        TyKind::LONG | TyKind::ULONG => ("kotlin/jvm/internal/Ref$LongRef", "J"),
+        TyKind::FLOAT => ("kotlin/jvm/internal/Ref$FloatRef", "F"),
+        TyKind::DOUBLE => ("kotlin/jvm/internal/Ref$DoubleRef", "D"),
+        TyKind::BOOLEAN => ("kotlin/jvm/internal/Ref$BooleanRef", "Z"),
+        TyKind::CHAR => ("kotlin/jvm/internal/Ref$CharRef", "C"),
+        TyKind::BYTE | TyKind::UBYTE => ("kotlin/jvm/internal/Ref$ByteRef", "B"),
+        TyKind::SHORT | TyKind::USHORT => ("kotlin/jvm/internal/Ref$ShortRef", "S"),
+        TyKind::Obj(name, _) if name.matches("kotlin/Int") || name.matches("kotlin/UInt") => {
             ("kotlin/jvm/internal/Ref$IntRef", "I")
         }
-        Ty::Obj(name, _) if name.matches("kotlin/Long") || name.matches("kotlin/ULong") => {
+        TyKind::Obj(name, _) if name.matches("kotlin/Long") || name.matches("kotlin/ULong") => {
             ("kotlin/jvm/internal/Ref$LongRef", "J")
         }
-        Ty::Obj(name, _) if name.matches("kotlin/Float") => {
+        TyKind::Obj(name, _) if name.matches("kotlin/Float") => {
             ("kotlin/jvm/internal/Ref$FloatRef", "F")
         }
-        Ty::Obj(name, _) if name.matches("kotlin/Double") => {
+        TyKind::Obj(name, _) if name.matches("kotlin/Double") => {
             ("kotlin/jvm/internal/Ref$DoubleRef", "D")
         }
-        Ty::Obj(name, _) if name.matches("kotlin/Boolean") => {
+        TyKind::Obj(name, _) if name.matches("kotlin/Boolean") => {
             ("kotlin/jvm/internal/Ref$BooleanRef", "Z")
         }
-        Ty::Obj(name, _) if name.matches("kotlin/Char") => ("kotlin/jvm/internal/Ref$CharRef", "C"),
-        Ty::Obj(name, _) if name.matches("kotlin/Byte") || name.matches("kotlin/UByte") => {
+        TyKind::Obj(name, _) if name.matches("kotlin/Char") => {
+            ("kotlin/jvm/internal/Ref$CharRef", "C")
+        }
+        TyKind::Obj(name, _) if name.matches("kotlin/Byte") || name.matches("kotlin/UByte") => {
             ("kotlin/jvm/internal/Ref$ByteRef", "B")
         }
-        Ty::Obj(name, _) if name.matches("kotlin/Short") || name.matches("kotlin/UShort") => {
+        TyKind::Obj(name, _) if name.matches("kotlin/Short") || name.matches("kotlin/UShort") => {
             ("kotlin/jvm/internal/Ref$ShortRef", "S")
         }
         _ => ("kotlin/jvm/internal/Ref$ObjectRef", "Ljava/lang/Object;"),
@@ -448,7 +450,7 @@ fn lambda_class_constructor(ir: &IrFile, internal: TypeName) -> Option<Vec<Ty>> 
 
 /// The element a constructor parameter of the erased `Ref$ObjectRef<T>` holder carries.
 fn erased_cell_element(parameter: Ty) -> Option<Ty> {
-    let Ty::Obj(holder, arguments) = parameter.non_null() else {
+    let TyKind::Obj(holder, arguments) = parameter.non_null().kind() else {
         return None;
     };
     if !holder.matches(OBJECT_REF) {
@@ -736,9 +738,9 @@ mod tests {
         assert!(matches!(
             ir.expr(operand),
             IrExpr::Variable {
-                ty: Ty::TyParam(name, _),
+                ty,
                 ..
-            } if *name == "R"
+            } if ty.ty_param_name() == Some("R")
         ));
 
         let IrExpr::RefNew {
@@ -748,7 +750,7 @@ mod tests {
         else {
             panic!("cell");
         };
-        assert!(matches!(elem, Ty::TyParam(name, _) if *name == "R"));
+        assert!(matches!(elem.kind(), TyKind::TyParam(name, _) if &*name == "R"));
         assert!(matches!(
             ir.expr(*init),
             IrExpr::TypeOp {
@@ -768,12 +770,12 @@ mod tests {
         assert_eq!(*type_operand, Ty::Int);
         assert!(matches!(
             ir.expr(*moved),
-            IrExpr::RefGet { elem, .. } if matches!(elem, Ty::TyParam(name, _) if *name == "R")
+            IrExpr::RefGet { elem, .. } if matches!(elem.kind(), TyKind::TyParam(name, _) if &*name == "R")
         ));
         let IrExpr::RefSet { elem, value, .. } = ir.expr(write) else {
             panic!("write");
         };
-        assert!(matches!(elem, Ty::TyParam(name, _) if *name == "R"));
+        assert!(matches!(elem.kind(), TyKind::TyParam(name, _) if &*name == "R"));
         assert!(matches!(
             ir.expr(*value),
             IrExpr::TypeOp {
@@ -877,9 +879,9 @@ mod tests {
         assert!(matches!(
             ir.expr(cell),
             IrExpr::RefNew {
-                elem: Ty::TyParam(name, _),
+                elem,
                 ..
-            } if *name == "R"
+            } if elem.ty_param_name() == Some("R")
         ));
     }
 
@@ -980,17 +982,17 @@ mod tests {
         assert!(matches!(
             ir.expr(cell),
             IrExpr::RefNew {
-                elem: Ty::TyParam(name, _),
+                elem,
                 ..
-            } if *name == "R"
+            } if elem.ty_param_name() == Some("R")
         ));
         assert!(matches!(
             ir.functions[specialized as usize].params.as_slice(),
-            [Ty::TyParam(name, _)] if *name == "R"
+            [parameter] if parameter.ty_param_name() == Some("R")
         ));
         assert!(matches!(
-            ir.shared_capture_parameters.get(&(specialized, 0)),
-            Some(Ty::TyParam(name, _)) if *name == "R"
+            ir.shared_capture_parameters.get(&(specialized, 0)).map(|ty| ty.kind()),
+            Some(TyKind::TyParam(name, _)) if &*name == "R"
         ));
         let IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
@@ -1003,9 +1005,9 @@ mod tests {
         assert!(matches!(
             ir.expr(*moved),
             IrExpr::RefGet {
-                elem: Ty::TyParam(name, _),
+                elem,
                 ..
-            } if *name == "R"
+            } if elem.ty_param_name() == Some("R")
         ));
     }
 

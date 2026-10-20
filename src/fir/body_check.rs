@@ -65,6 +65,8 @@ pub use session::BodyCheckSession;
 #[cfg(test)]
 mod nothing_instantiation_tests;
 mod plugins;
+#[cfg(test)]
+mod progression_tests;
 mod progressions;
 mod properties;
 #[cfg(test)]
@@ -198,7 +200,7 @@ impl CheckedBodyParameter<'_> {
     fn inline_expansion_mode(&self) -> crate::types::InlineExpansionMode {
         crate::types::InlineExpansionMode::declared(
             false,
-            matches!(self.ty.get(), Ty::Fun(_)),
+            self.ty.get().is_fun(),
             self.inline_modifier,
         )
     }
@@ -1645,7 +1647,7 @@ impl BodyFirChecker<'_> {
                     {
                         self.source_member_operator_call(expression, convention, *lo, &[*hi])?
                     } else {
-                        self.range_literal(*kind, *lo, *hi)?
+                        self.range_literal(expression, *kind, *lo, *hi)?
                     }
                 }
                 Expr::IncDec {
@@ -1716,6 +1718,8 @@ impl BodyFirChecker<'_> {
                                 start_type: self.expression_type(*start)?,
                                 end: self.expression(*end)?,
                                 end_type: self.expression_type(*end)?,
+                                ends_inlined_call: self
+                                    .selected_range_inlines(expression, operator),
                             }
                         } else {
                             self.source_member_operator_call(expression, operator, *start, &[*end])?

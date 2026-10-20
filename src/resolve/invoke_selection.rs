@@ -12,6 +12,7 @@
 //! own result, so an expected `R?` constrains `R`.
 
 use super::*;
+use crate::types::TyKind;
 
 /// One property read and the exact `invoke` declaration selected for its value before contextual
 /// lambda checking. The call keeps this object until commitment, so completed lambda types cannot
@@ -121,9 +122,9 @@ impl Checker<'_> {
             .chain(self.semantic_tparam_extra_bounds(scope, parameter))
         {
             let bound = bound.non_null();
-            let callable_bounds = match bound {
-                Ty::Fun(_) => vec![bound],
-                Ty::TyParam(..) => {
+            let callable_bounds = match bound.kind() {
+                TyKind::Fun(_) => vec![bound],
+                TyKind::TyParam(..) => {
                     self.collect_bound_function_types(scope, bound, visited, functions);
                     Vec::new()
                 }
@@ -149,8 +150,8 @@ impl Checker<'_> {
         receiver: ExprId,
         receiver_ty: Ty,
     ) -> Option<Ty> {
-        let callable_object = match receiver_ty.non_null() {
-            Ty::Obj(classifier, _) => {
+        let callable_object = match receiver_ty.non_null().kind() {
+            TyKind::Obj(classifier, _) => {
                 crate::libraries::function_classifiers::classifier(classifier).is_none()
             }
             _ => false,
@@ -178,7 +179,7 @@ impl Checker<'_> {
     fn invoke_projects_type_parameter(&self, receiver: Ty, function: Ty) -> bool {
         let mut first_bound = receiver.non_null();
         let mut visited = crate::fx_hash::HashSet::default();
-        while let Ty::TyParam(name, bound) = first_bound {
+        while let TyKind::TyParam(name, bound) = first_bound.kind() {
             if !visited.insert(name) {
                 return false;
             }
@@ -227,11 +228,11 @@ impl Checker<'_> {
         ty: Ty,
         visited: &mut crate::fx_hash::HashSet<&'static str>,
     ) -> bool {
-        match ty {
-            Ty::Nullable(_) | Ty::Null => true,
-            Ty::TyParam(name, bound) => {
-                visited.insert(name)
-                    && std::iter::once(*bound)
+        match ty.kind() {
+            TyKind::Nullable(_) | TyKind::Null => true,
+            TyKind::TyParam(name, bound) => {
+                visited.insert(name.as_str())
+                    && std::iter::once(bound)
                         .chain(self.semantic_tparam_extra_bounds(scope, ty))
                         .all(|bound| {
                             self.receiver_admits_null_through_bounds(scope, bound, visited)
@@ -263,7 +264,7 @@ impl Checker<'_> {
         }
         let property = self.select_property_read(scope, receiver, name).ok()??;
         let value = self.declared_function_semantic_type(property.ty());
-        if matches!(value.non_null(), Ty::Fun(_)) {
+        if value.non_null().is_fun() {
             return None;
         }
         let invoke =
@@ -439,7 +440,7 @@ impl Checker<'_> {
         for (source, (&parameter, &expected)) in
             argument_parameters.iter().zip(&argument_types).enumerate()
         {
-            let Ty::Fun(signature) = expected.non_null() else {
+            let TyKind::Fun(signature) = expected.non_null().kind() else {
                 continue;
             };
             param_types[source] = signature.params.clone();
@@ -1035,8 +1036,8 @@ impl Checker<'_> {
             "resolve",
             "invoke selection call={call:?} receiver={receiver:?} nominal={receiver_ty:?} semantic={semantic_receiver_ty:?} args={arg_tys:?}",
         );
-        let (params, ret, kind, arguments_already_mapped) = match semantic_receiver_ty {
-            Ty::Fun(_)
+        let (params, ret, kind, arguments_already_mapped) = match semantic_receiver_ty.kind() {
+            TyKind::Fun(_)
                 if self.invoke_receiver_admits_null(
                     scope,
                     self.invoke_receiver_flow_ty(scope, receiver, receiver_ty),
@@ -1052,7 +1053,7 @@ impl Checker<'_> {
                 );
                 return InvokeResolution::Selected(Ty::Error);
             }
-            Ty::Fun(sig) => {
+            TyKind::Fun(sig) => {
                 if self.invoke_projects_type_parameter(receiver_ty, semantic_receiver_ty) {
                     self.set(receiver, semantic_receiver_ty);
                 }
@@ -1405,9 +1406,7 @@ impl Checker<'_> {
         // A bare local call selects the receiver value and its function signature together. Publish
         // that committed semantic type on the callee expression; checked FIR consumes the same
         // decision instead of recovering from an earlier placeholder or re-reading storage type.
-        if matches!(semantic_receiver_ty, Ty::Fun(_))
-            && matches!(self.file.expr(receiver), Expr::Name(_))
-        {
+        if semantic_receiver_ty.is_fun() && matches!(self.file.expr(receiver), Expr::Name(_)) {
             self.set(receiver, semantic_receiver_ty);
         }
         self.expr_lowers.insert(

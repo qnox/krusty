@@ -201,6 +201,7 @@ mod tests {
     use super::super::{infer_generic_call_constraints_from_symbols, GSigBinds};
     use super::*;
     use crate::libraries::{EmptySymbolSource, GenericReturnPolicy};
+    use crate::types::TyKind;
 
     /// `class Cell<E>(item: E)` as its constructor's generic signature.
     fn cell_constructor(formal: &str) -> GenericSig {
@@ -329,7 +330,7 @@ mod tests {
         let declared = call.declared_bindings(inferred);
         let solved = declared.bindings[formal_name];
 
-        assert!(matches!(solved, Ty::DefinitelyNotNull(_)));
+        assert!(matches!(solved.kind(), TyKind::DefinitelyNotNull(_)));
         assert_eq!(Ty::nullable(solved), Ty::nullable(caller));
         assert_eq!(
             Ty::nullable(solved).non_null().ty_param_bound(),

@@ -10,7 +10,7 @@ use crate::ir::{
     Callee, IrBinOp, IrCheckedArgument, IrCheckedOperation, IrConst, IrExpr, IrFile, IrIntrinsic,
     IrTypeOp,
 };
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 mod arithmetic_result_types;
 mod callable_body_returns;
@@ -105,11 +105,11 @@ fn uninitialized_array_construction_is_a_direct_common_ir_value() {
         matches!(
             expression,
             IrExpr::Variable {
-                ty: Ty::Obj(name, _),
+                ty,
                 init: Some(value),
                 named: false,
                 ..
-            } if name.render() == "kotlin/IntArray"
+            } if ty.obj_parts().is_some_and(|(name, _)| name.render() == "kotlin/IntArray")
                 && matches!(ir.expr(*value), IrExpr::NewArray { .. })
         )
     }));
@@ -382,10 +382,8 @@ fn generic_cast_null_check_follows_the_checked_type_parameter_bound() {
         .iter()
         .filter_map(|expression| match expression {
             IrExpr::TypeOp {
-                op,
-                type_operand: Ty::TyParam(_, bound),
-                ..
-            } => Some((*op, **bound)),
+                op, type_operand, ..
+            } => type_operand.ty_param_bound().map(|bound| (*op, bound)),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -410,9 +408,9 @@ fn nullable_type_test_expands_from_its_checked_target() {
         expression,
         IrExpr::TypeOp {
             op: IrTypeOp::InstanceOf,
-            type_operand: Ty::String | Ty::Obj(_, _),
+            type_operand,
             ..
-        }
+        } if matches!(type_operand.kind(), TyKind::Obj(..))
     )));
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,
@@ -457,9 +455,9 @@ fn generic_member_set_forms_share_the_checked_declaration_boundary() {
                 expression,
                 IrExpr::TypeOp {
                     op: IrTypeOp::ImplicitCoercion,
-                    type_operand: Ty::TyParam(_, _),
+                    type_operand,
                     ..
-                }
+                } if type_operand.is_ty_param()
             )
         })
         .count();
@@ -658,22 +656,26 @@ fn external_property_function_reference_is_materialized_without_lookup() {
     });
     let reference = body.add_expr(FirExpr {
         origin,
-        ty: resolved(Ty::Fun(crate::types::intern_fnsig(crate::types::FnSig {
-            params: vec![],
-            ret: Ty::Int,
-            context_count: 0,
-            has_receiver: false,
-            suspend: false,
-        }))),
-        kind: FirExprKind::PropertyReference {
-            target: target.clone(),
-            function_type: resolved(Ty::Fun(crate::types::intern_fnsig(crate::types::FnSig {
+        ty: resolved(Ty::from(TyKind::Fun(crate::types::intern_fnsig(
+            crate::types::FnSig {
                 params: vec![],
                 ret: Ty::Int,
                 context_count: 0,
                 has_receiver: false,
                 suspend: false,
-            }))),
+            },
+        )))),
+        kind: FirExprKind::PropertyReference {
+            target: target.clone(),
+            function_type: resolved(Ty::from(TyKind::Fun(crate::types::intern_fnsig(
+                crate::types::FnSig {
+                    params: vec![],
+                    ret: Ty::Int,
+                    context_count: 0,
+                    has_receiver: false,
+                    suspend: false,
+                },
+            )))),
             reflective: false,
             binding: crate::fir::FirCallableReferenceBinding::Bound,
             dispatch_receiver: Some(FirReceiver {
@@ -1224,10 +1226,7 @@ fn extension_access_lowers_to_a_bound_function_wrapper_without_lookup() {
         .position(|function| function.name.starts_with("$fir_extension_bind_"))
         .expect("bound extension wrapper") as u32;
     assert_eq!(ir.functions[wrapper as usize].params.len(), 2);
-    assert!(matches!(
-        ir.functions[wrapper as usize].params[0],
-        Ty::Fun(_)
-    ));
+    assert!(ir.functions[wrapper as usize].params[0].is_fun());
     assert_eq!(
         ir.functions[wrapper as usize].params[1],
         Ty::obj("kotlin/Any")
@@ -2103,7 +2102,7 @@ fn generic_value_class_underlying_uses_its_declared_type_parameter_identity() {
             .first()
             .expect("value-class underlying field")
             .ty;
-        let crate::types::Ty::TyParam(semantic, _) = underlying else {
+        let crate::types::TyKind::TyParam(semantic, _) = underlying.kind() else {
             panic!("generic value-class underlying is not its type parameter: {underlying:?}");
         };
         assert!(signature

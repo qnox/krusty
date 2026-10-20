@@ -12,7 +12,7 @@ use crate::ir::{
 };
 use crate::metadata::builder::TypeAliasMeta;
 use crate::metadata::class_builder::{ClassMemberOrder, FnMeta, PropMeta};
-use crate::types::{wk, Ty, TypeName};
+use crate::types::{wk, Ty, TyKind, TypeName};
 use std::cmp::Ordering;
 
 /// Indices into a class's metadata function and property lists of members the compiler generates.
@@ -67,16 +67,16 @@ fn receiver_cmp(left: Option<Ty>, right: Option<Ty>) -> Ordering {
 /// arguments, then nullability; type parameters and other shapes after them.
 fn type_cmp(left: Ty, right: Ty) -> Ordering {
     fn classifier(ty: Ty) -> Option<TypeName> {
-        match ty.non_null() {
-            Ty::Obj(name, _) => Some(name),
-            Ty::Unit => Some(wk::unit()),
-            Ty::Nothing => Some(wk::nothing()),
+        match ty.non_null().kind() {
+            TyKind::Obj(name, _) => Some(name),
+            TyKind::Unit => Some(wk::unit()),
+            TyKind::Nothing => Some(wk::nothing()),
             _ => None,
         }
     }
-    let rank = |ty: Ty| match ty.non_null() {
+    let rank = |ty: Ty| match ty.non_null().kind() {
         _ if classifier(ty).is_some() => 0,
-        Ty::TyParam(..) => 1,
+        TyKind::TyParam(..) => 1,
         _ => 2,
     };
     rank(left)
@@ -85,14 +85,16 @@ fn type_cmp(left: Ty, right: Ty) -> Ordering {
             (Some(left), Some(right)) => left.path_cmp(right),
             _ => Ordering::Equal,
         })
-        .then_with(|| match (left.non_null(), right.non_null()) {
-            (Ty::Obj(_, left), Ty::Obj(_, right)) => left.len().cmp(&right.len()).then_with(|| {
-                left.iter()
-                    .zip(right)
-                    .map(|(left, right)| type_cmp(*left, *right))
-                    .find(|order| order.is_ne())
-                    .unwrap_or(Ordering::Equal)
-            }),
+        .then_with(|| match (left.non_null().kind(), right.non_null().kind()) {
+            (TyKind::Obj(_, left), TyKind::Obj(_, right)) => {
+                left.len().cmp(&right.len()).then_with(|| {
+                    left.iter()
+                        .zip(right)
+                        .map(|(left, right)| type_cmp(*left, *right))
+                        .find(|order| order.is_ne())
+                        .unwrap_or(Ordering::Equal)
+                })
+            }
             _ => Ordering::Equal,
         })
         .then_with(|| left.is_nullable().cmp(&right.is_nullable()))

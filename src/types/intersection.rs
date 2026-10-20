@@ -4,9 +4,10 @@
 //! shape. Diagnostic spelling is not an identity. Nullability stays on the intersection when
 //! every component admits null, so `Left? & Right?` is not the non-null type `Left & Right`.
 
+use crate::types::TyKind;
 use std::cmp::Ordering;
 
-use super::{intern_tys, Ty, TypeName, TypeVariance};
+use super::{Ty, TypeName, TypeVariance};
 
 struct Piece {
     core: Ty,
@@ -56,7 +57,7 @@ pub(super) fn canonical(parts: &[Ty]) -> Ty {
         [one] if all_nullable => Ty::nullable(*one),
         [one] => *one,
         many => {
-            let intersection = Ty::Intersection(intern_tys(many));
+            let intersection = Ty::from(TyKind::Intersection(crate::types::TyList::new(many)));
             if all_nullable {
                 Ty::nullable(intersection)
             } else {
@@ -74,39 +75,39 @@ pub(super) fn spell_nullable(
 ) -> String {
     let spell_one = |ty: Ty| {
         let rendered = render(ty);
-        if parenthesize_fun && matches!(ty, Ty::Fun(_)) {
+        if parenthesize_fun && ty.is_fun() {
             format!("({rendered})?")
         } else {
             format!("{rendered}?")
         }
     };
-    match inner {
-        Ty::Intersection(parts) => parts
+    match inner.kind() {
+        TyKind::Intersection(parts) => parts
             .iter()
             .copied()
             .map(spell_one)
             .collect::<Vec<_>>()
             .join(" & "),
-        other => spell_one(other),
+        _ => spell_one(inner),
     }
 }
 
 fn decompose(ty: Ty, inherited_nullable: bool, out: &mut Vec<Piece>) {
-    match ty {
-        Ty::Error => {}
-        Ty::Nullable(inner) => decompose(*inner, true, out),
-        Ty::PlatformNullable(inner) => decompose(*inner, true, out),
-        Ty::Intersection(parts) => {
+    match ty.kind() {
+        TyKind::Error => {}
+        TyKind::Nullable(inner) => decompose(inner, true, out),
+        TyKind::PlatformNullable(inner) => decompose(inner, true, out),
+        TyKind::Intersection(parts) => {
             for part in parts.iter().copied() {
                 decompose(part, inherited_nullable, out);
             }
         }
-        Ty::Null => out.push(Piece {
+        TyKind::Null => out.push(Piece {
             core: Ty::Nothing,
             nullable: true,
         }),
-        other => out.push(Piece {
-            core: other,
+        _ => out.push(Piece {
+            core: ty,
             nullable: inherited_nullable,
         }),
     }
@@ -116,10 +117,10 @@ fn decompose(ty: Ty, inherited_nullable: bool, out: &mut Vec<Piece>) {
 /// seen first in the process, so `Right` can sort before `Left` even though the path `Left`
 /// precedes `Right`. Permutations still collapse to one intersection.
 fn component_order(left: Ty, right: Ty) -> Ordering {
-    match (left, right) {
-        (Ty::Obj(left_name, left_args), Ty::Obj(right_name, right_args)) => {
+    match (left.kind(), right.kind()) {
+        (TyKind::Obj(left_name, left_args), TyKind::Obj(right_name, right_args)) => {
             type_path_cmp(left_name, right_name)
-                .then_with(|| slice_cmp(left_args, right_args, component_order))
+                .then_with(|| slice_cmp(&left_args, &right_args, component_order))
         }
         _ => structural_cmp(left, right),
     }
@@ -141,53 +142,55 @@ fn type_path_cmp(left: TypeName, right: TypeName) -> Ordering {
 fn structural_cmp(left: Ty, right: Ty) -> Ordering {
     structural_rank(left)
         .cmp(&structural_rank(right))
-        .then_with(|| match (left, right) {
-            (Ty::Obj(left_name, left_args), Ty::Obj(right_name, right_args)) => {
+        .then_with(|| match (left.kind(), right.kind()) {
+            (TyKind::Obj(left_name, left_args), TyKind::Obj(right_name, right_args)) => {
                 type_name_cmp(left_name, right_name)
-                    .then_with(|| slice_cmp(left_args, right_args, structural_cmp))
+                    .then_with(|| slice_cmp(&left_args, &right_args, structural_cmp))
             }
-            (Ty::Fun(left), Ty::Fun(right)) => left
+            (TyKind::Fun(left), TyKind::Fun(right)) => left
                 .suspend
                 .cmp(&right.suspend)
                 .then(left.has_receiver.cmp(&right.has_receiver))
                 .then(left.context_count.cmp(&right.context_count))
                 .then_with(|| slice_cmp(&left.params, &right.params, structural_cmp))
                 .then_with(|| structural_cmp(left.ret, right.ret)),
-            (Ty::Nullable(left), Ty::Nullable(right))
-            | (Ty::PlatformNullable(left), Ty::PlatformNullable(right))
-            | (Ty::InProjection(left), Ty::InProjection(right))
-            | (Ty::OutProjection(left), Ty::OutProjection(right))
-            | (Ty::StarProjection(left), Ty::StarProjection(right))
-            | (Ty::DefinitelyNotNull(left), Ty::DefinitelyNotNull(right)) => {
-                structural_cmp(*left, *right)
+            (TyKind::Nullable(left), TyKind::Nullable(right))
+            | (TyKind::PlatformNullable(left), TyKind::PlatformNullable(right))
+            | (TyKind::InProjection(left), TyKind::InProjection(right))
+            | (TyKind::OutProjection(left), TyKind::OutProjection(right))
+            | (TyKind::StarProjection(left), TyKind::StarProjection(right))
+            | (TyKind::DefinitelyNotNull(left), TyKind::DefinitelyNotNull(right)) => {
+                structural_cmp(left, right)
             }
-            (Ty::TyParam(left_name, left_bound), Ty::TyParam(right_name, right_bound)) => left_name
-                .cmp(right_name)
-                .then_with(|| structural_cmp(*left_bound, *right_bound)),
-            (Ty::Intersection(left), Ty::Intersection(right)) => {
-                slice_cmp(left, right, structural_cmp)
+            (TyKind::TyParam(left_name, left_bound), TyKind::TyParam(right_name, right_bound)) => {
+                left_name
+                    .cmp(&right_name)
+                    .then_with(|| structural_cmp(left_bound, right_bound))
+            }
+            (TyKind::Intersection(left), TyKind::Intersection(right)) => {
+                slice_cmp(&left, &right, structural_cmp)
             }
             _ => Ordering::Equal,
         })
 }
 
 fn structural_rank(ty: Ty) -> u8 {
-    match ty {
-        Ty::Unit => 0,
-        Ty::Obj(_, _) => 1,
-        Ty::Null => 2,
-        Ty::Nothing => 3,
-        Ty::Error => 4,
-        Ty::Pending => 5,
-        Ty::Fun(_) => 6,
-        Ty::Nullable(_) => 7,
-        Ty::PlatformNullable(_) => 8,
-        Ty::InProjection(_) => 9,
-        Ty::OutProjection(_) => 10,
-        Ty::StarProjection(_) => 11,
-        Ty::TyParam(_, _) => 12,
-        Ty::DefinitelyNotNull(_) => 13,
-        Ty::Intersection(_) => 14,
+    match ty.kind() {
+        TyKind::Unit => 0,
+        TyKind::Obj(_, _) => 1,
+        TyKind::Null => 2,
+        TyKind::Nothing => 3,
+        TyKind::Error => 4,
+        TyKind::Pending => 5,
+        TyKind::Fun(_) => 6,
+        TyKind::Nullable(_) => 7,
+        TyKind::PlatformNullable(_) => 8,
+        TyKind::InProjection(_) => 9,
+        TyKind::OutProjection(_) => 10,
+        TyKind::StarProjection(_) => 11,
+        TyKind::TyParam(_, _) => 12,
+        TyKind::DefinitelyNotNull(_) => 13,
+        TyKind::Intersection(_) => 14,
     }
 }
 
@@ -218,12 +221,12 @@ pub(crate) fn declaration_approximation(
     ty: Ty,
     variance_at: &mut dyn FnMut(TypeName, usize) -> Option<TypeVariance>,
 ) -> Option<Ty> {
-    match ty {
-        Ty::Nullable(inner) if matches!(*inner, Ty::Intersection(_)) => {
+    match ty.kind() {
+        TyKind::Nullable(inner) if matches!(inner.kind(), TyKind::Intersection(_)) => {
             Some(Ty::nullable(Ty::obj_name(super::wk::any())))
         }
-        Ty::Intersection(parts) => approximate_parts(parts, variance_at),
-        other => Some(other),
+        TyKind::Intersection(parts) => approximate_parts(parts.as_slice(), variance_at),
+        _ => Some(ty),
     }
 }
 
@@ -231,7 +234,7 @@ fn approximate_parts(
     parts: &[Ty],
     variance_at: &mut dyn FnMut(TypeName, usize) -> Option<TypeVariance>,
 ) -> Option<Ty> {
-    if parts.iter().all(|part| matches!(part, Ty::Fun(_))) {
+    if parts.iter().all(|part| part.is_fun()) {
         return approximate_functions(parts, variance_at);
     }
     if shared_classifier(parts).is_some() {
@@ -241,12 +244,12 @@ fn approximate_parts(
 }
 
 fn shared_classifier(parts: &[Ty]) -> Option<(TypeName, usize)> {
-    let Ty::Obj(name, arguments) = parts.first().copied()? else {
+    let TyKind::Obj(name, arguments) = (parts.first().copied()?).kind() else {
         return None;
     };
     parts
         .iter()
-        .all(|part| matches!(part, Ty::Obj(other, args) if *other == name && args.len() == arguments.len()))
+        .all(|part| matches!(part.kind(), TyKind::Obj(other, args) if other == name && args.len() == arguments.len()))
         .then_some((name, arguments.len()))
 }
 
@@ -264,8 +267,8 @@ fn approximate_objects(
     for index in 0..length {
         let at_index = parts
             .iter()
-            .filter_map(|part| match part {
-                Ty::Obj(_, args) => args.get(index).copied(),
+            .filter_map(|part| match part.kind() {
+                TyKind::Obj(_, args) => args.get(index).copied(),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -304,8 +307,8 @@ fn approximate_functions(
 ) -> Option<Ty> {
     let signatures = parts
         .iter()
-        .filter_map(|part| match part {
-            Ty::Fun(signature) => Some(*signature),
+        .filter_map(|part| match part.kind() {
+            TyKind::Fun(signature) => Some(signature),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -367,9 +370,7 @@ fn covariant_join(
         [] => Some(Ty::obj_name(super::wk::any())),
         [one] => Some(*one),
         many if shared_classifier(many).is_some() => approximate_objects(many, variance_at),
-        many if many.iter().all(|ty| matches!(ty, Ty::Fun(_))) => {
-            approximate_functions(many, variance_at)
-        }
+        many if many.iter().all(|ty| ty.is_fun()) => approximate_functions(many, variance_at),
         many if many.iter().all(|ty| ty.is_nullable()) => {
             let cores = many.iter().map(|ty| ty.non_null()).collect::<Vec<_>>();
             covariant_join(&cores, variance_at).map(Ty::nullable)
@@ -381,6 +382,7 @@ fn covariant_join(
 #[cfg(test)]
 mod tests {
     use super::{declaration_approximation, Ty, TypeVariance};
+    use crate::types::TyKind;
 
     fn out_variance(_classifier: crate::types::TypeName, _index: usize) -> Option<TypeVariance> {
         Some(TypeVariance::Out)
@@ -409,9 +411,12 @@ mod tests {
         let forward = Ty::intersection(&[Ty::Int, Ty::String, Ty::Int]);
         let reverse = Ty::intersection(&[Ty::String, Ty::Int]);
         assert_eq!(forward, reverse);
-        match forward {
-            Ty::Intersection(parts) => assert_eq!(parts.len(), 2),
-            other => panic!("expected an intersection, got {other:?}"),
+        match forward.kind() {
+            TyKind::Intersection(parts) => assert_eq!(parts.len(), 2),
+            _ => {
+                let other = forward;
+                panic!("expected an intersection, got {other:?}")
+            }
         }
     }
 
@@ -422,13 +427,16 @@ mod tests {
         let intersection = Ty::intersection(&[list_string, list_int, list_string]);
         let swapped = Ty::intersection(&[list_int, list_string]);
         assert_eq!(intersection, swapped);
-        match intersection {
-            Ty::Intersection(parts) => {
+        match intersection.kind() {
+            TyKind::Intersection(parts) => {
                 assert_eq!(parts.len(), 2);
                 assert!(parts.contains(&list_int));
                 assert!(parts.contains(&list_string));
             }
-            other => panic!("expected both list instantiations, got {other:?}"),
+            _ => {
+                let other = intersection;
+                panic!("expected both list instantiations, got {other:?}")
+            }
         }
     }
 
@@ -438,9 +446,12 @@ mod tests {
         let reverse = Ty::fun(vec![Ty::String], Ty::Int);
         let intersection = Ty::intersection(&[forward, reverse]);
         assert_eq!(intersection, Ty::intersection(&[reverse, forward]));
-        match intersection {
-            Ty::Intersection(parts) => assert_eq!(parts.len(), 2),
-            other => panic!("expected both function shapes, got {other:?}"),
+        match intersection.kind() {
+            TyKind::Intersection(parts) => assert_eq!(parts.len(), 2),
+            _ => {
+                let other = intersection;
+                panic!("expected both function shapes, got {other:?}")
+            }
         }
     }
 
@@ -537,10 +548,12 @@ mod tests {
         let inn_int = Ty::obj_args("demo/Inn", &[Ty::Int]);
         let inn_string = Ty::obj_args("demo/Inn", &[Ty::String]);
         let contravariant = Ty::intersection(&[inn_int, inn_string]);
-        match declaration_approximation(contravariant, &mut in_variance) {
-            Some(Ty::Obj(name, arguments)) => {
+        match declaration_approximation(contravariant, &mut in_variance).map(Ty::kind) {
+            Some(TyKind::Obj(name, arguments)) => {
                 assert!(name.matches("demo/Inn"));
-                assert!(matches!(arguments, [Ty::StarProjection(_)]));
+                assert!(
+                    matches!(arguments.as_slice(), [argument] if argument.is_star_projection())
+                );
             }
             other => panic!("expected a star argument, got {other:?}"),
         }
@@ -563,11 +576,13 @@ mod tests {
     fn differing_function_parameters_publish_a_star() {
         let left = Ty::fun(vec![Ty::Int], Ty::String);
         let right = Ty::fun(vec![Ty::String], Ty::String);
-        match declaration_approximation(Ty::intersection(&[left, right]), &mut out_variance) {
-            Some(Ty::Fun(signature)) => {
+        match declaration_approximation(Ty::intersection(&[left, right]), &mut out_variance)
+            .map(Ty::kind)
+        {
+            Some(TyKind::Fun(signature)) => {
                 assert!(matches!(
                     signature.params.as_slice(),
-                    [Ty::StarProjection(_)]
+                    [parameter] if parameter.is_star_projection()
                 ));
                 assert_eq!(signature.ret, Ty::String);
             }

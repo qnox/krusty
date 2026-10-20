@@ -22,7 +22,7 @@ use crate::diag::Span;
 use crate::libraries::LibraryType;
 use crate::spelling::Spelled;
 use crate::symbol_source::SymbolSource as _;
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 #[cfg(test)]
 mod tests;
@@ -129,13 +129,18 @@ impl Checker<'_> {
     /// Check the written type `arguments` of a classifier application outside a type reference
     /// (the left side of a callable reference), which resolved to `resolved`.
     pub(super) fn check_written_application_bounds(&mut self, arguments: &[TypeRef], resolved: Ty) {
-        let Ty::Obj(classifier, resolved) = resolved.non_null() else {
+        let TyKind::Obj(classifier, resolved) = resolved.non_null().kind() else {
             return;
         };
         let Some(declaration) = self.fed_source().classifier(classifier) else {
             return;
         };
-        self.check_classifier_argument_bounds(classifier, &declaration, arguments, resolved);
+        self.check_classifier_argument_bounds(
+            classifier,
+            &declaration,
+            arguments,
+            resolved.as_slice(),
+        );
     }
 
     /// [`Self::check_type_parameter_bound`] for a callable's type parameter, whose outermost
@@ -194,9 +199,9 @@ impl Checker<'_> {
         if reference.is_star_projection() {
             return;
         }
-        let resolved = match resolved {
-            Ty::InProjection(inner) | Ty::OutProjection(inner) => *inner,
-            other => other,
+        let resolved = match resolved.kind() {
+            TyKind::InProjection(inner) | TyKind::OutProjection(inner) => inner,
+            _ => resolved,
         }
         .non_null();
         if let Some(alias) = spelled.alias {
@@ -221,7 +226,7 @@ impl Checker<'_> {
             return;
         }
         if let Some(shape) = function_type_ref_shape(reference) {
-            let Ty::Fun(signature) = resolved else {
+            let TyKind::Fun(signature) = resolved.kind() else {
                 return;
             };
             let components = shape.params.iter().zip(signature.params.iter().copied());
@@ -231,7 +236,7 @@ impl Checker<'_> {
             }
             return;
         }
-        let Ty::Obj(classifier, arguments) = resolved else {
+        let TyKind::Obj(classifier, arguments) = resolved.kind() else {
             return;
         };
         if let Some(declaration) = self.fed_source().classifier(classifier) {
@@ -239,7 +244,7 @@ impl Checker<'_> {
                 classifier,
                 &declaration,
                 &reference.targs,
-                arguments,
+                arguments.as_slice(),
             );
         }
         for (index, (argument, resolved)) in reference.targs.iter().zip(arguments).enumerate() {
@@ -286,13 +291,13 @@ impl Checker<'_> {
         template: Ty,
         outermost: bool,
     ) {
-        let template = match template {
-            Ty::InProjection(inner) | Ty::OutProjection(inner) => *inner,
-            other => other,
+        let template = match template.kind() {
+            TyKind::InProjection(inner) | TyKind::OutProjection(inner) => inner,
+            _ => template,
         }
         .non_null();
-        let components = match template {
-            Ty::Obj(classifier, template_arguments) => {
+        let components = match template.kind() {
+            TyKind::Obj(classifier, template_arguments) => {
                 if let Some(declaration) = self.fed_source().classifier(classifier) {
                     let formals = bounded_formals(&declaration);
                     if formals.iter().any(|formal| !formal.bounds.is_empty()) {
@@ -329,7 +334,7 @@ impl Checker<'_> {
                 }
                 template_arguments.to_vec()
             }
-            Ty::Fun(signature) => signature
+            TyKind::Fun(signature) => signature
                 .params
                 .iter()
                 .copied()
@@ -462,10 +467,13 @@ impl Checker<'_> {
             .collect::<crate::symbol_resolver::GSigBinds>();
         for ((formal, argument), span) in formals.iter().zip(resolved).zip(spans) {
             let Some(span) = *span else { continue };
-            let actual = match *argument {
-                Ty::StarProjection(_) => continue,
-                Ty::InProjection(inner) | Ty::OutProjection(inner) => *inner,
-                other => other,
+            let actual = {
+                let other = *argument;
+                match other.kind() {
+                    TyKind::StarProjection(_) => continue,
+                    TyKind::InProjection(inner) | TyKind::OutProjection(inner) => inner,
+                    _ => other,
+                }
             };
             if !is_determined(actual) {
                 continue;
@@ -1033,9 +1041,9 @@ fn bounded_formals(declaration: &LibraryType) -> Vec<BoundedFormal<'_>> {
 /// Whether a typealias declaration's right-hand side checks an argument that resolved to
 /// `argument`: not a type parameter and without type arguments of its own.
 fn is_alias_checked(argument: Ty) -> bool {
-    let argument = match argument {
-        Ty::InProjection(inner) | Ty::OutProjection(inner) => *inner,
-        other => other,
+    let argument = match argument.kind() {
+        TyKind::InProjection(inner) | TyKind::OutProjection(inner) => inner,
+        _ => argument,
     }
     .non_null();
     !argument.is_ty_param() && argument.type_args().is_empty()
@@ -1052,7 +1060,7 @@ struct AliasApplication<'a> {
 impl AliasApplication<'_> {
     /// The written use-site argument when the template argument `template` is exactly a formal.
     fn formal_argument(&self, template: Ty) -> Option<&TypeRef> {
-        let Ty::TyParam(parameter, _) = template else {
+        let TyKind::TyParam(parameter, _) = template.kind() else {
             return None;
         };
         let index = self.formals.iter().position(|formal| formal == parameter)?;

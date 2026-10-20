@@ -283,9 +283,9 @@ fn classpath_member_receiver_lambda_with_defaulted_prefix_compiles_and_runs() {
         [None, Some(krusty::types::Ty::obj("lib/Holder"))]
     );
     assert!(matches!(
-        holder.generic_sig.as_ref().and_then(|signature| signature.params.get(1)),
-        Some(krusty::types::Ty::Fun(function))
-            if matches!(function.params.first(), Some(krusty::types::Ty::Obj(name, arguments))
+        holder.generic_sig.as_ref().and_then(|signature| signature.params.get(1)).map(|ty| ty.kind()),
+        Some(krusty::types::TyKind::Fun(function))
+            if matches!(function.params.first().map(|ty| ty.kind()), Some(krusty::types::TyKind::Obj(name, arguments))
                 if name.matches("lib/Holder") && arguments.len() == 1)
     ));
     let receiver_vararg = krusty::jvm::metadata::class_functions(&ui)
@@ -310,10 +310,10 @@ fn classpath_member_receiver_lambda_with_defaulted_prefix_compiles_and_runs() {
         .expect("variadic member");
     assert_eq!(variadic_member.call_sig.vararg_index, Some(0));
     assert!(matches!(
-        variadic.generic_sig.as_ref().and_then(|signature| signature.params.get(1)),
-        Some(krusty::types::Ty::Fun(function))
+        variadic.generic_sig.as_ref().and_then(|signature| signature.params.get(1)).map(|ty| ty.kind()),
+        Some(krusty::types::TyKind::Fun(function))
             if function.has_receiver
-                && matches!(function.params.first(), Some(krusty::types::Ty::TyParam(name, _)) if *name == "T")
+                && matches!(function.params.first().map(|ty| ty.kind()), Some(krusty::types::TyKind::TyParam(name, _)) if &*name == "T")
     ));
     let facade = library.find("lib/LibKt").expect("compiled file facade");
     let bounded_extension = krusty::jvm::metadata::package_functions(&facade)

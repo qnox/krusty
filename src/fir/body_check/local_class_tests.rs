@@ -1,5 +1,6 @@
 use super::test_support::{checked_function_body, root_expression};
 use super::*;
+use crate::types::TyKind;
 
 #[derive(Default)]
 struct StreamedBodySink(Vec<(BodyOwnerId, FirBody)>);
@@ -677,7 +678,7 @@ fn statement_local_alias_publishes_local_class_constructor_signature() {
         let FirExprKind::ConstructorCall(call) = &expression.kind else {
             return None;
         };
-        matches!(expression.ty.get(), Ty::Obj(_, _)).then_some(call)
+        matches!(expression.ty.get().kind(), TyKind::Obj(_, _)).then_some(call)
     });
     let call = call.expect("checked local-class constructor call");
     let FirConstructorTarget::Module {
@@ -719,7 +720,7 @@ fn local_generic_superclass_uses_its_own_type_parameter_in_constructor_reference
                 ty,
                 kind: FirExprKind::CallableReference { .. },
                 ..
-            }) if matches!(ty.get(), Ty::Fun(signature) if signature.params.len() == 1)
+            }) if matches!(ty.get().kind(), TyKind::Fun(signature) if signature.params.len() == 1)
         )
     }));
 }

@@ -1,6 +1,7 @@
 //! Scheduling and memo ownership for postponed signature-call arguments.
 
 use super::*;
+use crate::types::TyKind;
 
 /// Whether a postponed lambda can contribute constraints without concrete value-parameter
 /// expectations. Written value types, or contextual value parameters the body never reads, make
@@ -33,7 +34,7 @@ fn lambda_can_contribute_independently(
     let Some(expectation) = expectation else {
         return true;
     };
-    let Ty::Fun(signature) = expectation.get().non_null() else {
+    let TyKind::Fun(signature) = expectation.get().non_null().kind() else {
         return false;
     };
     let contextual_inputs =
@@ -77,7 +78,7 @@ pub(super) fn argument_order(
         let Some(expected) = expectations.get(index).copied().flatten() else {
             return false;
         };
-        let Ty::Fun(signature) = expected.get().non_null() else {
+        let TyKind::Fun(signature) = expected.get().non_null().kind() else {
             return false;
         };
         signature.params.iter().all(|parameter| {
@@ -258,10 +259,13 @@ impl Scheduler {
                 // change what the body means. A callable reference is different: its complete
                 // expected signature selects the referenced overload, including by result type.
                 let input_shape_changed = match (
-                    previous.map(ResolvedTy::get).map(Ty::non_null),
-                    Some(expectation.get().non_null()),
+                    previous
+                        .map(ResolvedTy::get)
+                        .map(Ty::non_null)
+                        .map(Ty::kind),
+                    Some(expectation.get().non_null().kind()),
                 ) {
-                    (Some(Ty::Fun(previous)), Some(Ty::Fun(current))) => {
+                    (Some(TyKind::Fun(previous)), Some(TyKind::Fun(current))) => {
                         previous.params != current.params
                             || previous.context_count != current.context_count
                             || previous.has_receiver != current.has_receiver

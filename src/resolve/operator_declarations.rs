@@ -7,6 +7,7 @@
 //! parameter or result spellings.
 
 use super::*;
+use crate::types::TyKind;
 
 #[derive(Clone, Copy)]
 pub(super) enum OperatorDeclarationSite {
@@ -120,7 +121,7 @@ fn equals_member_facts(
                     return false;
                 };
                 matches!(signature.parameters.as_ref(), [parameter]
-            if matches!(parameter.get(), Ty::Obj(classifier, _) if classifier == owner))
+            if matches!(parameter.get().kind(), TyKind::Obj(classifier, _) if classifier == owner))
                     && matches!(signature.result.get(), Ty::Boolean | Ty::Nothing)
             });
     EqualsMemberFacts {

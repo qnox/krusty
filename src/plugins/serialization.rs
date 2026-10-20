@@ -47,7 +47,7 @@ use crate::plugins::{
     FrontendCallable, FrontendClassContext, FrontendExpressionContext, IrPlugin, PluginContext,
     PluginExpressionPlan,
 };
-use crate::types::{type_name, Ty, TypeName};
+use crate::types::{type_name, Ty, TyKind, TypeName};
 
 use crate::fx_hash::HashMap;
 use constructed_standard_serializers::constructed_standard_serializer;
@@ -541,7 +541,7 @@ fn serialized_type_spelling(
     // wider gate would capture calls the generic path already compiles correctly and turn a working
     // file into a declined placeholder.
     constructed_standard_serializer(classifier)?;
-    let Ty::Obj(_, arguments) = ty.non_null() else {
+    let TyKind::Obj(_, arguments) = ty.non_null().kind() else {
         return None;
     };
     // Every currently mapped serializer is constructed over at least one checked type argument.
@@ -564,15 +564,13 @@ fn serialized_type_spelling(
 fn serialized_ty(spelling: &[TypeName]) -> Option<Ty> {
     match spelling {
         [classifier] => Some(Ty::obj_name(*classifier)),
-        [classifier, arguments @ ..] => Some(Ty::Obj(
+        [classifier, arguments @ ..] => Some(Ty::obj_args_name(
             *classifier,
-            crate::types::intern_tys(
-                &arguments
-                    .iter()
-                    .copied()
-                    .map(Ty::obj_name)
-                    .collect::<Vec<_>>(),
-            ),
+            &arguments
+                .iter()
+                .copied()
+                .map(Ty::obj_name)
+                .collect::<Vec<_>>(),
         )),
         [] => None,
     }
@@ -710,7 +708,7 @@ fn ty_descriptor(ctx: &PluginContext, ty: &Ty) -> Option<String> {
 /// reference/richer type (which needs `decodeSerializableElement`). Covers the full primitive set +
 /// String; backend lowering owns any wider physical carrier/local representation.
 fn decode_element_method(ty: &Ty) -> Option<(&'static str, &'static str)> {
-    if matches!(ty.non_null(), Ty::TyParam(..)) {
+    if ty.non_null().is_ty_param() {
         return None;
     }
     let fq = ty.kotlin_class_internal()?;
@@ -763,7 +761,7 @@ fn virtual_iface(owner: &str, name: &str, descriptor: &str) -> Callee {
 /// The `CompositeEncoder.encode<T>Element` method + descriptor for a property type, or `None` if the
 /// type isn't a directly-encodable primitive/String (a richer type needs `encodeSerializableElement`).
 fn encode_element_method(ty: &Ty) -> Option<(&'static str, &'static str)> {
-    if matches!(ty.non_null(), Ty::TyParam(..)) {
+    if ty.non_null().is_ty_param() {
         return None;
     }
     let fq = ty.kotlin_class_internal()?;
@@ -921,12 +919,12 @@ fn build_polymorphic_serializer(ir: &mut IrFile, classifier: TypeName) -> ExprId
 /// for, with the serializer it was selected for. A record without that accessor, or for another
 /// serializer, is an inconsistent lowering, not a reason to realize the serializer another way: it
 /// fails hard instead of falling back to the `new X(KClass)` convention.
-fn recorded_custom_serializer_construction<'ir>(
-    ir: &'ir IrFile,
+fn recorded_custom_serializer_construction(
+    ir: &IrFile,
     class_name: TypeName,
     custom: TypeName,
     frontend_owner: TypeName,
-) -> Option<&'ir crate::ir::IrCustomSerializerConstruction> {
+) -> Option<&crate::ir::IrCustomSerializerConstruction> {
     let construction = ir.custom_serializer_constructions.get(&class_name)?;
     assert!(
         construction.serializer == custom,

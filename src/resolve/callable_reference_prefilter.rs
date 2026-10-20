@@ -25,7 +25,7 @@ impl Checker<'_> {
         }
         let candidates = self.callable_ref_candidates(receiver_ty, name);
         if self
-            .select_bound_callable_ref(&candidates, Some(Ty::Fun(expected)))
+            .select_bound_callable_ref(&candidates, Some(Ty::from(TyKind::Fun(expected))))
             .is_some()
         {
             return Some(true);

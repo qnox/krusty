@@ -300,7 +300,7 @@ pub fn is_throwable_internal(internal: &str) -> bool {
         || internal.ends_with("Error")
 }
 
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 /// The JVM wrapper (box) class internal name for a Kotlin primitive's INTERNAL NAME
 /// (`kotlin/Int` → `java/lang/Integer`), or `None` if `internal` is not a Kotlin primitive name.
@@ -878,7 +878,7 @@ pub(super) fn is_mapped_collection_face(internal: TypeName) -> bool {
 /// this resolved relation to common inference; consumers never compare collection spellings or
 /// depend on JVM erasure groups directly.
 pub fn platform_flexible_upper_bound(lower: Ty) -> Ty {
-    let Ty::Obj(lower_owner, arguments) = lower else {
+    let TyKind::Obj(lower_owner, arguments) = lower.kind() else {
         return lower;
     };
     let jvm = to_jvm_type_name(lower_owner);
@@ -888,7 +888,7 @@ pub fn platform_flexible_upper_bound(lower: Ty) -> Ty {
     let Some(upper) = jvm_collection_to_kotlin_type_name(jvm) else {
         return lower;
     };
-    Ty::obj_args_name(upper, arguments)
+    Ty::obj_args_name(upper, arguments.as_slice())
 }
 
 pub fn type_name_to_jvm_builtin_internal(internal: TypeName) -> Option<&'static str> {
