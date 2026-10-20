@@ -37,3 +37,6 @@ repositories:
 <directory>/project/build/artifacts/CompiledJvmArtifact/appjvm/kotlin-output
 <directory>/project/app/src/main.kt
 ----
+--- outputs
+== assetsjvm/resources-output/greeting.txt
+hello

@@ -1,10 +1,10 @@
-//! The toolchain plugins a module enables, and the source directories they add to its main
-//! fragment.
+//! The toolchain plugins a module enables, and the source and resource directories they add to its
+//! main fragment.
 //!
 //! A plugin is a local plugin module the project lists (`plugins:` of `project.yaml`), known by
 //! its module's name. krusty-toolchain implements the plugins whose `plugin.yaml` only adds Kotlin
-//! source directories of the module (`declaration`); it runs none of their tasks, so a directory a
-//! task provides must already be there.
+//! source directories and resource directories of the module (`declaration`); it runs none of their
+//! tasks, so a directory a task provides must already be there.
 
 mod declaration;
 mod enabled;
@@ -18,18 +18,25 @@ use crate::reading::{read_document, FileReader, Value};
 /// The file a plugin module declares what it adds to a module in.
 const PLUGIN_FILE: &str = "plugin.yaml";
 
-/// The source directories the plugins `module` enables add to its main fragment, in the order
-/// they are enabled and declared, or why krusty-toolchain does not implement them.
-/// `module_directory` is the module's directory, `plugins` the module files of the project's
-/// plugins.
-pub(super) fn generated_sources(
+/// The directories the plugins a module enables add to its main fragment, each in the order the
+/// plugins are enabled and declare them.
+#[derive(Default)]
+pub(super) struct Generated {
+    pub sources: Vec<PathBuf>,
+    pub resources: Vec<PathBuf>,
+}
+
+/// The directories the plugins `module` enables add to its main fragment, or why krusty-toolchain
+/// does not implement them. `module_directory` is the module's directory, `plugins` the module
+/// files of the project's plugins.
+pub(super) fn generated(
     module: &str,
     module_directory: &Path,
     configuration: &Configuration,
     plugins: &[PathBuf],
-) -> Result<Vec<PathBuf>, Vec<Diagnostic>> {
+) -> Result<Generated, Vec<Diagnostic>> {
     let enabled = enabled::enabled(module, configuration)?;
-    let mut directories = Vec::new();
+    let mut generated = Generated::default();
     let mut refused = Vec::new();
     for plugin in &enabled {
         let Some(plugin_module) = plugins.iter().find(|file| {
@@ -59,7 +66,9 @@ pub(super) fn generated_sources(
                 continue;
             }
         };
-        for source in &declaration.sources {
+        let sources = declaration.sources.iter().map(|source| (source, false));
+        let resources = declaration.resources.iter().map(|source| (source, true));
+        for (source, is_resources) in sources.chain(resources) {
             let directory = source
                 .below_module
                 .iter()
@@ -90,11 +99,15 @@ pub(super) fn generated_sources(
                 ));
                 continue;
             }
-            directories.push(directory);
+            if is_resources {
+                generated.resources.push(directory);
+            } else {
+                generated.sources.push(directory);
+            }
         }
     }
     if refused.is_empty() {
-        Ok(directories)
+        Ok(generated)
     } else {
         Err(refused)
     }

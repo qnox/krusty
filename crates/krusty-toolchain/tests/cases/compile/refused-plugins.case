@@ -1,5 +1,5 @@
-What a toolchain plugin declares beyond Kotlin source directories of the module is refused where
-it is written, as is a plugin the project does not list, a plugin with settings or `pluginInfo`, a
+What a toolchain plugin declares beyond Kotlin source and resource directories of the module is
+refused where it is written, as is a plugin the project does not list, a plugin with settings or `pluginInfo`, a
 directory a plugin task provides that is not there (krusty-toolchain runs no plugin task), a
 directory of generated sources written out that no task's action argument is (which the toolchain
 rejects too), and a source directory that exists without being a directory, for every
@@ -59,6 +59,7 @@ generated:
       fragment: main
   resources:
     - directory: ${module.rootDir}/res
+      fragment: main
 commands: []
 --- tools/named/module.yaml
 product: jvm/amper-plugin
@@ -123,9 +124,9 @@ error	tools/pregenerated/plugin.yaml:8:18: ERROR: module `missing` needs the dir
 error	unlisted/module.yaml:5:3: ERROR: module `unlisted` enables toolchain plugin `elsewhere`, which the project does not list in its `plugins`
 error	tools/direct/plugin.yaml:1:1: ERROR: The `directory` path `<directory>/project/app/generated-src/kotlin` in must be an `@Output` of some task registered in this plugin
 error	tools/elaborate/plugin.yaml:5:5: ERROR: task `produce` of plugin `elaborate` sets `markOutputsAs`, and krusty-toolchain does not implement it
-error	tools/elaborate/plugin.yaml:17:1: ERROR: plugin `elaborate` declares `commands`, and krusty-toolchain does not implement it
+error	tools/elaborate/plugin.yaml:18:1: ERROR: plugin `elaborate` declares `commands`, and krusty-toolchain does not implement it
 error	tools/elaborate/plugin.yaml:10:17: ERROR: plugin `elaborate` generates sources other than Kotlin sources, and krusty-toolchain compiles Kotlin sources only
 error	tools/elaborate/plugin.yaml:14:7: ERROR: plugin `elaborate` sets `fragment` on generated sources, and krusty-toolchain does not implement it
 error	tools/elaborate/plugin.yaml:13:18: ERROR: krusty-toolchain reads a directory of plugin `elaborate` only as a task action's argument that is `${module.rootDir}` or a path below it
-error	tools/elaborate/plugin.yaml:15:3: ERROR: plugin `elaborate` declares `generated.resources`, and krusty-toolchain does not implement it
+error	tools/elaborate/plugin.yaml:17:7: ERROR: plugin `elaborate` sets `fragment` on generated resources, and krusty-toolchain does not implement it
 error	tools/named/module.yaml:2:1: ERROR: toolchain plugin `named` sets `pluginInfo`, and krusty-toolchain does not read it
