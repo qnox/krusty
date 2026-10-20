@@ -88,8 +88,8 @@ pregenerated
 <directory>/project/build/artifacts/CompiledJvmArtifact/appjvm/kotlin-output
 <directory>/project/app/src/main.kt
 ----
---- resources-outputs
-== libjvm/META-INF/build-info.properties
+--- outputs
+== libjvm/resources-output/META-INF/build-info.properties
 version=1
-== libjvm/own.txt
+== libjvm/resources-output/own.txt
 own

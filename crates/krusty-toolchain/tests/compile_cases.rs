@@ -13,9 +13,10 @@
 //! (the order it starts them in is checked by its own tests). Where the oracle runs, the
 //! toolchain's recorded invocations must be the `krusty-argv` ledger's, compared module by module
 //! (the toolchain may compile independent modules in either order), the sources of each as a set.
-//! A case's `resources-outputs` section lists the files of its modules' resources outputs once the
-//! task has run (`compiling::resources_outputs`), which must be what krusty-toolchain and, where the
-//! oracle runs, the toolchain leave there; without it they leave none.
+//! A case's `outputs` section lists the files the task leaves in the modules' artifact directories
+//! (`compiling::artifact_outputs`; the recorder compiles nothing, so these are the resources
+//! outputs), which must be what krusty-toolchain and, where the oracle runs, the toolchain leave
+//! there; without it they leave none.
 //! A case whose modules enable a toolchain plugin names the plugin's module in a
 //! `toolchain-plugin-module` section: the toolchain compiles that module for real to run the
 //! plugin's tasks (`compiling::RecordingKrustyCompilingPlugin`), and its invocation, which
@@ -43,7 +44,7 @@ const REPOSITORY_SECTION: &str = "m2/";
 const TASK_SECTION: &str = "task";
 const ARGV_SECTION: &str = "krusty-argv";
 const PLUGIN_SECTION: &str = "toolchain-plugin-module";
-const RESOURCES_SECTION: &str = "resources-outputs";
+const OUTPUTS_SECTION: &str = "outputs";
 const PLACEHOLDER: &str = "<directory>";
 
 type Files = Vec<(String, String)>;
@@ -59,9 +60,9 @@ struct CompileCase {
     /// The toolchain plugin module the toolchain compiles, and krusty-toolchain does not, to run
     /// its tasks, when there is one.
     plugin_module: Option<String>,
-    /// The files of the modules' resources outputs once the task has run, as
-    /// [`compiling::resources_outputs`] lists them: none without the section.
-    resources: String,
+    /// The files the task leaves in the modules' artifact directories, as
+    /// [`compiling::artifact_outputs`] lists them: none without the section.
+    outputs: String,
 }
 
 fn files_below(directory: &Path, prefix: &str, files: &mut Files) {
@@ -93,7 +94,7 @@ fn compile_cases() -> Vec<CompileCase> {
                 task: String::new(),
                 argv: None,
                 plugin_module: None,
-                resources: String::new(),
+                outputs: String::new(),
                 refusal: match case.krusty {
                     Some(KrustyExpected::Refusal(refused)) => Some(refused),
                     Some(KrustyExpected::Difference(_)) => {
@@ -111,8 +112,8 @@ fn compile_cases() -> Vec<CompileCase> {
                     compiled.argv = Some(text);
                 } else if file == PLUGIN_SECTION {
                     compiled.plugin_module = Some(text.trim().to_string());
-                } else if file == RESOURCES_SECTION {
-                    compiled.resources = text;
+                } else if file == OUTPUTS_SECTION {
+                    compiled.outputs = text;
                 } else {
                     compiled.project.push((file, text));
                 }
@@ -136,8 +137,9 @@ fn compile_cases() -> Vec<CompileCase> {
 struct Ran {
     output: Output,
     record: String,
-    /// The modules' resources outputs, as [`compiling::resources_outputs`] lists them.
-    resources: String,
+    /// The files left in the modules' artifact directories, as [`compiling::artifact_outputs`]
+    /// lists them.
+    outputs: String,
     directory: PathBuf,
     /// Removes the run's directory when dropped.
     _temp: support::TempDir,
@@ -159,7 +161,7 @@ fn krusty_toolchain(
     Ran {
         output,
         record: placed(&directory.display().to_string(), record.as_bytes()),
-        resources: compiling::resources_outputs(&directory),
+        outputs: compiling::artifact_outputs(&directory, None),
         directory,
         _temp: temp,
     }
@@ -242,12 +244,12 @@ fn every_compile_case_is_exact() {
         );
         let actual = &ran.output;
         let printed = format!(
-            "status {}, stdout\n{}stderr\n{}record\n{}resources outputs\n{}",
+            "status {}, stdout\n{}stderr\n{}record\n{}outputs\n{}",
             actual.code,
             placed(&actual.root, &actual.stdout),
             placed(&actual.root, &actual.stderr),
             ran.record,
-            ran.resources
+            ran.outputs
         );
         match (&case.argv, &case.refusal) {
             (Some(argv), _) => {
@@ -255,11 +257,11 @@ fn every_compile_case_is_exact() {
                     actual.code == 0 && actual.stdout.is_empty() && actual.stderr.is_empty();
                 if !clean
                     || by_module_text(&ran.record) != by_module_text(argv)
-                    || ran.resources != case.resources
+                    || ran.outputs != case.outputs
                 {
                     failures.push(format!(
-                        "{}: krusty-toolchain did {printed}\nthe case expects status 0, no output, the record\n{argv}and the resources outputs\n{}",
-                        case.name, case.resources
+                        "{}: krusty-toolchain did {printed}\nthe case expects status 0, no output, the record\n{argv}and the outputs\n{}",
+                        case.name, case.outputs
                     ));
                 }
             }
@@ -365,7 +367,7 @@ fn every_compile_case_passes_the_arguments_the_toolchain_passes() {
     let mut failures = Vec::new();
     for (case, toolchain) in cases.iter().zip(outputs) {
         let stdout = placed(&toolchain.root, &toolchain.stdout);
-        let (record, resources) = compiling::record_and_resources(&stdout);
+        let (record, outputs) = compiling::record_and_outputs(&stdout);
         let Some(argv) = case.argv.as_deref() else {
             // Both reject the project, with the same problems.
             let ran = krusty_toolchain(
@@ -387,7 +389,7 @@ fn every_compile_case_passes_the_arguments_the_toolchain_passes() {
             if toolchain.code == 0
                 || !unread.is_empty()
                 || !record.is_empty()
-                || !resources.is_empty()
+                || !outputs.is_empty()
                 || refused.as_ref() != Some(&rejected)
             {
                 failures.push(format!(
@@ -411,14 +413,14 @@ fn every_compile_case_passes_the_arguments_the_toolchain_passes() {
         if toolchain.code != 0
             || !plugin_compiled
             || recorded != by_module(argv)
-            || resources != case.resources
+            || outputs != case.outputs
         {
             failures.push(format!(
-                "{}: the toolchain exited {} having printed\n{}and recorded\n{record}\nwith the resources outputs\n{resources}\nthe `krusty-argv` section is\n{argv}and the `resources-outputs` section\n{}",
+                "{}: the toolchain exited {} having printed\n{}and recorded\n{record}\nwith the outputs\n{outputs}\nthe `krusty-argv` section is\n{argv}and the `outputs` section\n{}",
                 case.name,
                 toolchain.code,
                 placed(&toolchain.root, &toolchain.stderr),
-                case.resources
+                case.outputs
             ));
         }
     }
@@ -870,7 +872,7 @@ fn diamond() -> CompileCase {
         argv: None,
         refusal: None,
         plugin_module: None,
-        resources: String::new(),
+        outputs: String::new(),
     }
 }
 
@@ -1108,10 +1110,10 @@ fn several_tasks_compile_the_union_of_what_they_need_once() {
         compiler: Some(&compiling::RecordingKrusty),
     });
     let stdout = placed(&toolchain.root, &toolchain.stdout);
-    let (recorded, resources) = compiling::record_and_resources(&stdout);
+    let (recorded, outputs) = compiling::record_and_outputs(&stdout);
     assert_eq!(
-        (toolchain.code, by_module(recorded), resources),
-        (0, by_module(&ran.record), ran.resources.as_str()),
+        (toolchain.code, by_module(recorded), outputs),
+        (0, by_module(&ran.record), ran.outputs.as_str()),
         "the toolchain printed\n{}",
         placed(&toolchain.root, &toolchain.stderr)
     );
