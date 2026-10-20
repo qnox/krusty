@@ -487,7 +487,13 @@ impl Emitter<'_> {
                 static_receiver: None,
             });
         }
-        let emitted_by_owner = self.static_owner == Some(StaticOwner::Class(storage.owner));
+        // kotlinc keeps an accessor call in an inline function's body, which other classes
+        // inline: the companion's own accessor, when that side has one.
+        let in_inline_body = self
+            .function
+            .is_some_and(|function| self.ir.inline_fns.contains(&function));
+        let emitted_by_owner = self.static_owner == Some(StaticOwner::Class(storage.owner))
+            && !(in_inline_body && !storage.bridged);
         if emitted_by_owner || self.ir.is_jvm_field_static(storage.index) {
             return Some(PropertyAccess::Field {
                 owner: storage.owner,

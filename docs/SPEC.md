@@ -5270,9 +5270,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   body is lowered whether it inlines from compiled bodies (`Backend::same_module_inlining`); the
   JVM does, every other target expands the IR template. Common lowering then decides each call's
   route once (`fir_lower/source_calls/inline_route.rs`): a call stays a call recorded for the
-  backend (`IrFile::compiled_inline_call`) only when the callee is a top-level, non-suspend
-  function in this module (public, or declared in the caller's own file; not a companion-block
-  member, which its class compiles) with no suspend function-typed parameter or receiver, no
+  backend (`IrFile::compiled_inline_call`) only when the callee is a non-suspend function in this
+  module (public, or declared in the caller's own file), top-level or a member of a class, object
+  or companion, with no suspend function-typed parameter or receiver, no
   `crossinline` parameter, and a template without lambdas, callable references, local classes,
   or a subject `when` that switches on an enum's keys (`IrFile::enum_switch_when`),
   called with every argument from any body outside a suspend state machine: a named function, an
@@ -5289,6 +5289,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parameter, which binds none, does not shift the parameters after it. Every other call is
   expanded in IR for a named reason. The JVM compiles each such callee once per emission pass, alone, into a writer of
   its declaring class and source file, and the inliner reads that body as it reads a dependency's.
+  A member is compiled as its class emits it: an instance method whose `this` is the call's
+  dispatch receiver (a companion's or object's member takes the singleton instance), or a value
+  class's static `-impl`, whose call names the exact function it realizes. A member declared in
+  another file of the module is compiled on the class its template records as its dispatch
+  owner, under that file's name; a member of another file's value class is realized there as its
+  class realizes it, a static `-impl` over the carrier. A `companion { … }` block member is a
+  static of its class, compiled there. A call inlined this way never invokes the member, so it needs
+  no `access$` bridge to it even when the member is private to another class. A private inline
+  function whose body another class of the file inlines (a nested class calling its outer
+  class's private inline member) reads private members through its class's synthetic accessors,
+  as kotlinc compiles it, since that body runs in the calling class; called only from its own
+  class it keeps direct access. A delegated property's reference operand that the compiled body
+  of its operator never reads is passed as `null`, so no `$$delegatedProperties` entry is made
+  for it (`PropertyReferenceLowering`). Every emitted member inline method opens with the
+  `$i$f$` marker, a value class's static `-impl` included, and the marker carries no line, as a
+  top-level one's does not. An inline function's own body reads a hoisted companion property
+  through the companion's accessor rather than the outer class's static field, as kotlinc keeps
+  an accessor call inside an inline function, and a body other classes inline reads a private
+  companion instance through the outer class's `access$get<Companion>$p`.
   A callee whose body inlines another same-module callee is compiled after it, as kotlinc compiles
   a callee's node when a call first needs it; the node carries its method's own source map (the
   lines it inlined are numbered past its file's own line count, not the caller's), so the caller

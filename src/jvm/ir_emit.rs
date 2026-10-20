@@ -4564,17 +4564,16 @@ fn emit_placed_method(
     // istore_<n>` into a synthetic `$i$f$<name>` int local covering the body — its inliner tracks
     // splice depth through these. Emitted after the parameter guards; the body's LineNumberTable
     // then naturally starts at the post-store pc.
-    let inline_marker: Option<(u16, u16)> = (ir.top_level_inline_functions.contains(&fid)
-        || (receiver_value && ir.inline_fns.contains(&fid)))
-    .then(|| {
-        let slot = e
-            .frame
-            .enter_temp(TempRole::InlineDepthMarker, Ty::Int)
-            .slot();
-        code.push_int(0, e.cw);
-        store(Ty::Int, slot, &mut code);
-        (slot, code.bytes.len() as u16)
-    });
+    let inline_marker: Option<(u16, u16)> =
+        function_debug::opens_with_inline_depth_marker(ir, fid, receiver_value).then(|| {
+            let slot = e
+                .frame
+                .enter_temp(TempRole::InlineDepthMarker, Ty::Int)
+                .slot();
+            code.push_int(0, e.cw);
+            store(Ty::Int, slot, &mut code);
+            (slot, code.bytes.len() as u16)
+        });
     // The marker and the parameter guards carry no line. The method's first entry is the first
     // statement, or the expression body — kotlinc does not also record the signature line there.
     // Building the machine: everything the discovery pass learned is in hand, so the entry,

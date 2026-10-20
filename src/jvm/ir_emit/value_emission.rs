@@ -31,7 +31,12 @@ impl super::Emitter<'_> {
             self.static_owner,
             super::companion_field::companion_field_read(self.ir, self.classifiers, node),
         ) {
-            match super::companion_field::companion_field_accessor(self.ir, context, &read) {
+            match super::companion_field::companion_field_accessor(
+                self.ir,
+                context,
+                self.export_private_calls,
+                &read,
+            ) {
                 Err(error) => {
                     *self.run.emit_error.borrow_mut() = Some(error);
                     return;
@@ -442,6 +447,11 @@ impl super::Emitter<'_> {
                     code.invokespecial(m, aw, 0);
                 }
             }
+            IrExpr::Call { .. } | IrExpr::MethodCall { .. }
+                if self.ir.compiled_inline_call(e).is_some() =>
+            {
+                self.inline_compiled_module_call(e, code);
+            }
             IrExpr::MethodCall {
                 class,
                 index,
@@ -651,9 +661,6 @@ impl super::Emitter<'_> {
                         code.checkcast(class);
                     }
                 }
-            }
-            IrExpr::Call { args, .. } if self.ir.compiled_inline_call(e).is_some() => {
-                self.inline_compiled_module_call(e, args, code);
             }
             IrExpr::Call {
                 callee,
