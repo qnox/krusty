@@ -3317,21 +3317,21 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 defaults,
                                 symbolic
                                     .iter()
-                                    .map(|parameter| match parameter.non_null() {
-                                        Ty::Fun(function) => function.params.clone(),
+                                    .map(|parameter| match parameter.non_null().kind() {
+                                        TyKind::Fun(function) => function.params.clone(),
                                         _ => Vec::new(),
                                     })
                                     .collect(),
                                 symbolic
                                     .iter()
                                     .map(|parameter| {
-                                        matches!(parameter.non_null(), Ty::Fun(function) if function.has_receiver)
+                                        matches!(parameter.non_null().kind(), TyKind::Fun(function) if function.has_receiver)
                                     })
                                     .collect::<crate::libraries::ParamFlags>(),
                                 symbolic
                                     .iter()
-                                    .map(|parameter| match parameter.non_null() {
-                                        Ty::Fun(function) => function.context_count,
+                                    .map(|parameter| match parameter.non_null().kind() {
+                                        TyKind::Fun(function) => function.context_count,
                                         _ => 0,
                                     })
                                     .collect(),
@@ -3453,7 +3453,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         .supertypes
                         .iter()
                         .map(|supertype| ty_of_ref_silent(supertype, &class_names, &symbolic_ctp))
-                        .filter(|supertype| matches!(supertype, Ty::Fun(_)))
+                        .filter(|supertype| supertype.is_fun())
                         .collect::<Vec<_>>();
                     let callable_signature = callable_signatures.first().copied();
                     let super_internal_ref = super_internal
