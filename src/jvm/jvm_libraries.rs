@@ -4906,10 +4906,13 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
             .iter()
             .copied()
             .collect::<crate::fx_hash::HashSet<_>>();
-        let resolves = |candidate: &str| {
+        let is_source_classifier = |candidate: &str| {
             crate::types::existing_type_name(candidate)
                 .is_some_and(|name| source_classifiers.contains(&name))
-                || self.cp.find(candidate).is_some()
+        };
+        let world = super::java_stub::SourceModuleHeaderWorld {
+            source_classifiers: &is_source_classifier,
+            classpath: &self.cp,
         };
         let java_blocks = java
             .iter()
@@ -4918,7 +4921,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         let Some(headers) = super::java_stub::stub_classes(
             &java_blocks,
             super::java_stub::StubMode::Strict,
-            &resolves,
+            &world,
         ) else {
             return Err(crate::libraries::SourceHeaderError {
                 source: java[0].0,
@@ -6272,7 +6275,7 @@ mod tests {
                 "class Outer { public static class Inner$Part {} }".into(),
             )],
             crate::jvm::java_stub::StubMode::Strict,
-            &|candidate| candidate == "java/lang/Object",
+            &|candidate: &str| candidate == "java/lang/Object",
         )
         .expect("stubs");
         let class = stubs
@@ -6355,7 +6358,7 @@ mod tests {
         let stubs = crate::jvm::java_stub::stub_classes(
             &sources,
             crate::jvm::java_stub::StubMode::Strict,
-            &|candidate| candidate == "java/lang/Object",
+            &|candidate: &str| candidate == "java/lang/Object",
         )
         .expect("member stubs");
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
@@ -6404,7 +6407,7 @@ mod tests {
         let stubs = crate::jvm::java_stub::stub_classes(
             &sources,
             crate::jvm::java_stub::StubMode::Strict,
-            &|candidate| candidate == "java/lang/Object",
+            &|candidate: &str| candidate == "java/lang/Object",
         )
         .expect("field-hiding stubs");
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
@@ -6440,7 +6443,7 @@ mod tests {
         let stubs = crate::jvm::java_stub::stub_classes(
             &sources,
             crate::jvm::java_stub::StubMode::Strict,
-            &|candidate| matches!(candidate, "java/lang/Object" | "java/lang/String"),
+            &|candidate: &str| matches!(candidate, "java/lang/Object" | "java/lang/String"),
         )
         .expect("protected associated-property stub");
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
@@ -6469,7 +6472,7 @@ mod tests {
         let stubs = crate::jvm::java_stub::stub_classes(
             &sources,
             crate::jvm::java_stub::StubMode::Strict,
-            &|candidate| {
+            &|candidate: &str| {
                 matches!(
                     candidate,
                     "java/lang/Object" | "java/lang/CharSequence" | "java/util/List"

@@ -6308,6 +6308,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Plain line breaks only; an explicit `;` still terminates the expression. Test:
   `nested_string_template_e2e::template_interpolation_allows_newlines_around_expression`.
 
+- **A Java source class sees the member types it inherits.** A simple type name inside a Java class
+  body denotes a member type declared in the class, else one inherited from its supertypes (JLS
+  §8.5), before the enclosing class, imports, and package are consulted; two distinct inherited
+  member types of that name are ambiguous. Java source headers resolve supertypes through Java
+  sources and the classpath; a Kotlin source classifier contributes the member types it declares
+  (its own supertypes resolve after the headers are built). Tests:
+  `jvm::java_stub::tests::a_simple_name_denotes_a_member_type_of_the_superclass` and siblings.
+
 - **A Java instance field is a Kotlin `var` property (unless `final`), with Java visibility.** Public
   fields read/write anywhere; protected fields bind from a subclass of the declaring class (any
   depth). An accessible field beats a bean-getter synthetic property even across hierarchy rungs

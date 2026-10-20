@@ -286,7 +286,10 @@ fn emit_frontend_dependency(
         let Some(headers) = krusty::jvm::java_stub::stub_classes(
             java_blocks,
             krusty::jvm::java_stub::StubMode::Strict,
-            &|candidate| emitted.contains(candidate) || cp.class_exists(candidate),
+            &krusty::jvm::java_stub::SourceModuleHeaderWorld {
+                source_classifiers: &|candidate| emitted.contains(candidate),
+                classpath: cp,
+            },
         ) else {
             return Err(
                 "check: cannot retain Java source declaration headers for a dependent frontend module"

@@ -6603,7 +6603,7 @@ mod fq_tests {
         let stubs = crate::jvm::java_stub::stub_classes(
             &[("W.java".into(), "package p; public class Widget {}".into())],
             crate::jvm::java_stub::StubMode::Lenient,
-            &|candidate| candidate == "java/lang/Object",
+            &|candidate: &str| candidate == "java/lang/Object",
         )
         .expect("stub");
         cp.set_stub_overlay(stubs);
@@ -6633,7 +6633,7 @@ mod fq_tests {
         let stubs = crate::jvm::java_stub::stub_classes(
             &[("W.java".into(), "package p; public class Widget {}".into())],
             crate::jvm::java_stub::StubMode::Lenient,
-            &|c| c == "java/lang/Object",
+            &|c: &str| c == "java/lang/Object",
         )
         .expect("stub");
         let cp = Classpath::new(vec![]);

@@ -28,6 +28,7 @@ use crate::java_source::{
     lex_java, parse_raw_file, primitive_desc, resolve_internal_name_with_depth, DeclKind, FileCtx,
     JavaConstant, Member, RawDecl, ResolvedJavaName, SrcType, SrcWildcard, STUB_DEFAULT,
 };
+use std::cell::RefCell;
 
 #[cfg(test)]
 use crate::java_source::parse_source_file;
@@ -44,11 +45,70 @@ impl StubMode {
     }
 }
 
+/// The classifiers outside the Java sources being stubbed, named by JVM internal name.
+pub trait JavaHeaderWorld {
+    /// Whether this world declares the classifier.
+    fn contains(&self, internal: &str) -> bool;
+    /// Direct supertypes of a classifier [`Self::contains`] accepted. A class inherits the member
+    /// types of its supertypes (JLS §8.5), so a simple name in a Java source can denote a nested
+    /// classifier of one of them.
+    fn direct_supertypes(&self, internal: &str) -> Vec<String>;
+}
+
+/// A world known only by name: its classifiers declare no supertypes, so they pass no member types
+/// on to a Java source class extending them.
+impl<F: Fn(&str) -> bool> JavaHeaderWorld for F {
+    fn contains(&self, internal: &str) -> bool {
+        self(internal)
+    }
+
+    fn direct_supertypes(&self, _internal: &str) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+impl JavaHeaderWorld for super::classpath::Classpath {
+    fn contains(&self, internal: &str) -> bool {
+        self.find(internal).is_some()
+    }
+
+    fn direct_supertypes(&self, internal: &str) -> Vec<String> {
+        self.find(internal).map_or_else(Vec::new, |class| {
+            class
+                .super_class()
+                .into_iter()
+                .chain(class.interfaces())
+                .collect()
+        })
+    }
+}
+
+/// A classpath together with the classifiers of the module's other sources. Those are known by
+/// name only while Java headers are built (their supertypes resolve later), so the member types
+/// they declare are visible and the ones they inherit are not.
+pub struct SourceModuleHeaderWorld<'a> {
+    pub source_classifiers: &'a dyn Fn(&str) -> bool,
+    pub classpath: &'a super::classpath::Classpath,
+}
+
+impl JavaHeaderWorld for SourceModuleHeaderWorld<'_> {
+    fn contains(&self, internal: &str) -> bool {
+        (self.source_classifiers)(internal) || self.classpath.contains(internal)
+    }
+
+    fn direct_supertypes(&self, internal: &str) -> Vec<String> {
+        if (self.source_classifiers)(internal) {
+            return Vec::new();
+        }
+        self.classpath.direct_supertypes(internal)
+    }
+}
+
 /// Generate stub classes for Java sources.
 pub fn stub_classes(
     sources: &[(String, String)],
     mode: StubMode,
-    resolve: &dyn Fn(&str) -> bool,
+    world: &dyn JavaHeaderWorld,
 ) -> Option<Vec<(String, Vec<u8>)>> {
     // Two passes: collect every declared type's internal name first, so same-compilation Java
     // types resolve against each other regardless of file order.
@@ -71,18 +131,26 @@ pub fn stub_classes(
     // visible through it. Walking encoded names by splitting `$` would make a legal `$` inside an
     // identifier look like an enclosing declaration.
     let mut declarations_by_internal = HashMap::default();
-    for declaration in parsed.iter().flat_map(|(_, declarations)| declarations) {
-        // Emission keeps the first declaration for a duplicate internal name. Lexical-owner and
-        // type-variable lookup must consult that same declaration rather than a later duplicate.
-        declarations_by_internal
-            .entry(declaration.internal.as_str())
-            .or_insert(declaration);
+    let mut contexts_by_internal = HashMap::default();
+    for (ctx, declarations) in &parsed {
+        for declaration in declarations {
+            // Emission keeps the first declaration for a duplicate internal name. Lexical-owner,
+            // supertype, and type-variable lookup must consult that same declaration rather than a
+            // later duplicate.
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                declarations_by_internal.entry(declaration.internal.as_str())
+            {
+                entry.insert(declaration);
+                contexts_by_internal.insert(declaration.internal.as_str(), ctx);
+            }
+        }
     }
     // Signature/descriptor resolution knows every parsed declaration, including private nested
     // classes: javac emits real class files for them, and a member signature may name one. Only
     // the overlay's emission set excludes them (they are invisible to Kotlin source).
-    let resolve_all = |cand: &str| source_declarations.contains(cand) || resolve(cand);
+    let resolve_all = |cand: &str| source_declarations.contains(cand) || world.contains(cand);
 
+    let supertypes = RefCell::default();
     let mut out = Vec::new();
     let mut emitted: HashSet<&str> = HashSet::default();
     for (ctx, decls) in &parsed {
@@ -95,9 +163,12 @@ pub fn stub_classes(
             let r = Resolver {
                 ctx,
                 resolve: &resolve_all,
+                world,
                 mode,
                 owner: Some(raw.internal.as_str()),
                 declarations_by_internal: &declarations_by_internal,
+                contexts_by_internal: &contexts_by_internal,
+                supertypes: &supertypes,
             };
             let type_variables = TypeVariables::for_declaration(raw, &declarations_by_internal);
             match r.emit(raw, &type_variables) {
@@ -110,16 +181,32 @@ pub fn stub_classes(
     Some(out)
 }
 
+#[derive(Clone, Copy)]
 struct Resolver<'a> {
     ctx: &'a FileCtx,
     resolve: &'a dyn Fn(&str) -> bool,
+    /// The classifiers outside these sources, consulted for the supertypes they declare.
+    world: &'a dyn JavaHeaderWorld,
     mode: StubMode,
-    /// Internal name of the declaration being emitted — member types of the enclosing chain
-    /// shadow the package (`Proc` inside `Builder` is `Builder$Proc`, JLS scoping).
+    /// Internal name of the declaration being emitted — member types of the enclosing chain,
+    /// declared or inherited, shadow the package (`Proc` inside `Builder` is `Builder$Proc`, JLS
+    /// scoping).
     owner: Option<&'a str>,
     /// Parsed internal name → declaration. This supplies both the syntactic enclosing edge and the
     /// enclosing type-parameter scope without interpreting the encoded JVM spelling.
     declarations_by_internal: &'a HashMap<&'a str, &'a RawDecl>,
+    /// Parsed internal name → the file context its supertype spellings resolve in.
+    contexts_by_internal: &'a HashMap<&'a str, &'a FileCtx>,
+    /// Direct supertypes already resolved for a classifier; `None` while they are being resolved,
+    /// so a cyclic `extends` reads as declaring none instead of recursing.
+    supertypes: &'a RefCell<HashMap<String, Option<Vec<String>>>>,
+}
+
+/// The outcome of looking a simple name up among one class's member types.
+enum MemberType {
+    Found(String),
+    Absent,
+    Ambiguous,
 }
 
 /// Type variables in scope at one source position: the class's, then a member's own. Each level is
@@ -305,25 +392,105 @@ impl Resolver<'_> {
     }
 
     fn internal_of_with_depth(&self, name: &str) -> Option<ResolvedJavaName> {
-        if let Some(owner) = self.owner {
-            let nested = name.replace('.', "$");
-            let mut scope = Some(owner);
-            while let Some(current) = scope {
-                let candidate = format!("{current}${nested}");
-                if (self.resolve)(&candidate) {
+        let mut segments = name.split('.');
+        let head = segments.next()?;
+        let mut scope = self.owner;
+        while let Some(current) = scope {
+            match self.member_type(current, head) {
+                MemberType::Found(mut internal) => {
+                    let mut nested_depth = 0;
+                    for segment in segments {
+                        let MemberType::Found(member) = self.member_type(&internal, segment) else {
+                            return None;
+                        };
+                        internal = member;
+                        nested_depth += 1;
+                    }
                     return Some(ResolvedJavaName {
-                        internal: candidate,
-                        nested_depth: name.split('.').count().saturating_sub(1),
+                        internal,
+                        nested_depth,
                     });
                 }
-                scope = self
-                    .declarations_by_internal
-                    .get(current)
-                    .copied()
-                    .and_then(|declaration| declaration.outer_internal.as_deref());
+                MemberType::Ambiguous => return None,
+                MemberType::Absent => {}
             }
+            scope = self
+                .declarations_by_internal
+                .get(current)
+                .copied()
+                .and_then(|declaration| declaration.outer_internal.as_deref());
         }
         resolve_internal_name_with_depth(&self.ctx.package, &self.ctx.imports, name, self.resolve)
+    }
+
+    /// The member type `name` of `class`: one it declares, else the one it inherits from its
+    /// supertypes (JLS §8.5). Two distinct inherited member types of that name make every simple
+    /// reference to it ambiguous.
+    fn member_type(&self, class: &str, name: &str) -> MemberType {
+        let mut visited = HashSet::default();
+        let mut found = Vec::new();
+        self.collect_member_types(class, name, &mut visited, &mut found);
+        match found.len() {
+            0 => MemberType::Absent,
+            1 => MemberType::Found(found.pop().unwrap()),
+            _ => MemberType::Ambiguous,
+        }
+    }
+
+    fn collect_member_types(
+        &self,
+        class: &str,
+        name: &str,
+        visited: &mut HashSet<String>,
+        found: &mut Vec<String>,
+    ) {
+        if !visited.insert(class.to_string()) {
+            return;
+        }
+        let declared = format!("{class}${name}");
+        if (self.resolve)(&declared) {
+            if !found.contains(&declared) {
+                found.push(declared);
+            }
+            return;
+        }
+        for supertype in self.direct_supertypes(class) {
+            self.collect_member_types(&supertype, name, visited, found);
+        }
+    }
+
+    fn direct_supertypes(&self, class: &str) -> Vec<String> {
+        if let Some(known) = self.supertypes.borrow().get(class) {
+            return known.clone().unwrap_or_default();
+        }
+        self.supertypes.borrow_mut().insert(class.to_string(), None);
+        let resolved = self.resolve_direct_supertypes(class);
+        self.supertypes
+            .borrow_mut()
+            .insert(class.to_string(), Some(resolved.clone()));
+        resolved
+    }
+
+    /// A source declaration's supertypes resolve in its own file, in the scope that encloses it;
+    /// any other classifier's come from the world that declares it.
+    fn resolve_direct_supertypes(&self, class: &str) -> Vec<String> {
+        let (Some(declaration), Some(ctx)) = (
+            self.declarations_by_internal.get(class).copied(),
+            self.contexts_by_internal.get(class).copied(),
+        ) else {
+            return self.world.direct_supertypes(class);
+        };
+        let enclosing = Resolver {
+            ctx,
+            owner: declaration.outer_internal.as_deref(),
+            ..*self
+        };
+        declaration
+            .superclass
+            .iter()
+            .chain(&declaration.interfaces)
+            .filter_map(|supertype| enclosing.internal_of(&supertype.name))
+            .collect()
     }
 
     /// Erased JVM descriptor of a source type (JLS §4.6). `None` if a reference type doesn't
@@ -870,7 +1037,7 @@ mod tests {
     fn stubs(java: &str, known: &[&str]) -> Option<Vec<(String, Vec<u8>)>> {
         let sources = vec![("T.java".to_string(), java.to_string())];
         let known: Vec<String> = known.iter().map(|s| s.to_string()).collect();
-        stub_classes(&sources, StubMode::Strict, &|c| {
+        stub_classes(&sources, StubMode::Strict, &|c: &str| {
             known.iter().any(|k| k == c)
         })
     }
@@ -1317,8 +1484,10 @@ mod tests {
             ),
             ("B.java".to_string(), "public class B {}".to_string()),
         ];
-        let out =
-            stub_classes(&sources, StubMode::Strict, &|c| c == "java/lang/Object").expect("stubs");
+        let out = stub_classes(&sources, StubMode::Strict, &|c: &str| {
+            c == "java/lang/Object"
+        })
+        .expect("stubs");
         assert_eq!(out.len(), 2);
     }
 
@@ -1421,8 +1590,10 @@ mod tests {
             "T.java".to_string(),
             "public class J { public Missing f() { return null; } }".to_string(),
         )];
-        let out = stub_classes(&sources, StubMode::Lenient, &|c| c == "java/lang/Object")
-            .expect("lenient emits despite unresolvable Missing");
+        let out = stub_classes(&sources, StubMode::Lenient, &|c: &str| {
+            c == "java/lang/Object"
+        })
+        .expect("lenient emits despite unresolvable Missing");
         let ci = crate::jvm::classreader::parse_class(&out[0].1).expect("parse");
         assert!(ci.method("f", "()Ljava/lang/Object;").is_some());
     }
@@ -1439,7 +1610,7 @@ mod tests {
                 "public class Good implements Missing {}".to_string(),
             ),
         ];
-        let out = stub_classes(&sources, StubMode::Lenient, &|candidate| {
+        let out = stub_classes(&sources, StubMode::Lenient, &|candidate: &str| {
             candidate == "java/lang/Object"
         })
         .expect("partial stubs");
@@ -1468,7 +1639,7 @@ mod tests {
                 "class Holder { Same value() { return null; } }".to_string(),
             ),
         ];
-        let out = stub_classes(&sources, StubMode::Lenient, &|candidate| {
+        let out = stub_classes(&sources, StubMode::Lenient, &|candidate: &str| {
             candidate == "java/lang/Object"
         })
         .expect("stubs");
@@ -1508,7 +1679,7 @@ mod tests {
              }"
             .to_string(),
         )];
-        let out = stub_classes(&sources, StubMode::Strict, &|candidate| {
+        let out = stub_classes(&sources, StubMode::Strict, &|candidate: &str| {
             candidate == "java/lang/Object"
         })
         .expect("private nested class in a member signature still stubs");
@@ -1622,8 +1793,10 @@ mod tests {
                 "package p; public class Use { public Dup get() { return null; } }".to_string(),
             ),
         ];
-        let out =
-            stub_classes(&sources, StubMode::Strict, &|c| c == "java/lang/Object").expect("stubs");
+        let out = stub_classes(&sources, StubMode::Strict, &|c: &str| {
+            c == "java/lang/Object"
+        })
+        .expect("stubs");
         let dups: Vec<_> = out.iter().filter(|(name, _)| name == "p/Dup").collect();
         assert_eq!(dups.len(), 1);
         let ci = parse_class(&dups[0].1).expect("parse");
@@ -1657,7 +1830,7 @@ mod tests {
                 .to_string(),
             ),
         ];
-        let out = stub_classes(&sources, StubMode::Strict, &|candidate| {
+        let out = stub_classes(&sources, StubMode::Strict, &|candidate: &str| {
             matches!(
                 candidate,
                 "java/lang/Object" | "java/lang/Number" | "java/lang/CharSequence"
@@ -1852,7 +2025,7 @@ mod tests {
         )];
 
         for mode in [StubMode::Strict, StubMode::Lenient] {
-            let out = stub_classes(&sources, mode, &|candidate| {
+            let out = stub_classes(&sources, mode, &|candidate: &str| {
                 matches!(candidate, "java/lang/Object" | "java/lang/Number")
             })
             .unwrap_or_else(|| panic!("{mode:?} stubs"));
@@ -1957,5 +2130,103 @@ mod tests {
             &["java/lang/Object", "java/lang/Number"],
         )
         .is_none());
+    }
+
+    /// The descriptor of the method `name` the stub for `class` declares.
+    fn method_descriptor(out: &[(String, Vec<u8>)], class: &str, name: &str) -> String {
+        let class = out
+            .iter()
+            .find(|(internal, _)| internal == class)
+            .and_then(|(_, bytes)| parse_class(bytes).ok())
+            .expect("stubbed class");
+        class
+            .methods
+            .iter()
+            .find(|method| method.name == name)
+            .map(|method| method.descriptor.clone())
+            .expect("stubbed method")
+    }
+
+    /// A world of named classifiers with the direct supertypes each declares.
+    struct DeclaredWorld(&'static [(&'static str, &'static [&'static str])]);
+
+    impl JavaHeaderWorld for DeclaredWorld {
+        fn contains(&self, internal: &str) -> bool {
+            self.0.iter().any(|(name, _)| *name == internal)
+        }
+
+        fn direct_supertypes(&self, internal: &str) -> Vec<String> {
+            self.0
+                .iter()
+                .find(|(name, _)| *name == internal)
+                .map_or_else(Vec::new, |(_, supertypes)| {
+                    supertypes.iter().map(|name| name.to_string()).collect()
+                })
+        }
+    }
+
+    #[test]
+    fn a_simple_name_denotes_a_member_type_of_the_superclass() {
+        let out = stubs(
+            "package p;\nimport q.Req;\n\
+             public class Child extends Base { public void take(Req<Object> request) {} }",
+            &["java/lang/Object", "p/Base", "p/Base$Req", "q/Req"],
+        )
+        .expect("stubs");
+        assert_eq!(
+            method_descriptor(&out, "p/Child", "take"),
+            "(Lp/Base$Req;)V"
+        );
+    }
+
+    #[test]
+    fn a_member_type_is_inherited_through_source_and_world_supertypes() {
+        let sources = vec![
+            (
+                "Middle.java".to_string(),
+                "package p; public abstract class Middle extends lib.Root implements Marked {}"
+                    .to_string(),
+            ),
+            (
+                "Marked.java".to_string(),
+                "package p; public interface Marked { interface Tag {} }".to_string(),
+            ),
+            (
+                "Leaf.java".to_string(),
+                "package p; public class Leaf extends Middle { \
+                 public Entry entry() { return null; } public Tag tag() { return null; } }"
+                    .to_string(),
+            ),
+        ];
+        let world = DeclaredWorld(&[
+            ("java/lang/Object", &[]),
+            ("lib/Root", &["lib/Base"]),
+            ("lib/Base", &["java/lang/Object"]),
+            ("lib/Base$Entry", &["java/lang/Object"]),
+        ]);
+        let out = stub_classes(&sources, StubMode::Strict, &world).expect("stubs");
+        assert_eq!(
+            method_descriptor(&out, "p/Leaf", "entry"),
+            "()Llib/Base$Entry;"
+        );
+        assert_eq!(method_descriptor(&out, "p/Leaf", "tag"), "()Lp/Marked$Tag;");
+    }
+
+    #[test]
+    fn two_distinct_inherited_member_types_make_the_simple_name_ambiguous() {
+        let world = DeclaredWorld(&[
+            ("java/lang/Object", &[]),
+            ("lib/A", &[]),
+            ("lib/A$Item", &[]),
+            ("lib/B", &[]),
+            ("lib/B$Item", &[]),
+        ]);
+        let sources = vec![(
+            "Both.java".to_string(),
+            "package p; public abstract class Both implements lib.A, lib.B { \
+             public abstract Item item(); }"
+                .to_string(),
+        )];
+        assert!(stub_classes(&sources, StubMode::Strict, &world).is_none());
     }
 }
