@@ -295,6 +295,42 @@ fn publish_classifier_member_annotations(
         );
         publish_accessor_annotations(index, declaration, property, info);
     }
+    for (sibling, parameter) in class.props.iter().enumerate() {
+        let Some(declaration) = u32::try_from(sibling)
+            .ok()
+            .filter(|_| parameter.is_property)
+            .and_then(|sibling| {
+                index
+                    .owned_declarations(owner)
+                    .iter()
+                    .copied()
+                    .find(|declaration| {
+                        index
+                            .declaration_anchor(*declaration)
+                            .is_some_and(|anchor| {
+                                anchor.kind == DeclarationKind::Property
+                                    && anchor.sibling == sibling
+                            })
+                            && index
+                                .declaration_header(*declaration)
+                                .is_some_and(|header| {
+                                    header
+                                        .flags
+                                        .has(crate::fir::DeclarationFlags::PROPERTY_PARAMETER)
+                                })
+                    })
+            })
+        else {
+            continue;
+        };
+        publish_property_accessor_applications(
+            index,
+            declaration,
+            &parameter.annotations,
+            [None, None],
+            info,
+        );
+    }
     let constructors = class
         .primary_ctor_annotations
         .iter()
@@ -319,6 +355,42 @@ fn publish_classifier_member_annotations(
     }
 }
 
+/// Publish every application that lands on each accessor of `declaration`, by the property's
+/// identity: a default accessor has no declaration of its own, and a use-site target (`@get:`,
+/// `@set:`) names the accessor from the property. `written` holds the getter's and the setter's
+/// own annotations.
+fn publish_property_accessor_applications(
+    index: &mut crate::fir::ResolvedModuleIndex,
+    declaration: crate::fir::DeclarationId,
+    property_annotations: &[crate::ast::AnnotationRef],
+    written: [Option<&Vec<crate::ast::AccessorAnnotation>>; 2],
+    info: &TypeInfo,
+) {
+    let [getter, setter] = written;
+    for (accessor, site, written) in [
+        (
+            crate::fir::PropertyAccessor::Getter,
+            crate::types::PropertyAnnotationSite::Getter,
+            getter,
+        ),
+        (
+            crate::fir::PropertyAccessor::Setter,
+            crate::types::PropertyAnnotationSite::Setter,
+            setter,
+        ),
+    ] {
+        let targeted = property_annotations
+            .iter()
+            .filter(|annotation| annotation.property_site == Some(site));
+        let written = written.into_iter().flatten().map(|entry| &entry.annotation);
+        index.publish_property_accessor_applied_annotations(
+            declaration,
+            accessor,
+            checked_applications(info, targeted.chain(written)),
+        );
+    }
+}
+
 /// Publish the checked annotations written on `property`'s getter and setter under the accessor
 /// declarations `declaration` owns.
 fn publish_accessor_annotations(
@@ -334,6 +406,13 @@ fn publish_accessor_annotations(
             property.setter.as_ref().map(|setter| &setter.annotations),
         ),
     ];
+    publish_property_accessor_applications(
+        index,
+        declaration,
+        &property.annotations,
+        [accessors[0].1, accessors[1].1],
+        info,
+    );
     for (sibling, annotations) in accessors {
         let Some(annotations) = annotations.filter(|annotations| !annotations.is_empty()) else {
             continue;
@@ -479,6 +558,10 @@ fn classifier_has_resolved_annotations(
             .flatten()
             .any(resolved)
         || class
+            .props
+            .iter()
+            .any(|parameter| parameter.is_property && parameter.annotations.iter().any(resolved))
+        || class
             .secondary_ctors
             .iter()
             .any(|constructor| constructor.annotations.iter().any(resolved))
@@ -532,6 +615,18 @@ impl Checker<'_> {
             .is_some()
     }
 
+    /// The source spans of the applications among `annotations` that Pass 1 bound.
+    fn bound_annotation_spans(
+        &self,
+        annotations: &[crate::ast::AnnotationRef],
+    ) -> crate::fx_hash::HashSet<crate::diag::Span> {
+        annotations
+            .iter()
+            .filter(|annotation| self.has_bound_annotation(annotation))
+            .map(|annotation| annotation.span)
+            .collect()
+    }
+
     /// Fold a classifier's own annotations and those of the members it declares, for the
     /// declaration-annotation fragment. Member annotations are declaration facts for later
     /// candidate collection and use-site checks; their declarations' body units check them again,
@@ -558,7 +653,26 @@ impl Checker<'_> {
             }
         }
         for property in &class.body_props {
-            self.fold_property_annotations(scope, property);
+            self.fold_property_annotations(
+                scope,
+                property,
+                super::annotation_applications::PropertyAnnotationOwner::Classifier {
+                    owner_is_interface: class.is_interface(),
+                },
+            );
+        }
+        // A constructor `val`/`var` is a property: fold exactly its Pass-1-bound applications, as
+        // a body property's, so publication never binds a name Pass 1 left unbound.
+        for parameter in class.props.iter().filter(|parameter| parameter.is_property) {
+            let bound = self.bound_annotation_spans(&parameter.annotations);
+            if !bound.is_empty() {
+                self.check_selected_constructor_parameter_annotations(
+                    scope,
+                    parameter,
+                    class.is_annotation(),
+                    &|annotation| bound.contains(&annotation.span),
+                );
+            }
         }
         let constructors = class
             .primary_ctor_annotations
@@ -599,21 +713,30 @@ impl Checker<'_> {
                     self.fold_method_annotations_in_temporary_scope(scope, function, false);
                 }
             }
-            Decl::Property(property) => self.fold_property_annotations(scope, property),
+            Decl::Property(property) => self.fold_property_annotations(
+                scope,
+                property,
+                super::annotation_applications::PropertyAnnotationOwner::File,
+            ),
             Decl::Class(_) => {}
         }
         self.diags.diags.truncate(diagnostics_before);
     }
 
-    /// Fold a property's own bound annotations and those written on its accessors.
-    fn fold_property_annotations(&mut self, scope: &CheckerScope<'_>, property: &PropDecl) {
+    /// Fold a property's own bound annotations and those written on its accessors. The property's
+    /// own applications are checked against the same host as in its body unit, so a use-site
+    /// target (`@get:`, `@set:`) is validated for the property that owns it.
+    fn fold_property_annotations(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        property: &PropDecl,
+        owner: super::annotation_applications::PropertyAnnotationOwner,
+    ) {
+        let bound = self.bound_annotation_spans(&property.annotations);
         let policy_depth =
-            self.push_declaration_policies(scope, &property.annotations, &property.annotation_args);
-        for (annotation, arguments) in property.annotations.iter().zip(&property.annotation_args) {
-            if self.has_bound_annotation(annotation) {
-                self.check_annotation_application(scope, annotation, arguments);
-            }
-        }
+            self.check_property_annotation_applications(scope, property, owner, &|annotation| {
+                bound.contains(&annotation.span)
+            });
         let accessors = property.getter_annotations.iter().chain(
             property
                 .setter
