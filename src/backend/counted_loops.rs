@@ -136,6 +136,35 @@ fn realize_memberships(
     next_slot: &mut Option<u32>,
 ) {
     for expression in 0..ir.exprs.len() {
+        if let IrExpr::Checked(IrCheckedOperation::ComparableRangeContains {
+            lower,
+            end,
+            negated,
+        }) = ir.exprs[expression]
+        {
+            let first_generated = ir.exprs.len();
+            let mut realizer = Realizer {
+                next_slot: next_slot.unwrap_or_else(|| ir.next_value_slot()),
+                ir: &mut *ir,
+                style,
+                inlining: HeaderInlining::None,
+                until_steps: UntilSteps::Built,
+                unsigned_compare: None,
+                inlined_calls: Vec::new(),
+                represented: Vec::new(),
+            };
+            let contains = realizer.comparable_range_contains(lower, end);
+            *next_slot = Some(realizer.next_slot);
+            finish_membership(
+                ir,
+                expression as ExprId,
+                contains,
+                negated,
+                first_generated,
+                &[],
+            );
+            continue;
+        }
         let IrExpr::Checked(IrCheckedOperation::RangeContains {
             operation,
             value,
@@ -168,17 +197,37 @@ fn realize_memberships(
         });
         *next_slot = Some(realizer.next_slot);
         let inlined_calls = std::mem::take(&mut realizer.inlined_calls);
-        if negated {
-            let contains = ir.add_expr(contains);
-            ir.logical_types.insert(contains, Ty::Boolean);
-            ir.replace_with_negation(expression as ExprId, contains);
-        } else {
-            ir.exprs[expression] = contains;
-        }
-        record_generated_origins(ir, expression as ExprId, first_generated, &inlined_calls);
-        if let Some(line) = ir.expr_source_lines.get(&(expression as ExprId)).copied() {
-            record_generated_line(ir, line, first_generated);
-        }
+        finish_membership(
+            ir,
+            expression as ExprId,
+            contains,
+            negated,
+            first_generated,
+            &inlined_calls,
+        );
+    }
+}
+
+/// Put a realized membership test in place of its checked node, negated for `!in`, and give the
+/// generated nodes the membership's origin and line.
+fn finish_membership(
+    ir: &mut IrFile,
+    expression: ExprId,
+    contains: IrExpr,
+    negated: bool,
+    first_generated: usize,
+    inlined_calls: &[ExprId],
+) {
+    if negated {
+        let contains = ir.add_expr(contains);
+        ir.logical_types.insert(contains, Ty::Boolean);
+        ir.replace_with_negation(expression, contains);
+    } else {
+        ir.exprs[expression as usize] = contains;
+    }
+    record_generated_origins(ir, expression, first_generated, inlined_calls);
+    if let Some(line) = ir.expr_source_lines.get(&expression).copied() {
+        record_generated_line(ir, line, first_generated);
     }
 }
 

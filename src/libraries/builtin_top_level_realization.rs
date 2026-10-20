@@ -583,6 +583,39 @@ fn progression_builder(facts: &BuiltinFunctionDeclaration<'_>) -> Option<Compile
     }
 }
 
+/// `ComparableRangeToHandler`: the stdlib's
+/// `operator fun <T : Comparable<T>> T.rangeTo(that: T): ClosedRange<T>`, declared by the
+/// authenticated compiler builtins owner. A dependency declaring the same shape keeps its body.
+fn comparable_range_to(
+    facts: &BuiltinFunctionDeclaration<'_>,
+    compiler_builtin_owner: bool,
+) -> Option<CompilerIntrinsic> {
+    use crate::types::wk;
+    if !compiler_builtin_owner
+        || facts.name != "rangeTo"
+        || !plain(facts, FnKind::Extension)
+        || !facts.is_operator
+        || facts.type_parameter_count != 1
+        || facts.vararg.is_some()
+    {
+        return None;
+    }
+    let element = facts.receiver?;
+    let bound = element.ty_param_bound()?;
+    let is_element = |ty: &Ty| match (ty.kind(), element.kind()) {
+        (TyKind::TyParam(name, _), TyKind::TyParam(declared, _)) => name == declared,
+        _ => false,
+    };
+    let applied_to_element = |ty: Ty, class| {
+        matches!(ty.kind(), TyKind::Obj(name, arguments)
+            if name == class && matches!(arguments.as_slice(), [argument] if is_element(argument)))
+    };
+    (applied_to_element(bound, wk::comparable())
+        && facts.params == [element]
+        && applied_to_element(facts.ret, wk::closed_range()))
+    .then_some(CompilerIntrinsic::ComparableRangeTo)
+}
+
 /// `matchStdlibExtensionContainsCall`: an operator `contains` extension of a closed range with one
 /// parameter.
 fn closed_range_contains(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
@@ -695,11 +728,13 @@ fn function_realization_with_stdlib_owner(
     } else if facts.package.matches("kotlin/reflect") {
         reflection(&facts)
     } else if facts.package == crate::types::wk::kotlin_ranges_package() {
-        progression_builder(&facts).or_else(|| {
-            compiler_builtin_owner
-                .then(|| closed_range_contains(&facts))
-                .flatten()
-        })
+        progression_builder(&facts)
+            .or_else(|| comparable_range_to(&facts, compiler_builtin_owner))
+            .or_else(|| {
+                compiler_builtin_owner
+                    .then(|| closed_range_contains(&facts))
+                    .flatten()
+            })
     } else {
         None
     }
@@ -1195,6 +1230,160 @@ mod tests {
             normalized_function_realization(package, "rangeTo", &same_shape),
             None
         );
+    }
+
+    #[test]
+    fn comparable_range_to_requires_the_complete_generic_declaration_and_its_owner() {
+        let comparable_of = |name: &str| {
+            Ty::obj_args(
+                "kotlin/Comparable",
+                &[Ty::ty_param(name, Ty::nullable(Ty::obj("kotlin/Any")))],
+            )
+        };
+        let element = Ty::ty_param("T", comparable_of("T"));
+        let other = Ty::ty_param("U", comparable_of("U"));
+        let closed_range = |argument| Ty::obj_args("kotlin/ranges/ClosedRange", &[argument]);
+        let params = [element];
+        let declaration = BuiltinFunctionDeclaration {
+            package: crate::types::wk::kotlin_ranges_package(),
+            name: "rangeTo",
+            kind: FnKind::Extension,
+            receiver: Some(element),
+            params: &params,
+            ret: closed_range(element),
+            context_count: 0,
+            type_parameter_count: 1,
+            vararg: None,
+            is_suspend: false,
+            is_operator: true,
+            is_infix: false,
+        };
+        assert_eq!(
+            function_realization_with_stdlib_owner(declaration, true),
+            Some(CompilerIntrinsic::ComparableRangeTo)
+        );
+        assert_eq!(
+            function_realization_with_stdlib_owner(declaration, false),
+            None,
+            "an unauthenticated provider's identical declaration"
+        );
+
+        let other_params = [other];
+        let concrete_params = [comparable_of("T")];
+        let foreign_bound = Ty::ty_param("T", comparable_of("U"));
+        let indirect_bound = Ty::ty_param("T", Ty::ty_param("U", comparable_of("T")));
+        for (near, why) in [
+            (
+                BuiltinFunctionDeclaration {
+                    params: &other_params,
+                    ..declaration
+                },
+                "a parameter of another type parameter",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    params: &concrete_params,
+                    ..declaration
+                },
+                "a Comparable parameter that is not the receiver's type parameter",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    receiver: Some(foreign_bound),
+                    params: &[foreign_bound],
+                    ret: closed_range(foreign_bound),
+                    ..declaration
+                },
+                "a bound comparing with another type parameter",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    receiver: Some(comparable_of("T")),
+                    params: &concrete_params,
+                    ret: closed_range(comparable_of("T")),
+                    ..declaration
+                },
+                "a Comparable receiver that is not a type parameter",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    ret: closed_range(other),
+                    ..declaration
+                },
+                "a range of another element",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    ret: Ty::nullable(closed_range(element)),
+                    ..declaration
+                },
+                "a nullable range",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    ret: Ty::ty_param("U", closed_range(element)),
+                    ..declaration
+                },
+                "another type parameter bounded by the range",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    ret: Ty::platform_nullable(closed_range(element)),
+                    ..declaration
+                },
+                "a platform range",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    receiver: Some(indirect_bound),
+                    params: &[indirect_bound],
+                    ret: closed_range(indirect_bound),
+                    ..declaration
+                },
+                "an indirect bound through another type parameter",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    type_parameter_count: 2,
+                    ..declaration
+                },
+                "a second type parameter",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    is_infix: true,
+                    ..declaration
+                },
+                "an infix declaration",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    is_suspend: true,
+                    ..declaration
+                },
+                "a suspend declaration",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    is_operator: false,
+                    ..declaration
+                },
+                "a declaration that is not an operator",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    package: type_name("fixture"),
+                    ..declaration
+                },
+                "another package",
+            ),
+        ] {
+            assert_eq!(
+                function_realization_with_stdlib_owner(near, true),
+                None,
+                "{why}"
+            );
+        }
     }
 
     #[test]

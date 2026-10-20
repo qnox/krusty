@@ -27,7 +27,8 @@ impl BodyFirChecker<'_> {
         let call = match kind {
             FirExprKind::Call(call)
             | FirExprKind::ComparisonCall { call, .. }
-            | FirExprKind::ContainmentCall { call, .. } => call,
+            | FirExprKind::ContainmentCall { call, .. }
+            | FirExprKind::ComparableRangeContainment { lower: call, .. } => call,
             _ => return Ok(()),
         };
         super::inline_body_plan::finalize(&self.body, call).map_err(|_| {

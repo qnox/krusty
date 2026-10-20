@@ -648,6 +648,7 @@ impl BodyFirChecker<'_> {
             }
             | FirExprKind::ComparisonCall { .. }
             | FirExprKind::ContainmentCall { .. }
+            | FirExprKind::ComparableRangeContainment { .. }
             | FirExprKind::FunctionInvokeReference { .. }
             | FirExprKind::ExtensionFunctionBinding { .. }
             | FirExprKind::CallableReference { .. }
@@ -1666,7 +1667,50 @@ impl BodyFirChecker<'_> {
                     let operator = kind.operator_name();
                     let selected_range = self.selected_operator(expression, operator);
                     let selected_contains = self.selected_operator(expression, "contains");
-                    if selected_range && selected_contains {
+                    if selected_range
+                        && selected_contains
+                        && self.selected_operator(expression, "compareTo")
+                    {
+                        let receiver = self.expression(*value)?;
+                        let mut lower = self.source_member_operator_call_on_value(
+                            expression,
+                            "compareTo",
+                            receiver,
+                            &[*start],
+                        )?;
+                        // kotlinc calls `compareTo` on the value cast to the `Comparable` it is
+                        // selected on; that view, not the value's own class, owns the dispatch.
+                        let view = match self.info.resolved_operator_call(expression, "compareTo") {
+                            Some(ResolvedCall::Member(compare_to)) => Some(compare_to.receiver),
+                            _ => None,
+                        };
+                        if let Some(view) = view {
+                            let span = self.file.expr_span(expression).ok_or_else(|| {
+                                self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
+                            })?;
+                            let conversion = FirConversion {
+                                origin: self.expression_origin(expression)?,
+                                kind: FirConversionKind::SmartCast {
+                                    to: self.resolved_type(span, view)?,
+                                },
+                            };
+                            if let Some(dispatch) = lower.dispatch_receiver.as_mut() {
+                                dispatch.conversion = Some(conversion);
+                            }
+                        }
+                        // `end` is still `rangeTo`'s argument: it keeps the boundary that call
+                        // selected for it.
+                        let span = self.file.expr_span(*end).ok_or_else(|| {
+                            self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
+                        })?;
+                        let bound =
+                            self.resolved_type(span, self.info.semantic_ty(*end).non_null())?;
+                        FirExprKind::ComparableRangeContainment {
+                            lower,
+                            upper_bound: self.direct_range_operand(*end, bound)?,
+                            negated: *negated,
+                        }
+                    } else if selected_range && selected_contains {
                         let range_kind = if self.selected_range_construction(expression, operator) {
                             FirExprKind::Range {
                                 operation: Self::range_operation(*kind),

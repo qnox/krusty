@@ -33,6 +33,11 @@ pub enum FirLoweringFailure {
         origin: OriginId,
         ty: crate::types::Ty,
     },
+    /// A comparable range's selected `compareTo` did not lower to one member call of the value
+    /// with the bound.
+    InvalidComparableRangeOrdering {
+        origin: OriginId,
+    },
     /// A member a counted or indexed loop reads that is not a dependency property; the checker
     /// only selects `kotlin.ranges` and `kotlin.CharSequence` members, which are.
     UnsupportedLoopMember,
