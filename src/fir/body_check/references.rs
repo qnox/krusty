@@ -854,7 +854,7 @@ impl BodyFirChecker<'_> {
                         None,
                         false,
                         &property.getter,
-                        property.setter.as_ref(),
+                        property.setter.as_deref(),
                         property.ty,
                         adaptation,
                     )

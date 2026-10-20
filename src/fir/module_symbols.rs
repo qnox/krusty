@@ -751,7 +751,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             context_parameter_identities: self
                 .property_context_parameter_identities(declaration, context_count),
             getter,
-            setter,
+            setter: setter.map(Box::new),
             setter_visibility,
             setter_parameter_name: self.property_setter_parameter_name(declaration, context_count),
             is_const: header.flags.has(DeclarationFlags::CONST),
@@ -1358,7 +1358,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 context_parameter_identities: self
                     .property_context_parameter_identities(declaration, context_count),
                 getter,
-                setter,
+                setter: setter.map(Box::new),
                 setter_visibility,
                 setter_parameter_name: self
                     .property_setter_parameter_name(declaration, context_count),
@@ -1756,7 +1756,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 context_parameter_identities: self
                     .property_context_parameter_identities(declaration, context_count),
                 getter,
-                setter,
+                setter: setter.map(Box::new),
                 setter_visibility,
                 setter_parameter_name: self
                     .property_setter_parameter_name(declaration, context_count),
