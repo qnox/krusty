@@ -30,9 +30,12 @@ pub(super) fn nullable_generic_actual(actual: Ty) -> Ty {
 /// shape. Nested flexible variables remain part of their enclosing structural constraint and do
 /// not enter this root-only rule.
 pub(super) fn flexible_variable_argument(shape: Ty, actual: Ty) -> Option<(Ty, Ty)> {
-    let TyKind::PlatformNullable(variable @ Ty::TyParam(..)) = shape.kind() else {
+    let TyKind::PlatformNullable(variable) = shape.kind() else {
         return None;
     };
+    if !variable.is_ty_param() {
+        return None;
+    }
     match actual.kind() {
         TyKind::Null => Some((variable, Ty::nullable(Ty::Nothing))),
         TyKind::Nullable(_) => Some((variable, actual)),

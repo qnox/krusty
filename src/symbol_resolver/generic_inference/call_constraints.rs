@@ -117,9 +117,7 @@ fn infer_generic_call_constraints_with_receiver_and_argument_ordinals(
                 );
             }
         }
-        if let Some((variable @ Ty::TyParam(_, _), actual)) =
-            flexible_variable_argument(shape, actual)
-        {
+        if let Some((variable, actual)) = flexible_variable_argument(shape, actual) {
             deferred_flexible_roots.push((argument, variable, actual));
             continue;
         }

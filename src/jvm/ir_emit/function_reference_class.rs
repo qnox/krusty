@@ -608,7 +608,7 @@ fn push_reflection_owner(
     mapped: &str,
 ) {
     let scalar = owner
-        .map(|owner| Ty::Obj(owner, Default::default()).canonical_semantic())
+        .map(|owner| Ty::obj_name(owner).canonical_semantic())
         .filter(|ty| ty.is_jvm_scalar() && !ty.is_unsigned());
     if let Some(wrapper) = scalar.and_then(crate::jvm::jvm_class_map::wrapper_internal) {
         let field = cw.fieldref(wrapper, "TYPE", "Ljava/lang/Class;");

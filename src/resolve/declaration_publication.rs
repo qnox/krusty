@@ -385,26 +385,28 @@ impl FlexibleValue {
     /// encoded under the physical continuation slot and publication must not guess that layout.
     fn selected(declared: Ty, selected: Ty, upper_bound: &dyn Fn(Ty) -> Ty) -> FlexibleValue {
         let mut head = None;
-        let (declared, selected) = match (declared, selected) {
-            (Ty::PlatformNullable(declared), Ty::PlatformNullable(selected)) => {
-                head = Some(upper_bound(*selected));
-                (*declared, *selected)
+        let (declared, selected) = match (declared.kind(), selected.kind()) {
+            (TyKind::PlatformNullable(declared), TyKind::PlatformNullable(selected)) => {
+                head = Some(upper_bound(selected));
+                (declared, selected)
             }
             // A nullable solution collapses both faces to one rigid type.
-            (Ty::PlatformNullable(declared), Ty::Nullable(selected)) => (*declared, *selected),
-            (Ty::PlatformNullable(declared), selected @ (Ty::Obj(..) | Ty::Fun(_))) => {
+            (TyKind::PlatformNullable(declared), TyKind::Nullable(selected)) => {
+                (declared, selected)
+            }
+            (TyKind::PlatformNullable(declared), TyKind::Obj(..) | TyKind::Fun(_)) => {
                 head = Some(upper_bound(selected));
-                (*declared, selected)
+                (declared, selected)
             }
-            (Ty::PlatformNullable(declared), selected) => (*declared, selected),
-            (Ty::Nullable(declared), Ty::Nullable(selected))
-            | (Ty::DefinitelyNotNull(declared), Ty::DefinitelyNotNull(selected))
-            | (Ty::InProjection(declared), Ty::InProjection(selected))
-            | (Ty::OutProjection(declared), Ty::OutProjection(selected))
-            | (Ty::StarProjection(declared), Ty::StarProjection(selected)) => {
-                (*declared, *selected)
+            (TyKind::PlatformNullable(declared), _) => (declared, selected),
+            (TyKind::Nullable(declared), TyKind::Nullable(selected))
+            | (TyKind::DefinitelyNotNull(declared), TyKind::DefinitelyNotNull(selected))
+            | (TyKind::InProjection(declared), TyKind::InProjection(selected))
+            | (TyKind::OutProjection(declared), TyKind::OutProjection(selected))
+            | (TyKind::StarProjection(declared), TyKind::StarProjection(selected)) => {
+                (declared, selected)
             }
-            pair => pair,
+            _ => (declared, selected),
         };
 
         if matches!(declared.kind(), TyKind::TyParam(_, bound) if bound.is_platform_nullable()) {

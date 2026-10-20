@@ -1050,9 +1050,9 @@ fn encode_type_with_parameter(
         }
         TyKind::Intersection(parts) => {
             let semantic = if nullable {
-                Ty::nullable(Ty::Intersection(parts))
+                Ty::nullable(Ty::from(TyKind::Intersection(parts)))
             } else {
-                Ty::Intersection(parts)
+                Ty::from(TyKind::Intersection(parts))
             };
             let approximated = strings
                 .intersection_approximation

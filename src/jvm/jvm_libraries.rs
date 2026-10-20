@@ -72,7 +72,7 @@ use crate::libraries::{
 use crate::runtime::{PlatformRangeCtor, RangeConstruction};
 use crate::symbol_resolver::{ty_subst, ty_subst_all, ty_subst_keep_unbound};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
-use crate::types::{type_name, SemanticCallableOwner, Ty, TypeName, TypeNameList};
+use crate::types::{type_name, SemanticCallableOwner, Ty, TyKind, TypeName, TypeNameList};
 
 fn effective_class_access(class: &super::classreader::ClassInfo) -> u16 {
     class
@@ -182,8 +182,8 @@ impl JvmLibraries {
     /// not carry the callable shape; `callable_signature` is decoded from the interface's `invoke`
     /// declaration and its type-parameter metadata.
     fn semanticize_jvm_type(&self, ty: Ty) -> Ty {
-        match ty {
-            Ty::Obj(internal, args) => {
+        match ty.kind() {
+            TyKind::Obj(internal, args) => {
                 let args = args
                     .iter()
                     .map(|arg| self.semanticize_jvm_type(*arg))
@@ -207,21 +207,19 @@ impl JvmLibraries {
                 let Some(arguments) = args
                     .iter()
                     .zip(classifier.type_param_variances())
-                    .map(|(argument, variance)| match (argument, variance) {
-                        (Ty::InProjection(inner), crate::types::TypeVariance::In)
-                        | (Ty::OutProjection(inner), crate::types::TypeVariance::Out) => {
-                            Some(gsig_unbox_wrapper(**inner))
+                    .map(|(argument, variance)| match (argument.kind(), variance) {
+                        (TyKind::InProjection(inner), crate::types::TypeVariance::In)
+                        | (TyKind::OutProjection(inner), crate::types::TypeVariance::Out) => {
+                            Some(gsig_unbox_wrapper(inner))
                         }
-                        (Ty::StarProjection(inner), crate::types::TypeVariance::Out) => {
-                            Some(gsig_unbox_wrapper(**inner))
+                        (TyKind::StarProjection(inner), crate::types::TypeVariance::Out) => {
+                            Some(gsig_unbox_wrapper(inner))
                         }
-                        (Ty::StarProjection(_), crate::types::TypeVariance::In) => {
+                        (TyKind::StarProjection(_), crate::types::TypeVariance::In) => {
                             Some(Ty::Nothing)
                         }
-                        (Ty::InProjection(_) | Ty::OutProjection(_) | Ty::StarProjection(_), _) => {
-                            None
-                        }
-                        (argument, _) => Some(gsig_unbox_wrapper(*argument)),
+                        _ if argument.projection_inner().is_some() => None,
+                        _ => Some(gsig_unbox_wrapper(*argument)),
                     })
                     .collect::<Option<Vec<_>>>()
                 else {
@@ -235,7 +233,7 @@ impl JvmLibraries {
                     .collect::<crate::fx_hash::HashMap<_, _>>();
                 ty_subst_keep_unbound(signature, &bindings)
             }
-            Ty::Fun(signature) => Ty::fun_with_shape(
+            TyKind::Fun(signature) => Ty::fun_with_shape(
                 signature
                     .params
                     .iter()
@@ -246,12 +244,14 @@ impl JvmLibraries {
                 signature.has_receiver,
                 signature.suspend,
             ),
-            Ty::Nullable(inner) => Ty::nullable(self.semanticize_jvm_type(*inner)),
-            Ty::PlatformNullable(inner) => Ty::platform_nullable(self.semanticize_jvm_type(*inner)),
-            Ty::InProjection(inner) => Ty::in_projection(self.semanticize_jvm_type(*inner)),
-            Ty::OutProjection(inner) => Ty::out_projection(self.semanticize_jvm_type(*inner)),
-            Ty::StarProjection(inner) => Ty::star_projection(self.semanticize_jvm_type(*inner)),
-            Ty::TyParam(name, bound) => Ty::ty_param(&name, self.semanticize_jvm_type(*bound)),
+            TyKind::Nullable(inner) => Ty::nullable(self.semanticize_jvm_type(inner)),
+            TyKind::PlatformNullable(inner) => {
+                Ty::platform_nullable(self.semanticize_jvm_type(inner))
+            }
+            TyKind::InProjection(inner) => Ty::in_projection(self.semanticize_jvm_type(inner)),
+            TyKind::OutProjection(inner) => Ty::out_projection(self.semanticize_jvm_type(inner)),
+            TyKind::StarProjection(inner) => Ty::star_projection(self.semanticize_jvm_type(inner)),
+            TyKind::TyParam(name, bound) => Ty::ty_param(&name, self.semanticize_jvm_type(bound)),
             _ => ty,
         }
     }
@@ -1130,7 +1130,7 @@ impl JvmLibraries {
         receiver: Ty,
         target_internal: TypeName,
     ) -> crate::fx_hash::HashMap<String, Ty> {
-        let Ty::Obj(start, start_args) = receiver else {
+        let TyKind::Obj(start, start_args) = receiver.kind() else {
             return crate::fx_hash::HashMap::default();
         };
         let target = super::jvm_class_map::to_jvm_type_name(target_internal);
@@ -1169,7 +1169,7 @@ impl JvmLibraries {
             match (supers, &ci) {
                 (Some(supers), _) => {
                     for sup in supers {
-                        if let Ty::Obj(sup_internal, sup_args) = sup {
+                        if let TyKind::Obj(sup_internal, sup_args) = sup.kind() {
                             let sup_targs = ty_subst_all(sup_args.as_slice(), &binds);
                             q.push_back((
                                 super::jvm_class_map::to_jvm_type_name(sup_internal),
@@ -1744,7 +1744,8 @@ impl JvmLibraries {
                         let generic = member.generic_sig.as_ref().map(|g| g.params.clone());
                         if let Some(generic) = generic.filter(|g| g.len() == member.params.len()) {
                             for (param, shape) in member.params.iter_mut().zip(&generic) {
-                                if matches!(shape.non_null(), Ty::Fun(sig) if sig.has_receiver) {
+                                if matches!(shape.non_null().kind(), TyKind::Fun(sig) if sig.has_receiver)
+                                {
                                     *param = *shape;
                                 }
                             }
@@ -1753,8 +1754,8 @@ impl JvmLibraries {
                         member.call_sig.lambda_receivers = member
                             .params
                             .iter()
-                            .map(|param| match param.non_null() {
-                                Ty::Fun(sig) if sig.has_receiver => sig.params.first().copied(),
+                            .map(|param| match param.non_null().kind() {
+                                TyKind::Fun(sig) if sig.has_receiver => sig.params.first().copied(),
                                 _ => None,
                             })
                             .collect();
@@ -2251,22 +2252,22 @@ impl JvmLibraries {
             } else {
                 declared_supertype_templates
                     .into_iter()
-                    .map(|template| match template {
-                        Ty::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
+                    .map(|template| match template.kind() {
+                        TyKind::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
                             name,
                             &arguments
                                 .iter()
                                 .map(|argument| java_type_argument_nullability(*argument))
                                 .collect::<Vec<_>>(),
                         ),
-                        other => other,
+                        _ => template,
                     })
                     .collect()
             };
             let mut callable_signatures = declared_supertype_templates
                 .iter()
                 .copied()
-                .filter(|supertype| matches!(supertype, Ty::Fun(_)))
+                .filter(|supertype| supertype.is_fun())
                 .collect::<Vec<_>>();
             let callable_signature = callable_signatures.first().copied();
             let self_arguments = type_params
@@ -2646,7 +2647,7 @@ fn parse_gsig_type_args(s: &str, for_field: bool) -> Option<(Vec<Ty>, bool, bool
 }
 
 fn gsig_unbox_wrapper(g: Ty) -> Ty {
-    let Ty::Obj(internal, args) = g else {
+    let TyKind::Obj(internal, args) = g.kind() else {
         return g;
     };
     super::jvm_class_map::wrapper_to_kotlin_prim_name(internal)
@@ -2754,13 +2755,13 @@ pub(in crate::jvm) fn parse_member_method_gsig(
 }
 
 fn has_free_ty_params(ty: Ty) -> bool {
-    match ty {
-        Ty::TyParam(..) => true,
-        Ty::Fun(sig) => {
+    match ty.kind() {
+        TyKind::TyParam(..) => true,
+        TyKind::Fun(sig) => {
             sig.params.iter().any(|param| has_free_ty_params(*param)) || has_free_ty_params(sig.ret)
         }
-        Ty::Obj(_, args) => args.iter().any(|arg| has_free_ty_params(*arg)),
-        Ty::Nullable(inner) => has_free_ty_params(*inner),
+        TyKind::Obj(_, args) => args.iter().any(|arg| has_free_ty_params(*arg)),
+        TyKind::Nullable(inner) => has_free_ty_params(inner),
         _ => false,
     }
 }
@@ -3800,8 +3801,8 @@ impl JvmLibraries {
     }
 
     fn normalized_type_alias_target(target: TypeName, expansion: Ty) -> Option<TypeName> {
-        match expansion.non_null() {
-            Ty::Fun(_) => crate::libraries::type_alias_target_classifier(expansion),
+        match expansion.non_null().kind() {
+            TyKind::Fun(_) => crate::libraries::type_alias_target_classifier(expansion),
             _ => Some(target),
         }
     }
@@ -3946,8 +3947,8 @@ impl JvmLibraries {
                 }
                 let raw_receiver = mf.generic_sig.as_ref().and_then(|g| g.receiver);
                 let receiver = raw_receiver
-                    .map(|r| match r {
-                        Ty::TyParam(..) => r,
+                    .map(|r| match r.kind() {
+                        TyKind::TyParam(..) => r,
                         _ => ty_subst(r, &crate::fx_hash::HashMap::default()),
                     })
                     .or_else(|| mf.receiver_class.map(kotlin_type_name_to_ty))
@@ -5042,7 +5043,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         // constructor/method parameter carries. Arrays recurse into their element (`Array<Set<String>>`
         // → `[Ljava/util/Set;` on the descriptor side), so a nested collection element normalizes too.
         // Other kinds (primitives, `String`, function types) already compare exactly across the sides.
-        match ty {
+        match ty.kind() {
             // Kotlin scalar classifiers are semantic class identities in core. At this JVM boundary their
             // non-null value form is the scalar carrier (`kotlin/Int` -> `I`, `UInt` -> `I`), never the
             // wrapper class used by a nullable/generic position.
@@ -5055,7 +5056,9 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                 let e = ty.array_elem().unwrap_or_else(|| Ty::obj("kotlin/Any"));
                 Ty::obj_args("kotlin/Array", &[self.library_value_form(e)])
             }
-            Ty::Obj(internal, _) => Ty::obj_name(super::jvm_class_map::to_jvm_type_name(internal)),
+            TyKind::Obj(internal, _) => {
+                Ty::obj_name(super::jvm_class_map::to_jvm_type_name(internal))
+            }
             _ => ty,
         }
     }
@@ -5367,7 +5370,9 @@ mod tests {
     use crate::libraries::{GenericReturnPolicy, SemanticPlatform};
     use crate::symbol_source::SymbolNamespace;
     use crate::types::type_name;
-    use crate::types::{Ty, Visibility};
+    use crate::types::{Ty, TyKind, Visibility};
+
+    mod signature_parsing;
 
     fn initialized_libraries(classpath: std::rc::Rc<super::Classpath>) -> super::JvmLibraries {
         super::JvmLibraries::new(classpath).expect("JVM provider initialization")
@@ -5507,7 +5512,11 @@ mod tests {
         let classifier = libraries
             .classifier_record(type_name("kotlin/Function1"))
             .expect("semantic Function1 classifier");
-        let Ty::Fun(signature) = classifier.callable_signature.expect("invoke signature") else {
+        let TyKind::Fun(signature) = classifier
+            .callable_signature
+            .expect("invoke signature")
+            .kind()
+        else {
             panic!("Function1 callable signature is not a function")
         };
         assert_eq!(signature.params.len(), 1);
@@ -5727,7 +5736,7 @@ mod tests {
             })
             .expect("declared set(T, V)");
         assert!(
-            matches!(declared_set.semantic_params()[1], Ty::TyParam(name, bound) if name == "V" && bound.is_nullable()),
+            matches!(declared_set.semantic_params()[1].kind(), TyKind::TyParam(name, bound) if name == "V" && bound.is_nullable()),
             "declared set value parameter: {:?}",
             declared_set.semantic_params()[1]
         );
@@ -6490,7 +6499,7 @@ mod tests {
             .select_member_property(Ty::obj_args("sample/Holder", &[formal]), "values")
             .expect("normalized property declaration");
         assert!(
-            matches!(declared_values.ty.non_null(), Ty::Obj(_, arguments) if arguments == [formal]),
+            matches!(declared_values.ty.non_null().kind(), TyKind::Obj(_, arguments) if arguments == [formal]),
             "property signature must retain its declaration variable: {:?}",
             declared_values.ty,
         );
@@ -6510,7 +6519,7 @@ mod tests {
             .expect("raw public property")
             .ty;
         assert!(
-            matches!(raw_values.non_null(), Ty::Obj(_, arguments) if arguments.is_empty()),
+            matches!(raw_values.non_null().kind(), TyKind::Obj(_, arguments) if arguments.is_empty()),
             "an unbound property parameter must use the erased declaration type, got {raw_values:?}"
         );
     }
@@ -6573,428 +6582,6 @@ mod tests {
                 &[Ty::obj_args("kotlin/collections/MutableSet", &[Ty::String])],
             ),
             "each nesting level recovers its declared mutability under the same guard",
-        );
-    }
-
-    #[test]
-    fn method_descriptor_parser_rejects_partial_or_malformed_input() {
-        assert_eq!(
-            parse_method_desc("(ILjava/lang/String;)[B"),
-            Some((vec![Ty::Int, Ty::String], Ty::array(Ty::Byte),))
-        );
-        for invalid in [
-            "",
-            "I)V",
-            "(I",
-            "(I)",
-            "(V)V",
-            "([V)V",
-            "(Q)V",
-            "(Ljava/lang/String)V",
-            "(Ljava/lang/String;;)V",
-            "()Ljava/lang/String;I",
-        ] {
-            assert_eq!(
-                parse_method_desc(invalid),
-                None,
-                "accepted malformed descriptor {invalid}"
-            );
-        }
-    }
-
-    #[test]
-    fn method_descriptor_preserves_declared_primitive_width() {
-        assert_eq!(parse_method_desc("()B"), Some((Vec::new(), Ty::Byte)));
-        assert_eq!(parse_method_desc("()S"), Some((Vec::new(), Ty::Short)));
-        assert_eq!(
-            parse_method_desc("(BS)S"),
-            Some((vec![Ty::Byte, Ty::Short], Ty::Short))
-        );
-    }
-
-    #[test]
-    fn method_generic_signature_retains_interformal_bounds() {
-        let signature = parse_method_gsig(
-            "<T:Ljava/lang/Object;R:Ljava/lang/Object;C::Ljava/util/Collection<-TR;>;>\
-             ([TT;TC;Lkotlin/jvm/functions/Function1<-TT;+TR;>;)TC;",
-        )
-        .expect("generic signature");
-        assert_eq!(signature.formals, ["T", "R", "C"]);
-        assert_eq!(
-            signature.formal_bounds[2],
-            [Ty::platform_nullable(Ty::obj_args(
-                "kotlin/collections/Collection",
-                &[Ty::in_projection(Ty::ty_param(
-                    "R",
-                    Ty::platform_nullable(Ty::obj("kotlin/Any")),
-                ))],
-            ))]
-        );
-    }
-
-    #[test]
-    fn java_flexibility_recurses_through_formal_bounds_and_projections() {
-        let (_, bounds, _) =
-            parse_formals("<T:Ljava/util/List<Ljava/lang/String;>;>Ljava/lang/Object;");
-        assert_eq!(
-            bounds,
-            [vec![Ty::platform_nullable(Ty::obj_args(
-                "kotlin/collections/List",
-                &[Ty::platform_nullable(Ty::String)],
-            ))]],
-        );
-
-        assert_eq!(
-            java_type_nullability(
-                Ty::obj_args("java/util/List", &[Ty::in_projection(Ty::String)]),
-                None,
-            ),
-            Ty::platform_nullable(Ty::obj_args(
-                "java/util/List",
-                &[Ty::in_projection(Ty::platform_nullable(Ty::String))],
-            )),
-        );
-
-        let base = Ty::obj("fixtures/Base");
-        assert_eq!(
-            java_type_nullability(Ty::array(base), None),
-            Ty::platform_nullable(Ty::obj_args("kotlin/Array", &[Ty::platform_nullable(base)],)),
-            "the Java provider must retain the flexible reference-array lower bound",
-        );
-
-        assert_eq!(
-            java_type_nullability(Ty::fun(vec![Ty::String, Ty::Int], Ty::String), None),
-            Ty::platform_nullable(Ty::fun(
-                vec![Ty::platform_nullable(Ty::String), Ty::Int],
-                Ty::platform_nullable(Ty::String),
-            )),
-            "Java publication makes function containers and reference positions flexible without boxing scalar positions",
-        );
-    }
-
-    #[test]
-    fn raw_signature_marks_only_outer_method_formal_returns_flexible() {
-        // The policy belongs to the exact declaration shape: a method-owned outer formal denotes an
-        // unannotated reference result, while a nested occurrence already has a reference container and
-        // an owner formal is not rebound by the method call. This prevents broad classpath provenance from
-        // changing unrelated generic returns.
-        let direct = parse_method_gsig("<T:Ljava/lang/Object;>(TT;)TT;").expect("direct formal");
-        assert_eq!(direct.return_policy, GenericReturnPolicy::FlexibleReference);
-
-        let nested = parse_method_gsig("<T:Ljava/lang/Object;>(TT;)Ljava/util/List<TT;>;")
-            .expect("nested formal");
-        assert_eq!(nested.return_policy, GenericReturnPolicy::Exact);
-
-        let owner = parse_method_gsig("(TT;)TT;").expect("owner formal");
-        assert_eq!(owner.return_policy, GenericReturnPolicy::Exact);
-    }
-
-    #[test]
-    fn ordinary_generic_signatures_retain_projection_and_inner_class_parsing() {
-        let method =
-            parse_method_gsig("(Ljava/util/List<+Ljava/lang/String;>;)Ljava/util/List<*>;")
-                .expect("method signature");
-        assert_eq!(
-            method.params,
-            [Ty::obj_args(
-                "kotlin/collections/List",
-                &[Ty::out_projection(Ty::String)]
-            )]
-        );
-        assert_eq!(
-            method.ret,
-            Ty::obj_args(
-                "kotlin/collections/List",
-                &[Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")))]
-            )
-        );
-
-        let (_, _, supertypes) = parse_class_gsig(
-            "Ljava/lang/Object;\
-             Lfixture/Outer<Ljava/lang/Integer;>.Inner<Ljava/lang/Long;>;",
-        )
-        .expect("class signature");
-        assert_eq!(
-            supertypes[1],
-            Ty::obj_args("fixture/Outer$Inner", &[Ty::obj("java/lang/Long")])
-        );
-    }
-
-    #[test]
-    fn class_generic_signature_canonicalizes_unsigned_arguments() {
-        let (_, _, supertypes) =
-            parse_class_gsig("Ljava/lang/Object;Ljava/lang/Iterable<Lkotlin/UInt;>;")
-                .expect("class signature");
-        assert_eq!(
-            supertypes[1],
-            Ty::obj_args("kotlin/collections/Iterable", &[Ty::UInt])
-        );
-    }
-
-    #[test]
-    fn class_generic_signature_retains_formal_bounds() {
-        let (formals, bounds, _) =
-            parse_class_gsig("<T:Ljava/lang/CharSequence;>Ljava/lang/Object;")
-                .expect("class signature");
-        assert_eq!(formals, ["T"]);
-        assert_eq!(
-            bounds,
-            [vec![Ty::platform_nullable(Ty::obj("kotlin/CharSequence"))]]
-        );
-    }
-
-    #[test]
-    fn function_generic_signature_canonicalizes_bottom_and_unit_returns() {
-        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
-            return;
-        };
-        let libraries = initialized_libraries(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(vec![stdlib]),
-        ));
-        let unit = libraries.semanticize_jvm_generic_sig(
-            parse_method_gsig("(Lkotlin/jvm/functions/Function0<Lkotlin/Unit;>;)V")
-                .expect("Unit function signature"),
-        );
-        assert_eq!(unit.params, [Ty::fun(Vec::new(), Ty::Unit)]);
-
-        let bottom = libraries.semanticize_jvm_generic_sig(
-            parse_method_gsig("(Lkotlin/jvm/functions/Function0<Lkotlin/Nothing;>;)V")
-                .expect("Nothing function signature"),
-        );
-        assert_eq!(bottom.params, [Ty::fun(Vec::new(), Ty::Nothing)]);
-    }
-
-    #[test]
-    fn function_generic_signature_consumes_function_interface_variance() {
-        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
-            return;
-        };
-        let libraries = initialized_libraries(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(vec![stdlib]),
-        ));
-        let signature = libraries.semanticize_jvm_generic_sig(
-            parse_method_gsig(
-                "<T:Ljava/lang/Object;>(Lkotlin/jvm/functions/Function1<\
-                 -Ljava/lang/String;+TT;>;)TT;",
-            )
-            .expect("function-typed generic signature"),
-        );
-        assert_eq!(
-            signature.params,
-            [Ty::fun(
-                vec![Ty::String],
-                Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any"))),
-            )]
-        );
-    }
-
-    #[test]
-    fn java_function_signature_keeps_boxed_slot_flexibility_when_semanticized() {
-        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
-            return;
-        };
-        let libraries = initialized_libraries(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(vec![stdlib]),
-        ));
-        let signature = libraries
-            .publish_java_member_generic_signature(
-                Some(
-                    "()Lkotlin/jvm/functions/Function1<\
-                     Ljava/lang/String;Ljava/lang/Integer;>;",
-                ),
-                &Default::default(),
-                &[],
-                None,
-                None,
-            )
-            .expect("Java function-typed generic signature");
-        assert_eq!(
-            signature.ret,
-            Ty::platform_nullable(Ty::fun(
-                vec![Ty::platform_nullable(Ty::String)],
-                Ty::platform_nullable(Ty::Int),
-            )),
-            "Java reference flexibility must be recorded before Function1 slots are unboxed",
-        );
-    }
-
-    #[test]
-    fn field_generic_signature_must_be_complete_and_concrete() {
-        assert_eq!(
-            parse_concrete_field_gsig(
-                "Ljava/util/List<Lkotlin/collections/Set<Ljava/lang/Integer;>;>;",
-                "Ljava/util/List;",
-            ),
-            Some(Ty::obj_args(
-                "kotlin/collections/List",
-                &[Ty::obj_args("kotlin/collections/Set", &[Ty::Int])],
-            ))
-        );
-        assert_eq!(
-            parse_concrete_field_gsig(
-                "Ljava/util/List<Ljava/lang/String;>;junk",
-                "Ljava/util/List;",
-            ),
-            None
-        );
-        assert_eq!(
-            parse_concrete_field_gsig("Ljava/util/List<Ljava/lang/String;", "Ljava/util/List;",),
-            None
-        );
-    }
-
-    #[test]
-    fn field_generic_signature_rejects_wildcards_and_projections() {
-        assert_eq!(
-            parse_field_gsig(
-                "TT;",
-                "Ljava/lang/CharSequence;",
-                &[(
-                    "T".to_string(),
-                    Ty::platform_nullable(Ty::obj("kotlin/CharSequence")),
-                )]
-                .into_iter()
-                .collect(),
-            )
-            .map(|(ty, _)| ty),
-            Some(Ty::ty_param(
-                "T",
-                Ty::platform_nullable(Ty::obj("kotlin/CharSequence"))
-            )),
-            "a field type variable must erase through, and carry, its declaring-class bound"
-        );
-        for signature in [
-            "Ljava/util/List<*>;",
-            "Ljava/util/List<+Ljava/lang/String;>;",
-            "Ljava/util/List<-Ljava/lang/String;>;",
-            "Ljava/util/List<Ljava/util/Set<+Ljava/lang/String;>;>;",
-            "Lkotlin/jvm/functions/Function1<-Ljava/lang/String;+Ljava/lang/Long;>;",
-        ] {
-            let descriptor = format!("L{};", &signature[1..signature.find('<').unwrap()]);
-            assert_eq!(
-                parse_concrete_field_gsig(signature, &descriptor),
-                None,
-                "accepted lossy field signature {signature}"
-            );
-        }
-    }
-
-    #[test]
-    fn field_generic_signature_recurses_through_function_types() {
-        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
-            return;
-        };
-        let libraries = initialized_libraries(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(vec![stdlib]),
-        ));
-        let raw = parse_concrete_field_gsig(
-            "Lkotlin/jvm/functions/Function1<\
-             Ljava/util/List<Ljava/lang/Integer;>;\
-             Ljava/util/Set<Ljava/lang/Long;>;>;",
-            "Lkotlin/jvm/functions/Function1;",
-        )
-        .expect("concrete generic field signature");
-        assert_eq!(
-            libraries.semanticize_jvm_type(raw),
-            Ty::fun(
-                vec![Ty::obj_args("kotlin/collections/List", &[Ty::Int])],
-                Ty::obj_args("kotlin/collections/Set", &[Ty::Long]),
-            )
-        );
-        assert_eq!(
-            parse_concrete_field_gsig(
-                "Lkotlin/jvm/functions/Function1<\
-                 Ljava/util/List<TT;>;\
-                 Ljava/util/Set<Ljava/lang/Long;>;>;",
-                "Lkotlin/jvm/functions/Function1;",
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn field_generic_signature_requires_unparameterized_inner_class_owners() {
-        assert_eq!(
-            parse_concrete_field_gsig(
-                "Lfixture/Outer<Ljava/lang/Integer;>.\
-                 Inner<Ljava/lang/Long;>.\
-                 Leaf<Ljava/lang/Double;>;",
-                "Lfixture/Outer$Inner$Leaf;",
-            ),
-            None
-        );
-        assert_eq!(
-            parse_concrete_field_gsig(
-                "Lfixture/Outer.Inner<Ljava/lang/Long;>.Leaf<Ljava/lang/Double;>;",
-                "Lfixture/Outer$Inner$Leaf;",
-            ),
-            None
-        );
-        assert_eq!(
-            parse_concrete_field_gsig(
-                "Lfixture/Outer.Inner.Leaf<Ljava/lang/Double;>;",
-                "Lfixture/Outer$Inner$Leaf;",
-            ),
-            Some(Ty::obj_args("fixture/Outer$Inner$Leaf", &[Ty::Double]))
-        );
-    }
-
-    #[test]
-    fn field_function_shape_comes_from_the_classifier_declaration() {
-        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
-            return;
-        };
-        let libraries = initialized_libraries(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(vec![stdlib]),
-        ));
-        let valid = parse_concrete_field_gsig(
-            "Lkotlin/jvm/functions/Function2<\
-                 Ljava/lang/Integer;\
-                 Ljava/lang/Long;\
-                 Ljava/lang/String;>;",
-            "Lkotlin/jvm/functions/Function2;",
-        )
-        .expect("valid generic field signature");
-        assert_eq!(
-            libraries.semanticize_jvm_type(valid),
-            Ty::fun(vec![Ty::Int, Ty::Long], Ty::String),
-        );
-
-        for signature in [
-            "Lkotlin/jvm/functions/Function1<Ljava/lang/String;>;",
-            "Lkotlin/jvm/functions/Function1<\
-             Ljava/lang/Integer;Ljava/lang/Long;Ljava/lang/String;>;",
-            "Lkotlin/jvm/functions/FunctionX<Ljava/lang/String;>;",
-            "Lkotlin/jvm/functions/Function1Extra<Ljava/lang/String;>;",
-            "Lkotlin/jvm/functions/Function+1<Ljava/lang/String;Ljava/lang/String;>;",
-            "Lkotlin/jvm/functions/Function<Ljava/lang/String;>;",
-        ] {
-            let descriptor = format!("L{};", &signature[1..signature.find('<').unwrap()]);
-            let raw = parse_concrete_field_gsig(signature, &descriptor)
-                .expect("well-formed nominal generic signature");
-            assert!(
-                !matches!(libraries.semanticize_jvm_type(raw), Ty::Fun(_)),
-                "invented a function shape for {signature}"
-            );
-        }
-    }
-
-    #[test]
-    fn field_generic_signature_requires_reference_and_matching_erasure() {
-        assert_eq!(parse_concrete_field_gsig("I", "I"), None);
-        assert_eq!(parse_concrete_field_gsig("V", "V"), None);
-        assert_eq!(parse_concrete_field_gsig("[V", "[V"), None);
-        assert_eq!(
-            parse_concrete_field_gsig("[I", "[I"),
-            Some(Ty::array(Ty::Int))
-        );
-        assert_eq!(
-            parse_concrete_field_gsig("Ljava/util/List<Ljava/lang/Integer;>;", "Ljava/util/Set;",),
-            None
-        );
-        assert_eq!(
-            parse_concrete_field_gsig("Ljava/util/List<TT;>;", "Ljava/util/List;"),
-            None
         );
     }
 }

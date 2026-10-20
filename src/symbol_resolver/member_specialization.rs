@@ -142,18 +142,22 @@ pub(super) fn preserve_receiver_identity_bindings(
     actual: Ty,
     bindings: &mut GSigBinds,
 ) {
-    match (declared.non_null(), actual.non_null()) {
-        (Ty::TyParam(declared, _), actual @ Ty::TyParam(found, _)) if declared == found => {
-            bindings.entry(declared.to_string()).or_insert(actual);
+    match (declared.non_null().kind(), actual.non_null().kind()) {
+        (TyKind::TyParam(declared, _), TyKind::TyParam(found, _)) if declared == found => {
+            bindings
+                .entry(declared.to_string())
+                .or_insert(actual.non_null());
         }
-        (Ty::Obj(declared, declared_args), Ty::Obj(found, actual_args)) if declared == found => {
+        (TyKind::Obj(declared, declared_args), TyKind::Obj(found, actual_args))
+            if declared == found =>
+        {
             for (&declared, &actual) in declared_args.iter().zip(actual_args) {
                 preserve_receiver_identity_bindings(declared, actual, bindings);
             }
         }
-        (Ty::InProjection(declared), Ty::InProjection(actual))
-        | (Ty::OutProjection(declared), Ty::OutProjection(actual)) => {
-            preserve_receiver_identity_bindings(*declared, *actual, bindings);
+        (TyKind::InProjection(declared), TyKind::InProjection(actual))
+        | (TyKind::OutProjection(declared), TyKind::OutProjection(actual)) => {
+            preserve_receiver_identity_bindings(declared, actual, bindings);
         }
         _ => {}
     }
@@ -198,20 +202,24 @@ fn specialize_member_type_with_unbound(
                     binding.non_null()
                 }
             };
-            match (position, binding) {
+            match (position, binding.kind()) {
                 // The projection already carries the capture's readable bound. Applying the
                 // declaration bound again would silently narrow the actual capture before a
                 // selected-call or recovery consumer observes its value type.
-                (TypePosition::Out, Ty::OutProjection(inner) | Ty::StarProjection(inner)) => *inner,
-                (TypePosition::In, Ty::OutProjection(_) | Ty::StarProjection(_)) => Ty::Nothing,
-                (TypePosition::Out, Ty::InProjection(_)) => bound,
-                (TypePosition::In, Ty::InProjection(inner)) => adjusted(*inner),
+                (
+                    TypePosition::Out,
+                    TyKind::OutProjection(inner) | TyKind::StarProjection(inner),
+                ) => inner,
+                (TypePosition::In, TyKind::OutProjection(_) | TyKind::StarProjection(_)) => {
+                    Ty::Nothing
+                }
+                (TypePosition::Out, TyKind::InProjection(_)) => bound,
+                (TypePosition::In, TyKind::InProjection(inner)) => adjusted(inner),
                 (
                     TypePosition::Invariant,
-                    projected
-                    @ (Ty::InProjection(_) | Ty::OutProjection(_) | Ty::StarProjection(_)),
-                ) => projected,
-                (_, binding) => adjusted(binding),
+                    TyKind::InProjection(_) | TyKind::OutProjection(_) | TyKind::StarProjection(_),
+                ) => binding,
+                _ => adjusted(binding),
             }
         }
         TyKind::Fun(signature) => Ty::fun_with_shape(

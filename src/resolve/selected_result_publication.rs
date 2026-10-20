@@ -418,11 +418,9 @@ fn publish_selected(declared: Ty, selected: Ty, bindings: &HashMap<String, Ty>) 
         (TyKind::Nullable(declared), TyKind::Nullable(selected)) => {
             Ty::nullable(publish_selected(declared, selected, bindings).platform_lower_bound())
         }
-        (TyKind::DefinitelyNotNull(declared), TyKind::DefinitelyNotNull(selected)) => {
-            Ty::DefinitelyNotNull(crate::types::intern_ty(publish_selected(
-                declared, selected, bindings,
-            )))
-        }
+        (TyKind::DefinitelyNotNull(declared), TyKind::DefinitelyNotNull(selected)) => Ty::from(
+            TyKind::DefinitelyNotNull(publish_selected(declared, selected, bindings)),
+        ),
         (TyKind::InProjection(declared), TyKind::InProjection(selected)) => {
             Ty::in_projection(publish_selected(declared, selected, bindings))
         }

@@ -364,7 +364,7 @@ fn expected_supertype_contextualizes_nested_constructor_lambdas() {
     };
     assert_eq!(call.substitutions.len(), 1);
     assert!(call.substitutions[0].value.get().is_ty_param());
-    assert!(matches!(root.ty.get().type_args(), [Ty::TyParam(..)]));
+    assert!(matches!(root.ty.get().type_args(), [argument] if argument.is_ty_param()));
 }
 
 #[test]
@@ -455,7 +455,7 @@ fn expected_primary_constructor_result_fixes_a_member_generic_lambda_parameter()
         .expect("member-generic constructor call");
     assert!(matches!(
         constructor.0.ty.get().type_args(),
-        [Ty::TyParam(..), Ty::TyParam(..)]
+        [first, second] if first.is_ty_param() && second.is_ty_param()
     ));
     assert_eq!(constructor.1.substitutions.len(), 2);
     assert!(constructor
@@ -1074,7 +1074,7 @@ fn projected_generic_constructor_parameter_keeps_symbolic_argument_in_fir() {
 
     let root = body.expr(root_expression(&body)).expect("constructor call");
     assert!(matches!(root.kind, FirExprKind::ConstructorCall(_)));
-    assert!(matches!(root.ty.get().type_args(), [Ty::TyParam(..)]));
+    assert!(matches!(root.ty.get().type_args(), [argument] if argument.is_ty_param()));
 }
 
 #[test]
@@ -1111,7 +1111,7 @@ fun <T> makeOut(buildee: Buildee<T>) = OutBuildee(buildee)
         let root = body.expr(root_expression(&body)).expect("constructor call");
         assert!(matches!(root.kind, FirExprKind::ConstructorCall(_)));
         assert!(
-            matches!(root.ty.get().type_args(), [Ty::TyParam(..)]),
+            matches!(root.ty.get().type_args(), [argument] if argument.is_ty_param()),
             "{function} inferred {:?}",
             root.ty.get()
         );

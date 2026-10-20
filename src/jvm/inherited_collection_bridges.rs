@@ -840,14 +840,14 @@ fn reference_of(ty: Ty) -> Ty {
     if let Some(boxed) = ty.boxed_ref() {
         return boxed;
     }
-    match ty {
-        Ty::String => Ty::obj("java/lang/String"),
-        Ty::TyParam(_, bound) => reference_of(*bound),
-        Ty::DefinitelyNotNull(inner) => reference_of(*inner),
-        Ty::StarProjection(_) | Ty::OutProjection(_) | Ty::InProjection(_) => {
+    match ty.kind() {
+        TyKind::STRING => Ty::obj("java/lang/String"),
+        TyKind::TyParam(_, bound) => reference_of(bound),
+        TyKind::DefinitelyNotNull(inner) => reference_of(inner),
+        TyKind::StarProjection(_) | TyKind::OutProjection(_) | TyKind::InProjection(_) => {
             Ty::obj("java/lang/Object")
         }
-        Ty::Obj(name, arguments) => Ty::obj_args_name(name, arguments.as_slice()),
+        TyKind::Obj(name, arguments) => Ty::obj_args_name(name, arguments.as_slice()),
         _ => Ty::obj("java/lang/Object"),
     }
 }

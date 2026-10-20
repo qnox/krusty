@@ -605,29 +605,31 @@ pub(crate) fn collect_generic_identity_bindings(
     formals: &[String],
     bindings: &mut GSigBinds,
 ) {
-    match (declared, actual) {
-        (Ty::TyParam(declared, _), actual @ Ty::TyParam(found, _))
+    match (declared.kind(), actual.kind()) {
+        (TyKind::TyParam(declared, _), TyKind::TyParam(found, _))
             if declared == found && formals.iter().any(|formal| formal == declared) =>
         {
             bindings.entry(declared.to_string()).or_insert(actual);
         }
-        (Ty::InProjection(declared), Ty::InProjection(actual))
-        | (Ty::OutProjection(declared), Ty::OutProjection(actual))
-        | (Ty::Nullable(declared), Ty::Nullable(actual))
-        | (Ty::PlatformNullable(declared), Ty::PlatformNullable(actual)) => {
-            collect_generic_identity_bindings(*declared, *actual, formals, bindings);
+        (TyKind::InProjection(declared), TyKind::InProjection(actual))
+        | (TyKind::OutProjection(declared), TyKind::OutProjection(actual))
+        | (TyKind::Nullable(declared), TyKind::Nullable(actual))
+        | (TyKind::PlatformNullable(declared), TyKind::PlatformNullable(actual)) => {
+            collect_generic_identity_bindings(declared, actual, formals, bindings);
         }
-        (Ty::Nullable(declared) | Ty::PlatformNullable(declared), actual) if !null_only(actual) => {
-            collect_generic_identity_bindings(*declared, actual.non_null(), formals, bindings);
+        (TyKind::Nullable(declared) | TyKind::PlatformNullable(declared), _)
+            if !null_only(actual) =>
+        {
+            collect_generic_identity_bindings(declared, actual.non_null(), formals, bindings);
         }
-        (Ty::Obj(declared_name, declared_args), Ty::Obj(actual_name, actual_args))
+        (TyKind::Obj(declared_name, declared_args), TyKind::Obj(actual_name, actual_args))
             if declared_name == actual_name =>
         {
             for (&declared, &actual) in declared_args.iter().zip(actual_args) {
                 collect_generic_identity_bindings(declared, actual, formals, bindings);
             }
         }
-        (Ty::Fun(declared), Ty::Fun(actual))
+        (TyKind::Fun(declared), TyKind::Fun(actual))
             if declared.params.len() == actual.params.len()
                 && declared.context_count == actual.context_count
                 && declared.has_receiver == actual.has_receiver
@@ -706,7 +708,12 @@ pub(crate) fn callable_reference_expected_bindings(
     bindings: &GSigBinds,
     selected_by_prior_callable_references: &crate::fx_hash::HashSet<String>,
 ) -> GSigBinds {
-    let Some(shape @ Ty::Fun(_)) = signature.params.get(parameter).copied().map(Ty::non_null)
+    let Some(shape) = signature
+        .params
+        .get(parameter)
+        .copied()
+        .map(Ty::non_null)
+        .filter(|shape| shape.is_fun())
     else {
         return bindings.clone();
     };
@@ -1162,11 +1169,11 @@ pub(super) fn unify_inferred_ty_impl(
             // The variable's definitely-non-null face is the same identity: shaping `T!` against
             // `T!` reaches this collector as `T` against `T & Any`. Binding `T` to that face turns
             // the flexible identity into a new constraint and can later widen the result to `Any`.
-            if matches!(
-                actual.kind(),
-                TyKind::TyParam(actual_name, _) | TyKind::DefinitelyNotNull(Ty::TyParam(actual_name, _))
-                    if actual_name == name
-            ) {
+            let identity = match actual.kind() {
+                TyKind::DefinitelyNotNull(inner) => inner,
+                _ => actual,
+            };
+            if matches!(identity.kind(), TyKind::TyParam(actual_name, _) if actual_name == name) {
                 return;
             }
             match binds.entry(name.to_string()) {
@@ -1253,9 +1260,12 @@ pub(crate) fn merge_inferred_ty_from_symbols(
     // parameter identity and tightened bound agree. Keep the provenance-bearing form at that join
     // so substituting the inferred result through `R?` can reopen the original caller `T?`.
     let same_parameter_dnn = |provenance: Ty, compact: Ty| match provenance.kind() {
-        TyKind::DefinitelyNotNull(Ty::TyParam(name, bound)) => {
-            compact == Ty::ty_param(name.as_str(), bound.definitely_non_null())
-        }
+        TyKind::DefinitelyNotNull(inner) => match inner.kind() {
+            TyKind::TyParam(name, bound) => {
+                compact == Ty::ty_param(name.as_str(), bound.definitely_non_null())
+            }
+            _ => false,
+        },
         _ => false,
     };
     if same_parameter_dnn(current, actual) {

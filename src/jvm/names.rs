@@ -429,25 +429,24 @@ fn descriptor_shapes_match(left: Ty, right: Ty) -> bool {
 }
 
 fn descriptor_shape(ty: Ty) -> DescriptorShape {
-    match ty {
-        Ty::Pending | Ty::Error => {
+    match ty.kind() {
+        TyKind::Pending | TyKind::Error => {
             unreachable!("a not-determined type reached {}", "a JVM descriptor")
         }
-        Ty::Int | Ty::UInt => DescriptorShape::Primitive(b'I'),
-        Ty::Byte | Ty::UByte => DescriptorShape::Primitive(b'B'),
-        Ty::Short | Ty::UShort => DescriptorShape::Primitive(b'S'),
-        Ty::Long | Ty::ULong => DescriptorShape::Primitive(b'J'),
-        Ty::Float => DescriptorShape::Primitive(b'F'),
-        Ty::Double => DescriptorShape::Primitive(b'D'),
-        Ty::Boolean => DescriptorShape::Primitive(b'Z'),
-        Ty::Char => DescriptorShape::Primitive(b'C'),
-        Ty::Unit => DescriptorShape::Primitive(b'V'),
-        Ty::String => {
+        TyKind::INT | TyKind::UINT => DescriptorShape::Primitive(b'I'),
+        TyKind::BYTE | TyKind::UBYTE => DescriptorShape::Primitive(b'B'),
+        TyKind::SHORT | TyKind::USHORT => DescriptorShape::Primitive(b'S'),
+        TyKind::LONG | TyKind::ULONG => DescriptorShape::Primitive(b'J'),
+        TyKind::FLOAT => DescriptorShape::Primitive(b'F'),
+        TyKind::DOUBLE => DescriptorShape::Primitive(b'D'),
+        TyKind::BOOLEAN => DescriptorShape::Primitive(b'Z'),
+        TyKind::CHAR => DescriptorShape::Primitive(b'C'),
+        TyKind::Unit => DescriptorShape::Primitive(b'V'),
+        TyKind::STRING => {
             DescriptorShape::Class(classfile_internal_name_of(crate::types::wk::string()))
         }
-        Ty::Obj(name, args) => {
-            let object = Ty::Obj(name, args);
-            if object.is_reference_array() {
+        TyKind::Obj(name, args) => {
+            if ty.is_reference_array() {
                 let element = args
                     .first()
                     .copied()
@@ -460,19 +459,19 @@ fn descriptor_shape(ty: Ty) -> DescriptorShape {
                 }
                 return DescriptorShape::Array(element);
             }
-            if let Some(element) = object.array_elem() {
+            if let Some(element) = ty.array_elem() {
                 return DescriptorShape::Array(element);
             }
             DescriptorShape::Class(classfile_internal_name_of(name))
         }
-        Ty::Nothing => {
+        TyKind::Nothing => {
             DescriptorShape::Class(classfile_internal_name_of(crate::types::wk::java_void()))
         }
-        Ty::Null => DescriptorShape::Class(classfile_internal_name_of(crate::types::wk::any())),
-        Ty::Fun(signature) => DescriptorShape::Class(function_classfile_name(
+        TyKind::Null => DescriptorShape::Class(classfile_internal_name_of(crate::types::wk::any())),
+        TyKind::Fun(signature) => DescriptorShape::Class(function_classfile_name(
             signature.params.len() + usize::from(signature.suspend),
         )),
-        Ty::Nullable(inner) => match *inner {
+        TyKind::Nullable(inner) => match inner {
             Ty::Unit => {
                 DescriptorShape::Class(classfile_internal_name_of(crate::types::wk::unit()))
             }
@@ -490,15 +489,15 @@ fn descriptor_shape(ty: Ty) -> DescriptorShape {
             }
             other => descriptor_shape(other.boxed_ref().unwrap_or(other)),
         },
-        Ty::DefinitelyNotNull(inner) => descriptor_shape(*inner),
-        Ty::Intersection(parts) => descriptor_shape(
+        TyKind::DefinitelyNotNull(inner) => descriptor_shape(inner),
+        TyKind::Intersection(parts) => descriptor_shape(
             super::physical_type::intersection_jvm_carrier(parts.as_slice()),
         ),
-        Ty::TyParam(_, bound)
-        | Ty::PlatformNullable(bound)
-        | Ty::OutProjection(bound)
-        | Ty::StarProjection(bound) => descriptor_shape(*bound),
-        Ty::InProjection(_) => {
+        TyKind::TyParam(_, bound)
+        | TyKind::PlatformNullable(bound)
+        | TyKind::OutProjection(bound)
+        | TyKind::StarProjection(bound) => descriptor_shape(bound),
+        TyKind::InProjection(_) => {
             DescriptorShape::Class(classfile_internal_name_of(crate::types::wk::java_object()))
         }
     }
@@ -546,35 +545,37 @@ pub(crate) fn anewarray_element_class(element: Ty) -> String {
 /// `kotlin/Nothing.class` in kotlin-stdlib), so no name here could be right. Common lowering
 /// settles `is Nothing` before a backend sees it.
 pub(crate) fn instanceof_internal_name(t: Ty) -> String {
-    match t {
-        Ty::String => "java/lang/String".to_string(),
-        Ty::Nullable(inner) | Ty::PlatformNullable(inner) if inner.is_unsigned() => match *inner {
-            Ty::UByte => "kotlin/UByte".to_string(),
-            Ty::UShort => "kotlin/UShort".to_string(),
-            Ty::UInt => "kotlin/UInt".to_string(),
-            Ty::ULong => "kotlin/ULong".to_string(),
-            _ => unreachable!("is_unsigned accepts only the four unsigned scalar types"),
-        },
-        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => inner
+    match t.kind() {
+        TyKind::STRING => "java/lang/String".to_string(),
+        TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) if inner.is_unsigned() => {
+            match inner {
+                Ty::UByte => "kotlin/UByte".to_string(),
+                Ty::UShort => "kotlin/UShort".to_string(),
+                Ty::UInt => "kotlin/UInt".to_string(),
+                Ty::ULong => "kotlin/ULong".to_string(),
+                _ => unreachable!("is_unsigned accepts only the four unsigned scalar types"),
+            }
+        }
+        TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => inner
             .boxed_ref()
             .and_then(Ty::obj_internal)
             .map(|name| crate::jvm::names::classfile_internal_name_of(name).to_string())
-            .unwrap_or_else(|| instanceof_internal_name(*inner)),
+            .unwrap_or_else(|| instanceof_internal_name(inner)),
         // An array's reference identity is its descriptor (`[I`, `[Ljava/lang/String;`) — checked before
         // the `Obj` arm since arrays are now `Obj("kotlin/Array")`/`Obj("kotlin/IntArray")` too.
-        t if t.is_array() => type_descriptor(t),
+        _ if t.is_array() => type_descriptor(t),
         // Erase a Kotlin built-in name (`kotlin/collections/MutableList`) to its JVM identity here at the
         // bytecode boundary, so `instanceof`/`checkcast`/method-owner refs never leak a Kotlin-only name.
-        Ty::Obj(n, _) => crate::jvm::names::classfile_internal_name_of(n).to_string(),
+        TyKind::Obj(n, _) => crate::jvm::names::classfile_internal_name_of(n).to_string(),
         // A function type's reference identity is its `kotlin/jvm/functions/FunctionN` interface, so
         // `x is Function1<*, *>` / `x as (A) -> B` test/cast against that class, not `Object`.
-        Ty::Fun(signature) => crate::jvm::names::function_interface_internal_name(
+        TyKind::Fun(signature) => crate::jvm::names::function_interface_internal_name(
             signature.params.len() + usize::from(signature.suspend),
         ),
         // `Unit` is a real class with one instance, so `x is Unit` is a real question about the
         // object. Without this arm it fell to the erasure below and asked `instanceof
         // java/lang/Object`, which every non-null value passes.
-        Ty::Unit => "kotlin/Unit".to_string(),
+        TyKind::Unit => "kotlin/Unit".to_string(),
         // Everything left is erased: an unbounded type parameter tests against `Object`, which is
         // what Kotlin's erasure means and what kotlinc emits.
         _ => "java/lang/Object".to_string(),
@@ -928,7 +929,7 @@ mod tests {
             Ty::obj("kotlin/Function1"),
             Ty::obj("kotlin/jvm/functions/Function1"),
             Ty::ty_param("T", Ty::obj("kotlin/CharSequence")),
-            Ty::DefinitelyNotNull(crate::types::intern_ty(Ty::ty_param(
+            Ty::from(TyKind::DefinitelyNotNull(Ty::ty_param(
                 "D",
                 Ty::nullable(Ty::obj("kotlin/Any")),
             ))),
@@ -992,11 +993,11 @@ mod tests {
             ("function return error", Ty::fun(Vec::new(), Ty::Error)),
             (
                 "definitely non-null pending",
-                Ty::DefinitelyNotNull(crate::types::intern_ty(Ty::Pending)),
+                Ty::from(TyKind::DefinitelyNotNull(Ty::Pending)),
             ),
             (
                 "definitely non-null error",
-                Ty::DefinitelyNotNull(crate::types::intern_ty(Ty::Error)),
+                Ty::from(TyKind::DefinitelyNotNull(Ty::Error)),
             ),
         ];
 

@@ -85,7 +85,7 @@ fn property_reference_receiver(receiver: Ty, mutable: bool) -> Option<(u8, &'sta
 fn property_reference_metadata_parameter(ty: Ty) -> bool {
     let ty = ty.non_null();
     ty.obj_internal() == Some(crate::types::type_name("kotlin/reflect/KProperty"))
-        && matches!(ty.type_args(), [Ty::StarProjection(_)])
+        && matches!(ty.type_args(), [argument] if argument.is_star_projection())
 }
 
 pub(crate) fn function_semantic_role(
@@ -445,10 +445,13 @@ fn with_index(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsi
     let class = receiver.obj_internal();
     let (element, container) = if facts.package == wk::kotlin_collections_package() {
         if receiver.is_reference_array() {
-            let [Ty::OutProjection(element)] = receiver.type_args() else {
+            let [argument] = receiver.type_args() else {
                 return None;
             };
-            (generic_element(**element)?, wk::iterable())
+            let TyKind::OutProjection(element) = argument.kind() else {
+                return None;
+            };
+            (generic_element(element)?, wk::iterable())
         } else if receiver.is_array() {
             if facts.type_parameter_count != 0 {
                 return None;

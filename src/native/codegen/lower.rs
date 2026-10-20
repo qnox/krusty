@@ -272,8 +272,7 @@ pub fn lower_file(
             export.singleton_member_receiver.is_some_and(|effect| {
                 effect.classifier() == classifier && !effect.evaluate_source()
             }) || export.singleton_extension_receiver.is_some_and(|effect| {
-                effect.semantic_type() == Ty::Obj(classifier, crate::types::TyList::EMPTY)
-                    && !effect.evaluate_source()
+                effect.semantic_type() == Ty::obj_name(classifier) && !effect.evaluate_source()
             })
         },
     );
@@ -515,7 +514,7 @@ impl<'a> FileLowering<'a> {
             // A value class's member takes the VALUE as `this`; its box reaches it through a
             // bridge. Every other member takes the object, as a reference.
             params.push(if self.values.is_value_class(owner) {
-                Ty::Obj(owner, crate::types::TyList::EMPTY)
+                Ty::obj_name(owner)
             } else {
                 any()
             });
@@ -756,7 +755,7 @@ impl<'a> FileLowering<'a> {
         // `this`, when there is one, is value slot 0 and the parameters follow it.
         let mut slots: Vec<Ty> = Vec::with_capacity(function.params.len() + 1);
         if let Some(owner) = function.dispatch_receiver {
-            slots.push(Ty::Obj(owner, crate::types::TyList::EMPTY));
+            slots.push(Ty::obj_name(owner));
         }
         slots.extend(super::super::captures::carried_parameters(
             self.ir,
@@ -767,7 +766,7 @@ impl<'a> FileLowering<'a> {
         // entries can deliberately be the holder's physical reference type.
         let mut semantic_slots = Vec::with_capacity(function.params.len() + 1);
         if let Some(owner) = function.dispatch_receiver {
-            semantic_slots.push(Ty::Obj(owner, crate::types::TyList::EMPTY));
+            semantic_slots.push(Ty::obj_name(owner));
         }
         semantic_slots.extend(function.params.iter().copied());
         let name = function.name.clone();

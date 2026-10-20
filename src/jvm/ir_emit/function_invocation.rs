@@ -175,9 +175,9 @@ impl Emitter<'_> {
                 semantic_scalar_adapter(ret, rt),
             );
         } else {
-            match rt {
-                Ty::Unit | Ty::Nothing => code.pop(),
-                Ty::String => {
+            match rt.kind() {
+                TyKind::Unit | TyKind::Nothing => code.pop(),
+                TyKind::STRING => {
                     let ci = self.cw.class_ref("java/lang/String");
                     code.checkcast(ci);
                 }
@@ -187,7 +187,7 @@ impl Emitter<'_> {
                 }
                 // `StackValue.coerce` between two equal types writes nothing: an erased result
                 // stays the `Object` the interface returned.
-                Ty::Obj(internal, _) if rt != Ty::obj("java/lang/Object") => {
+                TyKind::Obj(internal, _) if rt != Ty::obj("java/lang/Object") => {
                     let ci = self.cw.class_ref(&internal.render());
                     code.checkcast(ci);
                 }
