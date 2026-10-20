@@ -9,7 +9,11 @@ mod callable_availability;
 mod catalog_presence;
 mod classifier_facts;
 mod classpath_annotation_classes;
+mod collection_canonicalization;
 use classpath_annotation_classes::{classpath_annotation_targets, java_annotation_parameter_list};
+use collection_canonicalization::{
+    canonicalize_jvm_collections, overlay_metadata_collection_names,
+};
 #[cfg(test)]
 mod contract_dsl_tests;
 mod dependency_access_policy;
@@ -247,7 +251,7 @@ impl JvmLibraries {
             Ty::InProjection(inner) => Ty::in_projection(self.semanticize_jvm_type(*inner)),
             Ty::OutProjection(inner) => Ty::out_projection(self.semanticize_jvm_type(*inner)),
             Ty::StarProjection(inner) => Ty::star_projection(self.semanticize_jvm_type(*inner)),
-            Ty::TyParam(name, bound) => Ty::ty_param(name, self.semanticize_jvm_type(*bound)),
+            Ty::TyParam(name, bound) => Ty::ty_param(&name, self.semanticize_jvm_type(*bound)),
             _ => ty,
         }
     }
@@ -766,7 +770,7 @@ impl JvmLibraries {
                     .reified_type_parameter_ordinals()
                     .to_vec()
                     .into_boxed_slice(),
-                singleton_dispatch: Some(Box::new(singleton.clone())),
+                singleton_dispatch: Some(Box::new(singleton)),
                 physical_name: (function.jvm_name != function.kotlin_name)
                     .then(|| function.jvm_name.clone()),
                 reflection_name: Some(function.kotlin_name.clone()),
@@ -853,7 +857,7 @@ impl JvmLibraries {
                             inline: InlineKind| {
                 LibraryCallable {
                     inline,
-                    singleton_dispatch: Some(Box::new(singleton.clone())),
+                    singleton_dispatch: Some(Box::new(singleton)),
                     physical_name: (source_name != jvm_name).then(|| jvm_name.to_string()),
                     ..LibraryCallable::library(owner, source_name, params, ret, physical, desc)
                 }
@@ -1166,7 +1170,7 @@ impl JvmLibraries {
                 (Some(supers), _) => {
                     for sup in supers {
                         if let Ty::Obj(sup_internal, sup_args) = sup {
-                            let sup_targs = ty_subst_all(sup_args, &binds);
+                            let sup_targs = ty_subst_all(sup_args.as_slice(), &binds);
                             q.push_back((
                                 super::jvm_class_map::to_jvm_type_name(sup_internal),
                                 sup_targs,
@@ -1523,7 +1527,7 @@ impl JvmLibraries {
                     member.call_sig = CallSig::metadata_member(
                         member.params.len(),
                         declaration.params.names.clone(),
-                        declaration.params.defaults.clone(),
+                        declaration.params.defaults.to_vec(),
                         declaration.params.vararg,
                     );
                     // A constructor metadata key ending in the platform marker names an alternate
@@ -1644,7 +1648,7 @@ impl JvmLibraries {
                 // Claiming the fact there would repr a boxed value as unboxed. Without it the member
                 // falls back to the descriptor comparison, which classifies this case correctly.
                 if let Some(java_nullable) = platform_nullable_params.clone() {
-                    member.call_sig.platform_nullable_params = java_nullable;
+                    member.call_sig.platform_nullable_params = java_nullable.into();
                 }
                 member.signature = m.signature.clone();
                 // Kotlin metadata is the source declaration. Its generic signature retains Kotlin
@@ -1708,7 +1712,7 @@ impl JvmLibraries {
                     }
                 }
                 if let Some(java_nullable) = platform_nullable_params {
-                    member.call_sig.platform_nullable_params = java_nullable;
+                    member.call_sig.platform_nullable_params = java_nullable.into();
                     member.call_sig.result_enhancement =
                         java_result_enhancement(internal_name, m.return_nullability);
                 }
@@ -1728,7 +1732,7 @@ impl JvmLibraries {
                     if let (Some(gsig), Some(recv_fun)) = (
                         member.generic_sig.as_mut(),
                         signature
-                            .map(|params| params.recv_fun.clone())
+                            .map(|params| params.recv_fun)
                             .filter(|marks| marks.iter().any(|&is_receiver| is_receiver)),
                     ) {
                         mark_receiver_fun_params(gsig, &recv_fun, false);
@@ -2055,7 +2059,7 @@ impl JvmLibraries {
                 constructor.call_sig = CallSig::metadata_member(
                     constructor.params.len(),
                     signature.names.clone(),
-                    signature.defaults.clone(),
+                    signature.defaults.to_vec(),
                     signature.vararg,
                 );
                 constructors.insert(0, constructor);
@@ -2764,91 +2768,6 @@ fn has_free_ty_params(ty: Ty) -> bool {
 fn parse_concrete_field_gsig(signature: &str, erased_descriptor: &str) -> Option<Ty> {
     let (ty, has_free) = parse_field_gsig(signature, erased_descriptor, &Default::default())?;
     (!has_free).then_some(ty)
-}
-
-/// Overlay the `@Metadata`-declared collection classifiers onto a JVM-signature-derived type, level
-/// by level. The signature erases read-only vs mutable (`List`/`MutableList` both spell
-/// `java/util/List`) at EVERY nesting depth; the metadata type preserves it. At each level the
-/// metadata classifier replaces the signature's name ONLY when the shared builtin-erasure table says
-/// it is a Kotlin collection sibling mapping to the same JVM internal — guaranteeing the same
-/// collection family and arity —
-/// and the walk descends into type arguments only when the two classifiers agree (sibling or
-/// identical) with matching arity, so a divergent classifier (stale metadata) never forms an
-/// arity-mismatched or misaligned type. The base keeps its structure, primitives, and nullability;
-/// only names are taken from metadata.
-fn overlay_metadata_collection_names(base: Ty, meta: Ty) -> Ty {
-    // Nullability lives on the base (the resolution pipeline applies it separately); look through a
-    // metadata `T?` to its classifier.
-    let meta = meta.non_null();
-    let (Ty::Obj(base_name, base_args), Ty::Obj(meta_name, meta_args)) = (base, meta) else {
-        return base;
-    };
-    let sibling = super::jvm_class_map::is_kotlin_collection_type_name(meta_name)
-        && super::jvm_class_map::type_names_map_to_same_jvm_internal(meta_name, base_name);
-    if !sibling && base_name != meta_name {
-        return base;
-    }
-    let name = if sibling { meta_name } else { base_name };
-    if !base_args.is_empty() && base_args.len() == meta_args.len() {
-        let merged: Vec<Ty> = base_args
-            .iter()
-            .zip(meta_args.iter())
-            .map(|(&base_arg, &meta_arg)| overlay_metadata_collection_names(base_arg, meta_arg))
-            .collect();
-        Ty::obj_args_name(name, &merged)
-    } else {
-        // No arguments to align (a raw erased base) or an arity mismatch: the outer classifier is
-        // still sound to take, the arguments stay the base's own.
-        Ty::obj_args_name(name, base_args)
-    }
-}
-
-/// Recursively rewrite each JVM collection interface in `ty` (`java/util/List<T>` → its Kotlin
-/// `kotlin/collections/List<T>`), leaving every other type and the type arguments' own structure intact.
-fn canonicalize_jvm_collections(ty: Ty) -> Ty {
-    match ty {
-        // A boxed primitive wrapper (`java/lang/Integer`) — always a type ARGUMENT here (a top-level
-        // return is a collection with args, or handled by the suspend bare-class path). Its Kotlin type is
-        // the PRIMITIVE (`kotlin/Int` → `Ty::Int`), not a boxed `Obj("kotlin/Int")`: a signature spells a
-        // generic argument's primitive in its boxed JVM form (`List<Integer>`), but `List<Int>`'s element
-        // is `Int`, so `for (x in xs) { s += x }` / `xs.sum()` resolve and the element unboxes rather than
-        // comparing `Int` against a boxed reference.
-        Ty::Obj(name, []) => match super::jvm_class_map::wrapper_to_kotlin_prim_name(name) {
-            Some(prim) => super::classpath::kotlin_name_to_ty(prim),
-            None => Ty::obj_name(
-                super::jvm_class_map::jvm_collection_to_kotlin_type_name(name).unwrap_or(name),
-            ),
-        },
-        Ty::Obj(name, args) => {
-            // Canonicalize a JVM collection to its Kotlin form (`java/util/List` →
-            // `kotlin/collections/List`), so a member/`for`/extension keyed on the Kotlin collection
-            // resolves on the recovered type.
-            let kname =
-                super::jvm_class_map::jvm_collection_to_kotlin_type_name(name).unwrap_or(name);
-            let cargs: Vec<Ty> = args
-                .iter()
-                .map(|a| canonicalize_jvm_collections(*a))
-                .collect();
-            Ty::obj_args_name(kname, &cargs)
-        }
-        Ty::Fun(sig) => {
-            let params = sig
-                .params
-                .iter()
-                .map(|param| canonicalize_jvm_collections(*param))
-                .collect();
-            let ret = canonicalize_jvm_collections(sig.ret);
-            Ty::fun_with_shape(
-                params,
-                ret,
-                sig.context_count,
-                sig.has_receiver,
-                sig.suspend,
-            )
-        }
-        Ty::Nullable(inner) => Ty::nullable(canonicalize_jvm_collections(*inner)),
-        other => other,
-    }
 }
 
 /// Count the `Byte`/`Short` primitive parameters in a JVM method descriptor — the "narrowing" measure
@@ -5808,7 +5727,7 @@ mod tests {
             })
             .expect("declared set(T, V)");
         assert!(
-            matches!(declared_set.semantic_params()[1], Ty::TyParam("V", bound) if bound.is_nullable()),
+            matches!(declared_set.semantic_params()[1], Ty::TyParam(name, bound) if name == "V" && bound.is_nullable()),
             "declared set value parameter: {:?}",
             declared_set.semantic_params()[1]
         );

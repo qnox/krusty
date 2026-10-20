@@ -167,9 +167,9 @@ fn annotation_type(declaration: &semantic::KotlinClass) -> LibraryType {
         named_parameter_lists.push(ParamList {
             visibility: constructor.visibility,
             names: constructor.param_names.clone(),
-            defaults: constructor.param_defaults.clone(),
+            defaults: constructor.param_defaults.as_slice().into(),
             types: params,
-            recv_fun: Vec::new(),
+            recv_fun: Vec::new().into(),
             vararg: constructor.vararg,
             annotation: None,
         });

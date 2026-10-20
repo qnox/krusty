@@ -179,7 +179,7 @@ fn signature_is_serializer_accessor(
     }
     let mut formals: Vec<Ty> = Vec::with_capacity(type_parameters);
     for &parameter in params {
-        let Ty::Obj(owner, [argument]) = parameter else {
+        let Some((owner, [argument])) = parameter.obj_parts() else {
             return false;
         };
         if owner != serializer
@@ -191,7 +191,7 @@ fn signature_is_serializer_accessor(
         }
         formals.push(*argument);
     }
-    let Ty::Obj(owner, [served]) = ret else {
+    let Some((owner, [served])) = ret.obj_parts() else {
         return false;
     };
     owner == serializer

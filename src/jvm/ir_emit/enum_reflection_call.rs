@@ -18,7 +18,10 @@ impl Emitter<'_> {
             }
             Ty::TyParam(identity, _) => {
                 code.push_int(5, self.cw);
-                code.push_string(crate::types::type_parameter_source_name(identity), self.cw);
+                code.push_string(
+                    crate::types::type_parameter_source_name(identity.as_str()),
+                    self.cw,
+                );
                 let marker = self.cw.methodref(
                     "kotlin/jvm/internal/Intrinsics",
                     "reifiedOperationMarker",
@@ -60,7 +63,10 @@ impl Emitter<'_> {
                 // mode-5 marker plus a null Class placeholder. A consuming compiler replaces that
                 // placeholder at the call site.
                 code.push_int(5, self.cw);
-                code.push_string(crate::types::type_parameter_source_name(identity), self.cw);
+                code.push_string(
+                    crate::types::type_parameter_source_name(identity.as_str()),
+                    self.cw,
+                );
                 let marker = self.cw.methodref(
                     "kotlin/jvm/internal/Intrinsics",
                     "reifiedOperationMarker",

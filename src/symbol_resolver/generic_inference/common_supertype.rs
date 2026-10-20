@@ -338,7 +338,8 @@ pub(crate) fn reified_runtime_type(
     let Ty::Intersection(parts) = inner else {
         return ty;
     };
-    let Some(approximated) = approximate_reified_intersection(parts, direct_supertypes) else {
+    let Some(approximated) = approximate_reified_intersection(parts.as_slice(), direct_supertypes)
+    else {
         return ty;
     };
     if nullable {

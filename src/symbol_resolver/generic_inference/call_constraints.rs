@@ -143,7 +143,7 @@ fn infer_generic_call_constraints_with_receiver_and_argument_ordinals(
         let Ty::TyParam(formal, _) = variable else {
             unreachable!("deferred flexible root is a declaration variable")
         };
-        if invariantly_fixed.contains(formal) {
+        if invariantly_fixed.contains(formal.as_str()) {
             continue;
         }
         constraints
@@ -222,7 +222,13 @@ pub(crate) fn collect_assignability_constraints_from_symbols(
         match actual {
             Ty::TyParam(name, _) => {
                 let expected = expected.projection_inner().unwrap_or(expected);
-                constraints.insert(source, name, expected, position, ConstraintOrigin::Receiver);
+                constraints.insert(
+                    source,
+                    name.as_str(),
+                    expected,
+                    position,
+                    ConstraintOrigin::Receiver,
+                );
             }
             Ty::Nullable(inner) | Ty::PlatformNullable(inner) => {
                 actual_side(source, expected.non_null(), *inner, position, constraints)
@@ -508,11 +514,11 @@ impl CallInferenceConstraints {
                     {
                         let prior = self
                             .lower_inputs
-                            .get(bound_formal)
+                            .get(bound_formal.as_str())
                             .is_some_and(|inputs| inputs.contains(&(actual, origin)));
                         self.insert(
                             source,
-                            bound_formal,
+                            bound_formal.as_str(),
                             actual,
                             ConstraintPosition::Lower,
                             origin,
@@ -520,7 +526,7 @@ impl CallInferenceConstraints {
                         changed |= !prior;
                     }
                     for &actual in upper
-                        .get(bound_formal)
+                        .get(bound_formal.as_str())
                         .map(Vec::as_slice)
                         .unwrap_or_default()
                     {
@@ -707,7 +713,7 @@ fn collect_call_inference_constraints(
     constraints: &mut CallInferenceConstraints,
 ) {
     match shape {
-        Ty::TyParam(name, _) => constraints.insert(source, name, actual, position, origin),
+        Ty::TyParam(name, _) => constraints.insert(source, name.as_str(), actual, position, origin),
         Ty::Nullable(inner) => {
             collect_call_inference_constraints(
                 source,

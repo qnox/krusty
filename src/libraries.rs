@@ -22,8 +22,10 @@ mod enhanced_nullability;
 pub(crate) mod function_classifiers;
 mod generic_signature;
 mod inline_body;
+mod inline_kind;
 mod member_flags;
 mod metadata_normalization;
+mod param_flags;
 pub(crate) mod physical_parameter_plan;
 mod platform_contract;
 mod property_producer;
@@ -57,6 +59,8 @@ pub(crate) use dependency_body_contract::{
     DependencyBodyProviderRole, DependencyBodyProviderSnapshot, DependencyBodySnapshot,
 };
 pub use enhanced_nullability::{enhance_from_overridden, EnhancedResult, TypeEnhancement};
+pub use inline_kind::InlineKind;
+pub use param_flags::ParamFlags;
 pub use physical_parameter_plan::PhysicalParameterSlot;
 pub use platform_contract::{
     PlatformInitializationError, PlatformSourceHeaderInput, SourceHeaderError,
@@ -1084,17 +1088,17 @@ pub struct CallSig {
     /// empty metadata name, or another spelling convention.
     pub parameter_identities: Vec<crate::fir::ResolvedParameterIdentity>,
     /// Per logical param: whether it has a default value (so it may be omitted). Parallel to the params.
-    pub param_defaults: Vec<bool>,
+    pub param_defaults: ParamFlags,
     /// Per logical parameter: the declared type is annotated with Kotlin's internal `@Exact`, so
     /// applicability requires equality after generic substitution rather than ordinary subtyping.
-    pub exact_params: Vec<bool>,
+    pub exact_params: ParamFlags,
     /// Per logical parameter: the declared type carries Kotlin's internal `@NoInfer`, so the
     /// argument is checked for applicability after inference but contributes no type-variable
     /// constraint itself.
-    pub no_infer_params: Vec<bool>,
+    pub no_infer_params: ParamFlags,
     /// Per logical parameter, the resolved declaration carries
     /// `kotlin.internal.ImplicitIntegerCoercion`.
-    pub implicit_integer_coercion: Vec<bool>,
+    pub implicit_integer_coercion: ParamFlags,
     /// Per logical param: if it is a function type `(A, B) -> R`, its inner param types `[A, B]` (to type
     /// a lambda argument's `it`/params); otherwise empty. Parallel to the params.
     pub lambda_param_types: Vec<Vec<Ty>>,
@@ -1104,14 +1108,14 @@ pub struct CallSig {
     pub lambda_receivers: Vec<Option<Ty>>,
     /// Per logical param: whether it is a receiver function type, even when metadata cannot name a
     /// concrete receiver class because the receiver is a type parameter (`T.() -> R`).
-    pub lambda_receiver_params: Vec<bool>,
+    pub lambda_receiver_params: ParamFlags,
     /// Leading context receiver count for each function-typed parameter.
     pub lambda_context_counts: Vec<usize>,
     /// Per logical param: its `crossinline`/`noinline` modifier ([`InlineParameterModifier`]).
     /// Parallel to the params; empty when the source publishes none.
     pub inline_modifiers: Vec<InlineParameterModifier>,
     /// Per logical Java parameter, whether nullable arguments are accepted.
-    pub platform_nullable_params: Vec<bool>,
+    pub platform_nullable_params: ParamFlags,
     /// Java signature enhancement of the declared result's nullability.
     pub result_enhancement: ResultEnhancement,
     /// Minimum arguments a caller must supply (params beyond this have defaults). 0 by default.
@@ -1125,7 +1129,7 @@ pub struct CallSig {
 pub struct ParamList {
     pub visibility: Visibility,
     pub names: Vec<String>,
-    pub defaults: Vec<bool>,
+    pub defaults: ParamFlags,
     /// Declared Kotlin parameter types, parallel to [`Self::names`]. Empty only when the provider cannot
     /// recover the semantic signature. Constructor selection must never replace these with storage types.
     pub types: Vec<Ty>,
@@ -1133,7 +1137,7 @@ pub struct ParamList {
     /// descriptor and `Signature` both erase that to a plain `FunctionN`, so only the source-level
     /// metadata carries it — and without it a lambda argument gets no implicit receiver, leaving a bare
     /// member call inside unresolved. Empty when the origin records no per-parameter types.
-    pub recv_fun: Vec<bool>,
+    pub recv_fun: ParamFlags,
     pub vararg: Option<usize>,
     /// Present only when this is a provider-normalized annotation application shape rather than a
     /// constructor parameter list. The checker consumes the policy without asking whether the
@@ -1343,13 +1347,14 @@ impl CallSig {
 
     pub fn source(
         param_names: Vec<String>,
-        param_defaults: Vec<bool>,
+        param_defaults: impl Into<ParamFlags>,
         lambda_param_types: Vec<Vec<Ty>>,
-        lambda_recv: Vec<bool>,
+        lambda_recv: impl Into<ParamFlags>,
         lambda_context_counts: Vec<usize>,
         required: usize,
         vararg_index: Option<usize>,
     ) -> Self {
+        let lambda_recv: ParamFlags = lambda_recv.into();
         let lambda_receivers = lambda_recv
             .iter()
             .enumerate()
@@ -1382,7 +1387,7 @@ impl CallSig {
                 })
                 .collect(),
             param_names,
-            param_defaults,
+            param_defaults: param_defaults.into(),
             lambda_param_types,
             lambda_receivers,
             lambda_receiver_params: lambda_recv,
@@ -1437,7 +1442,7 @@ impl CallSig {
         lambda_receiver_params: Vec<bool>,
     ) {
         self.lambda_receivers = vec_for_arity(lambda_receivers, param_count);
-        self.lambda_receiver_params = vec_for_arity(lambda_receiver_params, param_count);
+        self.lambda_receiver_params = vec_for_arity(lambda_receiver_params, param_count).into();
     }
 
     fn metadata_base(
@@ -1471,7 +1476,7 @@ impl CallSig {
                 )
                 .collect(),
             param_names: names,
-            param_defaults: defaults,
+            param_defaults: defaults.into(),
             vararg: vararg_index.is_some(),
             vararg_index,
             ..Default::default()
@@ -1910,50 +1915,6 @@ impl FunctionInfo {
         member.stable_declaration = self.stable_declaration;
         member.source_member = self.source_member;
         member
-    }
-}
-
-/// How a callable relates to bytecode inlining — the single state that replaces the old
-/// `inline` + `inline_only`/`must_inline` boolean pairs (one per layer: [`FnFlags`],
-/// [`LibraryCallable`], and `ir::Callee::Static`). Ordered weakest→strongest; the splice obligation
-/// strengthens as you go down.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum InlineKind {
-    /// Not an `inline` function — emit an ordinary call (`invokestatic`/`invokevirtual`).
-    #[default]
-    None,
-    /// A Kotlin `inline` function (per its `@Metadata`): the JVM backend MAY splice its compiled body
-    /// at the call site, but a real call is a legal fallback (the callee is a public method).
-    CanInline,
-    /// No legal direct-call fallback. This includes a NON-PUBLIC `@InlineOnly` function
-    /// (`require`/`check`/`error`/`let`/…) whose method is inaccessible and a reified source body
-    /// whose erased method may exist only to publish inline code. The backend MUST splice the body;
-    /// a failed splice skips the whole file rather than emitting an inaccessible or unspecialized
-    /// `invokestatic`.
-    MustInline,
-}
-
-impl InlineKind {
-    /// Build from the legacy `(inline, must_inline)` boolean pair. `must_inline` is the stronger
-    /// signal (no callable fallback), so it wins regardless of the `inline` bit — which the `@Metadata`
-    /// `inline` flag can read back as `false` for a `@JvmName`-mangled private callee even though it
-    /// must still be spliced.
-    pub fn from_flags(inline: bool, must_inline: bool) -> InlineKind {
-        if must_inline {
-            InlineKind::MustInline
-        } else if inline {
-            InlineKind::CanInline
-        } else {
-            InlineKind::None
-        }
-    }
-    /// True when the backend may attempt to splice the body (`inline` OR `@InlineOnly`).
-    pub fn can_inline(self) -> bool {
-        self != InlineKind::None
-    }
-    /// True when splicing is mandatory — the callee has no legal call site to fall back to.
-    pub fn must_inline(self) -> bool {
-        self == InlineKind::MustInline
     }
 }
 
@@ -2868,9 +2829,9 @@ mod tests {
         let expected = ParamList {
             visibility: Visibility::Public,
             names: vec!["host".into(), "port".into()],
-            defaults: vec![false, true],
+            defaults: vec![false, true].into(),
             types: Vec::new(),
-            recv_fun: vec![false, false],
+            recv_fun: vec![false, false].into(),
             vararg: None,
             annotation: None,
         };
@@ -2884,9 +2845,9 @@ mod tests {
             t.named_parameter_lists = vec![ParamList {
                 visibility: Visibility::Public,
                 names: vec!["".into()],
-                defaults: vec![false],
+                defaults: vec![false].into(),
                 types: Vec::new(),
-                recv_fun: vec![false],
+                recv_fun: vec![false].into(),
                 vararg: None,
                 annotation: None,
             }];
@@ -2903,9 +2864,9 @@ mod tests {
         let parameters = ParamList {
             visibility: Visibility::Public,
             names: vec!["text".into()],
-            defaults: vec![false],
+            defaults: vec![false].into(),
             types: vec![Ty::String],
-            recv_fun: vec![false],
+            recv_fun: vec![false].into(),
             vararg: None,
             annotation: Some(policy),
         };

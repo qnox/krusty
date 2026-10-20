@@ -131,7 +131,7 @@ pub(crate) fn complete_return_only_captured_receiver_bindings(
         }
         let captured_upper = match bound.non_null() {
             Ty::TyParam(receiver_formal, _) => receiver_bindings
-                .get(receiver_formal)
+                .get(receiver_formal.as_str())
                 .copied()
                 .filter(|captured| captured.projection_inner().is_some())
                 .map(Ty::projection_read_ty),
@@ -186,7 +186,7 @@ pub(super) fn complete_dependent_bound_bindings(
                 else {
                     continue;
                 };
-                if !explicit.fixes(bound_index) && !bindings.contains_key(bound_formal) {
+                if !explicit.fixes(bound_index) && !bindings.contains_key(bound_formal.as_str()) {
                     bindings.insert(bound_formal.to_string(), actual);
                     changed = true;
                 }
@@ -386,7 +386,7 @@ pub(crate) fn resolve_bound_violating_bindings(
             else {
                 continue;
             };
-            if explicit.fixes(open_index) || bindings.contains_key(open) {
+            if explicit.fixes(open_index) || bindings.contains_key(open.as_str()) {
                 continue;
             }
             let Some(open_bounds) = generic_sig.formal_bounds.get(open_index) else {

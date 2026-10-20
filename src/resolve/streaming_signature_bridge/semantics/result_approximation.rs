@@ -19,12 +19,12 @@ pub(super) fn denotable_signature_result(
             // `Null` is the solver's literal-only bottom marker. A declaration inferred from that
             // expression publishes Kotlin's denotable `Nothing?`; the marker must not escape.
             Ty::Null => Ty::nullable(Ty::Nothing),
-            Ty::TyParam(name, bound) if !denotable.contains(name) => {
-                if !visiting.insert(name) {
+            Ty::TyParam(name, bound) if !denotable.contains(name.as_str()) => {
+                if !visiting.insert(name.as_str()) {
                     return Ty::nullable(Ty::obj("kotlin/Any"));
                 }
                 let approximated = result(bound.projection_read_ty(), denotable, visiting);
-                visiting.remove(name);
+                visiting.remove(name.as_str());
                 approximated
             }
             Ty::TyParam(..) => ty,
@@ -33,7 +33,7 @@ pub(super) fn denotable_signature_result(
                 &arguments
                     .iter()
                     .map(|argument| match *argument {
-                        Ty::TyParam(name, bound) if !denotable.contains(name) => {
+                        Ty::TyParam(name, bound) if !denotable.contains(name.as_str()) => {
                             Ty::star_projection(result(
                                 bound.projection_read_ty(),
                                 denotable,

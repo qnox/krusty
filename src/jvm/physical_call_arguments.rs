@@ -178,11 +178,11 @@ fn class_bound_is_unsigned(
     match ty {
         Ty::DefinitelyNotNull(inner) => class_bound_is_unsigned(*inner, parameters, visiting),
         Ty::TyParam(name, bound) => {
-            if visiting.contains(&name) {
+            if visiting.contains(&name.as_str()) {
                 return Err(format!("type parameter {name} has a cyclic class bound"));
             }
-            visiting.push(name);
-            let declared = parameters.lookup(name)?;
+            visiting.push(name.as_str());
+            let declared = parameters.lookup(name.as_str())?;
             if let Some(bounds) = declared {
                 for &(bound, is_interface) in bounds {
                     let bound = bound.non_null();

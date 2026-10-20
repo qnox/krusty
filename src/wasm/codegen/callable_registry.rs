@@ -588,7 +588,7 @@ mod tests {
     #[test]
     fn a_serialized_companion_call_keeps_exactly_its_authenticated_receiver_slot() {
         let callable = companion_callable();
-        let receiver = Ty::Obj(type_name("kotlin/Float"), &[]);
+        let receiver = Ty::Obj(type_name("kotlin/Float"), crate::types::TyList::EMPTY);
         let params = [Ty::String, receiver, Ty::Int];
 
         assert_eq!(
@@ -647,7 +647,7 @@ mod tests {
         exports.record_singleton_member_receiver(0, type_name("demo/Companion"), false);
         exports.record_singleton_extension_unread_receiver(
             0,
-            Ty::Obj(type_name("demo/Companion"), &[]),
+            Ty::Obj(type_name("demo/Companion"), crate::types::TyList::EMPTY),
             true,
         );
         registry
@@ -655,7 +655,7 @@ mod tests {
             .expect("the library export is valid");
         assert_eq!(
             registry.singleton_extension_unread_receivers[&identity].semantic_type(),
-            Ty::Obj(type_name("demo/Companion"), &[])
+            Ty::Obj(type_name("demo/Companion"), crate::types::TyList::EMPTY)
         );
         assert!(registry.singleton_extension_unread_receivers[&identity].evaluate_source());
         assert_eq!(

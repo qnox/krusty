@@ -47,7 +47,9 @@ pub(super) fn java_collection_return_lower_bound(ty: Ty) -> Ty {
         Ty::StarProjection(inner) => {
             Ty::star_projection(java_collection_return_lower_bound(*inner))
         }
-        Ty::TyParam(name, bound) => Ty::ty_param(name, java_collection_return_lower_bound(*bound)),
+        Ty::TyParam(name, bound) => {
+            Ty::ty_param(name.as_str(), java_collection_return_lower_bound(*bound))
+        }
         Ty::Fun(signature) => Ty::fun_with_shape(
             signature.params.clone(),
             java_collection_return_lower_bound(signature.ret),

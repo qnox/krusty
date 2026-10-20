@@ -295,7 +295,7 @@ impl Checker<'_> {
 fn single_upper_bound_classifier(owner: &LibraryType, ty: Ty) -> Option<TypeName> {
     let mut bounds = Vec::new();
     collect_upper_bounds(owner, ty, &mut HashSet::new(), &mut bounds);
-    let any = Ty::Obj(crate::types::wk::any(), &[]);
+    let any = Ty::Obj(crate::types::wk::any(), crate::types::TyList::EMPTY);
     if bounds.len() > 1 {
         bounds.retain(|bound| bound.non_null() != any);
     }
@@ -319,7 +319,7 @@ fn collect_upper_bounds(
 ) {
     match ty.non_null() {
         Ty::TyParam(name, bound) => {
-            if !seen.insert(name) {
+            if !seen.insert(name.as_str()) {
                 return;
             }
             let declared = owner

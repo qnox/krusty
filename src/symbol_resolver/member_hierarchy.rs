@@ -1201,7 +1201,7 @@ fn inherit_overridden_default_arguments(source: &dyn SymbolSource, functions: &m
         // bitmap length here silently skipped every slot across a compiled-module boundary.
         let parameter_count = implementation.semantic_params().len();
         if implementation.call_sig.param_defaults.is_empty() {
-            implementation.call_sig.param_defaults = vec![false; parameter_count];
+            implementation.call_sig.param_defaults = vec![false; parameter_count].into();
         }
         let supplier = leftmost_default_supplier(source, implementation.callable.owner, &inherited);
         let mut inherited_any_default = false;
@@ -1217,7 +1217,7 @@ fn inherit_overridden_default_arguments(source: &dyn SymbolSource, functions: &m
                     .copied()
                     .unwrap_or(false)
             }) {
-                implementation.call_sig.param_defaults[parameter] = true;
+                implementation.call_sig.param_defaults.set(parameter, true);
                 inherited_any_default = true;
                 if implementation
                     .default_values

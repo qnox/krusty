@@ -360,7 +360,7 @@ pub(crate) fn classifier_value_receiver(
 /// ordinary candidate list; the intersection itself has no classifier identity.
 pub(crate) fn intersection_components(ty: Ty) -> Option<&'static [Ty]> {
     match ty.non_null() {
-        Ty::Intersection(parts) => Some(parts),
+        Ty::Intersection(parts) => Some(parts.as_slice()),
         _ => None,
     }
 }

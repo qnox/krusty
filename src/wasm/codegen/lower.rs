@@ -121,7 +121,7 @@ pub(super) fn lower_file(
                 || call_targets
                     .singleton_extension_unread_receiver(target)
                     .is_some_and(|effect| {
-                        effect.semantic_type() == Ty::Obj(classifier, &[])
+                        effect.semantic_type() == Ty::Obj(classifier, crate::types::TyList::EMPTY)
                             && !effect.evaluate_source()
                     })
         },
@@ -173,7 +173,7 @@ pub(super) fn lower_file(
         };
         let mut parameters = Vec::new();
         if let Some(owner) = function.dispatch_receiver {
-            parameters.push(Ty::Obj(owner, &[]));
+            parameters.push(Ty::Obj(owner, crate::types::TyList::EMPTY));
         }
         parameters.extend(function.params.iter().copied());
         let mut body = Body::new(

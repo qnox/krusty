@@ -120,7 +120,7 @@ impl Closure<'_> {
     fn see(&mut self, ty: Ty) {
         match ty {
             Ty::TyParam(name, bound) => {
-                if self.own.contains(&name)
+                if self.own.contains(&name.as_str())
                     || self
                         .captured
                         .iter()
@@ -204,7 +204,9 @@ impl BodyLowering<'_> {
         let Ty::TyParam(semantic_name, _) = ty else {
             unreachable!("a closure captures type parameters only");
         };
-        if let Some(parameter) = super::generics::module_type_parameter(self.index, semantic_name) {
+        if let Some(parameter) =
+            super::generics::module_type_parameter(self.index, semantic_name.as_str())
+        {
             return parameter;
         }
         self.published_local_callables

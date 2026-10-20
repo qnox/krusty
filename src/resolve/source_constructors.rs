@@ -639,7 +639,7 @@ impl Checker<'_> {
                 .collect();
         }
         if call_sig.param_defaults.len() != parameter_count {
-            call_sig.param_defaults = vec![false; parameter_count];
+            call_sig.param_defaults = vec![false; parameter_count].into();
         }
         call_sig.required = required_arity(parameter_count, &call_sig.param_defaults);
         call_sig.vararg = call_sig.vararg_index.is_some();

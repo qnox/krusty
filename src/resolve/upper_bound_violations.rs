@@ -135,7 +135,12 @@ impl Checker<'_> {
         let Some(declaration) = self.fed_source().classifier(classifier) else {
             return;
         };
-        self.check_classifier_argument_bounds(classifier, &declaration, arguments, resolved);
+        self.check_classifier_argument_bounds(
+            classifier,
+            &declaration,
+            arguments,
+            resolved.as_slice(),
+        );
     }
 
     /// [`Self::check_type_parameter_bound`] for a callable's type parameter, whose outermost
@@ -239,7 +244,7 @@ impl Checker<'_> {
                 classifier,
                 &declaration,
                 &reference.targs,
-                arguments,
+                arguments.as_slice(),
             );
         }
         for (index, (argument, resolved)) in reference.targs.iter().zip(arguments).enumerate() {
