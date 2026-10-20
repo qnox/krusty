@@ -29,6 +29,12 @@ const GOTO: u8 = 0xa7;
 const GETFIELD: u8 = 0xb4;
 const PUTFIELD: u8 = 0xb5;
 const ILOAD: u8 = 0x15;
+const ICONST_M1: u8 = 0x02;
+const ICONST_5: u8 = 0x08;
+const BIPUSH: u8 = 0x10;
+const SIPUSH: u8 = 0x11;
+const INVOKESPECIAL: u8 = 0xb7;
+const RETURN: u8 = 0xb1;
 const INVOKESTATIC: u8 = 0xb8;
 const ACC_STATIC: u16 = 0x0008;
 const ACC_BRIDGE: u16 = 0x0040;
@@ -218,58 +224,98 @@ fn captured_fields(
         .code
         .as_ref()
         .ok_or_else(|| malformed("a default lambda's constructor has no code"))?;
-    parameter_assignments(&class.name, code)
+    let super_name = class
+        .super_name
+        .as_deref()
+        .ok_or_else(|| malformed("a default lambda class has no superclass"))?;
+    parameter_assignments(&class.name, super_name, code)
 }
 
-/// The fields of `owner` that the constructor `code` assigns from its parameters. Each parameter
-/// must be loaded from its own slot, by the load its type takes, and stored into one field, in
-/// declaration order; any other shape is refused rather than bound to the wrong field.
+/// The fields of `owner` that the constructor `code` assigns from its parameters. The constructor
+/// must be exactly kotlinc's lambda constructor: one `aload 0; <load>; putfield` per parameter in
+/// declaration order, each loading that parameter's own slot by the load its type takes into a
+/// distinct field of its type, then `aload 0; [arity]; invokespecial <super>.<init>; return`.
+/// Anything else is refused, since deleting the constructor would drop its other work or bind a
+/// capture to the wrong field.
 fn parameter_assignments(
     owner: &str,
+    super_name: &str,
     code: &MethodNode,
 ) -> Result<Vec<CapturedField>, InlineError> {
-    let instructions: Vec<&Insn> = code.instructions().collect();
-    let assignments: Vec<(u8, u16, CapturedField)> = instructions
-        .windows(3)
-        .filter_map(|window| match window {
-            [Insn::Var { op: ALOAD, slot: 0 }, Insn::Var {
-                op: load @ ILOAD..=ALOAD,
-                slot,
-            }, Insn::Field {
+    let refused =
+        || unsupported("a default lambda whose constructor is not kotlinc's lambda constructor");
+    let parameters = descriptors::argument_types(&code.desc)
+        .ok_or_else(|| malformed("a default lambda's constructor descriptor cannot be parsed"))?;
+    let mut instructions = code.instructions();
+    let mut expected_slot = 1;
+    let mut fields: Vec<CapturedField> = Vec::with_capacity(parameters.len());
+    for parameter in &parameters {
+        let (
+            Some(Insn::Var { op: ALOAD, slot: 0 }),
+            Some(Insn::Var { op: load, slot }),
+            Some(Insn::Field {
                 op: PUTFIELD,
                 owner: field_owner,
                 name,
                 desc,
-            }] if field_owner == owner => Some((
-                *load,
-                *slot,
-                CapturedField {
-                    name: name.clone(),
-                    desc: desc.clone(),
-                },
-            )),
-            _ => None,
-        })
-        .collect();
-    let parameters = descriptors::argument_types(&code.desc)
-        .ok_or_else(|| malformed("a default lambda's constructor descriptor cannot be parsed"))?;
-    let refused = || {
-        unsupported("a default lambda whose constructor does not assign its parameters in order")
-    };
-    if parameters.len() != assignments.len() {
-        return Err(refused());
-    }
-    let mut expected_slot = 1;
-    let mut fields = Vec::with_capacity(assignments.len());
-    for (parameter, (load, slot, field)) in parameters.iter().zip(assignments) {
-        if field.desc != *parameter
-            || slot != expected_slot
-            || load != Category::of_descriptor(parameter).load_op()
+            }),
+        ) = (
+            instructions.next(),
+            instructions.next(),
+            instructions.next(),
+        )
+        else {
+            return Err(refused());
+        };
+        if field_owner != owner
+            || desc != parameter
+            || *slot != expected_slot
+            || *load != Category::of_descriptor(parameter).load_op()
+            || fields.iter().any(|field| field.name == *name)
         {
             return Err(refused());
         }
         expected_slot += descriptors::size(parameter) as u16;
-        fields.push(field);
+        fields.push(CapturedField {
+            name: name.clone(),
+            desc: desc.clone(),
+        });
+    }
+    if !matches!(instructions.next(), Some(Insn::Var { op: ALOAD, slot: 0 })) {
+        return Err(refused());
+    }
+    let mut next = instructions.next();
+    let arity = matches!(
+        next,
+        Some(
+            Insn::Op(ICONST_M1..=ICONST_5)
+                | Insn::Int {
+                    op: BIPUSH | SIPUSH,
+                    ..
+                }
+        )
+    );
+    if arity {
+        next = instructions.next();
+    }
+    let super_constructor = if arity { "(I)V" } else { "()V" };
+    let Some(Insn::Method {
+        op: INVOKESPECIAL,
+        owner: called,
+        name,
+        desc,
+        ..
+    }) = next
+    else {
+        return Err(refused());
+    };
+    if called != super_name
+        || name != "<init>"
+        || desc != super_constructor
+        || instructions.next() != Some(&Insn::Op(RETURN))
+        || instructions.next().is_some()
+    {
+        return Err(refused());
     }
     Ok(fields)
 }
@@ -559,32 +605,56 @@ mod tests {
     use super::*;
 
     const LLOAD: u8 = 0x16;
-    const RETURN: u8 = 0xb1;
+    const DLOAD: u8 = 0x18;
     const OWNER: &str = "Client$f$1";
+    const LAMBDA: &str = "kotlin/jvm/internal/Lambda";
 
-    /// A constructor `(desc)V` whose body is `loads` assigned in turn to fields `a`, `b`, ….
+    fn assign(node: &mut MethodNode, op: u8, slot: u16, field: &str, desc: &str) {
+        node.nodes
+            .push(Node::Insn(Insn::Var { op: ALOAD, slot: 0 }));
+        node.nodes.push(Node::Insn(Insn::Var { op, slot }));
+        node.nodes.push(Node::Insn(Insn::Field {
+            op: PUTFIELD,
+            owner: OWNER.into(),
+            name: field.into(),
+            desc: desc.into(),
+        }));
+    }
+
+    fn super_call(node: &mut MethodNode) {
+        node.nodes
+            .push(Node::Insn(Insn::Var { op: ALOAD, slot: 0 }));
+        node.nodes.push(Node::Insn(Insn::Op(ICONST_0)));
+        node.nodes.push(Node::Insn(Insn::Method {
+            op: INVOKESPECIAL,
+            owner: LAMBDA.into(),
+            name: "<init>".into(),
+            desc: "(I)V".into(),
+            interface: false,
+        }));
+        node.nodes.push(Node::Insn(Insn::Op(RETURN)));
+    }
+
+    /// kotlinc's constructor `(desc)V` for `loads`, assigned in turn to fields `a`, `b`, ….
     fn constructor(desc: &str, loads: &[(u8, u16, &str)]) -> MethodNode {
         let mut node = MethodNode::new(0, "<init>", desc);
         for (index, (op, slot, field_desc)) in loads.iter().enumerate() {
-            node.nodes
-                .push(Node::Insn(Insn::Var { op: ALOAD, slot: 0 }));
-            node.nodes.push(Node::Insn(Insn::Var {
-                op: *op,
-                slot: *slot,
-            }));
-            node.nodes.push(Node::Insn(Insn::Field {
-                op: PUTFIELD,
-                owner: OWNER.into(),
-                name: ((b'a' + index as u8) as char).to_string(),
-                desc: (*field_desc).into(),
-            }));
+            let field = ((b'a' + index as u8) as char).to_string();
+            assign(&mut node, *op, *slot, &field, field_desc);
         }
-        node.nodes.push(Node::Insn(Insn::Op(RETURN)));
+        super_call(&mut node);
         node
     }
 
     fn names(fields: &[CapturedField]) -> Vec<&str> {
         fields.iter().map(|field| field.name.as_str()).collect()
+    }
+
+    fn refused(code: &MethodNode) -> bool {
+        matches!(
+            parameter_assignments(OWNER, LAMBDA, code),
+            Err(InlineError::DefaultLambda(_))
+        )
     }
 
     #[test]
@@ -597,43 +667,71 @@ mod tests {
                 (ILOAD, 4, "I"),
             ],
         );
-        let fields = parameter_assignments(OWNER, &code).expect("in-order assignments");
+        let fields = parameter_assignments(OWNER, LAMBDA, &code).expect("kotlinc's constructor");
         assert_eq!(names(&fields), ["a", "b", "c"]);
     }
 
     #[test]
     fn a_constructor_assigning_same_typed_parameters_out_of_order_is_refused() {
-        let code = constructor("(II)V", &[(ILOAD, 2, "I"), (ILOAD, 1, "I")]);
-        assert!(matches!(
-            parameter_assignments(OWNER, &code),
-            Err(InlineError::DefaultLambda(_))
-        ));
+        assert!(refused(&constructor(
+            "(II)V",
+            &[(ILOAD, 2, "I"), (ILOAD, 1, "I")]
+        )));
     }
 
     #[test]
     fn a_constructor_assigning_one_parameter_twice_is_refused() {
-        let code = constructor(
+        assert!(refused(&constructor(
             "(Ljava/lang/String;Ljava/lang/String;)V",
             &[
                 (ALOAD, 1, "Ljava/lang/String;"),
                 (ALOAD, 1, "Ljava/lang/String;"),
             ],
-        );
-        assert!(matches!(
-            parameter_assignments(OWNER, &code),
-            Err(InlineError::DefaultLambda(_))
-        ));
+        )));
     }
 
     #[test]
     fn a_two_word_parameter_moves_the_next_parameter_two_slots() {
-        let code = constructor("(DI)V", &[(0x18, 1, "D"), (ILOAD, 2, "I")]);
-        assert!(matches!(
-            parameter_assignments(OWNER, &code),
-            Err(InlineError::DefaultLambda(_))
-        ));
-        let code = constructor("(DI)V", &[(0x18, 1, "D"), (ILOAD, 3, "I")]);
-        let fields = parameter_assignments(OWNER, &code).expect("double then int");
+        assert!(refused(&constructor(
+            "(DI)V",
+            &[(DLOAD, 1, "D"), (ILOAD, 2, "I")]
+        )));
+        let code = constructor("(DI)V", &[(DLOAD, 1, "D"), (ILOAD, 3, "I")]);
+        let fields = parameter_assignments(OWNER, LAMBDA, &code).expect("double then int");
         assert_eq!(names(&fields), ["a", "b"]);
+    }
+
+    #[test]
+    fn a_constructor_assigning_two_parameters_to_one_field_is_refused() {
+        let mut code = MethodNode::new(0, "<init>", "(II)V");
+        assign(&mut code, ILOAD, 1, "a", "I");
+        assign(&mut code, ILOAD, 2, "a", "I");
+        super_call(&mut code);
+        assert!(refused(&code));
+    }
+
+    #[test]
+    fn a_constructor_that_writes_a_capture_again_later_is_refused() {
+        let mut code = constructor("(I)V", &[(ILOAD, 1, "I")]);
+        let ret = code.nodes.pop().expect("return");
+        assign(&mut code, ILOAD, 1, "a", "I");
+        code.nodes.push(ret);
+        assert!(refused(&code));
+    }
+
+    #[test]
+    fn a_constructor_with_other_work_is_refused() {
+        let mut code = constructor("(I)V", &[(ILOAD, 1, "I")]);
+        code.nodes.insert(
+            3,
+            Node::Insn(Insn::Method {
+                op: 0xb8,
+                owner: "Side".into(),
+                name: "effect".into(),
+                desc: "()V".into(),
+                interface: false,
+            }),
+        );
+        assert!(refused(&code));
     }
 }

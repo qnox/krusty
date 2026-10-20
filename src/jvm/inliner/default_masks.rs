@@ -21,7 +21,7 @@
 use std::collections::{HashSet, VecDeque};
 
 use crate::jvm::bytecode_passes::descriptors;
-use crate::jvm::method_node::{Constant, Insn, LabelId, MethodNode, Node};
+use crate::jvm::method_node::{Category, Constant, Insn, LabelId, MethodNode, Node};
 
 use super::InlineError;
 
@@ -145,7 +145,7 @@ pub(crate) fn expand(
             .and_then(Option::as_ref)
             .and_then(|position| position.checked_sub(1))
             .ok_or_else(|| malformed("a mask test jumps to a label the body never places"))?;
-        if let Some(arm) = extracted_arm(node, slot, condition.jump, store) {
+        if let Some(arm) = extracted_arm(node, slot, condition.jump, store)? {
             for at in arm.deleted {
                 deleted[at] = true;
             }
@@ -213,23 +213,32 @@ pub(crate) fn expand(
 }
 
 /// The default arm ending at `store` whose lambda is extracted, by what produces the stored value:
-/// a lambda class's singleton or its constructor. Any other default is stored as it is.
-fn extracted_arm(node: &MethodNode, slot: u16, jump: usize, store: usize) -> Option<ExtractedArm> {
-    let mut value = store.checked_sub(1)?;
+/// a lambda class's singleton or its constructor. Any other default is stored as it is; a
+/// constructed default whose shape is not kotlinc's is an error.
+fn extracted_arm(
+    node: &MethodNode,
+    slot: u16,
+    jump: usize,
+    store: usize,
+) -> Result<Option<ExtractedArm>, InlineError> {
+    let Some(mut value) = store.checked_sub(1) else {
+        return Ok(None);
+    };
     if matches!(
         node.nodes.get(value),
         Some(Node::Insn(Insn::Type { op: CHECKCAST, .. }))
-    ) {
-        value = value.checked_sub(1)?;
+    ) && value > 0
+    {
+        value -= 1;
     }
     match node.nodes.get(value) {
         Some(Node::Insn(Insn::Field { op: GETSTATIC, .. })) => {
-            singleton_default(node, slot, jump, store)
+            Ok(singleton_default(node, slot, jump, store))
         }
         Some(Node::Insn(Insn::Method {
             op: INVOKESPECIAL, ..
-        })) => constructed_default(node, slot, jump, store),
-        _ => None,
+        })) => constructed_default(node, slot, jump, store).map(Some),
+        _ => Ok(None),
     }
 }
 
@@ -278,20 +287,26 @@ fn singleton_default(
 
 /// The default arm `[needClassReification] new Lambda; dup; <captured values>; invokespecial
 /// Lambda.<init>; [checkcast] astore slot` ending at `store`. The code that loads the captured
-/// values stays; the store becomes the fake call that takes them.
+/// values stays; the store becomes the fake call that takes them. The arm must be exactly that:
+/// each captured value a plain load of the type the constructor takes, with nothing else touching
+/// the uninitialized object and nothing branching into the arm, so deleting `new`, `dup` and the
+/// constructor call leaves the captured values on the stack and nothing else.
 fn constructed_default(
     node: &MethodNode,
     slot: u16,
     jump: usize,
     store: usize,
-) -> Option<ExtractedArm> {
-    let mut constructor = store.checked_sub(1)?;
+) -> Result<ExtractedArm, InlineError> {
+    let refused = || {
+        InlineError::DefaultLambda("a constructed default lambda whose arm is not kotlinc's shape")
+    };
+    let mut constructor = store - 1;
     let checkcast = matches!(
         node.nodes.get(constructor),
         Some(Node::Insn(Insn::Type { op: CHECKCAST, .. }))
     );
     if checkcast {
-        constructor = constructor.checked_sub(1)?;
+        constructor -= 1;
     }
     let Some(Node::Insn(Insn::Method {
         op: INVOKESPECIAL,
@@ -301,34 +316,65 @@ fn constructed_default(
         ..
     })) = node.nodes.get(constructor)
     else {
-        return None;
+        return Err(refused());
     };
     if name != "<init>" || !desc.ends_with(")V") {
-        return None;
+        return Err(refused());
     }
-    let mut creations = (jump + 1..constructor).filter(|&at| {
-        matches!(
-            node.nodes.get(at),
-            Some(Node::Insn(Insn::Type { op: NEW, class })) if class == owner
-        )
-    });
-    let creation = creations.next()?;
-    if creations.next().is_some()
-        || !matches!(
-            node.nodes.get(creation + 1),
-            Some(Node::Insn(Insn::Op(DUP)))
-        )
+    let parameters = descriptors::argument_types(desc).ok_or_else(refused)?;
+    let mut instructions = (jump + 1..constructor)
+        .filter_map(|at| match &node.nodes[at] {
+            Node::Insn(insn) => Some((at, insn)),
+            Node::Label(_) | Node::Line { .. } => None,
+        })
+        .peekable();
+    let marker = instructions
+        .next_if(|(at, _)| reification_marker(node, jump, at + 1) == Some(*at))
+        .map(|(at, _)| at);
+    let Some((creation, Insn::Type { op: NEW, class })) = instructions.next() else {
+        return Err(refused());
+    };
+    if class != owner {
+        return Err(refused());
+    }
+    let Some((duplicate, Insn::Op(DUP))) = instructions.next() else {
+        return Err(refused());
+    };
+    let loads: Vec<u8> = instructions
+        .map(|(_, insn)| match insn {
+            Insn::Var { op, .. } if (ILOAD..=ALOAD).contains(op) => Some(*op),
+            _ => None,
+        })
+        .collect::<Option<_>>()
+        .ok_or_else(refused)?;
+    if loads.len() != parameters.len()
+        || loads
+            .iter()
+            .zip(&parameters)
+            .any(|(load, parameter)| *load != Category::of_descriptor(parameter).load_op())
     {
-        return None;
+        return Err(refused());
     }
-    let marker = reification_marker(node, jump, creation);
-    let mut deleted = marker.into_iter().collect::<Vec<_>>();
-    deleted.extend([creation, creation + 1, constructor]);
+    let arm_labels: HashSet<LabelId> = (jump + 1..=store)
+        .filter_map(|at| match node.nodes[at] {
+            Node::Label(label) => Some(label),
+            _ => None,
+        })
+        .collect();
+    if node
+        .instructions()
+        .flat_map(Insn::jump_targets)
+        .any(|target| arm_labels.contains(&target))
+    {
+        return Err(refused());
+    }
+    let mut deleted: Vec<usize> = marker.into_iter().collect();
+    deleted.extend([creation, duplicate, constructor]);
     if checkcast {
         deleted.push(constructor + 1);
     }
-    let close = desc.rfind(')')?;
-    Some(ExtractedArm {
+    let close = desc.rfind(')').ok_or_else(refused)?;
+    Ok(ExtractedArm {
         lambda: ExtractedDefaultLambda {
             slot,
             class: owner.clone(),
@@ -885,6 +931,8 @@ mod tests {
     const ISTORE: u8 = 0x36;
     const ATHROW: u8 = 0xbf;
     const IRETURN: u8 = 0xac;
+    const RETURN: u8 = 0xb1;
+    const GOTO: u8 = 0xa7;
 
     /// `fun f(a: String? = null, b: Int = 7)`'s bridge: two mask tests, then `return b`.
     fn bridge() -> (MethodNode, LabelId, LabelId, LabelId) {
@@ -984,6 +1032,191 @@ mod tests {
                 Node::Label(target),
             ],
         );
+    }
+
+    const LAMBDA_CLASS: &str = "Client$f$1";
+
+    /// `fun f(a: String, b: () -> Unit = { a })`'s bridge, its default arm `arm` (which must leave
+    /// the lambda on the stack), then `return`; slot 1 is an inline lambda parameter.
+    fn capturing_bridge(arm: Vec<Node>) -> (MethodNode, DefaultMasks) {
+        let mut node = MethodNode::new(
+            0x1008,
+            "f$default",
+            "(Ljava/lang/String;Lkotlin/jvm/functions/Function0;ILjava/lang/Object;)V",
+        );
+        let after = node.new_label();
+        node.nodes = vec![
+            Node::Insn(Insn::Var { op: ILOAD, slot: 2 }),
+            Node::Insn(Insn::Op(ICONST_2)),
+            Node::Insn(Insn::Op(IAND)),
+            Node::Insn(Insn::Jump {
+                op: IFEQ,
+                target: after,
+            }),
+        ];
+        node.nodes.extend(arm);
+        node.nodes.extend([
+            Node::Insn(Insn::Type {
+                op: CHECKCAST,
+                class: "kotlin/jvm/functions/Function0".to_owned(),
+            }),
+            Node::Insn(Insn::Var {
+                op: ASTORE,
+                slot: 1,
+            }),
+            Node::Label(after),
+            Node::Insn(Insn::Op(RETURN)),
+        ]);
+        let masks = DefaultMasks {
+            start: 2,
+            masks: vec![2],
+            parameters: vec![(0, 0), (1, 1)],
+            inline_lambdas: vec![1],
+        };
+        (node, masks)
+    }
+
+    fn construction() -> Node {
+        Node::Insn(Insn::Type {
+            op: NEW,
+            class: LAMBDA_CLASS.to_owned(),
+        })
+    }
+
+    fn constructor_call() -> Node {
+        Node::Insn(Insn::Method {
+            op: INVOKESPECIAL,
+            owner: LAMBDA_CLASS.to_owned(),
+            name: "<init>".to_owned(),
+            desc: "(Ljava/lang/String;)V".to_owned(),
+            interface: false,
+        })
+    }
+
+    fn refuses_construction(arm: Vec<Node>) -> bool {
+        let (mut node, masks) = capturing_bridge(arm);
+        matches!(
+            expand(&mut node, &masks),
+            Err(InlineError::DefaultLambda(_))
+        )
+    }
+
+    #[test]
+    fn a_constructed_default_keeps_its_captured_loads_before_the_fake_call() {
+        let (mut node, masks) = capturing_bridge(vec![
+            construction(),
+            Node::Insn(Insn::Op(DUP)),
+            Node::Insn(Insn::Var { op: ALOAD, slot: 0 }),
+            constructor_call(),
+        ]);
+        let extracted = expand(&mut node, &masks).expect("kotlinc's constructed default");
+        assert_eq!(
+            extracted,
+            vec![ExtractedDefaultLambda {
+                slot: 1,
+                class: LAMBDA_CLASS.to_owned(),
+                need_reification: false,
+                constructor: Some("(Ljava/lang/String;)V".to_owned()),
+            }]
+        );
+        let instructions: Vec<&Insn> = node.instructions().collect();
+        assert_eq!(
+            instructions,
+            vec![
+                &Insn::Var { op: ALOAD, slot: 0 },
+                &Insn::Method {
+                    op: INVOKESTATIC,
+                    owner: DEFAULT_LAMBDA_FAKE_CALL.to_owned(),
+                    name: format!("{DEFAULT_LAMBDA_FAKE_CALL}1"),
+                    desc: "(Ljava/lang/String;)V".to_owned(),
+                    interface: false,
+                },
+                &Insn::Op(RETURN),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_constructed_default_that_spills_the_new_object_is_refused() {
+        assert!(refuses_construction(vec![
+            construction(),
+            Node::Insn(Insn::Op(DUP)),
+            Node::Insn(Insn::Op(DUP)),
+            Node::Insn(Insn::Var {
+                op: ASTORE,
+                slot: 4,
+            }),
+            Node::Insn(Insn::Var { op: ALOAD, slot: 0 }),
+            constructor_call(),
+        ]));
+    }
+
+    #[test]
+    fn a_constructed_default_that_spills_and_reloads_the_new_object_is_refused() {
+        assert!(refuses_construction(vec![
+            construction(),
+            Node::Insn(Insn::Op(DUP)),
+            Node::Insn(Insn::Var {
+                op: ASTORE,
+                slot: 4,
+            }),
+            Node::Insn(Insn::Var { op: ALOAD, slot: 4 }),
+            Node::Insn(Insn::Var { op: ALOAD, slot: 0 }),
+            constructor_call(),
+        ]));
+    }
+
+    #[test]
+    fn a_constructed_default_whose_captured_value_is_computed_is_refused() {
+        assert!(refuses_construction(vec![
+            construction(),
+            Node::Insn(Insn::Op(DUP)),
+            Node::Insn(Insn::Var { op: ALOAD, slot: 0 }),
+            Node::Insn(Insn::Method {
+                op: INVOKESTATIC,
+                owner: "Side".to_owned(),
+                name: "id".to_owned(),
+                desc: "(Ljava/lang/String;)Ljava/lang/String;".to_owned(),
+                interface: false,
+            }),
+            constructor_call(),
+        ]));
+    }
+
+    #[test]
+    fn a_constructed_default_loading_the_wrong_type_is_refused() {
+        assert!(refuses_construction(vec![
+            construction(),
+            Node::Insn(Insn::Op(DUP)),
+            Node::Insn(Insn::Var { op: ILOAD, slot: 0 }),
+            constructor_call(),
+        ]));
+    }
+
+    #[test]
+    fn a_constructed_default_that_is_branched_into_is_refused() {
+        let (mut node, masks) = capturing_bridge(Vec::new());
+        let inside = node.new_label();
+        let arm = vec![
+            construction(),
+            Node::Insn(Insn::Op(DUP)),
+            Node::Label(inside),
+            Node::Insn(Insn::Var { op: ALOAD, slot: 0 }),
+            constructor_call(),
+        ];
+        node.nodes.splice(4..4, arm);
+        let ret = node.nodes.len() - 1;
+        node.nodes.insert(
+            ret,
+            Node::Insn(Insn::Jump {
+                op: GOTO,
+                target: inside,
+            }),
+        );
+        assert!(matches!(
+            expand(&mut node, &masks),
+            Err(InlineError::DefaultLambda(_))
+        ));
     }
 
     #[test]
