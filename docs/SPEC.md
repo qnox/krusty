@@ -11211,6 +11211,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/serialization_external_kinds_e2e.rs` (a kotlinc-built dependency and a sibling file
   under both compilers, and the cached child serializers compared with kotlinc's), and the kind
   rules in `plugins::serialization::external_serializer::tests`.
+- **A serializable class's child-serializer cache members follow both generated constructors.**
+  kotlinc declares the deserialization constructor, then the no-arg convenience constructor of a
+  class whose every primary-constructor parameter has a default, then the `$childSerializers`
+  factories and their `…$cp` accessor. krusty declared the cache members before the no-arg
+  constructor. Test: `tests/serializable_noarg_constructor_order_e2e.rs` (ordered member lists and
+  class bytes compared with kotlinc's).
 - **A `Unit` tailrec's `f(x); return` is a tail call in any block.** Nothing of the function runs
   after a `return`, so the statement right before one is in tail position whether the block ends
   the body or sits inside an `if`, a `when` arm or a loop. Only the body's own last block was
