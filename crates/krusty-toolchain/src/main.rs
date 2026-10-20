@@ -350,6 +350,12 @@ fn main() -> ExitCode {
                         );
                         status.get_or_insert(code);
                     }
+                    compile::RunFailure::Ksp { module, code } => {
+                        eprintln!(
+                            "\nERROR: Task ':{module}:kspJvm' failed: KSP exited with status {code}"
+                        );
+                        status.get_or_insert(code);
+                    }
                     compile::RunFailure::Io(message) => {
                         eprintln!("\nERROR: {message}");
                         status.get_or_insert(1);

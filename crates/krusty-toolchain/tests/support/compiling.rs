@@ -2,9 +2,9 @@
 //! compiler arguments it gives krusty.
 //!
 //! A run is laid out as `kotlin::Resolving` lays it out (`<directory>` in compared output), with a
-//! JDK beside the project (`jdk`: a `release` file naming `JAVA_VERSION="25.0.2"` and empty
-//! `bin/javac` and `bin/java`, which is all either reads of it) and the file the recording krusty
-//! writes (`record`). `KRUSTY_BIN` names that recorder: it appends its arguments to the record, one
+//! JDK beside the project (`jdk`: a `release` file naming `JAVA_VERSION="25.0.2"`, an empty
+//! `bin/javac`, and a `bin/java` that records the KSP runs both make, which is all either reads of
+//! it) and the file the recording krusty writes (`record`). `KRUSTY_BIN` names that recorder: it appends its arguments to the record, one
 //! per line, then a `----` line, each invocation whole under a lock (a `record.lock` directory),
 //! since the toolchain compiles independent modules at the same time; it exits 0, or with status 3
 //! for the module `KRUSTY_RECORDER_FAIL` names. Nothing is compiled, so a `compilation-fingerprint`
@@ -78,6 +78,23 @@ const PLUGIN_COMPILATION: &str = "if [ \"$module\" = \"$KRUSTY_RECORDER_PLUGIN\"
 fi
 ";
 
+/// The run's stand-in `java`, which the toolchain and krusty-toolchain alike run KSP with: it
+/// records its arguments as the recording krusty does, each `@file` argument replaced by the
+/// arguments the file holds, one per line.
+const JAVA_RECORDER: &str = "#!/bin/sh
+until mkdir \"$KRUSTY_RECORD.lock\" 2>/dev/null; do sleep 0.01; done
+{
+  for argument in \"$@\"; do
+    case $argument in
+      @*) sed -e '$a\\' \"${argument#@}\" ;;
+      *) printf '%s\\n' \"$argument\" ;;
+    esac
+  done
+  printf '%s\\n' '----'
+} >> \"$KRUSTY_RECORD\"
+rmdir \"$KRUSTY_RECORD.lock\"
+";
+
 const TOOLCHAIN_RECORDER: &str = "#!/bin/sh
 for argument in \"$@\"; do
   case $argument in -module-name=*) module=${argument#-module-name=} ;; esac
@@ -129,6 +146,7 @@ fn recorders() -> &'static Path {
             ("krusty", RECORDER.to_string()),
             ("krusty-compiling-plugin", plugin_compiling_recorder()),
             ("krusty-toolchain-krusty", TOOLCHAIN_RECORDER.to_string()),
+            ("java", JAVA_RECORDER.to_string()),
         ] {
             let path = directory.join(name);
             std::fs::write(&path, script).unwrap();
@@ -168,10 +186,10 @@ pub fn lay_out(directory: &Path) {
     let jdk = directory.join(JDK);
     std::fs::create_dir_all(jdk.join("bin")).unwrap();
     std::fs::write(jdk.join("release"), "JAVA_VERSION=\"25.0.2\"\n").unwrap();
-    for tool in ["javac", "java"] {
-        std::fs::write(jdk.join("bin").join(tool), "").unwrap();
-        make_executable(&jdk.join("bin").join(tool));
-    }
+    std::fs::write(jdk.join("bin").join("javac"), "").unwrap();
+    make_executable(&jdk.join("bin").join("javac"));
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(recorders().join("java"), jdk.join("bin").join("java")).unwrap();
     std::fs::create_dir_all(directory.join(Resolving::CACHE)).unwrap();
 }
 
@@ -277,6 +295,10 @@ impl Compiler for RecordingKrusty {
         let mut identity = vec![
             ("recorder".to_string(), RECORDER.as_bytes().to_vec()),
             ("outputs".to_string(), OUTPUTS.as_bytes().to_vec()),
+            (
+                "java recorder".to_string(),
+                JAVA_RECORDER.as_bytes().to_vec(),
+            ),
         ];
         identity.extend(implementation_sources());
         identity
