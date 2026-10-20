@@ -57,6 +57,7 @@ mod local_classes;
 mod local_function_tests;
 mod local_functions;
 mod local_increments;
+mod outer_values;
 mod session;
 #[cfg(test)]
 mod substitution_tests;
@@ -492,7 +493,7 @@ struct BodyFirChecker<'a> {
     body: FirBody,
     scopes: Vec<HashMap<String, LocalBinding>>,
     delegate_scopes: Vec<HashMap<String, LocalDelegateBinding>>,
-    outer_values: HashMap<String, (u32, LocalBinding)>,
+    outer_values: outer_values::OuterValues,
     outer_delegates: HashMap<String, (u32, LocalDelegateBinding)>,
     class_values: HashMap<String, ClassCaptureBinding>,
     class_capture_values: Vec<(String, ClassCaptureBinding)>,
@@ -943,7 +944,7 @@ impl BodyFirChecker<'_> {
             body,
             scopes: vec![HashMap::default()],
             delegate_scopes: vec![HashMap::default()],
-            outer_values: HashMap::default(),
+            outer_values: outer_values::OuterValues::default(),
             outer_delegates: HashMap::default(),
             class_values: class_context.values,
             class_capture_values: class_context.capture_values,
@@ -1083,7 +1084,7 @@ impl BodyFirChecker<'_> {
             .filter_map(|scope| scope.get(name).copied().map(|binding| (None, binding)))
             .chain(
                 self.outer_values
-                    .get(name)
+                    .shadowed(name)
                     .map(|(depth, binding)| (Some(*depth), *binding)),
             )
             .nth(shadow_depth)
@@ -1426,18 +1427,15 @@ impl BodyFirChecker<'_> {
                             dispatch_receiver,
                         }
                     } else if let Some(field) = self.active_class_storage_read(expression) {
-                        match self.class_values.get(name).copied() {
-                            Some(binding) => {
-                                let origin = self.expression_origin(expression)?;
-                                self.class_storage_read_kind(binding, origin)?
-                            }
+                        let binding = match self.class_values.get(name).copied() {
+                            Some(binding) => binding,
                             None => {
                                 let field = *field;
-                                let origin = self.expression_origin(expression)?;
                                 let ty = self.expression_type(expression)?;
-                                self.direct_class_storage_read_kind(field, ty, origin)?
+                                self.direct_class_capture_binding(field, ty)?
                             }
-                        }
+                        };
+                        self.capture_read_kind(expression, binding)?
                     } else if let Some(ExprLowering::SingletonValue(singleton)) =
                         self.info.expr_lowers.get(&expression)
                     {
@@ -1477,8 +1475,7 @@ impl BodyFirChecker<'_> {
                             source.lateinit.then_some(name.as_str()),
                         );
                     } else if let Some(binding) = self.class_values.get(name).copied() {
-                        let origin = self.expression_origin(expression)?;
-                        let kind = self.class_storage_read_kind(binding, origin)?;
+                        let kind = self.capture_read_kind(expression, binding)?;
                         return self.checked_storage_read(expression, binding.ty, kind);
                     } else if let Some((owner, parameter, ty)) =
                         self.current_named_context_parameter(name)

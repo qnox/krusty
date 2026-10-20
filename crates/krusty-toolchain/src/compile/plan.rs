@@ -1,5 +1,6 @@
-//! The plan of a `compileJvm` task: the modules to compile, in order, each with its compiler
-//! arguments and resources, built completely, with every refusal, before anything runs.
+//! The plan of `compileJvm` tasks: the modules to compile, in order, each with its compiler
+//! arguments, its resources and the modules it waits for, built completely, with every refusal,
+//! before anything runs.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -8,7 +9,7 @@ use std::path::{Path, PathBuf};
 use super::arguments::{arguments, Compilation};
 use super::classpath::classpath;
 use super::order::{compile_dependencies, compile_order};
-use super::{jdk, refusals, sources};
+use super::{jdk, plugins, refusals, sources};
 use crate::diagnostic::{Diagnostic, Diagnostics};
 use crate::maven::{missing, Coordinates, Metadata, OpenError, Problem, Store};
 use crate::model::Model;
@@ -30,11 +31,16 @@ pub struct Step {
     /// krusty's arguments; `None` when the fragment has no Kotlin sources, which the toolchain
     /// does not compile.
     pub arguments: Option<Vec<OsString>>,
+    /// Where the last successful compilation's inputs and output are recorded (`avoidance.rs`).
+    pub state: PathBuf,
     /// Where the resources are copied. It holds exactly the resources directory's contents, and
     /// nothing when the fragment has no resources directory.
     pub resources_output: PathBuf,
     /// The fragment's resources directory, when it has one.
     pub resources: Option<PathBuf>,
+    /// The earlier steps this one starts after: those of the modules the fragment compiles against
+    /// directly, which start after the ones they compile against.
+    pub waits: Vec<usize>,
 }
 
 /// The modules to compile, each after the modules it compiles against.
@@ -56,21 +62,37 @@ fn artifact_directory(root: &Path, module: &str) -> PathBuf {
         .join(format!("{module}jvm"))
 }
 
-/// The plan for compiling `module` of `model`, or `None` when something it needs is refused: why
-/// goes to `diagnostics`, for every module the plan needs, in the order they would compile.
+/// Where krusty-toolchain records a module's last successful compilation, outside the toolchain's
+/// own artifacts.
+fn state_file(root: &Path, module: &str) -> PathBuf {
+    root.join("build")
+        .join("krusty-toolchain")
+        .join(format!("{module}jvm"))
+        .join("compilation.state")
+}
+
+/// The plan for compiling the modules `modules` of `model`, or `None` when something it needs is
+/// refused: why goes to `diagnostics`, for every module the plan needs, in the order they would
+/// compile.
 pub fn plan(
     model: &Model,
-    module: &str,
+    modules: &[&str],
     environment: &Environment,
     diagnostics: &mut Diagnostics,
 ) -> Result<Option<Plan>, String> {
     let declarations = resolution::read_declarations(&model.modules, &model.configured)?;
-    let target = model
-        .modules
+    let targets = modules
         .iter()
-        .position(|header| header.name == module)
-        .ok_or_else(|| format!("no module is named `{module}`"))?;
-    let order = match compile_order(&compile_dependencies(&declarations), target) {
+        .map(|module| {
+            model
+                .modules
+                .iter()
+                .position(|header| header.name == *module)
+                .ok_or_else(|| format!("no module is named `{module}`"))
+        })
+        .collect::<Result<Vec<usize>, String>>()?;
+    let dependencies = compile_dependencies(&declarations);
+    let order = match compile_order(&dependencies, &targets) {
         Ok(order) => order,
         Err(cycle) => {
             let names: Vec<&str> = cycle
@@ -102,6 +124,8 @@ pub fn plan(
     // compiled output when the module has Kotlin sources, then the resources output when it has
     // resources.
     let mut outputs: HashMap<&str, Vec<PathBuf>> = HashMap::new();
+    // The step of each module planned so far, by module index.
+    let mut planned_steps: HashMap<usize, usize> = HashMap::new();
     for index in order {
         let header = &model.modules[index];
         let name = header.name.as_str();
@@ -110,9 +134,19 @@ pub fn plan(
             return Err(format!("module `{name}` is not configured"));
         };
         let settings = main.get("settings").ok_or("a fragment without settings")?;
+        let directory = header.file.parent().unwrap_or(Path::new(""));
+        let (generated, plugins_refused) = match plugins::generated_sources(
+            name,
+            directory,
+            configuration,
+            &model.project.plugins,
+        ) {
+            Ok(generated) => (generated, Vec::new()),
+            Err(refused) => (Vec::new(), refused),
+        };
         let refused = refusals::refusals(name, configuration, main);
-        let compiles = refused.is_empty();
-        for diagnostic in refused {
+        let mut compiles = refused.is_empty() && plugins_refused.is_empty();
+        for diagnostic in plugins_refused.into_iter().chain(refused) {
             diagnostics.push(diagnostic);
         }
         let jdk_home = jdk::select(
@@ -123,8 +157,7 @@ pub fn plan(
         )
         .map_err(|diagnostic| diagnostics.push(diagnostic))
         .ok();
-        let directory = header.file.parent().unwrap_or(Path::new(""));
-        let layout = sources::layout(
+        let mut layout = sources::layout(
             directory,
             &configuration
                 .module
@@ -132,6 +165,7 @@ pub fn plan(
                 .and_then(|whole| whole.text_at(&["layout"]))
                 .unwrap_or_default(),
         );
+        layout.sources.extend(generated);
         let found = match sources::find(&layout.sources) {
             Ok(found) => found,
             Err(error) => {
@@ -145,6 +179,17 @@ pub fn plan(
                 continue;
             }
         };
+        for file in &found.not_directories {
+            compiles = false;
+            diagnostics.push(Diagnostic::error(
+                file,
+                None,
+                format!(
+                    "Source directory at '{}' exists, but it's not a directory, this is currently unsupported",
+                    file.display()
+                ),
+            ));
+        }
         let artifacts = artifact_directory(root, name);
         let output = artifacts.join("kotlin-output");
         let resources_output = artifacts.join("resources-output");
@@ -212,18 +257,36 @@ pub fn plan(
                 classpath: &entries,
                 module_name: name,
                 java_parameters: settings.is_enabled(&["jvm", "storeParameterNames"]),
+                fragment_sources: (found.filled > 1).then_some(found.walked.as_slice()),
                 plugins: &plugins,
                 kotlin_version: &kotlin_version,
                 output: &output,
                 sources: &found.kotlin,
             })?)
         };
+        let waits: Option<Vec<usize>> = dependencies[index]
+            .iter()
+            .map(|dependency| planned_steps.get(dependency).copied())
+            .collect();
+        let Some(waits) = waits else {
+            // A module it compiles against has no step because it was refused, so there is no
+            // plan; anything else is a mistake in planning.
+            if diagnostics.has_errors() {
+                continue;
+            }
+            return Err(format!(
+                "module `{name}` compiles against a module that is not planned before it"
+            ));
+        };
+        planned_steps.insert(index, steps.len());
         steps.push(Step {
             module: name.to_string(),
             output,
             arguments,
+            state: state_file(root, name),
             resources_output,
             resources,
+            waits,
         });
     }
     Ok((!diagnostics.has_errors()).then_some(Plan { steps }))

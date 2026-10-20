@@ -699,3 +699,67 @@ fn a_diverging_literal_inside_a_bracketed_body_runs() {
         );
     }
 }
+
+const REIFIED_NESTED_LIBRARY: &str = r#"val Int.isEven get() = this % 2 == 0
+
+inline operator fun <reified T : Number> T.plus(other: T): T = when (T::class) {
+    Double::class -> (this as Double) + (other as Double)
+    Int::class -> (this as Int) + (other as Int)
+    Long::class -> (this as Long) + (other as Long)
+    else -> TODO()
+} as T
+
+inline fun <reified T : Number> Collection<T>.median(): Double {
+    val sorted = this.sortedBy {
+        it.toDouble()
+    }
+
+    return if (size.isEven || size == 1) {
+        sorted[size / 2]
+    } else {
+        sorted[size / 2] + sorted[size / 2 + 1]
+    }.toDouble()
+}
+"#;
+
+const REIFIED_NESTED_MAIN: &str = r#"class Reproducer {
+    private var someListOfLongs = mutableListOf<Long>(1L)
+
+    fun repro() = someListOfLongs.median()
+}
+
+fun box(): String = if (Reproducer().repro() > 0) "OK" else "fail"
+"#;
+
+#[test]
+fn a_reified_body_expanding_another_reified_call_runs() {
+    common::expect_box_ok_files_with_stdlib(
+        &[
+            ("main.kt", REIFIED_NESTED_MAIN),
+            ("lib.kt", REIFIED_NESTED_LIBRARY),
+        ],
+        "ReifiedNestedExpansion",
+    );
+}
+
+/// `a + b` selects the same generic operator as `a.plus(b)` and forwards the caller's reified `T`
+/// to it, so `viaOperator`'s compiled body inlines `plus` with `T` still to be substituted.
+const REIFIED_OPERATOR_SOURCE: &str = r#"inline operator fun <reified T : Number> T.plus(other: Any): Boolean = other is T
+
+inline fun <reified T : Number> viaOperator(x: T, y: Any): Boolean = x + y
+
+fun box(): String = if (viaOperator(2, 3) && !viaOperator(2, 3L)) "OK" else "fail"
+"#;
+
+#[test]
+fn a_reified_operator_call_forwards_its_type_argument_like_kotlinc() {
+    assert_like_kotlinc(&[("main.kt", REIFIED_OPERATOR_SOURCE)]);
+}
+
+#[test]
+fn a_reified_operator_call_forwarding_its_type_argument_runs() {
+    common::expect_box_ok_files_with_stdlib(
+        &[("main.kt", REIFIED_OPERATOR_SOURCE)],
+        "ReifiedOperatorForwarding",
+    );
+}

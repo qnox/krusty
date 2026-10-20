@@ -65,28 +65,36 @@ pub(super) fn holder_ty(elem: &Ty) -> Ty {
 /// Replace only backend declaration slots. The marker map remains logical so metadata, diagnostics,
 /// and non-JVM backends never observe `Ref$*Ref` as the captured source value's type.
 pub(super) fn lower_class_capture_slots(ir: &mut IrFile) {
-    let mut physical = HashMap::<ClassId, Vec<(usize, Ty)>>::default();
-    for (&(class, field), _) in &ir.shared_class_capture_fields {
+    // Each cell is a field and the constructor-prefix parameter that fills it. A local class can
+    // keep a capture in its parameter alone, so the two positions can differ.
+    let mut physical = HashMap::<ClassId, Vec<(usize, usize, Ty)>>::default();
+    for &(class, field) in ir.shared_class_capture_fields.keys() {
+        let declaration = &ir.classes[class as usize];
+        let parameter = declaration
+            .ctor_args
+            .iter()
+            .position(|argument| argument.field_index == Some(field))
+            .expect("a shared capture field is filled by a constructor-prefix parameter");
         let field = field as usize;
-        let element = ir.classes[class as usize].fields[field].ty;
+        let element = declaration.fields[field].ty;
         physical
             .entry(class)
             .or_default()
-            .push((field, holder_ty(&element)));
+            .push((field, parameter, holder_ty(&element)));
     }
     for slots in physical.values_mut() {
-        slots.sort_unstable_by_key(|(field, _)| *field);
+        slots.sort_unstable_by_key(|(field, _, _)| *field);
     }
 
     for (&class, slots) in &physical {
         let declaration = &mut ir.classes[class as usize];
-        for &(field, holder) in slots {
+        for &(field, parameter, holder) in slots {
             declaration.fields[field].ty = holder;
-            let argument = &mut declaration.ctor_args[field];
+            let argument = &mut declaration.ctor_args[parameter];
             argument.ty = holder;
             argument.check = None;
             for constructor in &mut declaration.secondary_ctors {
-                constructor.prefix_params[field] = holder;
+                constructor.prefix_params[parameter] = holder;
             }
         }
     }
@@ -122,8 +130,8 @@ pub(super) fn lower_class_capture_slots(ir: &mut IrFile) {
         let Some(slots) = class_names.get(internal) else {
             continue;
         };
-        for &(field, holder) in slots {
-            parameters[field] = holder;
+        for &(_, parameter, holder) in slots {
+            parameters[parameter] = holder;
         }
     }
 }
@@ -571,62 +579,56 @@ mod tests {
 
     #[test]
     fn realizes_only_marked_class_capture_slots() {
+        // A local class's constructor prefix: an unstored capture kept in its parameter alone,
+        // then the shared and the plain stored captures, so field and parameter positions differ.
+        let capture = |field_index: Option<u32>| IrCtorArg {
+            name: None,
+            context_kind: crate::types::ContextParameterKind::None,
+            ty: Ty::String,
+            declared_ty: None,
+            is_field: field_index.is_some(),
+            field_index,
+            has_default: false,
+            is_vararg: false,
+            type_param: None,
+            check: None,
+            anonymous_super_forward: None,
+            capture: None,
+            provenance: crate::ir::IrCtorParameterProvenance::Capture,
+            capture_identity: None,
+        };
         let mut ir = IrFile::default();
         let mut class = IrClass::synthetic(crate::types::type_name("Captured"));
         class.fields = vec![
             IrField::new("shared".to_string(), Ty::String),
             IrField::new("plain".to_string(), Ty::String),
         ];
-        class.ctor_args = vec![
-            IrCtorArg {
-                name: Some("shared".to_string()),
-                context_kind: crate::types::ContextParameterKind::None,
-                ty: Ty::String,
-                declared_ty: None,
-                is_field: true,
-                field_index: None,
-                has_default: false,
-                is_vararg: false,
-                type_param: None,
-                check: Some("shared".to_string()),
-                anonymous_super_forward: None,
-                capture: None,
-                provenance: crate::ir::IrCtorParameterProvenance::Value,
-                capture_identity: None,
-            },
-            IrCtorArg {
-                name: Some("plain".to_string()),
-                context_kind: crate::types::ContextParameterKind::None,
-                ty: Ty::String,
-                declared_ty: None,
-                is_field: true,
-                field_index: None,
-                has_default: false,
-                is_vararg: false,
-                type_param: None,
-                check: Some("plain".to_string()),
-                anonymous_super_forward: None,
-                capture: None,
-                provenance: crate::ir::IrCtorParameterProvenance::Value,
-                capture_identity: None,
-            },
-        ];
+        class.ctor_args = vec![capture(None), capture(Some(0)), capture(Some(1))];
+        class.constructor_prefix_count = 3;
         let class = ir.add_class(class);
         ir.shared_class_capture_fields
             .insert((class, 0), Ty::String);
 
         lower_class_capture_slots(&mut ir);
 
+        let holder = Ty::obj_args(OBJECT_REF, &[Ty::String]);
+        let lowered = &ir.classes[class as usize];
         assert_eq!(
-            ir.classes[class as usize].fields[0].ty,
-            Ty::obj_args(OBJECT_REF, &[Ty::String])
+            lowered
+                .fields
+                .iter()
+                .map(|field| field.ty)
+                .collect::<Vec<_>>(),
+            [holder, Ty::String]
         );
-        assert_eq!(ir.classes[class as usize].fields[1].ty, Ty::String);
         assert_eq!(
-            ir.classes[class as usize].ctor_args[0].ty,
-            Ty::obj_args(OBJECT_REF, &[Ty::String])
+            lowered
+                .ctor_args
+                .iter()
+                .map(|argument| argument.ty)
+                .collect::<Vec<_>>(),
+            [Ty::String, holder, Ty::String]
         );
-        assert_eq!(ir.classes[class as usize].ctor_args[1].ty, Ty::String);
         assert_eq!(
             ir.shared_class_capture_fields.get(&(class, 0)),
             Some(&Ty::String)

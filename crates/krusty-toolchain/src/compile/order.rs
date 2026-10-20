@@ -1,6 +1,6 @@
-//! Which modules a module's compilation needs, and the order to compile them in: every module the
-//! main fragment depends on for compilation, transitively, each after the modules it depends on,
-//! the project's order deciding between modules that are ready together.
+//! Which modules compiling some modules needs, and the order to compile them in: those modules and
+//! every module their main fragments depend on for compilation, transitively, each after the
+//! modules it depends on, the project's order deciding between modules that are ready together.
 
 use std::collections::BTreeSet;
 
@@ -25,17 +25,18 @@ pub(super) fn compile_dependencies(modules: &[ModuleDeclarations]) -> Vec<Vec<us
         .collect()
 }
 
-/// The modules compiling module `target` needs, `target` last, in the order to compile them, given
-/// each module's direct compile `dependencies`; or,
-/// when they depend on each other in a cycle, the modules of the first cycle found, starting and
-/// ending with the same module.
+/// The modules compiling the modules `targets` needs, each once, in the order to compile them,
+/// given each module's direct compile `dependencies`; or, when they depend on each other in a
+/// cycle, the modules of the first cycle found, starting and ending with the same module.
 pub(super) fn compile_order(
     dependencies: &[Vec<usize>],
-    target: usize,
+    targets: &[usize],
 ) -> Result<Vec<usize>, Vec<usize>> {
     let count = dependencies.len();
     let mut needed = vec![false; count];
-    find_cycle(dependencies, target, &mut needed)?;
+    for &target in targets {
+        find_cycle(dependencies, target, &mut needed)?;
+    }
     // Each needed module waits for the needed modules it depends on.
     let mut waiting: Vec<usize> = (0..count)
         .map(|index| {
@@ -118,9 +119,17 @@ mod tests {
     fn dependencies_come_first_and_the_project_order_breaks_ties() {
         // 0 needs 3 and 1; 1 needs 2; 3 needs nothing; 4 is not needed.
         let dependencies = [vec![3, 1], vec![2], vec![], vec![], vec![0]];
-        assert_eq!(order(&dependencies, 0), Ok(vec![2, 1, 3, 0]));
-        assert_eq!(order(&dependencies, 4), Ok(vec![2, 1, 3, 0, 4]));
-        assert_eq!(order(&dependencies, 3), Ok(vec![3]));
+        assert_eq!(order(&dependencies, &[0]), Ok(vec![2, 1, 3, 0]));
+        assert_eq!(order(&dependencies, &[4]), Ok(vec![2, 1, 3, 0, 4]));
+        assert_eq!(order(&dependencies, &[3]), Ok(vec![3]));
+    }
+
+    #[test]
+    fn several_targets_compile_the_union_of_what_they_need_once() {
+        // 0 needs 2; 1 needs 2 and 3; 4 needs nothing and is not asked for.
+        let dependencies = [vec![2], vec![2, 3], vec![], vec![], vec![]];
+        assert_eq!(order(&dependencies, &[1, 0]), Ok(vec![2, 0, 3, 1]));
+        assert_eq!(order(&dependencies, &[0, 0, 2]), Ok(vec![2, 0]));
     }
 
     #[test]
@@ -131,6 +140,7 @@ mod tests {
             find_cycle(&dependencies, 0, &mut needed),
             Err(vec![1, 2, 1])
         );
-        assert_eq!(order(&dependencies, 3), Err(vec![3, 3]));
+        assert_eq!(order(&dependencies, &[3]), Err(vec![3, 3]));
+        assert_eq!(order(&dependencies, &[3, 0]), Err(vec![3, 3]));
     }
 }

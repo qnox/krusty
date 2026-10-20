@@ -5053,3 +5053,44 @@ fn multiline_member_call_keeps_the_selected_call_source_and_end_lines() {
         }
     );
 }
+
+/// `a + b` selects the same generic operator as `a.plus(b)` and publishes the type arguments that
+/// selection solved, so a reified `T` reaches the call exactly as it does for the explicit call.
+#[test]
+fn a_generic_operator_call_publishes_its_solved_type_arguments() {
+    for (source, operator) in [
+        (
+            "class Box(val value: Int)\n\
+             inline operator fun <reified T> Box.plus(other: T): Box = this\n\
+             fun use(a: Box): Box = a + 1\n",
+            "plus",
+        ),
+        (
+            "class Box(val value: Int)\n\
+             inline operator fun <reified T> Box.rangeTo(other: T): Box = this\n\
+             fun use(a: Box): Box = a..\"end\"\n",
+            "rangeTo",
+        ),
+    ] {
+        let (body, index) = checked_function_body_with_platform(source, "use", jvm_semantics());
+        let expression = body.expr(root_expression(&body)).expect("operator call");
+        let FirExprKind::Call(call) = &expression.kind else {
+            panic!("{operator} must become a checked FIR call")
+        };
+        let target = call.target.module().expect("source operator target");
+        assert_eq!(index.callable_name(target), Some(operator));
+        let [substitution] = call.substitutions.as_ref() else {
+            panic!(
+                "{operator} must publish its solved T, found {:?}",
+                call.substitutions
+            )
+        };
+        assert!(substitution.reified);
+        let expected = if operator == "plus" {
+            Ty::Int
+        } else {
+            Ty::obj("kotlin/String")
+        };
+        assert_eq!(substitution.value.get(), expected);
+    }
+}

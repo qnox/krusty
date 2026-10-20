@@ -56,6 +56,13 @@ impl Emitter<'_> {
         self.primitive_to_object_operands(lhs, rhs).is_some()
     }
 
+    /// Whether `PrimitiveToObjectComparison` stores the primitive: it does when that operand is
+    /// on the right (see `check_type_and_unbox`).
+    pub(super) fn primitive_to_object_stores(&self, lhs: ExprId, rhs: ExprId) -> bool {
+        self.primitive_to_object_operands(lhs, rhs)
+            .is_some_and(|operands| !operands.left_is_primitive)
+    }
+
     /// The operand shape of `PrimitiveToObjectComparison`, from the operands' JVM types.
     fn primitive_to_object_operands(
         &self,

@@ -113,6 +113,12 @@ incremental = true
 opt-level = 2
 codegen-units = 16
 
+# `krusty-build` holds the hand-written SHA-256 that `krusty compilation-fingerprint` runs every
+# input through. At opt-level 0 it digested about 18 MB/s, so fingerprinting one module that names
+# a JDK image took 10 s in the gate binary against 0.7 s to compile it.
+[profile.gate.package.krusty-build]
+opt-level = 2
+
 # The focused KLIB artifact producer builds krusty twice: once as the library behind `klib_e2e`
 # and once as the cfg(test) unit-test harness. Those binaries run only the small KLIB/Native
 # regression inventory, so optimizing both compiler copies like the full box corpus spends more

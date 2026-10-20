@@ -747,6 +747,8 @@ mod diagnostics_type_inference_cases_e2e;
 mod discarded_dependency_result_e2e;
 #[path = "discarded_generic_result_e2e.rs"]
 mod discarded_generic_result_e2e;
+#[path = "discarded_inline_lambda_result_e2e.rs"]
+mod discarded_inline_lambda_result_e2e;
 #[path = "discarded_read_statement_e2e.rs"]
 mod discarded_read_statement_e2e;
 #[path = "discarded_when_e2e.rs"]
@@ -1252,6 +1254,8 @@ mod java_member_modules;
 mod java_self_bounded_constructor_e2e;
 #[path = "local_class_capture_order_e2e.rs"]
 mod local_class_capture_order_e2e;
+#[path = "local_class_construction_capture_e2e.rs"]
+mod local_class_construction_capture_e2e;
 #[path = "local_function_reference_inference_e2e.rs"]
 mod local_function_reference_inference_e2e;
 java_member_modules::declare!();
@@ -1525,6 +1529,8 @@ mod metadata_return_value_status_e2e;
 mod metadata_synthetic_classes_e2e;
 mod metadata_type_modules;
 metadata_type_modules::declare!();
+#[path = "metadata_value_class_synthesized_members_e2e.rs"]
+mod metadata_value_class_synthesized_members_e2e;
 #[path = "metadata_version_requirement_e2e.rs"]
 mod metadata_version_requirement_e2e;
 #[path = "method_access_flags_e2e.rs"]
@@ -1551,6 +1557,8 @@ mod mpp_requires_the_feature_e2e;
 mod nested_class_annotation_scope_e2e;
 #[path = "nested_inline_lambda_e2e.rs"]
 mod nested_inline_lambda_e2e;
+#[path = "nested_inline_lambda_line_e2e.rs"]
+mod nested_inline_lambda_line_e2e;
 #[path = "nested_receiver_lambda_captures_e2e.rs"]
 mod nested_receiver_lambda_captures_e2e;
 #[path = "nested_type_parameter_bound_e2e.rs"]
@@ -2602,6 +2610,8 @@ mod erased_parameter_boxing_e2e;
 mod function_type_parameter_name_e2e;
 #[path = "hidden_deprecation_overload_e2e.rs"]
 mod hidden_deprecation_overload_e2e;
+#[path = "nullable_when_subject_membership_e2e.rs"]
+mod nullable_when_subject_membership_e2e;
 #[path = "super_argument_outer_receiver_e2e.rs"]
 mod super_argument_outer_receiver_e2e;
 #[path = "tparam_bound_member_e2e.rs"]
@@ -2708,6 +2718,8 @@ mod unsigned_loop_lines_e2e;
 mod unsigned_narrow_carrier_e2e;
 #[path = "unsigned_property_getter_e2e.rs"]
 mod unsigned_property_getter_e2e;
+#[path = "unsigned_range_contains_e2e.rs"]
+mod unsigned_range_contains_e2e;
 #[path = "unsigned_toplevel_e2e.rs"]
 mod unsigned_toplevel_e2e;
 #[path = "use_inline_finally_e2e.rs"]
@@ -2816,6 +2828,8 @@ mod when_null_guard_smartcast_e2e;
 mod when_statement_value_arm_e2e;
 #[path = "when_subject_ieee754_e2e.rs"]
 mod when_subject_ieee754_e2e;
+#[path = "when_subject_range_temporary_e2e.rs"]
+mod when_subject_range_temporary_e2e;
 #[path = "when_subject_variable_e2e.rs"]
 mod when_subject_variable_e2e;
 #[path = "when_throwing_branch_e2e.rs"]

@@ -6,6 +6,7 @@
 //! Every class-file surface that names a capture goes through this module.
 
 use crate::fir::CapturedCallableOwner;
+use crate::fx_hash::HashSet;
 use crate::ir::{
     FunId, IrCapturedReceiver, IrClass, IrConstructorCapture, IrFile, IrLambdaCapture,
     IrLambdaClass, IrParameterIdentity, IrParameterRole,
@@ -14,15 +15,45 @@ use crate::jvm::anonymous_context_labels;
 use crate::jvm::suspend::cps::SuspendLambdaParameters;
 use crate::types::CapturedContextKind;
 
-/// The field a local or anonymous `class` stores `capture` in, which is also the constructor's
-/// `-java-parameters` entry, and the constructor's local-variable name for it: `$a` for a value;
-/// a receiver spelled as [`receiver_name`] spells it, unless the class is written in a value-class
-/// member or constructor, whose static realizes that receiver as a value (`$arg0`, `$tmp0`).
-pub(super) fn class_capture(
-    ir: &IrFile,
-    class: &IrClass,
-    capture: &IrConstructorCapture,
-) -> CaptureNames {
+/// The names of each capture a local or anonymous `class` stores, by constructor argument (`None`
+/// for an argument that is no capture): the field, which is also the constructor's
+/// `-java-parameters` entry, and the constructor's local-variable name.
+///
+/// kotlinc allocates them in the constructor's physical order, so a capture whose spelling an
+/// earlier capture already took is numbered after it: a shadowing `val registry` and the context
+/// parameter `registry` it hides are `$registry` and `$registry$1`, whichever comes first.
+pub(super) fn class_captures(ir: &IrFile, class: &IrClass) -> Vec<Option<CaptureNames>> {
+    let mut names = class
+        .ctor_args
+        .iter()
+        .map(|argument| Some(class_capture(ir, class, argument.capture.as_ref()?)))
+        .collect::<Vec<_>>();
+    let physical = super::ir_emit::capture_order::physical(ir, class, (0..names.len()).collect());
+    let mut taken = HashSet::default();
+    for identity in physical {
+        let Some(capture) = names[identity].as_mut() else {
+            continue;
+        };
+        let field = (0u32..)
+            .map(|ordinal| match ordinal {
+                0 => capture.field.clone(),
+                _ => format!("{}${ordinal}", capture.field),
+            })
+            .find(|candidate| !taken.contains(candidate))
+            .expect("an unbounded range has an untaken name");
+        taken.insert(field.clone());
+        if capture.parameter == capture.field {
+            capture.parameter.clone_from(&field);
+        }
+        capture.field = field;
+    }
+    names
+}
+
+/// The names of one capture before numbering: `$a` for a value; a receiver spelled as
+/// [`receiver_name`] spells it, unless the class is written in a value-class member or
+/// constructor, whose static realizes that receiver as a value (`$arg0`, `$tmp0`).
+fn class_capture(ir: &IrFile, class: &IrClass, capture: &IrConstructorCapture) -> CaptureNames {
     let Some(receiver) = &capture.receiver else {
         return CaptureNames::value(&capture.source_name, false);
     };

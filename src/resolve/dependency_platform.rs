@@ -773,7 +773,7 @@ mod tests {
             context_param_names: Vec::new(),
             context_parameter_identities: Vec::new(),
             getter,
-            setter,
+            setter: setter.map(Box::new),
             setter_visibility: visibility,
             setter_parameter_name: None,
             is_const: false,

@@ -965,10 +965,9 @@ impl super::Emitter<'_> {
                     );
                     // `@InlineOnly`/non-public inline functions must splice. Public inline functions have
                     // callable bytecode, so a failed optional splice can fall back to a real call. An
-                    // ordinary `$default` synthetic is an ABI dispatcher whose mask prologue must run
-                    // as emitted. Only a metadata-normalized splice-only declaration may bypass it.
-                    if inline.can_inline() && (!name.ends_with("$default") || inline.must_inline())
-                    {
+                    // inline function's `$default` bridge is inlined like the function, its masks
+                    // resolving the bridge's header, as kotlinc's `IrInlineCodegen` does.
+                    if inline.can_inline() {
                         let call_frame = self.frame.mark();
                         let spliced = self.try_splice_static_inline(
                             bytecode_inline_call::StaticSpliceRequest {
@@ -1614,6 +1613,18 @@ impl super::Emitter<'_> {
                     // realized in IR. This emitter-owned class path is only the SAM shim.
                     self.run
                         .set_emit_error(lambda_class::unrealized(self.ir, *impl_fn));
+                    return code.aconst_null();
+                }
+                if lambda_mode == LambdaMode::Indy
+                    && crate::jvm::suspend::suspend_lambda::takes_value_class_carrier(
+                        self.ir, *impl_fn,
+                    )
+                {
+                    self.run.set_emit_error(format!(
+                        "internal error: suspend lambda {} takes a value-class carrier, which needs \
+                         its SuspendLambda class",
+                        self.ir.functions[*impl_fn as usize].name
+                    ));
                     return code.aconst_null();
                 }
                 if lambda_mode == LambdaMode::Indy {

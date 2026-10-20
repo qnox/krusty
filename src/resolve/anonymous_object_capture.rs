@@ -47,6 +47,10 @@ pub struct AnonymousObjectCapture {
     /// construction site. This is a bounded-checker coordinate, not a source location; checked FIR
     /// consumes it while the active lexical scopes still exist.
     pub(crate) lexical_shadow_depth: u32,
+    /// Lexical identity of the captured value's binding: two same-named values (a shadowing local
+    /// and the context value it hides) are two captures with distinct identities. Absent for a
+    /// receiver, and for a value that is not a function-local binding.
+    pub(crate) lexical_binding: Option<u32>,
     /// Semantic closure field forwarded by this capture. Direct captures leave this absent and
     /// establish their own identity when checked; transitive captures preserve the upstream field.
     pub(crate) capture_dependency: Option<crate::fir::ClassCaptureIdentity>,
@@ -167,6 +171,8 @@ pub(super) struct AnonymousCaptureCandidate {
     pub(super) receiver_label: Option<Box<str>>,
     pub(super) receiver: Option<crate::fir::FirCapturedReceiver>,
     pub(super) semantic_receiver: Option<AnonymousObjectReceiverSource>,
+    /// Lexical identity of a function-local value's binding.
+    pub(super) lexical_binding: Option<u32>,
     /// Exact live checker-scope identity when this candidate is a receiver. It exists only long
     /// enough to project a direct nested anonymous object's use onto this class's capture field.
     pub(super) receiver_identity: Option<(usize, usize)>,
@@ -369,6 +375,7 @@ impl Checker<'_> {
                         },
                     ),
                     lexical_shadow_depth: 0,
+                    lexical_binding: None,
                     capture_dependency: None,
                     receiver_capture,
                     receiver_role: receiver.receiver_role,
@@ -792,6 +799,7 @@ mod receiver_remap_tests {
                 depth,
             }),
             lexical_shadow_depth: 0,
+            lexical_binding: None,
             capture_dependency: None,
             receiver_capture: Some(identity),
             receiver_role: Some(role),
@@ -1186,6 +1194,7 @@ pub(super) fn record_anonymous_construction_captures(
             receiver: candidate.receiver.clone(),
             semantic_receiver: candidate.semantic_receiver,
             lexical_shadow_depth: 0,
+            lexical_binding: candidate.lexical_binding,
             capture_dependency: None,
             receiver_capture: candidate.receiver_capture,
             receiver_role: candidate.receiver_role,

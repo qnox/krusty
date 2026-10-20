@@ -473,6 +473,19 @@ impl Emitter<'_> {
         }
     }
 
+    /// Whether `expression` realizes an inlined call in place (`SyntheticOriginKind::InlinedCall`)
+    /// or is an external-inline expansion lowered from its declaration plan.
+    pub(super) fn realizes_inlined_call(&self, expression: ExprId) -> bool {
+        self.ir.external_inline_expansions.contains(&expression)
+            || matches!(
+                self.ir.fir_origins.get(&expression),
+                Some(IrNodeOrigin::Synthetic {
+                    kind: SyntheticOriginKind::InlinedCall,
+                    ..
+                })
+            )
+    }
+
     /// kotlinc's `markLineNumberAfterInlineIfNeeded`, after a node that realizes an inlined call in
     /// place (`SyntheticOriginKind::InlinedCall`), and after an external-inline expansion lowered
     /// from its declaration plan.
@@ -481,15 +494,7 @@ impl Emitter<'_> {
     /// anywhere else it is forgotten, so the next mark of any line is written — kotlinc resets its
     /// last line number after an inlined body, which ran under the callee's lines.
     pub(super) fn mark_after_inlined_call(&self, expression: ExprId, code: &mut CodeBuilder) {
-        let inlined = self.ir.external_inline_expansions.contains(&expression)
-            || matches!(
-                self.ir.fir_origins.get(&expression),
-                Some(IrNodeOrigin::Synthetic {
-                    kind: SyntheticOriginKind::InlinedCall,
-                    ..
-                })
-            );
-        if !inlined {
+        if !self.realizes_inlined_call(expression) {
             return;
         }
         if self.ir.inline_result_adaptation_restores_caller(expression) {

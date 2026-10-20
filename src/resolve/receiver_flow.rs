@@ -150,7 +150,9 @@ impl Checker<'_> {
         source: &ResolvedContextArgument,
     ) -> Option<NarrowPath> {
         match source {
-            ResolvedContextArgument::Binding { name, shadow_depth } => {
+            ResolvedContextArgument::Binding {
+                name, shadow_depth, ..
+            } => {
                 let local = scope
                     .shadowed_binding(Ns::Value, name, *shadow_depth)?
                     .value()?;
