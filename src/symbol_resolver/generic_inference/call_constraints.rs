@@ -447,6 +447,9 @@ pub(crate) fn publish_denotable_upper_bindings(
 }
 
 impl CallInferenceConstraints {
+    /// Record `actual` as a bound of `name`. Returns whether the system gained a constraint it did
+    /// not already hold: an erroneous or self-referential input is dropped, and an input is stored
+    /// in its normalized form, so a caller cannot compare the raw input against the stored set.
     fn insert(
         &mut self,
         source: &dyn SymbolSource,
@@ -454,20 +457,21 @@ impl CallInferenceConstraints {
         actual: Ty,
         position: ConstraintPosition,
         origin: ConstraintOrigin,
-    ) {
+    ) -> bool {
         if actual.mentions_error() {
-            return;
+            return false;
         }
         let actual = inference_actual(actual);
         if matches!(actual, Ty::TyParam(actual_name, _) if actual_name == name) {
-            return;
+            return false;
         }
         match position {
             ConstraintPosition::Lower => {
                 let inputs = self.lower_inputs.entry(name.to_string()).or_default();
-                if !inputs.contains(&(actual, origin)) {
-                    inputs.push((actual, origin));
+                if inputs.contains(&(actual, origin)) {
+                    return false;
                 }
+                inputs.push((actual, origin));
                 // A formal's FIRST lower constraint keeps a use-site projection intact (`B<*>`
                 // against `B<T>` binds `T := out Any?` — the stand-in for kotlinc's captured type):
                 // the parameter then substitutes back to the argument's own type, so the call stays
@@ -482,11 +486,13 @@ impl CallInferenceConstraints {
             }
             ConstraintPosition::Upper => {
                 let bounds = self.upper.entry(name.to_string()).or_default();
-                if !bounds.contains(&actual) {
-                    bounds.push(actual);
+                if bounds.contains(&actual) {
+                    return false;
                 }
+                bounds.push(actual);
             }
         }
+        true
     }
 
     /// Propagate the declaration's direct variable bounds as constraints before collapsing them to
@@ -512,36 +518,26 @@ impl CallInferenceConstraints {
                     for &(actual, origin) in
                         lower.get(formal).map(Vec::as_slice).unwrap_or_default()
                     {
-                        let prior = self
-                            .lower_inputs
-                            .get(bound_formal.as_str())
-                            .is_some_and(|inputs| inputs.contains(&(actual, origin)));
-                        self.insert(
+                        changed |= self.insert(
                             source,
                             bound_formal.as_str(),
                             actual,
                             ConstraintPosition::Lower,
                             origin,
                         );
-                        changed |= !prior;
                     }
                     for &actual in upper
                         .get(bound_formal.as_str())
                         .map(Vec::as_slice)
                         .unwrap_or_default()
                     {
-                        let prior = self
-                            .upper
-                            .get(formal)
-                            .is_some_and(|bounds| bounds.contains(&actual));
-                        self.insert(
+                        changed |= self.insert(
                             source,
                             formal,
                             actual,
                             ConstraintPosition::Upper,
                             ConstraintOrigin::Receiver,
                         );
-                        changed |= !prior;
                     }
                 }
             }
@@ -713,7 +709,9 @@ fn collect_call_inference_constraints(
     constraints: &mut CallInferenceConstraints,
 ) {
     match shape {
-        Ty::TyParam(name, _) => constraints.insert(source, name.as_str(), actual, position, origin),
+        Ty::TyParam(name, _) => {
+            constraints.insert(source, name.as_str(), actual, position, origin);
+        }
         Ty::Nullable(inner) => {
             collect_call_inference_constraints(
                 source,
