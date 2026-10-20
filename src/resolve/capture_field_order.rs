@@ -12,7 +12,7 @@
 //! Field ordinals are identities, not the physical layout. Once a local class's body has been
 //! checked, its lexical-value captures also get kotlinc's first-use order, computed from the
 //! storage identities that body recorded. The order is a recorded fact the JVM backend applies;
-//! every earlier phase keeps field order.
+//! every earlier phase keeps field order. The same walk decides which captures need storage.
 
 use super::context_capture::context_argument_sites;
 use super::scope::PathRoot;
@@ -146,6 +146,16 @@ pub(super) fn order_receivers_by_first_use(
 /// capture without a use means the class body was not completely checked in this visit; such a
 /// visit publishes no order, and checked FIR rejects a local class whose captures never received
 /// one.
+///
+/// The same walk decides storage. kotlinc's constructor code (the primary constructor's defaults and
+/// super-constructor arguments, the property initializers and `init` blocks, and each secondary
+/// constructor's defaults, delegation arguments and body) reads a capture from its constructor
+/// parameter. A value capture whose every use is such a direct read needs no field. Every other use
+/// keeps one: a member, a lambda, a local function or classifier the class includes, a write, a
+/// captured delegated local, an implicit context argument, and an inner class (which reads the
+/// outer instance's storage). A data class's generated `copy` constructs the class again from its
+/// storage, so its captures all keep fields. A shared cell keeps its field as well; keeping one in
+/// its parameter alone is not modelled yet.
 impl super::Checker<'_> {
     pub(super) fn publish_local_class_capture_layout(
         &mut self,
@@ -186,6 +196,9 @@ impl super::Checker<'_> {
             included: HashSet::default(),
             context_uses: HashMap::default(),
             unordered: None,
+            construction: false,
+            stored: HashSet::default(),
+            construction_reads: Vec::new(),
         };
         uses.collect(Closure::Class(class, Some(declaration)));
         if let Some(unordered) = uses.unordered.take() {
@@ -195,9 +208,25 @@ impl super::Checker<'_> {
         }
         // A revisit that does not check the whole body (one for signature defaults) keeps the
         // order of the complete check: established capture fields keep their identities.
-        if let Some(order) = first_use_order(captures, &uses.fields) {
-            self.class_capture_uses.orders.insert(declaration, order);
-        }
+        let Some(order) = first_use_order(captures, &uses.fields) else {
+            return;
+        };
+        let stored = captures
+            .iter()
+            .enumerate()
+            .map(|(field, capture)| {
+                class.is_data
+                    || !is_value_capture(capture)
+                    || capture.storage_ty.is_some()
+                    || capture.shared_cell
+                    || u32::try_from(field).is_ok_and(|field| uses.stored.contains(&field))
+            })
+            .collect();
+        let construction_reads = uses.construction_reads;
+        let layouts = &mut self.class_capture_uses.layouts;
+        layouts.construction_reads.extend(construction_reads);
+        layouts.orders.insert(declaration, order);
+        layouts.stored.insert(declaration, stored);
     }
 
     /// Record the lexical identities of a local function's captured values in kotlinc's first-use
@@ -247,6 +276,9 @@ impl super::Checker<'_> {
             included: std::iter::once(Inclusion::LocalFunction(statement)).collect(),
             context_uses,
             unordered: None,
+            construction: false,
+            stored: HashSet::default(),
+            construction_reads: Vec::new(),
         };
         uses.collect(Closure::Callable(callable_roots(
             &function.params,
@@ -353,11 +385,23 @@ impl super::Checker<'_> {
 pub(super) struct ClassCaptureUses {
     /// Assignment statements and what each one writes.
     writes: HashMap<StmtId, StorageUse>,
-    /// Published first-use orders, keyed by local classifier.
-    pub(super) orders: HashMap<DeclId, Box<[u32]>>,
+    /// What gets published.
+    pub(super) layouts: LocalClassCaptureLayouts,
     /// Each local function's captured lexical identities in first-use order, which a class that
     /// includes the function takes them in, or the capture no recorded use orders.
     function_orders: HashMap<StmtId, Result<Box<[u32]>, UnorderedCapture>>,
+}
+
+/// The constructor order and storage of each checked local class's captures, by local classifier.
+#[derive(Default)]
+pub struct LocalClassCaptureLayouts {
+    /// The first-use order: `order[position]` is the capture field kotlinc puts at that position.
+    pub orders: HashMap<DeclId, Box<[u32]>>,
+    /// By capture field, whether code that runs after construction uses it, so it needs a field.
+    pub stored: HashMap<DeclId, Box<[bool]>>,
+    /// Capture reads that run while their class is constructed, which read the constructor
+    /// parameter.
+    pub construction_reads: HashSet<ExprId>,
 }
 
 /// A local function's captured value that no recorded use places. Every capture is a read, write,
@@ -437,6 +481,8 @@ enum Closure<'w> {
     Class(&'w ClassDecl, Option<DeclId>),
     /// A body: parameter defaults, then the body.
     Callable(Vec<ExprId>),
+    /// Constructor code of the local class: its direct reads are construction reads.
+    Construction(Vec<ExprId>),
     /// A local function or classifier, included where it is used.
     Included(Inclusion),
 }
@@ -471,6 +517,11 @@ struct FirstUses<'w, 'c> {
     context_uses: HashMap<ExprId, Vec<u32>>,
     /// An included local function whose captures have no complete first-use order.
     unordered: Option<UnorderedCapture>,
+    /// Whether the walk is in the local class's own constructor code, outside any nested closure.
+    construction: bool,
+    /// Fields some use other than a construction read names.
+    stored: HashSet<u32>,
+    construction_reads: Vec<ExprId>,
 }
 
 /// One closure: what it reads itself, then what it includes, by source position, then the local
@@ -479,6 +530,16 @@ struct ClosureUses<'w> {
     direct: Vec<u32>,
     nested: Vec<(u32, Closure<'w>)>,
     declared: Vec<Inclusion>,
+}
+
+/// Constructor code of the walked local class (`declaration`), or of an inner class, which is not
+/// the class under construction.
+fn constructor_code<'w>(declaration: Option<DeclId>, roots: Vec<ExprId>) -> Closure<'w> {
+    if declaration.is_some() {
+        Closure::Construction(roots)
+    } else {
+        Closure::Callable(roots)
+    }
 }
 
 fn callable_roots(params: &[crate::ast::Param], body: &FunBody) -> Vec<ExprId> {
@@ -509,6 +570,13 @@ impl<'w> FirstUses<'w, '_> {
                 for root in roots {
                     self.expression(root, &mut closure_uses);
                 }
+            }
+            Closure::Construction(roots) => {
+                self.construction = true;
+                for root in roots {
+                    self.expression(root, &mut closure_uses);
+                }
+                self.construction = false;
             }
             Closure::Included(inclusion) => {
                 if !self.included.insert(inclusion) {
@@ -549,6 +617,12 @@ impl<'w> FirstUses<'w, '_> {
         self.span.lo <= span.lo && span.hi <= self.span.hi
     }
 
+    /// A use of `field` by code that is not a construction read.
+    fn stored_use(&mut self, field: u32, uses: &mut ClosureUses<'w>) {
+        self.stored.insert(field);
+        uses.direct.push(field);
+    }
+
     /// The field of the capture whose lexical binding is `identity`.
     fn captured_binding(&self, identity: u32) -> Option<u32> {
         let field = self
@@ -582,6 +656,9 @@ impl<'w> FirstUses<'w, '_> {
         declaration: Option<DeclId>,
         uses: &mut ClosureUses<'w>,
     ) {
+        // Only the local class itself is under construction: an inner class's code reads this
+        // class's storage through its outer instance.
+        self.construction = declaration.is_some();
         for step in &class.init_order {
             match step {
                 ClassInit::PropInit(index) => {
@@ -593,6 +670,7 @@ impl<'w> FirstUses<'w, '_> {
                 ClassInit::Block(body) => self.expression(*body, uses),
             }
         }
+        self.construction = false;
         for delegation in &class.interface_delegations {
             self.expression(delegation.value, uses);
         }
@@ -604,7 +682,8 @@ impl<'w> FirstUses<'w, '_> {
             .filter_map(|property| property.default)
             .chain(class.base_args.iter().copied())
             .collect();
-        uses.nested.push((0, Closure::Callable(primary)));
+        uses.nested
+            .push((0, constructor_code(declaration, primary)));
         if let Some(superclass) = declaration.and_then(|declaration| {
             self.checker
                 .local_superclass_declaration(declaration, class)
@@ -641,7 +720,7 @@ impl<'w> FirstUses<'w, '_> {
                 .chain(constructor.body)
                 .collect();
             uses.nested
-                .push((constructor.span.lo, Closure::Callable(roots)));
+                .push((constructor.span.lo, constructor_code(declaration, roots)));
         }
         // An inner class is a local declaration of the class, included where it is constructed.
         let file = self.checker.file;
@@ -677,7 +756,9 @@ impl<'w> FirstUses<'w, '_> {
         match checker.class_capture_uses.function_orders.get(&statement) {
             Some(Ok(order)) => {
                 for identity in order {
-                    uses.direct.extend(self.captured_binding(*identity));
+                    if let Some(field) = self.captured_binding(*identity) {
+                        self.stored_use(field, uses);
+                    }
                 }
             }
             Some(Err(unordered)) => {
@@ -720,7 +801,7 @@ impl<'w> FirstUses<'w, '_> {
             .get(&declaration)
             .map_or(&[][..], Vec::as_slice);
         let mut physical = captures.iter().enumerate().collect::<Vec<_>>();
-        if let Some(order) = checker.class_capture_uses.orders.get(&declaration) {
+        if let Some(order) = checker.class_capture_uses.layouts.orders.get(&declaration) {
             physical.sort_by_key(|(field, _)| {
                 order.iter().position(|ordered| *ordered as usize == *field)
             });
@@ -746,7 +827,9 @@ impl<'w> FirstUses<'w, '_> {
             } else {
                 self.carried_capture(capture, bindings.get(field).copied().flatten())
             };
-            uses.direct.extend(carried);
+            if let Some(field) = carried {
+                self.stored_use(field, uses);
+            }
         }
     }
 
@@ -767,7 +850,9 @@ impl<'w> FirstUses<'w, '_> {
         let file = checker.file;
         let position = self.position(expression);
         if let Some(&object) = file.anonymous_object_classes.get(&expression) {
-            // A forwarded super-constructor argument runs at the construction site.
+            // A forwarded super-constructor argument runs at the construction site, which binds it
+            // as the object's argument, not as a read of this class's constructor parameter.
+            let construction = std::mem::replace(&mut self.construction, false);
             for &argument in checker
                 .discovered_anonymous_super_forwards
                 .get(&object)
@@ -776,6 +861,7 @@ impl<'w> FirstUses<'w, '_> {
             {
                 self.expression(argument, uses);
             }
+            self.construction = construction;
             let object = Closure::Included(Inclusion::Classifier(object));
             uses.nested.push((position, object));
             return;
@@ -787,11 +873,20 @@ impl<'w> FirstUses<'w, '_> {
                 _ => None,
             },
         };
-        uses.direct
-            .extend(read.and_then(|read| self.storage_use(read)));
+        if let Some(read) = read {
+            match (self.storage_use(read), read) {
+                (Some(field), StorageUse::Field(_)) if self.construction => {
+                    self.construction_reads.push(expression);
+                    uses.direct.push(field);
+                }
+                (Some(field), _) => self.stored_use(field, uses),
+                (None, _) => {}
+            }
+        }
         // An implicit context argument is a use of the value it passes, where the call is.
-        if let Some(captures) = self.context_uses.get(&expression) {
-            uses.direct.extend(captures.iter().copied());
+        let context = self.context_uses.get(&expression).cloned();
+        for capture in context.into_iter().flatten() {
+            self.stored_use(capture, uses);
         }
         let function = match checker.expr_lowers.get(&expression) {
             Some(
@@ -856,8 +951,13 @@ impl<'w> FirstUses<'w, '_> {
             }
             _ => {}
         }
-        if let Some(&written) = checker.class_capture_uses.writes.get(&statement) {
-            uses.direct.extend(self.storage_use(written));
+        if let Some(field) = checker
+            .class_capture_uses
+            .writes
+            .get(&statement)
+            .and_then(|written| self.storage_use(*written))
+        {
+            self.stored_use(field, uses);
         }
         let mut children = Vec::new();
         checker.file.any_child_stmt(statement, &mut |child| {

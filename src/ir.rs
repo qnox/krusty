@@ -1605,8 +1605,8 @@ pub struct IrFile {
     /// captures. Keyed by `(subclass, secondary index, selected-super-parameter)`.
     pub(crate) shared_secondary_super_capture_parameters:
         crate::fx_hash::HashMap<(ClassId, u32, u32), Ty>,
-    /// Exact semantic closure identity for every local/anonymous-class capture field. Transitive
-    /// superclass forwarding consumes this coordinate instead of matching synthetic field names.
+    /// Exact closure identity of each local/anonymous-class capture by constructor-prefix identity.
+    /// Transitive superclass forwarding consumes this coordinate instead of synthetic field names.
     pub(crate) class_capture_identities:
         crate::fx_hash::HashMap<(ClassId, u32), crate::fir::ClassCaptureIdentity>,
     /// A local class's capture order by first use (`order[position]` is a field), JVM-applied.
