@@ -31,6 +31,8 @@ pub struct HostRuntime {
     pub kotlin_version: String,
     pub java: PathBuf,
     pub java_home: PathBuf,
+    /// The feature release of [`Self::java`], as its home's `release` file names it.
+    pub java_major: u32,
     /// `kotlin-compiler-embeddable` first, then its runtime dependencies.
     pub compiler_classpath: Vec<PathBuf>,
     /// [`ArtifactPin::identity`] of the pins the classpath was verified against, which names what is
@@ -41,9 +43,17 @@ pub struct HostRuntime {
 impl HostRuntime {
     /// A command that runs this runtime's `java` as its own JDK: `JAVA_HOME` names it, whatever the
     /// environment named, so what runs there and looks for a JDK finds the one that runs it.
+    ///
+    /// From Java 9 the JVM's own logging writes its warnings to stdout, where the host speaks its
+    /// protocol, and `JDK_JAVA_OPTIONS` can add more logging there. The command turns every
+    /// configured log output off and sends warnings and errors to stderr instead. Java 8 has no
+    /// such logging and no such option.
     pub(crate) fn java_command(&self) -> std::process::Command {
         let mut command = std::process::Command::new(&self.java);
         command.env("JAVA_HOME", &self.java_home);
+        if self.java_major >= 9 {
+            command.args(["-Xlog:disable", "-Xlog:all=warning:stderr"]);
+        }
         command
     }
 }
@@ -183,6 +193,7 @@ pub fn provision(
         kotlin_version: request.kotlin_version.to_string(),
         java: jdk.java,
         java_home: jdk.home,
+        java_major: jdk.major,
         compiler_classpath: classpath,
         compiler_identity: ArtifactPin::identity(classpath_pins),
     })
@@ -460,16 +471,20 @@ fn io(path: &std::path::Path, error: std::io::Error) -> ProvisionError {
 mod tests {
     use super::*;
 
-    #[test]
-    fn java_runs_with_its_own_home_as_java_home() {
-        let runtime = HostRuntime {
+    fn runtime(major: u32) -> HostRuntime {
+        HostRuntime {
             kotlin_version: "2.4.20".into(),
-            java: PathBuf::from("/jdks/21/bin/java"),
-            java_home: PathBuf::from("/jdks/21"),
+            java: PathBuf::from(format!("/jdks/{major}/bin/java")),
+            java_home: PathBuf::from(format!("/jdks/{major}")),
+            java_major: major,
             compiler_classpath: Vec::new(),
             compiler_identity: String::new(),
-        };
-        let command = runtime.java_command();
+        }
+    }
+
+    #[test]
+    fn java_runs_with_its_own_home_as_java_home() {
+        let command = runtime(21).java_command();
         assert_eq!(command.get_program(), "/jdks/21/bin/java");
         assert_eq!(
             command.get_envs().collect::<Vec<_>>(),
@@ -478,5 +493,19 @@ mod tests {
                 Some(std::ffi::OsStr::new("/jdks/21"))
             )]
         );
+    }
+
+    #[test]
+    fn java_9_and_later_log_to_stderr_and_java_8_takes_no_logging_option() {
+        let arguments = |major| {
+            runtime(major)
+                .java_command()
+                .get_args()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(arguments(9), ["-Xlog:disable", "-Xlog:all=warning:stderr"]);
+        assert_eq!(arguments(21), ["-Xlog:disable", "-Xlog:all=warning:stderr"]);
+        assert_eq!(arguments(8), Vec::<String>::new());
     }
 }
