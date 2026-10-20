@@ -6312,7 +6312,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   body denotes a member type declared in the class, else one inherited from its supertypes (JLS
   §8.5), before the enclosing class, imports, and package are consulted; two distinct inherited
   member types of that name are ambiguous. A private member type is not inherited, and a
-  package-private one only into a class of its package. Membership is structural: a member type is
+  package-private one only into a class of its package; accessibility is decided at each
+  inheritance edge, so a member type an intermediate class in another package cannot inherit stays
+  hidden from that class's subclasses, even back in the declaring package. Membership is structural: a member type is
   the one its declaring classifier publishes under that simple name (a classfile's `InnerClasses`
   entry, a Java source declaration's enclosing class, a Kotlin source classifier's nesting), never a
   composed `Owner$Name` spelling, because a top-level Java class may itself be named `Base$Req`.
@@ -6320,7 +6322,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   classifier contributes the member types it declares (its own supertypes resolve after the headers
   are built). Tests: `jvm::java_stub::tests::a_member_type_of_the_superclass_shadows_an_import`,
   `a_top_level_dollar_name_is_not_a_member_type`, `a_private_member_type_is_not_inherited`,
-  `a_package_private_member_type_is_inherited_only_within_its_package`, and siblings.
+  `a_package_private_member_type_is_inherited_only_within_its_package`,
+  `a_package_private_member_type_is_not_inherited_across_an_intermediate_package`, and siblings.
 
 - **A Java instance field is a Kotlin `var` property (unless `final`), with Java visibility.** Public
   fields read/write anywhere; protected fields bind from a subclass of the declaring class (any

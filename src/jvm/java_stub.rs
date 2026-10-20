@@ -2199,6 +2199,35 @@ mod tests {
     }
 
     #[test]
+    fn a_package_private_member_type_is_not_inherited_across_an_intermediate_package() {
+        let base = "package p; public class Base { static class N {} }";
+        let mid = "package q; public class Mid extends p.Base {}";
+        let leaf = "package p; public class Leaf extends q.Mid { public N f() { return null; } }";
+        let world = DeclaredWorld(&[declared("java/lang/Object")]);
+        assert!(stubs_in(
+            &world,
+            &[("Base.java", base), ("Mid.java", mid), ("Leaf.java", leaf)]
+        )
+        .is_none());
+
+        let world = DeclaredWorld(&[
+            declared("java/lang/Object"),
+            Declared {
+                name: "p/Base",
+                supertypes: &[],
+                members: &[("N", "p/Base$N", Visibility::PackagePrivate)],
+            },
+            declared("p/Base$N"),
+            Declared {
+                name: "q/Mid",
+                supertypes: &["p/Base"],
+                members: &[],
+            },
+        ]);
+        assert!(stubs_in(&world, &[("Leaf.java", leaf)]).is_none());
+    }
+
+    #[test]
     fn a_member_type_is_inherited_through_source_and_world_supertypes() {
         let world = DeclaredWorld(&[
             declared("java/lang/Object"),

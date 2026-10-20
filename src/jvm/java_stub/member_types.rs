@@ -243,7 +243,10 @@ impl<'a> MemberTypes<'a> {
     }
 
     /// Member types `class` makes available to a subclass in `package`: its own accessible ones,
-    /// else those it inherits in turn.
+    /// else those it inherits in turn. Accessibility is decided at each inheritance edge, so the
+    /// member types `class` inherits are those accessible from `class`'s own package: a
+    /// package-private member type an intermediate class in another package cannot inherit is not
+    /// resurrected when the chain returns to the declaring package.
     fn collect_inherited(
         &self,
         class: &str,
@@ -262,8 +265,16 @@ impl<'a> MemberTypes<'a> {
             }
             return;
         }
+        let inheriting_package = package_of(class);
         for supertype in self.direct_supertypes(class, source_supertypes) {
-            self.collect_inherited(&supertype, name, package, source_supertypes, visited, found);
+            self.collect_inherited(
+                &supertype,
+                name,
+                inheriting_package,
+                source_supertypes,
+                visited,
+                found,
+            );
         }
     }
 
