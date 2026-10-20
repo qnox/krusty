@@ -187,6 +187,7 @@ fn every_dependency_case_is_resolved_as_the_toolchain_resolves_it() {
             files: &inputs.project,
             args: ARGS,
             repository: Some(&inputs.repository),
+            compiler: None,
         })
         .collect();
     let outputs = kotlin::kotlin_all(&invocations);

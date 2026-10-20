@@ -25,6 +25,7 @@ fn every_settings_case_is_shown_as_the_toolchain_shows_it() {
             case: &case.name,
             files: &case.files,
             repository: None,
+            compiler: None,
             args: &["show", "settings", "--all-modules"],
         })
         .collect();
