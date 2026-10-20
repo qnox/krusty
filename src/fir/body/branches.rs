@@ -41,6 +41,9 @@ pub enum FirWhenCondition {
     SubjectEquals {
         candidate: FirExprId,
         numeric: Option<FirWhenSubjectNumericEquality>,
+        /// The floating type of an IEEE-754 equality with a nullable operand (fir2ir's
+        /// `ieee754equals`), which keeps each nullable operand boxed.
+        nullable_ieee754: Option<ResolvedTy>,
     },
     Predicate(FirExprId),
 }

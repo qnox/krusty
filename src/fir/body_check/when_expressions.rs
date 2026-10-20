@@ -127,36 +127,43 @@ impl BodyFirChecker<'_> {
                             self.boolean_condition(condition.expression())?
                         };
                         Ok(if has_subject && !condition.is_predicate() {
-                            let numeric = self
+                            let plan = self
                                 .info
-                                .when_subject_numeric_equality(condition.expression())
+                                .when_subject_numeric_equality(condition.expression());
+                            let nullable_ieee754 = self
+                                .info
+                                .when_subject_nullable_ieee754_equality(condition.expression());
+                            let resolved = |ty: Ty| {
+                                let span = self.file.expr_span(condition.expression()).ok_or_else(
+                                    || {
+                                        self.failure(
+                                            None,
+                                            super::BodyCheckFailureKind::MissingSourceSpan,
+                                        )
+                                    },
+                                )?;
+                                self.resolved_type(span, ty)
+                            };
+                            let numeric = plan
                                 .map(|plan| {
-                                    let span = self
-                                        .file
-                                        .expr_span(condition.expression())
-                                        .ok_or_else(|| {
-                                            self.failure(
-                                                None,
-                                                super::BodyCheckFailureKind::MissingSourceSpan,
-                                            )
-                                        })?;
                                     Ok::<_, BodyCheckFailure>(FirWhenSubjectNumericEquality {
-                                        subject_unbox: self
-                                            .resolved_type(span, plan.subject_unbox())?,
+                                        subject_unbox: resolved(plan.subject_unbox())?,
                                         subject_widening: plan
                                             .subject_widening()
-                                            .map(|ty| self.resolved_type(span, ty))
+                                            .map(resolved)
                                             .transpose()?,
                                         candidate_widening: plan
                                             .candidate_widening()
-                                            .map(|ty| self.resolved_type(span, ty))
+                                            .map(resolved)
                                             .transpose()?,
                                     })
                                 })
                                 .transpose()?;
+                            let nullable_ieee754 = nullable_ieee754.map(resolved).transpose()?;
                             FirWhenCondition::SubjectEquals {
                                 candidate: checked,
                                 numeric,
+                                nullable_ieee754,
                             }
                         } else {
                             FirWhenCondition::Predicate(checked)
