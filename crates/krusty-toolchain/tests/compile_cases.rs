@@ -1017,7 +1017,7 @@ fn a_failure_starts_no_module_and_waits_for_the_running_ones() {
 fn concurrent_failures_are_reported_in_plan_order() {
     compiling::recorder();
     for attempt in 0..4 {
-        let ran = timed_run(
+        let (code, stdout, stderr, events) = timed_run(
             &format!("siblings-{attempt}"),
             &[":app:compileJvm"],
             |command| {
@@ -1027,7 +1027,7 @@ fn concurrent_failures_are_reported_in_plan_order() {
             },
         );
         let base = "recorder: compiled base\n".to_string();
-        let expected = if parallel() {
+        let expected_output = if parallel() {
             (
                 4,
                 base,
@@ -1038,14 +1038,6 @@ fn concurrent_failures_are_reported_in_plan_order() {
                     sleeper("base"),
                     sleeper("left")
                 ),
-                lines(&[
-                    "start base",
-                    "end base",
-                    "start left",
-                    "start right",
-                    "end right",
-                    "end left",
-                ]),
             )
         } else {
             (
@@ -1057,21 +1049,51 @@ fn concurrent_failures_are_reported_in_plan_order() {
                     sleeper("base"),
                     sleeper("left")
                 ),
-                lines(&["start base", "end base", "start left", "end left"]),
             )
         };
-        let (code, stdout, stderr, events) = ran;
-        // `left` and `right` start together; `right` ends first.
-        let events = if parallel() {
-            settled(events, &[(2, 4)])
+        assert_eq!((code, stdout, stderr), expected_output, "attempt {attempt}");
+        if parallel() {
+            // The scheduler starts both siblings, but either child process may execute first. Each
+            // child records its start before its end, and `right` still finishes before `left`.
+            let mut exact_events = events.clone();
+            exact_events.sort();
+            assert_eq!(
+                exact_events,
+                lines(&[
+                    "end base",
+                    "end left",
+                    "end right",
+                    "start base",
+                    "start left",
+                    "start right",
+                ]),
+                "attempt {attempt}"
+            );
+            assert_eq!(
+                &events[..2],
+                lines(&["start base", "end base"]),
+                "attempt {attempt}"
+            );
+            let position = |event| events.iter().position(|actual| actual == event).unwrap();
+            assert!(
+                position("start left") < position("end left"),
+                "attempt {attempt}: {events:?}"
+            );
+            assert!(
+                position("start right") < position("end right"),
+                "attempt {attempt}: {events:?}"
+            );
+            assert!(
+                position("end right") < position("end left"),
+                "attempt {attempt}: {events:?}"
+            );
         } else {
-            events
-        };
-        assert_eq!(
-            (code, stdout, stderr, events),
-            expected,
-            "attempt {attempt}"
-        );
+            assert_eq!(
+                events,
+                lines(&["start base", "end base", "start left", "end left"]),
+                "attempt {attempt}"
+            );
+        }
     }
 }
 
