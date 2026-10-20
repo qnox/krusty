@@ -4338,6 +4338,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   checked type exactly as an `==` condition's does; an untyped read would be converted to the
   comparison type and that conversion stored in a temporary kotlinc never declares.
   `tests/when_subject_range_temporary_e2e.rs`.
+- **A `when` subject keeps its own type; a narrowed arm reads it through a smart cast.** The
+  subject is evaluated once into `tmp_subject` with the type it has at the `when`'s entry, so
+  `when (c: Int?) { null -> …; in 1..3 -> … }` stores the boxed `Int?` and tests it for `null`
+  first. An `is`/`in` condition in a later arm sees the subject narrowed by the arms before it
+  (past a `null` arm, or a failed `!is Int`), and reads it as kotlinc's smart-cast `$subj$`
+  does: an unboxing or smart cast of `tmp_subject` inside that condition. The resolver records
+  that narrowed view against the condition and keeps the subject's own type on the subject
+  node, which the condition shares as its operand; checked FIR applies the view as a conversion
+  of the subject's single value.
+  `tests/nullable_when_subject_membership_e2e.rs`.
 - **`x ?: return` smart-casts `x` for the code that follows** (also `?: throw`/`break`/`continue`/a
   `Nothing`-typed call): completing an elvis whose right-hand side is `Nothing` proves a stable
   `val`/parameter non-null, exactly like an `if (x == null) return` guard. A nullable-primitive local
