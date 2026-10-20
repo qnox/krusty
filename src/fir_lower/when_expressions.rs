@@ -31,7 +31,7 @@ impl BodyLowering<'_> {
         let subject = match (subject, subject_variable) {
             (Some(subject), Some(variable)) => {
                 let slot = self.value_slot(variable);
-                let read = self.when_subject_read(slot, Some(variable));
+                let read = self.when_subject_read(slot, Some(subject), Some(variable));
                 self.set_expression_state(subject, LoweringState::Lowered(read));
                 Some(slot)
             }
@@ -55,7 +55,7 @@ impl BodyLowering<'_> {
                     init: Some(value),
                     named: false,
                 }));
-                let read = self.when_subject_read(temporary, None);
+                let read = self.when_subject_read(temporary, Some(subject), None);
                 self.set_expression_state(subject, LoweringState::Lowered(read));
                 temporary
             }),
@@ -78,15 +78,8 @@ impl BodyLowering<'_> {
                         let subject = subject.ok_or(FirLoweringFailure::MissingWhenSubject {
                             origin: branch.origin,
                         })?;
-                        let read = self.when_subject_read(subject, subject_variable);
-                        // The read has the subject's checked type, as fir2ir's `irGet` of the
-                        // subject variable does; a backend's dispatch on it reads that type.
-                        if let Some(subject_ty) = subject_expression
-                            .and_then(|subject| self.body.expr(subject))
-                            .map(|subject| subject.ty.get())
-                        {
-                            self.ir.logical_types.insert(read, subject_ty);
-                        }
+                        let read =
+                            self.when_subject_read(subject, subject_expression, subject_variable);
                         let (subject, candidate) =
                             self.when_subject_equality_operands(read, candidate, numeric);
                         let comparison = self.ir.add_expr(IrExpr::PrimitiveBinOp {
@@ -104,7 +97,11 @@ impl BodyLowering<'_> {
                         // fir2ir reads the subject afresh in each condition (`is T`, `in r`), at
                         // that condition's offsets, so the read carries the condition's line.
                         if let (Some(expression), Some(temporary)) = (subject_expression, subject) {
-                            let read = self.when_subject_read(temporary, subject_variable);
+                            let read = self.when_subject_read(
+                                temporary,
+                                Some(expression),
+                                subject_variable,
+                            );
                             let line = self.body.expression_debug_lines(candidate).source;
                             if line != 0 {
                                 self.ir.expr_source_lines.insert(read, line);
@@ -168,8 +165,25 @@ impl BodyLowering<'_> {
     /// A fresh read of the selected subject slot. A declared subject keeps the checked local's
     /// stability on every predicate read, so nullable type tests can reuse that exact binding
     /// instead of introducing another snapshot temporary.
-    fn when_subject_read(&mut self, slot: u32, subject_variable: Option<LocalValueId>) -> ExprId {
+    ///
+    /// Every read has the subject's checked type, as fir2ir's `irGet` of the subject variable
+    /// does, whichever condition reads it: a backend's dispatch on it reads that type, and a
+    /// lowering that asks whether the read needs converting (`RangeContainsLowering`'s
+    /// `castIfNecessary`) must see the plain variable read kotlinc sees, not an untyped value
+    /// that it would convert and then store in a temporary of its own.
+    fn when_subject_read(
+        &mut self,
+        slot: u32,
+        subject_expression: Option<FirExprId>,
+        subject_variable: Option<LocalValueId>,
+    ) -> ExprId {
         let read = self.ir.add_expr(IrExpr::GetValue(slot));
+        if let Some(subject_ty) = subject_expression
+            .and_then(|subject| self.body.expr(subject))
+            .map(|subject| subject.ty.get())
+        {
+            self.ir.logical_types.insert(read, subject_ty);
+        }
         if let Some(stability) = subject_variable
             .and_then(|variable| self.binding_stability.get(&variable))
             .copied()
