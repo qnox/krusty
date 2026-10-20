@@ -4077,7 +4077,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   takes the erased `Object` result as the callee returned it (`share(42, holder.get())` passes it
   straight through), with a `checkcast` only where the consumer's class is narrower than `Object`.
   kotlinc never visits the substituted primitive there, so no `checkcast Number; intValue;
-  Integer.valueOf` round trip is written (`tests/erased_scalar_result_e2e.rs`).
+  Integer.valueOf` round trip is written (`tests/erased_scalar_result_e2e.rs`). The consumer's
+  origin does not matter: an argument of a dependency function or constructor, or of a member
+  called through its selected descriptor (`listOf(property.get())`, `Pair(list[0], 2L)`,
+  `map.put("k", list[0])`), is the same reference slot and takes the erased result the same way
+  (`erased_scalar_results_passed_to_dependency_reference_slots_are_byte_identical_to_kotlinc`).
+  A later argument that forces the earlier ones into temporaries (a `try`, or a `break` out of an
+  enclosing loop) does not change this: each argument is evaluated against its parameter slot
+  before it is stored, so the erased result is stored and reloaded as `Object`
+  (`spilled_erased_scalar_arguments_stay_in_their_object_slot`, which pins the complete instruction
+  sequence of a spilled construction, Java static call, and interface call). The spill LAYOUT itself
+  is a known, separate divergence from kotlinc: kotlinc keeps the operands on the stack until the
+  `try`/`break`, spills them there in reverse order (boxing each at its parameter type first), and
+  reloads them inside the protected region, while krusty evaluates every argument into a temporary
+  before the construction or call. It shows without any erased result: `Pair(7L, if (c) break else
+  2L)` in a loop differs on master (kotlinc boxes `7L` and spills the `Long`; krusty spills the
+  `long` and boxes it on reload). Those shapes are therefore not kotlinc byte-diff tests yet.
 - **Return-only type parameters on `inline` functions use the expected type.** The inferred binding
   must satisfy its declared bound and is passed to the inline expander for reified operations. For a
   nullable return such as `T?`, inference removes the return nullability before binding `T`.
