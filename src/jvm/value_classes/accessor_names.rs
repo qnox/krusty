@@ -8,7 +8,7 @@
 //! selected implementation is this property. Function bridges and a same-spelled accessor of
 //! another declaration keep their targets.
 
-use super::member_names::vc_mangle;
+use super::member_names::{accessor_type_is_value_class, vc_mangle};
 use super::Under;
 use crate::ir::{
     BridgeAccessorRole, BridgeKind, Callee, ExprId, IrExpr, IrFile, IrLocalPropertyLayout,
@@ -63,14 +63,11 @@ pub(super) fn stamp_synthesized(ir: &mut IrFile, under: &Under) {
             written_setter,
         } in properties
         {
-            let declared_value_class = ty
-                .non_null()
-                .obj_internal()
-                .is_some_and(|fq_name| under.contains_key(&fq_name));
-            // The property's own accessor is mangled only when its own type is a value class.
-            // When it merely overrides a value-class property (`override val p: Nothing?`), the
-            // own accessor keeps the plain spelling and its bridge carries the supertype's name.
-            if !declared_value_class {
+            // The property's own accessor is mangled only when its own type -- through its erased
+            // upper bound, so `val z: T` with `T : Z?` counts -- is a value class. When it merely
+            // overrides a value-class property (`override val p: Nothing?`), the own accessor
+            // keeps the plain spelling and its bridge carries the supertype's name.
+            if !accessor_type_is_value_class(&ty, under) {
                 continue;
             }
             // A written `@JvmName` is the accessor's whole JVM name: kotlinc does not mangle it.

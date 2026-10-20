@@ -12697,6 +12697,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   call records the override's declared parameters with that position marked as the box, and a
   nullable destination over a null-accepting underlying is the box. The override checks no null,
   as for any `Result` parameter. Tests: `tests/result_generic_override_argument_e2e.rs`.
+- **Value-class mangling reads two separate facts per parameter, through its erased upper bound.**
+  Whether a parameter *requires* mangling (kotlinc `getRequiresMangling`: a value class other than
+  `kotlin.Result`) decides whether a function's name is hashed at all, and also whether an ordinary
+  class's constructor is hidden behind its `DefaultConstructorMarker` accessor. How it is *spelled* in
+  the hashed signature does not exempt `Result`: once another parameter or a mangled result triggers
+  the hash, `Result` contributes `Lkotlin.Result;` (`Lkotlin.Result?;` when nullable) like any value
+  class. So `fun mixed(a: Result<Int>, ic: IC)` is `mixed-bIshmZE` (`Lkotlin.Result;LIC;`), a member
+  `same(a: Result<Int>): Result<Int>` is `same-bjn95JY`, `fun onlyResult(a: Result<Int>)` stays plain,
+  and `class ResultHolder(r: Result<Int>)` keeps a public `<init>(Object)` that its `@Metadata`
+  records over the carrier. Both facts read a type parameter through its bound: `val z: T` with
+  `T : Z1?` declares `getZ-<hash of ":LZ1?;">`, and `class Bounded<T : Z1?>(val z: T)` hides its
+  constructor. A bridge answers to the supertype member's own JVM name, hashed over that member's
+  declared parameters, not the override's substituted ones: `I<T>.foo(x: T): IC` is
+  `foo-<hash of "_:LIC;">` on `I` and on `C : I<IC2>`'s bridge, which unboxes the `IC2` a generic
+  call passes before calling `foo-<hash of "LIC2;:LIC;">`. Tests:
+  `tests/value_class_mangled_names_e2e.rs`.
 - **A nested value class's property is the shared carrier.** For `Outer(val inner: Inner)` over
   `Inner(val x: Any)`, `outer.inner` reads nothing: it is `Inner`'s carrier, which `Outer`'s carrier
   already is, so `Outer(outer.inner)` and `outer.inner.x` neither cast nor unbox, as kotlinc does.
