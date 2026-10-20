@@ -580,7 +580,7 @@ pub(crate) fn lower_value_classes(
         reference_returns::value_class_reference_supertypes(classifiers, &under);
 
     // Members of a value class: their bodies operate on the BOXED object (only signatures erase).
-    let vc_methods = value_members::value_class_members(ir);
+    let vc_methods = value_members::value_class_members(ir, &under);
     // Exprs reachable from a value-class member body reference the BOXED class (`other is X`, `this.field`
     // in the synthesized `equals`) and must NOT be erased — those methods run on the boxed object.
     let mut vc_body_exprs: HashSet<ExprId> = HashSet::default();
@@ -702,34 +702,11 @@ pub(crate) fn lower_value_classes(
     // `(owner-internal, plain name, arity)` → mangled name for declaration-owned JVM synthetics:
     // annotation markers and override bridges that name their own target method.
     let mut mangle_map: HashMap<(TypeName, String, usize), String> = HashMap::default();
-    // Exact getters whose override pair diverges in semantic type (for example `Vid` over `Vid?`).
-    // The two declarations hash differently under JVM value-class mangling, so the accessor bridge
-    // owns their compatibility and the implementation getter keeps its ordinary spelling.
-    let mut divergent_getters = HashSet::default();
     let property_annotation_markers = ir
         .property_annotation_markers
         .values()
         .copied()
         .collect::<HashSet<_>>();
-    for (&owner, edges) in &ir.property_overrides {
-        let Some(class) = ir.classes.iter().find(|class| class.fq_name == owner) else {
-            continue;
-        };
-        for edge in edges {
-            if edge.implementation_owner != owner || edge.declared_type == edge.implementation_type
-            {
-                continue;
-            }
-            if let Some(getter) = class
-                .properties
-                .iter()
-                .find(|property| property.name == edge.name)
-                .and_then(|property| property.getter)
-            {
-                divergent_getters.insert(getter);
-            }
-        }
-    }
     // `(fid, param idx, boxed value-class Ty)` for DEFAULTED nullable-underlying value-class params —
     // the base method unboxes them (below), but its `$default` stub + call site keep them boxed.
     let mut default_boxed: Vec<(u32, usize, Ty)> = Vec::new();
@@ -751,10 +728,7 @@ pub(crate) fn lower_value_classes(
         // A USER value-class member function's body runs on the BOXED object; its value-class-typed
         // parameters/return stay boxed (a sibling member call passes `this` — a box — directly). The
         // SYNTHESIZED members (`-impl`, `equals`/`hashCode`/`toString`, `<init>`) operate on the
-        // underlying representation, so they erase like any other function. An exact
-        // type-divergent override getter also keeps its ordinary spelling; its bridge owns the
-        // representation difference.
-        let is_divergent_override_getter = divergent_getters.contains(&(fid as u32));
+        // underlying representation, so they erase like any other function.
         let synthesized = matches!(
             f.name.as_str(),
             "box-impl"
@@ -765,8 +739,7 @@ pub(crate) fn lower_value_classes(
                 | "hashCode-impl"
                 | "toString-impl"
                 | "<init>"
-        ) || is_divergent_override_getter
-            || property_annotation_markers.contains(&(fid as u32))
+        ) || property_annotation_markers.contains(&(fid as u32))
             || realized_members.any_delegators.contains(&(fid as u32));
         let vc_member = !synthesized && vc_methods.contains(&(fid as u32));
         let source_name = f.name.clone();
@@ -2469,8 +2442,8 @@ pub(crate) fn lower_value_classes(
                         }
                     }
                 }
-                if let Some(function) = function.filter(|_| !uses_default_stub) {
-                    ir.jvm_member_targets.insert(id, function);
+                if !uses_default_stub {
+                    ir.record_realized_member_target(id, function, module_target);
                 }
                 // The `-impl` of an override whose primitive result is boxed returns the wrapper.
                 let boxed_result = match (function, module_target) {

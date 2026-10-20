@@ -433,20 +433,8 @@ impl Emitter<'_> {
         if matches!(source.non_null(), Ty::Null | Ty::Nothing) {
             return ReferenceCoercion::Unchanged;
         }
-        // A value class or unsigned type is carried as its underlying value, which the erased type
-        // does not name. Its representation belongs to the value-class adapter, so only a value
-        // coming out of erased `Object` is narrowed here.
-        let carried = |mut ty: Ty| loop {
-            ty = ty.non_null();
-            if ty.is_unsigned() || self.is_value_class_ty(&ty) {
-                break true;
-            }
-            match ty.array_elem() {
-                Some(element) => ty = element,
-                None => break false,
-            }
-        };
-        if carried(source) || carried(target) {
+        // Only a value coming out of erased `Object` is narrowed to a carried type here.
+        if self.is_carried_value(source) || self.is_carried_value(target) {
             return ReferenceCoercion::Carried;
         }
         let (from, to) = (ir_ty_to_jvm(&source), ir_ty_to_jvm(&target));
@@ -467,6 +455,21 @@ impl Emitter<'_> {
             ReferenceCoercion::Unchanged
         } else {
             ReferenceCoercion::Cast(internal)
+        }
+    }
+
+    /// A value class or unsigned type (or an array of one) is carried as its underlying value,
+    /// which the erased type does not name. Its representation belongs to the value-class adapter.
+    pub(super) fn is_carried_value(&self, mut ty: Ty) -> bool {
+        loop {
+            ty = ty.non_null();
+            if ty.is_unsigned() || self.is_value_class_ty(&ty) {
+                return true;
+            }
+            match ty.array_elem() {
+                Some(element) => ty = element,
+                None => return false,
+            }
         }
     }
 

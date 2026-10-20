@@ -986,13 +986,13 @@ impl Emitter<'_> {
         for (i, arg) in args.iter().enumerate() {
             match arg {
                 Some(a) => {
-                    self.emit_value(*a, code);
+                    let source = self.emit_operand_at_slot(*a, stub_params[i], code);
                     if let Some(vc) = boxed.get(&i) {
                         emit_box_impl(self.ir, self.cw, vc, code);
                     }
                     emit_primitive_box_if_needed(
                         self.cw,
-                        ir_ty_to_jvm(&self.value_ty(*a)),
+                        ir_ty_to_jvm(&source),
                         stub_params[i],
                         code,
                     );

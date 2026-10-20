@@ -49,7 +49,7 @@ mod catches;
 mod checked_types;
 mod companion_blocks;
 mod compiled_inline_calls;
-pub use compiled_inline_calls::SameModuleInlining;
+pub use compiled_inline_calls::{CompiledInlineOperands, SameModuleInlining};
 mod constants;
 mod constructors;
 mod default_arguments;
