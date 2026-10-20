@@ -16,14 +16,18 @@ The reference is Kotlin Toolchain 0.13.0.
   [--include-tests]` prints exactly what `kotlin show dependencies` prints: each module's resolved
   dependency graph for the compile and runtime classpaths of its main (and test) fragment. See
   [Dependency resolution](#dependency-resolution).
+- `krusty-toolchain [--project-dir=<path>] task :<module>:compileJvm` compiles the module's main
+  fragment and those of the modules it compiles against, with the krusty binary `KRUSTY_BIN` names,
+  passing it the compiler arguments the toolchain's compilation passes. See
+  [Compiling](#compiling).
 - Project discovery: the nearest directory at or above the current one with a `project.yaml`. A
   module file passed on the way that the project does not list makes its directory a single-module
   project.
 - `project.yaml`: `modules` (plain paths and globs) and `plugins`.
 - `module.yaml` and the templates it applies (`apply`, transitively): `product`, `description`,
   `dependencies` and `settings`, with `test-` and `@jvm` variants, read against the toolchain's
-  schema (`src/schema`). Of `repositories`, only `mavenLocal` is used; `layout` and `tasks` are
-  read but not yet used;
+  schema (`src/schema`). Of `repositories`, only `mavenLocal` is used; `layout` chooses where a
+  compiled module's sources and resources are; `tasks` is read but not yet used;
   `plugins`, `mavenPlugins`, `aliases` and `pluginInfo` are accepted without being read.
 
 ## Settings
@@ -111,8 +115,48 @@ Versions compare as Maven compares them (`maven_version.rs`), as the toolchain d
   JDK version and `excludeDependencies`), and parsed POMs, effective POMs and module metadata
   once per run.
 
+## Compiling
+
+`task :<module>:compileJvm` builds its whole plan before compiling anything (`src/compile/plan.rs`):
+the module and the modules it depends on for compilation, transitively, in dependency order with
+the project's module order breaking ties, each with its krusty arguments in the order the
+toolchain's compilation passes them:
+
+```text
+-Xjdk-release=<settings.jvm.release> -jdk-home=<JDK> -classpath=<classpath> -no-stdlib
+-module-name=<module> [-java-parameters] [-Xplugin=<kotlin-serialization-compiler-plugin jar>]
+-Xkotlin-reference-version=<settings.kotlin.version>
+-d <root>/build/artifacts/CompiledJvmArtifact/<module>jvm/kotlin-output <sources, sorted>
+```
+
+The classpath is the module's resolved compile graph, walked breadth first
+(`src/compile/classpath.rs`): first each module dependency's compiled output (when it has Kotlin
+sources) followed by its resources output (when it has resources), then each artifact's files,
+each once. The JDK is the one `JAVA_HOME` names; it must be a JDK (it has `bin/javac`) of the major
+version `settings.jvm.jdk.version` asks for. Artifact files and the serialization plugin come from
+the local repositories only. A module without Kotlin sources is not compiled. For each module in
+turn the task clears its output directory, runs `KRUSTY_BIN` with the arguments, its output
+streaming through, and copies the resources directory (`src/main/resources` in the Maven-like
+layout, else `resources`) to `resources-output`. The first compilation that fails stops the task
+with krusty's exit status.
+
+Before compiling anything, krusty-toolchain refuses, at the setting and naming the module, every
+module of the plan that:
+
+- enables toolchain plugins or runs KSP processors;
+- sets a compiler setting it does not pass yet (`src/compile/refusals.rs`: the language and API
+  versions, free compiler arguments, opt-ins, language features, warning options, explicit API
+  mode, `debug`, compiler plugins and the settings the toolchain turns into compiler plugins);
+- has Java sources;
+- needs a JDK provisioned (`selectionMode: alwaysProvision`, `distributions`, no `JAVA_HOME`, or a
+  `JAVA_HOME` that is not a JDK of the version asked for);
+- needs an artifact downloaded;
+
+and refuses compile dependencies that form a cycle. It refuses an unset `KRUSTY_BIN` rather than
+searching `PATH`, and every task other than `compileJvm`.
+
 The library's public surface is the command boundary: `model` (read a project), `configuration`,
-`dependencies`, `diagnostic` and `show`. Discovery, the file-system inventory, YAML,
+`compile`, `dependencies`, `diagnostic` and `show`. Discovery, the file-system inventory, YAML,
 the build-file readers, Maven metadata and resolution are private.
 
 ## Deliberate refusals
@@ -174,6 +218,16 @@ placeholder. Where krusty-toolchain refuses an artifact it cannot read completel
 `--- krusty-refusal` section holds its errors, `error` and a tab before each one in the form the
 toolchain's problems are read back in (`tests/support/rendering.rs`): read back the same way, they
 must be its complete stderr, with exit status 1 and nothing on stdout.
+
+`tests/cases/compile/*.case` run a `--- task` in the same layout, with a JDK beside the project and
+a `KRUSTY_BIN` that only records its arguments (`tests/support/compiling.rs`).
+`tests/compile_cases.rs` requires krusty-toolchain to record exactly the case's `--- krusty-argv`
+section (each invocation's arguments, then `----`, each run's directory replaced by a placeholder),
+with exit status 0 and no output, or to report exactly its `--- krusty-refusal` section and record
+nothing. The toolchain records the same arguments through krusty's Build Tools API implementation
+(`tools/krusty-build-tools`), built from its sources (by the JDK `KRUSTY_BUILD_TOOLS_JAVA_HOME`
+names, else `JAVA_HOME`) and installed into its shared cache, and must record each argv section
+(compared module by module, sources as a sorted list).
 
 `tests/support/oracle.rs` caches each reference's exit code and raw stdout and stderr (only a JVM's
 `Picked up JAVA_TOOL_OPTIONS` line is dropped from stderr) under

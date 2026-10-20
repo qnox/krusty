@@ -19,7 +19,7 @@ use super::super::super::encode::{BlockType, Code, Function, HeapType, Module, V
 use super::super::super::objects::REFERENCE;
 use super::super::super::runtime::{Runtime, EQZ32, OR32};
 use super::super::classes::{Accessor, FileClasses};
-use super::super::property_registry::TopLevelProperty;
+use super::super::property_registry::{MemberProperty, MemberPropertyDefinition, TopLevelProperty};
 use super::{carrier, Body, FileContext, Unsupported, STRING};
 
 /// The heap type of the runtime's `String`, type 1 (see `STRING`).
@@ -230,6 +230,50 @@ impl Body<'_> {
         self.dispatch(class, slot, receiver, args, &params)
     }
 
+    /// Dispatch a member-extension property's recorded accessor. Its extension receiver and any
+    /// context parameters are ordinary accessor arguments in common IR; the dispatch receiver is
+    /// the separate object whose table owns the slot.
+    fn dispatch_member_extension_property(
+        &mut self,
+        class: ClassId,
+        property: PropertyId,
+        setter: bool,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        let function = match self.ir.local_property_layouts.get(&property) {
+            Some(IrLocalPropertyLayout::MemberExtension {
+                getter,
+                setter: property_setter,
+                ..
+            }) => {
+                if setter {
+                    *property_setter
+                } else {
+                    Some(*getter)
+                }
+            }
+            _ => None,
+        }
+        .ok_or_else(|| "a member-extension property call with no recorded accessor".to_string())?;
+        let params = self.ir.functions[function as usize].params.clone();
+        if params.len() != args.len() {
+            return Err("a property call whose arguments do not match its accessor".into());
+        }
+        let target = ResolvedPropertyOverrideTarget::Module(property);
+        let key = if setter {
+            SlotKey::Setter(target)
+        } else {
+            SlotKey::Getter(target)
+        };
+        let slot = self
+            .file_classes()?
+            .tables
+            .slot(class, &key)
+            .ok_or_else(|| "a member-extension property with no dispatch slot".to_string())?;
+        self.dispatch(class, slot, receiver, args, &params)
+    }
+
     /// A call through `slot` of the table of `receiver`, statically of `class`.
     fn dispatch(
         &mut self,
@@ -328,12 +372,26 @@ impl Body<'_> {
                     }
                     IrVirtualTarget::PropertyGetter(ResolvedPropertyOverrideTarget::Module(
                         property,
-                    )) if args.is_empty() => self.property_read(*property, Some(receiver)),
+                    )) => match self.ir.local_property_layouts.get(property) {
+                        Some(IrLocalPropertyLayout::MemberExtension { .. }) => self
+                            .dispatch_member_extension_property(
+                                class, *property, false, receiver, args,
+                            ),
+                        _ if args.is_empty() => self.property_read(*property, Some(receiver)),
+                        _ => Err("a property getter call with arguments".to_string()),
+                    },
                     IrVirtualTarget::PropertySetter(ResolvedPropertyOverrideTarget::Module(
                         property,
-                    )) if args.len() == 1 => {
-                        self.property_write(*property, Some(receiver), args[0])
-                    }
+                    )) => match self.ir.local_property_layouts.get(property) {
+                        Some(IrLocalPropertyLayout::MemberExtension { .. }) => self
+                            .dispatch_member_extension_property(
+                                class, *property, true, receiver, args,
+                            ),
+                        _ if args.len() == 1 => {
+                            self.property_write(*property, Some(receiver), args[0])
+                        }
+                        _ => Err("a property setter call with the wrong arguments".to_string()),
+                    },
                     _ => Err("a call to a library member".to_string()),
                 }
             }
@@ -406,6 +464,16 @@ impl Body<'_> {
                 return Ok(());
             }
         }
+        if !self.ir.local_property_layouts.contains_key(&target) {
+            if let Some(entry) = self.module_member_property(target)? {
+                let receiver = receiver.ok_or_else(|| {
+                    "a receiver-less read of a cross-file member property".to_string()
+                })?;
+                self.value(receiver, Ty::Obj(entry.owner, &[]))?;
+                self.code.call(entry.getter);
+                return Ok(());
+            }
+        }
         let (class, index) = self.member_property(target)?;
         let property = self.ir.classes[class as usize].properties[index].clone();
         let receiver =
@@ -459,6 +527,20 @@ impl Body<'_> {
                 return Ok(());
             }
         }
+        if !self.ir.local_property_layouts.contains_key(&target) {
+            if let Some(entry) = self.module_member_property(target)? {
+                let receiver = receiver.ok_or_else(|| {
+                    "a receiver-less write of a cross-file member property".to_string()
+                })?;
+                let setter = entry
+                    .setter
+                    .ok_or_else(|| "a read-only cross-file property was written".to_string())?;
+                self.value(receiver, Ty::Obj(entry.owner, &[]))?;
+                self.value(value, entry.ty)?;
+                self.code.call(setter);
+                return Ok(());
+            }
+        }
         let (class, index) = self.member_property(target)?;
         let property = self.ir.classes[class as usize].properties[index].clone();
         let receiver =
@@ -491,6 +573,32 @@ impl Body<'_> {
                 property.name
             )),
         }
+    }
+
+    /// The program-wide entry reserved for an ordinary member property another source file owns.
+    /// The local module record and registry entry were produced from the same checked declaration;
+    /// validate that exact join rather than reconstructing an accessor from its spelling.
+    fn module_member_property(
+        &self,
+        target: PropertyId,
+    ) -> Result<Option<MemberProperty>, Unsupported> {
+        let Some(entry) = self.properties.member(target) else {
+            return Ok(None);
+        };
+        let declaration = self
+            .ir
+            .referenced_module_properties
+            .get(&target)
+            .ok_or_else(|| "a cross-file member property with no module record".to_string())?;
+        if declaration.owner != Some(entry.owner)
+            || declaration.ty != entry.ty
+            || declaration.mutable != entry.setter.is_some()
+            || declaration.extension_receiver.is_some()
+            || !declaration.context_parameters.is_empty()
+        {
+            return Err("a cross-file member property disagrees with its module record".into());
+        }
+        Ok(Some(entry))
     }
 
     /// The storage selected for a receiver-less property in this or an earlier source file.
@@ -874,6 +982,186 @@ pub(super) fn define_class_functions(
             },
         );
     }
+    Ok(())
+}
+
+/// Define the program-wide entries reserved for ordinary member properties of this source file.
+/// A using file calls only these indices; this defining file alone knows the class layout and
+/// realizes the property through its virtual slot, declared accessor or exact backing field.
+pub(super) fn define_module_property_functions(
+    context: &FileContext<'_>,
+    classes: &FileClasses,
+    definitions: &[MemberPropertyDefinition],
+    module: &mut Module,
+    runtime: &mut Runtime,
+) -> Result<(), Unsupported> {
+    for definition in definitions {
+        let layout = context
+            .ir
+            .local_property_layouts
+            .get(&definition.property)
+            .ok_or_else(|| "a module member property with no local layout".to_string())?;
+        let IrLocalPropertyLayout::Member {
+            class,
+            owner,
+            property,
+            ty,
+            mutable,
+            context_parameters,
+            ..
+        } = layout
+        else {
+            return Err("a module member property with a non-member layout".to_string());
+        };
+        if !context_parameters.is_empty()
+            || *owner != definition.entry.owner
+            || *ty != definition.entry.ty
+            || *mutable != definition.entry.setter.is_some()
+        {
+            return Err("a module member property entry disagrees with its local layout".into());
+        }
+        let declaration = context
+            .ir
+            .classes
+            .get(*class as usize)
+            .and_then(|class| class.properties.get(*property as usize))
+            .ok_or_else(|| "a module member property with an invalid class index".to_string())?;
+        if declaration
+            .storage_ty
+            .is_some_and(|storage| storage != declaration.ty)
+        {
+            return Err(format!(
+                "a property whose storage differs from its type (`{}`)",
+                declaration.name
+            ));
+        }
+
+        let value = carrier(definition.entry.ty)?;
+        let getter_ty = module.func_type(vec![REFERENCE], value.into_iter().collect());
+        let mut getter = Code::default();
+        emit_module_property_getter(context, classes, runtime, *class, *property, &mut getter)?;
+        module.define(
+            definition.entry.getter,
+            Function {
+                ty: getter_ty,
+                locals: Vec::new(),
+                code: getter,
+            },
+        );
+
+        if let Some(setter) = definition.entry.setter {
+            let value = value
+                .ok_or_else(|| "a mutable module member property with no Wasm value".to_string())?;
+            let setter_ty = module.func_type(vec![REFERENCE, value], Vec::new());
+            let mut body = Code::default();
+            emit_module_property_setter(context, classes, runtime, *class, *property, &mut body)?;
+            module.define(
+                setter,
+                Function {
+                    ty: setter_ty,
+                    locals: Vec::new(),
+                    code: body,
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
+fn emit_module_property_getter(
+    context: &FileContext<'_>,
+    classes: &FileClasses,
+    runtime: &Runtime,
+    class: ClassId,
+    property: u32,
+    code: &mut Code,
+) -> Result<(), Unsupported> {
+    let declaration = &context.ir.classes[class as usize].properties[property as usize];
+    let slot = local_property_target(context.ir, class, property as usize)
+        .and_then(|target| classes.tables.slot(class, &SlotKey::Getter(target)));
+    if let Some(slot) = slot {
+        code.local_get(0);
+        emit_module_property_dispatch(classes, runtime, class, slot, code)?;
+        return Ok(());
+    }
+    if let Some(getter) = declaration.getter {
+        let function = context
+            .functions
+            .get(getter as usize)
+            .copied()
+            .flatten()
+            .ok_or_else(|| "a module property getter with no emitted function".to_string())?;
+        code.local_get(0).call(function);
+        return Ok(());
+    }
+    let field = declaration
+        .backing_field
+        .ok_or_else(|| "a module property with neither storage nor a getter".to_string())?;
+    let structure = classes.structure(class);
+    code.local_get(0)
+        .ref_cast(false, HeapType::Concrete(structure))
+        .struct_get(structure, classes.field(class, field));
+    Ok(())
+}
+
+fn emit_module_property_setter(
+    context: &FileContext<'_>,
+    classes: &FileClasses,
+    runtime: &Runtime,
+    class: ClassId,
+    property: u32,
+    code: &mut Code,
+) -> Result<(), Unsupported> {
+    let declaration = &context.ir.classes[class as usize].properties[property as usize];
+    let slot = local_property_target(context.ir, class, property as usize)
+        .and_then(|target| classes.tables.slot(class, &SlotKey::Setter(target)));
+    if let Some(slot) = slot {
+        code.local_get(0).local_get(1);
+        emit_module_property_dispatch(classes, runtime, class, slot, code)?;
+        return Ok(());
+    }
+    if let Some(setter) = declaration.setter {
+        let function = context
+            .functions
+            .get(setter as usize)
+            .copied()
+            .flatten()
+            .ok_or_else(|| "a module property setter with no emitted function".to_string())?;
+        code.local_get(0).local_get(1).call(function);
+        return Ok(());
+    }
+    let field = declaration
+        .backing_field
+        .ok_or_else(|| "a module property with neither storage nor a setter".to_string())?;
+    let structure = classes.structure(class);
+    code.local_get(0)
+        .ref_cast(false, HeapType::Concrete(structure))
+        .local_get(1)
+        .struct_set(structure, classes.field(class, field));
+    Ok(())
+}
+
+/// Append the table reference and indirect call after the wrapper's receiver and value operands.
+fn emit_module_property_dispatch(
+    classes: &FileClasses,
+    runtime: &Runtime,
+    class: ClassId,
+    slot: u32,
+    code: &mut Code,
+) -> Result<(), Unsupported> {
+    let ty = classes
+        .slot_type(class, slot)
+        .ok_or_else(|| "a module property slot with no signature".to_string())?;
+    let table_type = classes.forms[class as usize]
+        .table_type
+        .unwrap_or(classes.file_table);
+    let object = runtime.objects.object;
+    code.local_get(0)
+        .ref_cast(false, HeapType::Concrete(object))
+        .struct_get(object, 0)
+        .ref_cast(false, HeapType::Concrete(table_type))
+        .struct_get(table_type, slot)
+        .call_ref(ty);
     Ok(())
 }
 

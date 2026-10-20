@@ -532,6 +532,8 @@ impl<'a> JvmClassRealization<'a> {
     fn primary_constructor(&self, params: &[(String, Ty)]) -> JvmConstructorSignature {
         let (ir, c) = (self.ir, self.c);
         let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
+        // A local class takes its captures in their physical order.
+        let arguments = super::capture_order::physical(ir, c, c.ctor_args.iter().collect());
         // A value class's primary constructor is realized as the static `constructor-impl` returning
         // the erased underlying, not `<init>`; its `@Metadata` signature records that.
         if c.is_value {
@@ -547,10 +549,7 @@ impl<'a> JvmClassRealization<'a> {
         if !c.is_enum && ir.vc_ctor_declared_params(c.fq_name_id()).is_some() {
             return JvmConstructorSignature::init(format!(
                 "({}Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
-                c.ctor_args
-                    .iter()
-                    .map(|arg| desc(arg.ty))
-                    .collect::<String>()
+                arguments.iter().map(|arg| desc(arg.ty)).collect::<String>()
             ));
         }
         // An `enum class`'s JVM constructor takes the two synthetic `Enum` parameters first, so its
@@ -567,7 +566,7 @@ impl<'a> JvmClassRealization<'a> {
             // class's enclosing instance (`Llib/Outer;`) — which `params` (source parameters) never
             // carry. kotlinc's record spells them (`(Llib/Outer;Ljava/lang/String;I)V`); without them
             // a consumer's constructor call is one slot short.
-            c.ctor_args
+            arguments
                 .iter()
                 .filter(|arg| arg.name.is_none())
                 .map(|arg| desc(arg.ty))

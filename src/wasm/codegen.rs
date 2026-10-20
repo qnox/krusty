@@ -360,6 +360,54 @@ mod tests {
     }
 
     #[test]
+    fn local_class_member_properties_do_not_reserve_module_entries() {
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(
+                target,
+                "fun box(): String {\n\
+                 \x20   class Local(val value: String)\n\
+                 \x20   return Local(\"OK\").value\n\
+                 }",
+            );
+            assert_eq!(diagnostics, Vec::<String>::new());
+            assert_eq!(outputs.len(), 2);
+        }
+    }
+
+    #[test]
+    fn anonymous_object_member_properties_do_not_reserve_module_entries() {
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(
+                target,
+                "fun box(): String {\n\
+                 \x20   val local = object { val value = \"OK\" }\n\
+                 \x20   return local.value\n\
+                 }",
+            );
+            assert_eq!(diagnostics, Vec::<String>::new());
+            assert_eq!(outputs.len(), 2);
+        }
+    }
+
+    #[test]
+    fn nothing_member_property_getter_has_no_wasm_result() {
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(
+                target,
+                "var flag = true\n\
+                 object Test { val magic: Nothing get() = null!! }\n\
+                 fun box(): String {\n\
+                 \x20   val answer: String\n\
+                 \x20   if (flag) answer = \"OK\" else Test.magic\n\
+                 \x20   return answer\n\
+                 }",
+            );
+            assert_eq!(diagnostics, Vec::<String>::new());
+            assert_eq!(outputs.len(), 2);
+        }
+    }
+
+    #[test]
     fn a_program_without_its_entry_emits_nothing() {
         for source in [
             "fun notBox(): String = \"OK\"",

@@ -802,10 +802,18 @@ pub struct PropMeta {
 }
 
 /// A source typealias declaration in package or classifier metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TypeAliasFormalMeta {
+    /// Name written by the declaration and displayed in Kotlin metadata.
+    pub source_name: String,
+    /// Stable frontend identity used by the resolved expansion.
+    pub semantic_name: String,
+}
+
 pub struct TypeAliasMeta {
     pub name: String,
-    /// The alias's own type-parameter names, in declaration order — `TypeAlias.typeParameter`.
-    pub formals: Vec<String>,
+    /// The alias's own type parameters, in declaration order — `TypeAlias.typeParameter`.
+    pub formals: Vec<TypeAliasFormalMeta>,
     /// The target applied to its own arguments, with [`Self::formals`] as `Ty::TyParam`
     /// (`typealias Box<S, A> = PBox<S, S, A, A>`). Frontend resolution must supply this exact
     /// semantic type; emission never retries with a bare classifier.
@@ -853,13 +861,17 @@ pub(crate) fn type_alias_pb(
     // a consumer reading this record back sees only the target CLASSIFIER and cannot place a use
     // site's arguments — `Box<String, Int>` would become `PBox<String, Int>`, an arity that type
     // does not have. kotlinc references an alias's own parameters BY NAME.
-    let tps: TypeParameters = alias
-        .formals
-        .iter()
-        .map(|formal| (formal.clone(), TypeParameterRef::Named(formal.clone())))
-        .collect();
+    let mut tps = TypeParameters::new();
+    for formal in &alias.formals {
+        let reference = TypeParameterRef::Named(formal.source_name.clone());
+        tps.insert(formal.source_name.clone(), reference.clone());
+        tps.insert(formal.semantic_name.clone(), reference);
+    }
     for (index, formal) in alias.formals.iter().enumerate() {
-        p.repeated_message(3, &encode_type_parameter(st, index, formal, false));
+        p.repeated_message(
+            3,
+            &encode_type_parameter(st, index, &formal.source_name, false),
+        );
         // TypeAlias.type_parameter = 3
     }
     // `underlying_type` (f4) is the right-hand side AS WRITTEN and `expanded_type` (f6) is that

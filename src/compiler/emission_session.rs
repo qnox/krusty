@@ -96,8 +96,12 @@ impl<'a, B: Backend> EmissionSession<'a, B> {
             module_name,
             diags,
             &mut self.dependency_support,
-            &mut |file, diags| {
-                file.dependency_exports = metadata.record_ir_file(file, &mut metadata_state, diags);
+            super::PassTwoHooks {
+                before_target: &mut |file, diags| {
+                    file.dependency_exports =
+                        metadata.record_ir_file(file, &mut metadata_state, diags);
+                },
+                checked_bodies: &mut super::NoObserver,
             },
         );
         if diags.has_errors() {

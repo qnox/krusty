@@ -2,7 +2,7 @@
 //! tests, test, each for the compile and the runtime classpath.
 
 use crate::diagnostic::Diagnostics;
-use crate::maven::{Metadata, Store};
+use crate::maven::{Metadata, OpenError, Store};
 use crate::model::Model;
 use crate::module::ModuleHeader;
 use crate::resolution;
@@ -21,23 +21,15 @@ pub fn show(
     diagnostics: &mut Diagnostics,
 ) -> Result<String, String> {
     let declarations = resolution::read_declarations(&model.modules, &model.configured)?;
-    let root = Store::default_root()
-        .ok_or("cannot locate the user cache directory: set KOTLIN_SHARED_CACHE_DIR")?;
     // The local Maven repository is read, before the cache, when any module lists it.
-    let local = if declarations.iter().any(|module| module.maven_local) {
-        match Store::local_repository() {
-            Ok(local) => local,
-            Err(problem) => {
-                diagnostics.push(problem.diagnostic());
-                return Ok(String::new());
-            }
+    let maven_local = declarations.iter().any(|module| module.maven_local);
+    let store = match Store::for_project(maven_local) {
+        Ok(store) => store,
+        Err(OpenError::NoCacheRoot(message)) => return Err(message.to_string()),
+        Err(OpenError::LocalRepository(problem)) => {
+            diagnostics.push(problem.diagnostic());
+            return Ok(String::new());
         }
-    } else {
-        None
-    };
-    let store = match local {
-        Some(local) => Store::with_local(&local, &root),
-        None => Store::new(&root),
     };
     let metadata = Metadata::new(&store);
     let mut resolvers = resolution::Resolvers::new(&metadata);

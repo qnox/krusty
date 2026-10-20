@@ -67,6 +67,8 @@ pub struct MetaProp {
     /// The getter is declared `inline`, from its accessor flag word. kotlinc omits a word equal
     /// to the property's default, which is never inline.
     pub getter_inline: bool,
+    /// The setter is declared `inline`, from its accessor flag word, as [`Self::getter_inline`].
+    pub setter_inline: bool,
     /// A `companion { … }` block property: a static member of the class that declares the block,
     /// read and written through its static accessors with no receiver.
     pub is_companion_block_member: bool,
@@ -145,6 +147,7 @@ pub(super) fn decode_properties(
         let mut legacy_flags = None;
         let mut modern_flags = None;
         let mut getter_flags = None;
+        let mut setter_flags = None;
         let mut sig = ParsedJvmPropertySignature::default();
         let mut sig_recorded = false;
         let mut receiver_class = None;
@@ -161,6 +164,7 @@ pub(super) fn decode_properties(
                 (1, 0) => legacy_flags = p.varint(),
                 (11, 0) => modern_flags = p.varint(),
                 (7, 0) => getter_flags = p.varint(),
+                (8, 0) => setter_flags = p.varint(),
                 (2, 0) => name_id = p.varint(),
                 (3, 2) => {
                     let Some(n) = p.varint() else { break };
@@ -474,6 +478,7 @@ pub(super) fn decode_properties(
             is_var,
             is_inline_underlying: inline_underlying_property_name_id == Some(name_id),
             getter_inline: accessor_is_inline(getter_flags),
+            setter_inline: accessor_is_inline(setter_flags),
             receiver_class,
             is_extension: receiver_body.is_some(),
             is_companion_block_member: receiver_body.is_none()

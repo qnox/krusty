@@ -4,63 +4,30 @@
 //! recover text or reparse a body. They are attached once, after checking, and travel with the body
 //! into lowering so a backend can record source positions without access to the source itself.
 
-use crate::fx_hash::HashMap;
-
 use crate::diag::Span;
 
 use super::*;
 
-/// Read one parsed file's expression and statement line maps, keyed by the spans checked FIR
-/// carries.
-///
-/// Both maps are the same responsibility — turning the parser's per-node line arrays into the
-/// span-keyed form a checked body is given — and they live beside the records they build rather
-/// than in the checking entry point, which owns neither.
-pub(crate) fn of_file(
-    file: &crate::ast::File,
-) -> (
-    HashMap<Span, FirExpressionDebugLines>,
-    HashMap<Span, FirStatementDebugLines>,
-) {
-    let expressions = file
-        .expr_spans
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(raw, span)| {
-            (
-                span,
-                FirExpressionDebugLines {
-                    source: file.expr_source_lines.get(raw).copied().unwrap_or(0),
-                    end: file.expr_end_lines.get(raw).copied().unwrap_or(0),
-                    positionless: false,
-                },
-            )
-        })
-        .collect();
-    let statements = file
-        .stmt_spans
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(raw, span)| {
-            (
-                span,
-                FirStatementDebugLines {
-                    source: file.stmt_lines.get(raw).copied().unwrap_or(0),
-                    // An assignment's lvalue line. A member assignment is a STATEMENT, whose only
-                    // line is its first, so the accessor dispatch has no line of its own to restore
-                    // unless the lvalue's travels with it.
-                    target: file
-                        .assignment_target_lines
-                        .get(&(raw as u32))
-                        .copied()
-                        .unwrap_or(0),
-                },
-            )
-        })
-        .collect();
-    (expressions, statements)
+/// The line facts of the parsed expression at `span`, keyed the way checked FIR carries it.
+fn expression_lines(file: &crate::ast::File, span: Span) -> Option<FirExpressionDebugLines> {
+    let raw = file.expression_at_span(span)? as usize;
+    Some(FirExpressionDebugLines {
+        source: file.expr_source_lines.get(raw).copied().unwrap_or(0),
+        end: file.expr_end_lines.get(raw).copied().unwrap_or(0),
+        positionless: false,
+    })
+}
+
+/// The same, for the parsed statement at `span`.
+fn statement_lines(file: &crate::ast::File, span: Span) -> Option<FirStatementDebugLines> {
+    let raw = file.statement_at_span(span)?;
+    Some(FirStatementDebugLines {
+        source: file.stmt_lines.get(raw as usize).copied().unwrap_or(0),
+        // An assignment's lvalue line. A member assignment is a STATEMENT, whose only line is its
+        // first, so the accessor dispatch has no line of its own to restore unless the lvalue's
+        // travels with it.
+        target: file.assignment_target_lines.get(&raw).copied().unwrap_or(0),
+    })
 }
 
 /// Line-only source metadata for one EXPRESSION.
@@ -152,12 +119,10 @@ impl FirBody {
     pub(crate) fn attach_debug_lines(
         &mut self,
         source: SourceFileId,
-        source_line_count: u32,
+        file: &crate::ast::File,
         origins: &OriginStore,
-        expression_lines: &HashMap<Span, FirExpressionDebugLines>,
-        statement_lines: &HashMap<Span, FirStatementDebugLines>,
     ) {
-        self.debug_lines.source_line_count = source_line_count;
+        self.debug_lines.source_line_count = file.source_line_count;
         // `Err` for a positionless origin, which no line may begin at.
         let source_span = |origin| {
             let mut current = origin;
@@ -180,7 +145,7 @@ impl FirBody {
             .iter()
             .map(|expression| match source_span(expression.origin) {
                 Ok(span) => span
-                    .and_then(|span| expression_lines.get(&span).copied())
+                    .and_then(|span| expression_lines(file, span))
                     .unwrap_or_default(),
                 Err(()) => FirExpressionDebugLines {
                     positionless: true,
@@ -195,40 +160,22 @@ impl FirBody {
                 source_span(statement.origin)
                     .ok()
                     .flatten()
-                    .and_then(|span| statement_lines.get(&span).copied())
+                    .and_then(|span| statement_lines(file, span))
                     .unwrap_or_default()
             })
             .collect();
         for statement in &mut self.statements {
             if let FirStatementKind::LocalFunction { body, .. } = &mut statement.kind {
-                body.attach_debug_lines(
-                    source,
-                    source_line_count,
-                    origins,
-                    expression_lines,
-                    statement_lines,
-                );
+                body.attach_debug_lines(source, file, origins);
             }
         }
         for expression in &mut self.expressions {
             if let FirExprKind::Lambda { body, .. } = &mut expression.kind {
-                body.attach_debug_lines(
-                    source,
-                    source_line_count,
-                    origins,
-                    expression_lines,
-                    statement_lines,
-                );
+                body.attach_debug_lines(source, file, origins);
             }
         }
         for body in &mut self.inline_nested_declaration_bodies {
-            body.attach_debug_lines(
-                source,
-                source_line_count,
-                origins,
-                expression_lines,
-                statement_lines,
-            );
+            body.attach_debug_lines(source, file, origins);
         }
     }
 }

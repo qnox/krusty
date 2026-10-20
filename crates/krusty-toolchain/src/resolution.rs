@@ -9,7 +9,7 @@ mod problems;
 mod roots;
 mod waves;
 
-pub use declarations::{read as read_declarations, ModuleDeclarations};
+pub use declarations::{read as read_declarations, ModuleDeclarations, Target};
 pub use graph::{Graph, Key, Kind, NodeId};
 pub use problems::collect as collect_problems;
 pub use roots::ModuleGraph;

@@ -29,7 +29,11 @@ impl Emitter<'_> {
         // must a subclass `super(…)` reach it through the PUBLIC|SYNTHETIC
         // `(…args, DefaultConstructorMarker)` accessor rather than the inaccessible declaration.
         let (mut super_param_tys, super_accessor) = super_ctor_jvm_tys(self.ir, c, superclass);
-        self.emit_constructor_delegation_arguments(&c.super_args, &c.super_ctor_params, &[], ctor);
+        // A local superclass takes its captures in its own physical order.
+        let super_ctor_params =
+            capture_order::physical_for(self.ir, c.superclass, c.super_ctor_params.clone());
+        let super_args = capture_order::physical_for(self.ir, c.superclass, c.super_args.clone());
+        self.emit_constructor_delegation_arguments(&super_args, &super_ctor_params, &[], ctor);
         // The call is back on the delegation's line after an operand on another, at its first
         // synthesized operand when it has one.
         if let Some(line) = delegation_line {
@@ -42,8 +46,8 @@ impl Emitter<'_> {
             .map(Vec::as_slice)
             .unwrap_or_default();
         if !super_defaults.is_empty() {
-            super_param_tys = jvm_tys(&c.super_ctor_params);
-            for mask in constructor_default_masks(super_defaults, c.super_ctor_params.len()) {
+            super_param_tys = jvm_tys(&super_ctor_params);
+            for mask in constructor_default_masks(super_defaults, super_ctor_params.len()) {
                 ctor.push_int(mask, self.cw);
                 super_param_tys.push(Ty::Int);
             }
@@ -70,7 +74,11 @@ impl Emitter<'_> {
 }
 
 fn super_ctor_jvm_tys(ir: &IrFile, c: &IrClass, superclass: &str) -> (Vec<Ty>, bool) {
-    let mut params = jvm_tys(&c.super_ctor_params);
+    let mut params = jvm_tys(&capture_order::physical_for(
+        ir,
+        c.superclass,
+        c.super_ctor_params.clone(),
+    ));
     let uses_accessor = (c.super_ctor.primary() && ir.has_value_param_ctor(superclass))
         || constructor_accessors::reached_through_accessor(
             c.super_ctor,

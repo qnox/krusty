@@ -25,6 +25,7 @@ pub fn differences(directory: &str, commands: &[(&str, &[&str])]) -> Vec<String>
             case: name,
             files: &case(name).files,
             repository: None,
+            compiler: None,
             args,
         })
         .collect();

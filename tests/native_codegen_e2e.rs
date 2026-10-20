@@ -11,6 +11,7 @@
 //! happens when no C cross-compiler was available at krusty's build time.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use krusty::backend::{Artifact, Backend as _};
 use krusty::diag::DiagSink;
@@ -19,6 +20,8 @@ use krusty::source::SourceInput;
 
 use super::common;
 
+static NEXT_SCRATCH_ID: AtomicU64 = AtomicU64::new(0);
+
 struct Scratch(PathBuf);
 
 impl Scratch {
@@ -26,9 +29,7 @@ impl Scratch {
         let path = std::env::temp_dir().join(format!(
             "krusty-codegen-{tag}-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |elapsed| elapsed.as_nanos())
+            NEXT_SCRATCH_ID.fetch_add(1, Ordering::Relaxed),
         ));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("create scratch directory");
@@ -44,6 +45,29 @@ impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+#[test]
+fn concurrent_native_codegen_scratch_directories_are_unique() {
+    const WORKERS: usize = 32;
+
+    let start = std::sync::Arc::new(std::sync::Barrier::new(WORKERS));
+    let workers = (0..WORKERS)
+        .map(|_| {
+            let start = std::sync::Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                let scratch = Scratch::new("parallel-uniqueness");
+                scratch.path().to_owned()
+            })
+        })
+        .collect::<Vec<_>>();
+    let paths = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("scratch allocation worker"))
+        .collect::<std::collections::HashSet<_>>();
+
+    assert_eq!(paths.len(), WORKERS);
 }
 
 fn host() -> Option<NativeTarget> {
