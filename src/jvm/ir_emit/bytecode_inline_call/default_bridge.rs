@@ -141,11 +141,21 @@ impl Emitter<'_> {
         extracted: &[inliner::ExtractedDefaultLambda],
         physical: &[Ty],
     ) -> Result<Vec<(usize, inliner::Lambda)>, inliner::InlineError> {
-        let function = call
-            .target
-            .name
-            .strip_suffix("$default")
-            .unwrap_or(call.target.name);
+        if extracted.is_empty() {
+            return Ok(Vec::new());
+        }
+        let function = match self
+            .default_call_operands
+            .defaulted_declaration(call.call_expression)
+        {
+            Ok(Some(declaration)) => declaration.name.as_str(),
+            Ok(None) => {
+                return Err(inliner::InlineError::DefaultLambda(
+                    "a default lambda of a call that is not a default call",
+                ));
+            }
+            Err(reason) => return Err(inliner::InlineError::DefaultLambda(reason)),
+        };
         extracted
             .iter()
             .map(|lambda| {
@@ -183,17 +193,22 @@ impl Emitter<'_> {
         name: &str,
         descriptor: &str,
         inline: crate::libraries::InlineKind,
-    ) -> bool {
-        match self.default_call_operands.declaration(call_expression) {
-            Some(declaration) => declaration_is_inline_only(
-                self.bodies,
-                &declaration.owner.render(),
-                &declaration.name,
-                &declaration.descriptor,
-                inline,
-            ),
-            None => declaration_is_inline_only(self.bodies, owner, name, descriptor, inline),
-        }
+    ) -> Result<bool, &'static str> {
+        Ok(
+            match self
+                .default_call_operands
+                .defaulted_declaration(call_expression)?
+            {
+                Some(declaration) => declaration_is_inline_only(
+                    self.bodies,
+                    &declaration.owner.render(),
+                    &declaration.name,
+                    &declaration.descriptor,
+                    inline,
+                ),
+                None => declaration_is_inline_only(self.bodies, owner, name, descriptor, inline),
+            },
+        )
     }
 
     /// How a default bridge call supplies the parameter at `index`: a mask word or the method

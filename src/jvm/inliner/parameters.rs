@@ -32,6 +32,10 @@ pub(crate) enum Binding {
     /// before it is placed (`markPlacesForInlineAndRemoveInlinable`), and each `invoke` of it
     /// becomes the lambda's own body, so it has no slot in the caller.
     Lambda(usize),
+    /// An omitted inline lambda parameter whose default lambda, read from its class, is inlined
+    /// like [`Self::Lambda`]. It still keeps a temporary that nothing writes, as kotlinc enters
+    /// one for every default parameter; the final slot compaction drops it when it stays unused.
+    DefaultLambda(usize),
     /// The body never reads this parameter once its null check is gone. The call still evaluates
     /// the argument, then pops it, and the parameter takes no slot in the caller.
     Unread,
@@ -122,7 +126,7 @@ impl Parameters {
             let words = parameter.category.words() as usize;
             if slot < declaration + words {
                 return match parameter.binding {
-                    Binding::Lambda(lambda) => Some(lambda),
+                    Binding::Lambda(lambda) | Binding::DefaultLambda(lambda) => Some(lambda),
                     _ => None,
                 };
             }
@@ -139,7 +143,10 @@ impl Parameters {
         let mut slots = vec![None; real + self.captured.len()];
         let mut next = 0u16;
         let mut assign = |index: usize, parameter: &Parameter, slots: &mut Vec<Option<u16>>| {
-            if parameter.binding == Binding::Temporary {
+            if matches!(
+                parameter.binding,
+                Binding::Temporary | Binding::DefaultLambda(_)
+            ) {
                 slots[index] = Some(next);
                 next += parameter.category.words() as u16;
             }
@@ -171,7 +178,12 @@ impl Parameters {
     /// The words the temporaries take (`actualParamsSize`).
     fn temporaries_size(&self) -> u16 {
         self.all()
-            .filter(|parameter| parameter.binding == Binding::Temporary)
+            .filter(|parameter| {
+                matches!(
+                    parameter.binding,
+                    Binding::Temporary | Binding::DefaultLambda(_)
+                )
+            })
             .map(|parameter| parameter.category.words() as u16)
             .sum()
     }
@@ -188,7 +200,7 @@ impl Parameters {
             let words = parameter.category.words() as u16;
             if slot < declaration + words {
                 return match &parameter.binding {
-                    Binding::Lambda(_) => Remapped::Lambda,
+                    Binding::Lambda(_) | Binding::DefaultLambda(_) => Remapped::Lambda,
                     Binding::Unread => Remapped::Unread,
                     Binding::Field { owner, name, desc } => Remapped::Field { owner, name, desc },
                     Binding::Temporary => Remapped::Frame(
