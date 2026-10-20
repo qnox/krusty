@@ -314,8 +314,14 @@ impl BodyLowering<'_> {
         let mut values = Vec::with_capacity(captures.len());
         let mut fields = Vec::with_capacity(captures.len());
         let mut arguments = Vec::with_capacity(captures.len());
-        for (field, capture) in captures.iter().enumerate() {
-            let field = u32::try_from(field).expect("too many captured class fields");
+        // Only a stored capture takes a field, in capture order. One only constructor code reads
+        // stays in its constructor parameter; the prefix keeps every capture at its identity.
+        let mut pre_super_fields = Vec::with_capacity(captures.len());
+        for (identity, capture) in captures.iter().enumerate() {
+            let identity = u32::try_from(identity).expect("too many captured class fields");
+            let field = capture
+                .stored
+                .then(|| u32::try_from(fields.len()).expect("too many captured class fields"));
             let value = match &capture.source {
                 FirLocalClassCaptureSource::Value(source) => {
                     self.ir.add_expr(IrExpr::GetValue(self.value_slot(*source)))
@@ -380,8 +386,12 @@ impl BodyLowering<'_> {
                 }
             };
             values.push((value, capture.ty.get()));
-            fields
-                .push(IrField::new(capture.name.to_string(), capture.ty.get()).with_is_final(true));
+            if let Some(field) = field {
+                fields.push(
+                    IrField::new(capture.name.to_string(), capture.ty.get()).with_is_final(true),
+                );
+                pre_super_fields.push((identity, field));
+            }
             // A captured receiver keeps what it was in source; the target spells its name.
             let receiver = capture
                 .receiver
@@ -393,8 +403,8 @@ impl BodyLowering<'_> {
                 context_kind: crate::types::ContextParameterKind::None,
                 ty: capture.ty.get(),
                 declared_ty: None,
-                is_field: true,
-                field_index: Some(field),
+                is_field: field.is_some(),
+                field_index: field,
                 has_default: false,
                 is_vararg: false,
                 type_param: None,
@@ -409,19 +419,20 @@ impl BodyLowering<'_> {
                 provenance: crate::ir::IrCtorParameterProvenance::Capture,
                 capture_identity: capture.capture_identity,
             });
-            if let Some(identity) = capture.capture_identity {
+            if let Some(capture_identity) = capture.capture_identity {
                 self.ir
                     .class_capture_identities
-                    .insert((class, field), identity);
+                    .insert((class, identity), capture_identity);
             }
-            if capture.shared_cell {
+            if let Some(field) = field.filter(|_| capture.shared_cell) {
                 self.ir
                     .shared_class_capture_fields
                     .insert((class, field), capture.ty.get());
             }
         }
         let class = &mut self.ir.classes[class as usize];
-        let shifted = u32::try_from(captures.len()).expect("too many captured class fields");
+        let prefix = u32::try_from(captures.len()).expect("too many captured class fields");
+        let shifted = u32::try_from(fields.len()).expect("too many captured class fields");
         for argument in &mut class.ctor_args {
             if let Some(field) = &mut argument.field_index {
                 *field = field
@@ -431,17 +442,15 @@ impl BodyLowering<'_> {
         }
         class.fields.splice(0..0, fields);
         class.ctor_args.splice(0..0, arguments);
-        // kotlinc's LocalDeclarationsLowering stores every captured value before the constructor
+        // kotlinc's LocalDeclarationsLowering stores every stored capture before the constructor
         // delegates (`this.$a = a; super(…)`), like the enclosing instance of an inner class.
         for (parameter, field) in &mut class.pre_super_param_fields {
-            *parameter += shifted;
+            *parameter += prefix;
             *field += shifted;
         }
-        class
-            .pre_super_param_fields
-            .splice(0..0, (0..shifted).map(|capture| (capture, capture)));
-        class.ctor_param_count += captures.len() as u32;
-        class.constructor_prefix_count += captures.len() as u32;
+        class.pre_super_param_fields.splice(0..0, pre_super_fields);
+        class.ctor_param_count += shifted;
+        class.constructor_prefix_count += prefix;
         class.is_local_class = true;
         // Capture fields are spliced in front of predeclared storage, including `$$delegate_N`.
         super::interface_delegation::shift_predeclared_field_indices(self.ir, declaration, shifted);
