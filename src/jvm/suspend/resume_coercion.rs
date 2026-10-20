@@ -18,7 +18,7 @@ pub(super) fn unbox(ir: &mut IrFile, value: ExprId, target: &Ty) -> ExprId {
     ir.add_expr(IrExpr::TypeOp {
         op,
         arg: value,
-        type_operand: target.clone(),
+        type_operand: *target,
     })
 }
 

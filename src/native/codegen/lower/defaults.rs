@@ -84,7 +84,7 @@ impl<'a> FileLowering<'a> {
             }
             let mut parameters: Vec<Ty> = declaration
                 .dispatch_receiver
-                .map(|owner| Ty::obj_name(owner))
+                .map(Ty::obj_name)
                 .into_iter()
                 .collect();
             for (ordinal, ty) in declaration.params.iter().enumerate() {
@@ -164,7 +164,7 @@ impl<'a> FileLowering<'a> {
         let receiver = usize::from(declaration.dispatch_receiver.is_some());
         let mut parameters: Vec<Ty> = declaration
             .dispatch_receiver
-            .map(|owner| Ty::obj_name(owner))
+            .map(Ty::obj_name)
             .into_iter()
             .collect();
         let mut supplied = Vec::new();
@@ -181,7 +181,7 @@ impl<'a> FileLowering<'a> {
         let target = self.functions[key.function as usize];
         let slots: Vec<Ty> = declaration
             .dispatch_receiver
-            .map(|owner| Ty::obj_name(owner))
+            .map(Ty::obj_name)
             .into_iter()
             .chain(super::super::super::captures::carried_parameters(
                 self.ir,
@@ -190,7 +190,7 @@ impl<'a> FileLowering<'a> {
             .collect();
         let semantic_slots: Vec<Ty> = declaration
             .dispatch_receiver
-            .map(|owner| Ty::obj_name(owner))
+            .map(Ty::obj_name)
             .into_iter()
             .chain(declaration.params.iter().copied())
             .collect();
