@@ -9,6 +9,7 @@
 //! modules it compiles against, starting no more once one fails.
 
 mod arguments;
+mod avoidance;
 mod classpath;
 mod jdk;
 mod order;

@@ -138,6 +138,13 @@ version `settings.jvm.jdk.version` asks for. Artifact files and the serializatio
 the local repositories only. A module without Kotlin sources is not compiled. For each module the
 task clears its output directory, runs `KRUSTY_BIN` with the arguments, and copies the resources
 directory (`src/main/resources` in the Maven-like layout, else `resources`) to `resources-output`.
+A module is not compiled again when its inputs and its output are as its last successful
+compilation left them (`src/compile/avoidance.rs`), the check krusty's Build Tools API
+implementation makes for the toolchain: krusty fingerprints the inputs
+(`krusty compilation-fingerprint` before the arguments), and the output directory is compared by its
+files' paths and contents with the state recorded in
+`<root>/build/krusty-toolchain/<module>jvm/compilation.state`. A body-only edit of a module
+therefore recompiles only that module. When krusty takes no fingerprint, the module compiles.
 Modules run as the toolchain runs its task graph (`src/compile/schedule.rs`): a module starts as
 soon as the modules it compiles against have finished, at most as many at once as the host has
 available processors (the toolchain bounds its task executor the same way and has no option for
