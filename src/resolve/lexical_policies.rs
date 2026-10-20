@@ -96,8 +96,23 @@ impl Checker<'_> {
         annotations: &[AnnotationRef],
         arguments: &[Vec<ExprId>],
     ) -> usize {
+        self.push_selected_declaration_policies(scope, annotations, arguments, &|_| true)
+    }
+
+    /// [`Self::push_declaration_policies`] for only the applications `include` selects. An
+    /// application it excludes is never checked here, so it can neither bind nor publish.
+    pub(super) fn push_selected_declaration_policies(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        annotations: &[AnnotationRef],
+        arguments: &[Vec<ExprId>],
+        include: &dyn Fn(&AnnotationRef) -> bool,
+    ) -> usize {
         let depth = self.active_lexical_policies.len();
         for (annotation, arguments) in annotations.iter().zip(arguments) {
+            if !include(annotation) {
+                continue;
+            }
             let policies = self.application_policies(scope, annotation, arguments);
             self.active_lexical_policies
                 .extend(policies.iter().cloned());
