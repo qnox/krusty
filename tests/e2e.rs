@@ -1569,6 +1569,8 @@ mod nothing_type_argument_signature_e2e;
 mod nullable_double_type_param_equality_e2e;
 #[path = "nullable_uint_property_e2e.rs"]
 mod nullable_uint_property_e2e;
+#[path = "object_initializer_receiver_e2e.rs"]
+mod object_initializer_receiver_e2e;
 #[path = "only_input_integer_literal_e2e.rs"]
 mod only_input_integer_literal_e2e;
 #[path = "only_input_type_producer_e2e.rs"]

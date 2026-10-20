@@ -94,16 +94,9 @@ pub(super) fn emit(
     let mut clinit_line_entries: Vec<(u16, u32)> = Vec::new();
     if let Some(init_body) = init_body {
         let body_start = clinit.bytes.len() as u16;
-        if init_body_reads_this(ir, init_body) {
-            let iref = emitter.cw.fieldref(fq_name, instance_name, &self_desc);
-            clinit.getstatic(iref, 1);
-            // The instance local opens a frame of its own: the stores before the source body
-            // are done with every slot they took.
-            emitter.frame = super::frame_map::FrameMap::default();
-            let receiver = emitter.frame.enter(FrameKey::Receiver, Ty::obj(fq_name));
-            store(Ty::obj(fq_name), receiver, &mut clinit);
-            emitter.slots.insert(0, (receiver, Ty::obj(fq_name)));
-        }
+        // The source body reads `this` as kotlinc does: each read loads the published instance
+        // again, with no local holding it.
+        emitter.singleton_receiver = Some(c.fq_name);
         // Each store marks its initializer's line, and the lines its value marks inside itself
         // stay, as in a constructor; an `init` block marks its own lines as it goes.
         let first = clinit.line_marks().len();

@@ -278,38 +278,6 @@ fn static_storage(ir: &IrFile, c: &IrClass) -> bool {
     object_static_storage(c) || companion_of_interface(ir, c)
 }
 
-/// Whether a static-storage object's `init_body` reads `this` (`GetValue(0)`) anywhere OTHER than
-/// as the receiver of a store to its own (now static) field — those receivers are dropped by the
-/// `putstatic` lowering, so only remaining reads force materializing INSTANCE into a local.
-fn init_body_reads_this(ir: &IrFile, body: crate::ir::ExprId) -> bool {
-    fn walk(ir: &IrFile, e: crate::ir::ExprId, skip_self: bool) -> bool {
-        use crate::ir::IrExpr;
-        match ir.expr(e) {
-            IrExpr::GetValue(v) => *v == 0 && !skip_self,
-            IrExpr::SetField {
-                receiver, value, ..
-            } => {
-                let receiver_is_this = matches!(ir.expr(*receiver), IrExpr::GetValue(0));
-                (!receiver_is_this && walk(ir, *receiver, false)) || walk(ir, *value, false)
-            }
-            IrExpr::Block { stmts, value } => {
-                stmts.iter().any(|&s| walk(ir, s, false))
-                    || value.is_some_and(|v| walk(ir, v, false))
-            }
-            _ => {
-                let mut found = false;
-                crate::ir::for_each_child(&ir.exprs, e, &mut |child| {
-                    if walk(ir, child, false) {
-                        found = true;
-                    }
-                });
-                found
-            }
-        }
-    }
-    walk(ir, body, false)
-}
-
 fn has_ctor_marker_accessor(ir: &IrFile, class: &IrClass) -> bool {
     // An INTERFACE's companion self-constructs in its own `<clinit>` (no cross-class construction),
     // so kotlinc emits no marker ctor for it.
