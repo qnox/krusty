@@ -4299,6 +4299,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   expression body made from this form is the subject's nested block, not the function's root scope;
   the subject's debug range therefore ends before the return, as in kotlinc.
   `tests/when_subject_variable_e2e.rs`.
+- **Every read of a `when` subject has the subject's type, whichever condition makes it.** fir2ir
+  reads the subject variable afresh in each condition (`== c`, `is T`, `in r`), and each `irGet`
+  has the variable's type. kotlinc's `RangeContainsLowering` stores the tested value in a
+  temporary only when it may have side effects (`createTemporaryVariableIfNecessary` over
+  `!isTrivial()`); a variable read has none, so `when (c) { in a..b -> … }` compares
+  `tmp_subject` with both bounds and allocates no second local, for signed, `Char`, floating and
+  unsigned subjects alike. The read of an `in`/`is` condition therefore carries the subject's
+  checked type exactly as an `==` condition's does; an untyped read would be converted to the
+  comparison type and that conversion stored in a temporary kotlinc never declares.
+  `tests/when_subject_range_temporary_e2e.rs`.
 - **`x ?: return` smart-casts `x` for the code that follows** (also `?: throw`/`break`/`continue`/a
   `Nothing`-typed call): completing an elvis whose right-hand side is `Nothing` proves a stable
   `val`/parameter non-null, exactly like an `if (x == null) return` guard. A nullable-primitive local
