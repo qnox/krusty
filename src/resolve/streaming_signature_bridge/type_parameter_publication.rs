@@ -320,20 +320,24 @@ pub(super) fn bounds(
     let bounds = stable
         .and_then(|generic| {
             let stable = generic.formal_bounds.get(ordinal)?;
-            (stable.len() == local.len()).then(|| {
-                stable
-                    .iter()
-                    .copied()
-                    .zip(&local)
-                    .map(|(stable, &local)| {
-                        if mentions_external_formal(stable, &generic.formals) {
-                            stable
-                        } else {
-                            local
-                        }
-                    })
-                    .collect()
-            })
+            if stable.len() == local.len() {
+                Some(
+                    stable
+                        .iter()
+                        .copied()
+                        .zip(&local)
+                        .map(|(stable, &local)| {
+                            if mentions_external_formal(stable, &generic.formals) {
+                                stable
+                            } else {
+                                local
+                            }
+                        })
+                        .collect(),
+                )
+            } else {
+                None
+            }
         })
         .unwrap_or(local);
     bounds
@@ -395,20 +399,20 @@ pub(super) fn publish(
                 .count();
             // `TParams` also carries inherited constraints after the written bounds. Publication
             // keeps exactly the written generic contract: kotlinc signs `T : U` as `T extends U`.
-            let local_bounds = (declared_bound_count > 0)
-                .then(|| {
-                    let mut bounds = vec![semantic
-                        .ty_param_bound()
-                        .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))];
-                    bounds.extend(
-                        symbolic
-                            .extra_bounds_of(source_name)
-                            .into_iter()
-                            .take(declared_bound_count - 1),
-                    );
-                    bounds
-                })
-                .unwrap_or_default();
+            let local_bounds = if declared_bound_count > 0 {
+                let mut bounds = vec![semantic
+                    .ty_param_bound()
+                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))];
+                bounds.extend(
+                    symbolic
+                        .extra_bounds_of(source_name)
+                        .into_iter()
+                        .take(declared_bound_count - 1),
+                );
+                bounds
+            } else {
+                Vec::new()
+            };
             (
                 u32::try_from(ordinal).expect("too many declaration type parameters"),
                 source_name.clone(),

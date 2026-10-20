@@ -28,6 +28,7 @@
 1	src/fir/signature.rs	this function has too many arguments (12/7)
 1	src/fir/signature/classifier_headers.rs	this function has too many arguments (8/7)
 1	src/fir/signature/evaluate.rs	this function has too many arguments (9/7)
+1	src/fir/signature/local_type_aliases.rs	this function has too many arguments (10/7)
 1	src/fir/signature_extract.rs	this function has too many arguments (8/7)
 1	src/fir/signature_extract/condition_facts.rs	this function has too many arguments (8/7)
 1	src/fir/signature_extract/try_flow.rs	this function has too many arguments (8/7)
@@ -121,7 +122,7 @@
 1	src/libraries.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if merged.as_slice() != arguments { Ty::obj_args_name(name, &merged) } else { declared }`
 1	src/libraries/builtin_top_level_realization.rs	function `function_realization` is never used
 1	src/libraries/call_realization.rs	this function has too many arguments (11/7)
-1	src/libraries/classifier_declaration.rs	large size difference between variants: the entire enum is at least 224 bytes
+1	src/libraries/classifier_declaration.rs	large size difference between variants: the entire enum is at least 232 bytes
 1	src/libraries/dependency_body_contract.rs	method `has_content_fingerprint` is never used
 1	src/metadata/class_builder/schema.rs	empty line after doc comment
 1	src/metadata/class_builder/schema.rs	the loop variable `index` is used to index `func_msgs`
@@ -151,6 +152,9 @@
 1	src/resolve.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if internal == foo { vec!["prop".to_string()] } else { Default::default() }`
 1	src/resolve.rs	usage of `bool::then` in `filter_map`
 1	src/resolve/alias_projection.rs	this function has too many arguments (8/7)
+1	src/resolve/body_local_property_selection.rs	this function has too many arguments (10/7)
+1	src/resolve/body_local_property_selection.rs	this function has too many arguments (8/7)
+1	src/resolve/body_local_property_selection.rs	this function has too many arguments (9/7)
 1	src/resolve/callable_reference_lhs.rs	this function has too many arguments (9/7)
 1	src/resolve/callable_reference_selection.rs	redundant closure: help: replace the closure with the function itself: `is_assignable`
 1	src/resolve/callable_reference_selection.rs	this `match` expression can be replaced with `?`
@@ -167,6 +171,7 @@
 1	src/resolve/interface_delegation.rs	you are using an explicit closure for copying elements
 1	src/resolve/local_method_dependencies.rs	large size difference between variants: the entire enum is at least 1600 bytes
 1	src/resolve/local_method_dependencies.rs	this `let...else` may be rewritten with the `?` operator: help: replace it with: `let (inherited, provider) = self.inherited_body_local_default_candidate(owner, candidate)?;`
+1	src/resolve/member_extension_properties.rs	this function has too many arguments (8/7)
 1	src/resolve/member_extension_properties.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/resolve/member_extension_selection.rs	items after a test module
 1	src/resolve/operator_calls.rs	this function has too many arguments (10/7)
@@ -175,12 +180,13 @@
 1	src/resolve/postponed_constraints.rs	this function has too many arguments (10/7)
 1	src/resolve/property_read_selection.rs	called `map(..).flatten()` on `Option`: help: try replacing `map` with `and_then` and remove the `.flatten()`: `and_then(|getter| getter.member.external_identity)`
 1	src/resolve/reified_type_arguments.rs	this function has too many arguments (9/7)
+1	src/resolve/resolved_type_occurrences.rs	this function has too many arguments (9/7)
 1	src/resolve/scope.rs	this `if` can be collapsed into the outer `match`
 1	src/resolve/scope.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/resolve/selected_argument_commitment.rs	this function has too many arguments (8/7)
 1	src/resolve/selected_result_publication.rs	this function has too many arguments (9/7)
 1	src/resolve/signature_collection/collection.rs	field assignment outside of initializer for an instance created with Default::default()
-1	src/resolve/signature_collection/type_universe.rs	large size difference between variants: the entire enum is at least 224 bytes
+1	src/resolve/signature_collection/type_universe.rs	large size difference between variants: the entire enum is at least 232 bytes
 1	src/resolve/signature_collection/type_universe.rs	the loop variable `file_index` is used to index `file_class_names`
 1	src/resolve/signature_collection/type_universe.rs	this `if` statement can be collapsed
 1	src/resolve/source_constructors.rs	very complex type used. Consider factoring parts into `type` definitions
@@ -199,7 +205,6 @@
 1	src/resolve/streaming_signature_bridge/semantics.rs	this `if let` can be collapsed into the outer `if let`
 1	src/resolve/streaming_signature_bridge/semantics.rs	this expression creates a reference which is immediately dereferenced by the compiler: help: change this to: `arguments`
 1	src/resolve/streaming_signature_bridge/semantics.rs	very complex type used. Consider factoring parts into `type` definitions
-1	src/resolve/streaming_signature_bridge/type_parameter_publication.rs	this function has too many arguments (8/7)
 1	src/resolve/streaming_signature_tests.rs	called `Iterator::last` on a `DoubleEndedIterator`; this will needlessly iterate the entire iterator
 1	src/resolve/type_parameter_owners.rs	this loop could be written as a `while let` loop: help: try: `while let Some(header) = index.declaration_header(current) { .. }`
 1	src/resolve/type_use_annotation_publication.rs	very complex type used. Consider factoring parts into `type` definitions
@@ -283,6 +288,7 @@
 3	src/module_symbols.rs	using `clone` on type `SingletonDispatch` which implements the `Copy` trait: help: try removing the `clone` call: `singleton`
 3	src/resolve.rs	unnecessary closure used to substitute value for `Option::None`
 3	src/resolve/streaming_signature_bridge/rejected_member_call.rs	this function has too many arguments (8/7)
+3	src/resolve/streaming_signature_bridge/type_parameter_publication.rs	this function has too many arguments (8/7)
 4	src/jvm/ir_emit.rs	this function has too many arguments (8/7)
 4	src/klib_lowering/body_unit.rs	the borrowed expression implements the required traits: help: change this to: `callee_declined`
 4	src/resolve/delegated_properties.rs	this function has too many arguments (8/7)
