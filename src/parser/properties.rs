@@ -75,6 +75,8 @@ impl Parser<'_> {
         } else {
             None
         };
+        // `typeConstraints` precede the initializer or delegate: `val <T> T.p: R where T : A by d`.
+        type_param_bounds.extend(self.parse_where_clause(&type_params, &name));
         let init_operator = self.eat_initializer_eq();
         let mut init = if init_operator.is_some() {
             self.skip_newlines();
@@ -101,7 +103,6 @@ impl Parser<'_> {
             self.i = delegate_start;
             None
         };
-        type_param_bounds.extend(self.parse_where_clause(&type_params, &name));
         // Optional custom accessors: `get() = expr` / `get() { … }` and/or `[private] set(v) { … }`
         // / `private set`. Either order; at most one of each. An accessor begins with `get`/`set`
         // (optionally preceded by a visibility modifier) — anything else ends the property.
