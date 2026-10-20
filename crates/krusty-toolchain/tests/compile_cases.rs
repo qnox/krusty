@@ -1164,11 +1164,15 @@ fn a_failure_starts_no_module_and_waits_for_the_running_ones() {
     let (code, stdout, stderr, events) =
         timed_run("diamond-failure", &[":app:compileJvm"], |command| {
             command.env("KRUSTY_RECORDER_FAIL", "left");
+            if parallel() {
+                command.env("KRUSTY_RECORDER_FAILURE_COMPANION", "right");
+            }
         });
     let failed = "recorder: failing left\n";
     let error = "\nERROR: Task ':left:compileJvm' failed: krusty exited with status 3\n";
     if parallel() {
-        // `right` runs while `left` fails at once: it finishes, and `app` never starts.
+        // `left` waits for `right` to start, and `right` waits for `left` to fail before
+        // finishing. Thus a running compiler is waited for, and `app` never starts.
         assert_eq!(
             (code, stdout, stderr, settled(events, &[(2, 4)])),
             (
