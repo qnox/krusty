@@ -10478,9 +10478,33 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   function captures in the function's own first-use order, found the same way: with
   `fun helper() = b + a`, a class whose only use is `helper()` takes `($b, $a)`, not name order.
   The resolver publishes that order of lexical identities only for the class that includes the
-  function; the function's own capture vector, and so its lifted parameters, are unchanged. A
-  class that includes a function whose captured value no recorded use orders (an implicit context
-  argument) is rejected as unsupported rather than ordered by name. Field and parameter order is JVM representation, so the checker
+  function; the function's own capture vector, and so its lifted parameters, are unchanged. An
+  implicit context argument or receiver is a use of the value it passes, at its call, as in
+  kotlinc: in `context(registry: Registry) fun render(other: String)`, a class that calls
+  `fun local() = other + contextualValue()` captures `($other, $registry)`; with the operands
+  swapped it captures `($registry, $other)`
+  (`an_implicit_context_argument_is_a_first_use_at_its_call`). The checker records the flow
+  identity of the binding it selects for each context argument or named context receiver, and the
+  order maps that identity to the capture, never the value's spelling. A shadowing local and the
+  context value it hides are two captures of one spelling: with `val registry = "shadow"` inside
+  that `render`, a class that calls `fun local() = registry + contextualValue() + other` takes
+  `($registry: String, $registry$1: Registry, $other)`. The class's call passes each of the
+  function's captures from the field that stores the same lexical binding, never the field of that
+  name. kotlinc names the fields in physical order: the first capture of a spelling is `$name` and
+  each later one `$name$1`, `$name$2`, …, so with `contextualValue()` first the class takes
+  `($registry: Registry, $registry$1: String, $other)`
+  (`a_shadowing_read_and_a_context_value_of_one_name_are_two_captures`,
+  `a_context_value_used_first_takes_the_plain_capture_name`). The JVM backend numbers the names
+  once over the physical order, and the field table, `MethodParameters` and the constructor's
+  `LocalVariableTable` all take them from there. Whether a local function's capture is a shared
+  cell is decided by its binding, as for a class capture, never by its spelling: a captured source
+  `var` is one cell, as kotlinc's `SharedVariablesLowering` makes it, and a write counts only
+  when the checker resolved it to that same binding. With `var registry = "shadow"` written by
+  `local` (`registry += "!"`), the class takes `Ref$ObjectRef` for the `var` and the plain
+  `Registry` for the context value, in either first-use order
+  (`a_written_shadowing_var_is_the_only_shared_capture`,
+  `a_context_value_before_a_written_shadowing_var_stays_unshared`). A capture no recorded use orders is
+  an internal error, never ordered by name. Field and parameter order is JVM representation, so the checker
   publishes the order as a recorded fact (`TypeInfo::local_class_capture_orders`, carried by the
   checked local-class declaration to `IrFile::class_capture_order`). Every phase before the JVM
   backend keeps capture fields, constructor parameters and construction arguments in field order,
@@ -10496,11 +10520,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `this@Outer` both go through. It is rejected when the enclosing receiver is a `@JvmInline value
   class`: there is no instance to capture, since `this` is the bare underlying value there
   (`codegen/box/inlineClasses/initBlock.kt` fails verification otherwise).
-  Two capture shapes are NOT modelled yet and are rejected (the file skips): a local class that
-  calls a local function capturing a value only an implicit context argument uses (no recorded use
-  orders that capture), and a reassigned `var` (shared mutable state, not capturable by value).
-  A capture read during construction is supported and ordered as described above. The capture
-  scan is syntactic and conservative: over-reporting skips a file, under-reporting emits a class without what it needs,
+  One capture shape is NOT modelled yet and is rejected (the file skips): a reassigned `var`
+  (shared mutable state, not capturable by value). A capture read during construction is
+  supported and ordered as described above. The capture scan is syntactic and conservative:
+  over-reporting skips a file, under-reporting emits a class without what it needs,
   which the box corpus caught as `NoSuchMethodError` on construction
   (`codegen/box/localClasses/capturingInDefaultConstructorParameter.kt`).
   Tests: `tests/local_class_scope_e2e.rs`.
