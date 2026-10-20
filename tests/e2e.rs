@@ -14,6 +14,8 @@ mod captured_field_storage_e2e;
 mod captured_receiver_names_e2e;
 #[path = "cast_operand_reread_e2e.rs"]
 mod cast_operand_reread_e2e;
+#[path = "classfile_low_priority_annotation_e2e.rs"]
+mod classfile_low_priority_annotation_e2e;
 #[path = "common/mod.rs"]
 mod common_core;
 #[cfg(test)]

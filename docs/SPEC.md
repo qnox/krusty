@@ -18379,6 +18379,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   omitted rather than recorded argument-less (a wrong record is worse than none). Test:
   `tests/classpath_annotation_emit_e2e.rs::classpath_low_priority_annotation_reaches_overload_selection`.
 
+- **A library function's annotations are read from its class-file method when metadata omits them.**
+  `Function.annotation` records exist only under `AnnotationsInMetadata` (language level 2.4). A
+  library compiled at an earlier level, such as kotlinx-coroutines 1.11, states them only in the
+  method's `RuntimeVisibleAnnotations`/`RuntimeInvisibleAnnotations`, where kotlinc reads them. So
+  `@LowPriorityInOverloadResolution` on coroutines' JVM `runBlocking` leaves the common
+  `runBlocking` (realized as `runBlockingK`) selected, as kotlinc selects it. A metadata function
+  with no recorded annotations takes the annotation classes of its exact realization method
+  (name and descriptor); nullability qualifiers stay out. Test:
+  `tests/classfile_low_priority_annotation_e2e.rs` (two krusty-built libraries at language 2.2).
+
 - **Member extension properties are metadata `Property` records, not accessor `Function`s.** A member
   extension property (`object Tools { val Int.doubled get() = … }`) lowers to accessor METHODS
   (`getDoubled(I)I`), but its class `@Metadata` record must be a `Property` carrying

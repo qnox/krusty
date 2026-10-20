@@ -18,7 +18,7 @@ mod string_table;
 mod type_aliases;
 mod value_parameter;
 
-pub use function::MetaFn;
+pub use function::{MetaFn, MfnFlags};
 
 use property_declarations::decode_properties;
 use property_identity::{
@@ -318,6 +318,7 @@ struct ParsedFunction {
     /// `Function.flags.MEMBER_KIND == SYNTHESIZED`. The enclosing declaration may attach implicit
     /// compiler semantics that kotlinc deliberately does not repeat on the value parameter.
     is_synthesized: bool,
+    annotations_on_realization: bool,
     is_operator: bool,
     is_infix: bool,
     /// Only the current `Function.flags` word (field 9) has the status bits; `old_flags` predates
@@ -518,6 +519,8 @@ fn parse_function(body: &[u8]) -> MetadataResult<ParsedFunction> {
         is_abstract: (flags >> 4) & 0x3 == 2,
         is_final: (flags >> 4) & 0x3 == 0,
         is_synthesized: (flags >> 6) & 0x3 == 3,
+        // `HAS_ANNOTATIONS` is bit 0 of both flag layouts.
+        annotations_on_realization: flags & 1 != 0 && annotation_bodies.is_empty(),
         is_operator: flags & IS_OPERATOR_BIT != 0,
         is_infix: flags & IS_INFIX_BIT != 0,
         return_value_status,
@@ -1063,88 +1066,6 @@ fn build_property_generic_sig(
         ret,
         return_policy: Default::default(),
     })
-}
-
-/// Bit-packed boolean flags for a [`MetaFn`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct MfnFlags(u16);
-
-impl MfnFlags {
-    pub(super) const IS_INLINE: u16 = 1 << 0;
-    pub(super) const IS_SUSPEND: u16 = 1 << 1;
-    pub(super) const IS_EXTENSION: u16 = 1 << 2;
-    pub(super) const RET_NULLABLE: u16 = 1 << 3;
-    pub(super) const IS_OPERATOR: u16 = 1 << 4;
-    pub(super) const IS_INFIX: u16 = 1 << 5;
-    pub(super) const HAS_REIFIED_TYPE_PARAMS: u16 = 1 << 6;
-    pub(super) const DEPRECATED_HIDDEN: u16 = 1 << 7;
-    pub(super) const IS_ABSTRACT: u16 = 1 << 8;
-    pub(super) const IS_FINAL: u16 = 1 << 9;
-    pub(super) const IS_COMPANION_BLOCK_MEMBER: u16 = 1 << 10;
-    pub(super) const IS_SYNTHESIZED: u16 = 1 << 11;
-
-    #[inline]
-    const fn with(mut self, mask: u16, on: bool) -> Self {
-        if on {
-            self.0 |= mask;
-        } else {
-            self.0 &= !mask;
-        }
-        self
-    }
-    #[inline]
-    pub(super) const fn has(self, mask: u16) -> bool {
-        self.0 & mask != 0
-    }
-
-    #[inline]
-    pub const fn with_is_inline(self, on: bool) -> Self {
-        self.with(Self::IS_INLINE, on)
-    }
-    #[inline]
-    pub const fn with_is_suspend(self, on: bool) -> Self {
-        self.with(Self::IS_SUSPEND, on)
-    }
-    #[inline]
-    pub const fn with_is_extension(self, on: bool) -> Self {
-        self.with(Self::IS_EXTENSION, on)
-    }
-    #[inline]
-    pub const fn with_ret_nullable(self, on: bool) -> Self {
-        self.with(Self::RET_NULLABLE, on)
-    }
-    #[inline]
-    pub const fn with_is_operator(self, on: bool) -> Self {
-        self.with(Self::IS_OPERATOR, on)
-    }
-    #[inline]
-    pub const fn with_is_infix(self, on: bool) -> Self {
-        self.with(Self::IS_INFIX, on)
-    }
-    #[inline]
-    pub const fn with_has_reified_type_params(self, on: bool) -> Self {
-        self.with(Self::HAS_REIFIED_TYPE_PARAMS, on)
-    }
-    #[inline]
-    pub const fn with_deprecated_hidden(self, on: bool) -> Self {
-        self.with(Self::DEPRECATED_HIDDEN, on)
-    }
-    #[inline]
-    pub const fn with_is_abstract(self, on: bool) -> Self {
-        self.with(Self::IS_ABSTRACT, on)
-    }
-    #[inline]
-    pub const fn with_is_final(self, on: bool) -> Self {
-        self.with(Self::IS_FINAL, on)
-    }
-    #[inline]
-    pub const fn with_is_companion_block_member(self, on: bool) -> Self {
-        self.with(Self::IS_COMPANION_BLOCK_MEMBER, on)
-    }
-    #[inline]
-    pub const fn with_is_synthesized(self, on: bool) -> Self {
-        self.with(Self::IS_SYNTHESIZED, on)
-    }
 }
 
 /// A JVM method signature carried by Kotlin metadata: method name + descriptor as one fact.
@@ -2120,6 +2041,7 @@ fn decode_functions(
                             .with_is_infix(pf.is_infix)
                             .with_is_companion_block_member(pf.is_companion && !pf.has_receiver)
                             .with_is_synthesized(pf.is_synthesized)
+                            .with_annotations_on_realization(pf.annotations_on_realization)
                             .with_has_reified_type_params(
                                 pf.type_params.iter().any(|parameter| parameter.reified),
                             ),
@@ -3072,6 +2994,19 @@ mod module_reader_tests {
         let ordinary = parse_function(&[]).expect("default function message");
         assert!(operator.is_operator);
         assert!(!ordinary.is_operator);
+    }
+
+    #[test]
+    fn annotations_live_on_the_realization_only_when_flagged_without_records() {
+        // Function.flags is field 9 (tag 0x48): the default 6 plus HAS_ANNOTATIONS (bit 0) is 7,
+        // and 6 alone states no annotations. Function.annotation is field 12 (tag 0x62); a record
+        // keeps metadata authoritative even when its body decodes to no identity.
+        let external = parse_function(&[0x48, 0x07]).expect("flagged function");
+        let unannotated = parse_function(&[0x48, 0x06]).expect("unannotated function");
+        let recorded = parse_function(&[0x48, 0x07, 0x62, 0x00]).expect("recorded function");
+        assert!(external.annotations_on_realization);
+        assert!(!unannotated.annotations_on_realization);
+        assert!(!recorded.annotations_on_realization);
     }
 
     #[test]

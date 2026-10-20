@@ -56,6 +56,15 @@ impl<'a> Realizations<'a> {
                 function.flags = function.flags.with_deprecated_hidden(true);
             }
             function.set_deprecation(self.deprecation(&function.jvm_name, function.jvm_desc));
+            // Metadata records a function's annotations only under `AnnotationsInMetadata`; a
+            // library compiled without it states them on the realization, where kotlinc reads them
+            // (`@LowPriorityInOverloadResolution` among them). Any recorded annotation keeps
+            // metadata authoritative, and `HAS_ANNOTATIONS` unset means there are none.
+            if function.annotations_on_realization() {
+                if let Some(method) = self.method(&function.jvm_name, function.jvm_desc) {
+                    function.annotations = method.annotations.to_vec();
+                }
+            }
         }
         functions
     }
@@ -84,5 +93,58 @@ impl<'a> Realizations<'a> {
             constructor.hidden_since = method.and_then(|method| method.deprecated_hidden_since);
             constructor.deprecation = method.and_then(|method| method.deprecation.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jvm::metadata::function::tests::blank;
+    use crate::jvm::metadata::MfnFlags;
+    use crate::types::{type_name, TypeName};
+
+    const LOW_PRIORITY: &str = "kotlin/internal/LowPriorityInOverloadResolution";
+
+    fn realization() -> MethodSig {
+        MethodSig {
+            access: crate::jvm::classreader::ACC_PUBLIC,
+            name: "pick".to_string(),
+            descriptor: "(Ljava/lang/String;)V".to_string(),
+            signature: None,
+            parameter_nullability: Vec::new(),
+            return_nullability: None,
+            deprecated_hidden: false,
+            deprecated_hidden_since: None,
+            deprecation: None,
+            has_annotation_default: false,
+            annotations: Box::new([type_name(LOW_PRIORITY)]),
+        }
+    }
+
+    fn stamped(annotations_on_realization: bool) -> Vec<TypeName> {
+        let mut decoded = blank();
+        decoded.jvm_name = "pick".to_string();
+        decoded.jvm_desc = Some("(Ljava/lang/String;)V");
+        decoded.flags =
+            MfnFlags::default().with_annotations_on_realization(annotations_on_realization);
+        let methods = [realization()];
+        let [function] = <[MetaFn; 1]>::try_from(
+            Realizations::new(&methods).stamp_functions(vec![MetaFn::from_decoded(decoded)]),
+        )
+        .expect("one function");
+        function.annotations
+    }
+
+    /// The external payload shape (`HAS_ANNOTATIONS` without records) takes the realization's.
+    #[test]
+    fn annotations_stated_only_on_the_realization_are_stamped() {
+        assert_eq!(stamped(true), vec![type_name(LOW_PRIORITY)]);
+    }
+
+    /// Metadata stating no annotations, or recording them itself (even undecodably), stays
+    /// authoritative over a physical method annotation.
+    #[test]
+    fn metadata_without_the_external_payload_shape_keeps_its_annotations() {
+        assert_eq!(stamped(false), Vec::<TypeName>::new());
     }
 }
