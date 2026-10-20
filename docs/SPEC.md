@@ -6004,10 +6004,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parameter gets only `checkcast Base`, never `Leaf` first. A template part is consumed the same
   way: `String.valueOf(Object)` and an `invokedynamic` argument take it unnarrowed, and
   `append(String)` (selected by a `String` smart cast) casts it to `String`. krusty defers the cast
-  only where the consumer itself materializes the value at its exact physical slot: a call argument
-  (cast to its parameter's descriptor type), a reference implicit coercion (cast to its target),
-  and a template part. Every other consumer keeps the narrowed value: a dispatch receiver, whose
-  slot is the member's owner, a suspend call's `$completion`, which is a `Continuation`, a local
+  only where the consumer itself materializes the value at its exact physical slot, and every such
+  consumer reads its operands through one step (`Emitter::slot_operands`, or
+  `emit_operand_at_slot` for a single operand): the arguments of source, descriptor and external
+  virtual or interface calls (`list.add(value)` is `aload; invokeinterface add(Object)`), of a
+  `$default` stub, whose receiver is an ordinary parameter of the declaring class (`checkcast Base`
+  for a receiver smart cast to `Sub`), of a constructor (an erased generic parameter takes the bare
+  load), of `FunctionN.invoke` and of an inlined function-value literal (whose own parameter casts
+  it as the body reads it), and both sides of `==` (`aload value; aload other;
+  Intrinsics.areEqual`) and `===`; a reference implicit coercion (cast to its target); and a
+  template part. Every other consumer keeps the narrowed value: a dispatch receiver, whose slot is
+  the class the call names, a suspend call's `$completion`, which is a `Continuation`, a local
   initializer, and the rest. A written `as` keeps its own cast, and a narrowing to or from a value
   class or unsigned type stays with the value-class adapter that owns its carried representation.
   Tests: `tests/smart_cast_consumer_cast_e2e.rs`.

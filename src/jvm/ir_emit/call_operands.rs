@@ -11,6 +11,7 @@
 //! then obliged to abandon the whole call — never to emit the `invoke*` that would follow — and to
 //! leave its own arm stack-correct via [`Emitter::bail_descriptor_arity`].
 
+use super::operand_stack::KeptSmartCasts;
 use super::*;
 
 /// Map a physical descriptor operand back to the selected call's checked argument vector. A
@@ -213,33 +214,6 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    /// `ops` with each argument smart cast replaced by its operand. A smart cast is kotlinc's
-    /// `IMPLICIT_CAST`, so an argument reaches its parameter unnarrowed; the caller materializes
-    /// every argument at its parameter's physical type, which writes the only `checkcast` (none for
-    /// `Object`). A receiver and a continuation are not materialized there, so they keep theirs.
-    fn uncast_argument_operands(
-        &self,
-        call: u32,
-        leading_non_argument_operands: usize,
-        ops: &[u32],
-    ) -> Vec<u32> {
-        ops.iter()
-            .enumerate()
-            .map(|(index, &operand)| {
-                let argument = call_argument_index(index, leading_non_argument_operands)
-                    .is_some_and(|argument| {
-                        !self.default_call_operands.is_continuation(call, argument)
-                    });
-                if argument {
-                    self.consumed_implicit_cast_operand(operand)
-                        .unwrap_or(operand)
-                } else {
-                    operand
-                }
-            })
-            .collect()
-    }
-
     /// Operands of a call to a function this module declares. Lowering already realized every
     /// representation change its checked arguments need, so each reference operand is only
     /// materialized at its parameter's type, the cast kotlinc writes for an upcast.
@@ -253,7 +227,13 @@ impl Emitter<'_> {
     ) -> Result<(), DescriptorArityMismatch> {
         DescriptorArityMismatch::check(None, ops.len(), physical.len())?;
         self.mark_generated_operand_start(call, ops.first().copied(), code);
-        let ops = self.uncast_argument_operands(call, leading_non_argument_operands, ops);
+        let ops = self.slot_operands(
+            ops,
+            KeptSmartCasts::CallReceivers {
+                call,
+                leading: leading_non_argument_operands,
+            },
+        );
         let mut index = 0usize;
         self.emit_operands_adapted(None, &ops, code, |this, source, code| {
             let parameter_index = index;
@@ -285,8 +265,10 @@ impl Emitter<'_> {
     ) -> Result<(), DescriptorArityMismatch> {
         DescriptorArityMismatch::check(None, ops.len(), physical.len())?;
         let origins = self.default_operand_origins(call, ops, true);
+        // A `$default` stub's receiver is an ordinary parameter, materialized at its type.
+        let ops = self.slot_operands(ops, KeptSmartCasts::CallReceivers { call, leading: 0 });
         let mut index = 0usize;
-        self.emit_operands_adapted(Some((call, &origins)), ops, code, |this, source, code| {
+        self.emit_operands_adapted(Some((call, &origins)), &ops, code, |this, source, code| {
             let parameter_index = index;
             let target = physical[index];
             index += 1;
@@ -364,8 +346,13 @@ impl Emitter<'_> {
         // The call owns any operand a default-argument realization synthesized for it, so its own
         // line goes back into effect at the start of each such run.
         let origins = self.default_operand_origins(call_expression, ops, false);
-        let ops =
-            &self.uncast_argument_operands(call_expression, leading_non_argument_operands, ops);
+        let ops = &self.slot_operands(
+            ops,
+            KeptSmartCasts::CallReceivers {
+                call: call_expression,
+                leading: leading_non_argument_operands,
+            },
+        );
         self.emit_operands_at_slots(
             Some((call_expression, &origins)),
             ops,
@@ -420,6 +407,13 @@ impl Emitter<'_> {
         });
         physical.extend_from_slice(physical_params);
         self.mark_generated_operand_start(call_expression, ops.first().copied(), code);
+        let ops = self.slot_operands(
+            &ops,
+            KeptSmartCasts::CallReceivers {
+                call: call_expression,
+                leading: 1,
+            },
+        );
         let mut index = 0usize;
         self.emit_operands_at_slots(None, &ops, &physical, code, |this, source, code| {
             let operand = ops[index];

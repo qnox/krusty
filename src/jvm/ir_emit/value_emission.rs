@@ -219,6 +219,8 @@ impl super::Emitter<'_> {
                 if self.emit_nullable_sam_wrapper_new(e, *internal, &args, code) {
                     return;
                 }
+                // Each argument is materialized at the constructor parameter it fills.
+                let args = self.slot_operands(&args, super::operand_stack::KeptSmartCasts::None);
                 let owner = internal.render();
                 // The constructor descriptor + its argument-word count come from ONE source, identified by
                 // the owner NAME (no same-file/other-file/classpath control-flow split):
@@ -470,7 +472,8 @@ impl super::Emitter<'_> {
                     // the placeholder is `valueOf` of the primitive zero, and a supplied primitive is
                     // boxed the same way.
                     let args = args.clone();
-                    self.emit_value(*receiver, code);
+                    // The stub takes its receiver as an ordinary parameter of the owner's type.
+                    self.emit_operand_at_slot(*receiver, Ty::obj_name(c.fq_name), code);
                     let mut stub_params = vec![Ty::obj_name(c.fq_name)];
                     stub_params
                         .extend(self.emit_default_call_arguments(e, fid, &args, &param_tys, code));
