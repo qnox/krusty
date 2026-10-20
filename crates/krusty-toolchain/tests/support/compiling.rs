@@ -6,7 +6,8 @@
 //! `bin/javac` and `bin/java`, which is all either reads of it) and the file the recording krusty
 //! writes (`record`). `KRUSTY_BIN` names that recorder: it appends its arguments to the record, one
 //! per line, then a `----` line, and exits 0, or with status 3 for the module
-//! `KRUSTY_RECORDER_FAIL` names. Nothing is compiled.
+//! `KRUSTY_RECORDER_FAIL` names. Nothing is compiled, so a `compilation-fingerprint` request fails
+//! unrecorded and the Build Tools API implementation always compiles.
 //!
 //! The toolchain compiles through the Build Tools API, whose implementation it loads from its
 //! shared cache by Maven coordinates. krusty's implementation (`tools/krusty-build-tools`) is
@@ -29,6 +30,9 @@ pub const RECORD: &str = "record";
 pub const END_OF_INVOCATION: &str = "----";
 
 const RECORDER: &str = "#!/bin/sh
+# The recorder writes no classes, so it takes no compilation fingerprint: the Build Tools API
+# implementation then compiles every time, and only compilations are recorded.
+if [ \"${1:-}\" = compilation-fingerprint ]; then exit 1; fi
 for argument in \"$@\"; do
   printf '%s\\n' \"$argument\"
   case $argument in -module-name=*) module=${argument#-module-name=} ;; esac
