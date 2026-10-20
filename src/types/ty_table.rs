@@ -195,4 +195,41 @@ mod tests {
         assert!(ids.windows(2).all(|pair| pair[0] == pair[1]));
         assert_eq!(ids[0].kind(), kind);
     }
+
+    /// Ids allocated into segments that did not exist yet are readable from another thread, and
+    /// the ids that thread already holds keep their kinds while new segments are published.
+    #[test]
+    fn new_segments_publish_while_another_thread_reads_earlier_ids() {
+        let root = Ty::intern(TyKind::Obj(
+            super::super::type_name("ty_table_test/SegmentRoot"),
+            super::super::TyList::EMPTY,
+        ));
+        let (sender, receiver) = std::sync::mpsc::channel::<(Ty, TyKind)>();
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(move || {
+                let mut held = Vec::new();
+                for (ty, kind) in receiver {
+                    assert_eq!(ty.kind(), kind);
+                    held.push((ty, kind));
+                    if held.len() % 512 == 0 {
+                        assert!(held.iter().all(|&(ty, kind)| ty.kind() == kind));
+                    }
+                }
+                assert!(held.iter().all(|&(ty, kind)| ty.kind() == kind));
+                held.len()
+            });
+            // Each kind wraps the previous type, so every one is new to the table.
+            let mut previous = root;
+            let first_segment = slot_position(root.0).0;
+            let mut sent = 0;
+            while slot_position(previous.0).0 < first_segment + 2 {
+                let kind = TyKind::OutProjection(previous);
+                previous = Ty::intern(kind);
+                sender.send((previous, kind)).unwrap();
+                sent += 1;
+            }
+            drop(sender);
+            assert_eq!(reader.join().unwrap(), sent);
+        });
+    }
 }
