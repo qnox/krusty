@@ -15307,8 +15307,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
 - **Unsigned `in`-range membership + a fast test profile.** `x in a..b` / `x !in a..b` for `UInt`/`ULong`
   operands lowers to the same bounds-check intrinsic as the signed case, but each comparison goes through
-  `Integer.compareUnsigned`/`Long.compareUnsigned` (`compareUnsigned(p, q) <op> 0`) rather than a signed
-  opcode — so values past the sign bit (`4000000000u`) order correctly, matching kotlinc's `uintCompare`.
+  an unsigned ordering rather than a signed opcode — so values past the sign bit (`4000000000u`) order
+  correctly. (Superseded: the ordering is now kotlinc's inlined `compareTo`; see the
+  `RangeContainsLowering` entry.)
   Iterating an unsigned range *value* (`for (i in 0u..n)`, which needs the mangled `UIntRange` getters) is
   still pending; direct `for (i in 0u until n)` already worked. (Infra: the in-loop test round now builds
   with an unoptimized `gate` cargo profile — overflow-checks off so krusty's wrapping arithmetic doesn't
@@ -17416,7 +17417,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   inclusive upper bound becomes the exclusive one a step above it (`x < 11`), unless it is its type's
   maximum. `downTo` builds a progression, which is not a closed range, and a floating-point `..<` an
   `OpenEndRange`: membership in either calls `contains`. Unsigned membership still compares only
-  operands of one type. The common backend realizes the checked membership for every target, as
+  operands of one type, and orders them with the unsigned `compareTo`, the value its receiver:
+  `0 <= x.compareTo(a) && x.compareTo(b) <= 0` (`< 0` for an exclusive end), and no constant end
+  moves. That `compareTo` is inline, and its body is the ordering function the provider publishes
+  in the `UnsignedCompare` role (`UnsignedKt.uintCompare`/`ulongCompare`), the one the membership
+  carries from resolution. On the JVM each ordering is a call of that function marked as an
+  inlined call, so inside a condition the line is written again at the jump after it; another
+  target orders the values with its unsigned-compare intrinsic. Every node the membership
+  generates carries the `in` expression's source line, as kotlinc builds them at its offsets: the
+  value comparison after an inlined ordering marks that line at its jump, and a membership whose
+  operands carry another line (a `when` subject) returns to the `in` line, not the statement's. A plain `<` or an explicit
+  `compareTo` call is kotlinc's intrinsic, `Integer.compareUnsigned`.
+  `tests/unsigned_range_contains_e2e.rs` (full-byte against kotlinc). The common backend realizes the checked membership for every target, as
   it realizes counted loops. Tests: `range_literal_membership_e2e` (class bytes and run against
   kotlinc), box `ranges/contains/comparisonWithRangeBoundEliminated.kt`.
 
