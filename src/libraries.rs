@@ -404,8 +404,10 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
 
     /// Install declaration headers contributed by platform source languages before Kotlin
     /// signature resolution starts. `source_classifiers` is the stable, qualified Kotlin
-    /// classifier inventory already extracted in Pass 1; it lets a Java provider resolve a header
-    /// such as `class J extends K` even though `K.class` has not been emitted yet.
+    /// classifier inventory already extracted in Pass 1, with each classifier's declared
+    /// visibility; it lets a Java provider resolve a header such as `class J extends K` even though
+    /// `K.class` has not been emitted yet, and decide which of `K`'s nested classifiers `J`
+    /// inherits.
     ///
     /// Implementations may retain normalized declaration records for the lifetime of this
     /// compilation, but must not retain source text, source ranges as lookup keys, or executable
@@ -413,7 +415,7 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     fn install_source_module_headers(
         &self,
         sources: &[PlatformSourceHeaderInput<'_>],
-        _source_classifiers: &[TypeName],
+        _source_classifiers: &[(TypeName, crate::types::Visibility)],
     ) -> Result<(), SourceHeaderError> {
         match sources.first() {
             Some(source) => Err(SourceHeaderError {

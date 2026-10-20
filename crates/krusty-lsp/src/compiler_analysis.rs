@@ -1070,7 +1070,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()
@@ -1119,7 +1119,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()
@@ -1176,7 +1176,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()
@@ -1219,7 +1219,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()
@@ -1333,7 +1333,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()
@@ -1409,7 +1409,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()
@@ -1466,7 +1466,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()
@@ -1517,7 +1517,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()
@@ -1586,7 +1586,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()
@@ -1641,7 +1641,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()
@@ -1717,7 +1717,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()
@@ -1778,7 +1778,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()
@@ -1831,7 +1831,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()
@@ -1882,7 +1882,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()

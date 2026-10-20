@@ -20,6 +20,7 @@ mod executable_owners;
 mod flags;
 mod nested_classifiers;
 mod property_flags;
+mod source_classifiers;
 mod type_use_annotations;
 mod visibility_suppressions;
 mod written_type_projection;
@@ -2667,38 +2668,6 @@ impl StreamedHeaderModule {
             .get(source.raw() as usize)
             .copied()
             .unwrap_or(false)
-    }
-
-    /// Qualified, JVM-neutral identities of non-local Kotlin classifiers published by this
-    /// source module. Platform source providers use this once during Pass 1 to resolve foreign
-    /// declaration headers against Kotlin declarations from the same compilation. Local and
-    /// anonymous classifiers are deliberately absent: another source file cannot name them.
-    pub fn source_classifier_names(&self) -> Vec<crate::types::TypeName> {
-        let mut names = self
-            .stubs
-            .iter()
-            .filter(|stub| stub.kind == DeclarationKind::Classifier)
-            .filter(|stub| {
-                !stub.flags.has(DeclarationFlags::LOCAL_CLASS)
-                    && !stub.flags.has(DeclarationFlags::ANONYMOUS_OBJECT)
-            })
-            .filter_map(|stub| {
-                let spelling = self.lookup_names.get(stub.lookup_name?)?;
-                let mut segments = spelling
-                    .split(['.', '$'])
-                    .filter(|segment| !segment.is_empty());
-                let first = segments.next()?;
-                let package = self.sources.get(stub.source)?.package;
-                let mut identity = crate::types::type_name_child(package, first);
-                for segment in segments {
-                    identity = crate::types::type_name_nested_child(identity, segment);
-                }
-                Some(identity)
-            })
-            .collect::<Vec<_>>();
-        let mut seen = crate::fx_hash::HashSet::default();
-        names.retain(|name| seen.insert(*name));
-        names
     }
 
     pub(crate) fn local_classifier_lexical_root(
