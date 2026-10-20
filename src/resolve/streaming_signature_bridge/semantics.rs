@@ -3472,16 +3472,12 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         classifier: Option<(crate::fir::SignatureScope, &str)>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let receiver = receiver.get();
-        let receiver = match (receiver, classifier) {
-            (Ty::Obj(internal, args), Some(_))
-                if args.is_empty() && receiver.is_reference_array() =>
-            {
-                Ty::obj_args_name(
-                    internal,
-                    &[Ty::out_projection(Ty::nullable(Ty::obj("kotlin/Any")))],
-                )
-            }
-            (Ty::Obj(internal, args), Some((scope, _))) if args.is_empty() && unbound => {
+        let receiver = match (receiver.obj_parts(), classifier) {
+            (Some((internal, [])), Some(_)) if receiver.is_reference_array() => Ty::obj_args_name(
+                internal,
+                &[Ty::out_projection(Ty::nullable(Ty::obj("kotlin/Any")))],
+            ),
+            (Some((internal, [])), Some((scope, _))) if unbound => {
                 let classifier =
                     self.with_resolver(scope, |resolver| resolver.classifier(internal))?;
                 super::super::class_literal_receiver::star_projected_class_literal_receiver(
@@ -3489,7 +3485,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     &classifier,
                 )
             }
-            (receiver, _) => receiver,
+            _ => receiver,
         };
         if !unbound && !receiver.is_reference() && receiver.jvm_boxed_ref().is_none() {
             return Err(Self::failure());

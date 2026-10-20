@@ -126,6 +126,9 @@ pub struct TyParamName(u32);
 const NAME_CHUNK_BITS: u32 = 10;
 const NAME_CHUNK: usize = 1 << NAME_CHUNK_BITS;
 const NAME_CHUNKS: usize = 1 << 12;
+/// Distinct type-parameter names the table can hold. Every id below it fits in a `u32`.
+const NAME_CAPACITY: usize = NAME_CHUNK * NAME_CHUNKS;
+const _: () = assert!(NAME_CAPACITY <= u32::MAX as usize + 1);
 
 /// One lazily allocated block of name slots.
 type NameChunk = Box<[OnceLock<&'static str>]>;
@@ -153,7 +156,11 @@ impl TyParamName {
         if let Some(&id) = ids.get(name) {
             return TyParamName(id);
         }
-        let id = u32::try_from(ids.len()).expect("type-parameter name table overflow");
+        assert!(
+            ids.len() < NAME_CAPACITY,
+            "type-parameter name table is full: {NAME_CAPACITY} distinct names"
+        );
+        let id = ids.len() as u32;
         let spelling = super::intern(name);
         let chunk = table.chunks[(id >> NAME_CHUNK_BITS) as usize]
             .get_or_init(|| (0..NAME_CHUNK).map(|_| OnceLock::new()).collect());
