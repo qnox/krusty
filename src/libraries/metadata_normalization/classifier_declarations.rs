@@ -8,6 +8,7 @@
 use super::{type_signatures::EnclosingBounds, TypeParameterIdentities};
 use crate::fir::ResolvedParameterIdentity;
 use crate::libraries::function_classifiers::supertype_classifier;
+use crate::libraries::ParamFlags;
 use crate::libraries::{
     constructor_generic_signature, CallSig, ClassifierInheritance, FnKind, FunctionInfo,
     ImplicitClassifierCallable, LibraryMember, LibraryType, ParamList, TypeKind,
@@ -295,16 +296,16 @@ pub(crate) fn constructor_parameter_list(constructor: &LibraryMember) -> ParamLi
     // A call signature omits its defaults when no parameter declares one; a parameter list
     // states each parameter's.
     let defaults = if constructor.call_sig.param_defaults.is_empty() {
-        vec![false; names.len()]
+        ParamFlags::repeat(false, names.len())
     } else {
-        constructor.call_sig.param_defaults.clone()
+        constructor.call_sig.param_defaults
     };
     ParamList {
         visibility: constructor.visibility,
         names: names.clone(),
         defaults,
         types: constructor.params.clone(),
-        recv_fun: constructor.call_sig.lambda_receiver_params.clone(),
+        recv_fun: constructor.call_sig.lambda_receiver_params,
         vararg: constructor.call_sig.vararg_index,
         annotation: None,
     }

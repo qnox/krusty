@@ -111,7 +111,7 @@ impl Checker<'_> {
             } else {
                 self.validate_class_literal_type_arguments(literal, receiver, ty)
             };
-            let Ty::Obj(internal, []) = ty else {
+            let Some((internal, [])) = ty.obj_parts() else {
                 return ty;
             };
             let classifier = self

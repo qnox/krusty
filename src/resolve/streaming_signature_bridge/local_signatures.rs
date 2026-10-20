@@ -562,7 +562,7 @@ fn publish_checked_local_signatures_selected(
                         declaration,
                         u32::try_from(ordinal).expect("too many local classifier type parameters"),
                         source_name,
-                        semantic_name,
+                        semantic_name.as_str(),
                         flags,
                         bounds,
                     ) else {
@@ -573,7 +573,7 @@ fn publish_checked_local_signatures_selected(
                 parameters.push(parameter);
                 continue;
             }
-            if let Some(parameter) = index.type_parameter_by_semantic_name(semantic_name) {
+            if let Some(parameter) = index.type_parameter_by_semantic_name(semantic_name.as_str()) {
                 parameters.push(parameter);
                 continue;
             }
@@ -582,8 +582,8 @@ fn publish_checked_local_signatures_selected(
             let Ok(parameter) = index.publish_type_parameter(
                 declaration,
                 ordinal,
-                crate::types::type_parameter_source_name(semantic_name),
-                semantic_name,
+                crate::types::type_parameter_source_name(semantic_name.as_str()),
+                semantic_name.as_str(),
                 ResolvedTypeParameterFlags::new(
                     crate::types::TypeVariance::Invariant,
                     false,
@@ -1652,7 +1652,7 @@ fn publish_checked_local_signatures_selected(
                 continue;
             };
             let parameter_names = signature.param_names.clone();
-            let parameter_defaults = signature.param_defaults.clone();
+            let parameter_defaults = signature.param_defaults;
             let vararg_index = signature.vararg_index;
             let callable = CallableId::from_raw(declaration.raw());
             index.publish_function(callable, declaration, &name, false);

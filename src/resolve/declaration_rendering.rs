@@ -432,8 +432,9 @@ fn potential_override_defaults(
                 .iter()
                 .find(|declaration| same_function_declaration(declaration, candidate))
         })
-        .map(|declaration| declaration.call_sig.param_defaults.clone())
+        .map(|declaration| declaration.call_sig.param_defaults)
         .unwrap_or_default()
+        .to_vec()
 }
 
 /// A property as its classifier declares it.
@@ -689,7 +690,7 @@ fn implicit_upper_bound(bound: Ty) -> bool {
 /// A type as kotlinc renders it for readability.
 pub(super) fn readable_type(source: &dyn SymbolSource, ty: Ty) -> String {
     match ty {
-        Ty::Obj(name, arguments) => classifier_display(source, name, arguments, false),
+        Ty::Obj(name, arguments) => classifier_display(source, name, arguments.as_slice(), false),
         Ty::Fun(function) => {
             let context = if function.context_count == 0 {
                 String::new()
@@ -731,16 +732,25 @@ pub(super) fn readable_type(source: &dyn SymbolSource, ty: Ty) -> String {
                 format!("({})?", readable_type(source, *inner))
             }
             Ty::TyParam(name, _) => {
-                format!("{}?", crate::types::type_parameter_source_name(name))
+                format!(
+                    "{}?",
+                    crate::types::type_parameter_source_name(name.as_str())
+                )
             }
             inner => format!("{}?", readable_type(source, inner)),
         },
         Ty::PlatformNullable(inner) => match *inner {
             Ty::Obj(name, arguments) => {
-                format!("{}!", classifier_display(source, name, arguments, true))
+                format!(
+                    "{}!",
+                    classifier_display(source, name, arguments.as_slice(), true)
+                )
             }
             Ty::TyParam(name, _) => {
-                format!("{}!", crate::types::type_parameter_source_name(name))
+                format!(
+                    "{}!",
+                    crate::types::type_parameter_source_name(name.as_str())
+                )
             }
             Ty::Fun(_) | Ty::DefinitelyNotNull(_) | Ty::Intersection(_) => {
                 format!("({})!", readable_type(source, *inner))
@@ -752,7 +762,7 @@ pub(super) fn readable_type(source: &dyn SymbolSource, ty: Ty) -> String {
         Ty::StarProjection(_) => "*".to_string(),
         Ty::TyParam(name, bound) => format!(
             "{}{}",
-            crate::types::type_parameter_source_name(name),
+            crate::types::type_parameter_source_name(name.as_str()),
             if matches!(*bound, Ty::PlatformNullable(_)) {
                 "!"
             } else {

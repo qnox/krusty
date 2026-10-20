@@ -52,7 +52,7 @@ fn resolve_primary_bound(
         .and_then(declared_primary_bound)
         .map(|bound| match bound.non_null() {
             Ty::TyParam(other, _) => {
-                resolve_primary_bound(other, parameters, referenced, resolved, visiting)
+                resolve_primary_bound(other.as_str(), parameters, referenced, resolved, visiting)
             }
             concrete => concrete.erased_recv(),
         })
@@ -71,7 +71,7 @@ fn resolve_primary_bound(
 /// JVM primitive and erases like any other bound.
 fn physical_type(ty: Ty, erasures: &HashMap<String, Ty>) -> Ty {
     match ty {
-        Ty::TyParam(name, _) => match erasures.get(name).copied() {
+        Ty::TyParam(name, _) => match erasures.get(name.as_str()).copied() {
             Some(_) if primitive_bound(ty) => ty,
             Some(erasure) if ty.upper_bound_admits_null() => Ty::nullable(erasure),
             Some(erasure) => erasure,

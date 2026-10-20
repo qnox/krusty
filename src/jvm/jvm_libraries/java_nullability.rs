@@ -55,7 +55,7 @@ pub(super) fn java_type_nullability(ty: Ty, nullability: Option<JavaNullability>
         // and does not repeat the wrapper's flexibility, which a bare variable's bound records
         // only where it is an argument (`List<E>`). The parse leaves a placeholder `Any` here, and
         // read as the bound of `E & Any` it made `ArrayList<V?>.get` substitute the non-null `V`.
-        Ty::TyParam(name, bound) => Ty::ty_param(name, Ty::nullable(bound.non_null())),
+        Ty::TyParam(name, bound) => Ty::ty_param(name.as_str(), Ty::nullable(bound.non_null())),
         _ => ty,
     };
     // Java wrapper classes are Kotlin primitive types with Java's flexible/nullability qualifier.
@@ -83,7 +83,9 @@ pub(super) fn java_type_nullability(ty: Ty, nullability: Option<JavaNullability>
 /// projection whose interior is flexible.
 pub(super) fn java_type_argument_nullability(ty: Ty) -> Ty {
     match ty {
-        Ty::TyParam(name, bound) => Ty::ty_param(name, java_type_nullability(*bound, None)),
+        Ty::TyParam(name, bound) => {
+            Ty::ty_param(name.as_str(), java_type_nullability(*bound, None))
+        }
         Ty::InProjection(inner) => Ty::in_projection(java_type_argument_nullability(*inner)),
         Ty::OutProjection(inner) => Ty::out_projection(java_type_argument_nullability(*inner)),
         Ty::StarProjection(inner) => Ty::star_projection(java_type_argument_nullability(*inner)),

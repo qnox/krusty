@@ -214,7 +214,7 @@ fn bind_concrete_parameter(
             if !is_concrete_constraint(constraint, &nested.formals, outer_formals) {
                 return true;
             }
-            match binds.get(name) {
+            match binds.get(name.as_str()) {
                 Some(existing) if *existing != constraint => false,
                 Some(_) => true,
                 None => {

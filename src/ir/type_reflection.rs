@@ -287,8 +287,8 @@ impl IrFile {
 pub(crate) fn type_parameters_named_by(ty: Ty, names: &mut Vec<&'static str>) {
     match ty {
         Ty::TyParam(name, _) => {
-            if !names.contains(&name) {
-                names.push(name);
+            if !names.contains(&name.as_str()) {
+                names.push(name.as_str());
             }
         }
         Ty::Obj(_, arguments) => {

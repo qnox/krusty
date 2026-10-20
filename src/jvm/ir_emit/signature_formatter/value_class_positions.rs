@@ -54,7 +54,7 @@ impl JvmSignatureFormatter<'_> {
         let semantic = ty.non_null();
         match semantic {
             Ty::TyParam(name, bound) => {
-                if !visited.insert(Visited::Parameter(name)) {
+                if !visited.insert(Visited::Parameter(name.as_str())) {
                     return None;
                 }
                 let upper = *bound;
@@ -132,7 +132,11 @@ impl JvmSignatureFormatter<'_> {
                 (declaration.underlying, declaration.type_parameters.to_vec())
             }
         };
-        Some(substituted_underlying(declared, &parameters, arguments))
+        Some(substituted_underlying(
+            declared,
+            &parameters,
+            arguments.as_slice(),
+        ))
     }
 }
 

@@ -400,7 +400,7 @@ fn sam_substitute(
     };
     let explicit_nullable = platform_inner.and_then(|inner| match inner {
         Ty::TyParam(name, _) => bindings
-            .get(name)
+            .get(name.as_str())
             .copied()
             .filter(|binding| matches!(binding, Ty::Nullable(_))),
         _ => None,

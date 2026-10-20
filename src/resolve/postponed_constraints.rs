@@ -577,7 +577,7 @@ impl Checker<'_> {
             return true;
         }
         constraints
-            .and_then(|constraints| constraints.get(formal))
+            .and_then(|constraints| constraints.get(formal.as_str()))
             .is_none_or(|arguments| {
                 arguments.iter().all(|argument| {
                     self.receiver_is_assignable(argument.ty(), target)

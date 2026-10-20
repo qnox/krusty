@@ -117,7 +117,7 @@ impl TypeEnhancement {
         binding: &dyn Fn(&str) -> Option<TypeEnhancement>,
     ) -> TypeEnhancement {
         match declared {
-            Ty::TyParam(name, _) => match binding(name) {
+            Ty::TyParam(name, _) => match binding(name.as_str()) {
                 Some(argument) => argument.with_head(self.head),
                 None => self.clone(),
             },

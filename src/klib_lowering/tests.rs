@@ -257,7 +257,7 @@ pub(super) fn type_name_of(ty: Ty) -> String {
         Ty::Nothing => "Nothing".to_owned(),
         Ty::Unit => "Unit".to_owned(),
         // Any other class without type arguments, by its qualified name (a test rendering).
-        Ty::Obj(name, []) => name.render(),
+        Ty::Obj(name, arguments) if arguments.is_empty() => name.render(),
         other => format!("{other:?}"),
     }
 }

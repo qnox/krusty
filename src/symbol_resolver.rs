@@ -5508,7 +5508,7 @@ mod tests {
             ret: crate::libraries::ReturnInfo::new(false, Some(Ty::UInt)),
             call_sig: CallSig {
                 required: 0,
-                param_defaults: vec![true],
+                param_defaults: vec![true].into(),
                 ..Default::default()
             },
             ..FunctionInfo::plain(FnKind::TopLevel, None, callable)
@@ -5965,7 +5965,7 @@ mod tests {
         let with_trailing_default = |mut member: LibraryMember| {
             member.call_sig.required = 1;
             member.call_sig.param_names = vec!["value".into(), "label".into()];
-            member.call_sig.param_defaults = vec![false, true];
+            member.call_sig.param_defaults = vec![false, true].into();
             member
         };
         let default_broad = with_trailing_default(member(vec![Ty::obj("demo/Base"), Ty::String]));
@@ -5985,7 +5985,7 @@ mod tests {
             member.call_sig.vararg = true;
             member.call_sig.vararg_index = Some(0);
             member.call_sig.param_names = vec!["values".into()];
-            member.call_sig.param_defaults = vec![false];
+            member.call_sig.param_defaults = vec![false].into();
             member
         };
         let vararg_broad = as_vararg(member(vec![Ty::array(Ty::obj("demo/Base"))]));
@@ -6160,7 +6160,7 @@ mod tests {
         callable.default_call = true;
         let mut bridge = FunctionInfo::plain(FnKind::TopLevel, None, callable);
         bridge.call_sig.required = 2;
-        bridge.call_sig.param_defaults = vec![false, false, true];
+        bridge.call_sig.param_defaults = vec![false, false, true].into();
         let mut base = bridge.clone();
         base.callable.physical_name = None;
         base.callable.default_call = false;

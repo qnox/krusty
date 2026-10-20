@@ -4180,14 +4180,14 @@ fn explicit_type_arguments_specialize_a_projected_sam_lambda_in_pass_one() {
         panic!("compareWith retains Comparator as its first parameter: {comparator:?}")
     };
     assert!(comparator.matches("Comparator"));
-    let [Ty::InProjection(projected)] = arguments else {
+    let [Ty::InProjection(projected)] = arguments.as_slice() else {
         panic!("Comparator retains its written `in T` argument: {arguments:?}")
     };
     let Ty::TyParam(projected, _) = **projected else {
         panic!("Comparator projection retains T: {projected:?}")
     };
-    assert_eq!(first.ty_param_name(), Some(projected));
-    assert_eq!(second.ty_param_name(), Some(projected));
+    assert_eq!(first.ty_param_name(), Some(projected.as_str()));
+    assert_eq!(second.ty_param_name(), Some(projected.as_str()));
 }
 
 #[test]

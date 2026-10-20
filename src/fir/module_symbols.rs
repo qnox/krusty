@@ -491,9 +491,9 @@ impl<'a> StreamedModuleSymbols<'a> {
             projected.named_parameter_lists.push(ParamList {
                 visibility: constructor.visibility,
                 names: call_sig.param_names.clone(),
-                defaults: call_sig.param_defaults.clone(),
+                defaults: call_sig.param_defaults,
                 types: parameters,
-                recv_fun: call_sig.lambda_receiver_params.clone(),
+                recv_fun: call_sig.lambda_receiver_params,
                 vararg: call_sig.vararg_index,
                 annotation: None,
             });
@@ -941,9 +941,9 @@ impl<'a> StreamedModuleSymbols<'a> {
                     .expect("a projected callable retains every typed parameter identity")
             })
             .collect();
-        shape.exact_params = exact;
-        shape.no_infer_params = no_infer;
-        shape.implicit_integer_coercion = implicit_integer_coercion;
+        shape.exact_params = exact.into();
+        shape.no_infer_params = no_infer.into();
+        shape.implicit_integer_coercion = implicit_integer_coercion.into();
         shape.inline_modifiers = inline_modifiers;
         let reified_type_parameter_ordinals = self
             .index
@@ -1431,7 +1431,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 function.kind = FnKind::TopLevel;
                 function.receiver = None;
             }
-            function.callable.singleton_dispatch = Some(Box::new(singleton.clone()));
+            function.callable.singleton_dispatch = Some(Box::new(singleton));
         }
         let mut properties = self.member_properties(companion_declaration, companion, false, name);
         for property in &mut properties {
@@ -1443,9 +1443,9 @@ impl<'a> StreamedModuleSymbols<'a> {
                 PropKind::MemberExtension => property.kind = PropKind::Extension,
                 PropKind::Extension | PropKind::TopLevel => {}
             }
-            property.getter.singleton_dispatch = Some(Box::new(singleton.clone()));
+            property.getter.singleton_dispatch = Some(Box::new(singleton));
             if let Some(setter) = &mut property.setter {
-                setter.singleton_dispatch = Some(Box::new(singleton.clone()));
+                setter.singleton_dispatch = Some(Box::new(singleton));
             }
         }
         (functions, properties)

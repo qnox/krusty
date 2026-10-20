@@ -75,7 +75,7 @@ fn map_type_default(ty: Ty, local_classifiers: &HashSet<TypeName>) -> Option<Str
         // declaration is approximated, so the physical descriptor stays derivable.
         Ty::Intersection(parts) => {
             return map_type_default(
-                super::physical_type::intersection_jvm_carrier(parts),
+                super::physical_type::intersection_jvm_carrier(parts.as_slice()),
                 local_classifiers,
             );
         }

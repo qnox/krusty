@@ -357,7 +357,7 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
         Ty::DefinitelyNotNull(inner) => ir_ty_to_jvm(inner),
         // A bound that already determines one carrier is published as that bound, not an
         // intersection. What remains shares one erased class, or it is `Object`.
-        Ty::Intersection(parts) => ir_ty_to_jvm(&intersection_jvm_carrier(parts)),
+        Ty::Intersection(parts) => ir_ty_to_jvm(&intersection_jvm_carrier(parts.as_slice())),
         _ => Ty::Error,
     }
 }

@@ -529,7 +529,7 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
                     _ => None,
                 }
                 .and_then(|parameter| {
-                    let parameter = crate::types::type_parameter_source_name(parameter);
+                    let parameter = crate::types::type_parameter_source_name(parameter.as_str());
                     c.type_params
                         .iter()
                         .position(|candidate| candidate == parameter)

@@ -746,14 +746,14 @@ pub struct Signature {
     /// For each parameter: whether it has a default value (so it may be omitted by name or position).
     /// Parallel to `params`; empty when unknown (callers then fall back to the `required` prefix count).
     /// This captures a *non-trailing* default (`f(x: Int = 3, g: () -> Int)`) that `required` cannot.
-    pub param_defaults: Vec<bool>,
+    pub param_defaults: crate::libraries::ParamFlags,
     /// Per parameter: its declared type carries Kotlin's internal `@Exact` constraint.
-    pub exact_params: Vec<bool>,
+    pub exact_params: crate::libraries::ParamFlags,
     /// Per parameter: its declared type carries Kotlin's internal `@NoInfer` constraint.
-    pub no_infer_params: Vec<bool>,
+    pub no_infer_params: crate::libraries::ParamFlags,
     /// Per parameter, the resolved declaration carries
     /// `kotlin.internal.ImplicitIntegerCoercion`.
-    pub implicit_integer_coercion: Vec<bool>,
+    pub implicit_integer_coercion: crate::libraries::ParamFlags,
     /// Parameter names, parallel to `params`. Used to map named arguments (`f(x = 1)`) to positions.
     /// Empty for signatures where named-argument calls aren't supported (methods, synthesized members).
     pub param_names: Vec<String>,
@@ -771,7 +771,7 @@ pub struct Signature {
     /// `(Recv, A) -> R`). A lambda passed to such a param binds `lambda_param_types[i][0]` as the
     /// implicit `this` receiver (so a bare member/extension call inside resolves against it). Parallel
     /// to `params`; empty = none are receivers.
-    pub lambda_recv: Vec<bool>,
+    pub lambda_recv: crate::libraries::ParamFlags,
     /// Per logical parameter, the `crossinline`/`noinline` modifier it wrote. Parallel to `params`;
     /// empty when the source publishes none.
     pub inline_modifiers: Vec<crate::types::InlineParameterModifier>,
@@ -884,9 +884,9 @@ impl Signature {
     pub fn call_sig(&self) -> CallSig {
         let mut call_sig = CallSig::source(
             self.param_names.clone(),
-            self.param_defaults.clone(),
+            self.param_defaults,
             self.lambda_param_types.clone(),
-            self.lambda_recv.clone(),
+            self.lambda_recv,
             self.params
                 .iter()
                 .map(|parameter| match parameter {
@@ -897,9 +897,9 @@ impl Signature {
             self.required,
             self.vararg_index,
         );
-        call_sig.exact_params = self.exact_params.clone();
-        call_sig.no_infer_params = self.no_infer_params.clone();
-        call_sig.implicit_integer_coercion = self.implicit_integer_coercion.clone();
+        call_sig.exact_params = self.exact_params;
+        call_sig.no_infer_params = self.no_infer_params;
+        call_sig.implicit_integer_coercion = self.implicit_integer_coercion;
         call_sig.inline_modifiers = self.inline_modifiers.clone();
         copy_parameter_identities(&mut call_sig, &self.parameter_identities, self.params.len());
         call_sig
@@ -3823,7 +3823,7 @@ fn erased_type_key(t: Ty) -> ErasedTypeKey {
                 .unwrap_or_else(|| Ty::obj("kotlin/Any"));
             Ty::obj_args("kotlin/Array", &[erased_key_ty(erased_type_key(e))])
         }
-        Ty::Obj(n, _) => Ty::Obj(n, &[]),
+        Ty::Obj(n, _) => Ty::Obj(n, crate::types::TyList::EMPTY),
         Ty::Null | Ty::Nothing | Ty::Error => Ty::obj("kotlin/Any"),
         Ty::Fun(s) => return ErasedTypeKey::Function(s.params.len() + usize::from(s.suspend)),
         Ty::Nullable(inner) => match *inner {
@@ -10241,7 +10241,7 @@ impl CheckerScope<'_> {
                         ..
                     } = binding
                     {
-                        if bound.non_null().ty_param_name() == Some(identity) {
+                        if bound.non_null().ty_param_name() == Some(identity.as_str()) {
                             matched = Some(extra_bounds.clone());
                         }
                     }
@@ -23238,7 +23238,7 @@ impl<'a> Checker<'a> {
             param_names: f.params.iter().map(|p| p.name.clone()).collect(),
             parameter_identities: declared_parameter_identities(&f.params),
             lambda_param_types: Vec::new(),
-            lambda_recv: Vec::new(),
+            lambda_recv: Vec::new().into(),
             inline_modifiers: f.params.iter().map(written_inline_modifier).collect(),
             visibility: f.visibility,
             context_count: f.context_count,
@@ -26737,7 +26737,7 @@ fun box(): String {
                 } else {
                     vec!["s".to_string()]
                 },
-                param_defaults: Vec::new(),
+                param_defaults: Vec::new().into(),
                 lambda_param_types: Vec::new(),
                 required: match name {
                     "knownTop" | "knownPair" | "mixExt" | "typedExt" | "getValue" => 2,
@@ -27270,7 +27270,7 @@ fun box(): String {
                         } else {
                             vec!["a".to_string(), "b".to_string()]
                         },
-                        param_defaults: defaults,
+                        param_defaults: defaults.into(),
                         required: 1,
                         ..Default::default()
                     };
@@ -35721,7 +35721,7 @@ struct MemberMappingFailure {
 
 fn ty_param_names_into(ty: Ty, out: &mut Vec<&'static str>) {
     match ty {
-        Ty::TyParam(name, _) => out.push(name),
+        Ty::TyParam(name, _) => out.push(name.as_str()),
         Ty::Nullable(inner)
         | Ty::PlatformNullable(inner)
         | Ty::InProjection(inner)
@@ -35849,7 +35849,7 @@ fn merge_source_constructor_shape_bindings(
                 // one argument falls outside the seed, ordinary joining takes over permanently.
                 if let Some(&seed) = inference
                     .seeded
-                    .get(name)
+                    .get(name.as_str())
                     .filter(|&&seed| current == Some(seed))
                 {
                     crate::trace_compiler!(
@@ -37688,7 +37688,7 @@ impl<'a> Checker<'a> {
                     return false;
                 };
                 let call_sig = CallSig {
-                    param_defaults: signature.param_defaults.clone(),
+                    param_defaults: signature.param_defaults,
                     required: signature.required,
                     vararg: signature.vararg(),
                     vararg_index: signature.vararg_index,
@@ -41162,7 +41162,7 @@ impl<'a> Checker<'a> {
             return Some(Self::local_function_reference_shape(signature, receiver));
         };
         let call_sig = CallSig {
-            param_defaults: signature.param_defaults.clone(),
+            param_defaults: signature.param_defaults,
             required: signature.required,
             vararg: signature.vararg(),
             vararg_index: signature.vararg_index,
@@ -42147,7 +42147,7 @@ impl<'a> Checker<'a> {
         (!fixed(formal_index)
             && !bound.admits_null()
             && declared_bounds.iter().all(|bound| bound.admits_null()))
-        .then(|| crate::types::type_parameter_source_name(formal).to_string())
+        .then(|| crate::types::type_parameter_source_name(formal.as_str()).to_string())
     }
 
     fn null_only_type(ty: Ty) -> bool {
@@ -43634,9 +43634,9 @@ impl<'a> Checker<'a> {
             let params = crate::libraries::ParamList {
                 visibility: Visibility::Public,
                 names: candidate.param_names.clone(),
-                defaults: candidate.defaults.clone(),
+                defaults: candidate.defaults.as_slice().into(),
                 types: candidate.target.params().to_vec(),
-                recv_fun: candidate.lambda_receivers.clone(),
+                recv_fun: candidate.lambda_receivers.as_slice().into(),
                 vararg: candidate.vararg,
                 annotation: None,
             };
@@ -44033,7 +44033,7 @@ impl<'a> Checker<'a> {
                 },
                 context_count: constructor.context_count,
                 param_names: call_sig.param_names,
-                defaults: call_sig.param_defaults,
+                defaults: call_sig.param_defaults.to_vec(),
                 vararg: call_sig.vararg_index,
                 supports_default_abi: constructor.stable_declaration.is_some()
                     || supports_default_abi,
@@ -44046,9 +44046,9 @@ impl<'a> Checker<'a> {
                     .copied()
                     .map(Self::constructor_shape_constraint)
                     .collect(),
-                implicit_integer_coercion: call_sig.implicit_integer_coercion,
+                implicit_integer_coercion: call_sig.implicit_integer_coercion.to_vec(),
                 lambda_receivers: if call_sig.lambda_receiver_params.len() == parameter_count {
-                    call_sig.lambda_receiver_params
+                    call_sig.lambda_receiver_params.to_vec()
                 } else {
                     Self::semantic_lambda_receiver_flags(&params)
                 },
@@ -46352,7 +46352,7 @@ impl<'a> Checker<'a> {
     ) -> Result<Vec<usize>, CallArgMappingFailure> {
         let signature = CallSig {
             param_names: parameters.names.clone(),
-            param_defaults: parameters.defaults.clone(),
+            param_defaults: parameters.defaults,
             required: required_arity(parameters.names.len(), &parameters.defaults),
             vararg: parameters.vararg.is_some(),
             vararg_index: parameters.vararg,
@@ -64380,7 +64380,7 @@ impl<'a> Checker<'a> {
                 },
                 context_count: member.context_count,
                 param_names: member.call_sig.param_names.clone(),
-                defaults: member.call_sig.param_defaults.clone(),
+                defaults: member.call_sig.param_defaults.to_vec(),
                 vararg: member.call_sig.vararg_index,
                 supports_default_abi: member.default_realization.is_some(),
                 low_priority: member.annotations.contains(&crate::types::type_name(
@@ -64391,10 +64391,10 @@ impl<'a> Checker<'a> {
                     .copied()
                     .map(Self::constructor_shape_constraint)
                     .collect(),
-                implicit_integer_coercion: member.call_sig.implicit_integer_coercion.clone(),
+                implicit_integer_coercion: member.call_sig.implicit_integer_coercion.to_vec(),
                 lambda_receivers: if member.call_sig.lambda_receiver_params.len() == parameter_count
                 {
-                    member.call_sig.lambda_receiver_params.clone()
+                    member.call_sig.lambda_receiver_params.to_vec()
                 } else {
                     Self::semantic_lambda_receiver_flags(&member.params)
                 },
@@ -65457,9 +65457,9 @@ impl<'a> Checker<'a> {
             Vec::new()
         };
         let param_defaults = if aligned && call_sig.param_defaults.len() == semantic_params.len() {
-            call_sig.param_defaults.clone()
+            call_sig.param_defaults
         } else {
-            vec![false; semantic_params.len()]
+            vec![false; semantic_params.len()].into()
         };
         // A parameter with a default may be omitted; `required` is the count that may not.
         let required = if aligned {
@@ -65486,9 +65486,9 @@ impl<'a> Checker<'a> {
             vararg_index,
             required,
             param_defaults,
-            exact_params: call_sig.exact_params.clone(),
-            no_infer_params: call_sig.no_infer_params.clone(),
-            implicit_integer_coercion: call_sig.implicit_integer_coercion.clone(),
+            exact_params: call_sig.exact_params,
+            no_infer_params: call_sig.no_infer_params,
+            implicit_integer_coercion: call_sig.implicit_integer_coercion,
             param_names,
             parameter_identities: aligned_parameter_identities(&call_sig, aligned),
             param_default_values: vec![None; semantic_params.len()],

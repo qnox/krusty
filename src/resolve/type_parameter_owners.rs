@@ -156,7 +156,7 @@ impl TypeParameterNumbering {
 /// Every type-parameter identity `ty` mentions, in the order a rendering of it writes them.
 pub(super) fn mentioned_type_parameters(ty: Ty, mentioned: &mut Vec<&'static str>) {
     match ty {
-        Ty::TyParam(parameter, _) => mentioned.push(parameter),
+        Ty::TyParam(parameter, _) => mentioned.push(parameter.as_str()),
         Ty::Nullable(inner)
         | Ty::PlatformNullable(inner)
         | Ty::InProjection(inner)
@@ -184,7 +184,7 @@ fn nullable_type_parameter(ty: Ty) -> Option<&'static str> {
     let Ty::TyParam(parameter, _) = *inner else {
         return None;
     };
-    Some(parameter)
+    Some(parameter.as_str())
 }
 
 /// The owner wording of a classifier's own formals from its provider-normalized declaration,

@@ -888,7 +888,7 @@ pub fn platform_flexible_upper_bound(lower: Ty) -> Ty {
     let Some(upper) = jvm_collection_to_kotlin_type_name(jvm) else {
         return lower;
     };
-    Ty::obj_args_name(upper, arguments)
+    Ty::obj_args_name(upper, arguments.as_slice())
 }
 
 pub fn type_name_to_jvm_builtin_internal(internal: TypeName) -> Option<&'static str> {

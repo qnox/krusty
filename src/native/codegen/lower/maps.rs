@@ -134,7 +134,7 @@ fn is_map_set_extension(signature: super::super::super::intrinsics::FunctionSign
     let Some(Ty::Obj(owner, arguments)) = signature.receiver.map(Ty::non_null) else {
         return false;
     };
-    let [key, value] = arguments else {
+    let [key, value] = arguments.as_slice() else {
         return false;
     };
     let [actual_key, actual_value] = signature.params else {
@@ -204,7 +204,7 @@ fn map_entry_symbol(
     signature: super::super::super::intrinsics::FunctionSignature<'_>,
 ) -> Option<(&'static str, Vec<Ty>, Ty)> {
     let extension_entry = if signature.owner.package_matches("kotlin/collections") {
-        let Ty::Obj(owner, [key, value]) = signature.receiver?.non_null() else {
+        let Some((owner, [key, value])) = signature.receiver?.non_null().obj_parts() else {
             return None;
         };
         if !super::super::super::intrinsics::classifier_matches(

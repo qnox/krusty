@@ -31,7 +31,7 @@ where
     P: Fn(&str) -> bool + Copy,
 {
     match ty {
-        Ty::TyParam(name, bound) => lookup(name)
+        Ty::TyParam(name, bound) => lookup(name.as_str())
             .map(|binding| {
                 if !enforce_bound_nullability || bound.upper_bound_admits_null() {
                     binding
@@ -40,7 +40,7 @@ where
                 }
             })
             .unwrap_or_else(|| {
-                if preserve_unbound(name) {
+                if preserve_unbound(name.as_str()) {
                     ty
                 } else {
                     bound.non_null()
@@ -73,9 +73,9 @@ where
         // binding consumes the occurrence: concrete nullable types become non-null, while a
         // nullable-bounded symbolic binding becomes that caller parameter's own `T & Any`.
         Ty::DefinitelyNotNull(inner) => match *inner {
-            Ty::TyParam(name, bound) => match lookup(name) {
+            Ty::TyParam(name, bound) => match lookup(name.as_str()) {
                 Some(binding) => binding.contributed_through_nullable_formal(),
-                None if preserve_unbound(name) => Ty::DefinitelyNotNull(inner),
+                None if preserve_unbound(name.as_str()) => Ty::DefinitelyNotNull(inner),
                 None => bound.contributed_through_nullable_formal(),
             },
             other => substitute_type_parameters(
@@ -239,9 +239,10 @@ pub(crate) fn ty_subst_all(types: &[Ty], bindings: &HashMap<String, Ty>) -> Vec<
 /// operation joins them without each decoder growing its own recursive walk.
 pub(crate) fn ty_with_param_bounds(ty: Ty, bounds: &HashMap<String, Ty>) -> Ty {
     match ty {
-        Ty::TyParam(name, current) => {
-            Ty::ty_param(name, bounds.get(name).copied().unwrap_or(*current))
-        }
+        Ty::TyParam(name, current) => Ty::ty_param(
+            name.as_str(),
+            bounds.get(name.as_str()).copied().unwrap_or(*current),
+        ),
         Ty::Fun(signature) => Ty::fun_with_shape(
             signature
                 .params
@@ -286,14 +287,14 @@ pub(crate) fn ty_with_transitive_param_bounds(ty: Ty, bounds: &HashMap<String, T
     fn hydrate(ty: Ty, bounds: &HashMap<String, Ty>, visiting: &mut Vec<&'static str>) -> Ty {
         match ty {
             Ty::TyParam(name, current) => {
-                if visiting.contains(&name) {
+                if visiting.contains(&name.as_str()) {
                     return ty;
                 }
-                visiting.push(name);
-                let declared = bounds.get(name).copied().unwrap_or(*current);
+                visiting.push(name.as_str());
+                let declared = bounds.get(name.as_str()).copied().unwrap_or(*current);
                 let hydrated = hydrate(declared, bounds, visiting);
                 visiting.pop();
-                Ty::ty_param(name, hydrated)
+                Ty::ty_param(name.as_str(), hydrated)
             }
             Ty::Fun(signature) => Ty::fun_with_shape(
                 signature
@@ -340,7 +341,10 @@ pub(crate) fn ty_with_transitive_param_bounds(ty: Ty, bounds: &HashMap<String, T
 pub(crate) fn ty_rename_params(ty: Ty, identities: &HashMap<&str, &'static str>) -> Ty {
     match ty {
         Ty::TyParam(name, bound) => Ty::ty_param(
-            identities.get(name).copied().unwrap_or(name),
+            identities
+                .get(name.as_str())
+                .copied()
+                .unwrap_or(name.as_str()),
             ty_rename_params(*bound, identities),
         ),
         Ty::Fun(signature) => Ty::fun_with_shape(
