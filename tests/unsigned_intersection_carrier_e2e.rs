@@ -120,24 +120,24 @@ fn unsigned_class_bound_call_instructions_match_kotlinc() {
             "{prefix} instructions"
         );
     }
-    // `in` lowers through `Integer.compareUnsigned`; kotlinc's body calls `uintCompare` and
-    // reorders constants. The carrier contract is the shared `int` descriptor and these exact
-    // invokes, none of which box `UInt`.
+    // `in` orders through the inline `UInt.compareTo`, whose body calls `uintCompare`, as
+    // kotlinc's does. The carrier contract is the shared `int` descriptor and these exact invokes,
+    // none of which box `UInt`.
     for (prefix, descriptor, compares) in [
         (
             "testContains-",
             "(I)Z",
             vec![
-                "invokestatic # // Method java/lang/Integer.compareUnsigned:(II)I",
-                "invokestatic # // Method java/lang/Integer.compareUnsigned:(II)I",
+                "invokestatic # // Method kotlin/UnsignedKt.uintCompare:(II)I",
+                "invokestatic # // Method kotlin/UnsignedKt.uintCompare:(II)I",
             ],
         ),
         (
             "named-",
             "(II)Z",
             vec![
-                "invokestatic # // Method java/lang/Integer.compareUnsigned:(II)I",
-                "invokestatic # // Method java/lang/Integer.compareUnsigned:(II)I",
+                "invokestatic # // Method kotlin/UnsignedKt.uintCompare:(II)I",
+                "invokestatic # // Method kotlin/UnsignedKt.uintCompare:(II)I",
             ],
         ),
         (
