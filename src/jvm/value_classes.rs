@@ -28,6 +28,7 @@ mod hidden_constructors;
 mod inherited_default_calls;
 mod inline_body_slots;
 mod interface_entries;
+mod lambda_slots;
 mod mangled_calls;
 mod member_names;
 mod module_members;
@@ -61,6 +62,8 @@ use call_results::CallTypes;
 pub(crate) use class_annotations::class_file_annotations;
 pub(crate) use declaration_inventory::record_referenced as record_referenced_value_classes;
 pub(crate) use inherited_default_calls::InheritedDefaultStatics;
+use lambda_slots::{boxed_lambda_own_params_from, lambda_sam_params, lambda_slot_is_boxed};
+pub(crate) use member_names::suspend_lambda_invoke_name;
 use member_names::{vc_mangle, vc_mangle_once, vc_member_entry_name, vc_member_impl_name};
 pub(crate) use module_members::*;
 use operand_nullness::{operand_nonnull, operand_null_only};
@@ -617,6 +620,7 @@ pub(crate) fn lower_value_classes(
     // the value-class ABI. Record it against both local declarations and exact call identities
     // before either pass rewrites expressions.
     let force_boxed_suspend_returns = record_suspend_results(ir, &under, &orig_rets, &suspend_fids);
+    let suspend_lambda_classes = lambda_slots::suspend_lambda_classes(ir, &suspend_fids);
     let slot_types: Vec<HashMap<u32, Ty>> = ir
         .functions
         .iter()
@@ -632,7 +636,11 @@ pub(crate) fn lower_value_classes(
             // boundary: like kotlinc's inlined lambda it takes the parameter unboxed, and whoever inlines
             // it unboxes the incoming box (`inline_body_slots`). Value-class-ness is decided HERE
             // (with `under`), not in the lambda-agnostic lowerer.
-            let own_from = ir.lambda_own_params_from.get(&(fid as u32)).copied();
+            let own_from = boxed_lambda_own_params_from(
+                &ir.lambda_own_params_from,
+                &suspend_lambda_classes,
+                fid as u32,
+            );
             let sam_params = own_from.and_then(|s| {
                 lambda_sam_params(&ir.lambda_sam_signature, fid as u32, s, f.params.len())
             });
@@ -807,7 +815,11 @@ pub(crate) fn lower_value_classes(
                 slot_types[fid].insert(0, Ty::obj_name(owner));
             }
         }
-        let own_from = ir.lambda_own_params_from.get(&(fid as u32)).copied();
+        let own_from = boxed_lambda_own_params_from(
+            &ir.lambda_own_params_from,
+            &suspend_lambda_classes,
+            fid as u32,
+        );
         let sam_params = own_from.and_then(|s| {
             lambda_sam_params(&ir.lambda_sam_signature, fid as u32, s, f.params.len())
         });
@@ -4582,37 +4594,6 @@ fn box_nullable_vc_tail(
             }
         }
     }
-}
-
-/// Erase a value-class type to its underlying representation. Non-null `X` → underlying `U`. A nullable
-/// `X?` erases to the underlying ONLY when that underlying is a reference (which can itself hold null);
-/// over a primitive underlying, `X?` stays the boxed `X` (a primitive can't represent null). Non-value
-/// types pass through.
-/// Whether a lifted lambda realizes the value class in one of its OWN slots BOXED.
-///
-/// A plain `FunctionN.invoke` slot is generic (`Object`), and a value class travelling through one is
-/// boxed. A SAM conversion targets a DECLARED method instead, so the answer is whatever the interface
-/// spells: a slot declared as the value class itself erases to the underlying (kotlinc's
-/// `ResultHandler.onResult(Ljava/lang/Object;)` carries the *carrier*, not a `kotlin/Result` box),
-/// while a slot declared as a type parameter is generic again and does box. `declared` is the SAM
-/// method's declaration at that position; `None` means there is no SAM (or its arity doesn't line up
-/// with the lambda's own parameters), which keeps the `FunctionN` reading.
-fn lambda_slot_is_boxed(declared: Option<&Ty>, value_class: TypeName) -> bool {
-    declared.is_none_or(|t| t.non_null().obj_internal() != Some(value_class))
-}
-
-/// The SAM method's declared parameter types for a lifted lambda, aligned to the lambda's OWN
-/// parameters (`own_from` is where those begin, after the captures). `None` unless the lambda was SAM
-/// converted AND the two arities agree — an implicit receiver or context parameter in the lambda's
-/// own slots has no counterpart in the interface declaration, and misaligned slots must not be read.
-fn lambda_sam_params(
-    signatures: &HashMap<u32, (Vec<Ty>, Ty)>,
-    fid: u32,
-    own_from: u32,
-    total_params: usize,
-) -> Option<&[Ty]> {
-    let (params, _) = signatures.get(&fid)?;
-    (params.len() == total_params.saturating_sub(own_from as usize)).then_some(params.as_slice())
 }
 
 /// Whether the lambda `impl_fn` was SAM-converted to a method whose DECLARED return is the very value

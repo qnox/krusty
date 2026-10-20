@@ -1704,6 +1704,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `create`/`invoke` and an erased `invoke` bridge, created by `new C(captures…, null)`. Moving to that
   shape is step 6 of `docs/JVM_INLINE_BEFORE_CPS.md` §1a. Behaviour is covered by
   `tests/suspend_e2e.rs` (`suspend_lambda_*`) and `tests/suspend_receiver_lambda_e2e.rs`.
+- **A suspend lambda takes a value-class parameter as its carrier, through a mangled typed `invoke`.**
+  kotlinc always writes a suspend lambda as a `SuspendLambda` class, never an `invokedynamic`, so the
+  value-class pass lowers its body over each value class's carrier, as for any function, instead of
+  over the box a generic `FunctionN` slot hands an `invokedynamic` lambda. The typed `invoke` takes the
+  carrier (`IC` → `String`, `BI` → `int`, `IC?` → `String`, while `BI?` and `UInt?` stay boxed) and is
+  mangled like a function taking a value class over the lambda's declared parameters, receiver first,
+  with the continuation hashed as `_` and its `Any?` result never: `suspend (IC) -> Unit` and
+  `suspend (IC) -> IC` both take `invoke-hHQ9REg`, and `suspend (Result<Int>) -> Unit` stays `invoke`.
+  The erased `FunctionN.invoke` bridge and `create(Object, Continuation)` unbox the box they receive
+  (`checkcast IC; unbox-impl`, null-safely for a nullable reference carrier), `create` casts a box that
+  is itself the physical type (`checkcast BI` for `BI?`) where it stores any other reference unchecked,
+  the typed `invoke` boxes the carrier again to hand it to `create`, and the spill field (`L$0`, `I$0`)
+  holds the carrier, which `invokeSuspend` reads back cast to it. Only a suspend lambda with a class
+  site takes the carrier: one that is SAM converted, or an inline call's argument that krusty still
+  materializes as an `invokedynamic` over the lifted function (a `crossinline` lambda captured into an
+  object, where kotlinc inlines the body instead), keeps the boxed slot that realization hands it. A
+  carrier-taking suspend lambda the class lowering then declines is an emission error rather than an
+  `invokedynamic` that would hand its lifted function a box. Proven byte for byte
+  against kotlinc and box-run (`tests/suspend_lambda_value_class_invoke_e2e.rs`).
 - **A suspend lambda's parameter slots bind the RECEIVER as `this` — for a classpath callee too.** A
   `suspend R.() -> T` parameter folds its receiver into the erased `Function{n+1}`'s FIRST slot, and the
   checker resolves a bare member in the body against that receiver. Lowering binds the leading
@@ -1871,6 +1890,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   ordinary class does. `Unit` and `Nothing` are legal constructor properties: their JVM value
   positions are `kotlin.Unit` and `java.lang.Void`, not `void`. A local-variable descriptor follows
   the same rule, including a type parameter that erases to `Unit`. `tests/full_value_classes_e2e.rs`.
+- **`@Metadata` of a boxed value class is a value class's.** kotlinc 2.4.20 sets `IS_VALUE` on a
+  `+FullValueClasses` class as on a `@JvmInline` one, but writes no inline underlying property. A
+  final one lists, after its declared functions, each `equals`/`hashCode`/`toString` it generates as
+  a SYNTHESIZED function record (the data-class flags: `0x101d6` for `equals`, `0x100d6` for the
+  other two). An abstract or sealed one declares each `Any` member its source does not override as
+  an open DECLARATION (`0x10116`/`0x10016`) that has no JVM method; a regular class extending it
+  declares none. krusty records the final class's generated members as common IR roles where it
+  synthesizes their bodies, and the metadata writer reads the roles; the abstract class's
+  declarations come from the class kind and its `Any` overrides, as an inline value class's do.
+  `tests/metadata_value_class_synthesized_members_e2e.rs`, which also pins the `@JvmInline` forms.
 - `==` on `String` (Kotlin `==` = `.equals`, `===` = reference). Structural
   `==`/`!=` on reference operands compiles to `kotlin/jvm/internal/Intrinsics.areEqual(Object,Object)Z`
   — the exact helper kotlinc's JVM backend emits (`backend.jvm/.../intrinsics/Equals.kt`), so the
@@ -4299,6 +4328,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   expression body made from this form is the subject's nested block, not the function's root scope;
   the subject's debug range therefore ends before the return, as in kotlinc.
   `tests/when_subject_variable_e2e.rs`.
+- **Every read of a `when` subject has the subject's type, whichever condition makes it.** fir2ir
+  reads the subject variable afresh in each condition (`== c`, `is T`, `in r`), and each `irGet`
+  has the variable's type. kotlinc's `RangeContainsLowering` stores the tested value in a
+  temporary only when it may have side effects (`createTemporaryVariableIfNecessary` over
+  `!isTrivial()`); a variable read has none, so `when (c) { in a..b -> … }` compares
+  `tmp_subject` with both bounds and allocates no second local, for signed, `Char`, floating and
+  unsigned subjects alike. The read of an `in`/`is` condition therefore carries the subject's
+  checked type exactly as an `==` condition's does; an untyped read would be converted to the
+  comparison type and that conversion stored in a temporary kotlinc never declares.
+  `tests/when_subject_range_temporary_e2e.rs`.
 - **`x ?: return` smart-casts `x` for the code that follows** (also `?: throw`/`break`/`continue`/a
   `Nothing`-typed call): completing an elvis whose right-hand side is `Nothing` proves a stable
   `val`/parameter non-null, exactly like an `if (x == null) return` guard. A nullable-primitive local
@@ -5254,7 +5293,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   function in this module (public, or declared in the caller's own file; not a companion-block
   member, which its class compiles) with no suspend function-typed parameter or receiver, no
   `crossinline` parameter, and a template without lambdas, callable references, local classes,
-  nested expansions or a subject `when` that switches on an enum's keys (`IrFile::enum_switch_when`),
+  or a subject `when` that switches on an enum's keys (`IrFile::enum_switch_when`),
   called with every argument from any body outside a suspend state machine: a named function, an
   inline function (whose compiled body then holds the nested callee's code, as kotlinc's does), a
   lambda's method, a local function, a property initializer, an `init` block, a constructor or an
@@ -5272,7 +5311,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A callee whose body inlines another same-module callee is compiled after it, as kotlinc compiles
   a callee's node when a call first needs it; the node carries its method's own source map (the
   lines it inlined are numbered past its file's own line count, not the caller's), so the caller
-  maps a nested line through it back to the nested callee's source. A body bracketed for FixStack
+  maps a nested line through it back to the nested callee's source. A template that itself expands
+  another same-module call in IR is compiled the same way: the callee's compiled body holds that
+  expansion, and a reified type parameter it forwards to the nested call is recorded on the nested
+  call as the outer parameter, which the inliner substitutes when it inlines the outer body. An
+  operator call (`a + b`, `a..b`, `a < b`) publishes the type arguments its selection solved, as
+  the explicit `a.plus(b)` does, so a reified operator receives its argument the same way. An
+  inlined line joins only the last range of its file, or else the first, when that range came from
+  the same call and covers it or lies at the output frontier (`FileMapping.mapNewLineNumber`);
+  a second copy of a body on the same line therefore continues the range its nested callee opened
+  last rather than reusing an earlier range that covers it. A body bracketed for FixStack
   over caller operands runs over an empty stack inside the bracket, so a literal it expands is
   bracketed again only for operands of its own, and a literal that always throws leaves none open;
   a body it cannot compile or inline fails the emission, never becoming a real call. The call
@@ -6450,6 +6498,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   statement whose `Unit` value follows the lambda's brace now does too, unless a copied body's
   terminal `Unit` keeps its own mapped line and so writes that `nop` itself.
   Tests: `tests/inline_scope_function_bytes_e2e.rs`.
+- **A statement lambda's discarded result is popped on the call's line.** For a statement such as
+  `run { one() }`, `with(x) { length }` or `s.let { it.length }`, kotlinc leaves the inlined
+  lambda's value on the operand stack through the end of the lambda's locals and the call line
+  `markLineNumberAfterInlineIfNeeded` writes after the inline call; the statement's `pop` follows
+  there. The `pop` is that line's instruction, so `RedundantNopsCleanup` drops the frame's closing
+  `nop`: `invokestatic one; pop` with the call line at the `pop` and the `$i$a$` local ending
+  before it. A `when` tail still discards in its branches, which is where kotlinc's pop
+  propagation leaves those `pop`s, and a pure load or constant still vanishes with its `pop`.
+  Tests: `tests/discarded_inline_lambda_result_e2e.rs`.
 - **A same-file inline call's result is adapted after its copied frame ends.** kotlinc ends the
   `$i$f$` marker and the inlined parameter locals at the copied body's end label before its caller
   adapts the result. An erased type-parameter result is narrowed after those locals end, a

@@ -203,6 +203,7 @@ fn downloads_what_is_missing_says_why_and_reuses_it_silently() {
         kotlin_version: "2.4.20".into(),
         java: java_home.join("bin/java"),
         java_home,
+        java_major: 21,
         compiler_classpath: fixture.cached_jars(),
         compiler_identity: ArtifactPin::identity(
             fixture.pins.compiler_classpath("2.4.20").unwrap(),

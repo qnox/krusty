@@ -294,6 +294,7 @@ pub(super) fn build_continuation_class(
         is_inner_class: false,
         is_local_class: false,
         is_value: false,
+        is_full_value: false,
         is_data: false,
         decl_line: 0,
         decl_start_line: 0,

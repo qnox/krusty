@@ -128,6 +128,32 @@ fn an_option_the_plugin_does_not_declare_fails_with_kotlincs_message() {
     assert_eq!(host.load(&[], &[]).unwrap(), []);
 }
 
+/// The JVM's own logging writes to stdout unless told otherwise, and `JDK_JAVA_OPTIONS` can turn
+/// more of it on there; the host's protocol is not interrupted by it.
+#[cfg(unix)]
+#[test]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+fn jvm_logging_on_stdout_does_not_reach_the_protocol() {
+    let (mut runtime, env) = runtime();
+    let scratch = ScratchCache::new("jvm-logging");
+    std::fs::create_dir_all(&scratch.0).unwrap();
+    let java = scratch.0.join("java");
+    std::fs::write(
+        &java,
+        format!(
+            "#!/bin/sh\nJDK_JAVA_OPTIONS='-Xlog:gc*:stdout' exec '{}' \"$@\"\n",
+            runtime.java.display()
+        ),
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&java).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+    std::fs::set_permissions(&java, permissions).unwrap();
+    runtime.java = java;
+    let mut host = start(&runtime, &env);
+    assert_eq!(host.load(&[], &[]).unwrap(), []);
+}
+
 #[test]
 #[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
 fn a_classpath_entry_that_declares_no_registrar_loads_no_plugin() {

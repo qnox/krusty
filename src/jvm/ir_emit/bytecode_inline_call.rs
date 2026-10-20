@@ -635,25 +635,28 @@ impl Emitter<'_> {
             return None;
         };
         let mut lambdas = Vec::new();
+        let mut captured = Vec::new();
         let mut lambda_bindings = HashMap::default();
-        match self.load_default_lambdas(call, &default_lambdas, &physical) {
-            Ok(loaded) => {
-                for (operand, lambda) in loaded {
+        let loaded = self
+            .load_default_lambdas(call, &default_lambdas, &physical)
+            .and_then(|loaded| {
+                for (operand, mut lambda) in loaded {
+                    default_bridge::append_default_lambda_captures(&mut lambda, &mut captured)?;
                     lambda_bindings.insert(operand, lambdas.len());
                     lambdas.push(lambda);
                 }
-            }
-            Err(error) => {
-                crate::trace_compiler!("splice", "unified inliner declines: {error:?}");
-                return None;
-            }
+                Ok(())
+            });
+        if let Err(error) = loaded {
+            crate::trace_compiler!("splice", "unified inliner declines: {error:?}");
+            return None;
         }
         let parameters = self.call_parameters(
             &supplies,
             &physical,
             args,
             &lambda_bindings,
-            Vec::new(),
+            captured,
             &lambdas,
         );
         let base = self.inline_splice_base(self.frame.size());
@@ -760,15 +763,18 @@ impl Emitter<'_> {
         }
         let loaded = self
             .load_default_lambdas(call, default_lambdas, &physical)
-            .map_err(|error| {
-                crate::trace_compiler!("splice", "a default lambda is not inlined: {error:?}");
-                "a default lambda of a planned call cannot be inlined"
-            })?;
-        for (operand, mut lambda) in loaded {
-            lambda.captured = captured.len()..captured.len();
-            lambda_bindings.insert(operand, lambdas.len());
-            lambdas.push(lambda);
-        }
+            .and_then(|loaded| {
+                for (operand, mut lambda) in loaded {
+                    default_bridge::append_default_lambda_captures(&mut lambda, &mut captured)?;
+                    lambda_bindings.insert(operand, lambdas.len());
+                    lambdas.push(lambda);
+                }
+                Ok(())
+            });
+        loaded.map_err(|error| {
+            crate::trace_compiler!("splice", "a default lambda is not inlined: {error:?}");
+            "a default lambda of a planned call cannot be inlined"
+        })?;
         // The lambdas' lines are lines of the caller's map as compiling them left it.
         let lambda_lines = self
             .cw

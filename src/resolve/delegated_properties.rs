@@ -460,8 +460,8 @@ fn select_delegate_operator_in_kind(
         &callables,
         expected_result,
     ) {
-        crate::symbol_resolver::ReceiverFunctionSelection::Selected((selected, _, ret, _)) => {
-            DelegateConventionSelection::Selected(selected, ret)
+        crate::symbol_resolver::ReceiverFunctionSelection::Selected(selected) => {
+            DelegateConventionSelection::Selected(selected.function, selected.ret)
         }
         crate::symbol_resolver::ReceiverFunctionSelection::None => {
             DelegateConventionSelection::None(diagnostic_candidates)
@@ -1409,12 +1409,13 @@ impl Checker<'_> {
                 &callables,
                 expected_result,
             ) {
-                crate::symbol_resolver::ReceiverFunctionSelection::Selected((
-                    selected,
-                    _,
-                    ret,
-                    applied_receiver,
-                )) => OrdinaryDelegateSelection::Selected(selected, ret, applied_receiver),
+                crate::symbol_resolver::ReceiverFunctionSelection::Selected(selected) => {
+                    OrdinaryDelegateSelection::Selected(
+                        selected.function,
+                        selected.ret,
+                        selected.applied_receiver,
+                    )
+                }
                 crate::symbol_resolver::ReceiverFunctionSelection::None => {
                     OrdinaryDelegateSelection::None(diagnostic_candidates)
                 }

@@ -747,6 +747,8 @@ mod diagnostics_type_inference_cases_e2e;
 mod discarded_dependency_result_e2e;
 #[path = "discarded_generic_result_e2e.rs"]
 mod discarded_generic_result_e2e;
+#[path = "discarded_inline_lambda_result_e2e.rs"]
+mod discarded_inline_lambda_result_e2e;
 #[path = "discarded_read_statement_e2e.rs"]
 mod discarded_read_statement_e2e;
 #[path = "discarded_when_e2e.rs"]
@@ -1525,6 +1527,8 @@ mod metadata_return_value_status_e2e;
 mod metadata_synthetic_classes_e2e;
 mod metadata_type_modules;
 metadata_type_modules::declare!();
+#[path = "metadata_value_class_synthesized_members_e2e.rs"]
+mod metadata_value_class_synthesized_members_e2e;
 #[path = "metadata_version_requirement_e2e.rs"]
 mod metadata_version_requirement_e2e;
 #[path = "method_access_flags_e2e.rs"]
@@ -2818,6 +2822,8 @@ mod when_null_guard_smartcast_e2e;
 mod when_statement_value_arm_e2e;
 #[path = "when_subject_ieee754_e2e.rs"]
 mod when_subject_ieee754_e2e;
+#[path = "when_subject_range_temporary_e2e.rs"]
+mod when_subject_range_temporary_e2e;
 #[path = "when_subject_variable_e2e.rs"]
 mod when_subject_variable_e2e;
 #[path = "when_throwing_branch_e2e.rs"]

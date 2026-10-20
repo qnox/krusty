@@ -52,6 +52,8 @@ pub(crate) mod function_flags {
     pub const IS_STATIC: u64 = 1 << 18;
     /// Bits 6-7 are `MemberKind`. DELEGATION (2) is a function realized by `interface by`.
     pub const MEMBER_KIND_DELEGATION: u64 = 2 << 6;
+    /// Both `MemberKind` bits; clearing them makes a function a DECLARATION (0).
+    pub const MEMBER_KIND_MASK: u64 = 3 << 6;
 }
 
 pub(crate) mod property_flags {

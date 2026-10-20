@@ -257,7 +257,7 @@ impl Slot {
                 function.ret.apply(function.callable.ret),
             )],
             Slot::Property(property) => std::iter::once(&property.getter)
-                .chain(property.setter.as_ref())
+                .chain(property.setter.as_deref())
                 .map(|accessor| (accessor.params.clone().into_boxed_slice(), accessor.ret))
                 .collect(),
         }

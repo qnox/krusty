@@ -2359,7 +2359,7 @@ impl BodyFirChecker<'_> {
                         .or_else(|| {
                             context_access
                                 .as_ref()
-                                .and_then(|access| access.property.setter.as_ref())
+                                .and_then(|access| access.property.setter.as_deref())
                         })
                         .and_then(|setter| {
                             setter.external_property_identity.map(|property| {
@@ -2380,7 +2380,7 @@ impl BodyFirChecker<'_> {
                             .or_else(|| {
                                 context_access
                                     .as_ref()
-                                    .and_then(|access| access.property.setter.as_ref())
+                                    .and_then(|access| access.property.setter.as_deref())
                             })
                             .ok_or_else(|| {
                                 self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
