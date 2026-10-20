@@ -10533,7 +10533,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   when code that runs after construction uses it, as kotlinc's local declaration lowering does.
   Constructor code is the primary constructor's defaults and super-constructor arguments, the
   property initializers and delegate values, the `init` blocks, and each secondary constructor's
-  defaults, delegation arguments and body. In `class L { val x = a + 1; fun m() = b }` the
+  defaults, delegation arguments and body; a value only a delegate expression reads
+  (`val x by boxOf(a)`) is captured for that constructor read. In `class L { val x = a + 1; fun m() = b }` the
   constructor is `(a, b)`, the initializer reads the parameter `a`, and only `$b` is a field; in
   `class B { val x = a; fun m() = a }` the initializer still reads the parameter and `m` reads the
   field. The walk that orders the captures decides this: a direct read in the local class's own

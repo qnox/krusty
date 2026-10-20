@@ -131,8 +131,7 @@ fun mixed(a: Int, b: Int, c: Int): Int {
 }
 
 /// A super-constructor argument is constructor code: `a` is read from the parameter there and
-/// gets no field. (A primary-constructor default is constructor code too, but its class differs
-/// from kotlinc in an unrelated way: kotlinc counts the capture parameters in the `$default` mask.)
+/// gets no field.
 #[test]
 fn a_super_argument_reads_the_parameter() {
     let source = "\
@@ -170,4 +169,168 @@ fun box(): String = if (dataClass(7) == \"2:7\") \"OK\" else dataClass(7)
         common::expect_box_run_with_stdlib(source, "DataConstruction"),
         "OK"
     );
+}
+
+/// Require every member of `class`, with its code and debug tables, to be kotlinc's except for the
+/// one `$default` mask constant `mask` names: kotlinc numbers a local class's captures in its
+/// constructor's default mask, and krusty does not yet (`(kotlinc's line, krusty's line)`).
+/// Returns krusty's field declarations.
+fn assert_same_members_but_mask(
+    stem: &str,
+    source: &str,
+    class: &str,
+    mask: (&str, &str),
+) -> Vec<String> {
+    let comparison = common::compare_with_kotlinc_plugin(
+        stem,
+        source,
+        class,
+        &[common::stdlib_jar()],
+        "17",
+        &[],
+    )
+    .expect("the reference kotlinc and javap are provisioned");
+    let mut reference = common::member_blocks(&comparison.reference);
+    let krusty = common::member_blocks(&comparison.krusty);
+    let masks = reference
+        .iter()
+        .filter(|line| line.as_str() == mask.0)
+        .count();
+    assert_eq!(masks, 1, "{class}: kotlinc's mask `{}` occurs once", mask.0);
+    for line in &mut reference {
+        if line.as_str() == mask.0 {
+            *line = mask.1.to_string();
+        }
+    }
+    assert_eq!(krusty, reference, "{class}: kotlinc's members");
+    krusty
+        .into_iter()
+        .filter(|line| {
+            line.ends_with(';')
+                && !line.contains('(')
+                && !line.starts_with(|first: char| first.is_ascii_digit())
+        })
+        .collect()
+}
+
+/// A capture only a primary-constructor default reads is read in the `$default` constructor, from
+/// the capture parameter in slot 1, and gets no field.
+#[test]
+fn a_capture_read_only_by_a_primary_constructor_default_gets_no_field() {
+    let source = "\
+fun primaryDefault(a: Int): Int {
+    class P(val p: Int = a)
+    return P().p * 10 + P(1).p
+}
+
+fun box(): String = primaryDefault(3).toString()
+";
+    assert_eq!(
+        common::expect_box_run_with_stdlib(source, "PrimaryDefaultCapture"),
+        "31"
+    );
+    let class = "PrimaryDefaultCaptureKt$primaryDefault$P";
+    // `$default`: `if (mask & bit) p = $a` is `iload_3; iconst_N; iand; ifeq 8; iload_1; istore_2`.
+    let fields = assert_same_members_but_mask(
+        "PrimaryDefaultCapture",
+        source,
+        class,
+        ("1: iconst_2", "1: iconst_1"),
+    );
+    assert_eq!(fields, ["private final int p;"]);
+}
+
+/// A capture only a secondary constructor's parameter default reads is read in that constructor's
+/// `$default` overload, from the capture parameter in slot 1, and gets no field.
+#[test]
+fn a_capture_read_only_by_a_secondary_constructor_default_gets_no_field() {
+    let source = "\
+fun secondaryDefault(a: Int): Int {
+    class S(val x: Int) {
+        constructor(y: String, z: Int = a) : this(y.length + z)
+    }
+    return S(\"s\").x * 10 + S(\"s\", 5).x
+}
+
+fun box(): String = secondaryDefault(4).toString()
+";
+    assert_eq!(
+        common::expect_box_run_with_stdlib(source, "SecondaryDefaultCapture"),
+        "56"
+    );
+    let class = "SecondaryDefaultCaptureKt$secondaryDefault$S";
+    // `$default`: `if (mask & bit) z = $a` is `iload 4; iconst_N; iand; ifeq 9; iload_1; istore_3`.
+    let fields = assert_same_members_but_mask(
+        "SecondaryDefaultCapture",
+        source,
+        class,
+        ("2: iconst_4", "2: iconst_2"),
+    );
+    assert_eq!(fields, ["private final int x;"]);
+}
+
+/// A capture only a computed `this(…)` or `super(…)` delegation argument reads is read from the
+/// secondary constructor's own capture parameter, and gets no field; `this(…)` also forwards it.
+#[test]
+fn a_capture_read_only_by_a_delegation_argument_gets_no_field() {
+    let source = "\
+fun thisArgument(a: Int): Int {
+    class T(val x: Int) {
+        constructor() : this(a + 1)
+    }
+    return T().x
+}
+
+open class Base(val y: Int)
+
+fun superArgument(a: Int): Int {
+    class U : Base {
+        constructor() : super(a * 2)
+    }
+    return U().y
+}
+
+fun box(): String = \"${thisArgument(5)}:${superArgument(6)}\"
+";
+    assert_eq!(
+        common::expect_box_run_with_stdlib(source, "DelegationCapture"),
+        "6:12"
+    );
+    assert_same_class(
+        "DelegationCapture",
+        source,
+        "DelegationCaptureKt$thisArgument$T",
+    );
+    assert_same_class(
+        "DelegationCapture",
+        source,
+        "DelegationCaptureKt$superArgument$U",
+    );
+}
+
+/// A property delegate expression runs in the constructor: a capture only it reads comes from the
+/// parameter, and only the delegate itself is stored.
+#[test]
+fn a_capture_read_only_by_a_property_delegate_gets_no_field() {
+    let source = "\
+class Box(val v: Int) {
+    operator fun getValue(thisRef: Any?, property: kotlin.reflect.KProperty<*>): Int = v
+}
+
+fun boxOf(a: Int) = Box(a)
+
+fun delegated(a: Int): Int {
+    class D {
+        val x by boxOf(a)
+    }
+    return D().x
+}
+
+fun box(): String = delegated(7).toString()
+";
+    assert_eq!(
+        common::expect_box_run_with_stdlib(source, "DelegateCapture"),
+        "7"
+    );
+    assert_same_class("DelegateCapture", source, "DelegateCaptureKt$delegated$D");
 }
