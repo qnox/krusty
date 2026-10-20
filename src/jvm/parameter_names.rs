@@ -466,7 +466,7 @@ pub(super) fn constructor_method_parameters(
 
 /// A primary constructor's LocalVariableTable names. kotlinc names a local or anonymous class's
 /// captured-value parameter like the field it stores into, and a captured receiver as
-/// [`super::capture_names::class_capture`] says.
+/// [`super::capture_names::class_captures`] says.
 pub(super) fn constructor_local_variables(
     ir: &IrFile,
     class: &crate::ir::IrClass,
@@ -482,11 +482,10 @@ pub(super) fn constructor_local_variables(
         .iter()
         .zip(anonymous)
         .zip(arguments)
-        .map(|((identity, anonymous), argument)| {
-            argument
-                .capture
-                .as_ref()
-                .map(|capture| super::capture_names::class_capture(ir, class, capture).parameter)
+        .zip(super::capture_names::class_captures(ir, class))
+        .map(|(((identity, anonymous), argument), capture)| {
+            capture
+                .map(|capture| capture.parameter)
                 .or(anonymous)
                 .or_else(|| local_variable(identity, "<init>"))
                 .or_else(|| {

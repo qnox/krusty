@@ -506,106 +506,21 @@ impl ProductionSignatureSemantics<'_> {
         Ok(resolve(&lexical))
     }
 
-    /// Resolve a compact declared header type after signature solving but before the compact header
-    /// arena is destroyed. This is the same Pass-1 operation as [`Self::resolve_type`]; it exists so
-    /// classifier supertypes are published from authoritative compact syntax instead of accepting
-    /// provisional `Ty::Error` arguments from the transitional collector.
-    pub(super) fn resolve_compact_header_type(
-        &self,
-        scope: crate::fir::SignatureScope,
-        syntax: crate::fir::HeaderTypeId,
-    ) -> Option<Ty> {
-        let reference = self
-            .headers
-            .syntax
-            .transient_type_ref(syntax, &self.headers.lookup_names)?;
-        self.with_signature_type_scope(scope, |lexical| {
-            self.classifier_header_type_ref(scope, lexical, &reference)
-        })
-        .ok()
-        .flatten()
-        .filter(|ty| !ty.mentions_error())
-    }
-
-    /// Resolve one non-local explicit declaration type directly from the compact header arena.
-    /// Unlike `resolve_compact_header_type`, this enters the declaration's complete lexical class
-    /// scope and preserves a precise lookup/alias diagnostic. It is the authoritative Pass-1 path
-    /// for callable parameters/results and property types; the transitional symbol table is not a
-    /// fallback merely because it happened to manufacture a publishable target-classifier shape.
-    pub(super) fn resolve_explicit_header_type(
-        &self,
-        scope: crate::fir::SignatureScope,
-        syntax: crate::fir::HeaderTypeId,
-    ) -> Result<Ty, crate::fir::DiagnosticId> {
-        let reference = self
-            .headers
-            .syntax
-            .transient_type_ref(syntax, &self.headers.lookup_names)
-            .ok_or_else(Self::failure)?;
-        // Primary-constructor parameters use their own stable declaration for diagnostics and type
-        // parameter ownership. Their owning classifier is derived by the lookup only to add its
-        // inherited-classifier fallback rung; declarations nested in that classifier remain an
-        // ordinary nearer lexical binding.
-        self.resolve_signature_type_reference_at(scope, scope, &reference, true, None)
-    }
-
-    pub(super) fn resolve_signature_type_reference(
-        &self,
-        scope: crate::fir::SignatureScope,
-        reference: &TypeRef,
-    ) -> Result<Ty, crate::fir::DiagnosticId> {
-        self.resolve_signature_type_reference_at(scope, scope, reference, true, None)
-    }
-
-    /// Resolve a callable header bound outside the declaration body's classifier rung while using
-    /// the ordinary diagnostic path. Callable publication may already own the authoritative
-    /// semantic bound shape, but every written reference must still report its own frontend error.
-    pub(super) fn resolve_callable_header_bound(
-        &self,
-        scope: crate::fir::SignatureScope,
-        reference: &TypeRef,
-    ) -> Result<Ty, crate::fir::DiagnosticId> {
-        self.resolve_signature_type_reference_at(scope, scope, reference, false, None)
-    }
-
-    /// Resolve a classifier bound in the caller's provisional type-parameter scope and retain the
-    /// same precise source diagnostic as the ordinary signature path. The supplied scope is needed
-    /// before the classifier's stable parameter contract exists.
-    pub(super) fn resolve_classifier_header_bound(
-        &self,
-        scope: crate::fir::SignatureScope,
-        lexical: &super::super::CheckerScope<'_>,
-        reference: &TypeRef,
-    ) -> Result<Ty, crate::fir::DiagnosticId> {
-        if let Some(ty) = self.classifier_header_type_ref(scope, lexical, reference) {
-            if !ty.mentions_error() {
-                return Ok(ty);
-            }
-            if let Some(diagnostic) =
-                self.recorded_type_diagnostic(scope.owner, scope.source, reference)
-            {
-                return Err(diagnostic);
-            }
-        }
-        let failed = self.unresolved_signature_type_ref(scope, lexical, reference, false);
-        Err(self.record_failed_type_reference(scope, scope, failed.span, &failed.name))
-    }
-
-    fn resolve_signature_type_reference_at(
+    pub(super) fn resolve_signature_type_reference_at(
         &self,
         diagnostic_scope: crate::fir::SignatureScope,
         lookup_scope: crate::fir::SignatureScope,
         reference: &TypeRef,
         include_scope_owner_body: bool,
-        selected_origin: Option<crate::fir::OriginId>,
+        selected_site: Option<SelectedTypeSite>,
     ) -> Result<Ty, crate::fir::DiagnosticId> {
         let resolved = self.with_signature_type_scope(lookup_scope, |lexical| {
-            self.signature_type_ref_at_with_origin(
+            self.signature_type_ref_at_with_site(
                 lookup_scope,
                 lexical,
                 reference,
                 include_scope_owner_body,
-                selected_origin,
+                selected_site,
             )
             .map(Ok)
             .unwrap_or_else(|| {
@@ -653,7 +568,7 @@ impl ProductionSignatureSemantics<'_> {
 
     /// Report a type reference that bound to no single classifier: kotlinc lists the equally
     /// visible classifiers of an ambiguous name, and names the unbound segment otherwise.
-    fn record_failed_type_reference(
+    pub(super) fn record_failed_type_reference(
         &self,
         diagnostic_scope: crate::fir::SignatureScope,
         lookup_scope: crate::fir::SignatureScope,
@@ -695,45 +610,6 @@ impl ProductionSignatureSemantics<'_> {
                 spelling,
             ),
         }
-    }
-
-    /// Resolve the restricted compact type-expression subset used by explicit body-local headers.
-    /// These nodes differ from inferred signature expressions: all semantic choices are type lookup
-    /// and lexical alias expansion already fixed while the bounded Pass-1 AST was live.
-    pub(super) fn resolve_compact_graph_type(
-        &self,
-        graph: &crate::fir::SignatureGraph,
-        expression: crate::fir::SigExprId,
-    ) -> Option<Ty> {
-        let resolved = match graph.expr(expression)? {
-            crate::fir::SigExpr::Known(ty) => ty.get(),
-            crate::fir::SigExpr::ClassifierType { declaration, scope } => {
-                let scope = graph.scope(scope)?;
-                <Self as crate::fir::SignatureSemantics>::classifier_type(self, declaration, scope)
-                    .ok()?
-                    .get()
-            }
-            crate::fir::SigExpr::Type {
-                syntax,
-                scope,
-                origin,
-            } => {
-                let scope = graph.scope(scope)?;
-                <Self as crate::fir::SignatureSemantics>::resolve_type(
-                    self, scope, origin, syntax, graph,
-                )
-                .ok()?
-                .get()
-            }
-            crate::fir::SigExpr::Nullable(base) => {
-                Ty::nullable(self.resolve_compact_graph_type(graph, base)?)
-            }
-            crate::fir::SigExpr::NonNullable(base) => {
-                super::super::definitely_non_null_ty(self.resolve_compact_graph_type(graph, base)?)
-            }
-            _ => return None,
-        };
-        (!resolved.mentions_error() && !resolved.mentions_pending()).then_some(resolved)
     }
 
     pub(super) fn merge_scoped_constraints(
@@ -1247,12 +1123,41 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         graph: &crate::fir::SignatureGraph,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let reference = graph.transient_type_ref(syntax).ok_or_else(Self::failure)?;
+        let site = SelectedTypeSite::graph(graph.written_type_id(syntax), origin);
         // Signature-native type resolution: a type reference in a compact header is a type
         // parameter of the owning declaration chain, a scoped alias/classifier, or a leaf shape.
         // None of those needs a body checker, and Pass 1 has no body to check.
-        let ty =
-            self.resolve_signature_type_reference_at(scope, scope, &reference, true, Some(origin))?;
+        let mut ty =
+            self.resolve_signature_type_reference_at(scope, scope, &reference, true, Some(site))?;
+        // A compact written application evaluates every source argument as its own graph
+        // expression. Recursive ordinary lookup applies a child's use-site projection from its
+        // parent, but this standalone root has no parent left to do that. Retain the projection on
+        // the evaluated argument before it is substituted into the selected classifier template.
+        // Stars are graph-owned `Known` expressions and never enter this path.
+        if reference.in_projection() {
+            ty = Ty::in_projection(ty);
+        } else if reference.out_projection() {
+            ty = Ty::out_projection(ty);
+        }
+        self.record_type_spelling_projection(Some(site), ty);
+        if !self.project_graph_type_spelling_sites(graph, syntax, ty) {
+            return Err(Self::failure());
+        }
         crate::fir::ResolvedTy::new(ty).map_err(|_| Self::failure())
+    }
+
+    fn resolve_written_type_application(
+        &self,
+        expression: crate::fir::SigExprId,
+        graph: &crate::fir::SignatureGraph,
+        evaluate_argument: &mut dyn FnMut(
+            crate::fir::SigExprId,
+        ) -> Result<
+            crate::fir::ResolvedTy,
+            crate::fir::DiagnosticId,
+        >,
+    ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
+        self.evaluate_written_type_application(graph, expression, evaluate_argument)
     }
 
     fn resolve_contextual_type(

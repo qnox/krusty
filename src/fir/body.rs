@@ -13,6 +13,10 @@ pub use value_parameters::{FirDefaultValue, FirValueParameter, FirVarargParamete
 pub(crate) mod debug_lines;
 pub use debug_lines::{FirExpressionDebugLines, FirStatementDebugLines};
 mod capture_order;
+mod class_captures;
+pub(crate) use class_captures::{
+    ClassBodyContext, ClassCaptureBinding, ClassCaptureIdentity, ClassReceiverCaptureSource,
+};
 mod lifting_sites;
 mod local_type_parameters;
 pub use lifting_sites::{FirLiftingSite, FirLiftingStep};
@@ -459,71 +463,6 @@ impl DelegateStorage {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ClassCaptureBinding {
-    pub(crate) owner: DeclarationId,
-    pub(crate) field: u32,
-    pub(crate) ty: ResolvedTy,
-    pub(crate) shared_cell: bool,
-    pub(crate) enclosing_depth: u32,
-    /// Receiver-tower coordinate used by member bodies of this classifier when this binding is a
-    /// captured receiver. `None` for ordinary captured values/delegates.
-    pub(crate) semantic_receiver_depth: Option<u32>,
-    pub(crate) receiver_source: Option<ClassReceiverCaptureSource>,
-    /// Original classifier field whose closure value this field forwards. A directly captured
-    /// value has its own `(owner, field)` identity; a transitive recapture preserves the upstream
-    /// identity so independently streamed members never join closure operands by source spelling.
-    pub(crate) capture_identity: Option<ClassCaptureIdentity>,
-}
-
-/// Semantic closure coordinate. A lexical capture is the classifier field that first stored it.
-/// An implicit receiver is the checker's receiver-rung identity, shared by every classifier that
-/// captured that rung. Label spelling is not part of either coordinate.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum ClassCaptureIdentity {
-    Field { owner: TypeName, field: u32 },
-    Receiver(u32),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ClassReceiverCaptureSource {
-    pub(crate) enclosing_depth: u32,
-    pub(crate) current: bool,
-    pub(crate) depth: u32,
-}
-
-/// Checked lexical environment required by ordinary members of a local/anonymous classifier
-/// declared inside a retained inline/default FIR fragment. It contains semantic FIR identities and
-/// types only; no AST ids, source ranges, names used for lookup, or unresolved types survive.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct ClassBodyContext {
-    pub(crate) values: HashMap<String, ClassCaptureBinding>,
-    /// Every captured value keyed by semantic closure identity. `values` is only the nearest
-    /// source-name view used for ordinary reads; two forwarded closures may legitimately capture
-    /// different shadowed bindings with the same spelling.
-    pub(crate) capture_values: Vec<(String, ClassCaptureBinding)>,
-    pub(crate) delegates: HashMap<String, LocalDelegateBinding>,
-    pub(crate) callables: HashMap<BodyLocalCallableDeclarationId, (u32, LocalCallableId)>,
-    pub(crate) receivers: Vec<ClassCaptureBinding>,
-    pub(crate) enclosing_property: Option<PropertyId>,
-}
-
-impl ClassBodyContext {
-    pub(crate) fn record_value(&mut self, name: String, binding: ClassCaptureBinding) {
-        self.capture_values.push((name.clone(), binding));
-        self.values.insert(name, binding);
-    }
-
-    pub(crate) fn merge(&mut self, context: Self) {
-        self.values.extend(context.values);
-        self.capture_values.extend(context.capture_values);
-        self.delegates.extend(context.delegates);
-        self.callables.extend(context.callables);
-        self.receivers.extend(context.receivers);
-        self.enclosing_property = context.enclosing_property.or(self.enclosing_property);
-    }
-}
-
 /// A constructor declaration identity after overload selection. Module constructors use their
 /// stable callable identity. Dependency constructors retain a backend-neutral classifier and
 /// semantic parameter signature; a backend maps that exact declaration to physical linkage.
@@ -568,6 +507,11 @@ pub enum FirConstructorTarget {
         declaration: ExternalCallableId,
         classifier: TypeName,
         parameters: Box<[ResolvedTy]>,
+        /// The selected constructor's parameters before classifier type-argument substitution,
+        /// parallel to `parameters`. `Holder<T>(T)` selected as `Holder(Money)` keeps `T` here
+        /// while `parameters` holds `Money`; a target representing values across erasure needs
+        /// the declaration's slot, not the call site's specialization.
+        declared_parameters: Box<[ResolvedTy]>,
         annotation: Option<Box<FirAnnotationConstruction>>,
     },
 }
@@ -587,10 +531,11 @@ impl FirConstructorTarget {
             }),
             Self::External {
                 parameters,
+                declared_parameters,
                 annotation,
                 ..
             } => {
-                parameters.len() * std::mem::size_of::<ResolvedTy>()
+                (parameters.len() + declared_parameters.len()) * std::mem::size_of::<ResolvedTy>()
                     + annotation.as_ref().map_or(0, |annotation| {
                         annotation.members.len() * std::mem::size_of::<(Box<str>, ResolvedTy)>()
                             + annotation
@@ -1746,6 +1691,9 @@ pub enum FirStatementKind {
     LocalDeclaration {
         declaration: DeclarationId,
         captures: Box<[FirLocalClassCapture]>,
+        /// The capture fields in kotlinc's first-use order, which the JVM backend lays the
+        /// fields and constructor prefix out in. Every other phase keeps field order.
+        capture_order: Box<[u32]>,
     },
     LocalFunction {
         declaration: BodyLocalCallableDeclarationId,
@@ -1852,6 +1800,10 @@ pub struct FirBody {
     /// this once; common lowering copies it without consulting declaration headers or types.
     inline_parameter_modifiers: Vec<crate::types::InlineParameterModifier>,
     inline_expansion_modes: Vec<crate::types::InlineExpansionMode>,
+    /// The bound values of the parameters whose inline expansion mode is `Splice`, published as
+    /// each parameter is bound. The contract above is in physical order and also lists context
+    /// receivers that bind no value, so it does not pair positionally with `parameters`.
+    spliced_inline_parameters: Vec<LocalValueId>,
     parameters: Vec<FirValueParameter>,
     default_values: Vec<FirDefaultValue>,
     captures: Vec<FirCapture>,
@@ -1915,6 +1867,7 @@ impl FirBody {
             type_parameters: Box::default(),
             inline_parameter_modifiers: Vec::new(),
             inline_expansion_modes: Vec::new(),
+            spliced_inline_parameters: Vec::new(),
             parameters: Vec::new(),
             default_values: Vec::new(),
             captures: Vec::new(),
@@ -2172,6 +2125,15 @@ impl FirBody {
             &self.inline_parameter_modifiers,
             &self.inline_expansion_modes,
         )
+    }
+
+    pub(crate) fn add_spliced_inline_parameter(&mut self, value: LocalValueId) {
+        self.spliced_inline_parameters.push(value);
+    }
+
+    /// The bound values of this body's `Splice`-mode inline parameters.
+    pub(crate) fn spliced_inline_parameters(&self) -> &[LocalValueId] {
+        &self.spliced_inline_parameters
     }
 
     pub fn add_default_value(&mut self, default: FirDefaultValue) {
@@ -2833,6 +2795,7 @@ impl FirBody {
                 * std::mem::size_of::<crate::types::InlineParameterModifier>()
             + self.inline_expansion_modes.len()
                 * std::mem::size_of::<crate::types::InlineExpansionMode>()
+            + self.spliced_inline_parameters.len() * std::mem::size_of::<LocalValueId>()
             + self
                 .property_delegate
                 .as_ref()
@@ -2922,8 +2885,13 @@ impl FirBody {
                     | FirStatementKind::Loop { .. }
                     | FirStatementKind::InterfaceDelegationInitializer { .. }
                     | FirStatementKind::LocalTypeAlias => 0,
-                    FirStatementKind::LocalDeclaration { captures, .. } => {
+                    FirStatementKind::LocalDeclaration {
+                        captures,
+                        capture_order,
+                        ..
+                    } => {
                         captures.len() * std::mem::size_of::<FirLocalClassCapture>()
+                            + std::mem::size_of_val(capture_order.as_ref())
                             + captures
                                 .iter()
                                 .map(FirLocalClassCapture::storage_payload_bytes)

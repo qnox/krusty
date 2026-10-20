@@ -110,6 +110,7 @@ fn inline_plain(
             lines: &mut OwnLines,
             classes: &NoClasses,
             objects: &mut NoObjects,
+            enum_entries: &mut crate::jvm::reified_arguments::NoEnumEntriesReads,
         },
     )
 }
@@ -634,6 +635,7 @@ fn an_invoke_of_an_inline_lambda_becomes_the_lambdas_body() {
             lines: &mut OwnLines,
             classes: &NoClasses,
             objects: &mut NoObjects,
+            enum_entries: &mut crate::jvm::reified_arguments::NoEnumEntriesReads,
         },
     )
     .expect("inlines");
@@ -748,6 +750,7 @@ fn a_lambda_invoked_over_a_stacked_value_is_bracketed_for_fix_stack() {
             lines: &mut OwnLines,
             classes: &NoClasses,
             objects: &mut NoObjects,
+            enum_entries: &mut crate::jvm::reified_arguments::NoEnumEntriesReads,
         },
     )
     .expect("inlines");

@@ -1627,8 +1627,9 @@ mod tests {
             arg: None,
             targs: vec![function.params[0].ty.clone()],
             span: Span::new(0, 0),
-            fun_params: Vec::new(),
+            fun_params: Box::new([]),
             fun_context_count: 0,
+            qualifier_arguments: Default::default(),
         };
         let semantic = Ty::obj_args("left/Box", &[Ty::obj("kotlin/Any")]);
 

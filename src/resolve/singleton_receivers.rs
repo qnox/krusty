@@ -1,7 +1,16 @@
 use crate::symbol_resolver::{ClassifierCompanionInstance, SymbolResolver};
 use crate::types::{Ty, TypeName};
 
-use super::SingletonValue;
+/// Singleton instance selected by semantic resolution. Its classifier is the complete
+/// language-level identity; the target backend chooses how to materialize the value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SingletonValue {
+    pub classifier: TypeName,
+    /// Classifier whose value facet selected this companion, or `None` when the object itself was
+    /// selected. This is resolver-owned provenance; diagnostics never recover it from a name or
+    /// query the selected classifier's owner again.
+    pub companion_owner: Option<TypeName>,
+}
 
 /// Complete singleton value denoted by a classifier identity. A class with a companion denotes
 /// that nested singleton; an object denotes itself. This records the Kotlin value receiver;
@@ -14,11 +23,13 @@ pub(super) fn classifier_singleton_value(
     if classifier.is_object() {
         return Some(SingletonValue {
             classifier: internal,
+            companion_owner: None,
         });
     }
     let (_, companion) = classifier.companion_object.clone()?;
     Some(SingletonValue {
         classifier: companion,
+        companion_owner: Some(internal),
     })
 }
 
@@ -58,5 +69,6 @@ fn static_this_singleton(
         .filter(|instance| ty == Ty::obj_name(instance.companion))
         .map(|instance| SingletonValue {
             classifier: instance.companion,
+            companion_owner: None,
         })
 }

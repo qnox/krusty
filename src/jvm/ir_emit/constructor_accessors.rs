@@ -13,7 +13,7 @@
 //! accessors (`static_accessors`), at the first call from another class.
 
 use super::constructor_defaults::emit_ctor_marker_accessor;
-use super::{class_ctor_jvm_tys, jvm_tys, ClassWriter};
+use super::{class_ctor_jvm_tys, jvm_tys, secondary_prefix_jvm_tys, ClassWriter};
 use crate::ir::{
     ClassId, CtorDelegateTarget, IrClass, IrConstructorAccess, IrConstructorTarget, IrFile,
 };
@@ -134,7 +134,7 @@ pub(super) fn emit_accessor(
         OwnerConstructorPrefix::none()
     };
     let Some(secondary) = ordinal.checked_sub(1) else {
-        let declared = class_ctor_jvm_tys(class);
+        let declared = class_ctor_jvm_tys(ir, class);
         let identities = owner_prefix
             .identities()
             .chain(primary_constructor_identities(ir, class, &declared))
@@ -153,7 +153,7 @@ pub(super) fn emit_accessor(
         .types
         .iter()
         .copied()
-        .chain(jvm_tys(&constructor.prefix_params))
+        .chain(secondary_prefix_jvm_tys(ir, class, constructor))
         .chain(jvm_tys(&constructor.params))
         .collect::<Vec<_>>();
     let identities =

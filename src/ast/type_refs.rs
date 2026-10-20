@@ -5,7 +5,89 @@
 //! transformations with no resolution in them, which is why they sit beside the node rather than in
 //! the AST facade.
 
-use super::{AnnotationRef, TypeRef};
+use super::AnnotationRef;
+use crate::diag::Span;
+
+#[derive(Clone, Debug)]
+pub struct TypeRef {
+    pub name: String,
+    /// Nullability, function-type shape, and use-site projection flags.
+    pub flags: TrFlags,
+    /// Function result or the abbreviated classifier argument retained by parser syntax.
+    pub arg: Option<Box<TypeRef>>,
+    /// Classifier arguments in semantic application order.
+    pub targs: Vec<TypeRef>,
+    pub span: Span,
+    /// Written function parameters; `arg` owns the result.
+    pub fun_params: Box<[TypeRef]>,
+    pub fun_context_count: u32,
+    /// Type-argument lists written before the last qualified-name segment.
+    /// This syntax is rare and must not widen every expression carrying an inline `TypeRef`.
+    /// The indirect owner keeps the common empty representation to one word. Qualified-segment
+    /// syntax is rare, so paying one owner allocation when present is preferable to widening every
+    /// expression that embeds a `TypeRef`.
+    pub qualifier_arguments: QualifierArgumentLists,
+}
+
+/// One `<…>` list written on a segment of a qualified type or annotation reference.
+///
+/// The arguments remain syntax owned by this exact occurrence even though package-owned results
+/// never participate in classifier application. Resolution must still visit them for diagnostics;
+/// annotation names have no ordinary `TypeRef::targs` path from which they could be recovered.
+#[derive(Clone, Debug)]
+pub struct QualifierSegmentArguments {
+    pub segment: u32,
+    pub span: Span,
+    pub arguments: Box<[TypeRef]>,
+}
+
+/// Rare type-argument lists written on qualified-name segments before the selected classifier.
+///
+/// `TypeRef` is embedded directly in several expression variants. A `Vec` or boxed slice would
+/// reserve two or three words in every such expression even though almost every type has no
+/// qualified-segment arguments. This exact syntax owner is one word when empty.
+#[derive(Clone, Debug, Default)]
+pub struct QualifierArgumentLists(Option<Box<QualifierArgumentListStorage>>);
+
+#[derive(Clone, Debug)]
+struct QualifierArgumentListStorage(Vec<QualifierSegmentArguments>);
+
+impl QualifierArgumentLists {
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_none()
+    }
+
+    #[inline]
+    pub fn iter(&self) -> std::slice::Iter<'_, QualifierSegmentArguments> {
+        self.0
+            .as_deref()
+            .map_or([].as_slice(), |storage| storage.0.as_slice())
+            .iter()
+    }
+}
+
+impl FromIterator<QualifierSegmentArguments> for QualifierArgumentLists {
+    fn from_iter<T: IntoIterator<Item = QualifierSegmentArguments>>(iter: T) -> Self {
+        let values = iter.into_iter().collect::<Vec<_>>();
+        Self((!values.is_empty()).then(|| Box::new(QualifierArgumentListStorage(values))))
+    }
+}
+
+impl From<Vec<QualifierSegmentArguments>> for QualifierArgumentLists {
+    fn from(values: Vec<QualifierSegmentArguments>) -> Self {
+        values.into_iter().collect()
+    }
+}
+
+impl<'a> IntoIterator for &'a QualifierArgumentLists {
+    type Item = &'a QualifierSegmentArguments;
+    type IntoIter = std::slice::Iter<'a, QualifierSegmentArguments>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
 
 /// Bit-packed [`TypeRef`] flags.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -115,8 +197,9 @@ impl TypeRef {
             arg: None,
             targs: Vec::new(),
             span: annotation.span,
-            fun_params: Vec::new(),
+            fun_params: Box::new([]),
             fun_context_count: 0,
+            qualifier_arguments: QualifierArgumentLists::default(),
         }
     }
 

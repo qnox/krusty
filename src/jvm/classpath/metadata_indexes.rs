@@ -14,6 +14,7 @@ use crate::name_tree::{NameId, NameTree};
 use crate::types::{type_name, TypeName};
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Why an entry's declarations could not be indexed or loaded.
 #[derive(Debug)]
@@ -348,23 +349,31 @@ fn parse_aliases_from_bytes(
     let Some(class) = parse_metadata_class(bytes, internal)? else {
         return Ok(());
     };
-    for alias in crate::jvm::metadata::metadata_type_aliases(&class) {
-        let name = alias.name;
-        index.type_aliases.insert(name, type_name(&alias.target));
+    insert_type_aliases(&class, |_| true, index);
+    Ok(())
+}
+
+/// A Kotlin file facade (`*Kt`) is where a top-level type alias is recorded.
+/// Record the type aliases `class` declares whose name `keep` accepts.
+fn insert_type_aliases(class: &ClassInfo, keep: impl Fn(TypeName) -> bool, index: &mut TypeIndex) {
+    for alias in crate::jvm::metadata::metadata_type_aliases(class) {
+        if !keep(alias.name) {
+            continue;
+        }
+        let target = type_name(&alias.target);
+        index.type_aliases.insert(alias.name, target);
         index.alias_expansions.insert(
-            name,
+            alias.name,
             (
-                type_name(&alias.target),
+                target,
                 alias.formals.clone(),
                 alias.expansion,
                 alias.expansion_spelling.clone(),
             ),
         );
     }
-    Ok(())
 }
 
-/// A Kotlin file facade (`*Kt`) is where a top-level type alias is recorded.
 fn is_type_aliases_kt(internal: &str) -> bool {
     internal
         .rsplit('/')
@@ -416,6 +425,42 @@ pub(super) fn build_entry_package_types(
             }
         }
         Entry::Jimage(_) | Entry::CtSym { .. } => {}
+    }
+    Ok(index)
+}
+
+/// The type aliases package `package` declares in a completely catalogued entry. They live in the
+/// package's `kotlin_module` file facades, which are catalogued under the package they declare even
+/// when `@JvmPackageName` stores them elsewhere, and in any `*Kt` class of the package's own
+/// directory. Only those classes are read, through `load`, so one package's aliases never decode
+/// every facade of the entry.
+pub(super) fn complete_entry_package_types(
+    packages: &JarPackages,
+    package: TypeName,
+    mut load: impl FnMut(TypeName) -> Result<Option<Arc<ClassInfo>>, ReadError>,
+) -> Result<TypeIndex, ClassMetadataLoadError> {
+    let mut carriers: Vec<NameId> = packages
+        .entry_name(package)
+        .map(|entry| entry.facades.clone())
+        .unwrap_or_default();
+    if let Some(directory) = crate::types::existing_type_name_in(&packages.names, package) {
+        carriers.extend(packages.classes.iter().copied().filter(|&class| {
+            packages.names.parent(class).unwrap_or(NameTree::ROOT) == directory
+                && packages.names.segment(class).ends_with("Kt")
+        }));
+    }
+    let mut seen = HashSet::default();
+    let mut index = TypeIndex::default();
+    for carrier in carriers {
+        if !seen.insert(carrier) {
+            continue;
+        }
+        let internal = crate::types::type_name_from(&packages.names, carrier);
+        let class =
+            load(internal).map_err(|error| ClassMetadataLoadError::Class(internal, error))?;
+        if let Some(class) = class {
+            insert_type_aliases(&class, |alias| alias.namespace() == package, &mut index);
+        }
     }
     Ok(index)
 }
@@ -669,5 +714,51 @@ mod tests {
             "cannot read classpath entry /undecodable/lib.jar: undecodable entry name: \
              i/o error: undecodable entry name"
         );
+    }
+
+    #[test]
+    fn a_package_alias_table_reads_only_that_packages_classes() {
+        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        // A private copy gives the jar an entry identity no other test has warmed.
+        let directory = super::super::test_support::test_temp_dir("package-alias-reads");
+        let jar = directory.join("kotlin-stdlib-copy.jar");
+        std::fs::copy(&stdlib, &jar).expect("copy stdlib");
+        let cp = super::super::Classpath::new(vec![jar]);
+        let package = type_name("kotlin/collections");
+
+        let target = cp.type_alias_target_name(type_name("kotlin/collections/ArrayList"));
+
+        assert!(target.is_some_and(|target| target.matches("java/util/ArrayList")));
+        let parsed: Vec<TypeName> = cp.entry_caches[0]
+            .classes
+            .read()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect();
+        assert!(!parsed.is_empty());
+        let outside: Vec<String> = parsed
+            .iter()
+            // `@JvmPackageName` stores some of the package's facades one level down
+            // (`kotlin/collections/unsigned/UArraysKt`); they still belong to `kotlin/collections`.
+            .filter(|class| {
+                class.namespace() != package && class.namespace().parent() != Some(package)
+            })
+            .map(|class| class.render())
+            .collect();
+        assert_eq!(outside, Vec::<String>::new());
+        assert!(
+            !super::super::global_entry_types()
+                .map
+                .read()
+                .unwrap()
+                .contains_key(&cp.cache_key[0]),
+            "one package's aliases must not build the whole jar's alias table"
+        );
+
+        drop(cp);
+        std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 }

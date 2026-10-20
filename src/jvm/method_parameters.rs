@@ -204,18 +204,21 @@ pub(super) fn value_class_interface_entry(
         .collect()
 }
 
+/// A constructor's prefix parameters in their physical order.
 fn constructor_prefix(ir: &IrFile, class: &IrClass, count: usize) -> Vec<MethodParameter> {
     assert!(
         count <= class.ctor_args.len(),
         "constructor prefix exceeds its arguments"
     );
     let identities = crate::jvm::parameter_names::constructor_identities(&class.ctor_args);
-    class
+    let captures = crate::jvm::capture_names::class_captures(ir, class);
+    let prefix = class
         .ctor_args
         .iter()
         .zip(&identities)
+        .zip(captures)
         .take(count)
-        .map(|(argument, identity)| {
+        .map(|((argument, identity), capture)| {
             // The enclosing instance is the generated identity constructor_identities recorded.
             // An unnamed capture maps to a positional identity and is named by its storage below.
             if let IrParameterRole::Generated(role @ IrGeneratedParameterRole::OuterInstance) =
@@ -225,10 +228,8 @@ fn constructor_prefix(ir: &IrFile, class: &IrClass, count: usize) -> Vec<MethodP
                     .expect("a generated constructor prefix has a JVM parameter name");
                 return parameter(name, generated_constructor_flags(role));
             }
-            let name = argument
-                .capture
-                .as_ref()
-                .map(|capture| crate::jvm::capture_names::class_capture(ir, class, capture).field)
+            let name = capture
+                .map(|capture| capture.field)
                 .or_else(|| {
                     let field = argument.field_index?;
                     Some(class.fields.get(field as usize)?.name.clone())
@@ -237,7 +238,8 @@ fn constructor_prefix(ir: &IrFile, class: &IrClass, count: usize) -> Vec<MethodP
                 .expect("a captured constructor prefix needs an exact storage name");
             parameter(name, SYNTHETIC)
         })
-        .collect()
+        .collect();
+    crate::jvm::ir_emit::capture_order::physical(ir, class, prefix)
 }
 
 /// kotlinc marks an inner class constructor's outer instance `MANDATED`: the Java language requires
@@ -279,7 +281,7 @@ pub(super) fn primary_constructor_identities(
 ) -> Vec<Option<String>> {
     let identities = crate::jvm::parameter_names::constructor_local_variables(ir, class);
     assert_eq!(identities.len(), physical_parameters.len());
-    identities
+    crate::jvm::ir_emit::capture_order::physical(ir, class, identities)
 }
 
 /// Everything a class KIND prepends to EVERY constructor it declares, ahead of what the

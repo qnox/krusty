@@ -511,7 +511,7 @@ pub struct ClassWriter {
     deprecated_methods: crate::fx_hash::HashSet<(u16, u16)>,
     /// Candidate `InnerClasses` entries (the file's nested classes). `finish` emits only those whose
     /// `inner` is actually referenced as a class constant — kotlinc's rule.
-    inner_class_candidates: Vec<InnerClassSpec>,
+    inner_class_candidates: Vec<std::rc::Rc<InnerClassSpec>>,
     inner_class_resolver: Option<InnerClassResolver>,
     inner_class_table: inner_classes::InnerClassTable,
     value_classes: Rc<crate::jvm::bytecode_passes::redundant_boxing::ValueClassDescriptors>,
@@ -1511,7 +1511,7 @@ impl ClassWriter {
             // `getEnclosingClass`/`getDeclaringClass` when only one side carries the entry. The
             // reference filter below is right for every OTHER entry (a nested class this file merely
             // uses), and kotlinc emits both sides for its own nest too.
-            let referenced: Vec<InnerClassSpec> = self
+            let referenced: Vec<std::rc::Rc<InnerClassSpec>> = self
                 .inner_class_candidates
                 .iter()
                 .filter(|spec| self.retains_inner_class(spec))

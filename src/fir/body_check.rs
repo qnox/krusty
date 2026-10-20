@@ -57,6 +57,7 @@ mod local_classes;
 mod local_function_tests;
 mod local_functions;
 mod local_increments;
+mod outer_values;
 mod session;
 #[cfg(test)]
 mod substitution_tests;
@@ -190,6 +191,17 @@ pub struct CheckedBodyParameter<'a> {
     pub context_kind: crate::types::ContextParameterKind,
     pub inline_modifier: crate::types::InlineParameterModifier,
     pub name_binding: CheckedBodyParameterNameBinding,
+}
+
+impl CheckedBodyParameter<'_> {
+    /// How an inline call expands this parameter, from its declared type and modifier.
+    fn inline_expansion_mode(&self) -> crate::types::InlineExpansionMode {
+        crate::types::InlineExpansionMode::declared(
+            false,
+            matches!(self.ty.get(), Ty::Fun(_)),
+            self.inline_modifier,
+        )
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -366,13 +378,7 @@ fn check_body_unit_with_parameters_and_defaults(
         .collect::<Vec<_>>();
     let mut inline_expansion_modes = parameters
         .iter()
-        .map(|parameter| {
-            crate::types::InlineExpansionMode::declared(
-                false,
-                matches!(parameter.ty.get(), Ty::Fun(_)),
-                parameter.inline_modifier,
-            )
-        })
+        .map(CheckedBodyParameter::inline_expansion_mode)
         .collect::<Vec<_>>();
     if receiver_shape.extension_receiver.is_some() {
         let receiver_position = receiver_shape.context_receivers.len();
@@ -416,14 +422,9 @@ fn check_body_unit_with_parameters_and_defaults(
     // Convert transient parser coordinates into line-only output facts before this bounded syntax
     // unit is released. Checked/default/inline FIR may carry the resulting numbers, but never a
     // file offset or AST identity.
-    let (expression_lines, statement_lines) = crate::fir::body::debug_lines::of_file(file);
-    checker.body.attach_debug_lines(
-        source,
-        file.source_line_count,
-        checker.origins,
-        &expression_lines,
-        &statement_lines,
-    );
+    checker
+        .body
+        .attach_debug_lines(source, file, checker.origins);
     Ok(checker.body)
 }
 
@@ -473,6 +474,9 @@ fn bind_parameters_and_check_defaults(
         checker
             .body
             .add_parameter(FirValueParameter::bound(origin, value, parameter.ty));
+        if parameter.inline_expansion_mode() == crate::types::InlineExpansionMode::Splice {
+            checker.body.add_spliced_inline_parameter(value);
+        }
     }
     if defaults.next().is_some() {
         return Err(checker.failure(None, BodyCheckFailureKind::UnsupportedCallShape));
@@ -489,7 +493,7 @@ struct BodyFirChecker<'a> {
     body: FirBody,
     scopes: Vec<HashMap<String, LocalBinding>>,
     delegate_scopes: Vec<HashMap<String, LocalDelegateBinding>>,
-    outer_values: HashMap<String, (u32, LocalBinding)>,
+    outer_values: outer_values::OuterValues,
     outer_delegates: HashMap<String, (u32, LocalDelegateBinding)>,
     class_values: HashMap<String, ClassCaptureBinding>,
     class_capture_values: Vec<(String, ClassCaptureBinding)>,
@@ -940,7 +944,7 @@ impl BodyFirChecker<'_> {
             body,
             scopes: vec![HashMap::default()],
             delegate_scopes: vec![HashMap::default()],
-            outer_values: HashMap::default(),
+            outer_values: outer_values::OuterValues::default(),
             outer_delegates: HashMap::default(),
             class_values: class_context.values,
             class_capture_values: class_context.capture_values,
@@ -1080,7 +1084,7 @@ impl BodyFirChecker<'_> {
             .filter_map(|scope| scope.get(name).copied().map(|binding| (None, binding)))
             .chain(
                 self.outer_values
-                    .get(name)
+                    .shadowed(name)
                     .map(|(depth, binding)| (Some(*depth), *binding)),
             )
             .nth(shadow_depth)

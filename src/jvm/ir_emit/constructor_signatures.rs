@@ -5,27 +5,30 @@
 //! outer instance an inner class takes. An enum constructor and the constructor of an enum entry's
 //! subclass take the entry's name and ordinal first.
 
+use super::capture_order::physical;
 use super::declaration_types::class_ctor_jvm_tys;
 use super::signature_formatter::{ConstructorParameter, JvmSignatureFormatter};
 use super::type_descriptor;
-use crate::ir::{IrClass, IrCtorParameterProvenance};
+use crate::ir::{IrClass, IrCtorParameterProvenance, IrFile};
 use crate::types::Ty;
 
 /// The primary constructor's `Signature`, or `None` when it needs none.
 pub(super) fn primary_constructor_signature(
     formatter: &JvmSignatureFormatter<'_>,
+    ir: &IrFile,
     class: &IrClass,
 ) -> Option<String> {
-    formatter.constructor_signature(&primary_constructor_parameters(class))
+    formatter.constructor_signature(&primary_constructor_parameters(ir, class))
 }
 
 /// An enum's constructor `Signature`: its source parameters behind the name and ordinal.
 pub(super) fn enum_constructor_signature(
     formatter: &JvmSignatureFormatter<'_>,
+    ir: &IrFile,
     class: &IrClass,
 ) -> Option<String> {
     let parameters = enum_prefix()
-        .chain(primary_constructor_parameters(class))
+        .chain(primary_constructor_parameters(ir, class))
         .collect::<Vec<_>>();
     formatter.constructor_signature(&parameters)
 }
@@ -63,17 +66,16 @@ fn enum_prefix() -> impl Iterator<Item = ConstructorParameter> {
     .into_iter()
 }
 
-fn primary_constructor_parameters(class: &IrClass) -> Vec<ConstructorParameter> {
-    let descriptors = class_ctor_jvm_tys(class);
+fn primary_constructor_parameters(ir: &IrFile, class: &IrClass) -> Vec<ConstructorParameter> {
+    let descriptors = class_ctor_jvm_tys(ir, class);
     assert_eq!(
         class.ctor_args.len(),
         descriptors.len(),
         "{}: a primary constructor's recorded parameters match its JVM parameters",
         class.fq_name()
     );
-    class
-        .ctor_args
-        .iter()
+    physical(ir, class, class.ctor_args.iter().collect())
+        .into_iter()
         .zip(descriptors)
         .map(|(argument, descriptor)| {
             if argument.provenance == IrCtorParameterProvenance::EnclosingInstance {

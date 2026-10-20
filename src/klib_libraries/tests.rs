@@ -194,7 +194,10 @@ fn a_package_type_alias_is_published_from_its_metadata_declaration() {
             constants: Vec::new(),
             aliases: vec![crate::metadata::builder::TypeAliasMeta {
                 name: "Transform".to_string(),
-                formals: vec!["T".to_string()],
+                formals: vec![crate::metadata::builder::TypeAliasFormalMeta {
+                    source_name: "T".to_string(),
+                    semantic_name: "T".to_string(),
+                }],
                 expansion,
                 visibility: Visibility::Public,
                 expansion_spelling: Default::default(),

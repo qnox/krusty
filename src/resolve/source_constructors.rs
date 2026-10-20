@@ -185,33 +185,34 @@ impl Checker<'_> {
 
     /// The semantic superclass application written by the active classifier header.
     ///
-    /// Local classifier headers can be finalized only on their lexical Pass-2 rung, so prefer that
-    /// checked edge when present. Ordinary classifiers use the stable Pass-1 classifier header.
+    /// Local classifier headers can be finalized only on their lexical Pass-2 rung; when that rung
+    /// owns `current`, its answer (including no superclass) is final. A stable source declaration
+    /// likewise owns the answer before an external provider is considered.
     /// This is deliberately independent of `ClassDecl::base_class`: bounded parsing cannot
     /// syntactically distinguish a parenless superclass (`class C : Base`) from an interface in a
     /// different declaration unit, while the finalized semantic header already made that decision.
     pub(super) fn applied_declared_supertype(&self, current: TypeName) -> Option<Ty> {
-        if let Some(supertype) = self
-            .resolved_body_local_supertypes
-            .get(&current)
-            .and_then(|supertypes| {
-                supertypes.iter().find(|supertype| {
+        if let Some(supertypes) = self.resolved_body_local_supertypes.get(&current) {
+            return supertypes
+                .iter()
+                .find(|supertype| {
                     supertype
                         .non_null()
                         .kotlin_class_internal()
                         .and_then(|owner| self.resolver().classifier(owner))
                         .is_some_and(|classifier| !classifier.is_interface())
                 })
-            })
-            .copied()
-        {
-            return Some(supertype);
+                .copied();
         }
-        if let Some(superclass) = self.resolved_index.and_then(|index| {
-            let declaration = index.classifier_declaration(current)?;
-            index.classifier_header(declaration)?.superclass
+        if let Some((index, declaration)) = self.resolved_index.and_then(|index| {
+            index
+                .classifier_declaration(current)
+                .map(|declaration| (index, declaration))
         }) {
-            return Some(superclass.get());
+            return index
+                .classifier_header(declaration)
+                .and_then(|header| header.superclass)
+                .map(crate::fir::ResolvedTy::get);
         }
         let source = self.fed_source();
         let classifier = source.classifier(current)?;

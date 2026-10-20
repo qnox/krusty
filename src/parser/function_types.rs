@@ -86,8 +86,9 @@ impl Parser<'_> {
             arg: Some(Box::new(ret)),
             targs: Vec::new(),
             span,
-            fun_params,
+            fun_params: fun_params.into_boxed_slice(),
             fun_context_count,
+            qualifier_arguments: Default::default(),
         }
     }
 
@@ -101,8 +102,9 @@ impl Parser<'_> {
             arg: None,
             targs: Vec::new(),
             span,
-            fun_params: Vec::new(),
+            fun_params: Box::new([]),
             fun_context_count: 0,
+            qualifier_arguments: Default::default(),
         }
     }
 }

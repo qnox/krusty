@@ -99,9 +99,11 @@ impl Parser<'_> {
         self.expect(TokenKind::LParen, "'('");
         self.skip_newlines();
         while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+            let ty = self.parse_type();
             receivers.push(Param {
                 name: "_".to_owned(),
-                ty: self.parse_type(),
+                span: ty.span,
+                ty,
                 context_kind: crate::types::ContextParameterKind::LegacyReceiver,
                 is_vararg: false,
                 vararg_span: None,

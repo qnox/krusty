@@ -24,6 +24,87 @@ use crate::spelling::Spelled;
 use crate::symbol_source::SymbolSource as _;
 use crate::types::{Ty, TypeName};
 
+#[cfg(test)]
+mod tests;
+
+/// Check finalized top-level type-alias targets while their source syntax is still live. Stable
+/// declaration identity owns the semantic expansion; the parallel syntax supplies only spans.
+pub(crate) fn check_finalized_top_level_type_alias_bounds(
+    files: &[crate::ast::File],
+    index: &crate::fir::ResolvedModuleIndex,
+    symbols: &super::SymbolTable,
+    diags: &mut crate::diag::DiagSink,
+) {
+    for (file_index, file) in files.iter().enumerate() {
+        let source = crate::fir::SourceFileId::from_raw(file_index as u32);
+        let mut declarations = index
+            .source_inventory(source)
+            .iter()
+            .copied()
+            .filter(|declaration| {
+                index
+                    .declaration_header(*declaration)
+                    .is_some_and(|header| {
+                        header.owner.is_none()
+                            && header.kind == crate::fir::DeclarationKind::TypeAlias
+                    })
+            })
+            .collect::<Vec<_>>();
+        declarations.sort_unstable_by_key(|declaration| {
+            index
+                .source_order(*declaration)
+                .expect("an inventoried top-level type alias has source order")
+        });
+        if declarations.is_empty() {
+            continue;
+        }
+
+        // Earlier declaration validation may reject one alias while retaining its parser syntax
+        // for the diagnostic ledger. The declaration anchor's sibling is the stable inventory edge
+        // to that syntax; source order only orders the stable side and never substitutes for
+        // identity by zipping lists whose rejected members differ.
+        let declarations = declarations
+            .into_iter()
+            .filter_map(|declaration| {
+                let header = index.type_alias_header(declaration)?;
+                let anchor = index
+                    .declaration_anchor(declaration)
+                    .expect("an inventoried top-level type alias has an anchor");
+                assert_eq!(anchor.source, source);
+                assert_eq!(anchor.owner, None);
+                assert_eq!(anchor.kind, crate::fir::DeclarationKind::TypeAlias);
+                let sibling = usize::try_from(anchor.sibling)
+                    .expect("a type-alias sibling fits the active parser arena");
+                let syntax = file
+                    .type_alias_decls
+                    .get(sibling)
+                    .expect("a stable type-alias sibling names its exact parser declaration");
+                Some((syntax, header))
+            })
+            .collect::<Vec<_>>();
+
+        diags.set_file(file_index as u32);
+        let mut checker = super::make_checker_with_index(
+            file,
+            file_index as u32,
+            Some(files),
+            symbols,
+            Some(index),
+            None,
+            None,
+            diags,
+        );
+        checker.push_file_policies(index.file_lexical_policies(source));
+        for (syntax, header) in declarations {
+            checker.check_type_alias_declaration_bounds(
+                &syntax.target,
+                header.expansion.get(),
+                &header.expansion_spelling,
+            );
+        }
+    }
+}
+
 /// Transient context owned by upper-bound checking while one type reference is resolved.
 #[derive(Default)]
 pub(super) struct UpperBoundViolationState {
@@ -274,6 +355,7 @@ impl Checker<'_> {
     ) {
         let previous = std::mem::replace(&mut self.upper_bound_violations.alias_declaration, true);
         self.check_finalized_type_bounds(target, expansion, spelled);
+        self.check_finalized_package_type_arguments(target, expansion, spelled);
         self.upper_bound_violations.alias_declaration = previous;
     }
 
@@ -448,27 +530,6 @@ impl Checker<'_> {
 }
 
 impl<'a> Checker<'a> {
-    /// Check every stable top-level typealias declaration retained by this file. The syntax only
-    /// supplies diagnostic spans; the stable identity supplies the finalized expansion.
-    pub(super) fn check_file_type_alias_bounds(&mut self) {
-        let aliases = self.file.type_alias_decls.clone();
-        for alias in aliases {
-            let identity = crate::types::type_name_child(self.source_package_name(), &alias.name);
-            let Some(header) = self
-                .resolved_index
-                .and_then(|index| index.type_alias_by_identity(identity))
-                .cloned()
-            else {
-                continue;
-            };
-            self.check_type_alias_declaration_bounds(
-                &alias.target,
-                header.expansion.get(),
-                &header.expansion_spelling,
-            );
-        }
-    }
-
     /// Check stable aliases owned by `declaration`. Pass 1's declaration identities and source
     /// order pair retained syntax with finalized headers; target spellings are never resolved again.
     pub(super) fn check_stable_nested_type_alias_bounds(
@@ -515,38 +576,36 @@ impl<'a> Checker<'a> {
         &mut self,
         class: &crate::ast::ClassDecl,
         declaration: crate::fir::DeclarationId,
-    ) {
+    ) -> bool {
         let Some(header) = self
             .resolved_index
             .and_then(|index| index.classifier_header(declaration))
         else {
-            return;
+            return false;
         };
+        if class.base_class.is_some() != class.base_class_span.is_some() {
+            return false;
+        }
         let spellings = self.finalized_declaration_spellings(Some(declaration));
-        if header.interfaces.len() == class.supertypes.len() {
+        if let (Some(name), Some(span)) = (class.base_class.as_ref(), class.base_class_span) {
+            if header.interfaces.len() != class.supertypes.len() {
+                return false;
+            }
             for (index, (reference, resolved)) in class
                 .supertypes
                 .iter()
                 .zip(header.interfaces.iter())
                 .enumerate()
             {
-                self.record_finalized_supertype(
-                    reference,
-                    resolved.get(),
-                    spellings.supertype(index),
-                );
-                self.check_finalized_type_bounds(
+                self.record_finalized_declaration_type(
                     reference,
                     resolved.get(),
                     spellings.supertype(index),
                 );
             }
-        }
-        if let (Some(name), Some(span), Some(superclass)) = (
-            class.base_class.as_ref(),
-            class.base_class_span,
-            header.superclass,
-        ) {
+            let Some(superclass) = header.superclass else {
+                return false;
+            };
             // A superclass constructor call keeps its written type apart from the call; only the
             // arguments and the reference's span take part in the check.
             let reference = TypeRef {
@@ -555,12 +614,30 @@ impl<'a> Checker<'a> {
                 arg: None,
                 targs: class.base_type_args.clone(),
                 span,
-                fun_params: Vec::new(),
+                fun_params: Box::new([]),
                 fun_context_count: 0,
+                qualifier_arguments: Default::default(),
             };
-            self.record_finalized_supertype(&reference, superclass.get(), &spellings.superclass);
-            self.check_finalized_type_bounds(&reference, superclass.get(), &spellings.superclass);
+            self.record_finalized_declaration_type(
+                &reference,
+                superclass.get(),
+                &spellings.superclass,
+            );
+        } else {
+            let resolved = header.declared_supertypes().collect::<Vec<_>>();
+            if resolved.len() != class.supertypes.len() {
+                return false;
+            }
+            for (index, (reference, resolved)) in class.supertypes.iter().zip(resolved).enumerate()
+            {
+                self.record_finalized_declaration_type(
+                    reference,
+                    resolved.get(),
+                    spellings.supertype(index),
+                );
+            }
         }
+        true
     }
 
     /// Check the declared types of a member without a body (an abstract or interface function or
@@ -569,58 +646,83 @@ impl<'a> Checker<'a> {
     /// `declaration`.
     pub(super) fn check_bodyless_member_bounds(
         &mut self,
+        scope: &CheckerScope<'_>,
         declaration: Option<crate::fir::DeclarationId>,
         receiver: Option<&TypeRef>,
         parameters: &[(&TypeRef, bool)],
         ret: Option<&TypeRef>,
-    ) {
+        getter_ret: Option<&TypeRef>,
+    ) -> bool {
         let Some((declaration, index)) = declaration.zip(self.resolved_index) else {
-            return;
+            return false;
         };
-        let spellings = self.finalized_declaration_spellings(Some(declaration));
-        if let Some(reference) = receiver {
-            let finalized = index
-                .callable_for_declaration(declaration)
-                .and_then(|callable| callable.shape.extension_receiver)
-                .or_else(|| {
-                    index
-                        .property_for_declaration(declaration)
-                        .and_then(|property| index.property(property))
-                        .and_then(|property| property.extension_receiver)
-                });
-            if let Some(finalized) = finalized {
-                self.record_finalized_declaration_type(
-                    reference,
-                    finalized.get(),
-                    &spellings.receiver,
-                );
-            }
+        let spellings = self.finalized_declaration_spellings_for_binding(Some(declaration));
+        let finalized_receiver = index
+            .callable_for_declaration(declaration)
+            .and_then(|callable| callable.shape.extension_receiver)
+            .or_else(|| {
+                index
+                    .property_for_declaration(declaration)
+                    .and_then(|property| index.property(property))
+                    .and_then(|property| property.extension_receiver)
+            });
+        if receiver.is_some() != finalized_receiver.is_some() {
+            return false;
         }
-        let Some(signature) = index.signature(declaration) else {
-            return;
-        };
-        if signature.parameters.len() == parameters.len() {
-            for (position, ((reference, is_vararg), finalized)) in parameters
-                .iter()
-                .zip(signature.parameters.iter())
-                .enumerate()
-            {
-                let finalized = finalized.get();
-                self.record_finalized_parameter_type(
-                    reference,
-                    *is_vararg,
-                    finalized,
-                    spellings.param(position),
-                );
-            }
-        }
-        if let Some(reference) = ret {
-            self.record_finalized_declaration_type(
+        if let (Some(reference), Some(finalized)) = (receiver, finalized_receiver) {
+            self.record_or_bind_deferred_declaration_type(
+                scope,
+                declaration,
                 reference,
-                signature.result.get(),
-                &spellings.ret,
+                finalized.get(),
+                spellings
+                    .as_ref()
+                    .and_then(|spellings| spellings.receiver()),
             );
         }
+        let Some(signature) = index.signature(declaration) else {
+            return false;
+        };
+        if signature.parameters.len() != parameters.len() {
+            return false;
+        }
+        for (position, ((reference, is_vararg), finalized)) in parameters
+            .iter()
+            .zip(signature.parameters.iter())
+            .enumerate()
+        {
+            self.record_or_bind_deferred_parameter_type(
+                scope,
+                declaration,
+                reference,
+                *is_vararg,
+                finalized.get(),
+                spellings
+                    .as_ref()
+                    .and_then(|spellings| spellings.param(position)),
+            );
+        }
+        if let Some(reference) = ret {
+            self.record_or_bind_deferred_declaration_type(
+                scope,
+                declaration,
+                reference,
+                signature.result.get(),
+                spellings.as_ref().and_then(|spellings| spellings.ret()),
+            );
+        }
+        if let Some(reference) = getter_ret {
+            self.record_or_bind_deferred_declaration_type(
+                scope,
+                declaration,
+                reference,
+                signature.result.get(),
+                spellings
+                    .as_ref()
+                    .and_then(|spellings| spellings.getter_ret()),
+            );
+        }
+        true
     }
 
     /// [`Self::check_bodyless_member_bounds`] for a method of the class rung `scope`, when it has
@@ -635,35 +737,97 @@ impl<'a> Checker<'a> {
             return;
         }
         let method_scope = scope.child(ScopeKind::Function { receiver: None });
-        let parameters = method_scope
-            .visible_tparams()
-            .symbolic_extended_with(
+        let finalized_local_header =
+            declaration
+                .zip(self.resolved_index)
+                .is_some_and(|(declaration, index)| {
+                    index.declaration_header(declaration).is_some_and(|header| {
+                        header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
+                    }) && !self.has_deferred_local_header(Some(declaration))
+                });
+        let deferred_local_header = self.has_deferred_local_header(declaration);
+        let visible = method_scope.visible_tparams();
+        let parameters = if finalized_local_header {
+            declaration
+                .and_then(|declaration| {
+                    self.finalized_type_parameters(&visible, declaration, &function.type_params)
+                })
+                .unwrap_or_else(|| {
+                    if let Some(declaration) = declaration {
+                        self.failed_local_declaration_bindings.insert(declaration);
+                    }
+                    visible.clone()
+                })
+        } else if deferred_local_header {
+            self.bind_deferred_type_parameters(
+                &method_scope,
                 &function.type_params,
                 &function.type_param_bounds,
-                &|name| self.select_classifier(&method_scope, name).found(),
-            )
-            .alpha_renamed_declaration(
-                &function.type_params,
-                self.compilation_id,
-                self.file_index,
                 function.signature_span.lo,
-            );
+                true,
+            )
+        } else {
+            visible
+                .symbolic_extended_with(
+                    &function.type_params,
+                    &function.type_param_bounds,
+                    &|name| self.select_classifier(&method_scope, name).found(),
+                )
+                .alpha_renamed_declaration(
+                    &function.type_params,
+                    self.compilation_id,
+                    self.file_index,
+                    function.signature_span.lo,
+                )
+        };
         method_scope.declare_tparams(&function.type_params, &parameters, |name| {
             function.reified_type_params.contains(name)
         });
         let owned = self.publish_function_type_parameter_owner(&method_scope, function);
-        self.check_callable_type_parameter_bounds(&method_scope, &function.type_param_bounds);
+        if finalized_local_header {
+            if let Some(declaration) = declaration {
+                if !self.record_finalized_type_parameter_bounds(
+                    &method_scope,
+                    declaration,
+                    &function.type_params,
+                    &function.type_param_bounds,
+                ) {
+                    self.failed_local_declaration_bindings.insert(declaration);
+                }
+            }
+        } else if !deferred_local_header {
+            self.check_callable_type_parameter_bounds(&method_scope, &function.type_param_bounds);
+        }
+        if deferred_local_header {
+            if let Some(receiver) = function.receiver.as_ref() {
+                self.check_declaration_type(&method_scope, receiver);
+            }
+            for parameter in &function.params {
+                self.check_declaration_type(&method_scope, &parameter.ty);
+            }
+            if let Some(result) = function.ret.as_ref() {
+                self.check_declaration_type(&method_scope, result);
+            }
+            self.restore_type_parameter_owners(owned);
+            return;
+        }
         let value_parameters = function
             .params
             .iter()
             .map(|parameter| (&parameter.ty, parameter.is_vararg))
             .collect::<Vec<_>>();
-        self.check_bodyless_member_bounds(
+        if !self.check_bodyless_member_bounds(
+            &method_scope,
             declaration,
             function.receiver.as_ref(),
             &value_parameters,
             function.ret.as_ref(),
-        );
+            None,
+        ) {
+            if let Some(declaration) = declaration {
+                self.failed_local_declaration_bindings.insert(declaration);
+            }
+        }
         self.restore_type_parameter_owners(owned);
     }
 
@@ -687,28 +851,119 @@ impl<'a> Checker<'a> {
             return;
         }
         let property_scope = scope.child(ScopeKind::Function { receiver: None });
-        let parameters = property_scope
-            .visible_tparams()
-            .symbolic_extended_with(
+        let finalized_local_header =
+            declaration
+                .zip(self.resolved_index)
+                .is_some_and(|(declaration, index)| {
+                    index.declaration_header(declaration).is_some_and(|header| {
+                        header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
+                    }) && !self.has_deferred_local_header(Some(declaration))
+                });
+        let deferred_local_header = self.has_deferred_local_header(declaration);
+        let visible = property_scope.visible_tparams();
+        let parameters = if finalized_local_header {
+            declaration
+                .and_then(|declaration| {
+                    self.finalized_type_parameters(&visible, declaration, &property.type_params)
+                })
+                .unwrap_or_else(|| {
+                    if let Some(declaration) = declaration {
+                        self.failed_local_declaration_bindings.insert(declaration);
+                    }
+                    visible.clone()
+                })
+        } else if deferred_local_header {
+            self.bind_deferred_type_parameters(
+                &property_scope,
                 &property.type_params,
                 &property.type_param_bounds,
-                &|name| self.select_classifier(&property_scope, name).found(),
-            )
-            .alpha_renamed_declaration(
-                &property.type_params,
-                self.compilation_id,
-                self.file_index,
                 property.span.lo,
-            );
+                true,
+            )
+        } else {
+            visible
+                .symbolic_extended_with(
+                    &property.type_params,
+                    &property.type_param_bounds,
+                    &|name| self.select_classifier(&property_scope, name).found(),
+                )
+                .alpha_renamed_declaration(
+                    &property.type_params,
+                    self.compilation_id,
+                    self.file_index,
+                    property.span.lo,
+                )
+        };
         property_scope.declare_property_tparams(property, &parameters);
         let owned = self.publish_property_type_parameter_owner(&property_scope, property);
-        self.check_callable_type_parameter_bounds(&property_scope, &property.type_param_bounds);
-        self.check_bodyless_member_bounds(
+        if finalized_local_header {
+            if let Some(declaration) = declaration {
+                if !self.record_finalized_type_parameter_bounds(
+                    &property_scope,
+                    declaration,
+                    &property.type_params,
+                    &property.type_param_bounds,
+                ) {
+                    self.failed_local_declaration_bindings.insert(declaration);
+                }
+            }
+        } else if !deferred_local_header {
+            self.check_callable_type_parameter_bounds(&property_scope, &property.type_param_bounds);
+        }
+        if deferred_local_header {
+            if let Some(receiver) = property.receiver.as_ref() {
+                self.check_declaration_type(&property_scope, receiver);
+            }
+            for parameter in &property.context_params {
+                self.check_declaration_type(&property_scope, &parameter.ty);
+            }
+            let property_type = property
+                .ty
+                .as_ref()
+                .map(|declared| self.check_declaration_type(&property_scope, declared));
+            let getter_type = property
+                .getter_ty
+                .as_ref()
+                .map(|declared| self.check_declaration_type(&property_scope, declared));
+            if let (Some(property_type), Some(getter_type)) = (property_type, getter_type) {
+                if property_type != Ty::Error
+                    && getter_type != Ty::Error
+                    && property_type != getter_type
+                {
+                    self.diags.error(
+                        property
+                            .getter_ty
+                            .as_ref()
+                            .expect("getter annotation exists")
+                            .span,
+                        format!(
+                            "getter return type '{}' must be equal to the property type '{}'",
+                            getter_type.source_name(),
+                            property_type.source_name(),
+                        ),
+                    );
+                }
+            }
+            self.restore_type_parameter_owners(owned);
+            return;
+        }
+        let context_parameters = property
+            .context_params
+            .iter()
+            .map(|parameter| (&parameter.ty, parameter.is_vararg))
+            .collect::<Vec<_>>();
+        if !self.check_bodyless_member_bounds(
+            &property_scope,
             declaration,
             property.receiver.as_ref(),
-            &[],
-            property.declared_ty(),
-        );
+            &context_parameters,
+            property.ty.as_ref(),
+            property.getter_ty.as_ref(),
+        ) {
+            if let Some(declaration) = declaration {
+                self.failed_local_declaration_bindings.insert(declaration);
+            }
+        }
         self.restore_type_parameter_owners(owned);
     }
 

@@ -33,7 +33,7 @@ pub use entry::{Entry, BOX_RESULT_FRAME};
 
 pub use module_facts::{
     BackendClassifierFact, BackendClassifierSource, BackendFactError, BackendModuleFacts,
-    CheckedBackendClassifiers, UndeterminedType,
+    CheckedBackendClassifiers, EnumEntriesAccessor, UndeterminedType,
 };
 
 use crate::compilation_target::CompilationTarget;

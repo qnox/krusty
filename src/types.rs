@@ -48,8 +48,8 @@ use std::fmt;
 use std::sync::OnceLock;
 pub(crate) use type_parameter_identity::{
     call_site_type_variable, constructor_type_parameter, declaration_type_parameter,
-    generated_function_type_parameter, metadata_type_parameter, postponed_call_type_variable,
-    type_parameter_source_name,
+    generated_function_type_parameter, hidden_captured_type_parameter, metadata_type_parameter,
+    postponed_call_type_variable, type_parameter_source_name,
 };
 
 /// Compile-time policy for Kotlin's `assert` operation. Every backend must guard, retain, or elide
@@ -2135,7 +2135,8 @@ impl AnnotationRetention {
 
 /// One frontend-checked annotation argument. Every classifier identity is resolved before this
 /// crosses into common lowering; backends only choose the physical encoding of the recorded value.
-#[derive(Clone, Debug, PartialEq)]
+/// Its `Debug` form distinguishes every floating value, NaN payloads included.
+#[derive(Clone, PartialEq)]
 pub enum AnnotationValue {
     Int(i32),
     /// A `byte`/`short` element. The JVM writes these with their own element tags (`B`, `S`), so a
@@ -2159,6 +2160,67 @@ pub enum AnnotationValue {
         values: Vec<(String, AnnotationValue)>,
     },
     Array(Vec<AnnotationValue>),
+}
+
+impl std::fmt::Debug for AnnotationValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Int(value) => f.debug_tuple("Int").field(value).finish(),
+            Self::Byte(value) => f.debug_tuple("Byte").field(value).finish(),
+            Self::Short(value) => f.debug_tuple("Short").field(value).finish(),
+            Self::Long(value) => f.debug_tuple("Long").field(value).finish(),
+            Self::Float(value) => f
+                .debug_tuple("Float")
+                .field(&ExactFloat::from(*value))
+                .finish(),
+            Self::Double(value) => f
+                .debug_tuple("Double")
+                .field(&ExactFloat::from(*value))
+                .finish(),
+            Self::Boolean(value) => f.debug_tuple("Boolean").field(value).finish(),
+            Self::Char(value) => f.debug_tuple("Char").field(value).finish(),
+            Self::String(value) => f.debug_tuple("String").field(value).finish(),
+            Self::Enum(class, entry) => f.debug_tuple("Enum").field(class).field(entry).finish(),
+            Self::Class(ty) => f.debug_tuple("Class").field(ty).finish(),
+            Self::Annotation { internal, values } => f
+                .debug_struct("Annotation")
+                .field("internal", internal)
+                .field("values", values)
+                .finish(),
+            Self::Array(values) => f.debug_tuple("Array").field(values).finish(),
+        }
+    }
+}
+
+/// A floating value whose `Debug` form is distinct for distinct bits. Rust prints every NaN as
+/// `NaN`, but a class file can carry any NaN payload and the compiler emits the bits it read, so a
+/// NaN also shows its bits. Every other value already prints distinctly, `-0.0` included.
+pub(crate) enum ExactFloat {
+    Single(f32),
+    Double(f64),
+}
+
+impl From<f32> for ExactFloat {
+    fn from(value: f32) -> Self {
+        Self::Single(value)
+    }
+}
+
+impl From<f64> for ExactFloat {
+    fn from(value: f64) -> Self {
+        Self::Double(value)
+    }
+}
+
+impl std::fmt::Debug for ExactFloat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::Single(value) if value.is_nan() => write!(f, "NaN({:#010x})", value.to_bits()),
+            Self::Double(value) if value.is_nan() => write!(f, "NaN({:#018x})", value.to_bits()),
+            Self::Single(value) => write!(f, "{value:?}"),
+            Self::Double(value) => write!(f, "{value:?}"),
+        }
+    }
 }
 
 impl AnnotationValue {

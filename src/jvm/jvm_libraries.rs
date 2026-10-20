@@ -42,7 +42,8 @@ use builtin_classifier_shapes::{mapped_builtin_property, mapped_builtin_signatur
 use builtins_customizer::JvmBuiltInsCustomizer;
 pub(in crate::jvm) use generic_signatures::parse_class_gsig;
 use generic_signatures::{
-    concrete_generic_ret, mark_receiver_fun_params, parse_field_gsig, suspend_return_from_gsig,
+    concrete_generic_ret, hydrate_formal_bounds, mark_receiver_fun_params, parse_field_gsig,
+    suspend_return_from_gsig,
 };
 use inline_capability::{metadata_inline, property_accessor_inline, property_getter_inline};
 use java_nullability::{
@@ -1251,6 +1252,7 @@ impl JvmLibraries {
             let mut enum_entries_accessor = None;
             let has_kotlin_metadata = ci.meta.is_present();
             let uses_java_type_semantics = !has_kotlin_metadata;
+            let class_bounds = self.member_class_formal_bounds(&ci);
             let constructor_outer = ci.inner_class_self().and_then(|entry| {
                 (entry.access & ACC_STATIC == 0)
                     .then(|| entry.outer.as_deref().map(type_name))
@@ -1660,6 +1662,7 @@ impl JvmLibraries {
                     // the class type parameters; publication turns those into the result.
                     member.generic_sig = self.publish_java_member_generic_signature(
                         m.signature.as_deref(),
+                        &class_bounds,
                         m.parameter_nullability
                             .get(constructor_enclosing_prefix..)
                             .unwrap_or_default(),
@@ -2393,6 +2396,15 @@ impl JvmLibraries {
                 &mut constructors,
                 constructor_outer,
             );
+            let (own_type_parameter_count, type_parameters) = self.member_class_type_parameters(
+                constructor_outer,
+                internal_name,
+                crate::types::TypeParameters::new(
+                    type_params,
+                    type_param_bounds,
+                    type_param_variances,
+                ),
+            );
             Some(LibraryType {
                 is_kotlin: has_kotlin_metadata,
                 is_data: ci.meta.is_data,
@@ -2413,11 +2425,7 @@ impl JvmLibraries {
                 source_file: None,
                 stable_declaration: None,
                 is_nested: ci.inner_class_self().is_some(),
-                outer_instance: ci.inner_class_self().and_then(|entry| {
-                    (entry.access & ACC_STATIC == 0)
-                        .then(|| entry.outer.as_deref().map(type_name))
-                        .flatten()
-                }),
+                outer_instance: constructor_outer,
                 kind,
                 inheritance,
                 supertypes,
@@ -2444,12 +2452,8 @@ impl JvmLibraries {
                 value_underlying,
                 value_declaration: value_class.and_then(|declaration| declaration.declaration),
                 alias_target: None,
-                own_type_parameter_count: type_params.len(),
-                type_parameters: crate::types::TypeParameters::new(
-                    type_params,
-                    type_param_bounds,
-                    type_param_variances,
-                ),
+                own_type_parameter_count,
+                type_parameters,
                 sealed_subclasses: metadata::class_sealed_subclasses(&ci).into(),
                 enum_entries,
                 enum_entries_accessor,
@@ -2698,40 +2702,20 @@ fn parse_formals(s: &str) -> (Vec<String>, Vec<Vec<Ty>>, &str) {
     (formals, formal_bounds, &rest[1..])
 }
 
-/// Parse a JVM method generic signature `<formals>(params)ret`.
+/// Parse a JVM method generic signature `<formals>(params)ret` declared outside any generic class.
 pub(in crate::jvm) fn parse_method_gsig(sig: &str) -> Option<GenericSig> {
+    parse_member_method_gsig(sig, &crate::fx_hash::HashMap::default())
+}
+
+/// Parse a JVM method generic signature `<formals>(params)ret` whose free type variables may be the
+/// declaring class's formals, bounded as `class_bounds` records ([`JvmLibraries::member_class_formal_bounds`]). A method
+/// formal of the same name shadows the class formal.
+pub(in crate::jvm) fn parse_member_method_gsig(
+    sig: &str,
+    class_bounds: &crate::fx_hash::HashMap<String, Ty>,
+) -> Option<GenericSig> {
     let (formals, mut formal_bounds, s) = parse_formals(sig);
-    let mut inline_bounds = formals
-        .iter()
-        .zip(&formal_bounds)
-        .map(|(formal, bounds)| {
-            (
-                formal.clone(),
-                bounds
-                    .first()
-                    .copied()
-                    .unwrap_or_else(|| Ty::platform_nullable(Ty::obj("kotlin/Any"))),
-            )
-        })
-        .collect::<crate::fx_hash::HashMap<_, _>>();
-    for bounds in &mut formal_bounds {
-        for bound in bounds {
-            *bound = crate::types::ty_with_param_bounds(*bound, &inline_bounds);
-        }
-    }
-    inline_bounds = formals
-        .iter()
-        .zip(&formal_bounds)
-        .map(|(formal, bounds)| {
-            (
-                formal.clone(),
-                bounds
-                    .first()
-                    .copied()
-                    .unwrap_or_else(|| Ty::platform_nullable(Ty::obj("kotlin/Any"))),
-            )
-        })
-        .collect();
+    let inline_bounds = hydrate_formal_bounds(&formals, &mut formal_bounds, class_bounds);
     let inner = s.strip_prefix('(')?;
     let close = inner.find(')')?;
     let mut params_s = &inner[..close];
@@ -2778,7 +2762,7 @@ fn has_free_ty_params(ty: Ty) -> bool {
 }
 
 fn parse_concrete_field_gsig(signature: &str, erased_descriptor: &str) -> Option<Ty> {
-    let (ty, has_free) = parse_field_gsig(signature, erased_descriptor, None)?;
+    let (ty, has_free) = parse_field_gsig(signature, erased_descriptor, &Default::default())?;
     (!has_free).then_some(ty)
 }
 
@@ -3517,8 +3501,12 @@ impl JvmLibraries {
                     .signature
                     .as_deref()
                     .and_then(|signature| {
-                        parse_field_gsig(signature, &field.descriptor, ci.signature.as_deref())
-                            .map(|(ty, _)| self.semanticize_jvm_type(ty))
+                        parse_field_gsig(
+                            signature,
+                            &field.descriptor,
+                            &self.member_class_formal_bounds(&ci),
+                        )
+                        .map(|(ty, _)| self.semanticize_jvm_type(ty))
                     })
                     .unwrap_or(erased_ty);
                 let metadata = self.metadata_property_for_field(cn, &field.name, &field.descriptor);
@@ -6895,6 +6883,7 @@ mod tests {
                     "()Lkotlin/jvm/functions/Function1<\
                      Ljava/lang/String;Ljava/lang/Integer;>;",
                 ),
+                &Default::default(),
                 &[],
                 None,
                 None,
@@ -6941,11 +6930,19 @@ mod tests {
             parse_field_gsig(
                 "TT;",
                 "Ljava/lang/CharSequence;",
-                Some("<T::Ljava/lang/CharSequence;>Ljava/lang/Object;"),
+                &[(
+                    "T".to_string(),
+                    Ty::platform_nullable(Ty::obj("kotlin/CharSequence")),
+                )]
+                .into_iter()
+                .collect(),
             )
             .map(|(ty, _)| ty),
-            Some(Ty::ty_param("T", Ty::obj("kotlin/Any"))),
-            "a field type variable must erase through its declaring-class bound"
+            Some(Ty::ty_param(
+                "T",
+                Ty::platform_nullable(Ty::obj("kotlin/CharSequence"))
+            )),
+            "a field type variable must erase through, and carry, its declaring-class bound"
         );
         for signature in [
             "Ljava/util/List<*>;",

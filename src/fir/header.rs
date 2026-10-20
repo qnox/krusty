@@ -22,6 +22,7 @@ mod nested_classifiers;
 mod property_flags;
 mod type_use_annotations;
 mod visibility_suppressions;
+mod written_type_projection;
 
 use annotation_class_literals::annotation_class_literals;
 use annotation_strings::HeaderAnnotationStringArena;
@@ -266,6 +267,9 @@ pub struct HeaderSyntaxArena {
     /// Both keys and values are compact header identities. The parser's span-keyed rewrite table is
     /// consumed while one source AST is live and never becomes cross-pass state.
     source_spellings: crate::fx_hash::HashMap<HeaderTypeId, HeaderTypeId>,
+    /// The `<…>` lists a qualified classifier type wrote on its segments before the last one
+    /// (`TypeRef::qualifier_arguments`), by compact type.
+    qualifier_arguments: crate::fx_hash::HashMap<HeaderTypeId, crate::ast::QualifierArgumentLists>,
     classifier_types: Vec<HeaderClassifierType>,
     type_operands: Vec<HeaderTypeId>,
     path_segments: Vec<LookupNameId>,
@@ -405,17 +409,22 @@ impl HeaderSyntaxArena {
                 abbreviated_argument,
             }
         };
-        self.push_type(HeaderType {
+        let id = self.push_type(HeaderType {
             kind,
             flags,
             span: ty.span,
-        })
+        });
+        if !ty.qualifier_arguments.is_empty() {
+            self.qualifier_arguments
+                .insert(id, ty.qualifier_arguments.clone());
+        }
+        id
     }
 
     /// Consume the parser's temporary alias-rewrite sidecar for the compact types added since
     /// `first_type`. Associations are immediately converted from source spans to compact type
     /// identities; later signature/metadata publication never needs the `File` table.
-    fn capture_source_spellings(
+    pub(super) fn capture_source_spellings(
         &mut self,
         first_type: usize,
         spellings: &crate::fx_hash::HashMap<Span, TypeRef>,
@@ -614,70 +623,6 @@ impl HeaderSyntaxArena {
 
     pub fn ty(&self, id: HeaderTypeId) -> Option<HeaderType> {
         self.types.get(id.raw() as usize).copied()
-    }
-
-    /// Reconstruct one short-lived parser type for the existing resolver during migration. The
-    /// caller must resolve and drop it immediately; this never reconstructs a declaration or body
-    /// AST, and every child comes from the compact header arena.
-    pub fn transient_type_ref(&self, id: HeaderTypeId, names: &LookupNames) -> Option<TypeRef> {
-        let ty = self.ty(id)?;
-        let flags = TrFlags::default()
-            .with_nullable(ty.flags.nullable())
-            .with_definitely_non_null(ty.flags.definitely_non_null())
-            .with_fun_has_receiver(ty.flags.function_receiver())
-            .with_fun_suspend(ty.flags.suspend_function())
-            .with_in_projection(ty.flags.in_projection())
-            .with_out_projection(ty.flags.out_projection())
-            .with_import(ty.flags.is_import())
-            .with_star_projection(ty.flags.star_projection())
-            .with_class_literal_lhs(ty.flags.class_literal_lhs());
-        let (name, arg, targs, fun_params, fun_context_count) = match ty.kind {
-            HeaderTypeKind::Classifier {
-                detail,
-                abbreviated_argument,
-            } => {
-                let detail = self.classifier_type(detail)?;
-                let name = self
-                    .type_path(detail.path)
-                    .iter()
-                    .map(|segment| names.get(*segment))
-                    .collect::<Option<Vec<_>>>()?
-                    .join(".");
-                let mut targs = Vec::new();
-                for argument in self.type_operands(detail.arguments) {
-                    targs.push(self.transient_type_ref(*argument, names)?);
-                }
-                let arg = match abbreviated_argument {
-                    Some(argument) => Some(Box::new(self.transient_type_ref(argument, names)?)),
-                    None => None,
-                };
-                (name, arg, targs, Vec::new(), 0)
-            }
-            HeaderTypeKind::Function {
-                parameters,
-                result,
-                context_count,
-            } => {
-                let mut fun_params = Vec::new();
-                for parameter in self.type_operands(parameters) {
-                    fun_params.push(self.transient_type_ref(*parameter, names)?);
-                }
-                let arg = match result {
-                    Some(result) => Some(Box::new(self.transient_type_ref(result, names)?)),
-                    None => None,
-                };
-                ("<fun>".into(), arg, Vec::new(), fun_params, context_count)
-            }
-        };
-        Some(TypeRef {
-            name,
-            flags,
-            arg,
-            targs,
-            span: ty.span,
-            fun_params,
-            fun_context_count,
-        })
     }
 
     /// Reconstruct only the source-spelling substitutions reachable from one compact type root.
@@ -3092,37 +3037,8 @@ impl HeaderInventoryBuilder {
             &file.alias_spellings,
             &mut self.lookup_names,
         );
-        for &declaration in &file.decls {
-            let Some(&stable) = stable_by_transient.get(&declaration) else {
-                continue;
-            };
-            match file.decl(declaration) {
-                Decl::Fun(function) => {
-                    self.annotation_strings.add(
-                        stable,
-                        file,
-                        &function.annotations,
-                        &function.annotation_args,
-                    );
-                }
-                Decl::Class(class) => {
-                    self.annotation_strings.add(
-                        stable,
-                        file,
-                        &class.annotations,
-                        &class.annotation_args,
-                    );
-                }
-                Decl::Property(property) => {
-                    self.annotation_strings.add(
-                        stable,
-                        file,
-                        &property.annotations,
-                        &property.annotation_args,
-                    );
-                }
-            }
-        }
+        self.annotation_strings
+            .add_file(file, source, &stable_by_transient, &self.declarations);
         self.stubs.extend(stubs.iter().copied());
         self.inventory.extend(stubs.iter().map(|stub| stub.id));
         (stubs, stable_by_transient)

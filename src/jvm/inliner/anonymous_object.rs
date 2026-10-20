@@ -373,8 +373,12 @@ fn specialize_copied(
     body: &mut MethodNode,
     reified: &crate::jvm::reified_arguments::ReifiedArguments,
 ) -> Result<bool, RegenerationError> {
-    super::reified::specialize(body, reified)
-        .map_err(|error| RegenerationError::Inlining(Box::new(error)))?;
+    super::reified::specialize(
+        body,
+        reified,
+        &mut crate::jvm::reified_arguments::NoEnumEntriesReads,
+    )
+    .map_err(|error| RegenerationError::Inlining(Box::new(error)))?;
     Ok(super::reified::has_reified_markers(body))
 }
 

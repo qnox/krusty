@@ -17,7 +17,9 @@ use super::{ResolvedInterfaceDelegation, ResolvedParameterIdentity};
 mod arena_ranges;
 mod call_arguments;
 mod call_result_constraints;
+mod declaration_type_sites;
 mod expressions;
+mod local_type_aliases;
 mod postponed_argument_transaction;
 mod resolved_types;
 mod selected_result_publication;
@@ -28,7 +30,13 @@ pub use call_arguments::{ResolvedSigCallArgument, SigCallArgument, SigCallArgume
 pub use call_result_constraints::SignatureCallResultConstraint;
 pub use classifier_headers::ResolvedClassifierHeader;
 pub(crate) use classifier_headers::{superclass_slot, DeclaredSuperclass};
+use declaration_type_sites::DeclarationTypeSites;
+pub use declaration_type_sites::{ExplicitClassifierParents, ExplicitSignatureTypes};
 pub use expressions::*;
+pub(crate) use local_type_aliases::{
+    LocalTypeAliasTemplateId, LocalTypeTemplateFlags, LocalTypeTemplateNode,
+    LocalTypeTemplateNodeId, LocalTypeTemplateTarget, WrittenTypeApplication,
+};
 pub use postponed_argument_transaction::PostponedArgumentTransaction;
 pub use resolved_types::*;
 pub use selected_result_publication::SelectedResultPublicationSemantics;
@@ -36,7 +44,7 @@ pub use selections::*;
 pub use signature_state::SignatureState;
 mod classifier_headers;
 mod declaration_metadata;
-pub use declaration_metadata::NoArgSuperConstructor;
+pub use declaration_metadata::{NoArgSuperConstructor, PropertyAccessor};
 mod file_annotations;
 pub(crate) use file_annotations::FileAnnotationFacts;
 mod result_expectation;
@@ -105,29 +113,6 @@ pub struct LocalSignatureEffect {
     pub determines_result: bool,
 }
 
-/// Compact explicit type expressions captured while a body-local declaration's lexical aliases
-/// are in scope. The expressions are resolved during Pass 1 and the whole record is destroyed with
-/// the signature graph; only the resulting stable declaration signature is published.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ExplicitSignatureTypes {
-    pub parameters: OperandRange,
-    pub result: Option<SigExprId>,
-    pub receiver: Option<SigExprId>,
-    /// An explicitly declared backing-field type is a property-header fact, distinct from the
-    /// property's public result type. Body-local declarations keep it as a compact expression so
-    /// lexical aliases can be resolved before the signature graph is destroyed.
-    pub storage: Option<SigExprId>,
-}
-
-/// Classifier parent types captured while a body-local alias scope is active. Like explicit member
-/// types, these expressions are temporary Pass-1 constraints; only their resolved semantic types
-/// may be published into the stable classifier header.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ExplicitClassifierParents {
-    pub superclass: Option<SigExprId>,
-    pub supertypes: OperandRange,
-}
-
 /// All temporary state for signature inference. Dropping this value drops the entire constraint
 /// graph in bulk before checked FIR streaming begins.
 #[derive(Default)]
@@ -146,6 +131,11 @@ pub struct SignatureGraph {
     delegate_sites: Vec<SignatureDelegateSite>,
     type_syntax: HeaderSyntaxArena,
     type_names: LookupNames,
+    declaration_type_sites: DeclarationTypeSites,
+    written_type_applications: HashMap<SigExprId, WrittenTypeApplication>,
+    local_type_alias_templates: Vec<local_type_aliases::LocalTypeAliasTemplate>,
+    local_type_template_nodes: Vec<LocalTypeTemplateNode>,
+    shape_changing_local_alias_headers: HashSet<DeclarationId>,
     constraints: Vec<SignatureConstraint>,
     constraint_by_declaration: HashMap<DeclarationId, usize>,
     local_effects: HashMap<DeclarationId, LocalSignatureEffect>,
@@ -154,14 +144,6 @@ pub struct SignatureGraph {
 }
 
 impl SignatureGraph {
-    pub fn add_type_syntax(&mut self, ty: &crate::ast::TypeRef) -> HeaderTypeId {
-        self.type_syntax.add_type(ty, &mut self.type_names)
-    }
-
-    pub fn transient_type_ref(&self, id: HeaderTypeId) -> Option<crate::ast::TypeRef> {
-        self.type_syntax.transient_type_ref(id, &self.type_names)
-    }
-
     pub fn add_expr(&mut self, expression: SigExpr) -> SigExprId {
         let id = SigExprId::from_raw(next_id(self.nodes.len(), "signature expressions"));
         self.nodes.push(expression);
@@ -411,6 +393,7 @@ impl SignatureGraph {
         declaration: DeclarationId,
         parameters: impl IntoIterator<Item = SigExprId>,
         result: Option<SigExprId>,
+        getter_result: Option<SigExprId>,
         receiver: Option<SigExprId>,
         storage: Option<SigExprId>,
     ) {
@@ -420,6 +403,7 @@ impl SignatureGraph {
             .or_insert(ExplicitSignatureTypes {
                 parameters,
                 result,
+                getter_result,
                 receiver,
                 storage,
             });
@@ -483,6 +467,8 @@ impl SignatureGraph {
             + self.qualified_call_coordinates.len() * std::mem::size_of::<QualifiedCallCoordinate>()
             + self.delegate_sites.len() * std::mem::size_of::<SignatureDelegateSite>()
             + self.type_syntax.storage_payload_bytes()
+            + self.declaration_type_sites.storage_payload_bytes()
+            + self.written_type_application_payload_bytes()
             + self.type_names.storage_payload_bytes()
             + self.constraints.len() * std::mem::size_of::<SignatureConstraint>()
             + self.local_effects.len()
@@ -494,6 +480,7 @@ impl SignatureGraph {
             + self.explicit_classifier_parents.len()
                 * (std::mem::size_of::<DeclarationId>()
                     + std::mem::size_of::<ExplicitClassifierParents>())
+            + self.shape_changing_local_alias_headers.len() * std::mem::size_of::<DeclarationId>()
     }
 }
 
@@ -649,6 +636,16 @@ pub trait SignatureSemantics:
         origin: OriginId,
         syntax: HeaderTypeId,
         graph: &SignatureGraph,
+    ) -> Result<ResolvedTy, DiagnosticId>;
+
+    /// Resolve a graph-owned written type application. The semantic adapter first binds the
+    /// declaration-site target, evaluates package-owned argument subtrees only for diagnostics,
+    /// then asks the graph evaluator for exactly the semantic arguments that belong to the target.
+    fn resolve_written_type_application(
+        &self,
+        expression: SigExprId,
+        graph: &SignatureGraph,
+        evaluate_argument: &mut dyn FnMut(SigExprId) -> Result<ResolvedTy, DiagnosticId>,
     ) -> Result<ResolvedTy, DiagnosticId>;
 
     fn resolve_contextual_type(
@@ -1401,17 +1398,18 @@ pub struct ResolvedModuleIndex {
     /// publication selects from these once per checked body group; asking the whole inventory
     /// each time was linear in the module per body, i.e. quadratic.
     local_class_declarations: Vec<DeclarationId>,
-    /// Semantic lexical owner for parser-hoisted local classifiers. Both identities are stable
-    /// declaration headers; no parser node or source coordinate crosses into Pass 2.
-    local_classifier_lexical_roots: HashMap<DeclarationId, DeclarationId>,
+    /// Stable lexical roots and the later checked-completion state for body-local classifiers.
+    /// No parser node or source coordinate crosses into Pass 2.
+    body_local_ownership: declaration_metadata::BodyLocalOwnership,
+    /// Exact top-level expect declarations removed by source-set actualization. Their anchors stay
+    /// in the stable parser inventory, but ordinary Pass 2 must not treat the missing headers as a
+    /// recovery failure or infer this lifecycle state from that absence.
+    actualized_away_declarations: crate::fx_hash::HashSet<DeclarationId>,
     /// Resolved declaration annotation identities retained as stable semantic header metadata.
     /// Source spellings, spans, and target-specific interpretations do not cross this boundary.
     declaration_annotations: HashMap<DeclarationId, Box<[TypeName]>>,
-    /// Fully checked declaration annotation applications. Values are folded against the selected
-    /// annotation constructor and keyed by stable declaration identity; consumers never join them
-    /// back to the identity-only header list by ordinal.
-    declaration_applied_annotations:
-        HashMap<DeclarationId, Box<[crate::types::ResolvedAnnotation]>>,
+    /// Fully checked annotation applications by stable declaration or property-accessor site.
+    checked_annotation_applications: declaration_metadata::CheckedAnnotationApplications,
     /// Constant string arguments parallel to selected declaration annotations. This is compact,
     /// resolved header metadata (for example the value of `@JvmName`), not retained annotation
     /// syntax. Keeping it beside the stable declaration lets target realization consume annotation
@@ -1496,6 +1494,11 @@ pub struct ResolvedModuleIndex {
     /// Source type spellings required for declaration metadata, keyed by stable identity. These are
     /// serialization sidecars for already-resolved types; they are never lookup input in Pass 2.
     declaration_spellings: HashMap<DeclarationId, crate::spelling::DeclaredSpellings>,
+    /// Written type occurrences explicitly left for their first binding on an active Pass-2
+    /// lexical rung. This is distinct from absent metadata: membership is published only when a
+    /// mandatory body-local Pass-1 semantic header could not project its compact source roles.
+    deferred_declaration_spellings:
+        HashMap<DeclarationId, crate::spelling::DeferredDeclaredSpellings>,
     /// Checked compile-time values of source properties. Pass 1 folds the bounded initializer and
     /// publishes only this provider-neutral payload; no initializer syntax or source coordinate is
     /// retained for metadata or backend consumption.
@@ -1513,8 +1516,8 @@ pub struct ResolvedModuleIndex {
     /// Callable headers retained only while an invalid/locally deferred declaration has no
     /// signature. Pass-2 local publication may replace one with its finalized checked header.
     diagnostic_callables: crate::fx_hash::HashSet<CallableId>,
-    classifier_type_arguments: HashMap<DeclarationId, Box<[TypeParameterId]>>,
-    classifier_own_type_parameter_counts: HashMap<DeclarationId, u32>,
+    pub(super) classifier_type_arguments: HashMap<DeclarationId, Box<[TypeParameterId]>>,
+    pub(super) classifier_own_type_parameter_counts: HashMap<DeclarationId, u32>,
     pub(super) callable_parameters: HashMap<CallableId, Box<[super::ResolvedValueParameterHeader]>>,
     /// File-independent closed defaults for source annotation constructors. Ordinary executable
     /// defaults stay in retained checked bodies; annotation construction needs this declaration
@@ -1539,6 +1542,10 @@ pub struct ResolvedModuleIndex {
     property_parameter_identities_published: HashSet<PropertyId>,
     property_setter_parameter_identities: HashMap<PropertyId, ResolvedParameterIdentity>,
     pub(super) type_parameters: HashMap<(DeclarationId, u32), TypeParameterId>,
+    /// Number of source formals declared directly by each compact declaration. This is a
+    /// lifecycle fact: a signature/callable pair is not a complete semantic header while its
+    /// generic contract is still waiting for active Pass 2 binding.
+    pub(super) declaration_type_parameter_counts: HashMap<DeclarationId, u32>,
     pub(super) type_parameter_owners: Vec<(DeclarationId, u32)>,
     pub(super) type_parameter_headers: Vec<super::ResolvedTypeParameterHeader>,
     pub(super) package_function_origins: super::source_coordinates::PackageFunctionSourceOrigins,
@@ -1620,15 +1627,6 @@ impl ResolvedModuleIndex {
         declaration: DeclarationId,
     ) -> Option<StableDeclarationAnchor> {
         self.declarations.stable_anchor(declaration)
-    }
-
-    pub fn local_classifier_lexical_root(
-        &self,
-        declaration: DeclarationId,
-    ) -> Option<DeclarationId> {
-        self.local_classifier_lexical_roots
-            .get(&declaration)
-            .copied()
     }
 
     pub(super) fn temporary_declaration_range(
@@ -1779,6 +1777,49 @@ impl ResolvedModuleIndex {
         self.declaration_spellings.get(&declaration)
     }
 
+    pub(crate) fn declaration_spellings_deferred(&self, declaration: DeclarationId) -> bool {
+        self.deferred_declaration_spellings
+            .contains_key(&declaration)
+    }
+
+    pub(crate) fn deferred_declaration_spellings(
+        &self,
+        declaration: DeclarationId,
+    ) -> Option<&crate::spelling::DeferredDeclaredSpellings> {
+        self.deferred_declaration_spellings.get(&declaration)
+    }
+
+    pub(crate) fn seal_deferred_declaration_spellings(
+        &mut self,
+        checked: &crate::spelling::CheckedTypeUseAnnotations,
+        unchecked: &mut Vec<crate::spelling::AnnotationOccurrence>,
+    ) {
+        for spellings in self.deferred_declaration_spellings.values_mut() {
+            spellings.seal(checked, unchecked);
+        }
+    }
+
+    pub(crate) fn defer_declaration_spellings(
+        &mut self,
+        declaration: DeclarationId,
+        spellings: crate::spelling::DeferredDeclaredSpellings,
+    ) {
+        assert!(
+            self.declaration_headers.contains_key(&declaration),
+            "deferred written occurrences require a stable declaration inventory entry"
+        );
+        assert!(
+            !self.declaration_spellings.contains_key(&declaration),
+            "published declaration spellings cannot be deferred"
+        );
+        assert!(
+            self.deferred_declaration_spellings
+                .insert(declaration, spellings)
+                .is_none(),
+            "declaration spellings may be deferred only once"
+        );
+    }
+
     pub(crate) fn publish_declaration_spellings(
         &mut self,
         declaration: DeclarationId,
@@ -1794,6 +1835,7 @@ impl ResolvedModuleIndex {
                 .is_none(),
             "a declaration may publish source spellings only once"
         );
+        self.deferred_declaration_spellings.remove(&declaration);
     }
 
     pub fn compile_time_constant(
@@ -2133,84 +2175,6 @@ impl ResolvedModuleIndex {
         })
     }
 
-    /// Source parameter names owned by a finalized type alias, in declaration order.
-    pub fn type_alias_formals(&self, declaration: DeclarationId) -> Vec<String> {
-        (0..)
-            .map_while(|ordinal| self.type_parameter(declaration, ordinal))
-            .filter_map(|parameter| self.type_parameter_name(parameter).map(str::to_owned))
-            .collect()
-    }
-
-    /// Type-parameter identities carried by an applied classifier type, in the same order as
-    /// [`Ty::type_args`]: parameters declared by the classifier, followed by lexically captured
-    /// parameters from nearest owner outward.
-    pub fn classifier_type_arguments(
-        &self,
-        classifier: DeclarationId,
-    ) -> Option<&[TypeParameterId]> {
-        self.classifier_type_arguments
-            .get(&classifier)
-            .map(Box::as_ref)
-    }
-
-    pub fn classifier_own_type_parameter_count(&self, classifier: DeclarationId) -> Option<u32> {
-        self.classifier_own_type_parameter_counts
-            .get(&classifier)
-            .copied()
-    }
-
-    /// The classifier applied to its own stable semantic type-parameter identities.
-    ///
-    /// This is the root for publishing an applied hierarchy. Starting from a bare nominal type
-    /// would substitute every missing argument with its upper bound and erase declaration
-    /// variables from generic supertype edges.
-    pub fn classifier_self_type(&self, classifier: DeclarationId) -> Option<Ty> {
-        let identity = self.classifier_header(classifier)?.classifier;
-        let arguments = self
-            .classifier_type_arguments(classifier)
-            .unwrap_or_default()
-            .iter()
-            .map(|parameter| {
-                let header = self.type_parameter_header(*parameter)?;
-                let semantic_name = self.type_parameter_semantic_name(*parameter)?;
-                let bound = header
-                    .bounds
-                    .first()
-                    .map(|bound| bound.ty.get())
-                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-                Some(Ty::ty_param(semantic_name, bound))
-            })
-            .collect::<Option<Vec<_>>>()?;
-        Some(Ty::obj_args_name(identity, &arguments))
-    }
-
-    pub(crate) fn publish_classifier_type_arguments(
-        &mut self,
-        classifier: DeclarationId,
-        own_count: u32,
-        parameters: impl IntoIterator<Item = TypeParameterId>,
-    ) {
-        assert!(
-            self.classifiers.contains_key(&classifier),
-            "classifier type arguments require a published classifier header"
-        );
-        let parameters = parameters.into_iter().collect::<Box<[_]>>();
-        assert!(
-            own_count as usize <= parameters.len(),
-            "own classifier parameters must be a prefix of its applied layout"
-        );
-        assert!(
-            self.classifier_own_type_parameter_counts
-                .insert(classifier, own_count)
-                .is_none()
-                && self
-                    .classifier_type_arguments
-                    .insert(classifier, parameters)
-                    .is_none(),
-            "a classifier type-argument layout may be published only once"
-        );
-    }
-
     /// Bind an already-selected source constructor shape to its stable module declaration. This is
     /// identity publication, not overload selection: the resolver has already fixed primary versus
     /// secondary and the complete semantic parameter list.
@@ -2479,17 +2443,6 @@ impl ResolvedModuleIndex {
         self.declarations = declarations;
     }
 
-    pub(super) fn publish_local_classifier_lexical_roots(
-        &mut self,
-        roots: HashMap<DeclarationId, DeclarationId>,
-    ) {
-        assert!(
-            self.local_classifier_lexical_roots.is_empty(),
-            "local-classifier lexical ownership may be published only once"
-        );
-        self.local_classifier_lexical_roots = roots;
-    }
-
     pub fn signature(&self, declaration: DeclarationId) -> Option<&ResolvedSignature> {
         self.signatures.get(&declaration)
     }
@@ -2530,7 +2483,7 @@ impl ResolvedModuleIndex {
         self.declarations.is_empty()
             && self.declaration_headers.is_empty()
             && self.declaration_annotations.is_empty()
-            && self.declaration_applied_annotations.is_empty()
+            && self.checked_annotation_applications.is_empty()
             && self.declaration_annotation_string_arguments.is_empty()
             && self.declaration_annotation_class_arguments.is_empty()
             && self.continuation_ordinals.is_empty()
@@ -2554,6 +2507,7 @@ impl ResolvedModuleIndex {
             && self.property_return_value_statuses.is_empty()
             && self.function_typed_parameter_callables.is_empty()
             && self.properties.is_empty()
+            && self.declaration_type_parameter_counts.is_empty()
     }
 
     pub fn callable(&self, callable: CallableId) -> Option<ResolvedCallableHeader> {
@@ -2987,7 +2941,8 @@ impl ResolvedModuleIndex {
                 * (std::mem::size_of::<DeclarationId>()
                     + std::mem::size_of::<ResolvedDeclarationHeader>())
             + self.local_class_declarations.len() * std::mem::size_of::<DeclarationId>()
-            + self.local_classifier_lexical_roots.len() * (std::mem::size_of::<DeclarationId>() * 2)
+            + self.body_local_ownership.storage_payload_bytes()
+            + self.actualized_away_declarations.len() * std::mem::size_of::<DeclarationId>()
             + self.declaration_annotations.len()
                 * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<Box<[TypeName]>>())
             + self
@@ -2995,16 +2950,7 @@ impl ResolvedModuleIndex {
                 .values()
                 .map(|annotations| annotations.len() * std::mem::size_of::<TypeName>())
                 .sum::<usize>()
-            + self.declaration_applied_annotations.len()
-                * (std::mem::size_of::<DeclarationId>()
-                    + std::mem::size_of::<Box<[crate::types::ResolvedAnnotation]>>())
-            + self
-                .declaration_applied_annotations
-                .values()
-                .map(|annotations| {
-                    annotations.len() * std::mem::size_of::<crate::types::ResolvedAnnotation>()
-                })
-                .sum::<usize>()
+            + self.checked_annotation_applications.storage_payload_bytes()
             + self.declaration_annotation_string_arguments.len()
                 * (std::mem::size_of::<(DeclarationId, u32)>()
                     + std::mem::size_of::<Box<[Box<str>]>>())
@@ -3164,6 +3110,8 @@ impl ResolvedModuleIndex {
                 .map(|parameters| parameters.len() * std::mem::size_of::<TypeParameterId>())
                 .sum::<usize>()
             + self.classifier_own_type_parameter_counts.len()
+                * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<u32>())
+            + self.declaration_type_parameter_counts.len()
                 * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<u32>())
             + self.callable_parameter_storage_payload_bytes()
             + self.annotation_constructor_defaults.len()

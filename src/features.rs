@@ -9,9 +9,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::kotlin_version::KotlinVersion;
 use crate::language_version::LanguageVersion;
 
+pub(crate) mod deprecation_cycle_messages;
+mod deprecation_migrations;
 mod language_versions;
 mod table;
 
+pub(crate) use deprecation_migrations::DeprecationMigration;
+pub use deprecation_migrations::DeprecationMigrations;
 pub use language_versions::{vendored_language_versions, LanguageVersionPolicy, VersionStatus};
 pub use table::{vendored_table, BehaviorAfterSinceVersion, FeatureTable, LanguageFeature};
 
@@ -165,6 +169,7 @@ const MODELED_FEATURES: &[&str] = &[
     "ErrorAboutDataClassCopyVisibilityChange",
     "ExplicitBackingFields",
     "ExplicitContextArguments",
+    "ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier",
     "ForbidArrayOfNothingInLhsOfClassLiteral",
     "ForbidExternalEnumEntriesAndPrimaryConstructorProperties",
     "ForbidOperatorEqualsInEnumEntriesAndAnonymousObjects",
@@ -181,6 +186,9 @@ const MODELED_FEATURES: &[&str] = &[
     "NullableNothingInReifiedPosition",
     "PrioritizedEnumEntries",
     "ProhibitIntersectionReifiedTypeParameter",
+    "ReportDeprecatedCompanionInDelegation",
+    "ReportDeprecationsOfClassifiersInImplicitInvokes",
+    "ReportDeprecationsOfOuterImportedClasses",
     "ReportReificationProblemsInDnnAndFlexible",
     "ReportTypeVarianceConflictsInDnnAndFlexible",
     "UnitConversionsOnArbitraryExpressions",

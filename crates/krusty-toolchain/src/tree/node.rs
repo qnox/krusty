@@ -136,4 +136,27 @@ impl Node {
     pub fn get(&self, key: &str) -> Option<&Node> {
         self.entry(key).map(|entry| &entry.value)
     }
+
+    /// The node at `path` below this one.
+    pub fn at(&self, path: &[&str]) -> Option<&Node> {
+        path.iter().try_fold(self, |node, key| node.get(key))
+    }
+
+    /// The scalar at `path` below this one as text: a string, an enum's value or a number.
+    pub fn text_at(&self, path: &[&str]) -> Option<String> {
+        match &self.at(path)?.value {
+            Value::String(text) => Some(text.clone()),
+            Value::Enum(_, text) => Some(text.to_string()),
+            Value::Int(number) => Some(number.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Whether the value at `path` below this one is `true`.
+    pub fn is_enabled(&self, path: &[&str]) -> bool {
+        matches!(
+            self.at(path).map(|node| &node.value),
+            Some(Value::Boolean(true))
+        )
+    }
 }

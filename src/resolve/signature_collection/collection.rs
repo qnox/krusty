@@ -2432,6 +2432,8 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                             )
                                         },
                                     ),
+                                    deprecated_hidden: false,
+                                    accessor_availability: Default::default(),
                                     stable_declaration: property_header.declaration,
                                     source_member: compact_headers.is_none().then_some(
                                         crate::libraries::SourceMember::ClassProperty {
@@ -4322,6 +4324,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
         for (alias, formals, target) in &file_type_aliases[file_index] {
             let alias = SourceAlias {
                 identity: crate::types::type_name_child(package, alias),
+                nested_in: None,
                 formals,
                 target,
             };
@@ -4409,6 +4412,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     .fold(package, crate::types::type_name_child);
                 let source_alias = SourceAlias {
                     identity: crate::types::type_name_child(owner, &alias.name),
+                    nested_in: Some((alias_owner, &alias.name)),
                     formals: &alias.type_params,
                     target: &alias.target,
                 };
@@ -4482,9 +4486,6 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
         publish_legacy_top_level_conflict_recovery_keys(&mut table, files);
     }
 
-    if let Some(headers) = compact_headers {
-        collect_compact_declared_spellings(&mut table, headers, &file_class_names);
-    }
     collect_stable_visibility_suppressions(&mut table, compact_headers);
 
     table.class_names = class_names;

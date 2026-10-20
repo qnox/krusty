@@ -21,7 +21,9 @@ import org.jetbrains.kotlin.config.Services
 import org.jetbrains.kotlin.fir.pipeline.Fir2IrActualizedResult
 import org.jetbrains.kotlin.ir.IrElement
 import org.jetbrains.kotlin.ir.declarations.IrClass
+import org.jetbrains.kotlin.ir.declarations.IrDeclarationWithName
 import org.jetbrains.kotlin.ir.declarations.IrFunction
+import org.jetbrains.kotlin.ir.declarations.IrProperty
 import org.jetbrains.kotlin.ir.declarations.IrSimpleFunction
 import org.jetbrains.kotlin.ir.declarations.IrParameterKind
 import org.jetbrains.kotlin.ir.symbols.IrClassSymbol
@@ -301,15 +303,28 @@ private fun resolveIn(ir: Fir2IrActualizedResult, identity: CallableIdentity): I
 private fun match(ir: Fir2IrActualizedResult, identity: CallableIdentity): Pair<IrElement, IrFunction> {
     val context = ir.pluginContext
     val owner = identity.classes.takeIf { it.isNotEmpty() }?.let { ClassName(identity.packageName, it).classId }
-    fun callableId() = owner?.let { CallableId(it, Name.identifier(identity.name)) }
-        ?: CallableId(FqName(identity.packageName), Name.identifier(identity.name))
+    fun callableId() = CallableId(FqName(identity.packageName), Name.identifier(identity.name))
+    // A class's members are its declarations as the class sees them: its own and the fake
+    // overrides of what it inherits, which is what a call through that class names.
+    val members = owner?.let {
+        val symbol = context.referenceClass(it) ?: throw Refused("$identity names no class on the session's classpath")
+        symbol.owner.declarations.filter { member -> (member as? IrDeclarationWithName)?.name?.asString() == identity.name }
+    }
     val candidates: List<Pair<IrElement, IrFunction>> = when (identity.kind) {
-        CallableKind.FUNCTION -> context.referenceFunctions(callableId()).map { it.owner to it.owner }
+        CallableKind.FUNCTION -> if (members != null) {
+            members.filterIsInstance<IrSimpleFunction>().map { it to it }
+        } else {
+            context.referenceFunctions(callableId()).map { it.owner to it.owner }
+        }
         CallableKind.CONSTRUCTOR -> context.referenceConstructors(
             owner ?: throw Refused("$identity: a constructor needs a class"),
         ).map { it.owner to it.owner }
-        CallableKind.PROPERTY -> context.referenceProperties(callableId()).mapNotNull { symbol ->
-            symbol.owner.getter?.let { symbol.owner to it }
+        CallableKind.PROPERTY -> if (members != null) {
+            members.filterIsInstance<IrProperty>().mapNotNull { property -> property.getter?.let { property to it } }
+        } else {
+            context.referenceProperties(callableId()).mapNotNull { symbol ->
+                symbol.owner.getter?.let { symbol.owner to it }
+            }
         }
     }
     val matches = candidates.filter { (_, function) -> signatureIs(function, identity) }

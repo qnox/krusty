@@ -16,7 +16,8 @@ pub struct FileIr {
     pub path: String,
     /// Dot-separated; empty for the root package.
     pub package: String,
-    /// The file's whole text, which its line starts and offsets are measured in.
+    /// The file's whole text as kotlinc reads it, with every line break a `\n`. Its line starts and
+    /// offsets are measured in it.
     pub text: String,
     pub functions: Vec<FunctionIr>,
 }

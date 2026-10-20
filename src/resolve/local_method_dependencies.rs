@@ -37,6 +37,27 @@ pub(super) enum LocalMethodDemand {
 }
 
 impl Checker<'_> {
+    fn hierarchy_has_active_local_members(&self, receiver: Ty) -> bool {
+        let source = self.fed_source();
+        let mut pending = vec![crate::symbol_resolver::member_scope_receiver(receiver)];
+        let mut seen = crate::fx_hash::HashSet::default();
+        while let Some(current) = pending.pop() {
+            let Some(owner) = current.obj_internal() else {
+                continue;
+            };
+            if !seen.insert(owner) {
+                continue;
+            }
+            if self.resolved_body_local_supertypes.contains_key(&owner)
+                || self.checked_local_methods.contains_key(&owner)
+            {
+                return true;
+            }
+            pending.extend(crate::symbol_resolver::direct_supertypes(&source, current));
+        }
+        false
+    }
+
     /// Select the one inherited declaration whose invariant input shape this body-local method
     /// overrides. This runs only over typed provider candidates; the method's still-pending result
     /// is deliberately irrelevant to default availability, while the completed override plan later
@@ -189,23 +210,24 @@ impl Checker<'_> {
         receiver: Ty,
         name: &str,
     ) -> (Ty, Vec<crate::libraries::FunctionInfo>, bool) {
-        let body_local_receiver = crate::symbol_resolver::member_scope_receiver(receiver)
-            .obj_internal()
-            .is_some_and(|owner| {
-                self.resolved_body_local_supertypes.contains_key(&owner)
-                    || self.checked_local_methods.contains_key(&owner)
-                    // A local classifier whose header is already published (one declared in
-                    // another body) answers through the provider's member scope, inherited
-                    // members included; only a deferred header belongs to this body's rung.
-                    || self.resolved_index.is_some_and(|index| {
-                        index.classifier_declaration(owner).is_some_and(|declaration| {
-                            index.classifier_header(declaration).is_none()
-                                && index.declaration_header(declaration).is_some_and(|header| {
-                                    header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
-                                })
-                        })
+        let body_local_receiver = self.hierarchy_has_active_local_members(receiver)
+            || crate::symbol_resolver::member_scope_receiver(receiver)
+                .obj_internal()
+                .is_some_and(|owner| {
+                    // A local classifier whose header is already published (one declared in another
+                    // body) answers through the provider's member scope. Only an incomplete header or
+                    // an active overlay anywhere in this receiver's hierarchy needs the bounded union.
+                    self.resolved_index.is_some_and(|index| {
+                        index
+                            .classifier_declaration(owner)
+                            .is_some_and(|declaration| {
+                                index.classifier_header(declaration).is_none()
+                                    && index.declaration_header(declaration).is_some_and(|header| {
+                                        header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
+                                    })
+                            })
                     })
-            });
+                });
         if !body_local_receiver {
             return (
                 crate::symbol_resolver::member_scope_receiver(receiver),

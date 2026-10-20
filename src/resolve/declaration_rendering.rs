@@ -590,26 +590,95 @@ pub(super) fn type_parameter_owner_formals(
         .zip(bounds)
         .enumerate()
         .map(|(index, (formal, bounds))| {
-            let variance = match variances.get(index) {
-                Some(TypeVariance::In) => "in ",
-                Some(TypeVariance::Out) => "out ",
-                Some(TypeVariance::Invariant) | None => "",
-            };
-            let bounds = bounds
-                .iter()
-                .copied()
-                .filter(|bound| !implicit_upper_bound(*bound))
-                .map(|bound| readable_type(source, bound))
-                .collect::<Vec<_>>();
-            let name = crate::types::type_parameter_source_name(formal);
-            if bounds.is_empty() {
-                format!("{variance}{name}")
-            } else {
-                format!("{variance}{name} : {}", bounds.join(", "))
-            }
+            formal_display(
+                source,
+                variances.get(index).copied(),
+                crate::types::type_parameter_source_name(formal),
+                bounds,
+            )
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// One declared formal: `in T : Bound`, omitting Kotlin's implicit `Any?` bound.
+fn formal_display(
+    source: &dyn SymbolSource,
+    variance: Option<TypeVariance>,
+    name: &str,
+    bounds: &[Ty],
+) -> String {
+    let variance = match variance {
+        Some(TypeVariance::In) => "in ",
+        Some(TypeVariance::Out) => "out ",
+        Some(TypeVariance::Invariant) | None => "",
+    };
+    let bounds = bounds
+        .iter()
+        .copied()
+        .filter(|bound| !implicit_upper_bound(*bound))
+        .map(|bound| readable_type(source, bound))
+        .collect::<Vec<_>>();
+    if bounds.is_empty() {
+        format!("{variance}{name}")
+    } else {
+        format!("{variance}{name} : {}", bounds.join(", "))
+    }
+}
+
+/// kotlinc's rendering of an `inner` class symbol, `inner class Inner<U, Outer(T) : B> : Super<T>`:
+/// its own formals, then each formal it captures from an enclosing class as `Outer(T)`, then its
+/// direct supertypes.
+pub(super) fn inner_class_declaration(
+    source: &dyn SymbolSource,
+    internal: TypeName,
+    shape: &crate::libraries::LibraryType,
+) -> String {
+    let own = shape.own_type_parameter_count;
+    let formals = shape
+        .type_params()
+        .iter()
+        .enumerate()
+        .map(|(index, formal)| {
+            let name = crate::types::type_parameter_source_name(formal);
+            let name = if index < own {
+                name.to_string()
+            } else {
+                format!("Outer({name})")
+            };
+            let bounds = shape
+                .type_param_bounds()
+                .get(index)
+                .map_or(&[][..], Vec::as_slice);
+            formal_display(
+                source,
+                shape.type_param_variances().get(index).copied(),
+                &name,
+                bounds,
+            )
+        })
+        .collect::<Vec<_>>();
+    let formals = if formals.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", formals.join(", "))
+    };
+    // `Any` is a declared supertype only of a class that names no other one.
+    let supertypes = shape
+        .supertype_templates
+        .iter()
+        .filter(|supertype| !supertype.is_erased_top())
+        .map(|supertype| readable_type(source, *supertype))
+        .collect::<Vec<_>>();
+    let supertypes = if supertypes.is_empty() {
+        "Any".to_string()
+    } else {
+        supertypes.join(", ")
+    };
+    format!(
+        "inner class {}{formals} : {supertypes}",
+        internal.nested_segment_ref()
+    )
 }
 
 /// The bound a Kotlin type parameter has when none is written.

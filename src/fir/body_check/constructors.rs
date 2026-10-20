@@ -426,6 +426,12 @@ impl BodyFirChecker<'_> {
             .copied()
             .map(|parameter| self.resolved_type(span, parameter))
             .collect::<Result<Vec<_>, _>>()?;
+        let declared_parameters = member
+            .constructor_declaration_params()
+            .iter()
+            .copied()
+            .map(|parameter| self.resolved_type(span, parameter))
+            .collect::<Result<Box<[_]>, _>>()?;
         crate::trace_compiler!(
             "fir",
             "external constructor owner={owner} parameters={:?} identity={:?}",
@@ -449,6 +455,7 @@ impl BodyFirChecker<'_> {
                 declaration,
                 classifier: owner,
                 parameters: parameters.clone().into_boxed_slice(),
+                declared_parameters,
                 annotation: annotation
                     .map(|annotation| self.checked_annotation_construction(span, annotation))
                     .transpose()?
@@ -1019,17 +1026,20 @@ fn checked_delegation_target(
                         checker.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
                     });
             }
-            let parameters = params
-                .iter()
-                .copied()
-                .map(|parameter| checker.resolved_type(span, parameter))
-                .collect::<Result<Vec<_>, _>>()?;
+            let resolved = |types: &[Ty]| {
+                types
+                    .iter()
+                    .copied()
+                    .map(|parameter| checker.resolved_type(span, parameter))
+                    .collect::<Result<Box<[_]>, _>>()
+            };
             Ok(FirConstructorTarget::External {
                 declaration: external_identity.ok_or_else(|| {
                     checker.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
                 })?,
                 classifier: *owner,
-                parameters: parameters.into_boxed_slice(),
+                parameters: resolved(params)?,
+                declared_parameters: resolved(declaration_params)?,
                 annotation: None,
             })
         }
@@ -1117,7 +1127,9 @@ fn add_constructor_delegation(
         let outer_receiver = resolved
             .outer_receiver
             .as_ref()
-            .map(|selected| checker.materialize_implicit_receiver(origin, Some(span), selected))
+            .map(|selected| {
+                checker.materialize_constructor_prefix_receiver(origin, Some(span), selected)
+            })
             .transpose()?
             .flatten();
         Ok::<_, BodyCheckFailure>((arguments, outer_receiver))
@@ -1485,14 +1497,9 @@ pub(super) fn check_and_dispatch_constructor_body(
             }
         }
         // The delegation's operands carry their source lines, as a secondary constructor's do.
-        let (expression_lines, statement_lines) = crate::fir::body::debug_lines::of_file(file);
-        checker.body.attach_debug_lines(
-            source,
-            file.source_line_count,
-            checker.origins,
-            &expression_lines,
-            &statement_lines,
-        );
+        checker
+            .body
+            .attach_debug_lines(source, file, checker.origins);
         ordinary_sink.accept(work.owner, checker.body);
         return Ok(());
     }
@@ -1589,14 +1596,9 @@ pub(super) fn check_and_dispatch_constructor_body(
         checker.body.push_root(statement);
     }
     // A secondary constructor's body statements carry their source lines, as a function body's do.
-    let (expression_lines, statement_lines) = crate::fir::body::debug_lines::of_file(file);
-    checker.body.attach_debug_lines(
-        source,
-        file.source_line_count,
-        checker.origins,
-        &expression_lines,
-        &statement_lines,
-    );
+    checker
+        .body
+        .attach_debug_lines(source, file, checker.origins);
     ordinary_sink.accept(work.owner, checker.body);
     Ok(())
 }

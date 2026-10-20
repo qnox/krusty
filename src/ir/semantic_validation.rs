@@ -164,9 +164,14 @@ fn validate_constructor_target(
     target: &IrCheckedConstructorTarget,
 ) -> Result<(), UndeterminedIrType> {
     match target {
-        IrCheckedConstructorTarget::External { parameters, .. } => {
-            reject_all("checked constructor parameter", parameters.iter().copied())
-        }
+        IrCheckedConstructorTarget::External {
+            parameters,
+            declared_parameters,
+            ..
+        } => reject_all(
+            "checked constructor parameter",
+            parameters.iter().chain(declared_parameters).copied(),
+        ),
         IrCheckedConstructorTarget::Module(_) => Ok(()),
     }
 }

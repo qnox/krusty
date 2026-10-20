@@ -62,9 +62,14 @@ impl Parser<'_> {
             if let (Some(operator), Some(default)) = (default_operator, default) {
                 self.file.value_operator_spans.insert(default.0, operator);
             }
+            let span = Span::new(
+                self.t[prefix_start].span.lo,
+                self.t[self.i.saturating_sub(1)].span.hi,
+            );
             params.push(Param {
                 name: pname,
                 ty,
+                span,
                 context_kind: crate::types::ContextParameterKind::None,
                 is_vararg,
                 vararg_span,

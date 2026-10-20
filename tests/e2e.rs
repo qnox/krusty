@@ -1105,6 +1105,8 @@ mod import_resolution_diag_e2e;
 mod import_scope_conformance_e2e;
 #[path = "imported_companion_property_e2e.rs"]
 mod imported_companion_property_e2e;
+#[path = "in_place_call_argument_e2e.rs"]
+mod in_place_call_argument_e2e;
 #[path = "in_place_property_receiver_e2e.rs"]
 mod in_place_property_receiver_e2e;
 #[path = "increment_statement_e2e.rs"]
@@ -1227,6 +1229,8 @@ mod java_abstract_override_e2e;
 mod java_array_covariance_e2e;
 #[path = "java_bridge_members_e2e.rs"]
 mod java_bridge_members_e2e;
+#[path = "java_class_formal_bound_e2e.rs"]
+mod java_class_formal_bound_e2e;
 #[path = "java_class_intrinsic_e2e.rs"]
 mod java_class_intrinsic_e2e;
 #[path = "java_constructor_expected_type_e2e.rs"]
@@ -1246,6 +1250,8 @@ mod java_interface_mutable_collection_face_e2e;
 mod java_member_modules;
 #[path = "java_self_bounded_constructor_e2e.rs"]
 mod java_self_bounded_constructor_e2e;
+#[path = "local_class_capture_order_e2e.rs"]
+mod local_class_capture_order_e2e;
 #[path = "local_function_reference_inference_e2e.rs"]
 mod local_function_reference_inference_e2e;
 java_member_modules::declare!();
@@ -1555,8 +1561,6 @@ mod nothing_type_argument_signature_e2e;
 mod nullable_double_type_param_equality_e2e;
 #[path = "nullable_uint_property_e2e.rs"]
 mod nullable_uint_property_e2e;
-#[path = "object_qualifier_type_arguments_e2e.rs"]
-mod object_qualifier_type_arguments_e2e;
 #[path = "only_input_integer_literal_e2e.rs"]
 mod only_input_integer_literal_e2e;
 #[path = "only_input_type_producer_e2e.rs"]
@@ -1617,6 +1621,8 @@ mod suspend;
 mod suspending_concat_operands_e2e;
 #[path = "type_parameter_nullability_annotations_e2e.rs"]
 mod type_parameter_nullability_annotations_e2e;
+#[path = "e2e/type_resolution.rs"]
+mod type_resolution;
 #[path = "unit_expression_body_return_line_e2e.rs"]
 mod unit_expression_body_return_line_e2e;
 #[path = "unsigned_operations_e2e.rs"]
@@ -1661,6 +1667,8 @@ mod value_class_inherited_default_names_e2e;
 mod value_class_interface_default_receiver_e2e;
 #[path = "value_class_interface_entry_e2e.rs"]
 mod value_class_interface_entry_e2e;
+#[path = "value_class_java_generic_constructor_e2e.rs"]
+mod value_class_java_generic_constructor_e2e;
 #[path = "value_class_java_nullable_element_e2e.rs"]
 mod value_class_java_nullable_element_e2e;
 #[path = "value_class_lambda_class_e2e.rs"]
@@ -2129,10 +2137,8 @@ mod child_serializer_lazy_factory_e2e;
 mod class_static_signature_e2e;
 #[path = "declaration_debug_lines_e2e.rs"]
 mod declaration_debug_lines_e2e;
-#[path = "deprecation_classpath_e2e.rs"]
-mod deprecation_classpath_e2e;
-#[path = "deprecation_usage_e2e.rs"]
-mod deprecation_usage_e2e;
+#[path = "e2e/deprecations.rs"]
+mod deprecations;
 #[path = "extension_receiver_specificity_e2e.rs"]
 mod extension_receiver_specificity_e2e;
 #[path = "generic_serializable_class_e2e.rs"]

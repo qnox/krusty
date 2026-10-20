@@ -640,6 +640,24 @@ pub struct SemanticSupertype {
 }
 
 impl LibraryMember {
+    /// The accessor a backend emits for the synthetic `entries` property of an enum declared in
+    /// the module being compiled. It has no source declaration, so it is described here once, in
+    /// the same [`LibraryMember`] capability a dependency provider publishes, and every consumer
+    /// reads that one target rather than reconstructing the call. The logical name stays
+    /// uncallable: `Enum.getEntries()` is not a Kotlin source function; only the synthetic
+    /// `Enum.entries` property may select its physical name.
+    pub fn source_enum_entries_accessor(owner: TypeName) -> Self {
+        let mut entries = LibraryMember::new(
+            "<enum-entries-accessor>".to_string(),
+            Vec::new(),
+            Ty::obj_args("kotlin/enums/EnumEntries", &[Ty::obj_name(owner)]),
+            "()Lkotlin/enums/EnumEntries;".to_string(),
+        );
+        entries.owner = Some(owner);
+        entries.physical_name = Some("getEntries".to_string());
+        entries
+    }
+
     pub fn new(name: String, params: Vec<Ty>, ret: Ty, descriptor: String) -> Self {
         let call_sig = CallSig::metadata_plain(params.len());
         let parameter_plan = physical_parameter_plan::source_parameter_plan(params.len());
@@ -688,6 +706,18 @@ impl LibraryMember {
             stable_declaration: None,
             source_member: None,
         }
+    }
+
+    /// The selected constructor's parameter types before classifier type-argument substitution,
+    /// aligned with [`Self::params`]. Constructor selection specializes `params` from the generic
+    /// signature exactly when that signature has the same arity, so the same rule names the
+    /// declaration shape a specialized `params` came from (`Holder(T)` selected as `Holder(Money)`).
+    pub fn constructor_declaration_params(&self) -> &[Ty] {
+        self.generic_sig
+            .as_ref()
+            .map(|signature| signature.params.as_slice())
+            .filter(|params| params.len() == self.params.len())
+            .unwrap_or(&self.params)
     }
 
     #[inline]

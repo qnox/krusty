@@ -6,20 +6,23 @@
 //! function's pre-CPS result, and a class's parameters with their bounds.
 
 use super::*;
+use crate::types::TypeParameters;
 
 /// Decode the source type of a field while verifying that it erases to the classfile descriptor.
 /// Unlike the constant-field helper, this retains type variables: the shared resolver substitutes
 /// them from the applied receiver and falls back to `erased_ty` only for a raw receiver.
+/// `class_bounds` are the declaring class's formals ([`JvmLibraries::member_class_formal_bounds`]).
 pub(super) fn parse_field_gsig(
     signature: &str,
     erased_descriptor: &str,
-    declaring_class_signature: Option<&str>,
+    class_bounds: &crate::fx_hash::HashMap<String, Ty>,
 ) -> Option<(Ty, bool)> {
     if !matches!(signature.as_bytes().first(), Some(b'L' | b'T' | b'[')) {
         return None;
     }
-    let parsed = parse_gsig_inner(signature, true)?;
-    let erasure = field_type_parameter_erasure(signature, declaring_class_signature)
+    let mut parsed = parse_gsig_inner(signature, true)?;
+    parsed.ty = crate::types::ty_with_param_bounds(parsed.ty, class_bounds);
+    let erasure = field_type_parameter_erasure(signature, class_bounds)
         .or(parsed.erasure.as_deref().map(str::to_string));
     if !parsed.rest.is_empty()
         || erasure.as_deref() != Some(erased_descriptor)
@@ -32,10 +35,11 @@ pub(super) fn parse_field_gsig(
 
 /// Compute the descriptor erasure of an outermost declaring-class type variable (or an array of it).
 /// The JVM uses the variable's leftmost bound, so `T : CharSequence` erases to `CharSequence`, not
-/// unconditionally to `Object`. Chained bounds are followed defensively and cycles are rejected.
+/// unconditionally to `Object`. A hydrated bound carries its whole chain (`B extends A` is bounded by
+/// `A`, itself bounded), so the erasure is the first bound in it that is not a variable.
 fn field_type_parameter_erasure(
     signature: &str,
-    declaring_class_signature: Option<&str>,
+    class_bounds: &crate::fx_hash::HashMap<String, Ty>,
 ) -> Option<String> {
     let mut element = signature;
     let mut dimensions = 0;
@@ -44,24 +48,9 @@ fn field_type_parameter_erasure(
         element = rest;
     }
     let name = element.strip_prefix('T')?.strip_suffix(';')?;
-    let (formals, bounds, _) = parse_formals(declaring_class_signature?);
-    let by_name: crate::fx_hash::HashMap<&str, Ty> = formals
-        .iter()
-        .zip(&bounds)
-        .filter_map(|(formal, bounds)| {
-            bounds
-                .first()
-                .copied()
-                .map(|bound| (formal.as_str(), bound))
-        })
-        .collect();
-    let mut bound = *by_name.get(name)?;
-    let mut seen = crate::fx_hash::HashSet::default();
-    while let Ty::TyParam(next, _) = bound {
-        if !seen.insert(next) {
-            return None;
-        }
-        bound = *by_name.get(next)?;
+    let mut bound = *class_bounds.get(name)?;
+    while let Ty::TyParam(_, inner) | Ty::PlatformNullable(inner) | Ty::Nullable(inner) = bound {
+        bound = *inner;
     }
     Some(format!(
         "{}{}",
@@ -162,7 +151,12 @@ pub(super) fn mark_receiver_fun_params(gsig: &mut GenericSig, recv_fun: &[bool],
 pub(in crate::jvm) type ParsedClassGenericSignature = (Vec<String>, Vec<Vec<Ty>>, Vec<Ty>);
 
 pub(in crate::jvm) fn parse_class_gsig(sig: &str) -> Option<ParsedClassGenericSignature> {
-    let (formals, formal_bounds, mut s) = parse_formals(sig);
+    let (formals, mut formal_bounds, mut s) = parse_formals(sig);
+    hydrate_formal_bounds(
+        &formals,
+        &mut formal_bounds,
+        &crate::fx_hash::HashMap::default(),
+    );
     let mut supers = Vec::new();
     while !s.is_empty() {
         let (g, rest) = parse_gsig(s)?;
@@ -170,6 +164,57 @@ pub(in crate::jvm) fn parse_class_gsig(sig: &str) -> Option<ParsedClassGenericSi
         s = rest;
     }
     Some((formals, formal_bounds, supers))
+}
+
+/// The bound each occurrence of a formal carries: its first declared bound, or Java's implicit
+/// `Any!`. `enclosing` holds the declaring class's formals; a formal declared here shadows one of the
+/// same name there.
+pub(super) fn formal_inline_bounds(
+    formals: &[String],
+    formal_bounds: &[Vec<Ty>],
+    enclosing: &crate::fx_hash::HashMap<String, Ty>,
+) -> crate::fx_hash::HashMap<String, Ty> {
+    let mut inline_bounds = enclosing.clone();
+    inline_bounds.extend(formals.iter().zip(formal_bounds).map(|(formal, bounds)| {
+        (
+            formal.clone(),
+            bounds
+                .first()
+                .copied()
+                .unwrap_or_else(|| Ty::platform_nullable(Ty::obj("kotlin/Any"))),
+        )
+    }));
+    inline_bounds
+}
+
+/// Hydrate each declared bound through the complete chain of formals it names, the declaring
+/// class's (`enclosing`) included, and return the bound each occurrence of a formal carries. In
+/// `<A extends CharSequence, B extends A, C extends B>` a `C` occurrence is bounded by
+/// `B(A(CharSequence!))`, not by a `B` whose `A` still has the parser's `Any` placeholder. A cycle
+/// through a bound's own arguments (`T extends Comparable<T>`) keeps its first repeated occurrence.
+pub(super) fn hydrate_formal_bounds(
+    formals: &[String],
+    formal_bounds: &mut [Vec<Ty>],
+    enclosing: &crate::fx_hash::HashMap<String, Ty>,
+) -> crate::fx_hash::HashMap<String, Ty> {
+    let declared = formal_inline_bounds(formals, formal_bounds, enclosing);
+    for bound in formal_bounds.iter_mut().flatten() {
+        *bound = crate::types::ty_with_transitive_param_bounds(*bound, &declared);
+    }
+    formal_inline_bounds(formals, formal_bounds, enclosing)
+}
+
+/// The hydrated bound of each formal of a class generic signature, over the formals of the classes
+/// that enclose it (`enclosing`), which a formal declared here shadows.
+fn class_formal_bounds(
+    class_signature: Option<&str>,
+    enclosing: &crate::fx_hash::HashMap<String, Ty>,
+) -> crate::fx_hash::HashMap<String, Ty> {
+    let Some(signature) = class_signature else {
+        return enclosing.clone();
+    };
+    let (formals, mut formal_bounds, _) = parse_formals(signature);
+    hydrate_formal_bounds(&formals, &mut formal_bounds, enclosing)
 }
 
 /// The inference signature of a JVM constructor.
@@ -251,18 +296,119 @@ pub(super) fn constructor_inference_signature(
     }
 }
 
+/// A member class's type parameters: its `own`, then the formals of its `enclosing` class (that
+/// class's own, then those it captures in turn), as the common classifier model lists an inner
+/// class's: `Outer<String>.Inner` binds `T = String` in every `Inner` member that names `Outer`'s
+/// `T`. A captured formal the member class hides behind its own of the same spelling keeps its
+/// slot under an identity of its own, and every captured bound names it by that identity:
+/// `Outer<T : Comparable<T>, U : T>.Inner<T>` keeps `Comparable<T>` and `U : T` on the captured
+/// `T`, not on `Inner`'s.
+fn capture_enclosing_type_parameters(
+    name: TypeName,
+    own: &TypeParameters<Vec<Vec<Ty>>>,
+    enclosing: &TypeParameters<Vec<Vec<Ty>>>,
+) -> TypeParameters<Vec<Vec<Ty>>> {
+    let mut formals = own.type_params().clone();
+    let mut hidden = crate::fx_hash::HashMap::<&str, &'static str>::default();
+    for formal in enclosing.type_params() {
+        if formals.contains(formal) {
+            let identity = crate::types::hidden_captured_type_parameter(
+                name,
+                formals.len(),
+                crate::types::type_parameter_source_name(formal),
+            );
+            hidden.insert(formal, identity);
+            formals.push(identity.to_string());
+        } else {
+            formals.push(formal.clone());
+        }
+    }
+    let captured_bounds = enclosing.type_param_bounds().iter().map(|bounds| {
+        bounds
+            .iter()
+            .map(|bound| crate::types::ty_rename_params(*bound, &hidden))
+            .collect::<Vec<_>>()
+    });
+    TypeParameters::new(
+        formals,
+        own.type_param_bounds()
+            .iter()
+            .cloned()
+            .chain(captured_bounds)
+            .collect(),
+        [
+            own.type_param_variances().as_slice(),
+            enclosing.type_param_variances(),
+        ]
+        .concat(),
+    )
+}
+
 impl JvmLibraries {
-    /// Publish a Java method's `Signature` attribute: parameter and return nullability, then the
-    /// constructor's class type parameters when `constructor` is set. The caller decides
-    /// `<init>` at this provider boundary.
+    /// The bound of every class formal a member of `class` may name without declaring it. A Java
+    /// member's free type variables are its class's formals and, for a non-static member class
+    /// (`Outer<T>.Inner`), those of each enclosing class, whose `Signature` alone declares them:
+    /// `class Outer<T extends CharSequence>` makes `Inner.get()`'s `T` bounded by `CharSequence!`,
+    /// not by the parser's `Any` placeholder. An inner declaration shadows an outer one.
+    pub(super) fn member_class_formal_bounds(
+        &self,
+        class: &crate::jvm::classreader::ClassInfo,
+    ) -> crate::fx_hash::HashMap<String, Ty> {
+        let enclosing_of = |class: &crate::jvm::classreader::ClassInfo| {
+            class
+                .inner_class_self()
+                .filter(|entry| entry.access & crate::jvm::classreader::ACC_STATIC == 0)
+                .and_then(|entry| entry.outer.as_deref())
+                .and_then(|outer| self.cp.find_name(type_name(outer)))
+        };
+        let mut enclosing = Vec::new();
+        let mut current = enclosing_of(class);
+        while let Some(outer) = current {
+            current = enclosing_of(&outer);
+            enclosing.push(outer);
+        }
+        let outer_bounds = enclosing
+            .iter()
+            .rev()
+            .fold(crate::fx_hash::HashMap::default(), |bounds, outer| {
+                class_formal_bounds(outer.signature.as_deref(), &bounds)
+            });
+        class_formal_bounds(class.signature.as_deref(), &outer_bounds)
+    }
+
+    /// The type parameters class `name` publishes, and how many of them it declares itself. A
+    /// non-static member class (one with an `outer_instance`) captures its enclosing class's
+    /// formals after its own ([`capture_enclosing_type_parameters`]); a static nested class
+    /// captures none.
+    pub(super) fn member_class_type_parameters(
+        &self,
+        outer_instance: Option<TypeName>,
+        name: TypeName,
+        own: TypeParameters<Vec<Vec<Ty>>>,
+    ) -> (usize, TypeParameters<Vec<Vec<Ty>>>) {
+        let own_count = own.type_params().len();
+        match outer_instance.and_then(|outer| self.classifier_record(outer)) {
+            Some(enclosing) => (
+                own_count,
+                capture_enclosing_type_parameters(name, &own, &enclosing.type_parameters),
+            ),
+            None => (own_count, own),
+        }
+    }
+
+    /// Publish a Java method's `Signature` attribute: the declaring class's formal bounds
+    /// (`class_bounds`), parameter and return nullability, then the constructor's class type
+    /// parameters when `constructor` is set. The caller decides `<init>` at this provider boundary.
     pub(super) fn publish_java_member_generic_signature(
         &self,
         signature: Option<&str>,
+        class_bounds: &crate::fx_hash::HashMap<String, Ty>,
         parameter_nullability: &[Option<JavaNullability>],
         return_nullability: Option<JavaNullability>,
         constructor: Option<(Option<&str>, TypeName, &str)>,
     ) -> Option<GenericSig> {
-        let mut generic = signature.and_then(parse_method_gsig)?;
+        let mut generic =
+            signature.and_then(|signature| parse_member_method_gsig(signature, class_bounds))?;
         // A JVM generic signature still distinguishes a boxed Java reference from a Kotlin
         // primitive at this point (`java.lang.Integer` versus `Int`). Apply Java's type-use
         // flexibility while that declaration fact is available. Semanticizing a `FunctionN`
@@ -288,6 +434,156 @@ impl JvmLibraries {
             ));
         }
         Some(generic)
+    }
+}
+
+#[cfg(test)]
+mod class_formal_bound_tests {
+    use super::*;
+    use crate::fx_hash::HashMap;
+
+    const BOX: &str = "<T::Ljava/lang/CharSequence;>Ljava/lang/Object;";
+
+    fn char_sequence() -> Ty {
+        Ty::platform_nullable(Ty::obj("kotlin/CharSequence"))
+    }
+
+    #[test]
+    fn a_class_formal_occurrence_carries_the_declared_bound() {
+        let bounds = class_formal_bounds(Some(BOX), &HashMap::default());
+        let t = Ty::ty_param("T", char_sequence());
+        let method =
+            parse_member_method_gsig("(TT;)Ljava/util/List<TT;>;", &bounds).expect("member");
+
+        assert_eq!(method.params, vec![t]);
+        assert_eq!(method.ret.type_args(), [t]);
+        assert_eq!(
+            parse_member_method_gsig("()TT;", &bounds)
+                .expect("member")
+                .ret,
+            t
+        );
+        assert_eq!(
+            parse_field_gsig("TT;", "Ljava/lang/CharSequence;", &bounds),
+            Some((t, true))
+        );
+    }
+
+    #[test]
+    fn a_method_formal_bounded_by_a_class_formal_carries_its_declared_bound() {
+        let method = parse_member_method_gsig(
+            "<U:TT;>()TU;",
+            &class_formal_bounds(Some(BOX), &HashMap::default()),
+        )
+        .expect("member");
+        let t = Ty::platform_nullable(Ty::ty_param("T", char_sequence()));
+
+        assert_eq!(method.formal_bounds, vec![vec![t]]);
+        assert_eq!(method.ret, Ty::ty_param("U", t));
+    }
+
+    #[test]
+    fn a_chained_class_formal_carries_the_complete_declared_chain() {
+        let bounds = class_formal_bounds(
+            Some("<A::Ljava/lang/CharSequence;B:TA;C:TB;>Ljava/lang/Object;"),
+            &HashMap::default(),
+        );
+        let a = Ty::ty_param("A", char_sequence());
+        let b = Ty::ty_param("B", Ty::platform_nullable(a));
+        let c = Ty::ty_param("C", Ty::platform_nullable(b));
+
+        assert_eq!(
+            parse_member_method_gsig("()TC;", &bounds)
+                .expect("member")
+                .ret,
+            c
+        );
+        let method = parse_member_method_gsig("<D:TC;>()TD;", &bounds).expect("member");
+        assert_eq!(method.formal_bounds, vec![vec![Ty::platform_nullable(c)]]);
+    }
+
+    #[test]
+    fn an_inner_class_member_carries_its_enclosing_class_formal_bounds() {
+        let outer = class_formal_bounds(Some(BOX), &HashMap::default());
+        let t = Ty::ty_param("T", char_sequence());
+
+        let inner = class_formal_bounds(None, &outer);
+        assert_eq!(
+            parse_member_method_gsig("()TT;", &inner)
+                .expect("member")
+                .ret,
+            t
+        );
+        assert_eq!(
+            parse_field_gsig("TT;", "Ljava/lang/CharSequence;", &inner),
+            Some((t, true))
+        );
+
+        let generic_inner = class_formal_bounds(Some("<V:TT;>Ljava/lang/Object;"), &outer);
+        assert_eq!(
+            parse_member_method_gsig("()TV;", &generic_inner)
+                .expect("member")
+                .ret,
+            Ty::ty_param("V", Ty::platform_nullable(t))
+        );
+        assert_eq!(
+            parse_field_gsig("TV;", "Ljava/lang/CharSequence;", &generic_inner),
+            Some((Ty::ty_param("V", Ty::platform_nullable(t)), true))
+        );
+
+        let shadowing =
+            class_formal_bounds(Some("<T:Ljava/lang/Object;>Ljava/lang/Object;"), &outer);
+        assert_eq!(
+            parse_member_method_gsig("()TT;", &shadowing)
+                .expect("member")
+                .ret,
+            Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any")))
+        );
+    }
+
+    #[test]
+    fn a_hidden_captured_formal_keeps_its_self_and_cross_formal_bounds() {
+        let comparable = |argument| Ty::obj_args("kotlin/Comparable", &[argument]);
+        let outer_t = Ty::ty_param("T", Ty::obj("kotlin/Any"));
+        let enclosing = TypeParameters::new(
+            vec!["T".to_string(), "U".to_string()],
+            vec![vec![comparable(outer_t)], vec![outer_t]],
+            vec![crate::types::TypeVariance::Invariant; 2],
+        );
+        let own = TypeParameters::new(
+            vec!["T".to_string()],
+            vec![vec![Ty::obj("kotlin/Any")]],
+            vec![crate::types::TypeVariance::Invariant],
+        );
+        let inner = crate::types::type_name("Outer$Inner");
+
+        let captured = capture_enclosing_type_parameters(inner, &own, &enclosing);
+        let hidden = crate::types::hidden_captured_type_parameter(inner, 1, "T");
+        let hidden_t = Ty::ty_param(hidden, Ty::obj("kotlin/Any"));
+
+        assert_eq!(captured.type_params(), &["T", hidden, "U"]);
+        assert_eq!(
+            captured.type_param_bounds(),
+            &vec![
+                vec![Ty::obj("kotlin/Any")],
+                vec![comparable(hidden_t)],
+                vec![hidden_t],
+            ]
+        );
+        assert_eq!(crate::types::type_parameter_source_name(hidden), "T");
+    }
+
+    #[test]
+    fn a_method_formal_shadows_the_class_formal_of_the_same_name() {
+        let method = parse_member_method_gsig(
+            "<T:Ljava/lang/Object;>(TT;)TT;",
+            &class_formal_bounds(Some(BOX), &HashMap::default()),
+        )
+        .expect("member");
+        let own = Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any")));
+
+        assert_eq!(method.params, vec![own]);
+        assert_eq!(method.ret, own);
     }
 }
 

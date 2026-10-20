@@ -198,11 +198,12 @@ fn a_release_known_raw_language_feature_reaches_compilation() {
     );
 }
 
-/// intellij-community also sets `-progressive`. krusty does not implement the progressive
-/// features it turns on, so the rule's action must fail with the refusal and write nothing rather
-/// than compile under semantics the project did not ask for.
+/// intellij-community also sets `-progressive`. krusty models every progressive feature it turns
+/// on, so the rule's action compiles under them and writes the jar. This checks only that the rule
+/// surface forwards the flag; `package_qualifier_forms_e2e` compares its semantics with the
+/// reference compilers.
 #[test]
-fn the_projects_progressive_flag_is_refused() {
+fn the_projects_progressive_flag_is_honored() {
     let dir = workspace("progressive");
     let source = dir.join("P.kt");
     std::fs::write(&source, "package demo\nfun value(): Int = 1\n").expect("write source");
@@ -216,12 +217,13 @@ fn the_projects_progressive_flag_is_refused() {
             source.display().to_string(),
         ],
     );
-    assert_eq!(output.status.code(), Some(2));
     assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
-        "krusty: error: krusty does not implement the language feature 'ReportDeprecationsOfClassifiersInImplicitInvokes' selected by '-progressive'\n"
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(!jar.exists(), "a refused argument must not write the jar");
+    assert!(jar.exists(), "a compiled action writes its jar");
 }
 
 /// A failing compile must FAIL the action. A rule whose compiler exits 0 on a broken source
@@ -266,12 +268,11 @@ fn the_persistent_worker_serves_intellijs_argument_surface() {
     let abi = dir.join("demo.abi.jar");
     let cri = dir.join("demo.kotlinCriStorage");
 
-    // Request 1 is the options intellij-community actually builds with, including `--progressive`:
-    // it must be refused while those semantics are unimplemented. Request 2 supplies codegen
-    // decisions through the rule's `kotlinc_opts` passthrough ONLY: worker defaults must not
-    // overwrite them. Request 3 carries Java and must also be refused. Requests 4 and 5 prove both
-    // failures leave the worker alive; request 5 is request 1's supported subset and writes every
-    // declared output.
+    // Request 1 is the options intellij-community actually builds with, including `--progressive`,
+    // whose features are all modeled. Request 2 supplies codegen decisions through the rule's
+    // `kotlinc_opts` passthrough ONLY: worker defaults must not overwrite them. Request 3 carries
+    // Java and must be refused. Requests 4 and 5 prove the refusal leaves the worker alive;
+    // request 5 is request 1 without `--progressive` and writes every declared output.
     let requests = format!(
         concat!(
             r#"{{"arguments":["--target_label","//demo:demo","--kotlin_module_name","intellij.demo","#,
@@ -320,7 +321,7 @@ fn the_persistent_worker_serves_intellijs_argument_surface() {
     assert_eq!(
         lines,
         [
-            r#"{"exitCode":1,"output":"krusty: unsupported by krusty: krusty does not implement the language feature 'ReportDeprecationsOfClassifiersInImplicitInvokes' selected by '-progressive'","requestId":1}"#,
+            r#"{"exitCode":0,"output":"","requestId":1}"#,
             r#"{"exitCode":0,"output":"","requestId":2}"#,
             r#"{"exitCode":1,"output":"krusty: krusty has no Java front end, so this target cannot be built by it: --java-count 4","requestId":3}"#,
             r#"{"exitCode":0,"output":"","requestId":4}"#,
