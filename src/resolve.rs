@@ -29,7 +29,7 @@ use crate::types::{
     type_name_nested_child, Ty, TypeName, Visibility,
 };
 use scope::ScopeKind;
-use scope::{ContextReceiver, ContextReceiverKind, ContextValue, FlowExclusion, NarrowPath, Ns};
+use scope::{ContextReceiver, ContextReceiverKind, FlowExclusion, NarrowPath, Ns};
 
 mod abstract_obligations;
 mod access_control;
@@ -101,6 +101,7 @@ mod condition_exclusions;
 mod conditional_branch;
 mod constant_evaluation;
 mod constructor_commitment;
+mod context_argument_selection;
 mod context_capture;
 mod context_receiver_priority;
 mod context_sensitive_resolution;
@@ -4271,179 +4272,6 @@ fn map_param_list_args(
         params.vararg,
         trailing_lambda,
     )
-}
-
-/// Collect the outer-variable names a lambda body writes (assigns / `++`/`--`), so the lowerer can box
-/// them. Does not descend into nested lambdas; their writes are recorded when those lambdas are checked.
-fn collect_lambda_outer_writes(
-    file: &File,
-    e: ExprId,
-    outer_names: &crate::fx_hash::HashSet<String>,
-    out: &mut crate::fx_hash::HashSet<String>,
-) {
-    fn ce(
-        file: &File,
-        e: ExprId,
-        active: &crate::fx_hash::HashSet<String>,
-        out: &mut crate::fx_hash::HashSet<String>,
-    ) {
-        match file.expr(e) {
-            Expr::Block { stmts, trailing } => {
-                let mut active = active.clone();
-                for &s in stmts {
-                    cs(file, s, &mut active, out);
-                }
-                if let Some(t) = trailing {
-                    ce(file, *t, &active, out);
-                }
-            }
-            Expr::If {
-                cond,
-                then_branch,
-                else_branch,
-            } => {
-                ce(file, *cond, active, out);
-                ce(file, *then_branch, active, out);
-                if let Some(x) = else_branch {
-                    ce(file, *x, active, out);
-                }
-            }
-            Expr::Try {
-                body,
-                catches,
-                finally,
-            } => {
-                ce(file, *body, active, out);
-                for c in catches {
-                    let mut catch_active = active.clone();
-                    catch_active.remove(&c.name);
-                    ce(file, c.body, &catch_active, out);
-                }
-                if let Some(f) = finally {
-                    ce(file, *f, active, out);
-                }
-            }
-            Expr::When { subject, arms } => {
-                if let Some(s) = subject {
-                    ce(file, *s, active, out);
-                }
-                for a in arms {
-                    for condition in &a.conditions {
-                        ce(file, condition.expression(), active, out);
-                    }
-                    if let Some(guard) = a.guard {
-                        ce(file, guard, active, out);
-                    }
-                    ce(file, a.body, active, out);
-                }
-            }
-            Expr::Lambda { .. } => {}
-            _ => {}
-        }
-    }
-    fn cs(
-        file: &File,
-        s: StmtId,
-        active: &mut crate::fx_hash::HashSet<String>,
-        out: &mut crate::fx_hash::HashSet<String>,
-    ) {
-        match file.stmt(s) {
-            Stmt::IncDec { name, .. } => {
-                if active.contains(name) {
-                    out.insert(name.clone());
-                }
-            }
-            Stmt::Assign { name, value } => {
-                if active.contains(name) {
-                    out.insert(name.clone());
-                }
-                ce(file, *value, active, out);
-            }
-            Stmt::Local { name, init, .. } => {
-                ce(file, *init, active, out);
-                active.remove(name);
-            }
-            Stmt::LocalDelegate { name, delegate, .. } => {
-                ce(file, *delegate, active, out);
-                active.remove(name);
-            }
-            Stmt::LocalLateinit { name, .. } => {
-                active.remove(name);
-            }
-            Stmt::Destructure { entries, init } => {
-                ce(file, *init, active, out);
-                for entry in entries.iter().filter(|entry| !entry.ignored) {
-                    active.remove(&entry.name);
-                }
-            }
-            Stmt::AssignMember {
-                receiver, value, ..
-            } => {
-                ce(file, *receiver, active, out);
-                ce(file, *value, active, out);
-            }
-            Stmt::AssignIndex {
-                array,
-                indices,
-                value,
-            } => {
-                ce(file, *array, active, out);
-                for &i in indices {
-                    ce(file, i, active, out);
-                }
-                ce(file, *value, active, out);
-            }
-            Stmt::AssignSafeIndex {
-                receiver,
-                indices,
-                value,
-                ..
-            } => {
-                ce(file, *receiver, active, out);
-                for &index in indices {
-                    ce(file, index, active, out);
-                }
-                ce(file, *value, active, out);
-            }
-            Stmt::Return(Some(e), _) => ce(file, *e, active, out),
-            Stmt::While { cond, body, .. } | Stmt::DoWhile { cond, body, .. } => {
-                ce(file, *cond, active, out);
-                ce(file, *body, active, out);
-            }
-            Stmt::For {
-                name, range, body, ..
-            } => {
-                ce(file, range.start, active, out);
-                ce(file, range.end, active, out);
-                let mut body_active = active.clone();
-                body_active.remove(name);
-                ce(file, *body, &body_active, out);
-            }
-            Stmt::ForEach {
-                name,
-                iterable,
-                body,
-                ..
-            } => {
-                ce(file, *iterable, active, out);
-                let mut body_active = active.clone();
-                body_active.remove(name);
-                ce(file, *body, &body_active, out);
-            }
-            Stmt::Expr(e) => ce(file, *e, active, out),
-            Stmt::CompoundAssign { target, value, .. } => {
-                ce(file, *target, active, out);
-                ce(file, *value, active, out);
-            }
-            Stmt::Return(None, _)
-            | Stmt::Break(_)
-            | Stmt::Continue(_)
-            | Stmt::LocalFun(_)
-            | Stmt::LocalClass(_)
-            | Stmt::LocalTypeAlias(_) => {}
-        }
-    }
-    ce(file, e, outer_names, out);
 }
 
 fn fun_body_expr(body: &FunBody) -> Option<ExprId> {
@@ -9176,6 +9004,13 @@ pub struct LocalCapture {
     pub name: String,
     pub ty: Ty,
     pub shared_cell: bool,
+    /// The captured binding's flow identity, which an enclosing callable that calls this function
+    /// maps the capture by.
+    pub flow_identity: Option<u32>,
+    /// The captured binding's lexical identity, which a calling class maps the capture's field by.
+    pub lexical_binding: Option<u32>,
+    /// How many nearer same-named bindings shadow the captured one where the function is declared.
+    pub lexical_shadow_depth: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -15916,6 +15751,7 @@ impl<'a> Checker<'a> {
                         receiver_label: None,
                         receiver: None,
                         semantic_receiver: None,
+                        lexical_binding: local.lexical_capture_identity,
                         receiver_identity: None,
                         receiver_capture: None,
                         receiver_role: None,
@@ -16005,6 +15841,7 @@ impl<'a> Checker<'a> {
                                 receiver_label: self
                                     .anonymous_capture_receiver_label(scope, receiver),
                                 semantic_receiver: Some(semantic_receiver),
+                                lexical_binding: None,
                                 receiver_identity: Some(identity),
                             },
                             identity,
@@ -21940,8 +21777,7 @@ impl<'a> Checker<'a> {
                         .insert(d, std::mem::take(&mut captures.forwarded_super_arguments));
                 }
                 self.keep_unsupported_local_class_capture(scope, &mut captures);
-                let mut capture_bindings =
-                    self.local_capture_binding_identities(scope, &captures.values);
+                let mut capture_bindings = Self::local_capture_binding_identities(&captures.values);
                 self.restore_proven_local_receiver_captures(
                     &mut established,
                     &receiver_candidates,
@@ -23504,81 +23340,38 @@ impl<'a> Checker<'a> {
         }
 
         // A lifted local function can consume an implicit context binding without spelling its source
-        // name. Add those checker-selected bindings to the same capture ABI as explicit name reads;
-        // lowering must never rediscover a context source from the surrounding scope.
-        if let FunBody::Expr(body) | FunBody::Block(body) = &f.body {
-            let (selected_contexts, direct_receivers) = selected_context_values(
-                self.file,
-                SelectedContextSources {
-                    expr_types: &self.expr_types,
-                    implicit_receiver_selections: &self.implicit_receiver_selections,
-                    context_args: &self.context_args,
-                    resolved_calls: &self.resolved_calls,
-                    resolved_super_calls: &self.resolved_super_calls,
-                    stmt_lowers: &self.stmt_lowers,
-                },
-                *body,
-                true,
-            );
-            let selected_names = selected_contexts
-                .into_iter()
-                .filter_map(|source| match source {
-                    ResolvedContextArgument::Binding { name, .. } => Some(name),
-                    ResolvedContextArgument::ImplicitReceiver(selection) => {
-                        selection.context_binding.map(|(name, _)| name)
-                    }
-                })
-                .chain(
-                    direct_receivers
-                        .into_iter()
-                        .filter_map(|selection| selection.context_binding.map(|(name, _)| name)),
-                );
-            for name in selected_names {
-                if outer_names.contains(&name)
-                    && !captured_locals
-                        .iter()
-                        .any(|(captured, _, _)| captured == &name)
-                {
-                    let ty = self
-                        .lookup(scope, &name)
-                        .map(|local| local.ty)
-                        .unwrap_or(Ty::Error);
-                    captured_locals.push((name, ty, false));
-                }
+        // name. Add each checker-selected binding, retrieved by the identity recorded when it was
+        // selected, to the same capture ABI as explicit name reads.
+        let selected = match &f.body {
+            FunBody::Expr(body) | FunBody::Block(body) => {
+                self.selected_context_bindings(scope, *body)
             }
-        }
-        captured_locals.sort_by(|left, right| left.0.cmp(&right.0));
-        self.record_local_function_first_use(scope, stmt_id, f, &captured_locals);
-        let capture_bindings = captured_locals
-            .iter()
-            .map(|(name, _, _)| {
-                self.lookup(scope, name)
-                    .and_then(|binding| binding.lexical_capture_identity)
-            })
-            .collect::<Vec<_>>();
+            FunBody::None => Vec::new(),
+        };
+        let context_argument_selection::CapturedLocals {
+            captured: captured_locals,
+            locals,
+            shadow_depths,
+        } = self.captured_local_bindings(scope, captured_locals, selected, &outer_names);
+        self.record_local_function_first_use(stmt_id, f, &captured_locals, &locals);
         let captures = captured_locals
             .into_iter()
-            .map(|(name, ty, shared_hint)| {
-                let shared_cell = shared_hint
-                    || match &f.body {
-                        FunBody::Expr(e) | FunBody::Block(e) => {
-                            self.local_capture_needs_shared_cell(scope, *e, &name)
-                        }
-                        FunBody::None => false,
-                    }
-                    || f.params
-                        .iter()
-                        .filter_map(|parameter| parameter.default)
-                        .any(|default| self.local_capture_needs_shared_cell(scope, default, &name));
+            .zip(locals.iter().zip(shadow_depths))
+            .map(|((name, ty, shared_hint), (local, lexical_shadow_depth))| {
+                let shared_cell =
+                    shared_hint || self.local_function_capture_is_shared_cell(f, local.as_ref());
                 LocalCapture {
                     name,
                     ty,
                     shared_cell,
+                    flow_identity: local.as_ref().map(|local| local.flow_identity),
+                    lexical_binding: local
+                        .as_ref()
+                        .and_then(|local| local.lexical_capture_identity),
+                    lexical_shadow_depth,
                 }
             })
             .collect();
-        self.local_function_capture_bindings
-            .insert(stmt_id, capture_bindings);
         self.stmt_lowers.insert(
             stmt_id,
             StmtLowering::LocalFunction(Box::new(LocalFunInfo {
@@ -29077,13 +28870,14 @@ fun box(): String {
         let call = named_call(&file, "leaf");
         let target = module_top_level_target(&info, call);
         assert_eq!(target.callable.params, vec![Ty::obj("B")]);
-        assert_eq!(
-            target.context_args,
-            vec![Some(ResolvedContextArgument::Binding {
-                name: "b".to_string(),
+        assert!(matches!(
+            target.context_args.as_slice(),
+            [Some(ResolvedContextArgument::Binding {
+                name,
                 shadow_depth: 0,
-            })]
-        );
+                flow_identity: Some(_),
+            })] if name == "b"
+        ));
     }
 
     #[test]
@@ -32968,7 +32762,6 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         discovered_local_class_capture_bindings: HashMap::default(),
         class_capture_uses: Default::default(),
         finalized_local_class_captures: crate::fx_hash::HashSet::default(),
-        local_function_capture_bindings: HashMap::default(),
         receiver_capture_ids: receiver_capture_identity::ReceiverCaptureIds::default(),
         next_lexical_capture_identity: 0,
         try_body_writes: Vec::new(),
@@ -34988,10 +34781,21 @@ pub struct ImplicitReceiverSelection {
     pub classifier: Option<crate::fir::DeclarationId>,
     /// Exact lexical binding for a context receiver parameter. Ordinary dispatch/extension receivers
     /// leave this unset and use their receiver coordinate.
-    pub context_binding: Option<(String, usize)>,
+    pub context_binding: Option<ContextBinding>,
     /// Exact singleton declaration when the selected receiver is a lexical object rather than a
     /// scoped `this` value. `None` means lowering must materialize the selected scoped receiver.
     pub singleton: Option<SingletonValue>,
+}
+
+/// The lexical binding a named context receiver is also visible as.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextBinding {
+    pub name: String,
+    /// Number of nearer runtime bindings with the same name.
+    pub shadow_depth: usize,
+    /// The binding's flow identity, recorded when the checker selected it. A selection rebuilt
+    /// from checked FIR only materializes the value and carries none.
+    pub flow_identity: Option<u32>,
 }
 
 /// Runtime identity of a value selected for an implicit context parameter.
@@ -35001,6 +34805,9 @@ pub enum ResolvedContextArgument {
         name: String,
         /// Number of nearer runtime bindings with the same name.
         shadow_depth: usize,
+        /// The binding's flow identity, recorded when the checker selected it, or carried by a
+        /// lifted local function's capture.
+        flow_identity: Option<u32>,
     },
     ImplicitReceiver(ImplicitReceiverSelection),
 }
@@ -35782,8 +35589,6 @@ struct Checker<'a> {
     discovered_local_class_capture_bindings: HashMap<DeclId, Vec<Option<u32>>>,
     class_capture_uses: capture_field_order::ClassCaptureUses,
     finalized_local_class_captures: crate::fx_hash::HashSet<DeclId>,
-    /// Resolver-only binding identities parallel to lifted local-function capture vectors.
-    local_function_capture_bindings: HashMap<StmtId, Vec<Option<u32>>>,
     receiver_capture_ids: receiver_capture_identity::ReceiverCaptureIds,
     next_lexical_capture_identity: u32,
     /// Bindings written by each try body being checked, innermost last.
@@ -40812,159 +40617,6 @@ impl<'a> Checker<'a> {
                 self.mark_extension_receiver_used(call, receiver);
             }
         }
-    }
-
-    /// Resolve an operator/method call `receiver.name(args)` — a user-class MEMBER, a same-module
-    /// EXTENSION, or a library member — checking each argument type and returning the selected target.
-    /// `None` when no such method of matching arity exists (the caller then declines). Used by the
-    /// reference-range `in` desugaring (`rangeTo` then `contains`), which records the returned calls only
-    /// after the whole desugaring is valid.
-    /// Resolve each context-parameter type to one semantic scope value. The implicit-receiver tower is
-    /// searched nearest-first, followed by lexical bindings. The returned identities are the complete
-    /// checker/lowerer handoff; lowering does not repeat resolution.
-    fn select_context_arguments(
-        &self,
-        scope: &CheckerScope<'_>,
-        ctx_types: &[Ty],
-    ) -> Option<Vec<ResolvedContextArgument>> {
-        self.select_context_arguments_with_types(scope, ctx_types)
-            .ok()
-            .map(|arguments| {
-                arguments
-                    .into_iter()
-                    .map(|(argument, _)| argument)
-                    .collect()
-            })
-    }
-
-    fn select_context_arguments_with_types(
-        &self,
-        scope: &CheckerScope<'_>,
-        ctx_types: &[Ty],
-    ) -> Result<Vec<(ResolvedContextArgument, Ty)>, MissingContextParameter> {
-        let matches = |have: Ty, want: Ty| -> bool {
-            if have == want {
-                return true;
-            }
-            if let Some(bound) = want.ty_param_bound() {
-                return bound.is_erased_top() || arg_assignable_simple(bound, have);
-            }
-            match (have.obj_internal(), want.obj_internal()) {
-                (Some(h), Some(w)) => self.obj_name_is_subtype(h, w),
-                _ => want.mentions_ty_param() && have.erased_recv() == want.erased_recv(),
-            }
-        };
-        let mut out = Vec::with_capacity(ctx_types.len());
-        for (index, &want) in ctx_types.iter().enumerate() {
-            // `if (this is Scope)` changes the semantic type of the current receiver without
-            // changing its runtime identity. The scope tower deliberately stores the declared
-            // receiver type, so consult the checker's flow-aware receiver view before the raw
-            // context-value walk. Multiple equal context parameters may select this same value.
-            if let Some(actual) = self
-                .actual_this_narrow(scope)
-                .filter(|actual| matches(*actual, want))
-            {
-                let receiver = self
-                    .implicit_receivers(scope)
-                    .into_iter()
-                    .find(|receiver| receiver.current)
-                    .ok_or(MissingContextParameter { index, ty: want })?;
-                let selected =
-                    ResolvedContextArgument::ImplicitReceiver(ImplicitReceiverSelection {
-                        ty: actual,
-                        current: receiver.current,
-                        receiver_depth: receiver.receiver_depth,
-                        classifier: None,
-                        context_binding: None,
-                        singleton: self.implicit_singleton_value(actual, receiver.current),
-                    });
-                crate::trace_compiler!(
-                    "resolve",
-                    "context argument want={want:?} selected={selected:?}"
-                );
-                out.push((selected, actual));
-                continue;
-            }
-            let selected = scope.find_context_value(
-                |receiver| matches(receiver, want),
-                |binding| {
-                    binding.value().is_some_and(|local| {
-                        matches!(local.origin, ReceiverFnValueOrigin::Local)
-                            && local.is_context_parameter
-                            && matches(local.ty, want)
-                    })
-                },
-            );
-            let Some(selected) = selected else {
-                crate::trace_compiler!(
-                    "resolve",
-                    "context argument missing want={want:?} receivers={:?}",
-                    self.implicit_receivers(scope)
-                        .into_iter()
-                        .map(|receiver| receiver.ty)
-                        .collect::<Vec<_>>(),
-                );
-                return Err(MissingContextParameter { index, ty: want });
-            };
-            let (selected, actual) = match selected {
-                ContextValue::ImplicitReceiver {
-                    ty,
-                    current,
-                    receiver_depth,
-                    context_name,
-                    context_shadow_depth,
-                } => {
-                    // A named context parameter has a lexical alias, but its runtime identity is
-                    // still the selected implicit-receiver rung. Preserve both facts: FIR reads the
-                    // receiver coordinate and uses `context_binding` only when a nested body must
-                    // capture the named alias. Reclassifying it as an ordinary local loses the
-                    // receiver when Pass 2 reconstructs a lambda scope.
-                    let argument =
-                        ResolvedContextArgument::ImplicitReceiver(ImplicitReceiverSelection {
-                            ty,
-                            current,
-                            receiver_depth,
-                            classifier: None,
-                            context_binding: context_name.map(|name| (name, context_shadow_depth)),
-                            singleton: self.implicit_singleton_value(ty, current),
-                        });
-                    (argument, ty)
-                }
-                ContextValue::Binding { name, shadow_depth } => {
-                    let ty = self
-                        .lookup(scope, &name)
-                        .ok_or(MissingContextParameter { index, ty: want })?
-                        .ty;
-                    let argument = if name == "this" {
-                        let receiver = self
-                            .implicit_receivers(scope)
-                            .into_iter()
-                            .find(|receiver| receiver.current)
-                            .ok_or(MissingContextParameter { index, ty: want })?;
-                        ResolvedContextArgument::ImplicitReceiver(ImplicitReceiverSelection {
-                            // Keep the smart-cast result selected from the lexical shadow. Runtime
-                            // identity still comes from the receiver rung, not a nonexistent local
-                            // slot named `this`.
-                            ty,
-                            current: receiver.current,
-                            receiver_depth: receiver.receiver_depth,
-                            classifier: None,
-                            context_binding: Some((name, shadow_depth)),
-                            singleton: self.implicit_singleton_value(ty, receiver.current),
-                        })
-                    } else {
-                        ResolvedContextArgument::Binding { name, shadow_depth }
-                    };
-                    (argument, ty)
-                }
-            };
-            crate::trace_compiler!(
-                "resolve",
-                "context argument want={want:?} selected={selected:?}"
-            );
-            out.push((selected, actual));
-        }
-        Ok(out)
     }
 
     /// Specialize a selected generic property from its implicit context arguments. Context values

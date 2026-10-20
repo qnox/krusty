@@ -64,14 +64,8 @@ fn class_names(ir: &IrFile, class: &IrClass) -> NameAllocation {
     let captures: HashMap<usize, String> = class
         .ctor_args
         .iter()
-        .filter_map(|argument| {
-            let index = argument.field_index? as usize;
-            let capture = argument.capture.as_ref()?;
-            Some((
-                index,
-                super::super::capture_names::class_capture(ir, class, capture).field,
-            ))
-        })
+        .zip(super::super::capture_names::class_captures(ir, class))
+        .filter_map(|(argument, names)| Some((argument.field_index? as usize, names?.field)))
         .collect();
     let fields = class
         .fields

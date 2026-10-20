@@ -220,6 +220,7 @@ impl BodyFirChecker<'_> {
                         semantic_receiver_depth: None,
                         receiver_source: None,
                         capture_identity: required.capture_identity,
+                        lexical_binding: required.lexical_binding,
                     },
                     ConstructorCaptureOperand::ImplicitReceiver { .. } => required,
                 };
@@ -358,6 +359,18 @@ impl BodyFirChecker<'_> {
             .iter()
             .map(|(_, binding)| *binding)
             .filter(|binding| binding.capture_identity == Some(identity))
+            .min_by_key(|binding| binding.enclosing_depth)
+    }
+
+    /// The nearest class field that stores the binding whose lexical identity is `identity`.
+    pub(super) fn class_value_by_lexical_binding(
+        &self,
+        identity: u32,
+    ) -> Option<ClassCaptureBinding> {
+        self.class_capture_values
+            .iter()
+            .map(|(_, binding)| *binding)
+            .filter(|binding| binding.lexical_binding == Some(identity))
             .min_by_key(|binding| binding.enclosing_depth)
     }
 
@@ -604,6 +617,7 @@ impl BodyFirChecker<'_> {
                 semantic_receiver_depth: None,
                 receiver_source,
                 capture_identity: None,
+                lexical_binding: None,
             },
             origin,
         )
@@ -938,6 +952,7 @@ impl BodyFirChecker<'_> {
                             semantic_receiver_depth: None,
                             receiver_source: None,
                             capture_identity,
+                            lexical_binding: capture.lexical_binding,
                         });
                         if let DelegateStorage::ClassField(binding) = delegate.storage {
                             context.capture_values.push((capture.name.clone(), binding));
@@ -961,7 +976,9 @@ impl BodyFirChecker<'_> {
                                 semantic_receiver_depth: None,
                                 receiver_source: None,
                                 capture_identity,
+                                lexical_binding: capture.lexical_binding,
                             },
+                            capture.lexical_shadow_depth,
                         );
                         if let Some(enclosing_depth) = enclosing_depth {
                             self.body.add_capture(FirCapture {
@@ -993,7 +1010,9 @@ impl BodyFirChecker<'_> {
                                 semantic_receiver_depth: None,
                                 receiver_source: None,
                                 capture_identity,
+                                lexical_binding: capture.lexical_binding,
                             },
+                            capture.lexical_shadow_depth,
                         );
                         if self.reads_constructor_prefix_capture(
                             binding.owner,
@@ -1075,11 +1094,19 @@ impl BodyFirChecker<'_> {
                         semantic_receiver_depth,
                         receiver_source: None,
                         capture_identity,
+                        // A field forwarded from the enclosing class holds that field's binding.
+                        lexical_binding: capture
+                            .lexical_binding
+                            .or(source_binding.and_then(|binding| binding.lexical_binding)),
                     };
                     if semantic_receiver_depth.is_some() {
                         context.receivers.push(captured_binding);
                     } else {
-                        context.record_value(capture.name.clone(), captured_binding);
+                        context.record_value(
+                            capture.name.clone(),
+                            captured_binding,
+                            capture.lexical_shadow_depth,
+                        );
                     }
                     if let Some(semantic) = hoisted_receiver {
                         self.anonymous_receiver_capture_source(origin, semantic, ty, false)?
@@ -1129,6 +1156,7 @@ impl BodyFirChecker<'_> {
                                         semantic_receiver_depth: None,
                                         receiver_source: None,
                                         capture_identity: None,
+                                        lexical_binding: None,
                                     },
                                     origin,
                                 ),
@@ -1155,6 +1183,7 @@ impl BodyFirChecker<'_> {
                         semantic_receiver_depth: Some(semantic_receiver_depth),
                         receiver_source: None,
                         capture_identity,
+                        lexical_binding: None,
                     });
                     self.anonymous_receiver_capture_source(
                         origin,
@@ -1176,6 +1205,7 @@ impl BodyFirChecker<'_> {
                         semantic_receiver_depth: Some(semantic_receiver_depth),
                         receiver_source: None,
                         capture_identity,
+                        lexical_binding: None,
                     });
                     self.anonymous_receiver_capture_source(
                         origin,
@@ -1536,6 +1566,7 @@ impl BodyFirChecker<'_> {
             semantic_receiver_depth: Some(selected_depth),
             receiver_source: None,
             capture_identity: None,
+            lexical_binding: None,
         };
         let kind = self.class_storage_read_kind(binding, origin)?;
         let value = self.body.add_expr(FirExpr {
