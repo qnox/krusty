@@ -186,3 +186,26 @@ fun box(): String = if (f(\"hey\") == 3 && f(null) == -1) \"OK\" else \"FAIL\"\n
         "OK"
     );
 }
+
+#[test]
+fn an_inline_contract_declared_after_a_dropped_ordinary_body_is_checked_from_another_file() {
+    // Checking the inline function's contract walks its file's declarations, whose ordinary
+    // bodies Pass-1 compaction has already dropped.
+    let contracts = "@file:OptIn(kotlin.contracts.ExperimentalContracts::class)\n\
+import kotlin.contracts.contract\n\
+fun ordinary(): Int {\n\
+    return 1\n\
+}\n\
+inline fun <T> markNotNull(value: T?) {\n\
+    contract { returns() implies (value != null) }\n\
+}\n";
+    let main = "fun length(s: String?): Int {\n\
+    markNotNull(s)\n\
+    return s.length\n\
+}\n\
+fun box(): String = if (length(\"OK\") + ordinary() == 3) \"OK\" else \"FAIL\"\n";
+    common::expect_box_ok_files_with_stdlib(
+        &[("Contracts.kt", contracts), ("Main.kt", main)],
+        "Main",
+    );
+}
