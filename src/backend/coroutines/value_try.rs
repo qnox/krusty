@@ -78,10 +78,10 @@ pub(super) fn suspending_value_try(
             callee,
             dispatch_receiver: None,
             args,
-        } if matches!(&callee, Callee::Static { name, .. } if name == "box-impl")
+        } if matches!(&*callee, Callee::Static { name, .. } if name == "box-impl")
             && matches!(args.as_slice(), [arg] if matches!(ir.exprs[*arg as usize], IrExpr::Try { .. })) =>
         {
-            (args[0], Some(ValueBranchWrap::ValueClassBox(callee)))
+            (args[0], Some(ValueBranchWrap::ValueClassBox(*callee)))
         }
         _ => (expression, None),
     };
@@ -185,7 +185,7 @@ pub(super) fn assign_branch_to_tmp(
                         type_operand,
                     }),
                     ValueBranchWrap::ValueClassBox(callee) => ir.add_expr(IrExpr::Call {
-                        callee,
+                        callee: Box::new(callee),
                         dispatch_receiver: None,
                         args: vec![v],
                     }),

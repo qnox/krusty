@@ -35,15 +35,17 @@ impl IrFile {
         }
         for expression in &self.exprs {
             if let IrExpr::Call {
-                callee:
-                    Callee::Intrinsic {
-                        operation: IrIntrinsic::TypeOf { ty },
-                        ..
-                    },
+                callee: call_callee,
                 ..
             } = expression
             {
-                collect_classifier_names(*ty, &mut referenced);
+                if let Callee::Intrinsic {
+                    operation: IrIntrinsic::TypeOf { ty },
+                    ..
+                } = &**call_callee
+                {
+                    collect_classifier_names(*ty, &mut referenced);
+                }
             }
         }
         for classifier in referenced {

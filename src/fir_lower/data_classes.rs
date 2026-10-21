@@ -275,7 +275,7 @@ fn intrinsic(
     ret: Ty,
 ) -> ExprId {
     ir.add_expr(IrExpr::Call {
-        callee: crate::ir::Callee::Intrinsic { operation, ret },
+        callee: Box::new(crate::ir::Callee::Intrinsic { operation, ret }),
         dispatch_receiver: None,
         args,
     })

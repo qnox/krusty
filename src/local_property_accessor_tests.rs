@@ -61,9 +61,11 @@ class Other {
         .iter()
         .filter_map(|expression| match expression {
             IrExpr::Call {
-                callee: Callee::Virtual { name, target, .. },
+                callee: call_callee,
                 ..
-            } => Some((name.clone(), *target)),
+            } if let Callee::Virtual { name, target, .. } = &**call_callee => {
+                Some((name.clone(), *target))
+            }
             _ => None,
         })
         .collect::<Vec<_>>();

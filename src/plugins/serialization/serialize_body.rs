@@ -38,11 +38,11 @@ fn encode_serializable_element(
     args: [ExprId; 4],
 ) -> ExprId {
     let call = ir.add_expr(IrExpr::Call {
-        callee: virtual_iface(
+        callee: Box::new(virtual_iface(
             "kotlinx/serialization/encoding/CompositeEncoder",
             method,
             "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/SerializationStrategy;Ljava/lang/Object;)V",
-        ),
+        )),
         dispatch_receiver: Some(output),
         args: args.to_vec(),
     });
@@ -300,11 +300,11 @@ impl SerializeBody<'_> {
                 }
             } else if let Some((mname, mdesc)) = encode_element_method(ty) {
                 stmts.push(ir.add_expr(IrExpr::Call {
-                    callee: virtual_iface(
+                    callee: Box::new(virtual_iface(
                         "kotlinx/serialization/encoding/CompositeEncoder",
                         mname,
                         mdesc,
-                    ),
+                    )),
                     dispatch_receiver: Some(c),
                     args: vec![d, idx, v],
                 }));
@@ -341,11 +341,11 @@ impl SerializeBody<'_> {
                 let ci = ir.add_expr(IrExpr::Const(IrConst::Int(i as i32)));
                 let cc = ir.add_expr(IrExpr::GetValue(encoder_slot));
                 let should = ir.add_expr(IrExpr::Call {
-                    callee: virtual_iface(
+                    callee: Box::new(virtual_iface(
                         "kotlinx/serialization/encoding/CompositeEncoder",
                         "shouldEncodeElementDefault",
                         "(Lkotlinx/serialization/descriptors/SerialDescriptor;I)Z",
-                    ),
+                    )),
                     dispatch_receiver: Some(cc),
                     args: vec![cd, ci],
                 });
@@ -479,11 +479,11 @@ impl SerializeBody<'_> {
             let enc = ir.add_expr(IrExpr::GetValue(1));
             let dbegin = ir.add_expr(IrExpr::GetValue(3));
             let begin = ir.add_expr(IrExpr::Call {
-                callee: virtual_iface(
+                callee: Box::new(virtual_iface(
                     "kotlinx/serialization/encoding/Encoder",
                     "beginStructure",
                     "(Lkotlinx/serialization/descriptors/SerialDescriptor;)Lkotlinx/serialization/encoding/CompositeEncoder;",
-                ),
+                )),
                 dispatch_receiver: Some(enc),
                 args: vec![dbegin],
             });
@@ -500,14 +500,14 @@ impl SerializeBody<'_> {
             let type_serializer_descriptors =
                 "Lkotlinx/serialization/KSerializer;".repeat(type_serializers.len());
             let call_write_self = ir.add_expr(IrExpr::Call {
-                callee: Callee::Static {
+                callee: Box::new(Callee::Static {
                     owner: serialized_name,
                     name: write_self_name,
                     descriptor: format!(
                         "(L{class_internal};Lkotlinx/serialization/encoding/CompositeEncoder;Lkotlinx/serialization/descriptors/SerialDescriptor;{type_serializer_descriptors})V"
                     ),
                     inline: InlineKind::None,
-                },
+                }),
                 dispatch_receiver: None,
                 args: [wvalue, woutput, wdesc]
                     .into_iter()
@@ -517,11 +517,11 @@ impl SerializeBody<'_> {
             let cend = ir.add_expr(IrExpr::GetValue(4));
             let dend = ir.add_expr(IrExpr::GetValue(3));
             let end = ir.add_expr(IrExpr::Call {
-                callee: virtual_iface(
+                callee: Box::new(virtual_iface(
                     "kotlinx/serialization/encoding/CompositeEncoder",
                     "endStructure",
                     "(Lkotlinx/serialization/descriptors/SerialDescriptor;)V",
-                ),
+                )),
                 dispatch_receiver: Some(cend),
                 args: vec![dend],
             });

@@ -102,24 +102,24 @@ pub(super) fn specialize(ir: &mut IrFile, index: usize, kind: &str, exprs: &[u32
         _ => return true,
     };
     let descriptor = ir.add_expr(IrExpr::Call {
-        callee: Callee::realized_virtual(
+        callee: Box::new(Callee::realized_virtual(
             type_name(KSERIALIZER_FQ),
             "getDescriptor".to_string(),
             "()Lkotlinx/serialization/descriptors/SerialDescriptor;".to_string(),
             None,
             true,
-        ),
+        )),
         dispatch_receiver: Some(serializer),
         args: vec![],
     });
     let annotations = annotations.unwrap_or_else(|| {
         ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
+            callee: Box::new(Callee::Static {
                 owner: type_name("kotlin/collections/CollectionsKt"),
                 name: "emptyList".to_string(),
                 descriptor: "()Ljava/util/List;".to_string(),
                 inline: InlineKind::None,
-            },
+            }),
             dispatch_receiver: None,
             args: vec![],
         })
@@ -127,13 +127,13 @@ pub(super) fn specialize(ir: &mut IrFile, index: usize, kind: &str, exprs: &[u32
     let is_optional =
         is_optional.unwrap_or_else(|| ir.add_expr(IrExpr::Const(IrConst::Boolean(false))));
     ir.exprs[index] = IrExpr::Call {
-        callee: Callee::realized_virtual(
+        callee: Box::new(Callee::realized_virtual(
             type_name(CLASS_SERIAL_DESCRIPTOR_BUILDER_FQ),
             "element".to_string(),
             BUILDER_ELEMENT_DESC.to_string(),
             None,
             false,
-        ),
+        )),
         dispatch_receiver: Some(receiver),
         args: vec![name, descriptor, annotations, is_optional],
     };

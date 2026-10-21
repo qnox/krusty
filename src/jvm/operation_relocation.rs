@@ -95,7 +95,7 @@ mod tests {
     fn selected_call_facts_move_exclusively_to_the_cloned_operation() {
         let mut ir = IrFile::default();
         let source = ir.add_expr(IrExpr::Call {
-            callee: crate::ir::Callee::Local(7),
+            callee: Box::new(crate::ir::Callee::Local(7)),
             dispatch_receiver: None,
             args: Vec::new(),
         });

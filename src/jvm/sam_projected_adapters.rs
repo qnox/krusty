@@ -82,7 +82,7 @@ mod tests {
             impl_fn: implementation,
             arity: 2,
             captures: vec![0],
-            sam: Some(IrSamTarget {
+            sam: Some(Box::new(IrSamTarget {
                 classifier: crate::types::type_name("neutral/Sink"),
                 method: "accept".to_string(),
                 method_target: IrSamMethod::FunctionTypeInvoke,
@@ -101,7 +101,7 @@ mod tests {
                 nullable: false,
                 kotlin_interface: false,
                 parameter_identities: Vec::new(),
-            }),
+            })),
             inline_body: None,
         });
 

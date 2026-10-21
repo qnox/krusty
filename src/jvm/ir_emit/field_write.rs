@@ -294,7 +294,7 @@ mod tests {
 
         let argument = ir.add_expr(IrExpr::GetValue(0));
         let receiver = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(pass),
+            callee: Box::new(Callee::Local(pass)),
             dispatch_receiver: None,
             args: vec![argument],
         });

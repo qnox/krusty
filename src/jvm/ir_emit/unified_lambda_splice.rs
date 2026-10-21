@@ -896,7 +896,7 @@ mod tests {
         ir.logical_types.insert(lambda, block_type);
         ir.logical_types.insert(inline_body, Ty::Unit);
         let call = ir.add_expr(IrExpr::Call {
-            callee: crate::ir::Callee::Static {
+            callee: Box::new(crate::ir::Callee::Static {
                 owner: crate::types::type_name("lib/HostKt"),
                 name: "host".to_string(),
                 descriptor: "(Lkotlin/jvm/functions/Function0;)V".to_string(),
@@ -905,7 +905,7 @@ mod tests {
                 } else {
                     crate::libraries::InlineKind::CanInline
                 },
-            },
+            }),
             dispatch_receiver: None,
             args: vec![lambda],
         });

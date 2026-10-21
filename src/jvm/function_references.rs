@@ -794,10 +794,12 @@ pub(super) fn realize(
         let call = raw as u32;
         let (inline_parameters, args) = match &ir.exprs[raw] {
             IrExpr::Call {
-                callee: crate::ir::Callee::External { target, params, .. },
+                callee: call_callee,
                 args,
                 ..
-            } if ir.inline_call_sites.contains(&call) => {
+            } if let crate::ir::Callee::External { target, params, .. } = &**call_callee
+                && ir.inline_call_sites.contains(&call) =>
+            {
                 let callable = callables
                     .callable(*target)
                     .ok_or(FunctionReferenceRealizationTarget::External(*target))?;
@@ -908,7 +910,7 @@ pub(super) fn realize(
             raw,
             adapter_owner,
             own_invoke,
-            reference,
+            *reference,
         )?;
     }
     Ok(())

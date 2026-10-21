@@ -1070,11 +1070,10 @@ fn materialize_member_property(
         && ir.exprs.iter().any(|expression| {
             matches!(
                 expression,
-                IrExpr::Checked(IrCheckedOperation::PropertyReference {
+                IrExpr::Checked(checked_op) if matches!(&**checked_op, IrCheckedOperation::PropertyReference {
                     target,
                     ..
-                }) if target.module() == Some(property_id)
-            )
+                } if target.module() == Some(property_id)))
         });
     let class_flags = anchor
         .owner
@@ -1947,8 +1946,11 @@ fn rebase_initializer_values(
                     rebase(&mut catch.var)?;
                 }
             }
-            IrExpr::Checked(crate::ir::IrCheckedOperation::RangeLoop { variable, .. }) => {
-                rebase(variable)?;
+            IrExpr::Checked(checked_op) => {
+                if let crate::ir::IrCheckedOperation::RangeLoop { variable, .. } = &mut **checked_op
+                {
+                    rebase(variable)?;
+                }
             }
             _ => {}
         }
@@ -1966,7 +1968,7 @@ fn realize_backing_field_operations(
             IrExpr::Checked(operation) => operation,
             _ => continue,
         };
-        let replacement = match operation {
+        let replacement = match *operation {
             IrCheckedOperation::LateinitFieldRead {
                 target,
                 dispatch_receiver,

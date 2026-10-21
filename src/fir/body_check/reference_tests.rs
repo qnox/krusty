@@ -51,10 +51,8 @@ fn bound_external_extension_reference_on_a_singleton_publishes_the_exact_edge_cl
         .filter_map(|(id, expression)| {
             matches!(
                 expression,
-                crate::ir::IrExpr::Call {
-                    callee: crate::ir::Callee::External { .. },
-                    ..
-                }
+                crate::ir::IrExpr::Call { callee, .. }
+                    if matches!(**callee, crate::ir::Callee::External { .. })
             )
             .then_some(id as crate::ir::ExprId)
         })

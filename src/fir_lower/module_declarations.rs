@@ -442,20 +442,20 @@ pub(super) fn publish_referenced(
     for expression in &ir.exprs {
         match expression {
             IrExpr::Call {
-                callee: Callee::Module { target, .. },
+                callee: call_callee,
                 ..
-            } => {
+            } if let Callee::Module { target, .. } = &**call_callee => {
                 callables.insert(*target);
             }
             IrExpr::Call {
-                callee:
-                    Callee::ModuleWithDefaults {
-                        target,
-                        default_provider,
-                        ..
-                    },
+                callee: call_callee,
                 ..
-            } => {
+            } if let Callee::ModuleWithDefaults {
+                target,
+                default_provider,
+                ..
+            } = &**call_callee =>
+            {
                 callables.insert(*target);
                 if let crate::fir::ResolvedFunctionOverrideTarget::Module(default_provider) =
                     default_provider
@@ -465,46 +465,51 @@ pub(super) fn publish_referenced(
             }
             // A member call or `super` call a target may realize from the declaration's own facts.
             IrExpr::Call {
-                callee:
-                    Callee::Virtual {
-                        module_target: Some(target),
-                        ..
-                    }
-                    | Callee::Super {
-                        declaration:
-                            Some(crate::fir::ResolvedFunctionOverrideTarget::Module(target)),
-                        ..
-                    },
+                callee: call_callee,
                 ..
-            } => {
+            } if let Callee::Virtual {
+                module_target: Some(target),
+                ..
+            }
+            | Callee::Super {
+                declaration: Some(crate::fir::ResolvedFunctionOverrideTarget::Module(target)),
+                ..
+            } = &**call_callee =>
+            {
                 callables.insert(*target);
             }
-            IrExpr::Checked(IrCheckedOperation::PropertyRead { target, .. })
-            | IrExpr::Checked(IrCheckedOperation::PropertyWrite { target, .. }) => {
+            IrExpr::Checked(checked_op)
+                if let IrCheckedOperation::PropertyRead { target, .. }
+                | IrCheckedOperation::PropertyWrite { target, .. } = &**checked_op =>
+            {
                 properties.insert(*target);
             }
-            IrExpr::Checked(IrCheckedOperation::PropertyReference { target, .. }) => match target {
-                FirPropertyReferenceTarget::Module(property) => {
-                    properties.insert(*property);
-                }
-                FirPropertyReferenceTarget::SpecializedModule {
-                    property,
-                    reflection_owner,
-                    ..
-                } => {
-                    properties.insert(*property);
-                    // The classifier the reference was written on may be a subtype of the
-                    // declaring class, and it may live in another file. Realization names the
-                    // member on that classifier.
-                    if let Some(class) = *reflection_owner {
-                        if index.classifier_declaration(class).is_some() {
-                            classifiers.insert(class);
+            IrExpr::Checked(checked_op)
+                if let IrCheckedOperation::PropertyReference { target, .. } = &**checked_op =>
+            {
+                match target {
+                    FirPropertyReferenceTarget::Module(property) => {
+                        properties.insert(*property);
+                    }
+                    FirPropertyReferenceTarget::SpecializedModule {
+                        property,
+                        reflection_owner,
+                        ..
+                    } => {
+                        properties.insert(*property);
+                        // The classifier the reference was written on may be a subtype of the
+                        // declaring class, and it may live in another file. Realization names the
+                        // member on that classifier.
+                        if let Some(class) = *reflection_owner {
+                            if index.classifier_declaration(class).is_some() {
+                                classifiers.insert(class);
+                            }
                         }
                     }
+                    FirPropertyReferenceTarget::Classifier { .. }
+                    | FirPropertyReferenceTarget::External { .. } => {}
                 }
-                FirPropertyReferenceTarget::Classifier { .. }
-                | FirPropertyReferenceTarget::External { .. } => {}
-            },
+            }
             IrExpr::CallableReference(reference) => {
                 if let crate::ir::IrCallableReferenceTarget::Module(target) = reference.target {
                     callables.insert(target);
@@ -518,13 +523,13 @@ pub(super) fn publish_referenced(
             // A generated `hashCode` dispatches on the property's classifier, an interface's
             // through `Object`, wherever in the module it is declared.
             IrExpr::Call {
-                callee:
-                    Callee::Intrinsic {
-                        operation: crate::ir::IrIntrinsic::GeneratedPropertyHash { ty },
-                        ..
-                    },
+                callee: call_callee,
                 ..
-            } => {
+            } if let Callee::Intrinsic {
+                operation: crate::ir::IrIntrinsic::GeneratedPropertyHash { ty },
+                ..
+            } = &**call_callee =>
+            {
                 if let Some(classifier) = ty.non_null().obj_internal() {
                     if index.classifier_declaration(classifier).is_some() {
                         classifiers.insert(classifier);

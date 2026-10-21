@@ -42,7 +42,7 @@ fn realized_call_result(ir: &IrFile, call: ExprId) -> Option<Ty> {
             .get(function as usize)
             .map(|function| function.ret);
     }
-    match callee {
+    match &**callee {
         Callee::Intrinsic { ret, .. }
         | Callee::CrossFile { ret, .. }
         | Callee::Module { ret, .. }

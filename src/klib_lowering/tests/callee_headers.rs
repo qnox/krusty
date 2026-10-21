@@ -451,10 +451,10 @@ fn a_later_support_unit_selects_the_matching_singleton_edge_variant() {
         .enumerate()
         .filter_map(|(expression, node)| match node {
             crate::ir::IrExpr::Call {
-                callee: crate::ir::Callee::External { target, .. },
+                callee: call_callee,
                 dispatch_receiver,
                 args,
-            } => Some((
+            } if let crate::ir::Callee::External { target, .. } = &**call_callee => Some((
                 crate::ir::ExprId::try_from(expression).expect("an expression id fits u32"),
                 *target,
                 *dispatch_receiver,
@@ -583,7 +583,7 @@ fn stdlib_records(
                 .expect("a KLIB function carries its provider identity");
             let mut ir = crate::ir::IrFile::default();
             ir.add_expr(crate::ir::IrExpr::Call {
-                callee: crate::ir::Callee::External {
+                callee: Box::new(crate::ir::Callee::External {
                     target,
                     default_provider: None,
                     params: function.callable.params.clone(),
@@ -591,7 +591,7 @@ fn stdlib_records(
                     substitutions: Vec::new(),
                     defaults: Vec::new(),
                     extension_receiver_parameter: None,
-                },
+                }),
                 dispatch_receiver: None,
                 args: Vec::new(),
             });

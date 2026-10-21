@@ -45,16 +45,16 @@ impl BodyLowering<'_> {
     ) -> Result<ExprId, FirLoweringFailure> {
         let start = self.expression(start)?;
         let end = self.expression(end)?;
-        Ok(self
-            .ir
-            .add_expr(IrExpr::Checked(IrCheckedOperation::RangeConstruction {
+        Ok(self.ir.add_expr(IrExpr::Checked(Box::new(
+            IrCheckedOperation::RangeConstruction {
                 operation,
                 start,
                 start_type,
                 end,
                 end_type,
                 result,
-            })))
+            },
+        ))))
     }
 
     pub(super) fn in_range_expression(
@@ -87,9 +87,8 @@ impl BodyLowering<'_> {
             let start = self.expression(start)?;
             let end = self.expression(end)?;
             let value = self.expression(value)?;
-            return Ok(self
-                .ir
-                .add_expr(IrExpr::Checked(IrCheckedOperation::RangeContains {
+            return Ok(self.ir.add_expr(IrExpr::Checked(Box::new(
+                IrCheckedOperation::RangeContains {
                     operation,
                     value,
                     start,
@@ -103,7 +102,8 @@ impl BodyLowering<'_> {
                             result: function.result,
                         }
                     }),
-                })));
+                },
+            ))));
         }
         let mut declarations = Vec::with_capacity(3);
         let start = self.expression(start)?;

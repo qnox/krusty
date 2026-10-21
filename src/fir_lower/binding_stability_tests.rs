@@ -38,7 +38,7 @@ fn inline_rehome_moves_a_checked_range_loops_declared_value() {
     let start = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(0)));
     let end = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(3)));
     let body = ir.add_expr(IrExpr::UnitInstance);
-    let range = ir.add_expr(IrExpr::Checked(IrCheckedOperation::RangeLoop {
+    let range = ir.add_expr(IrExpr::Checked(Box::new(IrCheckedOperation::RangeLoop {
         variable: 2,
         variable_name: Some("element".into()),
         counter: Ty::Int,
@@ -51,7 +51,7 @@ fn inline_rehome_moves_a_checked_range_loops_declared_value() {
         body,
         label: "loop".to_string(),
         with_index: None,
-    }));
+    })));
 
     assert_eq!(
         super::source_calls::rehome_inline_body_values(&mut ir, range, &[37], 100),
@@ -59,6 +59,6 @@ fn inline_rehome_moves_a_checked_range_loops_declared_value() {
     );
     assert!(matches!(
         ir.expr(range),
-        IrExpr::Checked(IrCheckedOperation::RangeLoop { variable: 101, .. })
+        IrExpr::Checked(checked_op) if matches!(&**checked_op, IrCheckedOperation::RangeLoop { variable: 101, .. })
     ));
 }

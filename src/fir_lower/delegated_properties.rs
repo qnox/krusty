@@ -736,20 +736,22 @@ fn delegated_property_reference(
     unbound: bool,
     flags: DeclarationFlags,
 ) -> ExprId {
-    ir.add_expr(IrExpr::Checked(IrCheckedOperation::PropertyReference {
-        target: FirPropertyReferenceTarget::Module(property),
-        delegated: true,
-        binding: if unbound {
-            FirCallableReferenceBinding::Unbound
-        } else {
-            FirCallableReferenceBinding::Static
+    ir.add_expr(IrExpr::Checked(Box::new(
+        IrCheckedOperation::PropertyReference {
+            target: FirPropertyReferenceTarget::Module(property),
+            delegated: true,
+            binding: if unbound {
+                FirCallableReferenceBinding::Unbound
+            } else {
+                FirCallableReferenceBinding::Static
+            },
+            dispatch_receiver: None,
+            extension_receiver: None,
+            mutable: flags.has(DeclarationFlags::MUTABLE),
+            substitutions: Vec::new(),
+            adaptation: None,
         },
-        dispatch_receiver: None,
-        extension_receiver: None,
-        mutable: flags.has(DeclarationFlags::MUTABLE),
-        substitutions: Vec::new(),
-        adaptation: None,
-    }))
+    )))
 }
 
 fn push_delegate_static(
@@ -940,7 +942,7 @@ pub(super) fn delegated_call_with_dispatch(
                         ));
                     }
                     let expression = ir.add_expr(IrExpr::Call {
-                        callee: Callee::Virtual {
+                        callee: Box::new(Callee::Virtual {
                             owner: owner.classifier,
                             name: index
                                 .callable_name(*target)
@@ -960,7 +962,7 @@ pub(super) fn delegated_call_with_dispatch(
                             target: Some(crate::ir::IrVirtualTarget::Function(
                                 crate::fir::ResolvedFunctionOverrideTarget::Module(*target),
                             )),
-                        },
+                        }),
                         dispatch_receiver: Some(receiver),
                         args: arguments,
                     });
@@ -1032,7 +1034,7 @@ pub(super) fn delegated_call_with_dispatch(
                 },
             };
             let expression = ir.add_expr(IrExpr::Call {
-                callee,
+                callee: Box::new(callee),
                 dispatch_receiver: None,
                 args: arguments,
             });
@@ -1094,7 +1096,7 @@ pub(super) fn delegated_call_with_dispatch(
                 receiver
             };
             let expression = ir.add_expr(IrExpr::Call {
-                callee: Callee::External {
+                callee: Box::new(Callee::External {
                     target: *declaration,
                     default_provider: *default_provider,
                     params: parameters.iter().map(|ty| ty.get()).collect(),
@@ -1102,7 +1104,7 @@ pub(super) fn delegated_call_with_dispatch(
                     substitutions: Vec::new(),
                     defaults: Vec::new(),
                     extension_receiver_parameter: *extension_receiver_parameter,
-                },
+                }),
                 dispatch_receiver: Some(dispatch_receiver),
                 args: arguments,
             });
@@ -1398,10 +1400,14 @@ mod tests {
             .iter()
             .find_map(|expression| match expression {
                 IrExpr::Call {
-                    callee: Callee::Module { name, params, .. },
+                    callee: call_callee,
                     args,
                     ..
-                } if name == "provideDelegate" => Some((params, args)),
+                } if let Callee::Module { name, params, .. } = &**call_callee
+                    && name == "provideDelegate" =>
+                {
+                    Some((params, args))
+                }
                 _ => None,
             })
             .expect("sibling provideDelegate call");

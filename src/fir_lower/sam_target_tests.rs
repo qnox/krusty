@@ -12,7 +12,7 @@ fn sam_targets(ir: &IrFile) -> Vec<&IrSamTarget> {
     ir.exprs
         .iter()
         .filter_map(|expression| match expression {
-            IrExpr::Lambda { sam: Some(sam), .. } => Some(sam),
+            IrExpr::Lambda { sam: Some(sam), .. } => Some(&**sam),
             _ => None,
         })
         .collect()

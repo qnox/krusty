@@ -6141,7 +6141,7 @@ impl<'a> Emitter<'a> {
                 args,
             } => {
                 matches!(
-                    callee,
+                    &**callee,
                     Callee::Intrinsic {
                         operation: crate::ir::IrIntrinsic::Assert { .. },
                         ..
@@ -6522,7 +6522,7 @@ impl<'a> Emitter<'a> {
                 if let Some(function) = callee.source_function() {
                     call_ret_ty(&self.ir.functions[function as usize].ret)
                 } else {
-                    match callee {
+                    match &**callee {
                         Callee::CrossFile { ret, .. }
                         | Callee::Module { ret, .. }
                         | Callee::Super { ret, .. }

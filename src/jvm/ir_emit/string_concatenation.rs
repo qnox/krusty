@@ -123,12 +123,12 @@ impl Emitter<'_> {
         if matches!(
             self.ir.expr(expression),
             IrExpr::Call {
-                callee: Callee::Intrinsic {
+                callee: call_callee,
+                ..
+            } if matches!(&**call_callee, Callee::Intrinsic {
                     operation: crate::ir::IrIntrinsic::UnsignedToString { .. },
                     ..
-                },
-                ..
-            }
+                })
         ) {
             self.mark_expression_start(concat, code);
             self.append_top(Ty::obj("java/lang/Object"), code);

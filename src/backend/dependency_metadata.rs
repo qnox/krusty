@@ -104,11 +104,14 @@ pub(crate) fn inert_staged_singleton_bindings(
         for &expression in &namespace {
             let node = ir.expr(expression);
             let IrExpr::Call {
-                callee: Callee::External { target, .. },
+                callee: call_callee,
                 dispatch_receiver: Some(receiver),
                 ..
             } = node
             else {
+                continue;
+            };
+            let Callee::External { target, .. } = &**call_callee else {
                 continue;
             };
             if !reads.contains(receiver) || singleton_dispatch(expression) != Some(*classifier) {
@@ -396,7 +399,7 @@ mod tests {
             .insert(declaration);
         let read = ir.add_expr(IrExpr::GetValue(0));
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::External {
+            callee: Box::new(Callee::External {
                 target,
                 default_provider: None,
                 params: Vec::new(),
@@ -404,7 +407,7 @@ mod tests {
                 substitutions: Vec::new(),
                 defaults: Vec::new(),
                 extension_receiver_parameter: None,
-            },
+            }),
             dispatch_receiver: Some(read),
             args: Vec::new(),
         });

@@ -31,10 +31,13 @@ impl super::IrFile {
                 let index = match expression {
                     IrExpr::GetValue(index)
                     | IrExpr::SetValue { var: index, .. }
-                    | IrExpr::Variable { index, .. }
-                    | IrExpr::Checked(IrCheckedOperation::RangeLoop {
-                        variable: index, ..
-                    }) => Some(*index),
+                    | IrExpr::Variable { index, .. } => Some(*index),
+                    IrExpr::Checked(checked_op) => match &**checked_op {
+                        IrCheckedOperation::RangeLoop {
+                            variable: index, ..
+                        } => Some(*index),
+                        _ => None,
+                    },
                     IrExpr::Try { catches, .. } => catches.iter().map(|catch| catch.var).max(),
                     _ => None,
                 };

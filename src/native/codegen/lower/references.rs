@@ -87,13 +87,16 @@ struct Site {
 
 /// The reference a checked node creates, or `None` when it creates none.
 fn reference_site(expr: &IrExpr) -> Option<(&crate::fir::PropertyId, Option<u32>, bool)> {
-    let IrExpr::Checked(IrCheckedOperation::PropertyReference {
+    let IrExpr::Checked(checked_op) = expr else {
+        return None;
+    };
+    let IrCheckedOperation::PropertyReference {
         target,
         dispatch_receiver,
         extension_receiver,
         mutable,
         ..
-    }) = expr
+    } = &**checked_op
     else {
         return None;
     };
@@ -173,12 +176,15 @@ impl<'a> FileLowering<'a> {
     /// common and says nothing about which of them this is. The conditions below are the same ones
     /// [`reference_site`] and [`Self::reference_of`] decide by, read again to report them.
     pub(super) fn property_reference_decline(&self, id: u32) -> String {
-        let IrExpr::Checked(crate::ir::IrCheckedOperation::PropertyReference {
+        let IrExpr::Checked(checked_op) = self.ir.expr(id) else {
+            return "a property reference of a shape this generator does not read".to_string();
+        };
+        let crate::ir::IrCheckedOperation::PropertyReference {
             target,
             dispatch_receiver,
             extension_receiver,
             ..
-        }) = self.ir.expr(id)
+        } = &**checked_op
         else {
             return "a property reference of a shape this generator does not read".to_string();
         };

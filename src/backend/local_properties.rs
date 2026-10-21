@@ -43,52 +43,57 @@ pub(crate) fn realize(ir: &mut IrFile) -> Result<Vec<RealizedLocalPropertyAccess
     let mut realized = Vec::new();
     for raw in 0..ir.exprs.len() {
         let operation = raw as ExprId;
-        let (replacement, target, read, layout) = match ir.exprs[raw].clone() {
-            IrExpr::Checked(IrCheckedOperation::PropertyRead {
-                target,
-                dispatch_receiver,
-                extension_receiver,
-                context_arguments,
-                substitutions: _,
-            }) => {
-                let Some(layout) = ir.local_property_layouts.get(&target).cloned() else {
+        let checked_expression = ir.exprs[raw].clone();
+        let (replacement, target, read, layout) = match checked_expression {
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::PropertyRead {
+                    target,
+                    dispatch_receiver,
+                    extension_receiver,
+                    context_arguments,
+                    substitutions: _,
+                } = &**checked_op =>
+            {
+                let Some(layout) = ir.local_property_layouts.get(target).cloned() else {
                     continue;
                 };
                 let replacement = property_read(
                     ir,
                     &layout,
                     CheckedPropertyAccess {
-                        dispatch_receiver,
-                        extension_receiver,
-                        context_arguments: &context_arguments,
-                        target,
+                        dispatch_receiver: *dispatch_receiver,
+                        extension_receiver: *extension_receiver,
+                        context_arguments,
+                        target: *target,
                         operation,
                     },
                 )?;
                 (replacement, target, true, layout)
             }
-            IrExpr::Checked(IrCheckedOperation::PropertyWrite {
-                target,
-                dispatch_receiver,
-                extension_receiver,
-                context_arguments,
-                value,
-                substitutions: _,
-            }) => {
-                let Some(layout) = ir.local_property_layouts.get(&target).cloned() else {
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::PropertyWrite {
+                    target,
+                    dispatch_receiver,
+                    extension_receiver,
+                    context_arguments,
+                    value,
+                    substitutions: _,
+                } = &**checked_op =>
+            {
+                let Some(layout) = ir.local_property_layouts.get(target).cloned() else {
                     continue;
                 };
                 let replacement = property_write(
                     ir,
                     &layout,
                     CheckedPropertyAccess {
-                        dispatch_receiver,
-                        extension_receiver,
-                        context_arguments: &context_arguments,
-                        target,
+                        dispatch_receiver: *dispatch_receiver,
+                        extension_receiver: *extension_receiver,
+                        context_arguments,
+                        target: *target,
                         operation,
                     },
-                    value,
+                    *value,
                 )?;
                 (replacement, target, false, layout)
             }
@@ -103,20 +108,17 @@ pub(crate) fn realize(ir: &mut IrFile) -> Result<Vec<RealizedLocalPropertyAccess
         );
         // A member-extension accessor call keeps its declaration's parameter vector (contexts,
         // receiver, value), the checked fact an ordinary call carries for representation boundaries.
-        if let (
-            IrLocalPropertyLayout::MemberExtension { .. },
-            IrExpr::Call {
-                callee:
-                    Callee::Virtual {
-                        params: Some((parameters, _)),
-                        ..
-                    },
-                ..
-            },
-        ) = (&layout, &replacement)
+        if let (IrLocalPropertyLayout::MemberExtension { .. }, IrExpr::Call { callee, .. }) =
+            (&layout, &replacement)
         {
-            ir.call_declared_params
-                .insert(operation, parameters.clone().into_boxed_slice());
+            if let Callee::Virtual {
+                params: Some((parameters, _)),
+                ..
+            } = &**callee
+            {
+                ir.call_declared_params
+                    .insert(operation, parameters.clone().into_boxed_slice());
+            }
         }
         let first_operand = match &replacement {
             IrExpr::Call {
@@ -135,7 +137,7 @@ pub(crate) fn realize(ir: &mut IrFile) -> Result<Vec<RealizedLocalPropertyAccess
         ir.exprs[raw] = replacement;
         realized.push(RealizedLocalPropertyAccess {
             operation,
-            target,
+            target: *target,
             read,
             direct_member,
         });
@@ -169,7 +171,7 @@ fn property_read(
                 Err(target)
             } else if let Some(getter) = getter {
                 Ok(IrExpr::Call {
-                    callee: accessor_callee(ir, *getter),
+                    callee: Box::new(accessor_callee(ir, *getter)),
                     dispatch_receiver: None,
                     args: Vec::new(),
                 })
@@ -193,7 +195,7 @@ fn property_read(
                 _ => return Err(target),
             }
             Ok(IrExpr::Call {
-                callee: accessor_callee(ir, *getter),
+                callee: Box::new(accessor_callee(ir, *getter)),
                 dispatch_receiver: None,
                 args,
             })
@@ -215,7 +217,7 @@ fn property_read(
             let mut args = context_arguments.to_vec();
             args.push(extension);
             Ok(IrExpr::Call {
-                callee: Callee::Virtual {
+                callee: Box::new(Callee::Virtual {
                     owner: *owner,
                     name: ir
                         .functions
@@ -236,7 +238,7 @@ fn property_read(
                     target: Some(IrVirtualTarget::PropertyGetter(
                         crate::fir::ResolvedPropertyOverrideTarget::Module(target),
                     )),
-                },
+                }),
                 dispatch_receiver: Some(dispatch),
                 args,
             })
@@ -267,7 +269,7 @@ fn property_read(
             }
             let class_declaration = &ir.classes[*class as usize];
             Ok(IrExpr::Call {
-                callee: Callee::Virtual {
+                callee: Box::new(Callee::Virtual {
                     owner: *owner,
                     name: getter
                         .and_then(|getter| ir.functions.get(getter as usize))
@@ -282,7 +284,7 @@ fn property_read(
                     target: Some(IrVirtualTarget::PropertyGetter(
                         crate::fir::ResolvedPropertyOverrideTarget::Module(target),
                     )),
-                },
+                }),
                 dispatch_receiver: Some(receiver),
                 args: context_arguments.to_vec(),
             })
@@ -317,7 +319,7 @@ fn property_write(
                 Err(target)
             } else if let Some(setter) = setter {
                 Ok(IrExpr::Call {
-                    callee: accessor_callee(ir, *setter),
+                    callee: Box::new(accessor_callee(ir, *setter)),
                     dispatch_receiver: None,
                     args: vec![value],
                 })
@@ -346,7 +348,7 @@ fn property_write(
             }
             args.push(value);
             Ok(IrExpr::Call {
-                callee: accessor_callee(ir, setter),
+                callee: Box::new(accessor_callee(ir, setter)),
                 dispatch_receiver: None,
                 args,
             })
@@ -380,7 +382,7 @@ fn property_write(
                 });
             }
             Ok(IrExpr::Call {
-                callee: Callee::Virtual {
+                callee: Box::new(Callee::Virtual {
                     owner: *owner,
                     name: setter
                         .and_then(|setter| ir.functions.get(setter as usize))
@@ -400,7 +402,7 @@ fn property_write(
                     target: Some(IrVirtualTarget::PropertySetter(
                         crate::fir::ResolvedPropertyOverrideTarget::Module(target),
                     )),
-                },
+                }),
                 dispatch_receiver: Some(receiver),
                 args: context_arguments
                     .iter()
@@ -425,7 +427,7 @@ fn property_write(
             let dispatch = dispatch_receiver.ok_or(target)?;
             let extension = extension_receiver.ok_or(target)?;
             Ok(IrExpr::Call {
-                callee: Callee::Virtual {
+                callee: Box::new(Callee::Virtual {
                     owner: *owner,
                     name: setter
                         .and_then(|setter| ir.functions.get(setter as usize))
@@ -445,7 +447,7 @@ fn property_write(
                     target: Some(IrVirtualTarget::PropertySetter(
                         crate::fir::ResolvedPropertyOverrideTarget::Module(target),
                     )),
-                },
+                }),
                 dispatch_receiver: Some(dispatch),
                 args: context_arguments
                     .iter()

@@ -31,25 +31,29 @@ impl<'a> FileLowering<'a> {
         for index in 0..self.ir.exprs.len() {
             let (function, omitted) = match &self.ir.exprs[index] {
                 IrExpr::Call {
-                    callee:
-                        Callee::LocalWithDefaults { function, defaults }
-                        | Callee::ClassStaticWithDefaults {
-                            function, defaults, ..
-                        },
+                    callee: call_callee,
                     ..
-                } => (*function, defaults.to_vec()),
+                } if let Callee::LocalWithDefaults { function, defaults }
+                | Callee::ClassStaticWithDefaults {
+                    function, defaults, ..
+                } = &**call_callee =>
+                {
+                    (*function, defaults.to_vec())
+                }
                 // A defaulted call on a receiver arrives as a method call with holes in its
                 // argument list rather than as a callee of its own.
                 // A member call that INHERITS its defaults arrives naming the declaration they
                 // come from; see `inherited_default_provider`.
                 IrExpr::Call {
-                    callee: callee @ Callee::ModuleWithDefaults { defaults, .. },
+                    callee: call_callee,
                     dispatch_receiver: Some(_),
                     ..
-                } => match self.inherited_default_provider(callee) {
-                    Some(provider) => (provider, defaults.to_vec()),
-                    None => continue,
-                },
+                } if let callee @ Callee::ModuleWithDefaults { defaults, .. } = &**call_callee => {
+                    match self.inherited_default_provider(callee) {
+                        Some(provider) => (provider, defaults.to_vec()),
+                        None => continue,
+                    }
+                }
                 IrExpr::MethodCall {
                     class, index, args, ..
                 } if args.iter().any(Option::is_none) => {
