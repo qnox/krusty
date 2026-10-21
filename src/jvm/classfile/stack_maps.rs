@@ -33,7 +33,7 @@ use super::bytecode_analysis::{
 };
 use super::method_rewrite::var_slot;
 use super::{u2, ClassWriter, CodeBuilder, ConstPool, LvtEntry, VerifType};
-use crate::jvm::inline::{disassemble, insn_offsets_at, Insn};
+use crate::jvm::inline::{disassemble, insn_offsets_at};
 
 const NOP: u8 = 0x00;
 const ATHROW: u8 = 0xbf;
@@ -51,11 +51,14 @@ pub(super) struct Body<'a> {
     pub labels: Vec<usize>,
 }
 
-/// The computed frames of a body, with its instructions and the byte offset of each.
+/// The computed frames of a body, with the byte offset of each of its instructions. A class keeps
+/// the frames of every body it computed until it is written, so the instructions themselves are
+/// not kept: only the local slots they name, which `COMPUTE_MAXS` counts.
 pub(super) struct Computed {
     frames: ComputedFrames,
-    insns: Vec<Insn>,
     offsets: Vec<usize>,
+    /// One past the highest local slot a load, store or `iinc` names.
+    var_extent: usize,
 }
 
 impl Computed {
@@ -177,10 +180,16 @@ impl ClassWriter {
             Some(entry) => computation.compute_from(entry)?,
             None => computation.compute(body.access, body.name, body.descriptor)?,
         };
+        let var_extent = insns
+            .iter()
+            .filter_map(var_slot)
+            .map(|(slot, width)| usize::from(slot) + usize::from(width))
+            .max()
+            .unwrap_or(0);
         Ok(Computed {
             frames,
-            insns,
             offsets,
+            var_extent,
         })
     }
 
@@ -213,12 +222,11 @@ impl ClassWriter {
     fn max_locals(&self, body: &Body<'_>, computed: &Computed, lvt: &[LvtEntry]) -> usize {
         let entry = entry_frame(body.access, body.name, body.descriptor, &self.internal_name)
             .expect("a successfully computed method must have a valid entry frame");
-        let mut max = entry.iter().map(words).sum::<usize>();
-        for insn in &computed.insns {
-            if let Some((slot, width)) = var_slot(insn) {
-                max = max.max(usize::from(slot) + usize::from(width));
-            }
-        }
+        let mut max = entry
+            .iter()
+            .map(words)
+            .sum::<usize>()
+            .max(computed.var_extent);
         for &(_, descriptor, slot, _, _) in lvt {
             let width = match self
                 .cp

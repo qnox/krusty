@@ -234,6 +234,13 @@ pub(super) fn published_property(
             &mut property,
         );
     }
+    if let CallablePlacement::Member { owner, .. } = placement {
+        builtin_realizations::realize_throwable_property(
+            owner,
+            signed.compiler_builtin_owner,
+            &mut property,
+        );
+    }
     let kind = realization_kind(placement, property.receiver.is_some());
     identities.assign_property(signed, kind, &mut property);
     property

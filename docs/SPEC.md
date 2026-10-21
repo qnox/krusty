@@ -11354,6 +11354,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   factories and their `…$cp` accessor. krusty declared the cache members before the no-arg
   constructor. Test: `tests/serializable_noarg_constructor_order_e2e.rs` (ordered member lists and
   class bytes compared with kotlinc's).
+- **A value-class parameter keeps the no-arg convenience constructor.** A primary constructor
+  taking a value class is private behind its public `DefaultConstructorMarker` accessor, yet when
+  every parameter has a default kotlinc still adds `<init>()` at the primary's declared visibility
+  (public, or protected for a protected primary). Test:
+  `tests/value_class_parameter_no_arg_constructor_e2e.rs` (class bytes compared with kotlinc's).
 - **A hidden serializable primary's `…$cp` accessor follows its marker accessor.** When a
   `@Serializable` class's primary constructor takes a value class, kotlinc's accessor lowering
   declares the primary's `DefaultConstructorMarker` accessor, then
@@ -14603,6 +14608,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_value_class_member_function_takes_the_value`,
   `an_object_declared_in_another_file_is_constructed_once_and_called`,
   `a_companion_member_is_called_from_another_file`).
+- **Native: a class declared in another file is named by its module descriptor.** The runtime
+  type descriptor of a named source class is defined by its declaring file under one symbol per
+  class, named from the source module and the class's qualified name, so `is`, `!is`, `as`, `as?`
+  and a `catch` clause in another file of the module ask about the same descriptor the declaring
+  file stamps on the class's instances. A `when` over a sealed hierarchy declared elsewhere is
+  those checks. A local or anonymous class keeps a descriptor of its own file, since no other file
+  can name it.
+  Tests: `tests/native_cross_file_e2e.rs`
+  (`an_is_check_names_a_class_declared_in_another_file`,
+  `a_when_over_a_sealed_hierarchy_from_another_file_selects_its_branch`,
+  `an_exception_declared_in_another_file_is_caught_by_its_class`).
 - **Native: the public C ABI is primitives, String, and a Unit result.** A public top-level
   function whose parameters are primitives or `String` and whose result is one of those types or
   `Unit` is declared in the module's C header and exported under that declaration. The export runs
