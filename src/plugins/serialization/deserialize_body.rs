@@ -459,7 +459,9 @@ impl DeserializeBody<'_> {
                 let read = ir.add_expr(IrExpr::Call {
                     callee: Box::new(crate::ir::Callee::ClassStatic {
                         owner: ir.classes[foo_id as usize].fq_name_id(),
-                        function: plan.accessor,
+                        function: plan
+                            .accessor
+                            .expect("a $serializer reads the cache through its accessor"),
                     }),
                     dispatch_receiver: None,
                     args: vec![],

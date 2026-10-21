@@ -51,7 +51,9 @@ pub(super) fn load_cache_statement(
     let read = ir.add_expr(IrExpr::Call {
         callee: Box::new(Callee::ClassStatic {
             owner: serialized,
-            function: plan.accessor,
+            function: plan
+                .accessor
+                .expect("a $serializer reads the cache through its accessor"),
         }),
         dispatch_receiver: None,
         args: vec![],
@@ -154,8 +156,9 @@ pub(super) struct ChildSerializerCachePlan {
     /// directly, being a static member of the class that owns it.
     pub(super) static_index: u32,
     /// The `access$get$childSerializers$cp()` accessor a `$serializer` reaches the cache through,
-    /// as a function id rather than a name to look up.
-    pub(super) accessor: u32,
+    /// as a function id rather than a name to look up. An abstract class has no `$serializer`, and
+    /// kotlinc gives its cache no accessor.
+    pub(super) accessor: Option<u32>,
     /// Which serialized properties, in element order, the cache holds a slot for.
     pub(super) cached: Vec<bool>,
 }
@@ -384,30 +387,39 @@ pub(super) fn add_child_serializer_cache(
             source_order: u32::MAX,
             property_delegate: false,
         });
-        // Read the static just declared rather than describing the field again: a read built from a
-        // DESCRIPTOR carries the erased type, so returning it coerces to the accessor's declared
-        // type and emits a `checkcast [Lkotlin/Lazy;` the reference compiler does not. kotlinc's
-        // accessor body is `getstatic; areturn`.
-        let read = ir.add_expr(IrExpr::GetStatic(static_index));
-        let ret = ir.add_expr(IrExpr::Return(Some(read)));
-        ir.expr_lines.insert(read, owner_decl_line);
-        ir.expr_lines.insert(ret, owner_decl_line);
-        let body = ir.add_expr(IrExpr::Block {
-            stmts: vec![ret],
-            value: None,
-        });
-        let acc = ir.add_fun(IrFunction {
-            name: "access$get$childSerializers$cp".to_string(),
-            params: vec![],
-            ret: lazy_arr_ty,
-            body: Some(body),
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-        ir.synthetic_methods.insert(acc);
-        ir.serialization_cache_methods.insert(acc);
-        ir.classes[class_id as usize].methods.push(acc);
+        // Only a `$serializer` reads the cache from outside the class.
+        let accessor = ir
+            .generated_class(
+                serialized,
+                crate::ir::IrGeneratedClassRole::SerializationSerializer,
+            )
+            .map(|_| {
+                // Read the static just declared rather than describing the field again: a read built from a
+                // DESCRIPTOR carries the erased type, so returning it coerces to the accessor's declared
+                // type and emits a `checkcast [Lkotlin/Lazy;` the reference compiler does not. kotlinc's
+                // accessor body is `getstatic; areturn`.
+                let read = ir.add_expr(IrExpr::GetStatic(static_index));
+                let ret = ir.add_expr(IrExpr::Return(Some(read)));
+                ir.expr_lines.insert(read, owner_decl_line);
+                ir.expr_lines.insert(ret, owner_decl_line);
+                let body = ir.add_expr(IrExpr::Block {
+                    stmts: vec![ret],
+                    value: None,
+                });
+                let acc = ir.add_fun(IrFunction {
+                    name: "access$get$childSerializers$cp".to_string(),
+                    params: vec![],
+                    ret: lazy_arr_ty,
+                    body: Some(body),
+                    is_static: true,
+                    dispatch_receiver: None,
+                    param_checks: Vec::new(),
+                });
+                ir.synthetic_methods.insert(acc);
+                ir.serialization_cache_methods.insert(acc);
+                ir.classes[class_id as usize].methods.push(acc);
+                acc
+            });
         // kotlinc marks the cache `@JvmField` even though it is PRIVATE.
         ir.classes[class_id as usize]
             .field_annotations
@@ -417,7 +429,7 @@ pub(super) fn add_child_serializer_cache(
             });
         Some(ChildSerializerCachePlan {
             static_index,
-            accessor: acc,
+            accessor,
             cached: cached_plans.iter().map(Option::is_some).collect(),
         })
     }

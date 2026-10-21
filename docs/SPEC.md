@@ -11269,8 +11269,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   registers and writes them only when the target serializes the class's record: krusty's metadata
   writer asks each plugin in registration order, and the serialization plugin reads the field off
   the checked class then, so nothing is recorded for it beforehand. A `write$Self` without elements is a
-  bare `return` with no line. (A sealed class's `write$Self` and an abstract class's
-  `PolymorphicSerializer` companion are not generated yet.)
+  bare `return` with no line. (A sealed class's `write$Self` is not generated yet.)
   Test: `tests/open_serializable_write_self_e2e.rs`.
 - **A serializable subclass of a serializable class serializes the parent's elements first.** For a
   same-file, non-generic `@Serializable` superclass, kotlinc numbers the parent's elements ahead of
@@ -11281,6 +11280,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constructor before storing its own fields. (A superclass from another module or a generic one is
   not handled yet.)
   Test: `tests/serializable_inheritance_e2e.rs`.
+- **A serializable abstract class is serialized polymorphically.** kotlinc gives a non-generic,
+  non-sealed abstract `@Serializable` class no `$serializer`: `Companion.serializer()` returns
+  `new PolymorphicSerializer(C::class, new Annotation[0])`, cached in a `$cachedSerializer$delegate`
+  whose initializer and `access$…$cp` accessor follow the deserialization constructor and the
+  child-serializer cache, and whose `<clinit>` store returns on the class's last line. The class
+  keeps the `write$Self` and deserialization constructor its subclasses call. That constructor
+  checks no element (there is no descriptor to report against; the concrete subclass checked the
+  whole mask), and the class's `$childSerializers` has no `access$get$childSerializers$cp`, which
+  only a `$serializer` reads. A subclass reads its own cache after the parent's `write$Self` runs.
+  Test: `tests/abstract_serializable_e2e.rs`.
 - **`write$Self` reads an overridable property through its getter.** It reads a final property's
   backing field, as kotlinc's JVM lowering does for a default getter, but an open or overriding
   property's getter can be overridden, so kotlinc calls it: `override val name` is read with

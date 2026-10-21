@@ -120,14 +120,16 @@ pub(super) fn serializable_by_plugin(
 pub(super) fn generated_serializer_classifier_fact(
     ctx: &FrontendClassContext<'_>,
 ) -> Option<GeneratedClassifierFact> {
-    // An enum, a sealed base and an object build their serializer at run time (`EnumSerializer`,
-    // `SealedClassSerializer`, `ObjectSerializer`); only an ordinary class gets a `$serializer`.
+    // An enum, a sealed base, an abstract class and an object build their serializer at run time
+    // (`EnumSerializer`, `SealedClassSerializer`, `PolymorphicSerializer`, `ObjectSerializer`); only
+    // an ordinary class gets a `$serializer`.
     if !serializable_by_plugin(ctx.annotations, ctx.annotation_class_arguments)
         || matches!(
             ctx.kind,
             crate::libraries::TypeKind::Enum | crate::libraries::TypeKind::Object
         )
         || ctx.is_sealed
+        || super::cached_serializer::frontend_is_polymorphic_base(ctx)
     {
         return None;
     }
@@ -164,6 +166,7 @@ mod tests {
                 companion: None,
                 kind: crate::libraries::TypeKind::Class,
                 is_sealed: false,
+                is_abstract: false,
                 type_parameters: &crate::types::TypeParameters::new(
                     vec!["T".to_string()],
                     vec![Ty::nullable(Ty::obj("kotlin/Any"))],
@@ -227,6 +230,7 @@ mod tests {
                 companion: None,
                 kind: crate::libraries::TypeKind::Object,
                 is_sealed: false,
+                is_abstract: false,
                 type_parameters: &crate::types::TypeParameters::default(),
                 annotations: &annotation,
                 annotation_class_arguments: &[],
@@ -248,6 +252,7 @@ mod tests {
             companion: None,
             kind: crate::libraries::TypeKind::Class,
             is_sealed: false,
+            is_abstract: false,
             type_parameters: &parameters,
             annotations: &annotation,
             annotation_class_arguments: &[],
@@ -275,16 +280,23 @@ mod tests {
         let annotation = [type_name(SERIALIZABLE_FQ)];
         let custom = [(0, type_name("demo/OwnSerializer"))];
         let parameters = crate::types::TypeParameters::default();
-        for (kind, is_sealed, arguments) in [
-            (crate::libraries::TypeKind::Class, false, custom.as_slice()),
-            (crate::libraries::TypeKind::Enum, false, &[][..]),
-            (crate::libraries::TypeKind::Class, true, &[][..]),
+        for (kind, is_sealed, is_abstract, arguments) in [
+            (
+                crate::libraries::TypeKind::Class,
+                false,
+                false,
+                custom.as_slice(),
+            ),
+            (crate::libraries::TypeKind::Enum, false, false, &[][..]),
+            (crate::libraries::TypeKind::Class, true, true, &[][..]),
+            (crate::libraries::TypeKind::Class, false, true, &[][..]),
         ] {
             let context = FrontendClassContext {
                 classifier: type_name("demo/NotGenerated"),
                 companion: None,
                 kind,
                 is_sealed,
+                is_abstract,
                 type_parameters: &parameters,
                 annotations: &annotation,
                 annotation_class_arguments: arguments,
@@ -292,7 +304,7 @@ mod tests {
             assert_eq!(
                 generated_serializer_classifier_fact(&context),
                 None,
-                "{kind:?}, sealed={is_sealed}, arguments={arguments:?}"
+                "{kind:?}, sealed={is_sealed}, abstract={is_abstract}, arguments={arguments:?}"
             );
         }
     }
