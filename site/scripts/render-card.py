@@ -21,27 +21,30 @@ draw.ellipse((1040, 420, 1400, 780), fill=LAVENDER)
 draw.ellipse((1080, 60, 1150, 130), fill=LAVENDER)
 
 crab = Image.open("public/krusty.png").convert("RGBA")
-crab = crab.resize((round(crab.width * 400 / crab.height), 400), Image.LANCZOS)
-img.paste(crab, (W - crab.width - 70, (H - crab.height) // 2), crab)
+crab = crab.resize((round(crab.width * 300 / crab.height), 300), Image.LANCZOS)
+TEXT_RIGHT = 640  # the text column ends here; the mascot sits entirely to the right of it
+img.paste(crab, (W - crab.width - 60, (H - crab.height) // 2), crab)
+assert W - crab.width - 60 > TEXT_RIGHT + 20
 
-h1 = ImageFont.truetype(FONTS + "Inter-ExtraBold.otf", 110)
-h2 = ImageFont.truetype(FONTS + "Inter-SemiBold.otf", 40)
+h1 = ImageFont.truetype(FONTS + "Inter-ExtraBold.otf", 104)
+h2 = ImageFont.truetype(FONTS + "Inter-SemiBold.otf", 34)
 body = ImageFont.truetype(FONTS + "Inter-Regular.otf", 27)
 small = ImageFont.truetype(FONTS + "Inter-Medium.otf", 24)
 
 x = 80
 draw.text((x, 120), "krusty", font=h1, fill=FG)
-draw.text((x, 255), TAGLINE, font=h2, fill=ACCENT)
+assert draw.textlength(TAGLINE, font=h2) <= TEXT_RIGHT - x
+draw.text((x, 250), TAGLINE, font=h2, fill=ACCENT)
 lines, line = [], ""
 for word in DESCRIPTION.split():
     candidate = f"{line} {word}".strip()
-    if draw.textlength(candidate, font=body) > 520:
+    if draw.textlength(candidate, font=body) > TEXT_RIGHT - x:
         lines.append(line)
         line = word
     else:
         line = candidate
 lines.append(line)
-y = 330
+y = 320
 for text in lines:
     draw.text((x, y), text, font=body, fill=FG)
     y += 40
