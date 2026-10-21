@@ -33,6 +33,7 @@ mod kotlin_native_multimodule_support;
 #[path = "ksp_real_e2e.rs"]
 mod ksp_real_e2e;
 mod multimodule_conformance_cases;
+mod multimodule_ratchet;
 #[path = "common/reference_recording.rs"]
 mod reference_recording_support;
 #[path = "serialization_conformance.rs"]

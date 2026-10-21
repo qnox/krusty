@@ -154,12 +154,16 @@ impl NativeLane {
             rayon::current_thread_index().unwrap_or(0)
         ));
         if let Err(error) = std::fs::write(&executable, &image) {
-            return Outcome::Failed(format!("writing the executable: {error}"));
+            return Outcome::Harness(format!("writing the executable: {error}"));
         }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755));
+            if let Err(error) =
+                std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+            {
+                return Outcome::Harness(format!("setting executable permissions: {error}"));
+            }
         }
         let outcome = box_lane::run_program(Command::new(&executable).env_clear());
         let _ = std::fs::remove_file(&executable);
@@ -276,37 +280,51 @@ fn kotlin_codegen_box_native_conformance() {
 }
 
 /// Run one case selected by the shared backend-neutral multimodule conformance inventory.
-pub(super) fn run_multimodule_case(case: &super::multimodule_conformance_cases::Case) {
-    if not_applicable(case.source).is_some() {
-        return;
+pub(super) fn run_multimodule_case(case: &super::multimodule_conformance_cases::Case) -> Outcome {
+    if let Some(reason) = not_applicable(case.source) {
+        return Outcome::NotApplicable(reason);
     }
-    if let Some(answer) =
-        super::kotlin_native_multimodule_support::kotlin_native_multimodule_box(case.source)
-    {
-        assert_eq!(
-            answer, "OK",
-            "{}: pinned kotlinc-native must run the exact KLIB module graph as OK",
-            case.stem
-        );
-    }
-    run_krusty_multimodule_case(case.source, &format!("native-{}", case.stem));
-}
-
-fn run_krusty_multimodule_case(src: &str, stem: &str) {
     let Some(target) = host() else {
-        if std::env::var_os("KRUSTY_REQUIRE_NATIVE_CONFORMANCE").is_some() {
-            panic!("{stem}: required Native target/KLIB setup is unavailable");
-        }
-        return;
+        return Outcome::Harness("required Native target/KLIB setup is unavailable".into());
     };
-    let modules = krusty::conformance::split_modules(src).expect("valid module test shape");
+    let Some(answer) =
+        super::kotlin_native_multimodule_support::kotlin_native_multimodule_box(case.source)
+    else {
+        return Outcome::Harness(
+            "required pinned kotlinc-native module oracle is unavailable".into(),
+        );
+    };
+    assert_eq!(
+        answer, "OK",
+        "{}: pinned kotlinc-native must run the exact KLIB module graph as OK",
+        case.stem
+    );
+    let modules = krusty::conformance::split_modules(case.source).expect("valid module test shape");
     let units = krusty::conformance::module_units(&modules);
     let lane = NativeLane {
         target: Some(target),
     };
+    lane.compile_modules_and_run(
+        &std::env::temp_dir(),
+        &format!("native-{}", case.stem),
+        &units,
+        case.source,
+    )
+}
+
+#[test]
+fn native_module_abi_symbols_keep_same_named_internal_classifiers_distinct() {
+    // PLATFORM-SPECIFIC: Native value-class syntax and module-qualified runtime/box/unbox symbols.
+    let case = super::multimodule_conformance_cases::Case {
+        stem: "multimoduleNativeAbiSymbols",
+        source: "// TARGET_BACKEND: NATIVE\n\
+                 // MODULE: left\npackage shared\ninternal class Token(val value: String)\ninternal value class Packed(val value: String)\n\
+                 // MODULE: right\npackage shared\ninternal class Token(val value: String)\ninternal value class Packed(val value: String)\n\
+                 // MODULE: main(left, right)\nfun box() = \"OK\"\n",
+    };
     assert_eq!(
-        lane.compile_modules_and_run(&std::env::temp_dir(), stem, &units, src),
+        run_multimodule_case(&case),
         Outcome::Pass,
-        "{stem}: Native must run the exact separately analyzed module graph"
+        "Native ABI identities must remain distinct across the exact module graph"
     );
 }
