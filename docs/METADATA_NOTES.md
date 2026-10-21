@@ -647,7 +647,7 @@ does not acquire that operation. Native consumes the fact and the recorded recei
 and proves contiguous String/StringBuilder storage before invoking its existing trim runtime.
 Neither the serialized signature nor the callable is reconstructed from a backend spelling.
 
-## Ordinary KLIB generic declaration headers
+## KLIB accessor declaration modifiers
 
 Property getter and setter words are decoded independently, including visibility, modality,
 non-default, external and inline status. An absent word takes only the shared property prefix
@@ -657,8 +657,10 @@ default accessor is rejected as inconsistent metadata. The semantic declaration 
 accessor's own annotations (modern fields 15/16, BuiltIns fields 152/153, KLIB fields 177/178);
 `InlineOnly` obligation comes from the selected accessor, not the property's annotation list.
 Each accessor also carries the property's declaration-owned reified formal ordinals. These are
-existing schema facts, not new intrinsic markers or a metadata format change. This producer fix alone does not
-enable ordinary dependency-body emission.
+existing schema facts, not new intrinsic markers or a metadata format change. This producer fix
+alone does not enable ordinary dependency-body or inline-accessor emission.
+
+## Ordinary KLIB generic declaration headers
 
 The KLIB body contract separately freezes known implementation modifiers from each exact signed
 function or accessor. Constructors and providers without such a contract keep `None`, not an

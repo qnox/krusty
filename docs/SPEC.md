@@ -1930,6 +1930,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `CharSurrogateWhen`, and `CharSurrogateAnnotationArg` in `tests/feature_box_e2e.rs`, plus
   `cross_file_super_ctor_char_defaults_keep_utf16_code_units` in
   `tests/cross_file_ctor_default_e2e.rs` for the sibling-file handoff.
+- **Block comments nest, and an unclosed one is a syntax error at the end of the file.** Each
+  `/*` inside a block comment or KDoc opens another level that its own `*/` closes, so
+  ``/** wraps `/* */` */`` is one comment and `/* a /* b */ c */ val k` declares `k`. A comment still
+  open at the end of the file swallows the rest of the source; the compiler lexer reports kotlinc's
+  `syntax error: Unclosed comment.` at the end of the file (after any trailing newlines), once,
+  and nothing else for the swallowed text. The formatter's lexer keeps the comment text as written
+  and reports nothing. Tests: `tests/nested_block_comment_e2e.rs` (a box run against kotlinc, and
+  two exact kotlinc diagnostic comparisons: an unclosed nested comment and an unclosed comment
+  before trailing newlines); `ordinary_lexer_keeps_shebang_and_nests_block_comments` in
+  `src/lexer.rs`.
 - **A `Char` literal that is not exactly one UTF-16 code unit is REJECTED in the lexer.** The `i2c`
   truncation above is correct only because a *well-formed* literal is in the BMP, so the ill-formed ones
   have to be diagnosed rather than truncated: `const val E = '😀'` used to compile silently to
@@ -11292,6 +11302,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   line: the method opens on it at its first instruction, whether that is the child-serializer cache
   read, an unconditional element or a default-value guard, and a guard's comparison returns to it.
   Test: `tests/serialization_generated_debug_e2e.rs::write_self_opens_on_the_class_line_at_its_first_instruction`.
+- **`write$Self` reads an overridable property through its getter.** It reads a final property's
+  backing field, as kotlinc's JVM lowering does for a default getter, but an open or overriding
+  property's getter can be overridden, so kotlinc calls it: `override val name` is read with
+  `invokevirtual getName`, a plain `val tag` with `getfield`. The getter is chosen from the
+  property's modality alone; a target that cannot describe its result is a compiler error, never a
+  field read. A source-declared getter is called as that property's checked getter, like a source
+  read, so a value-class result keeps its mangled JVM name (`getU-pVg5ArA`).
+  Test: `tests/serialized_override_getter_e2e.rs`.
 - **A concrete generic element is cached; a generic class's descriptor and accessor follow
   kotlinc.** `val g: G<Int>` over a same-file generic `@Serializable class G<T>` is serialized by
   `new G.$serializer(IntSerializer.INSTANCE)`, a constructed serializer, so the holder caches it in
@@ -17966,7 +17984,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   it. A `null` of another type is an inconsistency. Test:
   `control_forms::a_nullability_smart_cast_lowers_as_the_source_smart_cast_does`.
 
-- **KLIB property accessors retain their own declaration modifiers.** Getter and setter flags are
+- **KLIB accessor declaration modifiers are independent.** Getter and setter flag words are
   independent. An absent word inherits only the property's annotation/visibility/modality prefix;
   explicit zero does not inherit. Inline, external and non-default status belong to each accessor,
   while property-level external status remains separate. An accessor's own `InlineOnly` annotation
@@ -18071,7 +18089,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   template is missing or declined is rejected, never compiled as a call of the dependency
   function; a `CanInline` callee without a template stays an ordinary call. A call that selected a
   template but cannot expand from it is rejected too. No per-shape plan is decoded for a KLIB
-  declaration and checked FIR carries none: KLIB inline knowledge enters at IR only. A member
+  declaration and checked FIR carries none: KLIB inline knowledge enters at IR only. The same
+  template expansion executes the `also`/`apply` lambda for its effects and returns the receiver,
+  preserving a taken non-local return from the lambda. A member
   extension keeps its declaration's `inline`/`reified` flags through the checker's member-extension
   view, as a top-level or member function does. Tests:
   `klib_lowering::tests::inline_templates::*`,

@@ -23,6 +23,7 @@ mod classifier_shapes;
 mod compiler_intrinsics;
 mod declared_capabilities;
 mod defaults;
+mod dispatch;
 mod entry;
 mod enums;
 mod exceptions;

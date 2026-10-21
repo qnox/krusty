@@ -5565,6 +5565,13 @@ non-inline callers, still reads the field directly. Test:
   finally, enums and companions on the class tables, and further target-KLIB
   library bodies/intrinsics keyed by the selected declaration.
 
+## KLIB accessor metadata
+
+- Accessor metadata preserves independent getter/setter modifiers and annotation identities,
+  including exact absent-word defaults and explicit zero. Accessor inline obligations now survive
+  provider normalization. This producer change does not enable ordinary-body or inline-accessor
+  emission; those consumers remain separate work.
+
 ## Prepared KLIB inline return frames  🚧
 
 - Branch-local returns in prepared stdlib inline bodies use an exact serialized block target,
@@ -5598,11 +5605,6 @@ non-inline callers, still reads the field directly. Test:
 - Ordinary generic headers authenticate the exact provider-frozen formal types and every full
   bound, including recursive/forward bounds, without prepared-inline erasure. Reification and
   parameter roles must agree independently of the flattened operand types.
-- Accessor metadata preserves independent getter/setter modifiers and annotation identities,
-  including exact absent-word defaults and explicit zero. Accessor inline obligations now survive
-  provider normalization. Remaining ordinary-body admission must authenticate those declaration
-  modifiers against the serialized function before selecting an emitted-use root; it is not yet
-  enabled by this metadata producer change.
 - The frozen body declaration contract now retains known inline/suspend/external/modality facts
   and independent property externality. Ordinary raw headers reject disagreement with those facts;
   selected variants with unknown or conflicting contracts cannot coalesce. Structural emitted-use

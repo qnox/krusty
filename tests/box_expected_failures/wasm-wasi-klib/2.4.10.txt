@@ -326,7 +326,6 @@ bridges/declarationDifferentSignature/simpleAbstractDeclarationOverridesConcrete
 bridges/declarationDifferentSignature/simpleConcreteDeclarationDifferentSignature.kt
 bridges/declarationDifferentSignature/simpleConcreteDeclarationOverridesAbstractDifferentSignature.kt
 bridges/delegation.kt
-bridges/delegationComplex.kt
 bridges/delegationComplexWithList.kt
 bridges/delegationProperty.kt
 bridges/diamond.kt
@@ -792,13 +791,10 @@ checkcastOptimization/kt19128.kt
 checkcastOptimization/kt19246.kt
 checkcastOptimization/kt50215.kt
 classDelegation/delegationToInOutTypeParameters.kt
-classDelegation/delegationToInTypeParameter.kt
 classDelegation/delegationToOutTypeParameter.kt
 classDelegation/delegationToStarProjectedType.kt
 classDelegation/delegationToTypeParameter.kt
-classDelegation/delegationToTypeParameterWithRecursiveBond.kt
 classDelegation/generic.kt
-classDelegation/hiddenDelegateAndLateinitVar.kt
 classDelegation/method.kt
 classDelegation/multipleModules.kt
 classDelegation/property.kt
@@ -822,9 +818,6 @@ classes/classObjectsWithParentClasses.kt
 classes/comanionObjectFieldVsClassField.kt
 classes/defaultObjectSameNamesAsInOuter.kt
 classes/delegateConstructorCallWithKeywords.kt
-classes/delegation2.kt
-classes/delegation3.kt
-classes/delegation4.kt
 classes/delegationGenericArg.kt
 classes/delegationGenericArgUpperBound.kt
 classes/delegationGenericLongArg.kt
@@ -833,7 +826,6 @@ classes/exceptionConstructor.kt
 classes/extensionFunWithDefaultParam.kt
 classes/extensionOnNamedClassObject.kt
 classes/implementComparableInSubclass.kt
-classes/inheritance.kt
 classes/initializerBlockDImpl.kt
 classes/inner/instantiateInDerived.kt
 classes/inner/instantiateInDerivedLabeled.kt
@@ -866,12 +858,8 @@ classes/kt2566_2.kt
 classes/kt2626.kt
 classes/kt2711.kt
 classes/kt2784.kt
-classes/kt285.kt
-classes/kt3001.kt
 classes/kt3114.kt
-classes/kt3414.kt
 classes/kt343.kt
-classes/kt3546.kt
 classes/kt471.kt
 classes/kt48.kt
 classes/kt496.kt
@@ -1122,7 +1110,6 @@ contextParameters/contextualAnonymousFunAsAnExpression.kt
 contextParameters/contextualAnonymousFunction.kt
 contextParameters/contextualFunctionConversion.kt
 contextParameters/contextualInlineCall.kt
-contextParameters/contextualLocalFunWithTypeParam.kt
 contextParameters/explicitPassing.kt
 contextParameters/functionalType.kt
 contextParameters/inferGenericPropertyType.kt
@@ -2164,7 +2151,6 @@ delegation/delegationDifferentModule2.kt
 delegation/delegationToIntersectionType.kt
 delegation/delegationToIntersectionType3.kt
 delegation/delegationToVar.kt
-delegation/delegationWithPrivateConstructor.kt
 delegation/genericFunctionInGenericInterface.kt
 delegation/genericProperty.kt
 delegation/hiddenSuperOverrideIn1.0.kt
@@ -2173,8 +2159,6 @@ delegation/inDataClass.kt
 delegation/kt30102_comparable.kt
 delegation/kt44199.kt
 delegation/kt8154.kt
-delegation/nestedNameClash.kt
-delegation/nestedNameClash2.kt
 delegation/smartCastedDelegation.kt
 delegation/viaTypeAlias.kt
 delegation/withDefaultParameters.kt
@@ -2403,7 +2387,6 @@ evaluate/serialization/nestedTypeAnnotation.kt
 evaluate/serialization/typeAnnotation.kt
 evaluate/shortOperations.kt
 evaluate/stdlibConst.kt
-evaluate/stringConcatenation.kt
 evaluate/stringConcatenationWithObject.kt
 evaluate/stringOperations.kt
 evaluate/thisPlusString.kt
@@ -2666,7 +2649,6 @@ functions/defaultargs5.kt
 functions/defaultargs6.kt
 functions/defaultargs7.kt
 functions/delegatedPropertyWithMultipleOverriddens_generics.kt
-functions/delegatedPropertyWithMultipleOverriddens_noGenerics.kt
 functions/functionExpression/functionExpression.kt
 functions/functionExpression/functionExpressionWithThisReference.kt
 functions/functionExpression/functionLiteralExpression.kt
@@ -2706,16 +2688,13 @@ functions/kt58825_arrayOverloads.kt
 functions/kt785.kt
 functions/kt873.kt
 functions/localFunction.kt
-functions/localFunctions/boundTypeParameterInSupertype.kt
 functions/localFunctions/boundTypeParameterInVararg.kt
 functions/localFunctions/callBetweenLocalFunctions.kt
 functions/localFunctions/callInlineLocalInLambda.kt
-functions/localFunctions/captureUpperBoundedTypeParameter.kt
 functions/localFunctions/definedWithinLambda.kt
 functions/localFunctions/definedWithinLambdaInnerUsage1.kt
 functions/localFunctions/definedWithinLambdaInnerUsage2.kt
 functions/localFunctions/kt2895.kt
-functions/localFunctions/kt3308.kt
 functions/localFunctions/kt3978.kt
 functions/localFunctions/kt3978_2.kt
 functions/localFunctions/kt4119.kt
@@ -2733,7 +2712,6 @@ functions/localFunctions/overloadedLocalFunction3.kt
 functions/localFunctions/parameterAsDefaultValue.kt
 functions/localReturnInsideFunctionExpression.kt
 functions/nothisnoclosure.kt
-functions/typeParametersInLocalFunction.kt
 ieee754/anyCastToPrimitiveCompareTo1.kt
 ieee754/anyCastToPrimitiveCompareTo2.kt
 ieee754/anyToReal.kt
@@ -2793,7 +2771,6 @@ increment/prefixIncrementOnClassSmartCast.kt
 increment/prefixIncrementOnSmartCast.kt
 increment/prefixNullableClassIncrement.kt
 increment/prefixNullableIncrement.kt
-inference/approximateNonTopLevelCapturedTypes.kt
 inference/builderInferenceLeakingVariable.kt
 inference/capturedSelfInsideIntersection.kt
 inference/capturedSelfInsideIntersection2.kt
@@ -2806,7 +2783,6 @@ inference/coerctionToUnitForLastExpressionWithStarProjection.kt
 inference/earlierReifiedFix.kt
 inference/earlyReturnInsideCrossinlineLambda.kt
 inference/ifWithAssignmentAndNothingBranch.kt
-inference/inferenceWithTypeVariableInsideCapturedType.kt
 inference/integerLiteralTypeInLamdaReturnType.kt
 inference/kt10822.kt
 inference/kt35684.kt
@@ -2990,7 +2966,6 @@ inference/tryCatchAtAssignment.kt
 inference/tryCatchAtAssignmentWithSmartCast.kt
 inference/tryWithAssignmentAndNothingTypedCatch.kt
 inference/unsafeVarianceCodegen.kt
-inference/whenAtAssignment.kt
 inference/whenAtAssignmentWithSmartCast.kt
 inference/whenAtAssignmentWithSmartCastInsideCapturedLambda.kt
 initializers/correctOrder1.kt
@@ -4065,7 +4040,6 @@ interfaceCallsNCasts/conservativeItable.kt
 interfaceCallsNCasts/diamond.kt
 interfaceCallsNCasts/finalMethod.kt
 interfaceCallsNCasts/interface0.kt
-interfaceCallsNCasts/kt83308.kt
 intrinsics/charToInt.kt
 intrinsics/ea35953.kt
 intrinsics/kt10131.kt
@@ -4319,7 +4293,6 @@ multiplatform/k2/basic/expectInterfaceInSupertypes.kt
 multiplatform/k2/basic/expectInterfaceInSupertypes2.kt
 multiplatform/k2/basic/expectProperty.kt
 multiplatform/k2/basic/extensionAndFakeOverride.kt
-multiplatform/k2/basic/extensionFunction.kt
 multiplatform/k2/basic/extensionFunctionAsASupertype.kt
 multiplatform/k2/basic/extensionFunctionAsASupertypeConversion.kt
 multiplatform/k2/basic/extensionFunctionAsAType.kt
@@ -4487,7 +4460,6 @@ objectExpression/expr2.kt
 objectExpression/expr3.kt
 objectExpression/multipleAnonymousObjectsInsideInlineFunction.kt
 objectIntrinsics/objects.kt
-objects/anonymousObjectAndContrvariantProjection.kt
 objects/anonymousObjectPropertyInitialization.kt
 objects/classCallsProtectedInheritedByCompanion.kt
 objects/classCompanion.kt
@@ -4545,7 +4517,6 @@ objects/kt2719.kt
 objects/kt32351.kt
 objects/kt32749.kt
 objects/kt3684.kt
-objects/kt46136.kt
 objects/kt52540.kt
 objects/kt535.kt
 objects/kt694.kt
@@ -4777,8 +4748,6 @@ properties/kt1398.kt
 properties/kt1892.kt
 properties/kt2331.kt
 properties/kt257.kt
-properties/kt2655.kt
-properties/kt2786.kt
 properties/kt2892.kt
 properties/kt3118.kt
 properties/kt3524.kt
@@ -5703,7 +5672,6 @@ regressions/commonSupertypeContravariant2.kt
 regressions/dataClassInInlineFunctionWithTypeParameters.kt
 regressions/dataClassInRegularFunctionWithTypeParameters.kt
 regressions/directInvokeDestructuring.kt
-regressions/dontCaptureTypesWithTypeVariables.kt
 regressions/functionLiteralAsLastExpressionInBlock.kt
 regressions/generic.kt
 regressions/hashCodeNPE.kt
@@ -5758,10 +5726,7 @@ regressions/multimodule/inlineTodoDefaultMessage.kt
 regressions/multimodule/inlineUnsignedConstructionAndData.kt
 regressions/multimodule/multimoduleDependencyFunctionImplementationMarkers.kt
 regressions/multimodule/multimoduleDirectCollectionIterator.kt
-regressions/noAssertionsWhenNullableTypeParameterReplacedWithIntersectionType.kt
 regressions/noCapturingForTypesWithTypeVariables.kt
-regressions/noResolutionRecursion.kt
-regressions/nullabilityForCommonCapturedSupertypes.kt
 regressions/objectCaptureOuterConstructorProperty.kt
 regressions/objectInsideDelegation.kt
 regressions/recursiveDnnTypeInLambda.kt
@@ -5871,7 +5836,6 @@ secondaryConstructors/dataClasses.kt
 secondaryConstructors/defaultArgs.kt
 secondaryConstructors/defaultParametersNotDuplicated.kt
 secondaryConstructors/delegatedThisWithLambda.kt
-secondaryConstructors/delegationWithPrimary.kt
 secondaryConstructors/enums.kt
 secondaryConstructors/generics.kt
 secondaryConstructors/inlineIntoTwoConstructors.kt
@@ -5896,9 +5860,7 @@ smartCasts/NullableFunctionTypeAsMemberImmutableProperty.kt
 smartCasts/NullableFunctionTypeAsMemberImmutablePropertyFromConstructor.kt
 smartCasts/NullableFunctionTypeAsPrimaryConstructorParameter.kt
 smartCasts/NullableFunctionTypeAsSecondaryConstructorParameter.kt
-smartCasts/complexExplicitReceiver.kt
 smartCasts/genericInheritanceWithNonGenericNoAmbiguity.kt
-smartCasts/genericIntersection.kt
 smartCasts/genericSet.kt
 smartCasts/invokeRecieverSmartcastK2.kt
 smartCasts/kt17725.kt
@@ -5915,7 +5877,6 @@ smartCasts/propertyInitializationAfterSmartCast.kt
 smartCasts/smartCastInsideIf.kt
 smartCasts/smartCastedGenericWhenSubjectInRangeCheck.kt
 smartCasts/smartcastFromGenericToString.kt
-smartCasts/smartcastToStarType.kt
 specialBuiltins/bridgeNotEmptyMap.kt
 specialBuiltins/bridges.kt
 specialBuiltins/emptyList.kt
