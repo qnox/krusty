@@ -148,7 +148,7 @@ changing its plugin configuration.
 | no-arg (`plugin.noarg`, `plugin.jpa`) | Supported, with the `jpa` preset; `invokeInitializers=true` is not implemented. |
 | sam-with-receiver | Supported. |
 | KSP (KSP2) | Supported through a build system: under Gradle, KSP's own `kspKotlin` task runs the processors and krusty compiles what they generate (KSP's Gradle plugin needs Gradle 8 or newer); under the Kotlin Toolchain, processors from Maven artifacts run before the module compiles, but only their generated classes and resources are picked up; a processor that generates Kotlin or Java sources fails the module for now. The plain command line has no codegen host and rejects the KSP plugin. |
-| Compose, Parcelize, assignment, kapt and every other FIR/IR plugin | Not supported; the build fails with an error. |
+| Compose, Parcelize, assignment, kapt and every other FIR/IR plugin | Not supported. Today the build fails with an error; the Gradle plugin is being changed to report the unsupported plugin and hand that compilation to kotlinc instead. |
 | Kotlin scripts (`.kts`) | Not supported. |
 
 ## Status
