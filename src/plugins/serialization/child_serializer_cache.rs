@@ -285,8 +285,8 @@ pub(super) fn add_child_serializer_cache(
         // and it is the serialized class's annotation-inclusive declaration line — the line its
         // `@Serializable` sits on.
         let owner_decl_line = ir.classes[class_id as usize].decl_start_line;
-        for index in 0..elements.len() {
-            let Some(plan) = cached_plans[index].clone() else {
+        for plan in &cached_plans {
+            let Some(plan) = plan.clone() else {
                 elems.push(ir.add_expr(IrExpr::Const(IrConst::Null)));
                 continue;
             };
