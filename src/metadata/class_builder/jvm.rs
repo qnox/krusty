@@ -33,6 +33,9 @@ pub struct JvmClassSignatures<'a> {
     pub properties: Vec<JvmPropertySignature>,
     /// The functions' realizations, parallel to the declaration's.
     pub functions: Vec<JvmFunctionSignature>,
+    /// The serialization plugin's `propertiesNamesInProgramOrder` (f18000) on an inheritable
+    /// serializable class: its own serialized property names, each already in the string table.
+    pub serializable_property_order: &'a [String],
 }
 
 /// A constructor's `JvmMethodSignature`: `<init>` or a value class's static `constructor-impl`.
@@ -193,8 +196,13 @@ impl ClassCarrier for JvmCarrier<'_, '_> {
         extensions
     }
 
-    fn class_trailer(&self, _: &mut StringTable<'_>) -> Pb {
-        Pb::new()
+    fn class_trailer(&self, st: &mut StringTable<'_>) -> Pb {
+        let mut trailer = Pb::new();
+        for name in self.signatures.serializable_property_order {
+            // SerializationPluginMetadataExtensions.propertiesNamesInProgramOrder = 18000
+            trailer.repeated_varint(18000, u64::from(st.local(name)));
+        }
+        trailer
     }
 }
 

@@ -280,6 +280,27 @@ impl IrFile {
             .push(member);
     }
 
+    /// Publish `owner`'s own serialized properties in program order, once.
+    pub(crate) fn publish_serializable_property_order(
+        &mut self,
+        owner: TypeName,
+        properties: Vec<String>,
+    ) {
+        assert!(
+            self.serializable_property_order
+                .insert(owner, properties)
+                .is_none(),
+            "one producer publishes a class's serializable property order"
+        );
+    }
+
+    /// `owner`'s published serialized properties in program order; empty when it published none.
+    pub(crate) fn serializable_property_order(&self, owner: TypeName) -> &[String] {
+        self.serializable_property_order
+            .get(&owner)
+            .map_or(&[], Vec::as_slice)
+    }
+
     pub(crate) fn generated_member_publication(
         &self,
         owner: TypeName,

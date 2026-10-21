@@ -520,13 +520,30 @@ pub(super) fn complete(
     super::complete_frontend_serializer_accessor(ir, owner, acc_body);
 
     if plain_data_class(ir, class_id) {
+        // Its statements carry the class's line; a class without elements has none, and kotlinc
+        // gives its bare `return` no line.
+        let write_self_line = if element_fields.is_empty() {
+            0
+        } else {
+            owner_start_line
+        };
         add_write_self(
             plugin,
             ir,
             class_id,
             &serializer_type_parameters,
-            owner_start_line,
+            write_self_line,
         );
+        // An open or abstract class's metadata lists its own elements in program order for a
+        // subclass's serializer; a sealed class's subclasses all live in its own module.
+        let class = &ir.classes[class_id as usize];
+        if write_self_is_public(class) && !class.is_sealed {
+            let properties = element_fields
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect();
+            ir.publish_serializable_property_order(class.fq_name_id(), properties);
+        }
     }
 
     // `<getter>$annotations()` markers for properties kotlinc preserves the serialization
@@ -628,7 +645,8 @@ pub(super) fn complete(
 }
 
 /// Add `class_id`'s `write$Self`. kotlinc generates it in its IR extension, not its FIR one: a
-/// KLIB's metadata has no record of it, while the JVM publishes it as an internal function.
+/// KLIB's metadata has no record of it, while the JVM publishes it as an internal function on a
+/// final class and a public one on an inheritable class.
 ///
 /// A generic class's `write$Self` declares its own copy of each class type parameter and takes
 /// one serializer per parameter after the descriptor, which `serialize` passes from its
@@ -681,7 +699,7 @@ fn add_write_self(
         value: None,
     });
     let write_self = ir.add_fun(IrFunction {
-        name: plugin.write_self_name(),
+        name: plugin.write_self_name(&ir.classes[class_id as usize]),
         params: std::iter::once(physical_self)
             .chain(leading)
             .chain(type_arguments.iter().map(|_| class_ty(KSERIALIZER_FQ)))
@@ -712,10 +730,12 @@ fn add_write_self(
     }
     ir.synthetic_methods.insert(write_self);
     ir.classes[class_id as usize].methods.push(write_self);
+    let visibility = write_self_visibility(&ir.classes[class_id as usize]);
     publish_write_self(
         ir,
         owner,
         write_self,
+        visibility,
         class_type_parameters.len(),
         owner_start_line,
     );

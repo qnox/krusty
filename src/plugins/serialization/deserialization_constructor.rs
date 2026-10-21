@@ -258,6 +258,7 @@ pub(super) fn declare_deserialization_constructor(
         }
     };
     let owner_start_line = ir.classes[class_id as usize].decl_start_line;
+    let visibility = super::write_self_visibility(&ir.classes[class_id as usize]);
     let ordinal = u32::try_from(ir.classes[class_id as usize].secondary_ctors.len())
         .expect("too many secondary constructors for an IR identity");
     ir.classes[class_id as usize]
@@ -281,7 +282,9 @@ pub(super) fn declare_deserialization_constructor(
                     )),
                 )))
                 .collect(),
-            metadata_visibility: Some(crate::types::Visibility::Internal),
+            // Public on an inheritable class, whose subclass's constructor in another module calls
+            // it, as its `write$Self` is.
+            metadata_visibility: Some(visibility),
             generated_debug: crate::ir::IrGeneratedDeclarationDebug::declaration_line(
                 owner_start_line,
             ),

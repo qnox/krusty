@@ -1529,6 +1529,7 @@ impl super::IrFile {
         remap_keyed(&mut self.function_overrides, names);
         remap_keyed(&mut self.inherited_defaults, names);
         remap_keyed(&mut self.generated_member_publications, names);
+        remap_keyed(&mut self.serializable_property_order, names);
         remap_keyed(&mut self.class_type_aliases, names);
         remap_keyed(&mut self.jvm_value_class_secondary_ctors, names);
         remap_keyed(&mut self.member_ext_props, names);

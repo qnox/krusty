@@ -1320,6 +1320,10 @@ pub struct IrFile {
     /// Exact generated function metadata/debug contracts, keyed by semantic owning classifier.
     /// Producers publish once; backends consume function identities without name/descriptor scans.
     generated_member_publications: crate::fx_hash::HashMap<TypeName, IrGeneratedMemberPublication>,
+    /// An inheritable serializable class's own serialized properties in program order, keyed by
+    /// the class. kotlinc's serialization plugin publishes them in the class's metadata, where a
+    /// subclass compiled against it reads them.
+    serializable_property_order: crate::fx_hash::HashMap<TypeName, Vec<String>>,
     /// Exact common-IR functions bound to compiler-synthesized data-class roles. The common
     /// producer records these before any backend rename; metadata and target realization consume
     /// the identities without scanning method spellings.

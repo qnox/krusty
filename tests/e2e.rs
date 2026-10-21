@@ -2183,6 +2183,8 @@ mod nested_data_class_tostring_recipe_e2e;
 mod nested_inline_delegate_e2e;
 #[path = "nullable_sam_e2e.rs"]
 mod nullable_sam_e2e;
+#[path = "open_serializable_write_self_e2e.rs"]
+mod open_serializable_write_self_e2e;
 #[path = "operator_declarations_e2e.rs"]
 mod operator_declarations_e2e;
 #[path = "operator_expected_result_seeding_e2e.rs"]

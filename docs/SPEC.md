@@ -11238,6 +11238,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   line: the method opens on it at its first instruction, whether that is the child-serializer cache
   read, an unconditional element or a default-value guard, and a guard's comparison returns to it.
   Test: `tests/serialization_generated_debug_e2e.rs::write_self_opens_on_the_class_line_at_its_first_instruction`.
+- **An inheritable serializable class's `write$Self` is public.** kotlinc keeps a final class's
+  `write$Self` internal, so its JVM name carries the module (`write$Self$main`), but an open,
+  abstract or sealed class's subclass, possibly in another module, calls it, so it is public under
+  its plain name `write$Self`, and the deserialization constructor's metadata is public too. An
+  open or abstract (not sealed) class's metadata lists its own elements in program order
+  (`propertiesNamesInProgramOrder`, field 18000), leaving out `@Transient` properties. A
+  `write$Self` without elements is a bare `return` with no line.
+  Test: `tests/open_serializable_write_self_e2e.rs`.
 - **A concrete generic element is cached; a generic class's descriptor and accessor follow
   kotlinc.** `val g: G<Int>` over a same-file generic `@Serializable class G<T>` is serialized by
   `new G.$serializer(IntSerializer.INSTANCE)`, a constructed serializer, so the holder caches it in
