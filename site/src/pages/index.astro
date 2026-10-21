@@ -1,8 +1,13 @@
 ---
+import { SEO } from "astro-seo";
+
 const repo = "https://github.com/qnox/krusty";
 const title = "krusty: a Kotlin compiler written in Rust";
 const description =
   "krusty is a Kotlin compiler written in Rust. Built as a drop-in replacement for kotlinc on the JVM: for the supported Kotlin subset, kotlinc-compatible flags and .class files that aim to be byte-for-byte identical to kotlinc's.";
+// Link-preview card: 1200x630 (X's and Open Graph's 1.91:1 size) so the crawler shows it uncropped.
+const card = new URL("/card.png", Astro.site).href;
+const cardAlt = "krusty, a crab mascot";
 const badge = (file: string) =>
   `https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2Fdec8149bc4f43b203d6cc9adc14f2026%2Fraw%2F${file}`;
 const jsonLd = {
@@ -23,20 +28,23 @@ const jsonLd = {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>{title}</title>
-    <meta name="description" content={description} />
-    <link rel="canonical" href={Astro.site?.href} />
-    <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48" />
-    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <meta name="twitter:card" content="summary_large_image" />
-    <meta property="og:type" content="website" />
-    <meta property="og:title" content={title} />
-    <meta property="og:description" content={description} />
-    <meta property="og:url" content={Astro.site?.href} />
-    <meta property="og:image" content={new URL("/krusty.png", Astro.site).href} />
-    <meta property="og:image:width" content="480" />
-    <meta property="og:image:height" content="311" />
-    <meta property="og:image:alt" content="krusty, a crab mascot" />
+    <SEO
+      title={title}
+      description={description}
+      canonical={Astro.site?.href}
+      openGraph={{
+        basic: { title, type: "website", image: card, url: Astro.site?.href },
+        optional: { description, siteName: "krusty" },
+        image: { type: "image/png", width: 1200, height: 630, alt: cardAlt },
+      }}
+      twitter={{ card: "summary_large_image", title, description, image: card, imageAlt: cardAlt }}
+      extend={{
+        link: [
+          { rel: "icon", href: "/favicon.ico", sizes: "16x16 32x32 48x48" },
+          { rel: "apple-touch-icon", href: "/apple-touch-icon.png" },
+        ],
+      }}
+    />
     <script type="application/ld+json" is:inline set:html={JSON.stringify(jsonLd)} />
   </head>
   <body>
