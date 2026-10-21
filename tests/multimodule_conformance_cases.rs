@@ -329,7 +329,49 @@ pub const RECEIVER_RETURNING_SCOPE_FUNCTIONS: Case = Case {
              }\n",
 };
 
+pub const THROWABLE_TRANSPORT: Case = Case {
+    stem: "multimoduleThrowableTransport",
+    source: "// MODULE: lib\n\
+             fun raiseHeld(value: Throwable): Nothing = throw value\n\
+             fun relayHeld(value: Throwable): Nothing {\n\
+             \x20   try { raiseHeld(value) } catch (caught: Throwable) { throw caught }\n\
+             }\n\
+             // MODULE: main(lib)\n\
+             fun box(): String {\n\
+             \x20   val held = Throwable(\"held\")\n\
+             \x20   val caught = try { relayHeld(held) } catch (value: Throwable) { value }\n\
+             \x20   if (caught !== held) return \"identity\"\n\
+             \x20   if (caught.message != \"held\") return \"message\"\n\
+             \x20   val empty = Throwable()\n\
+             \x20   if (empty.message != null) return \"empty message\"\n\
+             \x20   try { raiseHeld(empty) } catch (value: Throwable) {\n\
+             \x20       if (value !== empty) return \"empty identity\"\n\
+             \x20   }\n\
+             \x20   return \"OK\"\n\
+             }\n",
+};
+
+pub const TRY_NORMAL_COMPLETION: Case = Case {
+    stem: "multimoduleTryNormalCompletion",
+    source: "// MODULE: lib\n\
+             fun normalValue(): Int = try { 42 } catch (value: Throwable) { -1 }\n\
+             fun normalReturn(): String {\n\
+             \x20   try { return \"OK\" } catch (value: Throwable) { return \"caught\" }\n\
+             }\n\
+             // MODULE: main(lib)\n\
+             fun box(): String {\n\
+             \x20   if (normalValue() != 42) return \"value\"\n\
+             \x20   var count = 0\n\
+             \x20   while (count < 3) {\n\
+             \x20       try { count++; continue } catch (value: Throwable) { return \"loop\" }\n\
+             \x20   }\n\
+             \x20   return normalReturn()\n\
+             }\n",
+};
+
 pub const ALL: &[Case] = &[
+    THROWABLE_TRANSPORT,
+    TRY_NORMAL_COMPLETION,
     TOP_LEVEL_DEPENDENCY,
     DEPENDS_ON,
     EXPECT_DEFAULT_PROVIDER,
