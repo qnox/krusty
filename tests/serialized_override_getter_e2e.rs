@@ -7,7 +7,7 @@
 
 use super::common;
 use super::common::compare_with_kotlinc_plugin;
-use super::serialization_companion_byte_parity_e2e::{gradle_module_jar, plugin_and_runtime};
+use super::serialization_companion_byte_parity_e2e::plugin_and_runtime;
 
 const SRC: &str = "import kotlinx.serialization.Serializable\n\
                    interface Named { val name: String }\n\
@@ -47,7 +47,7 @@ const DECLARED_GETTER_SRC: &str = "import kotlinx.serialization.Serializable\n\
 
 #[test]
 fn write_self_calls_a_declared_value_class_getter_by_its_jvm_name() {
-    let json = gradle_module_jar("org.jetbrains.kotlinx", "kotlinx-serialization-json-jvm")
+    let json = krusty::toolchain::serialization_json_jar()
         .expect("kotlinx-serialization-json must be available to this regression");
     let (plugin, mut cp) = plugin_and_runtime()
         .expect("the serialization plugin and runtime must be available to this regression");

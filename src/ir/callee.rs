@@ -260,3 +260,41 @@ impl Callee {
         }
     }
 }
+
+impl super::IrFile {
+    /// A virtual call of the checked member property whose source-declared getter is `getter`, the
+    /// same selection a source read of that property records. A backend names the call from that
+    /// property's realization, never from `name`'s spelling.
+    pub(crate) fn declared_getter_call(
+        &self,
+        owner: TypeName,
+        name: String,
+        getter: FunId,
+    ) -> Callee {
+        let (property, ty) = self
+            .local_property_layouts
+            .iter()
+            .find_map(|(&property, layout)| match layout {
+                super::IrLocalPropertyLayout::Member {
+                    getter: Some(function),
+                    ty,
+                    ..
+                } if *function == getter => Some((property, *ty)),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!("declared getter {getter} is no checked member property's getter")
+            });
+        Callee::Virtual {
+            owner,
+            name,
+            descriptor: String::new(),
+            params: Some((Vec::new(), ty)),
+            interface: false,
+            module_target: None,
+            target: Some(IrVirtualTarget::PropertyGetter(
+                crate::fir::ResolvedPropertyOverrideTarget::Module(property),
+            )),
+        }
+    }
+}
