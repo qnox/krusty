@@ -1,0 +1,210 @@
+//! Compile-time constants of Java source fields.
+//!
+//! A `static final` field of a primitive or `String` type whose initializer is a constant
+//! expression is a constant variable (JLS §4.12.4), and kotlinc inlines a read of one. This
+//! bounded header parser evaluates the initializers that are one literal, optionally signed: the
+//! shape of the Android Gradle plugin's generated `BuildConfig` and of most hand-written constants.
+//! A compound expression (`1 << 3`, `A + 1`, a cast) is no constant here, so its reads stay
+//! `getstatic`.
+
+use crate::ir::IrConst;
+use crate::kt_string::KtString;
+
+/// The value of a field initializer that is one literal, before the field's type converts it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum JavaConstant {
+    String(String),
+    Boolean(bool),
+    /// An `int` literal, already wrapped to its 32-bit value.
+    Int(i32),
+    Long(i64),
+    Char(u16),
+    Float(f32),
+    Double(f64),
+}
+
+impl JavaConstant {
+    /// The constant a field with JVM descriptor `descriptor` holds when initialized by this
+    /// literal, under assignment conversion (JLS §5.2): widening, and the narrowing of an `int`
+    /// constant to `byte`, `short` or `char` when it fits. `None` where javac rejects the
+    /// initializer or the field is no constant variable's type.
+    pub(crate) fn field_constant(&self, descriptor: &str) -> Option<IrConst> {
+        use JavaConstant as C;
+        let integral = match *self {
+            C::Int(value) => Some(i64::from(value)),
+            C::Char(value) => Some(i64::from(value)),
+            _ => None,
+        };
+        Some(match (descriptor, self) {
+            ("Ljava/lang/String;", C::String(value)) => {
+                IrConst::String(KtString::from(value.clone()))
+            }
+            ("Z", C::Boolean(value)) => IrConst::Boolean(*value),
+            ("I", _) => IrConst::Int(i32::try_from(integral?).ok()?),
+            ("B", _) => IrConst::Byte(i8::try_from(integral?).ok()?),
+            ("S", _) => IrConst::Short(i16::try_from(integral?).ok()?),
+            ("C", _) => IrConst::Char(u16::try_from(integral?).ok()?),
+            ("J", C::Long(value)) => IrConst::Long(*value),
+            ("J", _) => IrConst::Long(integral?),
+            ("F", C::Float(value)) => IrConst::Float(*value),
+            ("F", C::Long(value)) => IrConst::Float(*value as f32),
+            ("F", _) => IrConst::Float(integral? as f32),
+            ("D", C::Double(value)) => IrConst::Double(*value),
+            ("D", C::Float(value)) => IrConst::Double(f64::from(*value)),
+            ("D", C::Long(value)) => IrConst::Double(*value as f64),
+            ("D", _) => IrConst::Double(integral? as f64),
+            _ => return None,
+        })
+    }
+}
+
+/// The literal spelled by `literal` (a lexed number, with its suffix) under `negative` sign, or
+/// `None` for a malformed or out-of-range literal or a hexadecimal floating-point one.
+pub(super) fn number_literal(literal: &str, negative: bool) -> Option<JavaConstant> {
+    let text = literal.replace('_', "");
+    let lower = text.to_ascii_lowercase();
+    let (radix, digits) = if let Some(rest) = lower.strip_prefix("0x") {
+        (16, rest)
+    } else if let Some(rest) = lower.strip_prefix("0b") {
+        (2, rest)
+    } else if lower.len() > 1
+        && lower.starts_with('0')
+        && lower
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'l')
+    {
+        (8, &lower[1..])
+    } else {
+        (10, lower.as_str())
+    };
+    let floating = radix == 10 && (digits.contains(['.', 'e']) || digits.ends_with(['f', 'd']));
+    if floating {
+        let sign = if negative { "-" } else { "" };
+        return if let Some(value) = digits.strip_suffix('f') {
+            format!("{sign}{value}")
+                .parse::<f32>()
+                .ok()
+                .map(JavaConstant::Float)
+        } else {
+            let value = digits.strip_suffix('d').unwrap_or(digits);
+            format!("{sign}{value}")
+                .parse::<f64>()
+                .ok()
+                .map(JavaConstant::Double)
+        };
+    }
+    if radix == 16 && digits.contains('p') {
+        return None;
+    }
+    let (digits, long) = match digits.strip_suffix('l') {
+        Some(digits) => (digits, true),
+        None => (digits, false),
+    };
+    let magnitude = u64::from_str_radix(digits, radix).ok()?;
+    // A decimal literal states a magnitude, which only `-` may take to the type's minimum; the
+    // other radixes state the two's-complement bits of the value (JLS §3.10.1).
+    let bits = if long { 64 } else { 32 };
+    let value = if radix == 10 {
+        let limit = (1u64 << (bits - 1)) - u64::from(!negative);
+        if magnitude > limit {
+            return None;
+        }
+        let signed = magnitude as i128;
+        (if negative { -signed } else { signed }) as i64
+    } else {
+        if bits == 32 && magnitude > u64::from(u32::MAX) {
+            return None;
+        }
+        let wrapped = if bits == 32 {
+            i64::from(magnitude as u32 as i32)
+        } else {
+            magnitude as i64
+        };
+        if negative {
+            wrapped.wrapping_neg()
+        } else {
+            wrapped
+        }
+    };
+    Some(if long {
+        JavaConstant::Long(value)
+    } else {
+        JavaConstant::Int(i32::try_from(value).ok()?)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn integer_literals_follow_their_radix_and_sign() {
+        assert_eq!(number_literal("42", false), Some(JavaConstant::Int(42)));
+        assert_eq!(
+            number_literal("2147483647", false),
+            Some(JavaConstant::Int(i32::MAX))
+        );
+        assert_eq!(number_literal("2147483648", false), None);
+        assert_eq!(
+            number_literal("2147483648", true),
+            Some(JavaConstant::Int(i32::MIN))
+        );
+        assert_eq!(
+            number_literal("0x7f01_0000", false),
+            Some(JavaConstant::Int(0x7f01_0000))
+        );
+        assert_eq!(
+            number_literal("0xFFFFFFFF", false),
+            Some(JavaConstant::Int(-1))
+        );
+        assert_eq!(number_literal("0b101", false), Some(JavaConstant::Int(5)));
+        assert_eq!(number_literal("017", false), Some(JavaConstant::Int(15)));
+        assert_eq!(number_literal("0", false), Some(JavaConstant::Int(0)));
+        assert_eq!(number_literal("10L", true), Some(JavaConstant::Long(-10)));
+        assert_eq!(
+            number_literal("9223372036854775808L", true),
+            Some(JavaConstant::Long(i64::MIN))
+        );
+    }
+
+    #[test]
+    fn floating_literals_round_once_to_their_own_type() {
+        assert_eq!(
+            number_literal("1.5f", false),
+            Some(JavaConstant::Float(1.5))
+        );
+        assert_eq!(
+            number_literal("0.1f", false),
+            Some(JavaConstant::Float(0.1))
+        );
+        assert_eq!(
+            number_literal("1e3", true),
+            Some(JavaConstant::Double(-1000.0))
+        );
+        assert_eq!(number_literal(".5", false), Some(JavaConstant::Double(0.5)));
+        assert_eq!(number_literal("2d", false), Some(JavaConstant::Double(2.0)));
+        assert_eq!(number_literal("0x1.8p1", false), None);
+    }
+
+    #[test]
+    fn assignment_conversion_types_the_literal_by_its_field() {
+        let int = JavaConstant::Int(200);
+        assert_eq!(int.field_constant("I"), Some(IrConst::Int(200)));
+        assert_eq!(int.field_constant("J"), Some(IrConst::Long(200)));
+        assert_eq!(int.field_constant("S"), Some(IrConst::Short(200)));
+        assert_eq!(int.field_constant("B"), None);
+        assert_eq!(int.field_constant("C"), Some(IrConst::Char(200)));
+        assert_eq!(int.field_constant("D"), Some(IrConst::Double(200.0)));
+        assert_eq!(int.field_constant("Z"), None);
+        assert_eq!(
+            JavaConstant::Boolean(false).field_constant("Z"),
+            Some(IrConst::Boolean(false))
+        );
+        assert_eq!(
+            JavaConstant::Char(u16::from(b'a')).field_constant("I"),
+            Some(IrConst::Int(97))
+        );
+        assert_eq!(JavaConstant::Double(1.0).field_constant("F"), None);
+        assert_eq!(JavaConstant::Long(1).field_constant("I"), None);
+    }
+}
