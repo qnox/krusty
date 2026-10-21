@@ -161,15 +161,35 @@ impl SerializeBody<'_> {
                     &annotated,
                 )
             };
-        // `write$Self` is a STATIC MEMBER of the serialized class, so it reads the
-        // property's private backing FIELD directly — which is what kotlinc emits.
+        // `write$Self` is a STATIC MEMBER of the serialized class, so it reads a final
+        // property's private backing FIELD directly — which is what kotlinc emits once its JVM
+        // lowering substitutes the default getter. An open or overriding property's getter can
+        // be overridden, so kotlinc calls it.
         let read_property = |ir: &mut IrFile, field_index: usize, ty: &Ty| -> ExprId {
             let receiver = ir.add_expr(IrExpr::GetValue(value_slot));
-            let read = ir.add_expr(IrExpr::GetField {
-                receiver,
-                class: foo_id,
-                index: field_index as u32,
-            });
+            let field = field_index as u32;
+            let overridable = ir.classes[foo_id as usize]
+                .properties
+                .iter()
+                .find(|property| property.backing_field == Some(field))
+                .filter(|property| property.is_open)
+                .map(|property| property.name.clone());
+            let getter = overridable.zip(super::ty_descriptor(ctx, ty));
+            let read = match getter {
+                Some((name, descriptor)) => super::synthesized_accessor::getter(
+                    ir,
+                    receiver,
+                    serialized_name,
+                    &name,
+                    descriptor,
+                    (foo_id, field),
+                ),
+                None => ir.add_expr(IrExpr::GetField {
+                    receiver,
+                    class: foo_id,
+                    index: field,
+                }),
+            };
             // An unsigned value is held as its signed carrier; the read is boxed as the
             // unsigned type it is.
             if ty.is_unsigned() {
