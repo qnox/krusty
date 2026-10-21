@@ -214,8 +214,7 @@ fn diagnostic_tails(stderr: &str, stdout: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use krusty::plugins::cli::{SAM_WITH_RECEIVER_PLUGIN_ID, SERIALIZATION_PLUGIN_ID};
-    use krusty::plugins::registry::{declared_registrars, PluginDiagnostic};
+    use krusty::plugins::registry::PluginDiagnostic;
 
     #[test]
     fn failed_gradle_output_keeps_stderr_and_stdout_tails_separate() {
@@ -352,7 +351,6 @@ mod tests {
         let fixture = IntegrationFixture::new("krusty-kotlin-slice", write_compiler_slice);
         let root = fixture.root.clone();
         let log = fixture.log.clone();
-        let diagnostics = fixture.diagnostics.clone();
         let kgp = fixture.kgp.clone();
         let build = || fixture.build();
         let full_build_tasks = [
@@ -816,10 +814,6 @@ mod tests {
                     "freeCompilerArg '-Xplugin=forbidden.jar' conflicts with compiler plugin configuration; configure the structured Gradle input instead",
                 ),
                 (
-                    "compiler-plugin",
-                    "unsupported compiler plugin",
-                ),
-                (
                     "compiler-version",
                     "Kotlin compiler 2.4.0 differs from Kotlin Gradle plugin 2.4.10",
                 ),
@@ -894,23 +888,35 @@ mod tests {
                     Err(error) => error,
                 };
                 let rendered = error.to_string();
-                if case == "compiler-plugin" {
-                    assert!(log.exists(), "{case} must be rejected by krusty's registry");
-                    let invocation = single_invocation(&log);
-                    assert_assignment_rejected_exactly(&diagnostics, &invocation, &[], &[]);
-                } else {
-                    let expected_line = format!("> {expected}");
-                    assert_eq!(
-                        rendered
-                            .lines()
-                            .filter(|line| line.trim() == expected_line)
-                            .count(),
-                        1,
-                        "{case}: {rendered}",
-                    );
-                    assert!(!log.exists(), "{case} must fail before execing krusty");
-                }
+                let expected_line = format!("> {expected}");
+                assert_eq!(
+                    rendered
+                        .lines()
+                        .filter(|line| line.trim() == expected_line)
+                        .count(),
+                    1,
+                    "{case}: {rendered}",
+                );
+                assert!(!log.exists(), "{case} must fail before execing krusty");
             }
+
+            // A compiler plugin krusty does not implement leaves the compile to kotlinc, reported.
+            let _ = std::fs::remove_file(&log);
+            let _ = std::fs::remove_file(&fixture.probes);
+            let output = build()
+                .property("krusty.negative", "compiler-plugin")
+                .tasks([":compiler:util:compileKotlin"])
+                .run_output()
+                .unwrap_or_else(|error| panic!("compiler-plugin: {error}"));
+            assert_assignment_left_to_kotlinc(
+                &output,
+                &fixture.probes,
+                ":compiler:util:compileKotlin",
+            );
+            assert!(
+                !log.exists(),
+                "kotlinc, not krusty, compiles a refused plugin request"
+            );
 
             // `compilerOptions.progressiveMode` is a structured input like `javaParameters`: the
             // plugin forwards it as kotlinc's `-progressive`, which krusty honors because it models
@@ -1287,12 +1293,7 @@ error: warnings found and -Werror specified\n";
     fn serialization_plugin_compiles_through_krusty() {
         let fixture =
             IntegrationFixture::new("krusty-kotlin-serialization", write_serialization_build);
-        let (root, log, diagnostics, kgp) = (
-            &fixture.root,
-            &fixture.log,
-            &fixture.diagnostics,
-            fixture.kgp.as_str(),
-        );
+        let (root, log, kgp) = (&fixture.root, &fixture.log, fixture.kgp.as_str());
 
         let output = fixture
             .build()
@@ -1354,35 +1355,21 @@ error: warnings found and -Werror specified\n";
         let _ = std::fs::remove_file(log);
         std::fs::create_dir_all(root.join("model/build/classes/java/main"))
             .expect("create empty Java output expected on the model classpath");
-        let result = fixture
+        let _ = std::fs::remove_file(&fixture.probes);
+        let output = fixture
             .build()
             .property("krusty.negative", "compiler-plugin-before-krusty")
             .tasks([":model:compileKotlin"])
-            .run();
-        match result {
-            Ok(()) => panic!("a compiler plugin applied before krusty was ignored"),
-            Err(_) => {}
-        }
+            .run_output()
+            .unwrap_or_else(|error| panic!("a compiler plugin applied before krusty: {error}"));
+        assert_assignment_left_to_kotlinc(&output, &fixture.probes, ":model:compileKotlin");
         assert!(
-            log.exists(),
-            "the compiler registry must inspect the forwarded plugin classpath"
+            !log.exists(),
+            "kotlinc, not krusty, compiles a refused plugin request"
         );
-        let invocation = single_invocation(log);
-        assert_assignment_rejected_exactly(
-            diagnostics,
-            &invocation,
-            &[
-                (
-                    SERIALIZATION_PLUGIN_ID,
-                    "org.jetbrains.kotlinx.serialization.compiler.extensions.SerializationComponentRegistrar",
-                ),
-                (
-                    SAM_WITH_RECEIVER_PLUGIN_ID,
-                    "org.jetbrains.kotlin.samWithReceiver.SamWithReceiverComponentRegistrar",
-                ),
-            ],
-            &[],
-        );
+        assert!(root
+            .join("model/build/classes/kotlin/main/model/Point$$serializer.class")
+            .is_file());
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1525,7 +1512,7 @@ fun main() {
     #[ignore = "downloads Gradle, the Kotlin Gradle plugin and KSP"]
     fn ksp2_generated_sources_compile_through_krusty() {
         let fixture = IntegrationFixture::new("krusty-ksp2", write_ksp2_build);
-        let (root, log, diagnostics) = (&fixture.root, &fixture.log, &fixture.diagnostics);
+        let (root, log) = (&fixture.root, &fixture.log);
 
         let output = fixture
             .build()
@@ -1566,33 +1553,21 @@ fun main() {
         }
 
         let _ = std::fs::remove_file(log);
-        let result = fixture
+        let _ = std::fs::remove_file(&fixture.probes);
+        let output = fixture
             .build()
             .property("krusty.negative", "assignment")
             .tasks([":app:compileKotlin"])
-            .run();
-        match result {
-            Ok(()) => panic!("the assignment plugin applied beside KSP was ignored"),
-            Err(_) => {}
-        }
+            .run_output()
+            .unwrap_or_else(|error| panic!("the assignment plugin beside KSP: {error}"));
+        assert_assignment_left_to_kotlinc(&output, &fixture.probes, ":app:compileKotlin");
         assert!(
-            log.exists(),
-            "the compiler registry must inspect the forwarded plugin classpath"
+            !log.exists(),
+            "kotlinc, not krusty, compiles a refused plugin request"
         );
-        let invocation = single_invocation(log);
-        // kspKotlin reruns for this build and recreates its outputs; the processor emits no Java,
-        // so its generated-classes directory on the classpath does not exist and krusty warns
-        // about it as kotlinc does.
-        let generated_classes = root.join("app/build/generated/ksp/main/classes");
-        assert_assignment_rejected_exactly(
-            diagnostics,
-            &invocation,
-            &[],
-            &[format!(
-                "classpath entry points to a non-existent location: {}",
-                generated_classes.display()
-            )],
-        );
+        assert!(root
+            .join("app/build/classes/kotlin/main/generated/Greetings.class")
+            .is_file());
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1772,7 +1747,8 @@ fun main() {
         _serial: std::sync::MutexGuard<'static, ()>,
         root: PathBuf,
         log: PathBuf,
-        diagnostics: PathBuf,
+        /// The recording proxy's log of compiler-plugin checks, apart from the compiles in `log`.
+        probes: PathBuf,
         proxy: PathBuf,
         plugin_project: PathBuf,
         plugin_version: String,
@@ -1804,12 +1780,13 @@ fun main() {
             // the recorded invocations carry the resolved path, so the normalization root must too.
             let root = root.canonicalize().expect("canonicalize fixture root");
             let log = root.join("krusty-invocations.txt");
+            let probes = root.join("krusty-plugin-checks.txt");
             let diagnostics = root.join("krusty-diagnostics.txt");
             let proxy = root.join("recording-krusty");
             let actual = std::env::var_os("KRUSTY_GRADLE_TEST_BIN")
                 .map(PathBuf::from)
                 .expect("KRUSTY_GRADLE_TEST_BIN must name the built krusty CLI");
-            write_krusty_proxy(&proxy, &log, &diagnostics, &actual);
+            write_krusty_proxy(&proxy, &log, &probes, &diagnostics, &actual);
             let wrapper = root.join("gradlew");
             std::fs::write(
                 &wrapper,
@@ -1844,7 +1821,7 @@ fun main() {
                 _serial: serial,
                 root,
                 log,
-                diagnostics,
+                probes,
                 proxy,
                 plugin_project,
                 plugin_version,
@@ -1991,64 +1968,50 @@ fun main() {
             .collect()
     }
 
-    /// Assert the complete diagnostic captured directly from krusty for the assignment plugin.
-    /// The Gradle cache prefix and artifact version vary by lane, so the exact jar path comes from
-    /// the recorded structured compiler-plugin argument rather than from Gradle's decorated error.
-    fn assert_assignment_rejected_exactly(
-        diagnostics: &Path,
-        args: &[String],
-        native_plugins: &[(&str, &str)],
-        warnings: &[String],
-    ) {
-        let requests = args
+    /// Assert that `task` was left to kotlinc because of the assignment compiler plugin: the build
+    /// reports exactly the refusal the krusty binary's plugin check printed for the assignment jar,
+    /// once. The Gradle cache prefix and artifact version vary by lane, so the exact jar path comes
+    /// from the recorded check rather than from Gradle's output.
+    fn assert_assignment_left_to_kotlinc(output: &str, probes: &Path, task: &str) {
+        let text = std::fs::read_to_string(probes).expect("compiler-plugin check log");
+        let mut assignments = invocations(&text)
             .iter()
-            .filter_map(|argument| argument.strip_prefix("-Xplugin="))
-            .flat_map(|jars| jars.split(','))
-            .collect::<Vec<_>>();
-        let assignment = requests
-            .iter()
-            .copied()
-            .find(|jar| {
-                Path::new(jar)
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.split('-').any(|part| part == "assignment"))
-            })
-            .expect("the invocation carries the assignment compiler plugin");
-        let mut expected = String::new();
-        for warning in warnings {
-            expected.push_str("warning: ");
-            expected.push_str(warning);
-            expected.push('\n');
-        }
-        for &(plugin_id, registrar) in native_plugins {
-            let jar = requests
-                .iter()
-                .copied()
-                .find(|jar| {
-                    declared_registrars(jar).is_some_and(|registrars| {
-                        registrars.iter().any(|declared| declared == registrar)
+            .flat_map(|args| {
+                args.iter()
+                    .filter_map(|argument| argument.strip_prefix("-Xplugin="))
+                    .flat_map(|jars| jars.split(','))
+                    .filter(|jar| {
+                        Path::new(jar)
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| name.split('-').any(|part| part == "assignment"))
                     })
-                })
-                .unwrap_or_else(|| panic!("the invocation carries registrar {registrar}"));
-            let substitution = PluginDiagnostic::NativeSubstitution {
-                plugin_id: plugin_id.to_owned(),
-                jar: Some(jar.to_owned()),
-            };
-            expected.push_str("info: ");
-            expected.push_str(&substitution.message());
-            expected.push('\n');
-        }
-        let unsupported = PluginDiagnostic::Unsupported {
-            plugin: assignment.to_owned(),
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assignments.dedup();
+        assert_eq!(assignments.len(), 1, "{text}");
+        let refusal = PluginDiagnostic::Unsupported {
+            plugin: assignments.remove(0),
         };
-        expected.push_str("error: ");
-        expected.push_str(&unsupported.message());
-        expected.push('\n');
-        assert_eq!(
-            std::fs::read_to_string(diagnostics).expect("recorded krusty diagnostics"),
-            expected
+        let header = format!(
+            "krusty: task '{task}' is left to kotlinc: krusty does not implement a compiler plugin it requests"
         );
+        let lines = output.lines().collect::<Vec<_>>();
+        let at = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| **line == header)
+            .map(|(at, _)| at)
+            .collect::<Vec<_>>();
+        assert_eq!(at.len(), 1, "{header}\n{output}");
+        let reported = lines[at[0] + 1..]
+            .iter()
+            .take_while(|line| line.starts_with("  "))
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(reported, [format!("  {}", refusal.message())], "{output}");
     }
 
     fn source_names(args: &[String]) -> Vec<&str> {
@@ -2100,9 +2063,22 @@ fun main() {
         out
     }
 
-    fn write_krusty_proxy(path: &Path, log: &Path, diagnostics: &Path, actual: &Path) {
+    fn write_krusty_proxy(
+        path: &Path,
+        log: &Path,
+        probes: &Path,
+        diagnostics: &Path,
+        actual: &Path,
+    ) {
         let quote = |value: &Path| value.display().to_string().replace('\'', "'\\''");
         let script = r#"#!/bin/sh
+if [ "$1" = compiler-plugins ]; then
+  {
+    echo "----"
+    printf '%s\n' "$@"
+  } >> "PROBESPATH"
+  exec 'ACTUAL' "$@"
+fi
 {
   echo "----"
   printf '%s\n' "$@"
@@ -2115,6 +2091,7 @@ mv "$diagnostics" "DIAGNOSTICSPATH"
 exit "$status"
 "#
         .replace("LOGPATH", &quote(log))
+        .replace("PROBESPATH", &quote(probes))
         .replace("DIAGNOSTICSPATH", &quote(diagnostics))
         .replace("ACTUAL", &quote(actual));
         std::fs::write(path, script).expect("write recording krusty");

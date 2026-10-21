@@ -20,6 +20,7 @@ import org.gradle.api.tasks.InputFile
 import org.gradle.api.tasks.InputFiles
 import org.gradle.api.tasks.compile.JavaCompile
 import org.gradle.api.tasks.OutputDirectory
+import org.gradle.api.tasks.OutputFile
 import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.TaskAction
@@ -32,6 +33,7 @@ import org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension
 import org.jetbrains.kotlin.gradle.plugin.CompilerPluginConfig
 import org.jetbrains.kotlin.gradle.plugin.KotlinBasePlugin
 import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
+import java.io.ByteArrayOutputStream
 import java.io.File
 import javax.inject.Inject
 
@@ -43,6 +45,11 @@ import javax.inject.Inject
  * A dirty task always compiles the complete source set into a clean output directory. Gradle owns
  * task incrementality; krusty does not try to infer Kotlin dependency invalidation from class-file
  * names or partial ABI snapshots.
+ *
+ * A compile that requests a compiler plugin krusty does not implement (Compose, Parcelize, kapt's
+ * stub generation, any third-party FIR/IR plugin) stays with kotlinc: a check task asks the krusty
+ * binary which requested plugins it refuses, reports them, and then the Kotlin task runs instead of
+ * its replacement.
  */
 abstract class KrustyKotlinPlugin @Inject constructor(
     private val javaToolchains: JavaToolchainService,
@@ -118,6 +125,23 @@ private fun replaceKotlinJvmCompiles(
         val pluginVersion = project.provider {
             project.plugins.withType(KotlinBasePlugin::class.java).single().pluginVersion
         }
+        val binaryPath = project.providers.gradleProperty("krusty.binary")
+            .orElse(project.providers.environmentVariable("KRUSTY_BIN"))
+        val compilerPluginArguments = kotlinTask.pluginOptions.map(::pluginOptionArguments)
+        val compilerChoice = project.layout.buildDirectory
+            .file("krusty/${kotlinTask.name}/compiler-plugins.txt").get().asFile
+        val pluginCheck = project.tasks.register(
+            "${kotlinTask.name}KrustyPluginCheck",
+            KrustyCompilerPluginCheckTask::class.java,
+        ) {
+            description = "Checks whether krusty implements the compiler plugins of ${kotlinTask.path}"
+            compileTaskPath.set(kotlinTask.path)
+            compilerPluginClasspath.from(kotlinTask.pluginClasspath)
+            compilerPluginOptions.set(compilerPluginArguments)
+            kotlinPluginVersion.set(pluginVersion)
+            binary.set(project.layout.file(binaryPath.map(::File)))
+            refusedPlugins.set(compilerChoice)
+        }
         val replacement = project.tasks.register(replacementName, KrustyCompileTask::class.java) {
             group = kotlinTask.group ?: "build"
             description = "${kotlinTask.description ?: kotlinTask.name}, using krusty"
@@ -138,16 +162,12 @@ private fun replaceKotlinJvmCompiles(
             // The compiler-plugin request kotlinc receives from this task: KGP's resolved plugin
             // classpath (`-Xplugin`) and its per-plugin options (`-P plugin:<id>:<key>=<value>`).
             compilerPluginClasspath.from(kotlinTask.pluginClasspath)
-            compilerPluginOptions.set(kotlinTask.pluginOptions.map(::pluginOptionArguments))
+            compilerPluginOptions.set(compilerPluginArguments)
             compilerVersion.set(
                 project.extensions.getByType(KotlinTopLevelExtension::class.java)
                     .compilerVersion.orElse(pluginVersion),
             )
-            val binaryPath = project.providers.gradleProperty("krusty.binary")
-                .orElse(project.providers.environmentVariable("KRUSTY_BIN"))
-            binary.set(
-                project.layout.file(binaryPath.map(::File)),
-            )
+            binary.set(project.layout.file(binaryPath.map(::File)))
             // A build that adds a source directory by path wires its generator onto the Kotlin
             // task (`compileKotlin { dependsOn(generator) }`), not onto the directory. The compile
             // runs here now, so it needs those dependencies; the Kotlin task's dependency on this
@@ -157,6 +177,8 @@ private fun replaceKotlinJvmCompiles(
                     kotlinTask.dependsOn.filterNot { it is TaskProvider<*> && it.name == replacementName }
                 },
             )
+            dependsOn(pluginCheck)
+            onlyIf("krusty implements every requested compiler plugin") { !compilerChoice.refusesPlugins() }
         }
         aggregate.configure { dependsOn(replacement) }
         project.pluginManager.withPlugin("java-base") {
@@ -196,10 +218,11 @@ private fun replaceKotlinJvmCompiles(
         }
 
         // Preserve the public task graph: callers and downstream tasks can still depend on
-        // compileKotlin/compileTestKotlin. A disabled task runs its dependencies but none of its own
-        // compiler actions, so no private action list is mutated.
+        // compileKotlin/compileTestKotlin. A skipped task runs its dependencies but none of its own
+        // compiler actions, so no private action list is mutated. kotlinc runs only for a compile
+        // whose compiler plugins krusty refused.
         kotlinTask.dependsOn(replacement)
-        kotlinTask.enabled = false
+        kotlinTask.onlyIf("krusty refused a requested compiler plugin") { compilerChoice.refusesPlugins() }
     }
 }
 
@@ -336,6 +359,73 @@ abstract class KrustyCompileTask @Inject constructor(
         }
     }
 }
+
+/**
+ * Asks the krusty binary which of a compile's requested compiler plugins it refuses, and records
+ * them, one per line, in [refusedPlugins]: an empty file means krusty compiles the request itself.
+ * The binary's plugin registry is the single place that knows what krusty implements.
+ */
+abstract class KrustyCompilerPluginCheckTask @Inject constructor(
+    private val execOperations: ExecOperations,
+) : DefaultTask() {
+    @get:Input
+    abstract val compileTaskPath: Property<String>
+
+    @get:Classpath
+    abstract val compilerPluginClasspath: ConfigurableFileCollection
+
+    @get:Input
+    abstract val compilerPluginOptions: ListProperty<String>
+
+    @get:Input
+    abstract val kotlinPluginVersion: Property<String>
+
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val binary: RegularFileProperty
+
+    @get:OutputFile
+    abstract val refusedPlugins: RegularFileProperty
+
+    @TaskAction
+    fun check() {
+        val arguments = ArrayList<String>()
+        arguments.add("compiler-plugins")
+        arguments.add("-Xkotlin-reference-version=${supportedKotlinPluginVersion(kotlinPluginVersion.get())}")
+        if (!compilerPluginClasspath.isEmpty) {
+            arguments.add(
+                "-Xplugin=" + compilerPluginClasspath.files.joinToString(",", transform = File::getAbsolutePath),
+            )
+        }
+        compilerPluginOptions.get().forEach { option ->
+            arguments.add("-P")
+            arguments.add(option)
+        }
+        val executable = binary.get().asFile.absolutePath
+        val output = ByteArrayOutputStream()
+        val result = execOperations.exec {
+            this.executable = executable
+            args(arguments)
+            standardOutput = output
+            isIgnoreExitValue = true
+        }
+        val refused = output.toString(Charsets.UTF_8).lines().filter(String::isNotBlank)
+        when (result.exitValue) {
+            0 -> refusedPlugins.get().asFile.writeText("")
+            1 -> {
+                logger.warn(
+                    "krusty: task '{}' is left to kotlinc: krusty does not implement a compiler plugin it requests\n{}",
+                    compileTaskPath.get(),
+                    refused.joinToString("\n") { "  $it" },
+                )
+                refusedPlugins.get().asFile.writeText(refused.joinToString("\n", postfix = "\n"))
+            }
+            else -> throw GradleException("$executable exited with ${result.exitValue} for $path")
+        }
+    }
+}
+
+private fun File.refusesPlugins(): Boolean = length() > 0
 
 private fun pluginOptionArguments(configs: List<CompilerPluginConfig>): List<String> =
     configs.flatMap { config ->

@@ -37,6 +37,15 @@ fn main() {
         }
         return;
     }
+    // `krusty compiler-plugins <kotlinc arguments>` says whether krusty compiles the compiler-plugin
+    // request of that command line itself; a build tool hands a refused one to kotlinc instead.
+    if argv
+        .first()
+        .is_some_and(|command| command == "compiler-plugins")
+    {
+        run_compiler_plugins(argv[1..].to_vec());
+        return;
+    }
     // Bazel starts a persistent worker by appending `--persistent_worker` to the tool's command
     // line; every actual compilation then arrives as a work request on stdin.
     if argv
@@ -115,6 +124,33 @@ fn run_cinterop(arguments: &[String]) {
             eprintln!("info: use krusty cinterop -help for more information");
             std::process::exit(1);
         }
+    }
+}
+
+/// Print each compiler plugin the command line requests that krusty refuses, one per line, and exit 1
+/// when there is one; exit 0 when krusty compiles the whole request. These are the refusals a
+/// compilation with the same arguments reports as errors before it reads a source. A malformed
+/// command line exits 2.
+fn run_compiler_plugins(argv: Vec<String>) {
+    let opts = cli::parse(argv);
+    let malformed = opts
+        .argument_errors
+        .iter()
+        .map(|error| kotlinc_arguments::render(error))
+        .chain(opts.errors.iter().cloned())
+        .collect::<Vec<_>>();
+    if !malformed.is_empty() {
+        for error in &malformed {
+            eprintln!("error: {error}");
+        }
+        std::process::exit(2);
+    }
+    let refused = opts.resolve_plugins(&[]).errors;
+    for plugin in &refused {
+        println!("{plugin}");
+    }
+    if !refused.is_empty() {
+        std::process::exit(1);
     }
 }
 
