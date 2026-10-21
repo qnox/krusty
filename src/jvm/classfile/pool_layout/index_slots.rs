@@ -53,6 +53,9 @@ pub(super) enum Holder {
     CodeAttribute(usize),
     /// The `Code` of the method at this position in the class's method table.
     Code(usize, Part),
+    /// A `MethodParameters` name of the method at this position: ASM interns it in
+    /// `visitParameter`, which a transformed method's node replays after the transformer ran.
+    Parameter(usize),
 }
 
 /// An index slot outside the pool.
@@ -400,9 +403,9 @@ impl Reader<'_> {
                     self.bootstrap_methods.push(method);
                 }
             }
-            ("MethodParameters", Scope::Method(_)) => {
+            ("MethodParameters", Scope::Method(method)) => {
                 for _ in 0..self.u1()? {
-                    self.index(class)?;
+                    self.index(Holder::Parameter(method))?;
                     self.skip(2)?;
                 }
             }
