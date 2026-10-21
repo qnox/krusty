@@ -71,6 +71,18 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
 
     // Pass 2: resolve signatures/properties against the now-complete type universe.
     let mut table = SymbolTable::default();
+    table.source_fragments =
+        crate::source::SourceFragments::new(files.iter().map(|file| file.fragment));
+    table
+        .source_fragments
+        .publish_alias_sources(file_type_aliases.iter().enumerate().flat_map(
+            |(source, aliases)| {
+                let package = source_package_ids[source];
+                aliases.iter().map(move |(alias, _, _)| {
+                    (crate::types::type_name_child(package, alias), source as u32)
+                })
+            },
+        ));
     table.sam_with_receiver_annotations = frontend_plugins.sam_with_receiver_annotations();
     let mut declaration_annotation_resolution_attempts = crate::fx_hash::HashSet::default();
     for file_index in 0..source_packages.len() {

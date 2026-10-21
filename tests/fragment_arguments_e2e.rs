@@ -298,3 +298,92 @@ fn a_fragment_the_leaf_does_not_refine_is_refused() {
         )
     );
 }
+
+/// A common source sees its own fragment and the fragments it refines, never the platform leaf
+/// that refines it: kotlinc analyzes each fragment as its own module.
+fn rejected_in_common(common_source: &str, platform_source: &str) {
+    let compiled = compile_sources(common_source, platform_source, common_and_jvm);
+    let (code, stderr, output) = &compiled.kotlinc;
+    assert_eq!((*code, output.len()), (1, 0), "kotlinc: {stderr}");
+    let (krusty_code, krusty_stderr, krusty_output) = &compiled.krusty;
+    assert_eq!(
+        (*krusty_code, krusty_output.len()),
+        (1, 0),
+        "krusty: {krusty_stderr}"
+    );
+    // Each compiler renders the source path its own way; the diagnostics are compared exactly.
+    assert_eq!(
+        common::compiler_errors(krusty_stderr),
+        common::compiler_errors(stderr)
+    );
+}
+
+#[test]
+fn a_common_call_of_a_platform_function_is_kotlincs_unresolved_reference() {
+    rejected_in_common(
+        "package p\nfun c() = platformOnly()\n",
+        "package p\nfun platformOnly() = 1\n",
+    );
+}
+
+#[test]
+fn a_common_signature_naming_a_platform_class_is_kotlincs_unresolved_reference() {
+    rejected_in_common(
+        "package p\nfun c(value: PlatformOnly): Int = 1\n",
+        "package p\nclass PlatformOnly\n",
+    );
+}
+
+#[test]
+fn a_common_read_of_a_platform_property_is_kotlincs_unresolved_reference() {
+    rejected_in_common(
+        "package p\nfun c() = platformOnly + 1\n",
+        "package p\nval platformOnly = 1\n",
+    );
+}
+
+#[test]
+fn a_common_call_of_a_platform_overload_binds_the_common_one_as_kotlinc_does() {
+    let compiled = compile_sources(
+        "package p\nfun f(value: Any) = \"any\"\nfun c() = f(1)\n",
+        "package p\nfun f(value: Int) = \"int\"\nfun j() = f(1)\n",
+        common_and_jvm,
+    );
+    assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
+    assert_eq!(compiled.krusty, compiled.kotlinc);
+}
+
+#[test]
+fn a_common_signature_naming_a_platform_alias_is_kotlincs_unresolved_reference() {
+    rejected_in_common(
+        "package p\nfun c(value: Alias): Int = 1\n",
+        "package p\ntypealias Alias = Int\n",
+    );
+}
+
+#[test]
+fn a_common_read_of_a_platform_object_is_kotlincs_unresolved_reference() {
+    rejected_in_common(
+        "package p\nfun c() { val value = PlatformOnly }\n",
+        "package p\nobject PlatformOnly\n",
+    );
+}
+
+#[test]
+fn a_common_import_of_a_platform_function_is_kotlincs_unresolved_reference() {
+    rejected_in_common(
+        "package p\nimport p.platformOnly\nfun c(): Int = 1\n",
+        "package p\nfun platformOnly() = 1\n",
+    );
+}
+
+#[test]
+fn an_inferred_common_signature_binds_the_platform_actual_as_kotlinc_does() {
+    let compiled = compile_sources(
+        "package p\nexpect fun top(): String\nfun inferred() = top()\n",
+        "package p\nactual fun top(): String = \"a\"\nfun j() = inferred()\n",
+        common_and_jvm,
+    );
+    assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
+    assert_eq!(compiled.krusty, compiled.kotlinc);
+}

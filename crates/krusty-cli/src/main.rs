@@ -322,6 +322,10 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
                 source,
             )
             .with_file_stem(stem);
+            let input = match opts.source_fragments.get(path) {
+                Some(fragment) => input.with_fragment(*fragment),
+                None => input,
+            };
             if opts.common_sources.contains(path) {
                 input.common()
             } else {

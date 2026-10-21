@@ -1458,6 +1458,8 @@ pub struct ResolvedModuleIndex {
     file_annotations: HashMap<SourceFileId, FileAnnotationFacts>,
     /// The sources compiled as common (`dependsOn`) sources of a multiplatform module.
     common_sources: std::collections::HashSet<SourceFileId>,
+    /// Each source's refined multiplatform fragment, which bounds the declarations it sees.
+    source_fragments: crate::source::SourceFragments,
     /// Resolved source annotation policies keyed by classifier identity. These are declaration
     /// header facts; no annotation syntax or source coordinate survives finalization.
     annotation_retentions: HashMap<TypeName, crate::types::AnnotationRetention>,
@@ -1891,6 +1893,21 @@ impl ResolvedModuleIndex {
     /// module's `actual` declarations replace.
     pub(crate) fn publish_common_source(&mut self, source: SourceFileId) {
         self.common_sources.insert(source);
+    }
+
+    pub(crate) fn publish_source_fragments(&mut self, fragments: crate::source::SourceFragments) {
+        self.source_fragments = fragments;
+    }
+
+    /// Whether a reference in source `from` sees a declaration of source `declared_in`: a refined
+    /// common fragment sees only its own declarations and those of the fragments it refines.
+    pub(crate) fn source_sees(
+        &self,
+        from: Option<u32>,
+        declared_in: Option<u32>,
+        declaration: Option<DeclarationId>,
+    ) -> bool {
+        self.source_fragments.sees(from, declared_in, declaration)
     }
 
     /// Whether a reference in `source` to `declaration` binds to the `expect` header that

@@ -121,7 +121,15 @@ impl<'a> StreamedModuleSymbols<'a> {
         let header = match namespace {
             SymbolNamespace::Package(package) => {
                 let identity = crate::types::existing_type_name_child(package, name)?;
-                self.index.type_alias_by_identity(identity)?
+                let header = self.index.type_alias_by_identity(identity)?;
+                let declared_in = self
+                    .index
+                    .declaration_anchor(header.declaration)
+                    .map(|anchor| anchor.source.raw());
+                if !self.index.source_sees(self.source_file, declared_in, None) {
+                    return None;
+                }
+                header
             }
             SymbolNamespace::Classifier(owner) => {
                 self.index.type_alias_in_classifier(owner, name)?
@@ -1471,6 +1479,15 @@ impl<'a> StreamedModuleSymbols<'a> {
             let Some(anchor) = self.index.declaration_anchor(declaration) else {
                 continue;
             };
+            // A refined common fragment sees only its own declarations and those of the fragments
+            // it refines: the platform declarations that refine it are no candidates there.
+            if !self.index.source_sees(
+                self.source_file,
+                Some(anchor.source.raw()),
+                Some(declaration),
+            ) {
+                continue;
+            }
             let declaration_package = self
                 .index
                 .source_package(anchor.source)
@@ -1626,6 +1643,15 @@ impl<'a> StreamedModuleSymbols<'a> {
             let Some(anchor) = self.index.declaration_anchor(declaration) else {
                 continue;
             };
+            // A refined common fragment sees only its own declarations and those of the fragments
+            // it refines: the platform declarations that refine it are no candidates there.
+            if !self.index.source_sees(
+                self.source_file,
+                Some(anchor.source.raw()),
+                Some(declaration),
+            ) {
+                continue;
+            }
             let declaration_package = self
                 .index
                 .source_package(anchor.source)
@@ -1842,6 +1868,25 @@ impl SymbolSource for StreamedModuleSymbols<'_> {
             functions.overloads.extend(associated_functions);
             properties.overloads.extend(associated_properties);
         }
+        // A classifier of a fragment that refines this one is no candidate in it either.
+        let classifier_hidden = classifier.as_ref().is_some_and(|classifier| {
+            !self.index.source_sees(
+                self.source_file,
+                classifier.source_file,
+                classifier.stable_declaration,
+            )
+        });
+        let (stable_classifier_name, type_alias, ordinary_classifier, classifier) =
+            if classifier_hidden {
+                (None, None, None, None)
+            } else {
+                (
+                    stable_classifier_name,
+                    type_alias,
+                    ordinary_classifier,
+                    classifier,
+                )
+            };
         // A HIDDEN-deprecated declaration stays in binary form but is never a Kotlin candidate.
         functions
             .overloads

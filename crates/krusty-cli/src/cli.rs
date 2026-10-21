@@ -76,6 +76,9 @@ pub struct Options {
     /// The `sources` a multiplatform fragment other than the platform leaf lists: common sources
     /// folded into the leaf's compilation (`-Xfragment-refines`).
     pub common_sources: Vec<String>,
+    /// Each source a multiplatform fragment lists, with that fragment, which bounds the
+    /// declarations the source sees.
+    pub source_fragments: std::collections::HashMap<String, krusty::source::SourceFragment>,
     /// Module name → `<module>.kotlin_module` (kotlinc `-module-name`, default `main`).
     pub module_name: String,
     /// Standard per-compilation language/API versions and their finalized feature baseline.
@@ -174,6 +177,7 @@ impl Default for Options {
             friend_paths: Vec::new(),
             sources: Vec::new(),
             common_sources: Vec::new(),
+            source_fragments: std::collections::HashMap::new(),
             module_name: "main".to_string(),
             // Parsing replaces this once it knows the selected release. Building it must not fix the
             // process-wide reference version, which `-Xkotlin-reference-version` may still choose.
@@ -356,9 +360,19 @@ fn read(argv: impl IntoIterator<Item = String>, reading: Reading) -> Options {
     for source in &tokenized.free {
         let first = opts.sources.len();
         collect_sources(source, &mut opts.sources, &mut opts.ignored);
-        if fragments.common.contains(source) {
+        if let Some(listed) = fragments
+            .sources
+            .iter()
+            .find(|listed| listed.source == *source)
+        {
             let collected = opts.sources[first..].to_vec();
-            opts.common_sources.extend(collected);
+            for collected_source in &collected {
+                opts.source_fragments
+                    .insert(collected_source.clone(), listed.fragment);
+            }
+            if listed.common {
+                opts.common_sources.extend(collected);
+            }
         }
     }
     opts.errors.extend(fragments.unsupported);

@@ -96,6 +96,7 @@ impl From<SourceSetAnalysis> for StreamingSourceSetAnalysis {
 pub(crate) struct ReparseSource {
     kind: SourceKind,
     is_common: bool,
+    fragment: Option<crate::source::SourceFragment>,
     text: Box<str>,
     #[cfg(test)]
     parse_count: std::cell::Cell<usize>,
@@ -155,6 +156,7 @@ impl ReparseSource {
             &module_features.for_source(&self.text),
             |mut file, diags| {
                 file.is_common = self.is_common;
+                file.fragment = self.fragment;
                 record_local_class_name_provenance_with_counters(
                     &mut file,
                     &mut local_name_counters,
@@ -214,6 +216,7 @@ impl ReparseSource {
                 let features = module_features.for_source(&self.text);
                 let mut file = parse_source_kind(&self.text, self.kind, &features, diags);
                 file.is_common = self.is_common;
+                file.fragment = self.fragment;
                 visit(file, diags);
             }
             SourceKind::Java => {}
@@ -287,6 +290,8 @@ struct ActualizedHeaders {
     matched: crate::fx_hash::HashSet<crate::fir::DeclarationId>,
     /// The `actual` declarations that actualized something.
     targets: crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    /// Each top-level `actual` and the source of the `expect` it stands for.
+    expect_sources: Vec<(crate::fir::DeclarationId, u32)>,
     /// Expect-owned defaults, as stable provider→target work.
     defaults: Vec<crate::fir::DefaultArgumentProvider>,
     /// Implementations that did not write `actual`.
@@ -325,6 +330,16 @@ fn actualize_headers_and_collect_inherited_defaults(
     // `actual typealias`, so it pairs `expect val S.tag: S` with `actual val String.tag: String`
     // where a name-and-arity key cannot.
     let actualized_targets = pairs.iter().map(|pair| pair.actual).collect();
+    let expect_sources = pairs
+        .iter()
+        .filter_map(|pair| {
+            let anchor = headers.declarations.anchor(pair.expect)?;
+            anchor
+                .owner
+                .is_none()
+                .then_some((pair.actual, anchor.source.raw()))
+        })
+        .collect();
     let mut work = Vec::new();
     for pair in pairs {
         let Some(source_declaration) = headers.syntax.declaration(pair.expect) else {
@@ -398,6 +413,7 @@ fn actualize_headers_and_collect_inherited_defaults(
     ActualizedHeaders {
         matched,
         targets: actualized_targets,
+        expect_sources,
         defaults: work,
         unmarked,
         incompatible,
@@ -1100,6 +1116,7 @@ where
         reparse_sources.sources.push(ReparseSource {
             kind: source.kind,
             is_common: source.is_common,
+            fragment: source.fragment,
             text: source.text.into(),
             #[cfg(test)]
             parse_count: std::cell::Cell::new(0),
@@ -1113,6 +1130,7 @@ where
                 .iter()
                 .any(|diagnostic| diagnostic.severity == Severity::Error);
         file.is_common = source.is_common;
+        file.fragment = source.fragment;
         if source.kind != SourceKind::Java {
             record_local_class_name_provenance(&mut file);
         }
@@ -1310,6 +1328,7 @@ where
         mut signature_default_work_items,
         matched_expect_declarations,
         actualized_targets,
+        actual_expect_sources,
         incompatible_expects,
         unactualized_members,
         incompatible_members,
@@ -1320,6 +1339,7 @@ where
         let ActualizedHeaders {
             matched,
             targets: actualized_targets,
+            expect_sources,
             defaults,
             unmarked,
             incompatible,
@@ -1359,6 +1379,7 @@ where
             signature_default_work_items,
             matched,
             actualized_targets,
+            expect_sources,
             incompatible,
             unactualized_members,
             incompatible_members,
@@ -1368,6 +1389,7 @@ where
             signature_default_work(&pass1_headers, &[]),
             crate::fx_hash::HashSet::default(),
             crate::fx_hash::HashSet::default(),
+            Vec::new(),
             crate::fx_hash::HashSet::default(),
             Vec::new(),
             crate::fx_hash::HashSet::default(),
@@ -1409,6 +1431,9 @@ where
         target,
         diags,
     );
+    symbols
+        .source_fragments
+        .publish_expect_sources(actual_expect_sources);
     if multiplatform {
         report_unmatched_expect_roots(
             UnmatchedExpectRoots {
@@ -1489,6 +1514,7 @@ where
                 index.publish_common_source(crate::fir::SourceFileId::from_raw(source as u32));
             }
         }
+        index.publish_source_fragments(symbols.source_fragments.clone());
         crate::resolve::project_finalized_signatures(&index, &mut symbols);
         crate::resolve::publish_checked_declaration_annotations(
             &files[..inferred_end],
@@ -1624,6 +1650,7 @@ where
         let mut index = streamed_index.index;
         pass1_headers.publish_declaration_inventory(&mut index);
         index.publish_actualized_away_declarations(&matched_expect_declarations);
+        index.publish_source_fragments(symbols.source_fragments.clone());
         // The declarations that DID finalize are still the module's facts. Project them into the
         // source symbol environment consumed beside the partial stable index; otherwise one
         // genuine signature error would make every use of an unrelated inferred declaration look

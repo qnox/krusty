@@ -15008,11 +15008,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   each fragment of the order whose refined fragment does not precede it (`there is a cycle in
   dependencies of module `<name>``), a repeated message once. For an edge that is not two names
   kotlinc prints its argument array's identity hash (`[Ljava.lang.String;@…`), which varies by
-  run; krusty prints the edge. Folding makes a declaration of the leaf visible to common sources,
-  so an invalid common source kotlinc rejects can compile. (`tests/fragment_arguments_e2e.rs`
+  run; krusty prints the edge. Folding keeps each fragment's source boundary: every source carries
+  its fragment (`SourceInput::with_fragment`), and a source sees only the top-level functions,
+  properties, classifiers and type aliases of its own fragment and of the fragments it refines, as
+  kotlinc's per-fragment sessions do. Both module symbol providers drop the other declarations
+  before overload selection, so a common call of a name the leaf declares is kotlinc's `unresolved
+  reference`, and a common call of an overload resolves among the common candidates even when the
+  leaf declares a more specific one. An `actual` is seen wherever the `expect` it actualizes is.
+  krusty distinguishes at most 64 fragments and refuses more. (`tests/fragment_arguments_e2e.rs`
   compares exit code, complete stderr and the output tree with kotlinc, including an `expect`
-  actualized by the leaf; `crates/krusty-cli/src/cli/fragments.rs` unit tests; the
-  `compiler/testData/cli/jvm/hmpp` cases and `kt77220` in the CLI corpus.)
+  actualized by the leaf, and compares the exact errors of a common reference to a leaf
+  function, property, class, object, type alias and import; `crates/krusty-cli/src/cli/fragments.rs`
+  unit tests; the `compiler/testData/cli/jvm/hmpp` cases and `kt77220` in the CLI corpus.)
 - **A supertype missing from the classpath is `MISSING_DEPENDENCY_SUPERCLASS`.** As kotlinc's
   `FirMissingDependencySupertype*` checkers, a classpath classifier naming a supertype that no
   source or classpath entry provides makes every use that depends on that hierarchy an error:

@@ -76,7 +76,11 @@ impl<'a> ModuleSymbols<'a> {
     ) -> Option<crate::libraries::AliasExpansion> {
         let identity = match namespace {
             SymbolNamespace::Package(package) => {
-                crate::types::existing_type_name_child(package, name)?
+                crate::types::existing_type_name_child(package, name).filter(|&identity| {
+                    self.syms
+                        .source_fragments
+                        .sees_alias(self.source_file, identity)
+                })?
             }
             // A nested alias is a declaration of its owner's classifier namespace, keyed by the
             // owner's identity: a local or hoisted owner's runtime name is not the alias's path.
@@ -1623,6 +1627,36 @@ impl SymbolSource for ModuleSymbols<'_> {
                 });
             }
         }
+        // A refined common fragment sees only its own declarations and those of the fragments it
+        // refines: the platform declarations that refine it are no candidates there.
+        let sees = |declared_in: Option<u32>, declaration: Option<crate::fir::DeclarationId>| {
+            self.syms
+                .source_fragments
+                .sees(self.source_file, declared_in, declaration)
+        };
+        let classifier_hidden = classifier
+            .as_ref()
+            .is_some_and(|classifier| !sees(classifier.source_file, classifier.stable_declaration));
+        let (classifier_name, classifier_declaration, classifier) = if classifier_hidden {
+            (None, None, None)
+        } else {
+            (classifier_name, classifier_declaration, classifier)
+        };
+        overloads.retain(|function| {
+            sees(
+                function
+                    .source_key
+                    .map(|(file, _)| file)
+                    .or(function.source_file),
+                function.stable_declaration,
+            )
+        });
+        properties.retain(|property| {
+            sees(
+                property.source_key.map(|(file, _)| file),
+                property.stable_declaration,
+            )
+        });
         let callables = match (overloads.is_empty(), properties.is_empty()) {
             (false, false) => Callables::Both {
                 functions: FunctionSet { overloads },

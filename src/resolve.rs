@@ -2597,6 +2597,7 @@ pub struct SymbolTable {
     /// dependency providers own their caches separately. The optional file component preserves
     /// private top-level visibility.
     pub(crate) module_symbol_cache: std::cell::RefCell<ModuleSymbolCache>,
+    pub(crate) source_fragments: crate::source::SourceFragments,
     pub(crate) module_shape_cache: std::cell::RefCell<
         HashMap<TypeName, Option<std::sync::Arc<crate::libraries::LibraryType>>>,
     >,
@@ -2805,6 +2806,7 @@ impl Default for SymbolTable {
         SymbolTable {
             compilation_id: NEXT_COMPILATION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             module_symbol_cache: Default::default(),
+            source_fragments: Default::default(),
             module_shape_cache: Default::default(),
             module_cache_enabled: std::cell::Cell::new(false),
             module_mutation_depth: std::cell::Cell::new(0),

@@ -2,7 +2,10 @@
 //! structure a build tool passes with the sources. kotlinc compiles each fragment in its own
 //! session and the last fragment of the refinement order is the platform leaf; krusty folds every
 //! other fragment into the leaf's compilation as common sources, which is the leaf's own output.
+//! Each source keeps its fragment, so a common source still sees only the fragments it refines.
 //! kotlinc's checks of the structure are reproduced in its words.
+
+use krusty::source::SourceFragment;
 
 /// The fragment arguments, in command-line order (each is a repeatable, comma-separated list).
 #[derive(Default)]
@@ -21,8 +24,16 @@ pub(super) struct FragmentCheck {
     pub(super) configuration_errors: Vec<String>,
     /// A well-formed structure krusty does not compile: a fragment the leaf does not refine.
     pub(super) unsupported: Option<String>,
-    /// The free arguments listed by a fragment other than the leaf: common sources.
-    pub(super) common: Vec<String>,
+    /// Each free argument a fragment lists, with that fragment. A fragment other than the leaf
+    /// lists common sources.
+    pub(super) sources: Vec<FragmentSource>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(super) struct FragmentSource {
+    pub(super) source: String,
+    pub(super) fragment: SourceFragment,
+    pub(super) common: bool,
 }
 
 pub(super) fn check(arguments: &FragmentArguments, free: &[String]) -> FragmentCheck {
@@ -121,17 +132,38 @@ pub(super) fn check(arguments: &FragmentArguments, free: &[String]) -> FragmentC
             ..FragmentCheck::default()
         };
     }
-    let common = free
+    if order.len() > SourceFragment::MAX {
+        return FragmentCheck {
+            unsupported: Some(format!(
+                "krusty compiles at most {} fragments, but {} are declared",
+                SourceFragment::MAX,
+                order.len()
+            )),
+            ..FragmentCheck::default()
+        };
+    }
+    let index = |fragment: &str| {
+        order
+            .iter()
+            .position(|ordered| *ordered == fragment)
+            .expect("every fragment is ordered")
+    };
+    let sources = free
         .iter()
-        .filter(|source| {
-            listed
-                .iter()
-                .any(|(seen, owner)| seen == source && owner != leaf)
+        .filter_map(|source| {
+            let (_, owner) = listed.iter().find(|(seen, _)| seen == source)?;
+            Some(FragmentSource {
+                source: source.clone(),
+                fragment: SourceFragment::new(
+                    index(owner),
+                    refined_closure(&refines, owner).into_iter().map(index),
+                ),
+                common: owner != leaf,
+            })
         })
-        .cloned()
         .collect();
     FragmentCheck {
-        common,
+        sources,
         ..FragmentCheck::default()
     }
 }
@@ -261,6 +293,14 @@ mod tests {
         values.iter().map(ToString::to_string).collect()
     }
 
+    fn fragment_source(source: &str, fragment: SourceFragment, common: bool) -> FragmentSource {
+        FragmentSource {
+            source: source.to_string(),
+            fragment,
+            common,
+        }
+    }
+
     fn checked(fragments: &[&str], fragment_sources: &[&str], free: &[&str]) -> FragmentCheck {
         refined(fragments, fragment_sources, &[], free)
     }
@@ -327,7 +367,7 @@ mod tests {
                     "source 'd' does not belong to any module",
                 ]),
                 unsupported: None,
-                common: Vec::new(),
+                sources: Vec::new(),
             }
         );
     }
@@ -361,7 +401,7 @@ mod tests {
                     "source 'A.kt' does not belong to any module",
                 ]),
                 unsupported: None,
-                common: Vec::new(),
+                sources: Vec::new(),
             }
         );
     }
@@ -393,7 +433,7 @@ mod tests {
                      `jvm`"
                         .to_string()
                 ),
-                common: Vec::new(),
+                sources: Vec::new(),
             }
         );
     }
@@ -409,7 +449,48 @@ mod tests {
                 &["a.kt", "b.kt", "c.kt", "J.java"]
             ),
             FragmentCheck {
-                common: strings(&["a.kt", "b.kt"]),
+                sources: vec![
+                    fragment_source("a.kt", SourceFragment::new(0, []), true),
+                    fragment_source("b.kt", SourceFragment::new(1, [0]), true),
+                    fragment_source("c.kt", SourceFragment::new(2, [0, 1]), false),
+                ],
+                ..FragmentCheck::default()
+            }
+        );
+    }
+
+    fn as_strs(values: &[String]) -> Vec<&str> {
+        values.iter().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn more_fragments_than_krusty_distinguishes_are_refused() {
+        let names = (0..=SourceFragment::MAX)
+            .map(|index| format!("f{index}"))
+            .collect::<Vec<_>>();
+        let sources = names
+            .iter()
+            .map(|name| format!("{name}:{name}.kt"))
+            .collect::<Vec<_>>();
+        let refines = names
+            .windows(2)
+            .map(|pair| format!("{}:{}", pair[1], pair[0]))
+            .collect::<Vec<_>>();
+        let free = names
+            .iter()
+            .map(|name| format!("{name}.kt"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            refined(
+                &as_strs(&names),
+                &as_strs(&sources),
+                &as_strs(&refines),
+                &as_strs(&free)
+            ),
+            FragmentCheck {
+                unsupported: Some(
+                    "krusty compiles at most 64 fragments, but 65 are declared".to_string()
+                ),
                 ..FragmentCheck::default()
             }
         );
@@ -426,7 +507,10 @@ mod tests {
                 &["A.kt", "B.kt"]
             ),
             FragmentCheck {
-                common: strings(&["A.kt"]),
+                sources: vec![
+                    fragment_source("A.kt", SourceFragment::new(0, []), true),
+                    fragment_source("B.kt", SourceFragment::new(1, [0]), false),
+                ],
                 ..FragmentCheck::default()
             }
         );
@@ -545,7 +629,7 @@ mod tests {
                     "source 'b.kt' does not belong to any module",
                 ]),
                 unsupported: None,
-                common: Vec::new(),
+                sources: Vec::new(),
             }
         );
         assert_eq!(
@@ -568,7 +652,7 @@ mod tests {
                      both `a` and `b`, please check you -Xfragment-sources options."
                 ]),
                 unsupported: None,
-                common: Vec::new(),
+                sources: Vec::new(),
             }
         );
     }
