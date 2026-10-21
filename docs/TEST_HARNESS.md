@@ -3,6 +3,10 @@
 Use `./run-tests.sh` as the canonical test entrypoint. It is self-provisioning and normally needs no
 parameters.
 
+`just versioning-tests` checks the release-version recipes against disposable Git history, without
+building the compiler. It is also part of `just lint`: missing or unrelated manifest baselines must
+fail without emitting a release version, while valid baseline and root counts remain exact.
+
 ## Agent Quick Reference
 
 - Use `./run-tests.sh` for the full suite; it provisions kotlinc and the Kotlin codegen/box corpus.

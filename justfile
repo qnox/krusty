@@ -45,7 +45,11 @@ ci: lint coverage-gate
 # Lint gate (enforced locally + in CI + by the pre-commit hook): formatting must be clean, and
 # clippy must introduce NO new findings beyond the frozen baseline (clippy-baseline.tsv). Existing
 # findings are tolerated; any new one fails. Identical behaviour everywhere — it's plain cargo + sh.
-lint: fmt-check clippy-baseline-check
+lint: versioning-tests fmt-check clippy-baseline-check
+
+# Cheap release-version contracts, without a compiler build or reference-toolchain download.
+versioning-tests:
+    bash scripts/test-versioning.sh
 
 # Run the LSP package without coverage instrumentation.
 test-lsp:
@@ -666,7 +670,12 @@ build-number VERSION:
     if [ "$base" = "-" ] || [ -z "$base" ]; then
         git rev-list --count HEAD
     else
-        echo $(( $(git rev-list --count "${base}..HEAD") + 1 ))
+        if ! git merge-base --is-ancestor "$base" HEAD; then
+            echo "Kotlin {{VERSION}} baseline $base is not an ancestor of HEAD" >&2
+            exit 1
+        fi
+        count=$(git rev-list --count "${base}..HEAD")
+        echo $((count + 1))
     fi
 
 # Full krusty release version: <max-reference-version>-build.<n>  (e.g. 2.4.20-build.3).
@@ -675,7 +684,8 @@ version:
     #!/usr/bin/env bash
     set -euo pipefail
     v=$(just max-version)
-    echo "${v}-build.$(just build-number "$v")"
+    number=$(just build-number "$v")
+    echo "${v}-build.$number"
 
 # Build optimized compiler and LSP executables from their independent workspace packages.
 build-release TARGET="":
