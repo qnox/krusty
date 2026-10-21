@@ -81,8 +81,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let methods = &ir.classes[class as usize].methods;
         // The member the checker selected, by its declaration: the owner's own or one it
         // inherits, whose key every table below its declaring class carries. Only a call that
-        // names no module function (one a plugin synthesized, or a dependency member the class
-        // overrides) is matched among the owner's methods by its signature.
+        // names no module function or property (one a plugin synthesized, or a dependency member
+        // the class overrides) is matched among the owner's methods by its signature.
         let fid = match target {
             Some(crate::ir::IrVirtualTarget::Function(
                 crate::fir::ResolvedFunctionOverrideTarget::Module(callable),
@@ -91,6 +91,42 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 .get(&callable)
                 .copied()
                 .ok_or_else(unknown)?,
+            Some(
+                crate::ir::IrVirtualTarget::PropertyGetter(
+                    crate::fir::ResolvedPropertyOverrideTarget::Module(property),
+                )
+                | crate::ir::IrVirtualTarget::PropertySetter(
+                    crate::fir::ResolvedPropertyOverrideTarget::Module(property),
+                ),
+            ) => {
+                let setter = matches!(target, Some(crate::ir::IrVirtualTarget::PropertySetter(_)));
+                let accessor = match ir.local_property_layouts.get(&property) {
+                    Some(crate::ir::IrLocalPropertyLayout::Member {
+                        getter,
+                        setter: setter_function,
+                        ..
+                    }) => {
+                        if setter {
+                            *setter_function
+                        } else {
+                            *getter
+                        }
+                    }
+                    Some(crate::ir::IrLocalPropertyLayout::MemberExtension {
+                        getter,
+                        setter: setter_function,
+                        ..
+                    }) => {
+                        if setter {
+                            *setter_function
+                        } else {
+                            Some(*getter)
+                        }
+                    }
+                    _ => None,
+                };
+                accessor.ok_or_else(unknown)?
+            }
             _ => {
                 let declared = params.map(|(params, _)| params.as_slice());
                 methods

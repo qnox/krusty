@@ -51,3 +51,30 @@ fn an_inherited_member_is_dispatched_through_a_subclass_type() {
         "InheritedSelection",
     );
 }
+
+/// The forwarders of `I by d` read and write the delegate's property through a virtual call that
+/// names the interface property's getter and setter, so this is the producer of those targets.
+#[test]
+fn a_delegated_property_reaches_the_delegate_through_its_accessors() {
+    expect_portable(
+        "interface Box {\n\
+         \x20   var value: String\n\
+         \x20   val size: Int\n\
+         }\n\
+         interface Labeled : Box\n\
+         class Cell : Labeled {\n\
+         \x20   override var value: String = \"\"\n\
+         \x20       set(v) { field = v + \"!\" }\n\
+         \x20   override val size: Int get() = value.length\n\
+         }\n\
+         open class Wrapper(inner: Labeled) : Labeled by inner\n\
+         class Leaf(inner: Labeled) : Wrapper(inner)\n\
+         fun box(): String {\n\
+         \x20   val leaf: Wrapper = Leaf(Cell())\n\
+         \x20   leaf.value = \"OK\"\n\
+         \x20   val result = leaf.value + leaf.size\n\
+         \x20   return if (result == \"OK!3\") \"OK\" else result\n\
+         }\n",
+        "DelegatedPropertySelection",
+    );
+}
