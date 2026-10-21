@@ -1260,6 +1260,8 @@ mod java_instance_e2e;
 #[path = "java_interface_mutable_collection_face_e2e.rs"]
 mod java_interface_mutable_collection_face_e2e;
 mod java_member_modules;
+#[path = "java_nonfinal_constant_e2e.rs"]
+mod java_nonfinal_constant_e2e;
 #[path = "java_self_bounded_constructor_e2e.rs"]
 mod java_self_bounded_constructor_e2e;
 #[path = "local_class_capture_order_e2e.rs"]
