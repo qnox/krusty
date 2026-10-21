@@ -2501,6 +2501,8 @@ mod serialization_transient_e2e;
 mod serialization_tuple_elements_e2e;
 #[path = "serialization_type_parameter_elements_e2e.rs"]
 mod serialization_type_parameter_elements_e2e;
+#[path = "serialized_override_getter_e2e.rs"]
+mod serialized_override_getter_e2e;
 #[path = "serializer_operand_cast_e2e.rs"]
 mod serializer_operand_cast_e2e;
 #[path = "session_subsystems_e2e.rs"]

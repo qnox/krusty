@@ -31,6 +31,15 @@ fn record_serialize_lines(
 /// `output.<method>(descriptor, index, serializer, value)`, one of `CompositeEncoder`'s
 /// serializable-element writes. Their `value` is declared `T`, a reference slot, so a value class
 /// reaches it as its box whatever its carrier, as it does at a source call of the same method.
+/// The target descriptor of an overridable property's getter, which `write$Self` must call.
+/// The getter is chosen by the property's modality, so a target that cannot describe its result
+/// is an unsupported representation, never a reason to read the field instead.
+fn overridable_getter_descriptor(ctx: &PluginContext, property: &str, ty: &Ty) -> String {
+    super::ty_descriptor(ctx, ty).unwrap_or_else(|| {
+        panic!("the target describes no getter result for overridable serialized property `{property}`")
+    })
+}
+
 fn encode_serializable_element(
     ir: &mut IrFile,
     method: &str,
@@ -161,15 +170,38 @@ impl SerializeBody<'_> {
                     &annotated,
                 )
             };
-        // `write$Self` is a STATIC MEMBER of the serialized class, so it reads the
-        // property's private backing FIELD directly — which is what kotlinc emits.
+        // `write$Self` is a STATIC MEMBER of the serialized class, so it reads a final
+        // property's private backing FIELD directly — which is what kotlinc emits once its JVM
+        // lowering substitutes the default getter. An open or overriding property's getter can
+        // be overridden, so kotlinc calls it.
         let read_property = |ir: &mut IrFile, field_index: usize, ty: &Ty| -> ExprId {
             let receiver = ir.add_expr(IrExpr::GetValue(value_slot));
-            let read = ir.add_expr(IrExpr::GetField {
-                receiver,
-                class: foo_id,
-                index: field_index as u32,
-            });
+            let field = field_index as u32;
+            let overridable = ir.classes[foo_id as usize]
+                .properties
+                .iter()
+                .find(|property| property.backing_field == Some(field))
+                .filter(|property| property.is_open)
+                .map(|property| (property.name.clone(), property.getter));
+            let read = match overridable {
+                Some((name, declared_getter)) => {
+                    let descriptor = overridable_getter_descriptor(ctx, &name, ty);
+                    super::synthesized_accessor::getter(
+                        ir,
+                        receiver,
+                        serialized_name,
+                        &name,
+                        descriptor,
+                        (foo_id, field),
+                        declared_getter,
+                    )
+                }
+                None => ir.add_expr(IrExpr::GetField {
+                    receiver,
+                    class: foo_id,
+                    index: field,
+                }),
+            };
             // An unsigned value is held as its signed carrier; the read is boxed as the
             // unsigned type it is.
             if ty.is_unsigned() {
@@ -542,6 +574,15 @@ mod tests {
     use crate::ir::{IrField, IrFunction};
     use crate::plugins::synthetic_class;
     use crate::types::type_name;
+
+    #[test]
+    #[should_panic(
+        expected = "the target describes no getter result for overridable serialized property `name`"
+    )]
+    fn an_overridable_property_without_a_getter_descriptor_is_not_read_from_its_field() {
+        // The default context's target describes no type, as an unsupported representation would.
+        overridable_getter_descriptor(&PluginContext::default(), "name", &Ty::String);
+    }
 
     #[test]
     fn an_unsupported_field_preserves_a_residual_instead_of_becoming_a_no_op() {

@@ -11258,6 +11258,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   line: the method opens on it at its first instruction, whether that is the child-serializer cache
   read, an unconditional element or a default-value guard, and a guard's comparison returns to it.
   Test: `tests/serialization_generated_debug_e2e.rs::write_self_opens_on_the_class_line_at_its_first_instruction`.
+- **`write$Self` reads an overridable property through its getter.** It reads a final property's
+  backing field, as kotlinc's JVM lowering does for a default getter, but an open or overriding
+  property's getter can be overridden, so kotlinc calls it: `override val name` is read with
+  `invokevirtual getName`, a plain `val tag` with `getfield`. The getter is chosen from the
+  property's modality alone; a target that cannot describe its result is a compiler error, never a
+  field read. A source-declared getter is called as that property's checked getter, like a source
+  read, so a value-class result keeps its mangled JVM name (`getU-pVg5ArA`).
+  Test: `tests/serialized_override_getter_e2e.rs`.
 - **A concrete generic element is cached; a generic class's descriptor and accessor follow
   kotlinc.** `val g: G<Int>` over a same-file generic `@Serializable class G<T>` is serialized by
   `new G.$serializer(IntSerializer.INSTANCE)`, a constructed serializer, so the holder caches it in
