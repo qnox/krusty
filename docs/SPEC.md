@@ -11278,6 +11278,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   line: the method opens on it at its first instruction, whether that is the child-serializer cache
   read, an unconditional element or a default-value guard, and a guard's comparison returns to it.
   Test: `tests/serialization_generated_debug_e2e.rs::write_self_opens_on_the_class_line_at_its_first_instruction`.
+- **An inheritable serializable class's `write$Self` is public.** kotlinc keeps a final class's
+  `write$Self` internal, so its JVM name carries the module (`write$Self$main`), but an open or
+  abstract class's subclass, possibly in another module, calls it, so it is public under its plain
+  name `write$Self`, and the deserialization constructor's metadata is public too. Kotlin metadata
+  lists a class's properties sorted by name, so kotlinc's plugin also writes an open or abstract
+  class's own elements in program order into its metadata (`propertiesNamesInProgramOrder`, field
+  18000, leaving out `@Transient` properties): a subclass's serializer in another module rebuilds
+  the parent's element order from it. As in kotlinc, a plugin owns the class metadata fields it
+  registers and writes them only when the target serializes the class's record: krusty's metadata
+  writer asks each plugin in registration order, and the serialization plugin reads the field off
+  the checked class then, so nothing is recorded for it beforehand. A `write$Self` without elements is a
+  bare `return` with no line. (A sealed class's `write$Self` and an abstract class's
+  `PolymorphicSerializer` companion are not generated yet.)
+  Test: `tests/open_serializable_write_self_e2e.rs`.
 - **`write$Self` reads an overridable property through its getter.** It reads a final property's
   backing field, as kotlinc's JVM lowering does for a default getter, but an open or overriding
   property's getter can be overridden, so kotlinc calls it: `override val name` is read with

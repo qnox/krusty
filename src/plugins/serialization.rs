@@ -27,6 +27,7 @@ pub(crate) use external_serializer::{custom_class_serializer, generated_external
 mod generated_classifier;
 mod generated_members;
 mod plugin_release;
+mod program_order_metadata;
 mod property_default;
 mod runtime_abi;
 mod serial_elements;
@@ -61,7 +62,7 @@ use generated_classifier::{
 };
 use generated_members::{
     add_serializer_members, descriptor_property, install_inherited_type_parameter_serializers,
-    publish_write_self, GeneratedSerializerMembers,
+    publish_write_self, write_self_is_public, write_self_visibility, GeneratedSerializerMembers,
 };
 pub use plugin_release::PluginRelease;
 pub use runtime_abi::SerializationAbi;
@@ -189,14 +190,14 @@ impl SerializationPlugin {
             .is_none_or(|release| release >= PluginRelease::V2_4_21)
     }
 
-    /// The per-class write-helper name for the target ABI. On core >= 1.6 the module name is mangled
-    /// into the suffix with every non-`[A-Za-z0-9]` character replaced by `_` (kotlinc sanitizes the
-    /// module name so it is a legal JVM method-name segment — `com.example_x-api` →
-    /// `com_example_x_api`).
-    fn write_self_name(&self) -> String {
+    /// The per-class write-helper name for the target ABI. On core >= 1.6 a final class's helper is
+    /// internal, so the module name is mangled into the suffix with every non-`[A-Za-z0-9]`
+    /// character replaced by `_` (kotlinc sanitizes the module name so it is a legal JVM
+    /// method-name segment — `com.example_x-api` → `com_example_x_api`). An inheritable class's
+    /// helper is public, because a subclass in another module calls it, and keeps its plain name.
+    fn write_self_name(&self, class: &crate::ir::IrClass) -> String {
         match self.abi {
-            SerializationAbi::V1_0 => "write$Self".to_string(),
-            SerializationAbi::V1_6Plus => {
+            SerializationAbi::V1_6Plus if !write_self_is_public(class) => {
                 let mangled: String = self
                     .module
                     .chars()
@@ -204,6 +205,7 @@ impl SerializationPlugin {
                     .collect();
                 format!("write$Self${mangled}")
             }
+            _ => "write$Self".to_string(),
         }
     }
 
@@ -1276,6 +1278,19 @@ impl IrPlugin for SerializationPlugin {
         "kotlinx.serialization"
     }
 
+    fn class_metadata_fields(&self) -> &'static [u32] {
+        &[program_order_metadata::PROPERTIES_NAMES_IN_PROGRAM_ORDER]
+    }
+
+    fn write_class_metadata(
+        &self,
+        ir: &IrFile,
+        class: &crate::ir::IrClass,
+        out: &mut crate::plugins::class_metadata::ClassMetadataExtensions<'_>,
+    ) {
+        program_order_metadata::write(ir, class, out);
+    }
+
     fn generate_frontend_declarations(
         &self,
         ctx: &FrontendClassContext<'_>,
@@ -1643,7 +1658,7 @@ impl IrPlugin for SerializationPlugin {
                                     crate::ir::IrGeneratedFunctionRole::SerializationWriteSelf,
                                 )
                                 .expect("a plain serializable class declares its write$Self"),
-                            write_self_name: self.write_self_name(),
+                            write_self_name: self.write_self_name(&ir.classes[foo_id as usize]),
                             cache: self
                                 .child_serializer_cache(ir.classes[foo_id as usize].fq_name_id()),
                         }

@@ -16,6 +16,7 @@
 //! generated symbols resolve. Body and expression rewriting belongs at the IR level.
 
 pub mod allopen;
+pub mod class_metadata;
 pub mod cli;
 pub mod codegen_loop;
 pub mod deps;
@@ -727,6 +728,21 @@ pub trait IrPlugin {
 
     /// Fill in or rewrite method bodies after IR lowering.
     fn transform_bodies(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
+
+    /// The class metadata extension fields this plugin owns; no two registered plugins share one.
+    fn class_metadata_fields(&self) -> &'static [u32] {
+        &[]
+    }
+
+    /// Write this plugin's extension fields of `class`'s metadata. A target calls it while it
+    /// serializes that record, after every core field; see [`class_metadata`].
+    fn write_class_metadata(
+        &self,
+        _ir: &IrFile,
+        _class: &crate::ir::IrClass,
+        _out: &mut class_metadata::ClassMetadataExtensions<'_>,
+    ) {
+    }
 }
 
 /// Declare what this compilation's native plugins generate, at the frontend/backend handoff.
@@ -1117,6 +1133,7 @@ impl PluginHost {
     }
 
     pub fn register(&mut self, plugin: Box<dyn IrPlugin>) {
+        class_metadata::assert_disjoint_fields(&self.plugins, plugin.as_ref());
         self.plugins.push(plugin);
     }
 

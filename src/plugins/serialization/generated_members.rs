@@ -4,7 +4,7 @@
 use super::kserializer_of;
 use super::{class_ty, unit};
 use crate::ir::{
-    Callee, ExprId, IrExpr, IrFile, IrFunction, IrGeneratedDeclarationDebug,
+    Callee, ExprId, IrClass, IrExpr, IrFile, IrFunction, IrGeneratedDeclarationDebug,
     IrGeneratedFunctionMetadata, IrGeneratedFunctionMetadataScope, IrGeneratedFunctionPublication,
     IrGeneratedMemberPublication, IrProperty,
 };
@@ -17,10 +17,26 @@ const DESERIALIZE_PARAMETER_NAMES: [&str; 1] = ["decoder"];
 const WRITE_SELF_KOTLIN_NAME: &str = "write$Self";
 const WRITE_SELF_PARAMETER_NAMES: [&str; 3] = ["self", "output", "serialDesc"];
 
+/// kotlinc publishes an open or abstract class's `write$Self` because a subclass, possibly in
+/// another module, calls it; a final class's stays internal. (A sealed class gets no `write$Self`
+/// yet.)
+pub(super) fn write_self_is_public(class: &IrClass) -> bool {
+    class.is_open || class.is_abstract
+}
+
+pub(super) fn write_self_visibility(class: &IrClass) -> Visibility {
+    if write_self_is_public(class) {
+        Visibility::Public
+    } else {
+        Visibility::Internal
+    }
+}
+
 /// `type_serializers` is the number of trailing type-parameter serializers a generic class's
 /// `write$Self` takes, named `typeSerial<k>`.
 pub(super) fn write_self_publication(
     function: u32,
+    visibility: Visibility,
     type_serializers: usize,
     owner_line: u32,
 ) -> IrGeneratedMemberPublication {
@@ -37,7 +53,7 @@ pub(super) fn write_self_publication(
                 .collect(),
             metadata: Some(IrGeneratedFunctionMetadata {
                 source_name: WRITE_SELF_KOTLIN_NAME.to_string(),
-                visibility: Visibility::Internal,
+                visibility,
             }),
             debug: IrGeneratedDeclarationDebug::declaration_line(owner_line),
         }],
@@ -48,6 +64,7 @@ pub(super) fn publish_write_self(
     ir: &mut IrFile,
     owner: TypeName,
     function: u32,
+    visibility: Visibility,
     type_serializers: usize,
     owner_line: u32,
 ) {
@@ -55,7 +72,7 @@ pub(super) fn publish_write_self(
         .insert(function, super::annotations::write_self_annotations());
     ir.publish_generated_members(
         owner,
-        write_self_publication(function, type_serializers, owner_line),
+        write_self_publication(function, visibility, type_serializers, owner_line),
     );
 }
 
@@ -579,7 +596,7 @@ mod tests {
 
     #[test]
     fn write_self_publication_is_additive_internal_and_uses_canonical_names() {
-        let publication = write_self_publication(7, 0, 23);
+        let publication = write_self_publication(7, Visibility::Internal, 0, 23);
         assert_eq!(
             publication.metadata_scope,
             IrGeneratedFunctionMetadataScope::Additive

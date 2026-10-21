@@ -36,6 +36,9 @@ pub struct EmitOptions {
     pub annotations_in_metadata: bool,
     /// Whether emitted Kotlin metadata carries kotlinc's pre-release flag.
     pub pre_release_metadata: bool,
+    /// The compilation's plugins, asked for their class metadata extensions as each record is
+    /// written.
+    pub(crate) plugins: std::rc::Rc<crate::plugins::PluginHost>,
 }
 
 /// The `mv` written without `-language-version`: kotlinc's default-language-version stamp.
@@ -112,6 +115,7 @@ impl Default for EmitOptions {
             metadata_version: None,
             annotations_in_metadata: true,
             pre_release_metadata: false,
+            plugins: std::rc::Rc::default(),
         }
     }
 }
