@@ -4358,6 +4358,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   into the IR's `Unit` type (`exhaustive_whens`); the JVM emitter chooses the pop.
   `tests/discarded_when_value_e2e.rs`, `src/fir/body_check/branch_exhaustiveness_tests.rs`,
   `src/fir_lower/when_result_type_tests.rs`.
+- **An exhaustive `Unit` switch materializes its arms' `Unit`.** kotlinc's `SwitchGenerator`
+  (a `when` dispatched through `tableswitch`/`lookupswitch`, a `String` switch included) pushes
+  `kotlin.Unit.INSTANCE` at the end of every arm of an exhaustive `Unit` `when`, and the statement
+  pops the joined value once; when the `when` is a statement block's last statement, the block's
+  locals end before that `pop`. A non-exhaustive switch and an `if`/`else` chain discard each
+  branch in the branch. `PopBackwardPropagation` removes the pushes and the `pop` wherever the
+  method fits its source-interpreter gate, so only a large method (such as a wide class's
+  `$$serializer.deserialize`) keeps them. Test: `tests/exhaustive_switch_unit_e2e.rs`.
 - **A subjectless `when` threads false-branch narrowings into later arms**: a later condition or body
   runs only after every earlier arm fell through. Null, compound, and type-test conditions use the
   same narrowing rules as `if` branches.

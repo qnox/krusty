@@ -314,6 +314,13 @@ impl Emitter<'_> {
         if emission.is_stmt {
             self.emit(body, code);
             !self.discarding_diverges(body)
+        } else if matches!(self.ir.expr(body), IrExpr::Block { stmts, value } if stmts.is_empty() && value.is_none())
+        {
+            // An empty arm of a `Unit` switch has no statement to carry a line: kotlinc
+            // materializes its `Unit` on the line before it.
+            let unit = self.cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
+            code.getstatic(unit, 1);
+            true
         } else {
             self.emit_value(body, code);
             self.adapt_physical_operand_for(body, self.value_ty(body), emission.result_ty, code);

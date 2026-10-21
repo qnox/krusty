@@ -867,6 +867,8 @@ mod error_branch_join_e2e;
 mod error_receiver_cascade_e2e;
 #[path = "escaping_reified_lambda_e2e.rs"]
 mod escaping_reified_lambda_e2e;
+#[path = "exhaustive_switch_unit_e2e.rs"]
+mod exhaustive_switch_unit_e2e;
 #[path = "expect_default_lambda_marker_e2e.rs"]
 mod expect_default_lambda_marker_e2e;
 #[path = "expected_return_invariant_binding_e2e.rs"]
