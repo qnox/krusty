@@ -37,13 +37,10 @@ fn main() {
         }
         return;
     }
-    // `krusty compiler-plugins <kotlinc arguments>` says whether krusty compiles the compiler-plugin
-    // request of that command line itself; a build tool hands a refused one to kotlinc instead.
-    if argv
-        .first()
-        .is_some_and(|command| command == "compiler-plugins")
-    {
-        run_compiler_plugins(argv[1..].to_vec());
+    // `krusty refusals <kotlinc arguments>` says whether krusty compiles a compilation with those
+    // arguments itself; a build tool hands a refused one to kotlinc instead.
+    if argv.first().is_some_and(|command| command == "refusals") {
+        run_refusals(argv[1..].to_vec());
         return;
     }
     // Bazel starts a persistent worker by appending `--persistent_worker` to the tool's command
@@ -127,27 +124,27 @@ fn run_cinterop(arguments: &[String]) {
     }
 }
 
-/// Print each compiler plugin the command line requests that krusty refuses, one per line, and exit 1
-/// when there is one; exit 0 when krusty compiles the whole request. These are the refusals a
-/// compilation with the same arguments reports as errors before it reads a source. A malformed
-/// command line exits 2.
-fn run_compiler_plugins(argv: Vec<String>) {
+/// Print each part of the command line krusty refuses, one per line, and exit 1 when there is one;
+/// exit 0 when krusty compiles the whole request. These are the refusals a compilation with the
+/// same arguments reports as errors before it reads a source: a kotlinc argument krusty does not
+/// implement, or a compiler plugin it neither reimplements nor hosts. A command line kotlinc itself
+/// could not read exits 2.
+fn run_refusals(argv: Vec<String>) {
     let opts = cli::parse(argv);
-    let malformed = opts
-        .argument_errors
-        .iter()
-        .map(|error| kotlinc_arguments::render(error))
-        .chain(opts.errors.iter().cloned())
-        .collect::<Vec<_>>();
-    if !malformed.is_empty() {
-        for error in &malformed {
-            eprintln!("error: {error}");
+    if !opts.argument_errors.is_empty() {
+        for error in &opts.argument_errors {
+            eprintln!("error: {}", kotlinc_arguments::render(error));
         }
         std::process::exit(2);
     }
-    let refused = opts.resolve_plugins(&[]).errors;
-    for plugin in &refused {
-        println!("{plugin}");
+    let refused = opts
+        .errors
+        .iter()
+        .cloned()
+        .chain(opts.resolve_plugins(&[]).errors)
+        .collect::<Vec<_>>();
+    for refusal in &refused {
+        println!("{refusal}");
     }
     if !refused.is_empty() {
         std::process::exit(1);

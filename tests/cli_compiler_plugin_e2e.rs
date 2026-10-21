@@ -357,22 +357,22 @@ fn without_the_serialization_plugin_nothing_is_synthesized() {
     assert_eq!(compiled.classes, reference);
 }
 
-/// `krusty compiler-plugins <arguments>` answers, before any source is read, whether krusty compiles
-/// the plugin request itself: a build tool hands a refused request to kotlinc. Each refusal is the
-/// error a compile with the same switches reports, one per line on stdout, and the exit code is 1;
-/// a request krusty implements prints nothing and exits 0.
+/// `krusty refusals <arguments>` answers, before any source is read, whether krusty compiles the
+/// request itself: a build tool hands a refused request to kotlinc. Each refusal is the error a
+/// compile with the same switches reports, one per line on stdout, and the exit code is 1; a request
+/// krusty implements prints nothing and exits 0.
 #[test]
-fn compiler_plugins_lists_the_plugins_krusty_refuses() {
+fn refusals_lists_the_arguments_and_plugins_krusty_refuses() {
     let probe = Probe::new("plugin-check", "fun main() {}\n");
     let widget = widget_plugin_jar(&probe.dir);
     let serialization = reference_plugin_jar("kotlinx-serialization-compiler-plugin.jar");
     let scripting = reference_plugin_jar("kotlin-scripting-compiler.jar");
     let check = |switches: &[String]| {
         let output = Command::new(common::krusty_binary())
-            .arg("compiler-plugins")
+            .arg("refusals")
             .args(switches)
             .output()
-            .expect("run krusty compiler-plugins");
+            .expect("run krusty refusals");
         (
             output.status.code(),
             String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -410,6 +410,20 @@ fn compiler_plugins_lists_the_plugins_krusty_refuses() {
                 "{}{}",
                 refused(&widget.display().to_string()),
                 refused("plugin id 'org.example.widget'")
+            ),
+            String::new()
+        )
+    );
+    assert_eq!(
+        check(&[
+            "-Xuse-inline-scopes-numbers".to_string(),
+            format!("-Xplugin={}", widget.display()),
+        ]),
+        (
+            Some(1),
+            format!(
+                "krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'\n{}",
+                refused(&widget.display().to_string())
             ),
             String::new()
         )

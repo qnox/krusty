@@ -126,12 +126,14 @@ Compiler plugins pass through the adapter as kotlinc receives them: each compile
 `pluginClasspath` becomes `-Xplugin=<jars>` and its `pluginOptions` become
 `-P plugin:<id>:<key>=<value>`, and the compiler resolves each jar by the registrar it declares.
 Plugin CLI free arguments stay rejected in favour of that structured input. Before the replacement
-runs, a `<task>KrustyPluginCheck` task passes the same plugin request to
-`krusty compiler-plugins`, which prints every plugin the compiler's registry refuses (one it neither
+runs, a `<task>KrustyCheck` task passes the same compiler arguments and plugin request to
+`krusty refusals`, which prints every kotlinc argument krusty does not implement (such as AGP's
+`-Xuse-inline-scopes-numbers`) and every plugin the compiler's registry refuses (one it neither
 reimplements nor hosts, such as Compose, Parcelize, assignment or kapt) and exits 1, or exits 0.
 A refused request leaves that one compile to kotlinc: the check logs
-`krusty: task '…' is left to kotlinc: krusty does not implement a compiler plugin it requests` with
-the refusals, the replacement is skipped, and the Kotlin task, which otherwise skips itself, runs.
+`krusty: task '…' is left to kotlinc: krusty does not implement everything it requests` with the
+refusals, the replacement is skipped, and the Kotlin task, which otherwise skips itself, runs. The
+`krustyCompile` aggregate depends on the Kotlin tasks, so it reaches whichever compiler runs.
 Every other compile of the build stays with krusty.
 
 Build correctness rests on these contracts:

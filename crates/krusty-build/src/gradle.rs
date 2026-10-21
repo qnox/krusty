@@ -762,26 +762,35 @@ mod tests {
         // A value-taking option introduced in 2.4.20 must consume its following token only under
         // the grammar of 2.4.20 and later. Under 2.4.0/2.4.10, the same token is an unknown -X option and
         // the following free -d remains visible to the plugin-owned destination check.
+        // Under 2.4.20 the option is one krusty does not implement, so the compile is left to
+        // kotlinc rather than failing the build.
         let _ = std::fs::remove_file(&log);
+        let _ = std::fs::remove_file(&fixture.probes);
         let release_boundary = build()
             .property("krusty.negative", "release-specific-argument-boundary")
             .tasks([":compiler:util:compileKotlin"])
-            .run();
-        assert!(
-            release_boundary.is_err(),
-            "release boundary probe succeeded"
-        );
+            .run_output();
         let release = krusty::kotlin_version::KotlinVersion::parse(&kgp)
             .unwrap_or_else(|| panic!("Kotlin Gradle plugin {kgp} is not a release version"));
         if release >= krusty::kotlin_version::KotlinVersion::V2_4_20 {
-            let invocation = single_invocation(&log);
-            assert!(has_pair(
-                &invocation,
-                "-Xescaping-functions",
-                "-d=forbidden"
-            ));
+            let output = release_boundary
+                .unwrap_or_else(|error| panic!("release boundary probe failed: {error}"));
+            let check = single_invocation(&fixture.probes);
+            assert!(has_pair(&check, "-Xescaping-functions", "-d=forbidden"));
+            assert_left_to_kotlinc(
+                &output,
+                ":compiler:util:compileKotlin",
+                &["krusty does not implement the kotlinc argument '-Xescaping-functions=-d=forbidden'"
+                    .to_string()],
+            );
+            assert!(
+                !log.exists(),
+                "kotlinc, not krusty, compiles a refused argument"
+            );
         } else {
-            let rendered = release_boundary.unwrap_err().to_string();
+            let rendered = release_boundary
+                .expect_err("release boundary probe succeeded")
+                .to_string();
             assert_eq!(
                 rendered
                     .lines()
@@ -1352,20 +1361,26 @@ error: warnings found and -Werror specified\n";
             assert!(root.join(class).is_file(), "missing {class}");
         }
 
+        // Through the `krustyCompile` aggregate too: it reaches the refused compile's kotlinc task,
+        // so `:model` is compiled (by kotlinc) rather than skipped with its replacement.
         let _ = std::fs::remove_file(log);
+        let _ = std::fs::remove_dir_all(root.join("model/build/classes/kotlin"));
         std::fs::create_dir_all(root.join("model/build/classes/java/main"))
             .expect("create empty Java output expected on the model classpath");
         let _ = std::fs::remove_file(&fixture.probes);
         let output = fixture
             .build()
             .property("krusty.negative", "compiler-plugin-before-krusty")
-            .tasks([":model:compileKotlin"])
+            .tasks(["krustyCompile"])
             .run_output()
             .unwrap_or_else(|error| panic!("a compiler plugin applied before krusty: {error}"));
         assert_assignment_left_to_kotlinc(&output, &fixture.probes, ":model:compileKotlin");
+        let text = std::fs::read_to_string(log).unwrap_or_default();
         assert!(
-            !log.exists(),
-            "kotlinc, not krusty, compiles a refused plugin request"
+            invocations(&text)
+                .iter()
+                .all(|run| !source_names(run).contains(&"Point.kt")),
+            "kotlinc, not krusty, compiles a refused plugin request: {text}"
         );
         assert!(root
             .join("model/build/classes/kotlin/main/model/Point$$serializer.class")
@@ -1747,7 +1762,7 @@ fun main() {
         _serial: std::sync::MutexGuard<'static, ()>,
         root: PathBuf,
         log: PathBuf,
-        /// The recording proxy's log of compiler-plugin checks, apart from the compiles in `log`.
+        /// The recording proxy's log of support checks, apart from the compiles in `log`.
         probes: PathBuf,
         proxy: PathBuf,
         plugin_project: PathBuf,
@@ -1969,11 +1984,11 @@ fun main() {
     }
 
     /// Assert that `task` was left to kotlinc because of the assignment compiler plugin: the build
-    /// reports exactly the refusal the krusty binary's plugin check printed for the assignment jar,
+    /// reports exactly the refusal the krusty binary's support check printed for the assignment jar,
     /// once. The Gradle cache prefix and artifact version vary by lane, so the exact jar path comes
     /// from the recorded check rather than from Gradle's output.
     fn assert_assignment_left_to_kotlinc(output: &str, probes: &Path, task: &str) {
-        let text = std::fs::read_to_string(probes).expect("compiler-plugin check log");
+        let text = std::fs::read_to_string(probes).expect("support check log");
         let mut assignments = invocations(&text)
             .iter()
             .flat_map(|args| {
@@ -1995,8 +2010,13 @@ fun main() {
         let refusal = PluginDiagnostic::Unsupported {
             plugin: assignments.remove(0),
         };
+        assert_left_to_kotlinc(output, task, &[refusal.message()]);
+    }
+
+    /// The build reports that `task` is left to kotlinc, followed by exactly `refusals`.
+    fn assert_left_to_kotlinc(output: &str, task: &str, refusals: &[String]) {
         let header = format!(
-            "krusty: task '{task}' is left to kotlinc: krusty does not implement a compiler plugin it requests"
+            "krusty: task '{task}' is left to kotlinc: krusty does not implement everything it requests"
         );
         let lines = output.lines().collect::<Vec<_>>();
         let at = lines
@@ -2011,7 +2031,11 @@ fun main() {
             .take_while(|line| line.starts_with("  "))
             .copied()
             .collect::<Vec<_>>();
-        assert_eq!(reported, [format!("  {}", refusal.message())], "{output}");
+        let expected = refusals
+            .iter()
+            .map(|refusal| format!("  {refusal}"))
+            .collect::<Vec<_>>();
+        assert_eq!(reported, expected, "{output}");
     }
 
     fn source_names(args: &[String]) -> Vec<&str> {
@@ -2072,7 +2096,7 @@ fun main() {
     ) {
         let quote = |value: &Path| value.display().to_string().replace('\'', "'\\''");
         let script = r#"#!/bin/sh
-if [ "$1" = compiler-plugins ]; then
+if [ "$1" = refusals ]; then
   {
     echo "----"
     printf '%s\n' "$@"
