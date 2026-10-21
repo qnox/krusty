@@ -636,6 +636,10 @@ roles consume either a separate receiver and one argument or the serialized para
 and one argument through the same representation path. Other layouts reject explicitly. This adds
 no declaration role or metadata wire format; the selected provider fact still owns the operation.
 
+The caller's nameless initializer context is a lowering fact as well. It is inherited through
+source lambdas, not named local functions, so an absent source callable spelling in an initializer
+does not reject an otherwise valid inline copy. This adds no metadata field or synthetic name.
+
 The target stdlib's exact zero-argument `CharSequence.trim(): CharSequence` extension is published
 with `CompilerIntrinsic::TextTrim` only after the provider authenticates the selected stdlib and
 its complete receiver, parameter, result and modifier shape. An identical ordinary dependency

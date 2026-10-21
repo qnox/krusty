@@ -6818,6 +6818,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   The file facade does not keep an implementation method for it. The copy is named from the
   caller's final placement (`caller$$inlined$callee$N`) only after lifted names exist; until then
   it has a private identity so it cannot collide with the declaration class.
+  An inline call inside a source lambda also retains whether its root executable context has no
+  source callable-name segment (for example an initializer). Lowering records that fact once and
+  inherits it through lambdas, including suspend lambdas, but resets it for named local functions.
+  An unnamed initializer lambda is therefore a valid caller of both source and dependency inline
+  bodies; a missing name on a named-function context still declines. No generated placeholder is
+  used as source provenance. Shared runtime regression: `inlineCallsInInitializerLambda.kt`.
   A local delegated property keeps the checker-selected declaration accessor plan across those
   copies. Kotlin emits that convention helper with the declaration's erased signature and reuses
   it across call-site type substitutions; common lowering therefore specializes the copied access

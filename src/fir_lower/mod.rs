@@ -222,6 +222,16 @@ pub(crate) fn lower_body_with_context(
     );
     let root_is_default = body.is_default_fragment();
     lowering.expansion_enclosure = root_enclosure(index, lowering.ir, declaration);
+    lowering.allows_empty_inline_caller_name = matches!(
+        lowering.expansion_enclosure,
+        Some(
+            crate::ir::IrEnclosure::Constructor { .. }
+                | crate::ir::IrEnclosure::File
+                | crate::ir::IrEnclosure::ClassInitializer(_)
+                | crate::ir::IrEnclosure::Classifier(_)
+                | crate::ir::IrEnclosure::PropertyAccessor { .. }
+        )
+    );
     lowering.inline_declaration = index
         .declaration_header(declaration)
         .filter(|header| header.flags.has(crate::fir::DeclarationFlags::INLINE))
@@ -367,6 +377,9 @@ struct BodyLowering<'a> {
     /// The declaration whose body or default fragment contains an inline expansion. Unlike
     /// `enclosure`, this retains a default fragment's lexical callable/constructor identity.
     expansion_enclosure: Option<crate::ir::IrEnclosure>,
+    /// A checked nameless root context, inherited through source lambdas but not named local
+    /// functions. Such a lambda legitimately has no source caller-name segment for inline copies.
+    allows_empty_inline_caller_name: bool,
     /// Checked source inline declaration whose body copies this nested callable and its locals.
     inline_declaration: Option<crate::ir::IrInlineDeclaration>,
     /// The values of this body that hold an inline parameter of that declaration.
@@ -673,6 +686,7 @@ impl<'a> BodyLowering<'a> {
             control_path: Vec::new(),
             enclosure: None,
             expansion_enclosure: None,
+            allows_empty_inline_caller_name: false,
             inline_declaration: None,
             inline_parameter_values: Default::default(),
             callables_reading_inline_parameters: Default::default(),

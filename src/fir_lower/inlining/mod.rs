@@ -308,8 +308,11 @@ impl BodyLowering<'_> {
                     | crate::ir::IrEnclosure::Classifier(_)
                     | crate::ir::IrEnclosure::PropertyAccessor { .. },
                 ) => String::new(),
-                // Function and lambda bodies always publish their source spelling. Decline the
-                // expansion if that checked provenance is absent instead of inventing one.
+                Some(crate::ir::IrEnclosure::Lambda(_)) if self.allows_empty_inline_caller_name => {
+                    String::new()
+                }
+                // A named function, or a lambda without a checked nameless root context, must
+                // retain its source spelling. Never invent one when that provenance is absent.
                 Some(crate::ir::IrEnclosure::Function(_) | crate::ir::IrEnclosure::Lambda(_)) => {
                     return None
                 }

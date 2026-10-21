@@ -1232,6 +1232,8 @@ impl BodyLowering<'_> {
         );
         nested.enclosure = declaration_enclosure;
         nested.expansion_enclosure = expansion_enclosure;
+        nested.allows_empty_inline_caller_name =
+            self.allows_empty_inline_caller_name && body.source_lambda().is_some();
         nested.inline_declaration = self.inline_declaration;
         nested.inline_parameter_values = inline_parameter_values;
         nested.suspend_context = suspend_context;
