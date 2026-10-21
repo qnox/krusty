@@ -5578,6 +5578,15 @@ non-inline callers, still reads the field directly. Test:
   provider normalization. This producer change does not enable ordinary-body or inline-accessor
   emission; those consumers remain separate work.
 
+## Declaration-owned list storage construction  🚧
+
+- Authenticate stdlib factory generic signatures at the provider boundary and freeze a typed
+  empty/singleton/packed storage plan. JVM alias expansion stays in the JVM provider.
+- Replace Native's factory spelling/physical-array matcher with consumption of that exact plan;
+  preserve singleton-array identity, readonly sharing and mutable copying through existing E2Es.
+- Validate actual JVM and all target-KLIB declarations plus malformed-contract negatives. The
+  inline-template branch still needs to use the same positive capability in its dependency graph.
+
 ## KLIB writer — krusty compiles a module to a Kotlin library  ◐
 
 A non-JVM dependency is distributed as a KLIB, and a dependent compilation reads its declarations

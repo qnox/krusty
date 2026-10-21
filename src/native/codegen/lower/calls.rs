@@ -1103,11 +1103,6 @@ impl BodyLowering<'_, '_, '_> {
                             .first()
                             .is_some_and(|ty| ty.non_null().is_reference_array());
                         if let Some(realized) =
-                            self.list_construction(signature, packs_a_vararg, args)
-                        {
-                            return realized;
-                        }
-                        if let Some(realized) =
                             self.map_construction(signature, packs_a_vararg, args)
                         {
                             return realized;

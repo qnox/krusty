@@ -75,6 +75,7 @@ pub(super) fn realize_package_function(
         &name,
         compiler_builtin_owner,
         function,
+        Some(crate::types::type_name("kotlin/collections/ArrayList")),
     );
     if compiler_builtin_owner {
         if let Some(intrinsic) = crate::libraries::stdlib_klib_intrinsic(signature) {

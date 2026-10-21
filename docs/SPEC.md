@@ -13808,6 +13808,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `IndexedValue.hashCode` wraps like Kotlin's `Int`. A string iterator is linear in the string's
   length.
   Tests: `tests/native_runtime_e2e.rs` (drivers under `tests/native_runtime/`).
+- **List factory storage is a provider-authenticated declaration plan.** The selected platform
+  stdlib's exact `emptyList`, `listOf`, `mutableListOf` and `arrayListOf` declarations publish empty,
+  singleton or packed storage, with readonly and mutable forms distinct. The full generic contract
+  has one non-reified formal bounded by `Any?`, used unchanged in the declared result and operands;
+  a packed operand is the declaration's non-null `Array<out T>` vararg at slot zero. Nullable or
+  changed results, defaults, receivers, contexts and incompatible modifiers do not acquire a plan.
+  The JVM provider supplies the expanded `ArrayList` alias identity; core sees no Java class name.
+  Native consumes only this plan: a singleton array remains one list element, readonly packed
+  storage wraps its array and mutable storage copies it. Malformed operand counts reject rather
+  than retry by name or physical array shape. Other backends retain their ordinary selected call.
+  This storage fact alone does not widen dependency-body root admission. Tests:
+  `builtin_top_level_realization::tests::list_storage_construction_*`,
+  `provider_normalization_tests::list_storage_plans_use_the_selected_stdlib_and_its_array_list_alias`,
+  `klib_libraries::tests::builtin_operations::target_stdlib_list_factories_publish_their_exact_storage_plans`
+  and `tests/native_lists_e2e.rs`.
 - **A native list is Kotlin's collection interfaces, and equals any `List`.** The growable list is
   `kotlin.collections.ArrayList` and implements `MutableList`, `List`, `MutableCollection`,
   `Collection`, `MutableIterable`, `Iterable` and `RandomAccess`, each an interface descriptor an
