@@ -481,7 +481,10 @@ fn first_free_slot(ir: &IrFile, roots: &[ExprId], frame: &Frame) -> u32 {
             IrExpr::GetValue(index)
             | IrExpr::SetValue { var: index, .. }
             | IrExpr::Variable { index, .. } => Some(*index),
-            IrExpr::Checked(crate::ir::IrCheckedOperation::RangeLoop { variable, .. }) => {
+            IrExpr::Checked(checked_op)
+                if let crate::ir::IrCheckedOperation::RangeLoop { variable, .. } =
+                    &**checked_op =>
+            {
                 Some(*variable)
             }
             IrExpr::Try { catches, .. } => catches.iter().map(|catch| catch.var).max(),
@@ -656,19 +659,19 @@ impl Frame {
 fn is_self_call(ir: &IrFile, call: ExprId, frame: &Frame) -> bool {
     match ir.expr(call) {
         IrExpr::Call {
-            callee:
-                Callee::LocalWithDefaults {
-                    function: target,
-                    defaults,
-                }
-                | Callee::ClassStaticWithDefaults {
-                    function: target,
-                    defaults,
-                    ..
-                },
+            callee: call_callee,
             dispatch_receiver: None,
             args,
-        } => {
+        } if let Callee::LocalWithDefaults {
+            function: target,
+            defaults,
+        }
+        | Callee::ClassStaticWithDefaults {
+            function: target,
+            defaults,
+            ..
+        } = &**call_callee =>
+        {
             frame.receiver.is_none()
                 && *target == frame.function
                 && args.len() + defaults.len() == frame.capture_prefix + frame.count
@@ -684,14 +687,14 @@ fn is_self_call(ir: &IrFile, call: ExprId, frame: &Frame) -> bool {
         // declaration and the same frame — the callee identity says so, not the owner's spelling —
         // and recognizing only `Local` left that shape recursing until `StackOverflowError`.
         IrExpr::Call {
-            callee:
-                Callee::Local(target)
-                | Callee::ClassStatic {
-                    function: target, ..
-                },
+            callee: call_callee,
             dispatch_receiver: None,
             args,
-        } => {
+        } if let Callee::Local(target)
+        | Callee::ClassStatic {
+            function: target, ..
+        } = &**call_callee =>
+        {
             frame.receiver.is_none()
                 && *target == frame.function
                 && args.len() == frame.capture_prefix + frame.count
@@ -886,12 +889,12 @@ fn passes_its_own_captures(ir: &IrFile, args: &[ExprId], frame: &Frame) -> bool 
 fn self_call_arguments(ir: &IrFile, call: ExprId) -> Vec<Option<ExprId>> {
     match ir.expr(call) {
         IrExpr::Call {
-            callee:
-                Callee::LocalWithDefaults { defaults, .. }
-                | Callee::ClassStaticWithDefaults { defaults, .. },
+            callee: call_callee,
             args,
             ..
-        } => {
+        } if let Callee::LocalWithDefaults { defaults, .. }
+        | Callee::ClassStaticWithDefaults { defaults, .. } = &**call_callee =>
+        {
             let mut supplied = args.iter().copied();
             (0..args.len() + defaults.len())
                 .map(|position| {
@@ -1204,7 +1207,7 @@ mod tests {
     fn returned_self_call(ir: &mut IrFile) -> ExprId {
         let argument = ir.add_expr(IrExpr::GetValue(0));
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(FUNCTION),
+            callee: Box::new(Callee::Local(FUNCTION)),
             dispatch_receiver: None,
             args: vec![argument],
         });
@@ -1300,7 +1303,7 @@ mod tests {
         let mut ir = file();
         let argument = ir.add_expr(IrExpr::GetValue(0));
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(FUNCTION),
+            callee: Box::new(Callee::Local(FUNCTION)),
             dispatch_receiver: None,
             args: vec![argument],
         });
@@ -1352,7 +1355,7 @@ mod tests {
         let mut ir = file();
         let argument = ir.add_expr(IrExpr::GetValue(0));
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(FUNCTION),
+            callee: Box::new(Callee::Local(FUNCTION)),
             dispatch_receiver: None,
             args: vec![argument],
         });
@@ -1402,7 +1405,7 @@ mod tests {
         let mut ir = file();
         let argument = ir.add_expr(IrExpr::GetValue(0));
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(FUNCTION),
+            callee: Box::new(Callee::Local(FUNCTION)),
             dispatch_receiver: None,
             args: vec![argument],
         });
@@ -1432,7 +1435,7 @@ mod tests {
         });
         let read = ir.add_expr(IrExpr::GetValue(1));
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(FUNCTION),
+            callee: Box::new(Callee::Local(FUNCTION)),
             dispatch_receiver: None,
             args: vec![read],
         });
@@ -1467,7 +1470,7 @@ mod tests {
         });
         ir.suspend_funs.push(suspendee);
         let suspension = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(suspendee),
+            callee: Box::new(Callee::Local(suspendee)),
             dispatch_receiver: None,
             args: Vec::new(),
         });
@@ -1479,7 +1482,7 @@ mod tests {
         });
         let read = ir.add_expr(IrExpr::GetValue(1));
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(FUNCTION),
+            callee: Box::new(Callee::Local(FUNCTION)),
             dispatch_receiver: None,
             args: vec![read],
         });
@@ -1505,13 +1508,13 @@ mod tests {
     fn a_self_call_whose_argument_suspends_across_a_unit_boundary_stays_a_call() {
         let mut ir = file();
         let suspension = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(FUNCTION),
+            callee: Box::new(Callee::Local(FUNCTION)),
             dispatch_receiver: None,
             args: Vec::new(),
         });
         ir.suspend_calls.insert(suspension, Ty::Int);
         let nested = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(FUNCTION),
+            callee: Box::new(Callee::Local(FUNCTION)),
             dispatch_receiver: None,
             args: vec![suspension],
         });
@@ -1542,7 +1545,7 @@ mod tests {
         });
         ir.suspend_funs.push(suspendee);
         let suspension = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(suspendee),
+            callee: Box::new(Callee::Local(suspendee)),
             dispatch_receiver: None,
             args: Vec::new(),
         });
@@ -1554,7 +1557,7 @@ mod tests {
         });
         let argument = ir.add_expr(IrExpr::GetValue(0));
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(FUNCTION),
+            callee: Box::new(Callee::Local(FUNCTION)),
             dispatch_receiver: None,
             args: vec![argument],
         });
@@ -1717,7 +1720,7 @@ mod tests {
         ir.functions[FUNCTION as usize].ret = Ty::Unit;
         let argument = ir.add_expr(IrExpr::GetValue(0));
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(FUNCTION),
+            callee: Box::new(Callee::Local(FUNCTION)),
             dispatch_receiver: None,
             args: vec![argument],
         });

@@ -10,12 +10,12 @@ pub(super) fn to_string_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &U
     let new_id = clone_below_representation_wrapper(ir, id);
     let u = under.get(&x).map(|t| erase(t, under)).unwrap_or(Ty::Error);
     ir.exprs[id as usize] = IrExpr::Call {
-        callee: Callee::Static {
+        callee: Box::new(Callee::Static {
             owner: x,
             name: "toString-impl".to_string(),
             descriptor: format!("({})Ljava/lang/String;", desc(&u)),
             inline: InlineKind::None,
-        },
+        }),
         dispatch_receiver: None,
         args: vec![new_id],
     };
@@ -31,12 +31,12 @@ pub(super) fn box_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) 
     let d = desc(&u);
     let owner_rendered = x.render();
     ir.exprs[id as usize] = IrExpr::Call {
-        callee: Callee::Static {
+        callee: Box::new(Callee::Static {
             owner: x,
             name: "box-impl".to_string(),
             descriptor: format!("({d})L{owner_rendered};"),
             inline: InlineKind::None,
-        },
+        }),
         dispatch_receiver: None,
         args: vec![new_id],
     };
@@ -85,12 +85,12 @@ pub(super) fn box_wrap_nullable(
     let owner_rendered = x.render();
     let boxed = ir.exprs.len() as ExprId;
     ir.exprs.push(IrExpr::Call {
-        callee: Callee::Static {
+        callee: Box::new(Callee::Static {
             owner: x,
             name: "box-impl".to_string(),
             descriptor: format!("({d})L{owner_rendered};"),
             inline: InlineKind::None,
-        },
+        }),
         dispatch_receiver: None,
         args: vec![get_for_box],
     });

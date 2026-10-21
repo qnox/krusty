@@ -124,24 +124,24 @@ pub(crate) fn referenced_classifier_names(ir: &IrFile) -> Vec<TypeName> {
                 collect_classifier_names(*array_type, &mut out)
             }
             IrExpr::Call {
-                callee:
-                    Callee::CrossFile { params, ret, .. }
-                    | Callee::ModuleWithDefaults { params, ret, .. },
+                callee: call_callee,
                 ..
-            } => {
+            } if let Callee::CrossFile { params, ret, .. }
+            | Callee::ModuleWithDefaults { params, ret, .. } = &**call_callee =>
+            {
                 params
                     .iter()
                     .for_each(|ty| collect_classifier_names(*ty, &mut out));
                 collect_classifier_names(*ret, &mut out);
             }
             IrExpr::Call {
-                callee:
-                    Callee::Virtual {
-                        params: Some((parameters, ret)),
-                        ..
-                    },
+                callee: call_callee,
                 ..
-            } => {
+            } if let Callee::Virtual {
+                params: Some((parameters, ret)),
+                ..
+            } = &**call_callee =>
+            {
                 parameters
                     .iter()
                     .for_each(|ty| collect_classifier_names(*ty, &mut out));

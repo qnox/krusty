@@ -29,22 +29,25 @@ pub(super) fn move_lifted_declarations_to_class(
     }
     for expression in &mut ir.exprs {
         let IrExpr::Call {
-            callee:
-                Callee::ClassStatic {
-                    owner: called,
-                    function,
-                }
-                | Callee::ClassStaticWithDefaults {
-                    owner: called,
-                    function,
-                    ..
-                }
-                | Callee::ClassStaticDefault {
-                    owner: called,
-                    function,
-                },
+            callee: call_callee,
             ..
         } = expression
+        else {
+            continue;
+        };
+        let (Callee::ClassStatic {
+            owner: called,
+            function,
+        }
+        | Callee::ClassStaticWithDefaults {
+            owner: called,
+            function,
+            ..
+        }
+        | Callee::ClassStaticDefault {
+            owner: called,
+            function,
+        }) = &mut **call_callee
         else {
             continue;
         };

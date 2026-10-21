@@ -149,7 +149,10 @@ fn accessor_plan(
 /// in the arena reaches here — and `Err(Some(reason))` where it is one and the shape is not
 /// realizable, so the decline can name it.
 fn property_plan(ir: &IrFile, id: ExprId) -> Result<PropertyPlan, Option<String>> {
-    let IrExpr::Checked(IrCheckedOperation::PropertyReference {
+    let IrExpr::Checked(checked_op) = ir.expr(id) else {
+        return Err(None);
+    };
+    let IrCheckedOperation::PropertyReference {
         target:
             crate::fir::FirPropertyReferenceTarget::External {
                 getter,
@@ -164,7 +167,7 @@ fn property_plan(ir: &IrFile, id: ExprId) -> Result<PropertyPlan, Option<String>
         mutable,
         substitutions: _,
         adaptation,
-    }) = ir.expr(id)
+    } = &**checked_op
     else {
         return Err(None);
     };
@@ -233,15 +236,17 @@ fn build_property(ir: &mut IrFile, plan: PropertyPlan) -> DependencyProperty {
     let leading = usize::from(receiver.is_some());
     let read = {
         let operand = receiver.map(|_| ir.add_expr(IrExpr::GetValue(0)));
-        let value = ir.add_expr(IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
-            target: getter.property,
-            dispatch: getter.dispatch,
-            receiver: operand,
-            arguments: Vec::new(),
-            parameters: getter.parameters,
-            result: getter.result,
-            source_receiver: None,
-        }));
+        let value = ir.add_expr(IrExpr::Checked(Box::new(
+            IrCheckedOperation::ExternalPropertyRead {
+                target: getter.property,
+                dispatch: getter.dispatch,
+                receiver: operand,
+                arguments: Vec::new(),
+                parameters: getter.parameters,
+                result: getter.result,
+                source_receiver: None,
+            },
+        )));
         let returned = ir.add_expr(IrExpr::Return(Some(value)));
         ir.add_expr(IrExpr::Block {
             stmts: vec![returned],
@@ -261,15 +266,17 @@ fn build_property(ir: &mut IrFile, plan: PropertyPlan) -> DependencyProperty {
     let written = setter.map(|setter| {
         let operand = receiver.map(|_| ir.add_expr(IrExpr::GetValue(0)));
         let value = ir.add_expr(IrExpr::GetValue(leading as u32));
-        let write = ir.add_expr(IrExpr::Checked(IrCheckedOperation::ExternalPropertyWrite {
-            target: setter.property,
-            dispatch: setter.dispatch,
-            receiver: operand,
-            arguments: vec![value],
-            parameters: setter.parameters.clone(),
-            result: setter.result,
-            source_receiver: None,
-        }));
+        let write = ir.add_expr(IrExpr::Checked(Box::new(
+            IrCheckedOperation::ExternalPropertyWrite {
+                target: setter.property,
+                dispatch: setter.dispatch,
+                receiver: operand,
+                arguments: vec![value],
+                parameters: setter.parameters.clone(),
+                result: setter.result,
+                source_receiver: None,
+            },
+        )));
         let body = ir.add_expr(IrExpr::Block {
             stmts: vec![write],
             value: None,

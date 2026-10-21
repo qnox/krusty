@@ -178,10 +178,9 @@ impl Emitter<'_> {
                 let inline_producer = matches!(
                     self.ir.expr(*arg),
                     IrExpr::Call {
-                        callee: crate::ir::Callee::Static { inline, .. },
+                        callee: call_callee,
                         ..
-                    } if inline.can_inline()
-                );
+                    } if matches!(&**call_callee, crate::ir::Callee::Static { inline, .. } if inline.can_inline()));
                 // Without a recorded result the producer's own value type is the slot. Only an
                 // erased top is the generic-result contract; a narrower slot is a smart cast
                 // (`p.type` proven `Ref.Cls`), which this coercion itself checks.

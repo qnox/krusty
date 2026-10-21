@@ -284,7 +284,7 @@ impl BodyLowering<'_, '_, '_> {
         }
         let singleton_dispatch = linked.singleton_dispatch;
         let call = self.ir.add_expr(IrExpr::Call {
-            callee: linked.callee,
+            callee: Box::new(linked.callee),
             dispatch_receiver,
             args,
         });

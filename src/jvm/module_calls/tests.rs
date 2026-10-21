@@ -12,7 +12,7 @@ use crate::types::{type_name, Ty};
 fn dependency_super_call(ir: &mut IrFile, target: ExternalCallableId) -> crate::ir::ExprId {
     let receiver = ir.add_expr(IrExpr::GetValue(0));
     ir.add_expr(IrExpr::Call {
-        callee: Callee::Super {
+        callee: Box::new(Callee::Super {
             owner: type_name("fixture/Legacy"),
             dispatch_owner: type_name("fixture/Child"),
             enclosing_dispatch: false,
@@ -26,7 +26,7 @@ fn dependency_super_call(ir: &mut IrFile, target: ExternalCallableId) -> crate::
             declaration: Some(ResolvedFunctionOverrideTarget::External(target)),
             defaults: Vec::new(),
             source_member: None,
-        },
+        }),
         dispatch_receiver: Some(receiver),
         args: Vec::new(),
     })
@@ -93,16 +93,19 @@ fn a_dependency_super_call_uses_its_frozen_nonvirtual_target() {
     )
     .expect("the frozen holder realizes the super call");
     let IrExpr::Call {
-        callee:
-            Callee::Static {
-                owner,
-                name,
-                descriptor,
-                ..
-            },
+        callee: call_callee,
         dispatch_receiver: Some(_),
         args,
     } = ir.expr(call)
+    else {
+        panic!("the legacy super call was not realized as its holder static");
+    };
+    let Callee::Static {
+        owner,
+        name,
+        descriptor,
+        ..
+    } = &**call_callee
     else {
         panic!("the legacy super call was not realized as its holder static");
     };

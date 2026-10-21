@@ -1311,35 +1311,37 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 value,
             } => self.field_write(receiver, class, index, value)?,
             IrExpr::SetStatic { index, value } => self.static_write(index, value)?,
-            IrExpr::Checked(IrCheckedOperation::PropertyWrite {
-                target,
-                dispatch_receiver,
-                extension_receiver,
-                context_arguments,
-                value,
-                ..
-            }) => {
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::PropertyWrite {
+                    target,
+                    dispatch_receiver,
+                    extension_receiver,
+                    context_arguments,
+                    value,
+                    ..
+                } = &**checked_op =>
+            {
                 if extension_receiver.is_some() || !context_arguments.is_empty() {
                     self.receiver_property(
-                        &target,
-                        dispatch_receiver,
-                        extension_receiver,
-                        &context_arguments,
-                        Some(value),
+                        target,
+                        *dispatch_receiver,
+                        *extension_receiver,
+                        context_arguments,
+                        Some(*value),
                     )?;
                     return Ok(());
                 }
                 // A property declared in another file of the module has no layout here; its
                 // declaring file exports the entry points of one shared plan.
-                if self.file.is_imported_property(&target) {
-                    return self.module_property_write(&target, dispatch_receiver, value);
+                if self.file.is_imported_property(target) {
+                    return self.module_property_write(target, *dispatch_receiver, *value);
                 }
-                match self.checked_property(&target) {
+                match self.checked_property(target) {
                     Ok(objects::CheckedProperty::Member(class, index)) => {
-                        self.property_write(class, index, dispatch_receiver, value)?
+                        self.property_write(class, index, *dispatch_receiver, *value)?
                     }
                     Ok(objects::CheckedProperty::TopLevel) => {
-                        self.top_level_write(&target, value)?;
+                        self.top_level_write(target, *value)?;
                     }
                     Err(reason) => return Err(reason),
                 }
@@ -1800,39 +1802,54 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             } => self.enclosing_instance(receiver, inner),
             // `name` and `ordinal` are `kotlin.Enum`'s, and an enum constant answers both from the
             // storage that base contributes.
-            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
-                target,
-                receiver: Some(receiver),
-                ..
-            }) if self.enum_member_name(target).is_some() => {
-                let member = self.enum_member_name(target).expect("checked by the guard");
-                self.enum_member(member, receiver)
-            }
-            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
-                target,
-                receiver: Some(receiver),
-                ..
-            }) if self.reference_property_role(target).is_some() => self
-                .reference_property(target, receiver)
-                .expect("the selected getter role was checked by the guard"),
-            // `k.simpleName` / `k.qualifiedName`: the descriptor's own Kotlin name.
-            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
-                target,
-                receiver: Some(receiver),
-                ..
-            }) if self.class_name_accessor(target).is_some() => {
-                let symbol = self
-                    .class_name_accessor(target)
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    receiver: Some(receiver),
+                    ..
+                } = &**checked_op
+                    && self.enum_member_name(*target).is_some() =>
+            {
+                let member = self
+                    .enum_member_name(*target)
                     .expect("checked by the guard");
-                self.class_name(symbol, receiver)
+                self.enum_member(member, *receiver)
+            }
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    receiver: Some(receiver),
+                    ..
+                } = &**checked_op
+                    && self.reference_property_role(*target).is_some() =>
+            {
+                self.reference_property(*target, *receiver)
+                    .expect("the selected getter role was checked by the guard")
+            }
+            // `k.simpleName` / `k.qualifiedName`: the descriptor's own Kotlin name.
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    receiver: Some(receiver),
+                    ..
+                } = &**checked_op
+                    && self.class_name_accessor(*target).is_some() =>
+            {
+                let symbol = self
+                    .class_name_accessor(*target)
+                    .expect("checked by the guard");
+                self.class_name(symbol, *receiver)
             }
             // `e.message`: the one field a runtime `Throwable` carries.
-            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
-                target,
-                receiver: Some(receiver),
-                ..
-            }) if self.throwable_field(target).is_some() => {
-                let symbol = self.throwable_field(target).expect("just matched");
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    receiver: Some(receiver),
+                    ..
+                } = &**checked_op
+                    && self.throwable_field(*target).is_some() =>
+            {
+                let symbol = self.throwable_field(*target).expect("just matched");
                 if self.file.overrides_a_throwable_accessor {
                     return Err(declined!(
                         "a read of `Throwable.{}` in a file that overrides one",
@@ -1843,85 +1860,109 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         }
                     ));
                 }
-                self.throwable_field_read(symbol, receiver)
+                self.throwable_field_read(symbol, *receiver)
             }
             // `cs.length` where the receiver is typed `CharSequence`: a string, on this target.
-            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
-                target,
-                receiver: Some(receiver),
-                ..
-            }) if self.is_text_length(target) => self.text_length(receiver),
-            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
-                target,
-                receiver: Some(receiver),
-                ..
-            }) if self.external_getter_is_indices(target) => self.indices(receiver),
-            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
-                target,
-                receiver: Some(receiver),
-                result,
-                ..
-            }) if self.range_getter(target, receiver).is_some() => {
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    receiver: Some(receiver),
+                    ..
+                } = &**checked_op
+                    && self.is_text_length(*target) =>
+            {
+                self.text_length(*receiver)
+            }
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    receiver: Some(receiver),
+                    ..
+                } = &**checked_op
+                    && self.external_getter_is_indices(*target) =>
+            {
+                self.indices(*receiver)
+            }
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    receiver: Some(receiver),
+                    result,
+                    ..
+                } = &**checked_op
+                    && self.range_getter(*target, *receiver).is_some() =>
+            {
                 let (owner, name) = self
-                    .range_getter(target, receiver)
+                    .range_getter(*target, *receiver)
                     .expect("checked by the guard");
-                self.range_property_member(owner, &name, receiver, result)
+                self.range_property_member(owner, &name, *receiver, *result)
                     .expect("a range member, by the guard")
             }
-            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
-                target,
-                receiver: Some(receiver),
-                ..
-            }) if self.lazy_getter(target, receiver).is_some()
-                || self.pair_getter(target, receiver).is_some() =>
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    receiver: Some(receiver),
+                    ..
+                } = &**checked_op
+                    && (self.lazy_getter(*target, *receiver).is_some()
+                        || self.pair_getter(*target, *receiver).is_some()) =>
             {
                 let name = self
-                    .lazy_getter(target, receiver)
-                    .or_else(|| self.pair_getter(target, receiver))
+                    .lazy_getter(*target, *receiver)
+                    .or_else(|| self.pair_getter(*target, *receiver))
                     .expect("checked by the guard");
-                match self.list_property_member(&name, receiver, any()) {
+                match self.list_property_member(&name, *receiver, any()) {
                     Some(realized) => realized,
                     None => Err(declined!("`{name}` of a receiver that answers none of it")),
                 }
             }
-            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
-                target,
-                receiver: Some(receiver),
-                ..
-            }) if self.indexed_value_getter(target, receiver).is_some() => {
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    receiver: Some(receiver),
+                    ..
+                } = &**checked_op
+                    && self.indexed_value_getter(*target, *receiver).is_some() =>
+            {
                 let name = self
-                    .indexed_value_getter(target, receiver)
+                    .indexed_value_getter(*target, *receiver)
                     .expect("checked by the guard");
                 let answer = lists::indexed_value_getter_ty(&name);
-                match self.list_property_member(&name, receiver, answer) {
+                match self.list_property_member(&name, *receiver, answer) {
                     Some(realized) => realized,
                     None => Err(declined!(
                         "`{name}` of a receiver that is not an indexed value"
                     )),
                 }
             }
-            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
-                target,
-                receiver: Some(receiver),
-                ..
-            }) if self.list_getter(target, receiver).is_some() => {
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    receiver: Some(receiver),
+                    ..
+                } = &**checked_op
+                    && self.list_getter(*target, *receiver).is_some() =>
+            {
                 let name = self
-                    .list_getter(target, receiver)
+                    .list_getter(*target, *receiver)
                     .expect("checked by the guard");
-                match self.list_property_member(&name, receiver, Ty::Int) {
+                match self.list_property_member(&name, *receiver, Ty::Int) {
                     Some(realized) => realized,
                     None => Err(declined!("`{name}` of a receiver that is not a collection")),
                 }
             }
-            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
-                target,
-                receiver: Some(receiver),
-                ..
-            }) if self.map_getter(target, receiver).is_some() => {
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    receiver: Some(receiver),
+                    ..
+                } = &**checked_op
+                    && self.map_getter(*target, *receiver).is_some() =>
+            {
                 let property = self
-                    .map_getter(target, receiver)
+                    .map_getter(*target, *receiver)
                     .expect("checked by the guard");
-                match self.map_property_member(property, receiver, property.answer()) {
+                match self.map_property_member(property, *receiver, property.answer()) {
                     Some(realized) => realized,
                     None => Err(declined!(
                         "`{}` of a receiver that is not a map",
@@ -1929,34 +1970,38 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     )),
                 }
             }
-            IrExpr::Checked(IrCheckedOperation::PropertyRead {
-                target,
-                dispatch_receiver,
-                extension_receiver,
-                context_arguments,
-                ..
-            }) => {
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::PropertyRead {
+                    target,
+                    dispatch_receiver,
+                    extension_receiver,
+                    context_arguments,
+                    ..
+                } = &**checked_op =>
+            {
                 if extension_receiver.is_some() || !context_arguments.is_empty() {
                     return self.receiver_property(
-                        &target,
-                        dispatch_receiver,
-                        extension_receiver,
-                        &context_arguments,
+                        target,
+                        *dispatch_receiver,
+                        *extension_receiver,
+                        context_arguments,
                         None,
                     );
                 }
-                if self.file.is_imported_property(&target) {
-                    return self.module_property_read(&target, dispatch_receiver);
+                if self.file.is_imported_property(target) {
+                    return self.module_property_read(target, *dispatch_receiver);
                 }
-                match self.checked_property(&target) {
+                match self.checked_property(target) {
                     Ok(objects::CheckedProperty::Member(class, index)) => {
-                        self.property_read(class, index, dispatch_receiver)
+                        self.property_read(class, index, *dispatch_receiver)
                     }
-                    Ok(objects::CheckedProperty::TopLevel) => self.top_level_read(&target),
+                    Ok(objects::CheckedProperty::TopLevel) => self.top_level_read(target),
                     Err(reason) => Err(reason),
                 }
             }
-            IrExpr::Checked(IrCheckedOperation::PropertyReference { .. }) => {
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::PropertyReference { .. } = &**checked_op =>
+            {
                 self.property_reference(id)
             }
             IrExpr::LocalDelegateAccess(access) => self.local_delegate_access(access),
@@ -1964,16 +2009,22 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             IrExpr::KClassLiteral {
                 classifier, value, ..
             } => self.class_literal(classifier, value),
-            IrExpr::Checked(IrCheckedOperation::RangeConstruction {
-                operation,
-                start,
-                start_type,
-                end,
-                end_type,
-                result,
-            }) => self.range_construction(operation, start, start_type, end, end_type, result),
-            IrExpr::Checked(IrCheckedOperation::IllegalProgressionStep { step }) => {
-                self.illegal_progression_step(step)
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::RangeConstruction {
+                    operation,
+                    start,
+                    start_type,
+                    end,
+                    end_type,
+                    result,
+                } = &**checked_op =>
+            {
+                self.range_construction(*operation, *start, *start_type, *end, *end_type, *result)
+            }
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::IllegalProgressionStep { step } = &**checked_op =>
+            {
+                self.illegal_progression_step(*step)
             }
             IrExpr::LateinitCheck { operand, name } => self.lateinit_check(operand, &name),
             IrExpr::Throw { operand } => self.throw(operand),
@@ -1990,8 +2041,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             | IrExpr::Break { .. }
             | IrExpr::Continue { .. }
             | IrExpr::SetField { .. }
-            | IrExpr::SetStatic { .. }
-            | IrExpr::Checked(IrCheckedOperation::PropertyWrite { .. }) => {
+            | IrExpr::SetStatic { .. } => {
+                self.statement(id)?;
+                Ok(None)
+            }
+            IrExpr::Checked(ref checked_op)
+                if matches!(&**checked_op, IrCheckedOperation::PropertyWrite { .. }) =>
+            {
                 self.statement(id)?;
                 Ok(None)
             }
@@ -2010,12 +2066,18 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// declining CALL already states its callee.
     fn describe_declined(&self, node: &IrExpr) -> String {
         let named = match node {
-            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead { target, .. }) => self
-                .external_property_name(*target)
-                .map(|name| ("read", name)),
-            IrExpr::Checked(IrCheckedOperation::ExternalPropertyWrite { target, .. }) => self
-                .external_property_name(*target)
-                .map(|name| ("write", name)),
+            IrExpr::Checked(checked_op)
+                if let IrCheckedOperation::ExternalPropertyRead { target, .. } = &**checked_op =>
+            {
+                self.external_property_name(*target)
+                    .map(|name| ("read", name))
+            }
+            IrExpr::Checked(checked_op)
+                if let IrCheckedOperation::ExternalPropertyWrite { target, .. } = &**checked_op =>
+            {
+                self.external_property_name(*target)
+                    .map(|name| ("write", name))
+            }
             _ => None,
         };
         match named {

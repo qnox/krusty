@@ -114,16 +114,17 @@ impl Emitter<'_> {
                 .iter()
                 .any(|&capture| self.must_spill_across(capture)),
             IrExpr::Call {
-                callee:
-                    Callee::Static {
-                        owner,
-                        name,
-                        descriptor,
-                        inline,
-                    },
+                callee: call_callee,
                 dispatch_receiver,
                 args,
-            } if inline.can_inline() => {
+            } if let Callee::Static {
+                owner,
+                name,
+                descriptor,
+                inline,
+            } = &**call_callee
+                && inline.can_inline() =>
+            {
                 self.bodies
                     .body(&owner.render(), name, descriptor)
                     .is_some_and(|body| !body.handlers.is_empty())

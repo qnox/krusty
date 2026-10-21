@@ -25,13 +25,17 @@ fn selected_call_ledger(ir: &IrFile, root: crate::ir::ExprId) -> Vec<SelectedCal
                 });
             }
             IrExpr::Call {
-                callee: Callee::Local(target),
+                callee: call_callee,
                 ..
-            } => ledger.push(SelectedCall::Local(*target)),
+            } if let Callee::Local(target) = &**call_callee => {
+                ledger.push(SelectedCall::Local(*target))
+            }
             IrExpr::Call {
-                callee: Callee::External { target, .. },
+                callee: call_callee,
                 ..
-            } => ledger.push(SelectedCall::External(*target)),
+            } if let Callee::External { target, .. } = &**call_callee => {
+                ledger.push(SelectedCall::External(*target))
+            }
             _ => {}
         }
         let mut children = Vec::new();

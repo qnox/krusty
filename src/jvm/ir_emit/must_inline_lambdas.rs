@@ -17,8 +17,7 @@ pub(super) fn splice_called_impls(ir: &IrFile) -> crate::fx_hash::HashSet<u32> {
                 ..
             } => matches!(
                 &ir.exprs[*body as usize],
-                IrExpr::Call { callee: Callee::Local(f), .. } if f == impl_fn
-            )
+                IrExpr::Call { callee: call_callee, .. } if matches!(&**call_callee, Callee::Local(f) if *f == *impl_fn))
             .then_some(*impl_fn),
             _ => None,
         })
@@ -43,14 +42,16 @@ pub fn mark_must_inline_lambdas(ir: &mut IrFile) -> Result<(), MissingInlinePara
         let call = u32::try_from(i).expect("IR expression index exceeds ExprId");
         let args = match &ir.exprs[i] {
             IrExpr::Call {
-                callee:
-                    Callee::Static {
-                        inline: crate::libraries::InlineKind::MustInline,
-                        ..
-                    },
+                callee: call_callee,
                 args,
                 ..
-            } => args.clone(),
+            } if let Callee::Static {
+                inline: crate::libraries::InlineKind::MustInline,
+                ..
+            } = &**call_callee =>
+            {
+                args.clone()
+            }
             IrExpr::Call { args, .. } if ir.module_inline_calls.contains(&call) => args.clone(),
             _ => match ir.compiled_inline_operands(call) {
                 Some(operands) => operands.arguments,
@@ -109,7 +110,9 @@ fn jumps_out_of_caller_loop(ir: &IrFile, body: u32) -> bool {
                 loops.pop();
                 escaped
             }
-            IrExpr::Checked(crate::ir::IrCheckedOperation::RangeLoop { label, .. }) => {
+            IrExpr::Checked(checked_op)
+                if let crate::ir::IrCheckedOperation::RangeLoop { label, .. } = &**checked_op =>
+            {
                 loops.push(Some(label.clone()));
                 let escaped = children_escape(ir, expression, loops);
                 loops.pop();
@@ -157,7 +160,7 @@ mod tests {
             inline_body: Some(body),
         });
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(impl_fn),
+            callee: Box::new(Callee::Local(impl_fn)),
             dispatch_receiver: None,
             args: vec![lambda],
         });

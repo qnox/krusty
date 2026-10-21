@@ -81,7 +81,11 @@ fn leaves_non_locally(ir: &IrFile, expression: ExprId, loops: &mut Vec<String>) 
             ..
         } => return leaves_non_locally(ir, *body, loops),
         IrExpr::While { label, .. } => Some(label.clone().unwrap_or_default()),
-        IrExpr::Checked(IrCheckedOperation::RangeLoop { label, .. }) => Some(label.clone()),
+        IrExpr::Checked(checked_op)
+            if let IrCheckedOperation::RangeLoop { label, .. } = &**checked_op =>
+        {
+            Some(label.clone())
+        }
         _ => None,
     };
     let entered = label.is_some();

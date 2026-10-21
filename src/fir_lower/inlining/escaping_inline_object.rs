@@ -71,17 +71,19 @@ fn anonymous_type_arguments(ir: &crate::ir::IrFile, function: u32) -> Vec<TypeNa
             continue;
         }
         if let IrExpr::Call {
-            callee: crate::ir::Callee::External { substitutions, .. },
+            callee: call_callee,
             ..
         } = ir.expr(expression)
         {
-            for substitution in substitutions {
-                if let TyKind::Obj(name, _) = substitution.value.non_null().kind() {
-                    if ir
-                        .class_id_by_name(name)
-                        .is_some_and(|class| ir.classes[class as usize].is_anonymous_object)
-                    {
-                        found.push(name);
+            if let crate::ir::Callee::External { substitutions, .. } = &**call_callee {
+                for substitution in substitutions {
+                    if let TyKind::Obj(name, _) = substitution.value.non_null().kind() {
+                        if ir
+                            .class_id_by_name(name)
+                            .is_some_and(|class| ir.classes[class as usize].is_anonymous_object)
+                        {
+                            found.push(name);
+                        }
                     }
                 }
             }

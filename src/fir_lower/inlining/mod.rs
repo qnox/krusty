@@ -1523,8 +1523,10 @@ fn rebase_values(
                 rebase_index(&mut catch.var, parameter_count, operands, local_base)?;
             }
         }
-        IrExpr::Checked(IrCheckedOperation::RangeLoop { variable, .. }) => {
-            rebase_index(variable, parameter_count, operands, local_base)?;
+        IrExpr::Checked(checked_op) => {
+            if let IrCheckedOperation::RangeLoop { variable, .. } = &mut **checked_op {
+                rebase_index(variable, parameter_count, operands, local_base)?;
+            }
         }
         _ => {}
     }
@@ -1893,12 +1895,14 @@ pub(super) fn specialize_dependency_substitutions(
     reified_bindings: &HashMap<String, Ty>,
 ) {
     if let IrExpr::Call {
-        callee: Callee::External { substitutions, .. },
+        callee: call_callee,
         ..
     } = expression
     {
-        for substitution in substitutions {
-            specialize_checked_substitution(substitution, reified_bindings);
+        if let Callee::External { substitutions, .. } = &mut **call_callee {
+            for substitution in substitutions {
+                specialize_checked_substitution(substitution, reified_bindings);
+            }
         }
     }
 }
@@ -2286,7 +2290,7 @@ mod value_rebasing_tests {
 
     #[test]
     fn a_checked_range_loop_reserves_and_rebases_its_declared_value() {
-        let mut expression = IrExpr::Checked(IrCheckedOperation::RangeLoop {
+        let mut expression = IrExpr::Checked(Box::new(IrCheckedOperation::RangeLoop {
             variable: 4,
             variable_name: Some("element".into()),
             counter: Ty::Int,
@@ -2299,7 +2303,7 @@ mod value_rebasing_tests {
             body: 2,
             label: "loop".to_string(),
             with_index: None,
-        });
+        }));
 
         assert_eq!(lambda_splice_contract::value_indices(&expression), vec![4]);
         assert_eq!(rebase_values(&mut expression, 2, &[], 20), Some(()));

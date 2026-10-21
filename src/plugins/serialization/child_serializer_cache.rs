@@ -49,10 +49,10 @@ pub(super) fn load_cache_statement(
     serialized: TypeName,
 ) -> ExprId {
     let read = ir.add_expr(IrExpr::Call {
-        callee: Callee::ClassStatic {
+        callee: Box::new(Callee::ClassStatic {
             owner: serialized,
             function: plan.accessor,
-        },
+        }),
         dispatch_receiver: None,
         args: vec![],
     });
@@ -123,15 +123,19 @@ fn read_cached_slot(ir: &mut IrFile, cache_local: u32, k: usize) -> ExprId {
     let cache = ir.add_expr(IrExpr::GetValue(cache_local));
     let index = ir.add_expr(IrExpr::Const(IrConst::Int(k as i32)));
     let slot = ir.add_expr(IrExpr::Call {
-        callee: Callee::Intrinsic {
+        callee: Box::new(Callee::Intrinsic {
             operation: crate::ir::IrIntrinsic::ArrayGet,
             ret: lazy_cache_element_ty(),
-        },
+        }),
         dispatch_receiver: Some(cache),
         args: vec![index],
     });
     ir.add_expr(IrExpr::Call {
-        callee: super::virtual_iface("kotlin/Lazy", "getValue", "()Ljava/lang/Object;"),
+        callee: Box::new(super::virtual_iface(
+            "kotlin/Lazy",
+            "getValue",
+            "()Ljava/lang/Object;",
+        )),
         dispatch_receiver: Some(slot),
         args: vec![],
     })
@@ -342,14 +346,14 @@ pub(super) fn add_child_serializer_cache(
                 descriptor: "Lkotlin/LazyThreadSafetyMode;".to_string(),
             });
             elems.push(ir.add_expr(IrExpr::Call {
-                callee: Callee::Static {
+                callee: Box::new(Callee::Static {
                     owner: type_name("kotlin/LazyKt"),
                     name: "lazy".to_string(),
                     descriptor:
                         "(Lkotlin/LazyThreadSafetyMode;Lkotlin/jvm/functions/Function0;)Lkotlin/Lazy;"
                             .to_string(),
                     inline: InlineKind::None,
-                },
+                }),
                 dispatch_receiver: None,
                 args: vec![mode, supplier],
             }));

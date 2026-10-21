@@ -170,7 +170,7 @@ fn shift_value_indices_shifts_lambda_captures_not_inline_body() {
     let outer = f.add_expr(IrExpr::GetValue(1)); // an enclosing value 1, sibling of the lambda
     let start = f.add_expr(IrExpr::Const(IrConst::Int(0)));
     let end = f.add_expr(IrExpr::Const(IrConst::Int(1)));
-    let range = f.add_expr(IrExpr::Checked(IrCheckedOperation::RangeLoop {
+    let range = f.add_expr(IrExpr::Checked(Box::new(IrCheckedOperation::RangeLoop {
         variable: 1,
         variable_name: Some("item".into()),
         counter: Ty::Int,
@@ -183,7 +183,7 @@ fn shift_value_indices_shifts_lambda_captures_not_inline_body() {
         body: outer,
         label: String::new(),
         with_index: None,
-    }));
+    })));
     let block = f.add_expr(IrExpr::Block {
         stmts: vec![lam, range],
         value: None,
@@ -204,7 +204,7 @@ fn shift_value_indices_shifts_lambda_captures_not_inline_body() {
     assert!(
         matches!(
             f.exprs[range as usize],
-            IrExpr::Checked(IrCheckedOperation::RangeLoop { variable: 3, .. })
+            IrExpr::Checked(ref checked_op) if matches!(&**checked_op, IrCheckedOperation::RangeLoop { variable: 3, .. })
         ),
         "a checked range loop's binding must shift with its uses"
     );
@@ -536,12 +536,12 @@ fn default_stub_trusts_value_construction_provenance_not_helper_spelling() {
     let mut f = IrFile::default();
     let fid = add_toplevel_fn(&mut f, "consume", Ty::Int);
     let call = f.add_expr(IrExpr::Call {
-        callee: Callee::Static {
+        callee: Box::new(Callee::Static {
             owner: crate::types::type_name("example/Wrapper"),
             name: "constructor-impl".to_string(),
             descriptor: "(I)I".to_string(),
             inline: InlineKind::None,
-        },
+        }),
         dispatch_receiver: None,
         args: Vec::new(),
     });
@@ -619,7 +619,7 @@ fn a_checked_range_declaration_reserves_its_value_slot() {
     let start = ir.add_expr(IrExpr::Const(IrConst::UInt(0)));
     let end = ir.add_expr(IrExpr::Const(IrConst::UInt(1)));
     let body = ir.add_expr(IrExpr::UnitInstance);
-    ir.add_expr(IrExpr::Checked(IrCheckedOperation::RangeLoop {
+    ir.add_expr(IrExpr::Checked(Box::new(IrCheckedOperation::RangeLoop {
         variable: 7,
         variable_name: None,
         counter: crate::types::Ty::UInt,
@@ -632,7 +632,14 @@ fn a_checked_range_declaration_reserves_its_value_slot() {
         body,
         label: "loop".to_string(),
         with_index: None,
-    }));
+    })));
 
     assert_eq!(ir.next_value_slot(), 8);
+}
+
+/// An arena node is as large as its largest variant, so every constant or local read would pay
+/// for a call's callee or a lambda's SAM record if they were inline. Those payloads are boxed.
+#[test]
+fn expression_node_does_not_carry_its_largest_payloads_inline() {
+    assert_eq!(std::mem::size_of::<IrExpr>(), 112);
 }

@@ -84,7 +84,10 @@ pub(crate) fn realize(ir: &mut IrFile, policy: CountedLoopPolicy) {
     } = policy;
     let mut next_slot = None;
     for expression in 0..ir.exprs.len() {
-        let IrExpr::Checked(IrCheckedOperation::RangeLoop {
+        let IrExpr::Checked(checked_op) = ir.exprs[expression].clone() else {
+            continue;
+        };
+        let IrCheckedOperation::RangeLoop {
             variable,
             variable_name,
             counter,
@@ -93,7 +96,7 @@ pub(crate) fn realize(ir: &mut IrFile, policy: CountedLoopPolicy) {
             body,
             label,
             with_index,
-        }) = ir.exprs[expression].clone()
+        } = *checked_op
         else {
             continue;
         };
@@ -136,36 +139,41 @@ fn realize_memberships(
     next_slot: &mut Option<u32>,
 ) {
     for expression in 0..ir.exprs.len() {
-        if let IrExpr::Checked(IrCheckedOperation::ComparableRangeContains {
-            lower,
-            end,
-            negated,
-        }) = ir.exprs[expression]
-        {
-            let first_generated = ir.exprs.len();
-            let mut realizer = Realizer {
-                next_slot: next_slot.unwrap_or_else(|| ir.next_value_slot()),
-                ir: &mut *ir,
-                style,
-                inlining: HeaderInlining::None,
-                until_steps: UntilSteps::Built,
-                unsigned_compare: None,
-                inlined_calls: Vec::new(),
-                represented: Vec::new(),
-            };
-            let contains = realizer.comparable_range_contains(lower, end);
-            *next_slot = Some(realizer.next_slot);
-            finish_membership(
-                ir,
-                expression as ExprId,
-                contains,
+        if let IrExpr::Checked(ref checked_op) = ir.exprs[expression] {
+            if let IrCheckedOperation::ComparableRangeContains {
+                lower,
+                end,
                 negated,
-                first_generated,
-                &[],
-            );
-            continue;
+            } = **checked_op
+            {
+                let first_generated = ir.exprs.len();
+                let mut realizer = Realizer {
+                    next_slot: next_slot.unwrap_or_else(|| ir.next_value_slot()),
+                    ir: &mut *ir,
+                    style,
+                    inlining: HeaderInlining::None,
+                    until_steps: UntilSteps::Built,
+                    unsigned_compare: None,
+                    inlined_calls: Vec::new(),
+                    represented: Vec::new(),
+                };
+                let contains = realizer.comparable_range_contains(lower, end);
+                *next_slot = Some(realizer.next_slot);
+                finish_membership(
+                    ir,
+                    expression as ExprId,
+                    contains,
+                    negated,
+                    first_generated,
+                    &[],
+                );
+                continue;
+            }
         }
-        let IrExpr::Checked(IrCheckedOperation::RangeContains {
+        let IrExpr::Checked(checked_op) = ir.exprs[expression].clone() else {
+            continue;
+        };
+        let IrCheckedOperation::RangeContains {
             operation,
             value,
             start,
@@ -173,7 +181,7 @@ fn realize_memberships(
             negated,
             counter,
             unsigned_compare,
-        }) = ir.exprs[expression].clone()
+        } = *checked_op
         else {
             continue;
         };
@@ -453,7 +461,7 @@ impl Realizer<'_> {
     fn runtime_call(&mut self, function: &IrRuntimeFunction, args: Vec<ExprId>) -> ExprId {
         self.add_checked(
             IrExpr::Call {
-                callee: Callee::External {
+                callee: Box::new(Callee::External {
                     target: function.function,
                     default_provider: None,
                     params: function.parameters.clone(),
@@ -461,7 +469,7 @@ impl Realizer<'_> {
                     substitutions: Vec::new(),
                     defaults: Vec::new(),
                     extension_receiver_parameter: None,
-                },
+                }),
                 dispatch_receiver: None,
                 args,
             },

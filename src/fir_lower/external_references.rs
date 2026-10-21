@@ -246,9 +246,8 @@ impl BodyLowering<'_> {
                 ))
             }
         };
-        Ok(self
-            .ir
-            .add_expr(IrExpr::CallableReference(crate::ir::IrCallableReference {
+        Ok(self.ir.add_expr(IrExpr::CallableReference(Box::new(
+            crate::ir::IrCallableReference {
                 target: crate::ir::IrCallableReferenceTarget::External {
                     declaration,
                     receiver: receiver.map(crate::fir::ResolvedTy::get),
@@ -265,6 +264,7 @@ impl BodyLowering<'_> {
                 declaration_suspend,
                 adaptation: adaptation.cloned().map(Box::new),
                 reflection_owner,
-            })))
+            },
+        ))))
     }
 }

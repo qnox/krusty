@@ -1808,7 +1808,7 @@ mod tests {
         let target_ty = Ty::obj_name(target);
         let names = HashMap::from_iter([(source, target)]);
 
-        let mut callable = IrExpr::CallableReference(IrCallableReference {
+        let mut callable = IrExpr::CallableReference(Box::new(IrCallableReference {
             target: IrCallableReferenceTarget::FunctionValueConversion { ordinal: 0 },
             adapter: 0,
             captures: Vec::new(),
@@ -1824,7 +1824,7 @@ mod tests {
                 suspend_conversion: false,
             })),
             reflection_owner: Some(source),
-        });
+        }));
         remap_expression(&mut callable, &names);
         let IrExpr::CallableReference(callable) = callable else {
             unreachable!()
@@ -1841,7 +1841,7 @@ mod tests {
             impl_fn: 0,
             arity: 0,
             captures: Vec::new(),
-            sam: Some(IrSamTarget {
+            sam: Some(Box::new(IrSamTarget {
                 classifier: source,
                 method: "apply".to_string(),
                 method_target: IrSamMethod::FunctionTypeInvoke,
@@ -1860,7 +1860,7 @@ mod tests {
                 nullable: false,
                 kotlin_interface: true,
                 parameter_identities: Vec::new(),
-            }),
+            })),
             inline_body: None,
         };
         remap_expression(&mut lambda, &names);
@@ -1996,7 +1996,7 @@ mod tests {
             param_checks: Vec::new(),
         });
         let reachable_inline_body = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(implementation),
+            callee: Box::new(Callee::Local(implementation)),
             dispatch_receiver: None,
             args: Vec::new(),
         });
@@ -2008,7 +2008,7 @@ mod tests {
             inline_body: Some(reachable_inline_body),
         });
         let other_inline_body = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(implementation),
+            callee: Box::new(Callee::Local(implementation)),
             dispatch_receiver: None,
             args: Vec::new(),
         });
@@ -2044,14 +2044,12 @@ mod tests {
         ));
         assert!(matches!(
             ir.expr(reachable_inline_body),
-            IrExpr::Call { callee: Callee::Local(function), .. }
-                if *function == detached[0].target
-        ));
+            IrExpr::Call { callee: call_callee, .. }
+                if matches!(&**call_callee, Callee::Local(function) if *function == detached[0].target)));
         assert!(matches!(
             ir.expr(other_inline_body),
-            IrExpr::Call { callee: Callee::Local(function), .. }
-                if *function == implementation
-        ));
+            IrExpr::Call { callee: call_callee, .. }
+                if matches!(&**call_callee, Callee::Local(function) if *function == implementation)));
         assert!(ir.inline_only_fns.contains(&implementation));
         assert!(ir.must_inline_lambdas.contains(&implementation));
         assert!(!ir.inline_only_fns.contains(&detached[0].target));
@@ -2147,12 +2145,12 @@ mod tests {
             },
         );
         let reachable = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(implementation),
+            callee: Box::new(Callee::Local(implementation)),
             dispatch_receiver: None,
             args: Vec::new(),
         });
         let other = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(implementation),
+            callee: Box::new(Callee::Local(implementation)),
             dispatch_receiver: None,
             args: Vec::new(),
         });
@@ -2170,14 +2168,12 @@ mod tests {
         assert!(!detached[0].class_site);
         assert!(matches!(
             ir.expr(reachable),
-            IrExpr::Call { callee: Callee::Local(function), .. }
-                if *function == detached[0].target
-        ));
+            IrExpr::Call { callee: call_callee, .. }
+                if matches!(&**call_callee, Callee::Local(function) if *function == detached[0].target)));
         assert!(matches!(
             ir.expr(other),
-            IrExpr::Call { callee: Callee::Local(function), .. }
-                if *function == implementation
-        ));
+            IrExpr::Call { callee: call_callee, .. }
+                if matches!(&**call_callee, Callee::Local(function) if *function == implementation)));
         assert_eq!(
             ir.functions[detached[0].target as usize].params,
             vec![Ty::obj_name(target)]
@@ -2221,7 +2217,7 @@ mod tests {
             },
         );
         let reachable = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(implementation),
+            callee: Box::new(Callee::Local(implementation)),
             dispatch_receiver: None,
             args: Vec::new(),
         });
@@ -2238,9 +2234,8 @@ mod tests {
         assert!(!detached[0].class_site);
         assert!(matches!(
             ir.expr(reachable),
-            IrExpr::Call { callee: Callee::Local(function), .. }
-                if *function == detached[0].target
-        ));
+            IrExpr::Call { callee: call_callee, .. }
+                if matches!(&**call_callee, Callee::Local(function) if *function == detached[0].target)));
         assert_eq!(
             ir.functions[detached[0].target as usize].params,
             vec![Ty::obj_name(target)]

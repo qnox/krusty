@@ -136,16 +136,19 @@ pub(super) fn elide_unread(ir: &mut IrFile, bodies: &dyn MethodBodies) {
     }
     for raw in 0..ir.exprs.len() {
         let IrExpr::Call {
-            callee:
-                Callee::Static {
-                    owner,
-                    name,
-                    descriptor,
-                    inline,
-                },
+            callee: call_callee,
             dispatch_receiver,
             args,
         } = &ir.exprs[raw]
+        else {
+            continue;
+        };
+        let Callee::Static {
+            owner,
+            name,
+            descriptor,
+            inline,
+        } = &**call_callee
         else {
             continue;
         };
@@ -310,10 +313,10 @@ pub(super) fn place(ir: &mut IrFile, operands: Vec<DelegatedOperand>) -> Delegat
         });
         let slot = ir.add_expr(IrExpr::Const(IrConst::Int(slot as i32)));
         ir.exprs[operand.operand as usize] = IrExpr::Call {
-            callee: Callee::Intrinsic {
+            callee: Box::new(Callee::Intrinsic {
                 operation: IrIntrinsic::ArrayGet,
                 ret: element_type(),
-            },
+            }),
             dispatch_receiver: Some(array),
             args: vec![slot],
         };

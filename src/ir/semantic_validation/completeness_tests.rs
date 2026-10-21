@@ -10,13 +10,15 @@ const HERE: SourceFileId = SourceFileId::from_raw(0);
 const ELSEWHERE: SourceFileId = SourceFileId::from_raw(1);
 
 fn read(ir: &mut IrFile, target: PropertyId) {
-    ir.add_expr(IrExpr::Checked(IrCheckedOperation::PropertyRead {
-        target,
-        dispatch_receiver: None,
-        extension_receiver: None,
-        context_arguments: Vec::new(),
-        substitutions: Vec::new(),
-    }));
+    ir.add_expr(IrExpr::Checked(Box::new(
+        IrCheckedOperation::PropertyRead {
+            target,
+            dispatch_receiver: None,
+            extension_receiver: None,
+            context_arguments: Vec::new(),
+            substitutions: Vec::new(),
+        },
+    )));
 }
 
 fn module_property(source: SourceFileId) -> IrModuleProperty {
@@ -309,7 +311,7 @@ fn a_local_call_that_forwards_a_holder_obliges_the_callee_parameter() {
     let make = forwarding_lambda(&mut ir, None);
     let captured = ir.add_expr(IrExpr::GetValue(0));
     let call = ir.add_expr(IrExpr::Call {
-        callee: crate::ir::Callee::Local(make),
+        callee: Box::new(crate::ir::Callee::Local(make)),
         dispatch_receiver: None,
         args: vec![captured],
     });
@@ -330,18 +332,20 @@ fn a_callable_reference_capture_obliges_the_adapter_parameter() {
     let mut ir = IrFile::default();
     let adapter = forwarding_lambda(&mut ir, None);
     let captured = ir.add_expr(IrExpr::GetValue(0));
-    let reference = ir.add_expr(IrExpr::CallableReference(crate::ir::IrCallableReference {
-        target: crate::ir::IrCallableReferenceTarget::FunctionValueConversion { ordinal: 0 },
-        adapter,
-        captures: vec![captured],
-        bound_receiver: None,
-        function_type: Ty::fun(Vec::new(), Ty::Unit),
-        declaration_parameters: Box::new([]),
-        declaration_result: Ty::Unit,
-        declaration_suspend: false,
-        adaptation: None,
-        reflection_owner: None,
-    }));
+    let reference = ir.add_expr(IrExpr::CallableReference(Box::new(
+        crate::ir::IrCallableReference {
+            target: crate::ir::IrCallableReferenceTarget::FunctionValueConversion { ordinal: 0 },
+            adapter,
+            captures: vec![captured],
+            bound_receiver: None,
+            function_type: Ty::fun(Vec::new(), Ty::Unit),
+            declaration_parameters: Box::new([]),
+            declaration_result: Ty::Unit,
+            declaration_suspend: false,
+            adaptation: None,
+            reflection_owner: None,
+        },
+    )));
     function_holding(&mut ir, "outer", reference);
     assert_eq!(
         ir.validate_complete_facts(HERE),

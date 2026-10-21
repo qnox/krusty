@@ -130,13 +130,15 @@ impl BodyLowering<'_, '_, '_> {
                 class: owner,
                 ..
             } => *receiver == read && *owner == class,
-            IrExpr::Checked(IrCheckedOperation::PropertyRead {
-                target,
-                dispatch_receiver: Some(receiver),
-                extension_receiver: None,
-                context_arguments,
-                ..
-            }) => {
+            IrExpr::Checked(checked_op)
+                if let IrCheckedOperation::PropertyRead {
+                    target,
+                    dispatch_receiver: Some(receiver),
+                    extension_receiver: None,
+                    context_arguments,
+                    ..
+                } = &**checked_op =>
+            {
                 *receiver == read
                     && context_arguments.is_empty()
                     && self.checked_property(target).is_ok_and(|property| {

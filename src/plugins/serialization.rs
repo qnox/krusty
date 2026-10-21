@@ -405,14 +405,14 @@ fn call_generated_serializer(
     let (params, ret) = instantiated_signature.unwrap_or((declared_params, declared_ret));
     match receiver {
         GeneratedSerializerReceiver::Static => ir.add_expr(IrExpr::Call {
-            callee: Callee::CrossFile {
+            callee: Box::new(Callee::CrossFile {
                 facade: classifier,
                 name: "serializer".to_string(),
                 params,
                 ret,
                 module_target: None,
                 module_default_call: false,
-            },
+            }),
             dispatch_receiver: None,
             args,
         }),
@@ -423,13 +423,13 @@ fn call_generated_serializer(
                 field: "INSTANCE",
             });
             ir.add_expr(IrExpr::Call {
-                callee: Callee::realized_virtual(
+                callee: Box::new(Callee::realized_virtual(
                     classifier,
                     "serializer".to_string(),
                     String::new(),
                     Some((params, ret)),
                     false,
-                ),
+                )),
                 dispatch_receiver: Some(receiver),
                 args,
             })
@@ -441,13 +441,13 @@ fn call_generated_serializer(
                 field: "Companion".to_string(),
             });
             ir.add_expr(IrExpr::Call {
-                callee: Callee::realized_virtual(
+                callee: Box::new(Callee::realized_virtual(
                     companion,
                     "serializer".to_string(),
                     String::new(),
                     Some((params, ret)),
                     false,
-                ),
+                )),
                 dispatch_receiver: Some(receiver),
                 args,
             })
@@ -510,13 +510,13 @@ fn call_external_companion_serializer(
     let params = vec![kserializer_of(class_ty("kotlin/Any")); args.len()];
     let ret = kserializer_of(Ty::obj_name(classifier));
     Some(ir.add_expr(IrExpr::Call {
-        callee: Callee::realized_virtual(
+        callee: Box::new(Callee::realized_virtual(
             owner,
             "serializer".to_string(),
             String::new(),
             Some((params, ret)),
             false,
-        ),
+        )),
         dispatch_receiver: Some(receiver),
         args,
     }))
@@ -674,13 +674,13 @@ fn specialize_expression_placeholders(ir: &mut IrFile, ctx: &PluginContext) {
             _ => continue,
         };
         let call = |descriptor: &str| IrExpr::Call {
-            callee: Callee::realized_virtual(
+            callee: Box::new(Callee::realized_virtual(
                 fmt,
                 kind.to_string(),
                 descriptor.to_string(),
                 None,
                 false,
-            ),
+            )),
             dispatch_receiver: Some(recv),
             args: vec![ser, arg],
         };
@@ -815,13 +815,13 @@ fn is_nullable(ty: &Ty) -> bool {
 /// descriptor's `serialName` gains the trailing `?`.
 fn wrap_nullable_serializer(ir: &mut IrFile, base: ExprId) -> ExprId {
     ir.add_expr(IrExpr::Call {
-        callee: Callee::Static {
+        callee: Box::new(Callee::Static {
             owner: type_name("kotlinx/serialization/builtins/BuiltinSerializersKt"),
             name: "getNullable".to_string(),
             descriptor: "(Lkotlinx/serialization/KSerializer;)Lkotlinx/serialization/KSerializer;"
                 .to_string(),
             inline: InlineKind::None,
-        },
+        }),
         dispatch_receiver: None,
         args: vec![base],
     })
@@ -876,12 +876,12 @@ fn contextual_kclass(ir: &mut IrFile, classifier: TypeName) -> ExprId {
         internal: Some(classifier),
     });
     ir.add_expr(IrExpr::Call {
-        callee: Callee::Static {
+        callee: Box::new(Callee::Static {
             owner: type_name("kotlin/jvm/internal/Reflection"),
             name: "getOrCreateKotlinClass".to_string(),
             descriptor: "(Ljava/lang/Class;)Lkotlin/reflect/KClass;".to_string(),
             inline: InlineKind::None,
-        },
+        }),
         dispatch_receiver: None,
         args: vec![classlit],
     })
@@ -895,12 +895,12 @@ fn build_polymorphic_serializer(ir: &mut IrFile, classifier: TypeName) -> ExprId
         internal: Some(classifier),
     });
     let kclass = ir.add_expr(IrExpr::Call {
-        callee: Callee::Static {
+        callee: Box::new(Callee::Static {
             owner: type_name("kotlin/jvm/internal/Reflection"),
             name: "getOrCreateKotlinClass".to_string(),
             descriptor: "(Ljava/lang/Class;)Lkotlin/reflect/KClass;".to_string(),
             inline: InlineKind::None,
-        },
+        }),
         dispatch_receiver: None,
         args: vec![classlit],
     });
@@ -1020,12 +1020,12 @@ impl SerializationPlugin {
         } else {
             let classlit = ir.class_const_name(Some(class_name));
             let kclass = ir.add_expr(IrExpr::Call {
-                callee: Callee::Static {
+                callee: Box::new(Callee::Static {
                     owner: type_name("kotlin/jvm/internal/Reflection"),
                     name: "getOrCreateKotlinClass".to_string(),
                     descriptor: "(Ljava/lang/Class;)Lkotlin/reflect/KClass;".to_string(),
                     inline: InlineKind::None,
-                },
+                }),
                 dispatch_receiver: None,
                 args: vec![classlit],
             });
@@ -1087,23 +1087,23 @@ impl SerializationPlugin {
         }
         // `Companion.serializer()` returns `(KSerializer) access$…$cp().getValue()` (the cached instance).
         let acc_call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
+            callee: Box::new(Callee::Static {
                 owner: class_name,
                 name: "access$get$cachedSerializer$delegate$cp".to_string(),
                 descriptor: "()Lkotlin/Lazy;".to_string(),
                 inline: InlineKind::None,
-            },
+            }),
             dispatch_receiver: None,
             args: vec![],
         });
         let get_value = ir.add_expr(IrExpr::Call {
-            callee: Callee::realized_virtual(
+            callee: Box::new(Callee::realized_virtual(
                 type_name("kotlin/Lazy"),
                 "getValue".to_string(),
                 String::new(),
                 Some((vec![], class_ty("kotlin/Any"))),
                 true,
-            ),
+            )),
             dispatch_receiver: Some(acc_call),
             args: vec![],
         });
@@ -1177,12 +1177,12 @@ impl SerializationPlugin {
     fn kclass_literal(ir: &mut IrFile, classifier: TypeName) -> ExprId {
         let classlit = ir.class_const_name(Some(classifier));
         ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
+            callee: Box::new(Callee::Static {
                 owner: type_name("kotlin/jvm/internal/Reflection"),
                 name: "getOrCreateKotlinClass".to_string(),
                 descriptor: "(Ljava/lang/Class;)Lkotlin/reflect/KClass;".to_string(),
                 inline: InlineKind::None,
-            },
+            }),
             dispatch_receiver: None,
             args: vec![classlit],
         })
@@ -1932,7 +1932,7 @@ mod tests {
 
     fn calls_method(ir: &IrFile, name: &str) -> bool {
         ir.exprs.iter().any(|e| {
-            matches!(e, IrExpr::Call { callee: Callee::Virtual { name: n, .. }, .. } if n == name)
+            matches!(e, IrExpr::Call { callee: call_callee, .. } if matches!(&**call_callee, Callee::Virtual { name: n, .. } if n == name))
         })
     }
 
@@ -2478,7 +2478,7 @@ mod tests {
         stmts
             .iter()
             .filter(|&&s| {
-                matches!(ir.expr(s), IrExpr::Call { callee: Callee::Virtual { name, .. }, .. } if name == "addElement")
+                matches!(ir.expr(s), IrExpr::Call { callee: call_callee, .. } if matches!(&**call_callee, Callee::Virtual { name, .. } if name == "addElement"))
             })
             .count()
     }
@@ -2655,17 +2655,17 @@ mod tests {
         specialize_expression_placeholders(&mut ir, &PluginContext::default());
         match &ir.exprs[mid as usize] {
             IrExpr::Call {
-                callee:
-                    Callee::Virtual {
-                        owner,
-                        name,
-                        descriptor,
-                        interface,
-                        ..
-                    },
+                callee: call_callee,
                 dispatch_receiver,
                 args,
-            } => {
+            } if let Callee::Virtual {
+                owner,
+                name,
+                descriptor,
+                interface,
+                ..
+            } = &**call_callee =>
+            {
                 assert_eq!(owner, "kotlinx/serialization/json/Json");
                 assert_eq!(name, "encodeToString");
                 assert_eq!(descriptor, ENCODE_TO_STRING_DESC);
@@ -2695,12 +2695,13 @@ mod tests {
         };
         match &ir.exprs[inner as usize] {
             IrExpr::Call {
-                callee: Callee::Virtual {
-                    name, descriptor, ..
-                },
+                callee: call_callee,
                 dispatch_receiver,
                 args,
-            } => {
+            } if let Callee::Virtual {
+                name, descriptor, ..
+            } = &**call_callee =>
+            {
                 assert_eq!(name, "decodeFromString");
                 assert_eq!(descriptor, DECODE_FROM_STRING_DESC);
                 assert_eq!(*dispatch_receiver, Some(recv));
@@ -2732,10 +2733,10 @@ mod tests {
 
         match &ir.exprs[marker as usize] {
             IrExpr::Call {
-                callee: Callee::Virtual { owner, name, .. },
+                callee: call_callee,
                 dispatch_receiver: Some(receiver),
                 args,
-            } => {
+            } if let Callee::Virtual { owner, name, .. } = &**call_callee => {
                 assert_eq!(
                     (*owner, name.as_str()),
                     (type_name("demo/Row$Companion"), "serializer")

@@ -23,11 +23,15 @@ impl BodyLowering<'_> {
                 arg,
                 ..
             } => self.passes_reordered_operand_in_place(*arg),
-            IrExpr::Checked(IrCheckedOperation::PropertyReference {
-                dispatch_receiver: None,
-                extension_receiver: None,
-                ..
-            }) => true,
+            IrExpr::Checked(checked_op)
+                if let IrCheckedOperation::PropertyReference {
+                    dispatch_receiver: None,
+                    extension_receiver: None,
+                    ..
+                } = &**checked_op =>
+            {
+                true
+            }
             IrExpr::GetValue(slot) => {
                 self.stable_value_read(value).is_some()
                     || self.receiver_slots().any(|receiver| receiver == *slot)
@@ -86,10 +90,12 @@ impl BodyLowering<'_> {
     }
 
     fn is_reference_value(&self, value: ExprId) -> bool {
-        matches!(
-            self.ir.expr(value),
-            IrExpr::CallableReference(_)
-                | IrExpr::Checked(IrCheckedOperation::PropertyReference { .. })
-        )
+        match self.ir.expr(value) {
+            IrExpr::CallableReference(_) => true,
+            IrExpr::Checked(checked_op) => {
+                matches!(&**checked_op, IrCheckedOperation::PropertyReference { .. })
+            }
+            _ => false,
+        }
     }
 }
