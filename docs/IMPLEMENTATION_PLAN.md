@@ -5553,6 +5553,9 @@ non-inline callers, still reads the field directly. Test:
   181/181/182; Native's counts are unchanged by the shared tables.
 - Known gap: `x as? C` on a value smart-cast earlier in the body lowers to a `When` with no
   checked type, which Wasm declines rather than infer one.
+- Wasm consumes the published declaration-result provenance of a generic call beneath its
+  checked result coercion. This preserves separate declared and selected types without inventing
+  missing facts; it does not yet supply generic scalar boxing or a canonical dependency-call ABI.
 - Not yet selectable from the CLI: a user-facing wasm target waits on that klib platform.
 - Catch-only EH: a module-owned tag carries the same Throwable reference across calls/modules.
   The selected stdlib's exact `Throwable()` / `Throwable(String?)` and nullable `message` getter
@@ -5561,6 +5564,13 @@ non-inline callers, still reads the field directly. Test:
 - Next: the Throwable hierarchy and remaining constructor/accessor forms, typed catch dispatch,
   finally, enums and companions on the class tables, and further target-KLIB
   library bodies/intrinsics keyed by the selected declaration.
+
+## KLIB accessor metadata
+
+- Accessor metadata preserves independent getter/setter modifiers and annotation identities,
+  including exact absent-word defaults and explicit zero. Accessor inline obligations now survive
+  provider normalization. This producer change does not enable ordinary-body or inline-accessor
+  emission; those consumers remain separate work.
 
 ## KLIB writer — krusty compiles a module to a Kotlin library  ◐
 

@@ -23,6 +23,8 @@ test("X selects a large-image card and finds its own tags without falling back t
   assert.equal(meta("name", "twitter:description"), meta("property", "og:description"));
   assert.equal(meta("name", "twitter:image"), meta("property", "og:image"));
   assert.equal(meta("name", "twitter:image:alt"), meta("property", "og:image:alt"));
+  assert.equal(meta("name", "twitter:site"), "@qnox");
+  assert.equal(meta("name", "twitter:creator"), "@qnox");
 });
 
 test("Open Graph names the page", () => {

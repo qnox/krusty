@@ -42,7 +42,7 @@ paired `.class` file over the longer file length. The Native conformance badge i
 the share of Native-applicable cases that compile against the Kotlin/Native stdlib KLIB, link, run,
 and return `OK`.
 
-[Website](https://krustythecompiler.dev) · [Download](https://github.com/qnox/krusty/releases/latest) · [Sponsor](https://github.com/sponsors/qnox)
+[Website](https://krustythecompiler.dev) · [Download](https://github.com/qnox/krusty/releases/latest) · [News: @qnox on X](https://x.com/qnox) · [Sponsor](https://github.com/sponsors/qnox)
 
 ## Install
 
@@ -115,18 +115,46 @@ KRUSTY_BIN=/absolute/path/to/krusty ./gradlew krustyCompile
   JetBrains' `codegen/box` suite.
 - **Low memory.** On our multi-module benchmark, about a third of the peak memory of the
   GraalVM-native `kotlinc`.
-- **kotlinx.serialization and KSP.**
-- **Bazel** persistent worker support.
+- **Build systems and compiler plugins** listed below: Gradle, the Kotlin Toolchain, the Kotlin
+  Build Tools API and Bazel; kotlinx.serialization, all-open, no-arg, sam-with-receiver and KSP.
 - **Editor support.** `krusty-lsp` language server, with a [Zed extension](editors/zed/README.md).
+
+## Supported build systems and compiler plugins
+
+krusty targets every Kotlin release listed in [`kotlin-versions`](kotlin-versions); the badge above
+shows the newest. Anything not listed here fails the build with an error instead of being skipped.
+
+### Build systems
+
+| Build system | Support |
+| --- | --- |
+| Command line | kotlinc-compatible flags for the supported subset; output to a class directory or a jar. Compiler plugins come in through `-Xplugin`/`-P`/`-Xcompiler-plugin` as for kotlinc. |
+| Gradle | `id("krusty")` plugin, shipped as `krusty-gradle-plugin-<version>.zip` in each release (see [Gradle](#gradle)). Replaces Kotlin/JVM compile tasks of source sets; validated with Gradle 7.6.3, 8.14.3, 9.5.0 and 9.7.0. `kotlin-dsl` builds such as `buildSrc` and compile tasks outside a source set stay with kotlinc, logged per task. |
+| Kotlin Toolchain (`project.yaml`/`module.yaml`) | `krusty-toolchain`, built from source in `crates/krusty-toolchain`, as a drop-in for JetBrains' `kotlin` command: `show modules`, `show settings`, `show dependencies` and `task :<module>:compileJvm`. JVM modules only; a module with Java sources, a compiler setting it does not pass yet or an artifact to download is refused by name. See [docs/KOTLIN_TOOLCHAIN.md](docs/KOTLIN_TOOLCHAIN.md). |
+| Kotlin Build Tools API | `krusty-build-tools-<version>-kotlin-<kotlin>.jar` in each release, one per supported Kotlin version, stands in for `kotlin-build-tools-impl` in a build tool that loads the API from a classpath (JetBrains' Kotlin Toolchain among them). JVM toolchain and in-process execution only. See [tools/krusty-build-tools](tools/krusty-build-tools/README.md). |
+| Bazel | `krusty_jvm_library` rule (`bazel/defs.bzl`) and a `--persistent_worker` speaking intellij-community's `jvm-inc-builder` vocabulary. The worker accepts no compiler plugins. See [bazel/intellij.md](bazel/intellij.md). |
+| Maven | Not supported. |
+
+### Compiler plugins
+
+krusty cannot run kotlinc's FIR/IR plugin jars. It reimplements the plugins below natively and
+selects them from the same jar and options kotlinc receives, so a build switches compilers without
+changing its plugin configuration.
+
+| Plugin | Support |
+| --- | --- |
+| kotlinx.serialization | Supported. Conformance is measured against the plugin's own box-test corpus. |
+| all-open (`plugin.allopen`, `plugin.spring`, `plugin.jpa`) | Supported, with the `spring` and `jpa` presets. |
+| no-arg (`plugin.noarg`, `plugin.jpa`) | Supported, with the `jpa` preset; `invokeInitializers=true` is not implemented. |
+| sam-with-receiver | Supported. |
+| KSP (KSP2) | Supported through a build system: under Gradle, KSP's own `kspKotlin` task runs the processors and krusty compiles what they generate (KSP's Gradle plugin needs Gradle 8 or newer); under the Kotlin Toolchain, processors from Maven artifacts run before the module compiles, but only their generated classes and resources are picked up; a processor that generates Kotlin or Java sources fails the module for now. The plain command line has no codegen host and rejects the KSP plugin. |
+| Compose, Parcelize, assignment, kapt and every other FIR/IR plugin | Not supported. Today the build fails with an error; the Gradle plugin is being changed to report the unsupported plugin and hand that compilation to kotlinc instead. |
+| Kotlin scripts (`.kts`) | Not supported. |
 
 ## Status
 
-krusty compiles plain Kotlin/JVM code today. Not supported yet:
-
-- Maven integration (use the command line, Gradle plugin or Bazel)
-- Compose, kapt and compiler plugins other than kotlinx.serialization, all-open, no-arg and
-  sam-with-receiver (assignment, Parcelize); krusty stops with an error rather than skipping them
-- Kotlin scripts (`.kts`)
+krusty compiles plain Kotlin/JVM code today, through the build systems and with the compiler
+plugins listed above.
 
 ## Roadmap
 
