@@ -369,12 +369,19 @@ fn expression_type(
         | IrExpr::Break { .. }
         | IrExpr::Continue { .. }
         | IrExpr::Throw { .. } => return Ok(None),
+        IrExpr::Checked(checked_op)
+            if matches!(
+                &**checked_op,
+                crate::ir::IrCheckedOperation::PropertyWrite { .. }
+            ) =>
+        {
+            Ty::Unit
+        }
         IrExpr::Variable { .. }
         | IrExpr::SetValue { .. }
         | IrExpr::SetStatic { .. }
         | IrExpr::SetField { .. }
         | IrExpr::PropertyWrite { .. }
-        | IrExpr::Checked(crate::ir::IrCheckedOperation::PropertyWrite { .. })
         | IrExpr::While { .. }
         | IrExpr::InlineFrameMarker
         | IrExpr::Block { value: None, .. } => Ty::Unit,
@@ -823,7 +830,7 @@ impl<'a> Body<'a> {
                     (Some(value), Some(_)) => self.value(value, self.result)?,
                     (Some(value), None) => self.statement(value)?,
                     (None, Some(_)) => {
-                        return Err("a `return` of no value from a non-`Unit` function".into())
+                        return Err("a `return` of no value from a non-`Unit` function".into());
                     }
                     (None, None) => {}
                 }
@@ -889,116 +896,117 @@ impl<'a> Body<'a> {
                 }
             }
             IrExpr::Call {
-                callee: Callee::Local(function),
+                callee: ref call_callee,
                 dispatch_receiver: None,
                 args,
-            } => {
-                let params = self.ir.functions[function as usize].params.clone();
+            } if let Callee::Local(function) = &**call_callee => {
+                let params = self.ir.functions[*function as usize].params.clone();
                 if params.len() != args.len() {
                     return Err("a call whose arguments do not match its parameters".into());
                 }
                 for (arg, param) in args.iter().zip(params) {
                     self.value(*arg, param)?;
                 }
-                let function = self.emitted_function(function)?;
+                let function = self.emitted_function(*function)?;
                 self.code.call(function);
             }
             IrExpr::Call {
-                callee: Callee::Module { target, params, .. },
+                callee: ref call_callee,
                 dispatch_receiver: None,
                 args,
-            }
-            | IrExpr::Call {
-                callee:
-                    Callee::CrossFile {
-                        module_target: Some(target),
-                        params,
-                        ..
-                    },
-                dispatch_receiver: None,
-                args,
-            } => {
+            } if let Callee::Module { target, params, .. }
+            | Callee::CrossFile {
+                module_target: Some(target),
+                params,
+                ..
+            } = &**call_callee =>
+            {
                 let function = self
                     .calls
-                    .module(target)
+                    .module(*target)
                     .ok_or_else(|| "an unregistered source callable identity".to_string())?;
-                self.direct_call(function, &params, &args)?;
+                self.direct_call(function, params, &args)?;
             }
             IrExpr::Call {
-                callee:
-                    Callee::ModuleWithDefaults {
-                        default_provider,
-                        params,
-                        defaults,
-                        dispatch_receiver_ty: None,
-                        extension_receiver_parameter: None,
-                        ..
-                    },
+                callee: ref call_callee,
                 dispatch_receiver: None,
                 args,
-            } => {
-                let provider = module_override_callable(default_provider).ok_or_else(|| {
+            } if let Callee::ModuleWithDefaults {
+                default_provider,
+                params,
+                defaults,
+                dispatch_receiver_ty: None,
+                extension_receiver_parameter: None,
+                ..
+            } = &**call_callee =>
+            {
+                let provider = module_override_callable(*default_provider).ok_or_else(|| {
                     "a source default entry whose provider is not in the current module".to_string()
                 })?;
                 let function = self
                     .calls
                     .module_default(provider)
                     .ok_or_else(|| "an unregistered source default entry".to_string())?;
-                self.defaulted_call(function, &params, &defaults, &args)?;
+                self.defaulted_call(function, params, defaults, &args)?;
             }
             IrExpr::Call {
-                callee:
-                    Callee::External {
-                        target,
-                        ret,
-                        defaults,
-                        ..
-                    },
+                callee: ref call_callee,
                 dispatch_receiver,
                 args,
-            } if defaults.is_empty() && self.is_throwable_message(target) => {
-                self.throwable_message(dispatch_receiver, &args, ret)?;
+            } if let Callee::External {
+                target,
+                ret,
+                defaults,
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self.is_throwable_message(*target) =>
+            {
+                self.throwable_message(dispatch_receiver, &args, *ret)?;
             }
             IrExpr::Call {
-                callee:
-                    Callee::External {
-                        target,
-                        params,
-                        ret,
-                        defaults,
-                        extension_receiver_parameter: None,
-                        ..
-                    },
+                callee: ref call_callee,
                 dispatch_receiver,
                 args,
-            } if defaults.is_empty() && self.scalar_operation_of(target).is_some() => {
-                self.scalar_operation_call(target, dispatch_receiver, &params, ret, &args)?;
+            } if let Callee::External {
+                target,
+                params,
+                ret,
+                defaults,
+                extension_receiver_parameter: None,
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self.scalar_operation_of(*target).is_some() =>
+            {
+                self.scalar_operation_call(*target, dispatch_receiver, params, *ret, &args)?;
             }
             IrExpr::Call {
-                callee:
-                    Callee::External {
-                        target,
-                        params,
-                        ret,
-                        defaults,
-                        extension_receiver_parameter,
-                        ..
-                    },
+                callee: ref call_callee,
                 dispatch_receiver: None,
                 args,
-            } if defaults.is_empty() => {
+            } if let Callee::External {
+                target,
+                params,
+                ret,
+                defaults,
+                extension_receiver_parameter,
+                ..
+            } = &**call_callee
+                && defaults.is_empty() =>
+            {
                 let function = self
                     .calls
-                    .external(target)
+                    .external(*target)
                     .ok_or_else(|| "an unregistered dependency callable identity".to_string())?;
-                let callable = self.callables.callable(target).ok_or_else(|| {
+                let callable = self.callables.callable(*target).ok_or_else(|| {
                     "a dependency callable without frozen callable facts".to_string()
                 })?;
                 let emitted_ret = callable.declared_ret.unwrap_or(callable.ret);
                 if let Some(receiver_position) = callable.klib_body_companion_receiver_position() {
                     let receiver_ty = self
                         .calls
-                        .singleton_extension_unread_receiver(target)
+                        .singleton_extension_unread_receiver(*target)
                         .ok_or_else(|| {
                             "a classifier-associated dependency without its exported body effect"
                                 .to_string()
@@ -1009,8 +1017,8 @@ impl<'a> Body<'a> {
                         // receiver at its serialized coordinate. Validate that exact shape and do
                         // not synthesize a second ABI slot.
                         if callable.serialized_companion_receiver_position(
-                            &params,
-                            extension_receiver_parameter,
+                            params,
+                            *extension_receiver_parameter,
                             false,
                             Some(receiver_ty),
                         ) != Some(receiver_position)
@@ -1020,7 +1028,7 @@ impl<'a> Body<'a> {
                                     .to_string(),
                             );
                         }
-                        self.direct_call(function, &params, &args)?;
+                        self.direct_call(function, params, &args)?;
                     } else {
                         // Source lookup exposes the declaration as a receiver-less top-level call.
                         // The frozen contract authenticates the extra body slot; the emitted body
@@ -1040,31 +1048,31 @@ impl<'a> Body<'a> {
                             receiver_ty,
                             receiver_position,
                             None,
-                            &params,
+                            params,
                             &args,
                         )?;
                     }
                 } else {
-                    self.direct_call(function, &params, &args)?;
+                    self.direct_call(function, params, &args)?;
                 }
-                self.coerce_emitted_value(emitted_ret, ret)?;
+                self.coerce_emitted_value(emitted_ret, *ret)?;
             }
             IrExpr::Call {
-                callee:
-                    Callee::External {
-                        target,
-                        params,
-                        ret,
-                        defaults,
-                        extension_receiver_parameter: None,
-                        ..
-                    },
+                callee: ref call_callee,
                 dispatch_receiver: Some(receiver),
                 args,
-            } if defaults.is_empty()
+            } if let Callee::External {
+                target,
+                params,
+                ret,
+                defaults,
+                extension_receiver_parameter: None,
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
                 && self
                     .calls
-                    .singleton_extension_unread_receiver(target)
+                    .singleton_extension_unread_receiver(*target)
                     .is_some_and(|effect| {
                         crate::backend::authenticated_singleton_receiver(
                             Some(receiver),
@@ -1082,17 +1090,17 @@ impl<'a> Body<'a> {
                 // receiver follows the ordinary extension path below and remains evaluated.
                 let function = self
                     .calls
-                    .external(target)
+                    .external(*target)
                     .ok_or_else(|| "an unregistered dependency extension identity".to_string())?;
-                let callable = self.callables.callable(target).ok_or_else(|| {
+                let callable = self.callables.callable(*target).ok_or_else(|| {
                     "a dependency extension without frozen callable facts".to_string()
                 })?;
                 let emitted_ret = callable.declared_ret.unwrap_or(callable.ret);
                 let (function, receiver_ty, receiver_position) =
-                    Self::dependency_extension_call(function, callable, &params, &args)?;
+                    Self::dependency_extension_call(function, callable, params, &args)?;
                 let effect = self
                     .calls
-                    .singleton_extension_unread_receiver(target)
+                    .singleton_extension_unread_receiver(*target)
                     .ok_or_else(|| {
                         "an unread singleton extension without its exported effect".to_string()
                     })?;
@@ -1107,30 +1115,30 @@ impl<'a> Body<'a> {
                     receiver_ty,
                     receiver_position,
                     effect.evaluate_source().then_some(receiver),
-                    &params,
+                    params,
                     &args,
                 )?;
-                self.coerce_emitted_value(emitted_ret, ret)?;
+                self.coerce_emitted_value(emitted_ret, *ret)?;
             }
             IrExpr::Call {
-                callee:
-                    Callee::External {
-                        target,
-                        params,
-                        ret,
-                        defaults,
-                        extension_receiver_parameter: None,
-                        ..
-                    },
+                callee: ref call_callee,
                 dispatch_receiver: Some(receiver),
                 args,
-            } if defaults.is_empty()
-                && self.calls.singleton_member_receiver(target).is_some()
+            } if let Callee::External {
+                target,
+                params,
+                ret,
+                defaults,
+                extension_receiver_parameter: None,
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self.calls.singleton_member_receiver(*target).is_some()
                 && super::callable_registry::authenticated_singleton_member_call(
                     Some(receiver),
                     self.callables.singleton_dispatch(id).is_some(),
                     self.callables
-                        .callable(target)
+                        .callable(*target)
                         .is_some_and(|callable| callable.is_member_function()),
                 ) =>
             {
@@ -1141,9 +1149,9 @@ impl<'a> Body<'a> {
                 // proof may erase evaluation of the source receiver expression.
                 let function = self
                     .calls
-                    .external(target)
+                    .external(*target)
                     .ok_or_else(|| "an unregistered dependency singleton member".to_string())?;
-                let callable = self.callables.callable(target).ok_or_else(|| {
+                let callable = self.callables.callable(*target).ok_or_else(|| {
                     "a dependency member without frozen callable facts".to_string()
                 })?;
                 let emitted_ret = callable.declared_ret.unwrap_or(callable.ret);
@@ -1153,7 +1161,7 @@ impl<'a> Body<'a> {
                     .expect("the guarded singleton call has its frozen per-expression fact");
                 let effect = self
                     .calls
-                    .singleton_member_receiver(target)
+                    .singleton_member_receiver(*target)
                     .ok_or_else(|| {
                         "a receiver-erased dependency member without its singleton effect"
                             .to_string()
@@ -1167,38 +1175,38 @@ impl<'a> Body<'a> {
                 if effect.evaluate_source() {
                     self.statement(receiver)?;
                 }
-                self.direct_call(function, &params, &args)?;
-                self.coerce_emitted_value(emitted_ret, ret)?;
+                self.direct_call(function, params, &args)?;
+                self.coerce_emitted_value(emitted_ret, *ret)?;
             }
             IrExpr::Call {
-                callee:
-                    Callee::External {
-                        target,
-                        params,
-                        ret,
-                        defaults,
-                        extension_receiver_parameter: None,
-                        ..
-                    },
+                callee: ref call_callee,
                 dispatch_receiver: Some(receiver),
                 args,
-            } if defaults.is_empty()
+            } if let Callee::External {
+                target,
+                params,
+                ret,
+                defaults,
+                extension_receiver_parameter: None,
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
                 && self
                     .callables
-                    .callable(target)
+                    .callable(*target)
                     .is_some_and(BackendCallableFact::is_member_function) =>
             {
                 let function = self
                     .calls
-                    .external(target)
+                    .external(*target)
                     .ok_or_else(|| "an unregistered dependency member identity".to_string())?;
-                let callable = self.callables.callable(target).ok_or_else(|| {
+                let callable = self.callables.callable(*target).ok_or_else(|| {
                     "a dependency member without frozen callable facts".to_string()
                 })?;
                 let emitted_ret = callable.declared_ret.unwrap_or(callable.ret);
                 let receiver_ty = self
                     .calls
-                    .member_receiver(target)
+                    .member_receiver(*target)
                     .ok_or_else(|| {
                         "an ordinary dependency member without its exported receiver type"
                             .to_string()
@@ -1211,73 +1219,74 @@ impl<'a> Body<'a> {
                     );
                 }
                 self.value(receiver, receiver_ty)?;
-                for (&argument, &parameter) in args.iter().zip(&params) {
+                for (&argument, &parameter) in args.iter().zip(params.iter()) {
                     self.value(argument, parameter)?;
                 }
                 self.code.call(function);
-                self.coerce_emitted_value(emitted_ret, ret)?;
+                self.coerce_emitted_value(emitted_ret, *ret)?;
             }
             IrExpr::Call {
-                callee:
-                    Callee::External {
-                        target,
-                        params,
-                        ret,
-                        defaults,
-                        extension_receiver_parameter: None,
-                        ..
-                    },
+                callee: ref call_callee,
                 dispatch_receiver: Some(receiver),
                 args,
-            } if defaults.is_empty() => {
+            } if let Callee::External {
+                target,
+                params,
+                ret,
+                defaults,
+                extension_receiver_parameter: None,
+                ..
+            } = &**call_callee
+                && defaults.is_empty() =>
+            {
                 let function = self
                     .calls
-                    .external(target)
+                    .external(*target)
                     .ok_or_else(|| "an unregistered dependency extension identity".to_string())?;
-                let callable = self.callables.callable(target).ok_or_else(|| {
+                let callable = self.callables.callable(*target).ok_or_else(|| {
                     "a dependency extension without frozen callable facts".to_string()
                 })?;
                 let emitted_ret = callable.declared_ret.unwrap_or(callable.ret);
                 let (function, receiver_ty, receiver_position) =
-                    Self::dependency_extension_call(function, callable, &params, &args)?;
+                    Self::dependency_extension_call(function, callable, params, &args)?;
                 self.direct_extension_call(
                     function,
                     receiver_ty,
                     receiver_position,
                     receiver,
-                    &params,
+                    params,
                     &args,
                 )?;
-                self.coerce_emitted_value(emitted_ret, ret)?;
+                self.coerce_emitted_value(emitted_ret, *ret)?;
             }
             IrExpr::Call {
-                callee:
-                    Callee::External {
-                        target,
-                        params,
-                        ret,
-                        defaults,
-                        extension_receiver_parameter: Some(extension_receiver_parameter),
-                        ..
-                    },
+                callee: ref call_callee,
                 dispatch_receiver: Some(dispatch_receiver),
                 args,
-            } if defaults.is_empty()
-                && self.calls.member_receiver(target).is_some()
+            } if let Callee::External {
+                target,
+                params,
+                ret,
+                defaults,
+                extension_receiver_parameter: Some(extension_receiver_parameter),
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self.calls.member_receiver(*target).is_some()
                 && self
                     .callables
-                    .callable(target)
+                    .callable(*target)
                     .is_some_and(BackendCallableFact::is_member_extension) =>
             {
                 let function = self
                     .calls
-                    .external(target)
+                    .external(*target)
                     .ok_or_else(|| "an unregistered dependency member extension".to_string())?;
-                let callable = self.callables.callable(target).ok_or_else(|| {
+                let callable = self.callables.callable(*target).ok_or_else(|| {
                     "a dependency member extension without frozen callable facts".to_string()
                 })?;
                 let receiver_position =
-                    usize::try_from(extension_receiver_parameter).map_err(|_| {
+                    usize::try_from(*extension_receiver_parameter).map_err(|_| {
                         "a dependency member extension with an invalid receiver coordinate"
                     })?;
                 if params.len() != args.len()
@@ -1292,21 +1301,23 @@ impl<'a> Body<'a> {
                 }
                 let dispatch_receiver_ty = self
                     .calls
-                    .member_receiver(target)
+                    .member_receiver(*target)
                     .expect("guarded dependency member extension receiver")
                     .semantic_type();
                 self.value(dispatch_receiver, dispatch_receiver_ty)?;
-                for (&argument, &parameter) in args.iter().zip(&params) {
+                for (&argument, &parameter) in args.iter().zip(params.iter()) {
                     self.value(argument, parameter)?;
                 }
                 self.code.call(function);
-                self.coerce_emitted_value(callable.declared_ret.unwrap_or(callable.ret), ret)?;
+                self.coerce_emitted_value(callable.declared_ret.unwrap_or(callable.ret), *ret)?;
             }
             IrExpr::Call {
-                callee: Callee::Intrinsic { operation, .. },
+                callee: ref call_callee,
                 dispatch_receiver,
                 args,
-            } => self.intrinsic(operation, dispatch_receiver, &args)?,
+            } if let Callee::Intrinsic { operation, .. } = &**call_callee => {
+                self.intrinsic(*operation, dispatch_receiver, &args)?
+            }
             IrExpr::TypeOp {
                 op: op @ (IrTypeOp::Cast | IrTypeOp::CastNonNull),
                 arg,
@@ -1415,44 +1426,64 @@ impl<'a> Body<'a> {
                 value,
                 ..
             } => self.realized_property_write(id, receiver, value)?,
-            IrExpr::Checked(crate::ir::IrCheckedOperation::PropertyRead {
-                target,
-                dispatch_receiver,
-                extension_receiver: None,
-                context_arguments,
-                ..
-            }) if context_arguments.is_empty() => self.property_read(target, dispatch_receiver)?,
-            IrExpr::Checked(crate::ir::IrCheckedOperation::ExternalPropertyRead {
-                target,
-                dispatch: crate::ir::IrPropertyDispatch::Ordinary,
-                receiver,
-                arguments,
-                parameters,
-                result,
-                source_receiver: Some(_),
-            }) if parameters.is_empty() && self.is_throwable_message_property(target) => {
-                self.throwable_message(receiver, &arguments, result)?;
+            IrExpr::Checked(ref checked_op)
+                if let crate::ir::IrCheckedOperation::PropertyRead {
+                    target,
+                    dispatch_receiver,
+                    extension_receiver: None,
+                    context_arguments,
+                    ..
+                } = &**checked_op
+                    && context_arguments.is_empty() =>
+            {
+                self.property_read(*target, *dispatch_receiver)?
             }
-            IrExpr::Checked(crate::ir::IrCheckedOperation::PropertyWrite {
-                target,
-                dispatch_receiver,
-                extension_receiver: None,
-                context_arguments,
-                value,
-                ..
-            }) if context_arguments.is_empty() => {
-                self.property_write(target, dispatch_receiver, value)?
+            IrExpr::Checked(ref checked_op)
+                if let crate::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    dispatch: crate::ir::IrPropertyDispatch::Ordinary,
+                    receiver,
+                    arguments,
+                    parameters,
+                    result,
+                    source_receiver: Some(_),
+                } = &**checked_op
+                    && parameters.is_empty()
+                    && self.is_throwable_message_property(*target) =>
+            {
+                self.throwable_message(*receiver, arguments, *result)?;
+            }
+            IrExpr::Checked(ref checked_op)
+                if let crate::ir::IrCheckedOperation::PropertyWrite {
+                    target,
+                    dispatch_receiver,
+                    extension_receiver: None,
+                    context_arguments,
+                    value,
+                    ..
+                } = &**checked_op
+                    && context_arguments.is_empty() =>
+            {
+                self.property_write(*target, *dispatch_receiver, *value)?
             }
             IrExpr::Call {
-                callee: Callee::Local(function),
+                callee: ref call_callee,
                 dispatch_receiver: Some(receiver),
                 args,
-            } => self.direct_member_call(function, receiver, &args)?,
+            } if let Callee::Local(function) = &**call_callee => {
+                self.direct_member_call(*function, receiver, &args)?
+            }
             IrExpr::Call {
-                callee: callee @ (Callee::Virtual { .. } | Callee::Super { .. }),
+                callee: ref call_callee,
                 dispatch_receiver: Some(receiver),
                 args,
-            } => self.member_call(&callee, receiver, &args)?,
+            } if matches!(
+                &**call_callee,
+                Callee::Virtual { .. } | Callee::Super { .. }
+            ) =>
+            {
+                self.member_call(call_callee, receiver, &args)?
+            }
             IrExpr::BottomValue {
                 producer,
                 completion,
@@ -1635,7 +1666,7 @@ impl<'a> Body<'a> {
                 return Err(format!(
                     "a string template part of type `{}`",
                     describe(other)
-                ))
+                ));
             }
             None => return Ok(()),
         };

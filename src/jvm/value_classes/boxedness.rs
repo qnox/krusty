@@ -85,9 +85,14 @@ impl ReprCtx<'_> {
                 }
             }
             IrExpr::Call {
-                callee: Callee::Static { owner, name, .. },
+                callee: call_callee,
                 ..
-            } if *owner == x && name == "box-impl" => true,
+            } if let Callee::Static { owner, name, .. } = &**call_callee
+                && *owner == x
+                && name == "box-impl" =>
+            {
+                true
+            }
             IrExpr::Call { callee, .. } if callee.source_function().is_some() => funcs
                 .get(
                     callee
@@ -99,34 +104,42 @@ impl ReprCtx<'_> {
             // facade/owner exposes the boxed wrapper across the file boundary (like a classpath member). So a
             // nullable-VC-return tail that is such a call is already boxed and must not be re-boxed.
             IrExpr::Call {
-                callee: Callee::CrossFile { ret, .. },
+                callee: call_callee,
                 ..
-            } => is_x(ret),
+            } if let Callee::CrossFile { ret, .. } = &**call_callee => is_x(ret),
             IrExpr::Call {
-                callee:
-                    Callee::Virtual {
-                        params: Some((_, ret)),
-                        ..
-                    },
+                callee: call_callee,
                 ..
-            } => is_x(ret),
+            } if let Callee::Virtual {
+                params: Some((_, ret)),
+                ..
+            } = &**call_callee =>
+            {
+                is_x(ret)
+            }
             // A function-value invocation (`fn.invoke(..)`) whose logical return is a value class `x`: the
             // generated `Function{N}.invoke` adapter returns a boxed `x` (the underlying `box-impl`'d back —
             // a `Function`'s reference type argument is the box), so a `.field` on the result `unbox-impl`s it.
             IrExpr::InvokeFunction { ret, .. } => is_x(ret),
             IrExpr::Call {
-                callee: Callee::Static { descriptor, .. } | Callee::Virtual { descriptor, .. },
+                callee: call_callee,
                 ..
-            } => descriptor_returns_class(descriptor, x),
+            } if let Callee::Static { descriptor, .. } | Callee::Virtual { descriptor, .. } =
+                &**call_callee =>
+            {
+                descriptor_returns_class(descriptor, x)
+            }
             // A stdlib reference-array element read yields a boxed element.
             IrExpr::Call {
-                callee:
-                    Callee::Intrinsic {
-                        operation: crate::ir::IrIntrinsic::ArrayGet,
-                        ..
-                    },
+                callee: call_callee,
                 ..
-            } => true,
+            } if let Callee::Intrinsic {
+                operation: crate::ir::IrIntrinsic::ArrayGet,
+                ..
+            } = &**call_callee =>
+            {
+                true
+            }
             // `e as X` / `e as X?` yields a boxed `X` (e.g. casting an `Any` returned by a value-class method
             // seen through a supertype) — the property access then `unbox-impl`s it. Except when the operand is
             // already an unboxed `X` (a generic value-class receiver erased to its underlying, with a no-op

@@ -263,8 +263,8 @@ impl BodyLowering<'_> {
         declaration_parameters: Vec<Ty>,
         declaration_result: Ty,
     ) -> ExprId {
-        self.ir
-            .add_expr(IrExpr::CallableReference(crate::ir::IrCallableReference {
+        self.ir.add_expr(IrExpr::CallableReference(Box::new(
+            crate::ir::IrCallableReference {
                 target: crate::ir::IrCallableReferenceTarget::Classifier {
                     classifier,
                     operation,
@@ -278,7 +278,8 @@ impl BodyLowering<'_> {
                 declaration_suspend: false,
                 adaptation: None,
                 reflection_owner: None,
-            }))
+            },
+        )))
     }
 
     fn structural_constructor_reference(
@@ -289,8 +290,8 @@ impl BodyLowering<'_> {
         target_parameters: Vec<Ty>,
         capture: Option<ExprId>,
     ) -> ExprId {
-        self.ir
-            .add_expr(IrExpr::CallableReference(crate::ir::IrCallableReference {
+        self.ir.add_expr(IrExpr::CallableReference(Box::new(
+            crate::ir::IrCallableReference {
                 target: crate::ir::IrCallableReferenceTarget::Constructor { classifier },
                 adapter,
                 captures: Vec::new(),
@@ -301,7 +302,8 @@ impl BodyLowering<'_> {
                 declaration_suspend: false,
                 adaptation: None,
                 reflection_owner: None,
-            }))
+            },
+        )))
     }
 
     fn constructor_reference_call(

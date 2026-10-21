@@ -513,9 +513,10 @@ impl BodyLowering<'_, '_, '_> {
     fn named_property_reference(&self, property: u32) -> Option<String> {
         match self.file.ir.expr(property) {
             IrExpr::LocalPropertyReference(reference) => Some(reference.name.to_string()),
-            IrExpr::Checked(crate::ir::IrCheckedOperation::PropertyReference {
-                target, ..
-            }) => {
+            IrExpr::Checked(checked_op)
+                if let crate::ir::IrCheckedOperation::PropertyReference { target, .. } =
+                    &**checked_op =>
+            {
                 let target = match target {
                     crate::fir::FirPropertyReferenceTarget::Module(property)
                     | crate::fir::FirPropertyReferenceTarget::SpecializedModule {

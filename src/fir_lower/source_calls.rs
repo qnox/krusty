@@ -165,14 +165,10 @@ impl BodyLowering<'_> {
             return true;
         }
         match self.ir.expr(expression) {
-            IrExpr::Call {
-                callee: Callee::Local(function),
-                ..
-            }
-            | IrExpr::Call {
-                callee: Callee::ClassStatic { function, .. },
-                ..
-            } => {
+            IrExpr::Call { callee, .. }
+                if let Callee::Local(function) | Callee::ClassStatic { function, .. } =
+                    &**callee =>
+            {
                 if self.ir.suspend_funs.contains(function) {
                     return true;
                 }
@@ -353,7 +349,7 @@ impl BodyLowering<'_> {
                 source_receiver,
             }
         };
-        let access = self.ir.add_expr(IrExpr::Checked(operation));
+        let access = self.ir.add_expr(IrExpr::Checked(Box::new(operation)));
         self.record_dispatch_class(access, dispatch_class);
         Some(self.wrap_call_statements(statements, access))
     }
@@ -475,7 +471,7 @@ impl BodyLowering<'_> {
             }
         }
         let call = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::External {
+            callee: Box::new(Callee::External {
                 target,
                 default_provider,
                 params: parameter_types,
@@ -483,7 +479,7 @@ impl BodyLowering<'_> {
                 substitutions: super::checked::lower_substitutions(substitutions),
                 defaults,
                 extension_receiver_parameter,
-            },
+            }),
             dispatch_receiver: receiver,
             args,
         });
@@ -713,7 +709,7 @@ impl BodyLowering<'_> {
                 let receiver = self.ir.add_expr(IrExpr::GetValue(outer_slot));
                 let default = self.ir.add_expr(IrExpr::Const(IrConst::Int(*default)));
                 let capacity_call = self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::External {
+                    callee: Box::new(Callee::External {
                         target: call.declaration,
                         default_provider: None,
                         params: call.parameters.iter().map(|ty| ty.get()).collect(),
@@ -721,7 +717,7 @@ impl BodyLowering<'_> {
                         substitutions: Vec::new(),
                         defaults: Vec::new(),
                         extension_receiver_parameter: None,
-                    },
+                    }),
                     dispatch_receiver: Some(receiver),
                     args: vec![default],
                 });
@@ -872,7 +868,7 @@ impl BodyLowering<'_> {
             }
         };
         let append_call = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::External {
+            callee: Box::new(Callee::External {
                 target: append_target,
                 default_provider: None,
                 params: append_params,
@@ -883,7 +879,7 @@ impl BodyLowering<'_> {
                 substitutions: Vec::new(),
                 defaults: Vec::new(),
                 extension_receiver_parameter: extension_parameter,
-            },
+            }),
             dispatch_receiver,
             args: append_args,
         });
@@ -964,7 +960,7 @@ impl BodyLowering<'_> {
             })?;
         debug_assert!(defaults.is_empty());
         let call = self.ir.add_expr(IrExpr::Call {
-            callee,
+            callee: Box::new(callee),
             dispatch_receiver: receiver,
             args,
         });
@@ -1895,7 +1891,7 @@ impl BodyLowering<'_> {
                 let classifier = self.index.enclosing_classifier(callable.declaration)?;
                 let flags = self.index.declaration_header(classifier.declaration)?.flags;
                 self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Virtual {
+                    callee: Box::new(Callee::Virtual {
                         owner: classifier.classifier,
                         name: self.index.callable_name(target)?.to_owned(),
                         descriptor: String::new(),
@@ -1905,7 +1901,7 @@ impl BodyLowering<'_> {
                         target: Some(crate::ir::IrVirtualTarget::Function(
                             crate::fir::ResolvedFunctionOverrideTarget::Module(target),
                         )),
-                    },
+                    }),
                     dispatch_receiver: Some(receiver),
                     args: slots.into_iter().collect::<Option<Vec<_>>>()?,
                 })
@@ -1916,7 +1912,7 @@ impl BodyLowering<'_> {
                 // Preserve the checked source call. A target backend owns the static bridge, masks,
                 // marker parameter, and dispatch-receiver placement.
                 self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::ModuleWithDefaults {
+                    callee: Box::new(Callee::ModuleWithDefaults {
                         target,
                         default_provider,
                         name: self.index.callable_name(target)?.to_owned(),
@@ -1927,7 +1923,7 @@ impl BodyLowering<'_> {
                         extension_receiver_parameter: declared_extension_receiver.map(|_| {
                             u32::try_from(extension_position).expect("too many source parameters")
                         }),
-                    },
+                    }),
                     dispatch_receiver: Some(receiver),
                     args: slots.into_iter().flatten().collect(),
                 })
@@ -1936,16 +1932,16 @@ impl BodyLowering<'_> {
             None if has_defaults => {
                 if let Some(function) = physical_function {
                     self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::LocalWithDefaults {
+                        callee: Box::new(Callee::LocalWithDefaults {
                             function,
                             defaults: default_argument_positions.clone().into_boxed_slice(),
-                        },
+                        }),
                         dispatch_receiver: None,
                         args: slots.into_iter().flatten().collect(),
                     })
                 } else {
                     self.ir.add_expr(IrExpr::Call {
-                        callee: Callee::ModuleWithDefaults {
+                        callee: Box::new(Callee::ModuleWithDefaults {
                             target,
                             default_provider,
                             name: self.index.callable_name(target)?.to_owned(),
@@ -1957,7 +1953,7 @@ impl BodyLowering<'_> {
                                 u32::try_from(extension_position)
                                     .expect("too many source parameters")
                             }),
-                        },
+                        }),
                         dispatch_receiver: None,
                         args: slots.into_iter().flatten().collect(),
                     })
@@ -1965,20 +1961,20 @@ impl BodyLowering<'_> {
             }
             None if !has_defaults && physical_function.is_some() => {
                 self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Local(
+                    callee: Box::new(Callee::Local(
                         physical_function.expect("same-file callable realization"),
-                    ),
+                    )),
                     dispatch_receiver: None,
                     args: slots.into_iter().collect::<Option<Vec<_>>>()?,
                 })
             }
             None if !has_defaults => self.ir.add_expr(IrExpr::Call {
-                callee: Callee::Module {
+                callee: Box::new(Callee::Module {
                     target,
                     name: self.index.callable_name(target)?.to_owned(),
                     params: declaration_parameter_types,
                     ret: declaration_result,
-                },
+                }),
                 dispatch_receiver: None,
                 args: slots.into_iter().collect::<Option<Vec<_>>>()?,
             }),
@@ -2382,10 +2378,13 @@ pub(super) fn rehome_inline_body_values(
                     *local_count = (*local_count).max(count);
                 }
             }
-            IrExpr::Checked(crate::ir::IrCheckedOperation::RangeLoop { variable, .. }) => {
-                let (mapped, count) = mapped(*variable, formal_slots, local_base)?;
-                *variable = mapped;
-                *local_count = (*local_count).max(count);
+            IrExpr::Checked(checked_op) => {
+                if let crate::ir::IrCheckedOperation::RangeLoop { variable, .. } = &mut **checked_op
+                {
+                    let (mapped, count) = mapped(*variable, formal_slots, local_base)?;
+                    *variable = mapped;
+                    *local_count = (*local_count).max(count);
+                }
             }
             _ => {}
         }

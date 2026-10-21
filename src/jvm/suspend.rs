@@ -3495,12 +3495,12 @@ fn add_static_call(
     args: Vec<ExprId>,
 ) -> ExprId {
     ir.add_expr(IrExpr::Call {
-        callee: Callee::Static {
+        callee: Box::new(Callee::Static {
             owner: type_name(owner),
             name: name.to_string(),
             descriptor: descriptor.to_string(),
             inline: InlineKind::None,
-        },
+        }),
         dispatch_receiver: None,
         args,
     })
@@ -3638,9 +3638,9 @@ fn suspends_through_super(ir: &IrFile, b: ExprId, suspend_set: &HashSet<u32>) ->
     if matches!(
         &ir.exprs[b as usize],
         IrExpr::Call {
-            callee: crate::ir::Callee::Special { .. },
+            callee: call_callee,
             ..
-        }
+        } if matches!(&**call_callee, crate::ir::Callee::Special { .. })
     ) && is_suspension_point(ir, b, suspend_set)
     {
         return true;
@@ -3753,7 +3753,7 @@ fn typed_suspension_operands(
             dispatch_receiver,
             args,
         } => {
-            let params: Vec<Ty> = match callee {
+            let params: Vec<Ty> = match &**callee {
                 Callee::Local(fid) => {
                     dispatch_receiver.is_none().then_some(())?;
                     ir.functions[*fid as usize].params.clone()

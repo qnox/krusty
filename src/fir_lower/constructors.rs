@@ -535,13 +535,18 @@ pub(super) fn finalize_constructors(
             } => (*value, stmts.clone()),
             _ => (delegation, Vec::new()),
         };
-        let IrExpr::Checked(IrCheckedOperation::ConstructorDelegation {
+        let IrExpr::Checked(checked_op) = ir.expr(delegation).clone() else {
+            return Err(FirFileLoweringFailure::UnsupportedCallableOwner(
+                declaration,
+            ));
+        };
+        let IrCheckedOperation::ConstructorDelegation {
             target,
             outer_parameter,
             outer_receiver,
             arguments,
             substitutions: _,
-        }) = ir.expr(delegation).clone()
+        } = *checked_op
         else {
             return Err(FirFileLoweringFailure::UnsupportedCallableOwner(
                 declaration,
@@ -1378,12 +1383,12 @@ pub(super) fn accept_constructor_body(
         .first()
         .copied()
         .filter(|expression| match ir.expr(*expression) {
-            IrExpr::Checked(IrCheckedOperation::ConstructorDelegation { .. }) => true,
+            IrExpr::Checked(checked_op) if let IrCheckedOperation::ConstructorDelegation { .. } = &**checked_op => true,
             IrExpr::Block {
                 value: Some(value), ..
             } => matches!(
                 ir.expr(*value),
-                IrExpr::Checked(IrCheckedOperation::ConstructorDelegation { .. })
+                IrExpr::Checked(checked_op) if matches!(&**checked_op, IrCheckedOperation::ConstructorDelegation { .. })
             ),
             _ => false,
         })

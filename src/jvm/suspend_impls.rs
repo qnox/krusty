@@ -183,10 +183,10 @@ pub(crate) fn lower_suspend_impls(ir: &mut IrFile) {
                 .map(|value| ir.add_expr(IrExpr::GetValue(value)))
                 .collect::<Vec<_>>();
             let call = ir.add_expr(IrExpr::Call {
-                callee: Callee::ClassStatic {
+                callee: Box::new(Callee::ClassStatic {
                     owner,
                     function: fid,
-                },
+                }),
                 dispatch_receiver: None,
                 args: arguments,
             });

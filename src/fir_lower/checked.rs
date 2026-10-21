@@ -515,7 +515,7 @@ impl BodyLowering<'_> {
                 (callable.shape.context_parameter_count as usize).min(declaration_parameters.len());
             declaration_parameters.insert(position, specialize(receiver.get()));
         }
-        Ok(Some(self.ir.add_expr(IrExpr::CallableReference(
+        Ok(Some(self.ir.add_expr(IrExpr::CallableReference(Box::new(
             crate::ir::IrCallableReference {
                 target: crate::ir::IrCallableReferenceTarget::Module(callable.id),
                 adapter: function,
@@ -528,7 +528,7 @@ impl BodyLowering<'_> {
                 adaptation: adaptation.cloned().map(Box::new),
                 reflection_owner,
             },
-        ))))
+        )))))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -581,9 +581,8 @@ impl BodyLowering<'_> {
                 return Ok(reference);
             }
         }
-        Ok(self
-            .ir
-            .add_expr(IrExpr::Checked(IrCheckedOperation::PropertyReference {
+        Ok(self.ir.add_expr(IrExpr::Checked(Box::new(
+            IrCheckedOperation::PropertyReference {
                 target: target.clone(),
                 delegated: false,
                 binding,
@@ -592,7 +591,8 @@ impl BodyLowering<'_> {
                 mutable,
                 substitutions: lower_substitutions(substitutions),
                 adaptation: adaptation.cloned().map(Box::new),
-            })))
+            },
+        ))))
     }
 
     pub(super) fn checked_call(
@@ -638,7 +638,7 @@ impl BodyLowering<'_> {
                     arguments,
                     substitutions: lower_substitutions(&call.substitutions),
                 };
-                let call = self.ir.add_expr(IrExpr::Checked(operation));
+                let call = self.ir.add_expr(IrExpr::Checked(Box::new(operation)));
                 self.record_dispatch_class(call, dispatch_class);
                 Ok(call)
             }
@@ -753,7 +753,7 @@ impl BodyLowering<'_> {
                     source_member: *source_member,
                 };
                 let call = self.ir.add_expr(IrExpr::Call {
-                    callee,
+                    callee: Box::new(callee),
                     dispatch_receiver: Some(dispatch_receiver),
                     args: arguments,
                 });
@@ -1013,15 +1013,15 @@ impl BodyLowering<'_> {
             }
         }
         let outer_receiver = self.receiver(call.outer_receiver)?;
-        let delegation =
-            self.ir
-                .add_expr(IrExpr::Checked(IrCheckedOperation::ConstructorDelegation {
-                    target,
-                    outer_parameter: call.outer_parameter.map(crate::fir::ResolvedTy::get),
-                    outer_receiver,
-                    arguments,
-                    substitutions: lower_substitutions(&call.substitutions),
-                }));
+        let delegation = self.ir.add_expr(IrExpr::Checked(Box::new(
+            IrCheckedOperation::ConstructorDelegation {
+                target,
+                outer_parameter: call.outer_parameter.map(crate::fir::ResolvedTy::get),
+                outer_receiver,
+                arguments,
+                substitutions: lower_substitutions(&call.substitutions),
+            },
+        )));
         Ok(if prelude.is_empty() {
             delegation
         } else {
@@ -1147,7 +1147,7 @@ impl BodyLowering<'_> {
                         .collect::<Result<Vec<_>, _>>()?,
                     substitutions: lower_substitutions(substitutions),
                 };
-                let expression = self.ir.add_expr(IrExpr::Checked(operation));
+                let expression = self.ir.add_expr(IrExpr::Checked(Box::new(operation)));
                 self.record_inline_property_splice(expression, inline_splice);
                 self.record_dispatch_class(expression, dispatch_class);
                 Ok(expression)
@@ -1228,7 +1228,7 @@ impl BodyLowering<'_> {
                     value: self.expression_with_conversion(value, conversion)?,
                     substitutions: lower_substitutions(substitutions),
                 };
-                let expression = self.ir.add_expr(IrExpr::Checked(operation));
+                let expression = self.ir.add_expr(IrExpr::Checked(Box::new(operation)));
                 self.record_inline_property_splice(expression, inline_splice);
                 self.record_dispatch_class(expression, dispatch_class);
                 Ok(expression)

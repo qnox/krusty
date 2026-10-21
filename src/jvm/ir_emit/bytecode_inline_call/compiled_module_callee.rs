@@ -112,21 +112,25 @@ fn visit_callee(
 fn names_compiled_callee(ir: &IrFile, call: u32, function: u32) -> bool {
     match ir.expr(call) {
         IrExpr::Call {
-            callee:
-                Callee::Local(callee)
-                | Callee::ClassStatic {
-                    function: callee, ..
-                },
+            callee: call_callee,
             dispatch_receiver: None,
             ..
-        } => *callee == function,
+        } if let Callee::Local(callee)
+        | Callee::ClassStatic {
+            function: callee, ..
+        } = &**call_callee =>
+        {
+            *callee == function
+        }
         // A value-class member's call is realized as a static call of its `-impl`, which names
         // the exact function it calls.
         IrExpr::Call {
-            callee: Callee::Static { .. },
+            callee: call_callee,
             dispatch_receiver: None,
             ..
-        } => ir.jvm_member_targets.get(&call) == Some(&function),
+        } if let Callee::Static { .. } = &**call_callee => {
+            ir.jvm_member_targets.get(&call) == Some(&function)
+        }
         IrExpr::MethodCall { class, index, .. } => {
             ir.classes
                 .get(*class as usize)
@@ -134,24 +138,27 @@ fn names_compiled_callee(ir: &IrFile, call: u32, function: u32) -> bool {
                 == Some(&function)
         }
         IrExpr::Call {
-            callee:
-                Callee::CrossFile {
-                    module_target: Some(target),
-                    module_default_call: false,
-                    ..
-                },
-            dispatch_receiver: None,
+            callee: call_callee,
+            dispatch_receiver,
             ..
+        } if let (
+            Callee::CrossFile {
+                module_target: Some(target),
+                module_default_call: false,
+                ..
+            },
+            None,
+        )
+        | (
+            Callee::Virtual {
+                module_target: Some(target),
+                ..
+            },
+            Some(_),
+        ) = (&**call_callee, dispatch_receiver) =>
+        {
+            ir.checked_callable_functions.get(target) == Some(&function)
         }
-        | IrExpr::Call {
-            callee:
-                Callee::Virtual {
-                    module_target: Some(target),
-                    ..
-                },
-            dispatch_receiver: Some(_),
-            ..
-        } => ir.checked_callable_functions.get(target) == Some(&function),
         _ => false,
     }
 }

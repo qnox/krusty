@@ -31,10 +31,13 @@ use crate::libraries::InlineKind;
 /// argument of an INLINE call can be spliced, so only there does the body belong to this frame.
 fn calls_an_inline_function(ir: &IrFile, expression: ExprId) -> bool {
     let IrExpr::Call {
-        callee: Callee::Static { name, inline, .. },
+        callee: call_callee,
         ..
     } = &ir.exprs[expression as usize]
     else {
+        return false;
+    };
+    let Callee::Static { name, inline, .. } = &**call_callee else {
         return false;
     };
     match inline {
@@ -460,12 +463,12 @@ fn places_literal_lambdas(ir: &IrFile, call: ExprId, suspend_set: &HashSet<u32>)
         let can_inline = matches!(
             &ir.exprs[call as usize],
             IrExpr::Call {
-                callee: Callee::Static {
+                callee: call_callee,
+                ..
+            } if matches!(&**call_callee, Callee::Static {
                     inline: InlineKind::CanInline,
                     ..
-                },
-                ..
-            }
+                })
         );
         return !reified && can_inline && ir.suspend_calls.contains_key(&call);
     }
@@ -569,12 +572,12 @@ mod tests {
     /// A call to an `inline` function taking `argument` — the only position whose lambda is spliced.
     fn inline_call(ir: &mut IrFile, argument: ExprId) -> ExprId {
         let call = ir.add_expr(IrExpr::Call {
-            callee: crate::ir::Callee::Static {
+            callee: Box::new(crate::ir::Callee::Static {
                 owner: crate::types::TypeName::from("LibKt"),
                 name: "with".to_string(),
                 descriptor: "(Lkotlin/jvm/functions/Function0;)Ljava/lang/Object;".to_string(),
                 inline: InlineKind::CanInline,
-            },
+            }),
             dispatch_receiver: None,
             args: vec![argument],
         });
@@ -665,12 +668,12 @@ mod tests {
     /// A call to a callable inline suspend function, spliced from its `$$forInline` copy.
     fn inline_suspend_call(ir: &mut IrFile, argument: ExprId, inline: InlineKind) -> ExprId {
         let call = ir.add_expr(IrExpr::Call {
-            callee: crate::ir::Callee::Static {
+            callee: Box::new(crate::ir::Callee::Static {
                 owner: crate::types::TypeName::from("lib/LibKt"),
                 name: "get".to_string(),
                 descriptor: "(Lkotlin/jvm/functions/Function0;)Ljava/lang/Object;".to_string(),
                 inline,
-            },
+            }),
             dispatch_receiver: None,
             args: vec![argument],
         });

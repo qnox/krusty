@@ -369,7 +369,7 @@ impl BodyLowering<'_> {
         let (dispatch_receiver, args) = (operands.receiver, operands.args);
         let singleton_dispatch = linked.singleton_dispatch;
         let call = self.ir.add_expr(IrExpr::Call {
-            callee,
+            callee: Box::new(callee),
             dispatch_receiver,
             args,
         });
@@ -418,7 +418,7 @@ impl BodyLowering<'_> {
             ..
         } = linked;
         let dispatch = IrPropertyDispatch::Ordinary;
-        Ok(self.ir.add_expr(IrExpr::Checked(if write {
+        Ok(self.ir.add_expr(IrExpr::Checked(Box::new(if write {
             IrCheckedOperation::ExternalPropertyWrite {
                 target,
                 dispatch,
@@ -438,7 +438,7 @@ impl BodyLowering<'_> {
                 result,
                 source_receiver,
             }
-        })))
+        }))))
     }
 
     /// A call's dispatch receiver and arguments, each read at the callee's declared type, after

@@ -110,15 +110,15 @@ pub(super) fn build_continuation_class(
     reentry_args.push(this_as_cont);
     let call_outer = match (receiver, static_owner) {
         (None, Some(owner)) => ir.add_expr(IrExpr::Call {
-            callee: Callee::ClassStatic {
+            callee: Box::new(Callee::ClassStatic {
                 owner,
                 function: outer_fid,
-            },
+            }),
             dispatch_receiver: None,
             args: reentry_args,
         }),
         (None, None) => ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(outer_fid),
+            callee: Box::new(Callee::Local(outer_fid)),
             dispatch_receiver: None,
             args: reentry_args,
         }),
@@ -150,10 +150,10 @@ pub(super) fn build_continuation_class(
                 let mut args = vec![recv];
                 args.extend(reentry_args);
                 ir.add_expr(IrExpr::Call {
-                    callee: Callee::ClassStatic {
+                    callee: Box::new(Callee::ClassStatic {
                         owner,
                         function: outer_fid,
-                    },
+                    }),
                     dispatch_receiver: None,
                     args,
                 })
@@ -176,7 +176,9 @@ pub(super) fn build_continuation_class(
                 // with `IncompatibleClassChangeError` (coroutines/suspendDefaultImpl).
                 let interface = owner_cid.is_some_and(|cid| ir.classes[cid].is_interface);
                 ir.add_expr(IrExpr::Call {
-                    callee: Callee::realized_virtual(owner, name, descriptor, None, interface),
+                    callee: Box::new(Callee::realized_virtual(
+                        owner, name, descriptor, None, interface,
+                    )),
                     dispatch_receiver: Some(recv),
                     args: reentry_args,
                 })

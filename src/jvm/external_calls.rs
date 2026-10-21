@@ -126,12 +126,12 @@ pub(super) fn realize(
                 let args = std::mem::take(args);
                 *external_target = None;
                 ir.exprs[index] = IrExpr::Call {
-                    callee: Callee::Static {
+                    callee: Box::new(Callee::Static {
                         owner,
                         name,
                         descriptor,
                         inline: callable.inline,
-                    },
+                    }),
                     dispatch_receiver: None,
                     args,
                 };
@@ -217,43 +217,52 @@ pub(super) fn realize(
             *default_prefix_count = 0;
             continue;
         }
-        let property = match ir.exprs[index].clone() {
-            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
-                target,
-                dispatch,
-                receiver,
-                arguments,
-                parameters,
-                result,
-                source_receiver,
-            }) => Some((
-                target,
-                false,
-                dispatch,
-                receiver,
-                arguments,
-                parameters,
-                result,
-                source_receiver,
-            )),
-            IrExpr::Checked(IrCheckedOperation::ExternalPropertyWrite {
-                target,
-                dispatch,
-                receiver,
-                arguments,
-                parameters,
-                result,
-                source_receiver,
-            }) => Some((
-                target,
-                true,
-                dispatch,
-                receiver,
-                arguments,
-                parameters,
-                result,
-                source_receiver,
-            )),
+        let checked_expression = ir.exprs[index].clone();
+        let property = match checked_expression {
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    dispatch,
+                    receiver,
+                    arguments,
+                    parameters,
+                    result,
+                    source_receiver,
+                } = &**checked_op =>
+            {
+                Some((
+                    target,
+                    false,
+                    dispatch,
+                    receiver,
+                    arguments,
+                    parameters,
+                    result,
+                    source_receiver,
+                ))
+            }
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::ExternalPropertyWrite {
+                    target,
+                    dispatch,
+                    receiver,
+                    arguments,
+                    parameters,
+                    result,
+                    source_receiver,
+                } = &**checked_op =>
+            {
+                Some((
+                    target,
+                    true,
+                    dispatch,
+                    receiver,
+                    arguments,
+                    parameters,
+                    result,
+                    source_receiver,
+                ))
+            }
             _ => None,
         };
         let mut property_dispatch = crate::ir::IrPropertyDispatch::Ordinary;
@@ -269,14 +278,14 @@ pub(super) fn realize(
             source_receiver,
         )) = property
         {
-            property_dispatch = dispatch;
+            property_dispatch = *dispatch;
             let realization = callables
-                .property(property)
-                .ok_or(ExternalDependencyTarget::Property(property))?;
+                .property(*property)
+                .ok_or(ExternalDependencyTarget::Property(*property))?;
             let target = if write {
                 realization
                     .setter
-                    .ok_or(ExternalDependencyTarget::Property(property))?
+                    .ok_or(ExternalDependencyTarget::Property(*property))?
             } else {
                 realization.getter
             };
@@ -287,21 +296,21 @@ pub(super) fn realize(
                 crate::ir::IrVirtualTarget::PropertyGetter(property_target)
             });
             ir.exprs[index] = IrExpr::Call {
-                callee: Callee::External {
+                callee: Box::new(Callee::External {
                     target,
                     default_provider: None,
-                    params: parameters,
-                    ret: result,
+                    params: parameters.to_vec(),
+                    ret: *result,
                     substitutions: Vec::new(),
                     defaults: Vec::new(),
                     extension_receiver_parameter: None,
-                },
-                dispatch_receiver: receiver,
-                args: arguments,
+                }),
+                dispatch_receiver: *receiver,
+                args: arguments.to_vec(),
             };
             if let Some(source_receiver) = source_receiver {
                 ir.ext_call_source_receiver
-                    .insert(expression, source_receiver);
+                    .insert(expression, *source_receiver);
             }
         }
         let (
@@ -314,26 +323,28 @@ pub(super) fn realize(
             extension_receiver_parameter,
         ) = match &ir.exprs[index] {
             IrExpr::Call {
-                callee:
-                    Callee::External {
-                        target,
-                        default_provider,
-                        params,
-                        ret,
-                        substitutions,
-                        defaults,
-                        extension_receiver_parameter,
-                    },
+                callee: call_callee,
                 ..
-            } => (
-                *target,
-                *default_provider,
-                params.clone(),
-                *ret,
-                substitutions.clone(),
-                defaults.clone(),
-                *extension_receiver_parameter,
-            ),
+            } if let Callee::External {
+                target,
+                default_provider,
+                params,
+                ret,
+                substitutions,
+                defaults,
+                extension_receiver_parameter,
+            } = &**call_callee =>
+            {
+                (
+                    *target,
+                    *default_provider,
+                    params.clone(),
+                    *ret,
+                    substitutions.clone(),
+                    defaults.clone(),
+                    *extension_receiver_parameter,
+                )
+            }
             _ => continue,
         };
         let callable = callables.callable(target).cloned().ok_or_else(|| {
@@ -707,7 +718,7 @@ pub(super) fn realize(
                 };
                 args.extend(mask_values);
                 args.push(marker);
-                *callee = Callee::Static {
+                **callee = Callee::Static {
                     owner: default.owner,
                     name: default.name.clone(),
                     descriptor: default.descriptor.clone(),
@@ -932,7 +943,7 @@ pub(super) fn realize(
             | None => None,
         };
         if let Some(operation) = selected_intrinsic {
-            *callee = Callee::Intrinsic {
+            **callee = Callee::Intrinsic {
                 operation,
                 ret: semantic_ret,
             };
@@ -948,7 +959,7 @@ pub(super) fn realize(
         });
         match kind {
             ExternalCallableKind::TopLevel => {
-                *callee = Callee::Static {
+                **callee = Callee::Static {
                     owner: callable.physical_owner,
                     name: physical_name.clone(),
                     descriptor,
@@ -960,7 +971,7 @@ pub(super) fn realize(
                 let position = callable.context_count.min(args.len());
                 args.insert(position, receiver);
                 extension_receiver_at = Some(position as u32);
-                *callee = Callee::Static {
+                **callee = Callee::Static {
                     owner: callable.physical_owner,
                     name: physical_name.clone(),
                     descriptor,
@@ -982,23 +993,23 @@ pub(super) fn realize(
                         // A legacy interface body lives only on its receiver-first holder static,
                         // which takes the retained dispatch receiver at its own class.
                         *callee = match callable.nonvirtual_realization.as_deref() {
-                            Some(holder) => Callee::Static {
+                            Some(holder) => Box::new(Callee::Static {
                                 owner: holder.owner,
                                 name: physical_name.clone(),
                                 descriptor: holder.descriptor.clone(),
                                 inline: crate::libraries::InlineKind::None,
-                            },
-                            None => Callee::Special {
+                            }),
+                            None => Box::new(Callee::Special {
                                 owner,
                                 name: physical_name.clone(),
                                 descriptor,
                                 interface,
                                 source_member: None,
                                 source: None,
-                            },
+                            }),
                         };
                     } else if callable.inline.must_inline() {
-                        *callee = Callee::Static {
+                        **callee = Callee::Static {
                             owner: callable.physical_owner,
                             name: physical_name.clone(),
                             descriptor,
@@ -1011,7 +1022,7 @@ pub(super) fn realize(
                     .and_then(primitive_hash_code)
                     {
                         args.insert(0, dispatch_receiver.take().ok_or(target)?);
-                        *callee = Callee::Static {
+                        **callee = Callee::Static {
                             owner,
                             name: physical_name.clone(),
                             descriptor,
@@ -1034,7 +1045,7 @@ pub(super) fn realize(
                         )
                         .ok_or(target)?;
                         args.insert(0, dispatch_receiver.take().ok_or(target)?);
-                        *callee = Callee::Static {
+                        **callee = Callee::Static {
                             owner: crate::types::type_name(&helper.owner),
                             name: helper.name,
                             descriptor: helper.descriptor,
@@ -1054,7 +1065,7 @@ pub(super) fn realize(
                                 classifier: missing.0,
                             }
                         })?;
-                        *callee = Callee::Virtual {
+                        **callee = Callee::Virtual {
                             owner,
                             name: physical_name.clone(),
                             descriptor,
@@ -1071,7 +1082,7 @@ pub(super) fn realize(
                     } else {
                         *dispatch_receiver = None;
                     }
-                    *callee = Callee::Static {
+                    **callee = Callee::Static {
                         owner: callable.physical_owner,
                         name: physical_name.clone(),
                         descriptor,
@@ -1083,7 +1094,7 @@ pub(super) fn realize(
                     | crate::libraries::CompilerIntrinsic::NullableAnyToString),
                 ) => {
                     physical_result = semantic_ret;
-                    *callee = Callee::Intrinsic {
+                    **callee = Callee::Intrinsic {
                         operation: if intrinsic == crate::libraries::CompilerIntrinsic::StringGet {
                             crate::ir::IrIntrinsic::StringGet
                         } else {
@@ -1101,7 +1112,7 @@ pub(super) fn realize(
                     | crate::libraries::CompilerIntrinsic::ArraySize),
                 ) => {
                     physical_result = semantic_ret;
-                    *callee = Callee::Intrinsic {
+                    **callee = Callee::Intrinsic {
                         operation: match intrinsic {
                             crate::libraries::CompilerIntrinsic::ArrayGet => {
                                 crate::ir::IrIntrinsic::ArrayGet
@@ -1121,7 +1132,7 @@ pub(super) fn realize(
                     *callee = match primitive_iterator_next(callable.physical_owner, receiver) {
                         Some((name, element)) => {
                             physical_result = element;
-                            Callee::Virtual {
+                            Box::new(Callee::Virtual {
                                 owner: callable.physical_owner,
                                 name,
                                 descriptor: crate::jvm::names::method_descriptor(&[], element),
@@ -1129,7 +1140,7 @@ pub(super) fn realize(
                                 interface: false,
                                 module_target: None,
                                 target: Some(selected),
-                            }
+                            })
                         }
                         None => {
                             let (owner, interface) = crate::jvm::member_dispatch::virtual_owner(
@@ -1143,7 +1154,7 @@ pub(super) fn realize(
                                 target,
                                 classifier: missing.0,
                             })?;
-                            Callee::Virtual {
+                            Box::new(Callee::Virtual {
                                 owner,
                                 name: physical_name.clone(),
                                 descriptor,
@@ -1151,7 +1162,7 @@ pub(super) fn realize(
                                 interface,
                                 module_target: None,
                                 target: Some(selected),
-                            }
+                            })
                         }
                     };
                 }
@@ -1162,12 +1173,12 @@ pub(super) fn realize(
                     *callee = match receiver.and_then(primitive_hash_code) {
                         Some((owner, descriptor)) => {
                             args.insert(0, dispatch_receiver.take().ok_or(target)?);
-                            Callee::Static {
+                            Box::new(Callee::Static {
                                 owner,
                                 name: physical_name.clone(),
                                 descriptor,
                                 inline: crate::libraries::InlineKind::None,
-                            }
+                            })
                         }
                         None => {
                             let (owner, interface) = crate::jvm::member_dispatch::virtual_owner(
@@ -1181,7 +1192,7 @@ pub(super) fn realize(
                                 target,
                                 classifier: missing.0,
                             })?;
-                            Callee::Virtual {
+                            Box::new(Callee::Virtual {
                                 owner,
                                 name: physical_name.clone(),
                                 descriptor,
@@ -1189,7 +1200,7 @@ pub(super) fn realize(
                                 interface,
                                 module_target: None,
                                 target: Some(selected),
-                            }
+                            })
                         }
                     };
                 }
@@ -1197,7 +1208,7 @@ pub(super) fn realize(
                 crate::libraries::MemberRealization::Intrinsic(
                     crate::libraries::CompilerIntrinsic::PrimitiveEquals,
                 ) => {
-                    *callee = Callee::Virtual {
+                    **callee = Callee::Virtual {
                         owner: crate::types::wk::java_object(),
                         name: physical_name.clone(),
                         descriptor: "(Ljava/lang/Object;)Z".to_string(),
@@ -1444,10 +1455,13 @@ fn record_protected_dependency_call(
         return;
     }
     let IrExpr::Call {
-        callee: Callee::Virtual { name, .. },
+        callee: call_callee,
         ..
     } = ir.expr(expression)
     else {
+        return;
+    };
+    let Callee::Virtual { name, .. } = &**call_callee else {
         return;
     };
     ir.jvm_protected_dependency_calls.insert(

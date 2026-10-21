@@ -1918,9 +1918,11 @@ pub(in super::super) fn expression_facts_use_binding(
     }
     match ir.expr(expression) {
         IrExpr::Call {
-            callee: Callee::External { substitutions, .. },
+            callee: call_callee,
             ..
-        } => substitutions_use_binding(substitutions, bindings),
+        } if let Callee::External { substitutions, .. } = &**call_callee => {
+            substitutions_use_binding(substitutions, bindings)
+        }
         IrExpr::Checked(operation) => checked_substitutions(operation)
             .is_some_and(|substitutions| substitutions_use_binding(substitutions, bindings)),
         IrExpr::ReifiedTypeOp { name, .. } | IrExpr::ReifiedClassMarker { name, .. } => {
@@ -1962,13 +1964,15 @@ fn node_uses_binding(expression: &IrExpr, bindings: &HashMap<String, Ty>) -> boo
             classifier.is_some_and(|ty| uses_binding(ty, bindings))
         }
         IrExpr::Call {
-            callee:
-                Callee::Intrinsic {
-                    operation: crate::ir::IrIntrinsic::TypeOf { ty },
-                    ..
-                },
+            callee: call_callee,
             ..
-        } => uses_binding(*ty, bindings),
+        } if let Callee::Intrinsic {
+            operation: crate::ir::IrIntrinsic::TypeOf { ty },
+            ..
+        } = &**call_callee =>
+        {
+            uses_binding(*ty, bindings)
+        }
         _ => false,
     }
 }

@@ -846,7 +846,7 @@ fn private_default_published_by_inline(ir: &IrFile, target: u32) -> bool {
 /// The local function a call names, when this expression is a direct call.
 fn default_or_inline_callee(ir: &IrFile, expression: crate::ir::ExprId) -> Option<u32> {
     match ir.expr(expression) {
-        IrExpr::Call { callee, .. } => match callee {
+        IrExpr::Call { callee, .. } => match &**callee {
             Callee::Local(function)
             | Callee::LocalDefault(function)
             | Callee::LocalWithDefaults { function, .. }
@@ -866,16 +866,13 @@ fn default_or_inline_callee(ir: &IrFile, expression: crate::ir::ExprId) -> Optio
 
 fn calls_default_bridge(ir: &IrFile, expression: crate::ir::ExprId, target: u32) -> bool {
     match ir.expr(expression) {
-        IrExpr::Call {
-            callee: Callee::LocalDefault(function) | Callee::LocalWithDefaults { function, .. },
-            ..
-        }
-        | IrExpr::Call {
-            callee:
-                Callee::ClassStaticDefault { function, .. }
-                | Callee::ClassStaticWithDefaults { function, .. },
-            ..
-        } => *function == target,
+        IrExpr::Call { callee, .. } => match &**callee {
+            Callee::LocalDefault(function)
+            | Callee::LocalWithDefaults { function, .. }
+            | Callee::ClassStaticDefault { function, .. }
+            | Callee::ClassStaticWithDefaults { function, .. } => *function == target,
+            _ => false,
+        },
         IrExpr::MethodCall {
             class, index, args, ..
         } => {

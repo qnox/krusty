@@ -708,10 +708,10 @@ impl BodyLowering<'_> {
                 let size = match traversal {
                     crate::fir::FirInlineIterationTraversal::Array => {
                         self.ir.add_expr(IrExpr::Call {
-                            callee: Callee::Intrinsic {
+                            callee: Box::new(Callee::Intrinsic {
                                 operation: crate::ir::IrIntrinsic::ArraySize,
                                 ret: Ty::Int,
-                            },
+                            }),
                             dispatch_receiver: Some(receiver),
                             args: Vec::new(),
                         })
@@ -747,10 +747,10 @@ impl BodyLowering<'_> {
                 let element = match traversal {
                     crate::fir::FirInlineIterationTraversal::Array => {
                         self.ir.add_expr(IrExpr::Call {
-                            callee: Callee::Intrinsic {
+                            callee: Box::new(Callee::Intrinsic {
                                 operation: crate::ir::IrIntrinsic::ArrayGet,
                                 ret: element_ty.get(),
-                            },
+                            }),
                             dispatch_receiver: Some(receiver),
                             args: vec![cursor],
                         })
@@ -1246,7 +1246,7 @@ impl BodyLowering<'_> {
             return None;
         }
         let expression = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::External {
+            callee: Box::new(Callee::External {
                 target: call.declaration,
                 default_provider: None,
                 params: call
@@ -1258,7 +1258,7 @@ impl BodyLowering<'_> {
                 substitutions: Vec::new(),
                 defaults: Vec::new(),
                 extension_receiver_parameter: None,
-            },
+            }),
             dispatch_receiver: receiver.map(|(receiver, _)| receiver),
             args,
         });

@@ -100,51 +100,53 @@ impl Emitter<'_> {
         // comparison directly into the consuming branch so no boxed values or intermediate Boolean
         // are created. Other field kinds retain the generic intrinsic realization below.
         if let IrExpr::Call {
-            callee:
-                Callee::Intrinsic {
-                    operation: crate::ir::IrIntrinsic::GeneratedPropertyEquals { ty },
-                    ..
-                },
+            callee: call_callee,
             args,
             ..
         } = self.ir.expr(cond)
         {
-            let scalar = ty.non_null();
-            if !ty.is_nullable() && matches!(scalar, Ty::Float | Ty::Double) {
+            if let Callee::Intrinsic {
+                operation: crate::ir::IrIntrinsic::GeneratedPropertyEquals { ty },
+                ..
+            } = &**call_callee
+            {
+                let scalar = ty.non_null();
+                if !ty.is_nullable() && matches!(scalar, Ty::Float | Ty::Double) {
+                    let [left, right] = args.as_slice() else {
+                        unreachable!("data-class field equality has two operands")
+                    };
+                    self.emit_value(*left, code);
+                    self.emit_value(*right, code);
+                    let (owner, descriptor) = match scalar {
+                        Ty::Float => ("java/lang/Float", "(FF)I"),
+                        Ty::Double => ("java/lang/Double", "(DD)I"),
+                        _ => unreachable!(),
+                    };
+                    let method = self.cw.methodref(owner, "compare", descriptor);
+                    code.invokestatic(method, (slot_words(scalar) * 2) as i32, 1);
+                    if jump_when_true {
+                        code.ifeq(target);
+                    } else {
+                        code.ifne(target);
+                    }
+                    return false;
+                }
+                // An enum property compares by reference, as kotlinc's `Equals` compares any two
+                // operands of which one has an enum type: an enum constant is a singleton.
                 let [left, right] = args.as_slice() else {
                     unreachable!("data-class field equality has two operands")
                 };
-                self.emit_value(*left, code);
-                self.emit_value(*right, code);
-                let (owner, descriptor) = match scalar {
-                    Ty::Float => ("java/lang/Float", "(FF)I"),
-                    Ty::Double => ("java/lang/Double", "(DD)I"),
-                    _ => unreachable!(),
-                };
-                let method = self.cw.methodref(owner, "compare", descriptor);
-                code.invokestatic(method, (slot_words(scalar) * 2) as i32, 1);
-                if jump_when_true {
-                    code.ifeq(target);
-                } else {
-                    code.ifne(target);
+                let (left, right) = (*left, *right);
+                if self.is_enum_value(left) || self.is_enum_value(right) {
+                    self.emit_value(left, code);
+                    self.emit_value(right, code);
+                    if jump_when_true {
+                        code.if_acmpeq(target);
+                    } else {
+                        code.if_acmpne(target);
+                    }
+                    return false;
                 }
-                return false;
-            }
-            // An enum property compares by reference, as kotlinc's `Equals` compares any two
-            // operands of which one has an enum type: an enum constant is a singleton.
-            let [left, right] = args.as_slice() else {
-                unreachable!("data-class field equality has two operands")
-            };
-            let (left, right) = (*left, *right);
-            if self.is_enum_value(left) || self.is_enum_value(right) {
-                self.emit_value(left, code);
-                self.emit_value(right, code);
-                if jump_when_true {
-                    code.if_acmpeq(target);
-                } else {
-                    code.if_acmpne(target);
-                }
-                return false;
             }
         }
         if let IrExpr::PrimitiveBinOp { op, .. } | IrExpr::Equality { op, .. } = *self.ir.expr(cond)

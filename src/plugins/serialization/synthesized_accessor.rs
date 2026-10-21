@@ -18,7 +18,7 @@ pub(super) fn getter(
     property: (ClassId, u32),
 ) -> ExprId {
     let call = ir.add_expr(IrExpr::Call {
-        callee: Callee::Virtual {
+        callee: Box::new(Callee::Virtual {
             owner,
             name: property_getter_name(property_name),
             descriptor: format!("(){descriptor}"),
@@ -26,7 +26,7 @@ pub(super) fn getter(
             interface: false,
             module_target: None,
             target: None,
-        },
+        }),
         dispatch_receiver: Some(receiver),
         args: vec![],
     });

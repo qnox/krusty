@@ -523,7 +523,7 @@ mod tests {
             param_checks: vec![],
         });
         let mismatched_call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(callee),
+            callee: Box::new(Callee::Local(callee)),
             dispatch_receiver: None,
             args: vec![],
         });
@@ -567,14 +567,14 @@ mod tests {
     fn a_cross_file_call_short_of_its_parameters_is_refused_not_emitted() {
         let mut ir = IrFile::default();
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::CrossFile {
+            callee: Box::new(Callee::CrossFile {
                 facade: crate::types::type_name("other/OtherKt"),
                 name: "takesTwo".into(),
                 params: vec![Ty::Int, Ty::Int],
                 ret: Ty::Unit,
                 module_target: None,
                 module_default_call: false,
-            },
+            }),
             dispatch_receiver: None,
             args: vec![],
         });
@@ -588,12 +588,12 @@ mod tests {
     fn a_classpath_static_call_short_of_its_descriptor_is_refused_not_emitted() {
         let mut ir = IrFile::default();
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
+            callee: Box::new(Callee::Static {
                 owner: crate::types::type_name("kotlin/text/StringsKt"),
                 name: "takesTwo".into(),
                 descriptor: "(Ljava/lang/String;I)V".into(),
                 inline: crate::libraries::InlineKind::None,
-            },
+            }),
             dispatch_receiver: None,
             args: vec![],
         });
@@ -609,13 +609,13 @@ mod tests {
         let mut ir = IrFile::default();
         let receiver = ir.add_expr(IrExpr::Const(IrConst::Null));
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::realized_virtual(
+            callee: Box::new(Callee::realized_virtual(
                 crate::types::type_name("java/lang/String"),
                 "takesTwo".into(),
                 "(Ljava/lang/String;I)V".into(),
                 None,
                 false,
-            ),
+            )),
             dispatch_receiver: Some(receiver),
             args: vec![],
         });

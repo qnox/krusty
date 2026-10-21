@@ -204,7 +204,7 @@ mod tests {
             param_checks: Vec::new(),
         });
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(function),
+            callee: Box::new(Callee::Local(function)),
             dispatch_receiver: None,
             args: Vec::new(),
         });

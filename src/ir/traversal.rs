@@ -6,7 +6,7 @@ use super::*;
 /// fail to compile here rather than silently drop its children from every walk.
 pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
     match &exprs[e as usize] {
-        IrExpr::Checked(operation) => match operation {
+        IrExpr::Checked(operation) => match &**operation {
             IrCheckedOperation::Call {
                 dispatch_receiver,
                 extension_receiver,
@@ -414,9 +414,10 @@ fn default_expr_stub_safe_with_locals(
             return false;
         }
         IrExpr::Call {
-            callee: Callee::Static { name, .. },
+            callee: call_callee,
             ..
-        } if name.contains('-')
+        } if let Callee::Static { name, .. } = &**call_callee
+            && name.contains('-')
             // Only a construction that THIS pass rewrote is known safe. Generated-looking spellings
             // are not reserved: accepting them by string would let an unrelated user/library call
             // bypass the conservative mangled-call gate.
@@ -520,10 +521,12 @@ fn remap_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, map: &dyn Fn(
                     }
                 }
             }
-            IrExpr::Checked(IrCheckedOperation::RangeLoop { variable, .. })
-                if *variable >= threshold =>
-            {
-                *variable = by(*variable);
+            IrExpr::Checked(checked_op) => {
+                if let IrCheckedOperation::RangeLoop { variable, .. } = &mut **checked_op {
+                    if *variable >= threshold {
+                        *variable = by(*variable);
+                    }
+                }
             }
             _ => {}
         }

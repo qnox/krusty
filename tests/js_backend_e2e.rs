@@ -159,19 +159,19 @@ fn ulong_backend_ir_uses_one_node_carrier() {
 
     let size = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
     let array = ir.add_expr(IrExpr::Call {
-        callee: Callee::Intrinsic {
+        callee: Box::new(Callee::Intrinsic {
             operation: IrIntrinsic::PrimitiveArrayNew { element: Ty::ULong },
             ret: Ty::array(Ty::ULong),
-        },
+        }),
         dispatch_receiver: None,
         args: vec![size],
     });
     let index = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
     let erased_read = ir.add_expr(IrExpr::Call {
-        callee: Callee::Intrinsic {
+        callee: Box::new(Callee::Intrinsic {
             operation: IrIntrinsic::ArrayGet,
             ret: Ty::nullable(Ty::obj("kotlin/Any")),
-        },
+        }),
         dispatch_receiver: Some(array),
         args: vec![index],
     });
@@ -195,10 +195,10 @@ fn ulong_backend_ir_uses_one_node_carrier() {
     });
     let index = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
     let erased_read = ir.add_expr(IrExpr::Call {
-        callee: Callee::Intrinsic {
+        callee: Box::new(Callee::Intrinsic {
             operation: IrIntrinsic::ArrayGet,
             ret: Ty::nullable(Ty::obj("kotlin/Any")),
-        },
+        }),
         dispatch_receiver: Some(array),
         args: vec![index],
     });

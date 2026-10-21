@@ -475,11 +475,10 @@ impl CheckedBackendCallables {
             .collect::<Vec<_>>();
         singleton_dispatches.sort_unstable_by_key(|(expression, _)| *expression);
         for (expression, classifier) in singleton_dispatches {
-            let crate::ir::IrExpr::Call {
-                callee: crate::ir::Callee::External { target, .. },
-                ..
-            } = ir.expr(expression)
-            else {
+            let crate::ir::IrExpr::Call { callee, .. } = ir.expr(expression) else {
+                return Err(DependencyFactError::InvalidSingletonDispatch(expression));
+            };
+            let crate::ir::Callee::External { target, .. } = &**callee else {
                 return Err(DependencyFactError::InvalidSingletonDispatch(expression));
             };
             if !facts.callables.contains_key(target) {

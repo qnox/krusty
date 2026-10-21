@@ -83,14 +83,14 @@ pub(super) fn add_cached_serializer_delegate(
         name: "PUBLICATION".into(),
     });
     let lazy = ir.add_expr(IrExpr::Call {
-        callee: Callee::Static {
+        callee: Box::new(Callee::Static {
             owner: type_name("kotlin/LazyKt"),
             name: "lazy".to_string(),
             descriptor:
                 "(Lkotlin/LazyThreadSafetyMode;Lkotlin/jvm/functions/Function0;)Lkotlin/Lazy;"
                     .to_string(),
             inline: InlineKind::None,
-        },
+        }),
         dispatch_receiver: None,
         args: vec![mode, block],
     });
@@ -213,13 +213,13 @@ pub(super) fn add_object_serializer(
         descriptor: "Lkotlin/Lazy;".to_string(),
     });
     let get_value = ir.add_expr(IrExpr::Call {
-        callee: Callee::realized_virtual(
+        callee: Box::new(Callee::realized_virtual(
             type_name("kotlin/Lazy"),
             "getValue".to_string(),
             String::new(),
             Some((vec![], class_ty("kotlin/Any"))),
             true,
-        ),
+        )),
         dispatch_receiver: Some(read),
         args: vec![],
     });

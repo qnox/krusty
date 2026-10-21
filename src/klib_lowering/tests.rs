@@ -134,7 +134,7 @@ fn frozen_in_namespaces(
     };
     let mut ir = IrFile::default();
     ir.add_expr(IrExpr::Call {
-        callee: Callee::External {
+        callee: Box::new(Callee::External {
             target: *target,
             default_provider: None,
             params: callable_params.clone(),
@@ -142,7 +142,7 @@ fn frozen_in_namespaces(
             substitutions: Vec::new(),
             defaults: Vec::new(),
             extension_receiver_parameter: None,
-        },
+        }),
         dispatch_receiver: None,
         args: Vec::new(),
     });
@@ -219,7 +219,7 @@ fn frozen_floating_hash_code(
     };
     let mut ir = IrFile::default();
     ir.add_expr(IrExpr::Call {
-        callee: Callee::External {
+        callee: Box::new(Callee::External {
             target: *target,
             default_provider: None,
             params: callable_params.clone(),
@@ -227,7 +227,7 @@ fn frozen_floating_hash_code(
             substitutions: Vec::new(),
             defaults: Vec::new(),
             extension_receiver_parameter: None,
-        },
+        }),
         dispatch_receiver: None,
         args: Vec::new(),
     });
@@ -387,10 +387,10 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
             )
         }
         IrExpr::Call {
-            callee: Callee::Local(function),
+            callee: call_callee,
             dispatch_receiver: None,
             args,
-        } => {
+        } if let Callee::Local(function) = &**call_callee => {
             let args = args
                 .iter()
                 .map(|argument| render(ir, *argument))
@@ -1645,8 +1645,12 @@ fn reinterpret_calls(
         .filter(|expression| {
             matches!(
                 expression,
-                IrExpr::Call { callee: Callee::External { target, ret, .. }, .. }
-                    if *target == targets[0] && *ret == result
+                IrExpr::Call { callee, .. }
+                    if matches!(
+                        &**callee,
+                        Callee::External { target, ret, .. }
+                            if *target == targets[0] && *ret == result
+                    )
             )
         })
         .count()
@@ -2156,7 +2160,7 @@ fn wasm_math_wrappers_are_scalar_roots_closing_through_one_instruction() {
             .exprs
             .iter()
             .filter_map(|expression| match expression {
-                IrExpr::Call { callee, .. } => Some(callee),
+                IrExpr::Call { callee, .. } => Some(&**callee),
                 _ => None,
             })
             .collect::<Vec<_>>();

@@ -62,19 +62,18 @@ fn external_call_keeps_checked_type_substitutions_until_provider_realization() {
         Some(&crate::types::SemanticCallRole::KotlinAnyToString)
     );
     assert!(matches!(
-        ir.expr(lowered.roots[0]),
-        IrExpr::Call {
-            callee: crate::ir::Callee::External { substitutions, .. },
-            ..
-        } if matches!(
-            substitutions.as_slice(),
-            [crate::ir::IrCheckedSubstitution {
-                parameter: FirTypeParameterRef::External { callable, ordinal: 0 },
-                reified: false,
-                value: Ty::String,
-                reified_runtime: Ty::String,
-                additional_bounds,
-            }] if *callable == declaration && additional_bounds.is_empty()
-        )
-    ));
+    ir.expr(lowered.roots[0]),
+    IrExpr::Call {
+        callee: call_callee,
+        ..
+    } if matches!(&**call_callee, crate::ir::Callee::External { substitutions, .. } if matches!(
+        substitutions.as_slice(),
+        [crate::ir::IrCheckedSubstitution {
+            parameter: FirTypeParameterRef::External { callable, ordinal: 0 },
+            reified: false,
+            value: Ty::String,
+            reified_runtime: Ty::String,
+            additional_bounds,
+        }] if *callable == declaration && additional_bounds.is_empty()
+    ))));
 }

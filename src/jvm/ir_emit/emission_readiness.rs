@@ -70,11 +70,12 @@ pub(super) fn trace_residual_nodes(ir: &IrFile) {
             .filter_map(|(expression, value)| match value {
                 IrExpr::Checked(_)
                 | IrExpr::PluginPlaceholder { .. }
-                | IrExpr::LocalDelegateAccess(_)
-                | IrExpr::Call {
-                    callee: Callee::Module { .. } | Callee::External { .. },
-                    ..
-                } => Some((expression, value)),
+                | IrExpr::LocalDelegateAccess(_) => Some((expression, value)),
+                IrExpr::Call { callee, .. }
+                    if matches!(**callee, Callee::Module { .. } | Callee::External { .. }) =>
+                {
+                    Some((expression, value))
+                }
                 _ => None,
             })
             .collect::<Vec<_>>()

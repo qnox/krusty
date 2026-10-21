@@ -569,9 +569,9 @@ impl Realizer<'_> {
 
     fn illegal_step(&mut self, step: ExprId) -> ExprId {
         let step = self.reread(step);
-        self.add(IrExpr::Checked(
+        self.add(IrExpr::Checked(Box::new(
             IrCheckedOperation::IllegalProgressionStep { step },
-        ))
+        )))
     }
 
     /// `asStepType`/`asElementType`: the coercion between a `Char` element and its `Int` step.

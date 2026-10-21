@@ -76,13 +76,13 @@ pub(super) fn operation(
                 let lhs = coerce(ir, receiver, receiver_ty, operand);
                 let rhs = coerce(ir, *argument, parameter, operand);
                 return Some(BuiltinMemberOperation::Value(IrExpr::Call {
-                    callee: Callee::Intrinsic {
+                    callee: Box::new(Callee::Intrinsic {
                         operation: IrIntrinsic::PrimitiveCompare {
                             operand,
                             relational_operator: false,
                         },
                         ret: Ty::Int,
-                    },
+                    }),
                     dispatch_receiver: Some(lhs),
                     args: vec![rhs],
                 }));

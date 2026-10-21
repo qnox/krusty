@@ -89,12 +89,12 @@ impl BodyLowering<'_> {
                             self.when_subject_equality_operands(read, candidate, numeric);
                         let comparison = match nullable_ieee754 {
                             Some(operand) => self.ir.add_expr(IrExpr::Call {
-                                callee: Callee::Intrinsic {
+                                callee: Box::new(Callee::Intrinsic {
                                     operation: IrIntrinsic::Ieee754Equals {
                                         operand: operand.get(),
                                     },
                                     ret: Ty::Boolean,
-                                },
+                                }),
                                 dispatch_receiver: None,
                                 args: vec![subject, candidate],
                             }),

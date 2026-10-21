@@ -63,7 +63,7 @@ fn closure_site(expr: &IrExpr) -> Option<Result<Site, Unsupported>> {
         } => Some(Ok(Site {
             impl_fn: *impl_fn,
             captures: captures.clone(),
-            sam: sam.clone(),
+            sam: sam.as_deref().cloned(),
             // A SAM delegate's identity depends on WHAT IT WRAPS, which needs the arena to see —
             // so it and the flag below are decided in `declare_lambdas` rather than here.
             identity: None,

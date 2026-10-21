@@ -386,7 +386,7 @@ impl BodyLowering<'_> {
             )
         };
         Ok(self.ir.add_expr(IrExpr::Call {
-            callee,
+            callee: Box::new(callee),
             dispatch_receiver: None,
             args,
         }))
@@ -803,7 +803,7 @@ impl BodyLowering<'_> {
             u32::try_from(adapter_parameter_count)
                 .expect("too many local reference adapter parameters"),
         );
-        Ok(Some(self.ir.add_expr(IrExpr::CallableReference(
+        Ok(Some(self.ir.add_expr(IrExpr::CallableReference(Box::new(
             crate::ir::IrCallableReference {
                 target: crate::ir::IrCallableReferenceTarget::Local {
                     owner: realization.owner,
@@ -820,7 +820,7 @@ impl BodyLowering<'_> {
                 adaptation: adaptation.cloned().map(Box::new),
                 reflection_owner: None,
             },
-        ))))
+        )))))
     }
 
     pub(super) fn local_function(

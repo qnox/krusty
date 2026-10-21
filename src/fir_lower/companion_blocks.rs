@@ -61,7 +61,7 @@ pub(super) fn realize_companion_block_calls(ir: &mut IrFile) {
                 .declaring_class(*function)
                 .map(|class| ir.classes[class as usize].fq_name_id())
         };
-        let replacement = match callee {
+        let replacement = match &**callee {
             Callee::Local(function) => owner_of(function).map(|owner| Callee::ClassStatic {
                 owner,
                 function: *function,
@@ -84,7 +84,7 @@ pub(super) fn realize_companion_block_calls(ir: &mut IrFile) {
         if let (Some(replacement), IrExpr::Call { callee, .. }) =
             (replacement, &mut ir.exprs[expression])
         {
-            *callee = replacement;
+            **callee = replacement;
         }
     }
 }

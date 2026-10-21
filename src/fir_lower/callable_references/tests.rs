@@ -5,7 +5,7 @@ fn semantic_references(ir: &IrFile) -> Vec<&crate::ir::IrCallableReference> {
     ir.exprs
         .iter()
         .filter_map(|expression| match expression {
-            IrExpr::CallableReference(reference) => Some(reference),
+            IrExpr::CallableReference(reference) => Some(&**reference),
             _ => None,
         })
         .collect()
@@ -104,16 +104,15 @@ fn adapted_local_function_reference_becomes_default_call_wrapper() {
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,
         IrExpr::Call {
-            callee: crate::ir::Callee::LocalWithDefaults {
-                function,
-                defaults,
-            },
+            callee: call_callee,
             args,
             ..
-        } if *function == join
+        } if matches!(&**call_callee, crate::ir::Callee::LocalWithDefaults {
+                function,
+                defaults,
+            } if *function == join
             && defaults.as_ref() == [1]
-            && args.len() == 1
-    )));
+            && args.len() == 1))));
     assert!(semantic_references(&ir).iter().any(|reference| {
         matches!(
             reference.target,
@@ -398,13 +397,12 @@ fn vararg_adapted_local_reference_packs_wrapper_parameters() {
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,
         IrExpr::Call {
-            callee: crate::ir::Callee::Local(function),
+            callee: call_callee,
             args,
             ..
-        } if *function == sum
+        } if matches!(&**call_callee, crate::ir::Callee::Local(function) if *function == sum
             && matches!(args.as_slice(), [array]
-                if matches!(ir.expr(*array), IrExpr::Vararg { elements, .. } if elements.len() == 2))
-    )));
+                if matches!(ir.expr(*array), IrExpr::Vararg { elements, .. } if elements.len() == 2))))));
     assert!(semantic_references(&ir).iter().any(|reference| {
         matches!(
             reference.target,
@@ -956,16 +954,15 @@ fn super_call_preserves_checked_default_ordinals_and_source_identity() {
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,
         IrExpr::Call {
-            callee: crate::ir::Callee::Super {
+            callee: call_callee,
+            args,
+            ..
+        } if matches!(&**call_callee, crate::ir::Callee::Super {
                 declaration: Some(crate::fir::ResolvedFunctionOverrideTarget::Module(_)),
                 realization: crate::libraries::MemberRealization::Dispatch,
                 defaults,
                 ..
-            },
-            args,
-            ..
-        } if defaults == &[0] && args.len() == 2
-    )));
+            } if defaults == &[0] && args.len() == 2))));
 }
 
 #[test]
@@ -985,14 +982,13 @@ fn sibling_inline_adapted_reference_uses_the_retained_inline_template() {
     assert!(!ir.exprs.iter().any(|expression| matches!(
         expression,
         IrExpr::Call {
-            callee: crate::ir::Callee::Module {
-                name,
-                ..
-            },
+            callee: call_callee,
             dispatch_receiver: None,
             ..
-        } if name == "sibling"
-    )));
+        } if matches!(&**call_callee, crate::ir::Callee::Module {
+                name,
+                ..
+            } if name == "sibling"))));
 }
 
 #[test]
@@ -1012,10 +1008,8 @@ fn sibling_suspend_call_retains_its_checked_coroutine_behavior() {
         .find(|(_, expression)| {
             matches!(
                 expression,
-                IrExpr::Call {
-                    callee: crate::ir::Callee::Module { name, .. },
-                    ..
-                } if name == "sibling"
+                IrExpr::Call { callee, .. }
+                    if matches!(&**callee, crate::ir::Callee::Module { name, .. } if name == "sibling")
             )
         })
         .expect("sibling suspend call");
@@ -1072,10 +1066,13 @@ fn block_trailing_expression_keeps_its_checked_statement_line() {
         .enumerate()
         .find_map(|(expression, node)| {
             let IrExpr::Call {
-                callee: Callee::Local(function),
+                callee: call_callee,
                 ..
             } = node
             else {
+                return None;
+            };
+            let Callee::Local(function) = &**call_callee else {
                 return None;
             };
             (ir.functions[*function as usize].name == "act").then_some(expression as u32)
@@ -1126,7 +1123,7 @@ fn companion_extension_references_lower_as_receiverless_static_values() {
     assert!(ir.exprs.iter().all(|expression| {
         !matches!(
             expression,
-            IrExpr::Checked(IrCheckedOperation::PropertyReference { .. })
+            IrExpr::Checked(checked_op) if matches!(&**checked_op, IrCheckedOperation::PropertyReference { .. })
         )
     }));
 }
@@ -1150,11 +1147,10 @@ fn companion_associated_function_body_and_call_have_no_runtime_receiver_slot() {
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,
         IrExpr::Call {
-            callee: crate::ir::Callee::Local(function),
+            callee: call_callee,
             args,
             dispatch_receiver: None,
-        } if *function == echo && args.len() == 1
-    )));
+        } if matches!(&**call_callee, crate::ir::Callee::Local(function) if *function == echo && args.len() == 1))));
 }
 
 #[test]
