@@ -4,6 +4,84 @@
 use super::*;
 
 impl BodyLowering<'_, '_, '_> {
+    /// A selected property's exact accessor export owns the access before target storage helpers.
+    /// No accessor spelling, overload reconstruction, or second evaluation of operands is needed.
+    pub(in super::super) fn emitted_dependency_property(
+        &mut self,
+        site: u32,
+        operation: &IrCheckedOperation,
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        let (property, dispatch, receiver, arguments, parameters, result, write) = match operation {
+            IrCheckedOperation::ExternalPropertyRead {
+                target,
+                dispatch,
+                receiver,
+                arguments,
+                parameters,
+                result,
+                ..
+            } => (
+                *target, *dispatch, *receiver, arguments, parameters, *result, false,
+            ),
+            IrCheckedOperation::ExternalPropertyWrite {
+                target,
+                dispatch,
+                receiver,
+                arguments,
+                parameters,
+                result,
+                ..
+            } => (
+                *target, *dispatch, *receiver, arguments, parameters, *result, true,
+            ),
+            _ => return None,
+        };
+        let property = self.file.callables.property(property)?;
+        let target = if write {
+            property.setter?
+        } else {
+            property.getter
+        };
+        let realization = self.file.callables.callable(target)?;
+        let identity = realization.dependency_callable.as_ref()?;
+        let export = self.file.dependency_symbols.get(identity)?;
+        Some((|| {
+            if dispatch != crate::ir::IrPropertyDispatch::Ordinary {
+                return Err("a dependency accessor export called through super".into());
+            }
+            if realization
+                .generic_sig
+                .as_ref()
+                .is_some_and(|signature| !signature.formals.is_empty())
+            {
+                return Err("a dependency property without checked generic substitutions".into());
+            }
+            // Source extensions may retain a separate receiver. Serialized extension accesses
+            // already flatten it at the declaration's context coordinate; member extensions
+            // retain class dispatch separately in both forms.
+            let extension_receiver_parameter =
+                if realization.is_member_extension()
+                    || (realization.is_extension() && receiver.is_none())
+                {
+                    Some(u32::try_from(realization.context_count).map_err(|_| {
+                        Unsupported::from("an invalid accessor receiver coordinate")
+                    })?)
+                } else {
+                    None
+                };
+            let callee = Callee::External {
+                target,
+                default_provider: None,
+                params: parameters.clone(),
+                ret: result,
+                substitutions: Vec::new(),
+                defaults: Vec::new(),
+                extension_receiver_parameter,
+            };
+            self.emitted_dependency_call(site, export, realization, &callee, receiver, arguments)
+        })())
+    }
+
     pub(super) fn emitted_dependency_call(
         &mut self,
         site: u32,

@@ -17,7 +17,7 @@ use super::body_lowering::{
 use super::callee_facts::{KlibCalleeFact, KlibCalleeFacts};
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
 use super::function_lowering::{
-    declare_function, function_header, function_header_with_emitted_dispatch, FunctionHeader,
+    declare_function, function_header, raw_function_header, FunctionHeader, HeaderPurpose,
 };
 use super::ir_builtins::IrBuiltinOperators;
 use super::lowering_checkpoint::LoweringCheckpoint;
@@ -454,7 +454,7 @@ impl CallLinker for Linker<'_, '_> {
         let selection = self.sources.callees.get(&identity);
         match selection {
             None => Ok(false),
-            Some(KlibCalleeFact::Selected(_)) => Ok(true),
+            Some(KlibCalleeFact::Selected(_)) => Ok(self.sources.callees.is_selected(&identity)),
             Some(KlibCalleeFact::Ambiguous) => Err(KlibBodyDeclineReason::AmbiguousCallee(
                 Box::new(callee.clone()),
             )),
@@ -497,8 +497,13 @@ impl CallLinker for Linker<'_, '_> {
             .function(&identity)
             .ok_or_else(|| callee_declined(KlibBodyDeclineReason::Unjoined))?;
         if let Some(intrinsic) = self.sources.intrinsics.get(&identity) {
-            let selected = selected_callable_for_header(selected, None, arena, declaration)
-                .map_err(&callee_declined)?;
+            let selected = selected_callable_for_header_purpose(
+                selected,
+                HeaderPurpose::External,
+                arena,
+                declaration,
+            )
+            .map_err(&callee_declined)?;
             self.cross_check_intrinsic(callee, selected, intrinsic)?;
             // A target intrinsic stays an ordinary call of its declaration; only the target's
             // emitter realizes it, through the provider fact frozen on the external handle. The
@@ -528,20 +533,16 @@ impl CallLinker for Linker<'_, '_> {
             });
         }
         if let Some(&emitted) = self.sources.externals.get(&identity) {
-            let selected = selected_callable_for_header(
-                selected,
-                emitted.singleton_dispatch(),
-                arena,
-                declaration,
-            )
-            .map_err(&callee_declined)?;
-            let header = function_header_with_emitted_dispatch(
-                selected,
-                emitted.singleton_dispatch(),
-                arena,
-                declaration,
-            )
-            .map_err(callee_declined)?;
+            let purpose = if declaration.body.is_none() {
+                HeaderPurpose::External
+            } else {
+                HeaderPurpose::Body(emitted.singleton_dispatch())
+            };
+            let selected =
+                selected_callable_for_header_purpose(selected, purpose, arena, declaration)
+                    .map_err(&callee_declined)?;
+            let header = raw_function_header(selected, purpose, arena, declaration)
+                .map_err(callee_declined)?;
             let (params, ret, context_count, extension_receiver, receiver) =
                 header.linked_signature();
             return Ok(LinkedCallee {
@@ -714,18 +715,27 @@ fn selected_callable_for_header<'callable>(
     arena: &KlibIrArena,
     function: &KlibIrFunction,
 ) -> Result<Option<KlibBodyCallable<'callable>>, KlibBodyDeclineReason> {
+    selected_callable_for_header_purpose(
+        candidates,
+        HeaderPurpose::Body(emitted_singleton_dispatch),
+        arena,
+        function,
+    )
+}
+
+fn selected_callable_for_header_purpose<'callable>(
+    candidates: Option<SelectedKlibCallables<'callable, '_>>,
+    purpose: HeaderPurpose,
+    arena: &KlibIrArena,
+    function: &KlibIrFunction,
+) -> Result<Option<KlibBodyCallable<'callable>>, KlibBodyDeclineReason> {
     let Some(candidates) = candidates else {
         return Ok(None);
     };
     let mut selected = None;
     let mut first_mismatch = None;
     let mut consider = |candidate| {
-        match function_header_with_emitted_dispatch(
-            Some(candidate),
-            emitted_singleton_dispatch,
-            arena,
-            function,
-        ) {
+        match raw_function_header(Some(candidate), purpose, arena, function) {
             Ok(_) if selected.is_none() => selected = Some(candidate),
             Ok(_) => return Some(KlibBodyDeclineReason::SignatureMismatch(
                 "more than one checked call-edge variant agrees with the serialized declaration"

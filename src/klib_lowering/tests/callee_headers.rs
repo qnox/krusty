@@ -129,6 +129,69 @@ fn a_serialized_function_must_agree_with_frozen_declaration_modifiers() {
 }
 
 #[test]
+fn an_external_declaration_retains_dispatch_without_authorizing_body_emission() {
+    use super::super::function_lowering::{raw_function_header, HeaderPurpose};
+    use crate::types::type_name;
+    let demo = demo(&IDENTITY_AND_CALLER, identity_and_caller);
+    let mut fact = demo.facts["b"].clone();
+    let owner = type_name("demo/Box");
+    let signature = demo_signature(Some("Box"), "b", &[], &[T::Int]);
+    fact.kind = ExternalCallableKind::Member;
+    fact.declaration_owner = Some(crate::types::SemanticCallableOwner::Classifier(owner));
+    fact.declaration_signature = Some(KlibDeclarationSignature::Public(signature.clone()));
+    fact.dependency_callable
+        .as_mut()
+        .expect("module owned")
+        .declaration = KlibDeclarationSignature::Public(signature.clone());
+    let tree = function_tree(signature, "b", true, 0, 1);
+    let KlibIrMember::Function(id) = tree.declaration else {
+        panic!("a function")
+    };
+    let mut function = tree.arena.function(id).clone();
+    function.body = None;
+    let selected = fact.klib_body_callable().expect("a selected member");
+    let header = raw_function_header(
+        Some(selected),
+        HeaderPurpose::External,
+        &tree.arena,
+        &function,
+    )
+    .expect("an external declaration keeps its receiver rather than erasing it");
+    let (parameters, result, contexts, extension, dispatch) = header.linked_signature();
+    assert_eq!(parameters, &[Ty::Int]);
+    assert_eq!(result, Ty::Int);
+    assert_eq!(contexts, 0);
+    assert!(!extension);
+    assert_eq!(dispatch, Some(Ty::obj_name(owner)));
+    assert_eq!(
+        super::super::function_lowering::function_header(Some(selected), &tree.arena, &function)
+            .err()
+            .expect("external authentication is not permission to erase dispatch"),
+        KlibBodyDeclineReason::SignatureMismatch(
+            "the serialized dispatch receiver disagrees with the selected or emitted singleton"
+                .to_owned()
+        )
+    );
+    fact.declaration_owner = Some(crate::types::SemanticCallableOwner::Classifier(type_name(
+        "demo/Other",
+    )));
+    assert_eq!(
+        raw_function_header(
+            fact.klib_body_callable(),
+            HeaderPurpose::External,
+            &tree.arena,
+            &function
+        )
+        .err()
+        .expect("a foreign declaration owner cannot authenticate the dispatch"),
+        KlibBodyDeclineReason::SignatureMismatch(
+            "the external dispatch receiver disagrees with its selected declaration owner"
+                .to_owned()
+        )
+    );
+}
+
+#[test]
 fn matching_function_modifiers_survive_the_provider_and_frozen_handoff() {
     use crate::metadata::semantic::{KotlinModality, KotlinPackage};
     for (inline, suspend, external, modality, flags) in [
@@ -209,6 +272,69 @@ fn missing_or_conflicting_modifier_facts_do_not_coalesce_selected_declarations()
             Some(super::super::callee_facts::KlibCalleeFact::Ambiguous)
         ));
     }
+}
+
+#[test]
+fn provider_header_evidence_does_not_invent_a_checked_call_obligation() {
+    let demo = demo(&IDENTITY_AND_CALLER, identity_and_caller);
+    let root = demo.facts["a"].klib_body_callable().expect("selected root");
+    let declaration = demo.facts["b"]
+        .klib_body_callable()
+        .expect("provider declaration");
+    let facts = KlibCalleeFacts::with_declarations([root], [declaration]);
+    assert!(facts.is_selected(root.identity()));
+    assert!(!facts.is_selected(declaration.identity()));
+    let Some(super::super::callee_facts::KlibCalleeFact::Selected(headers)) =
+        facts.get(declaration.identity())
+    else {
+        panic!("unselected provider evidence still authenticates the header");
+    };
+    assert_eq!(headers.len(), 1);
+    assert!(headers[0].same_declaration_contract(declaration));
+    let mut conflicting = demo.facts["b"].clone();
+    conflicting
+        .klib_body_declaration_modifiers
+        .as_mut()
+        .expect("known")
+        .is_inline = true;
+    let facts = KlibCalleeFacts::with_declarations(
+        [root],
+        [
+            declaration,
+            conflicting.klib_body_callable().expect("same identity"),
+        ],
+    );
+    assert!(!facts.is_selected(declaration.identity()));
+    assert!(matches!(
+        facts.get(declaration.identity()),
+        Some(super::super::callee_facts::KlibCalleeFact::Ambiguous)
+    ));
+}
+
+#[test]
+fn provider_header_evidence_does_not_invent_a_call_edge_variant() {
+    let demo = demo(&IDENTITY_AND_CALLER, identity_and_caller);
+    let mut provider = demo.facts["b"].clone();
+    provider.kind = ExternalCallableKind::Member;
+    let mut checked = provider.clone();
+    checked.singleton_dispatch = Some(crate::libraries::SingletonDispatch {
+        classifier: crate::types::type_name("demo/SelectedObject"),
+    });
+    let declaration = provider.klib_body_callable().expect("provider header");
+    let edge = checked.klib_body_callable().expect("checked edge");
+    let facts = KlibCalleeFacts::with_declarations([edge], [declaration]);
+    let Some(super::super::callee_facts::KlibCalleeFact::Selected(headers)) =
+        facts.get(edge.identity())
+    else {
+        panic!("one declaration contract");
+    };
+    assert!(facts.is_selected(edge.identity()));
+    assert_eq!(
+        headers.len(),
+        1,
+        "the provider record is not another checked edge"
+    );
+    assert_eq!(headers[0].singleton_dispatch(), edge.singleton_dispatch());
 }
 
 /// A provider record of `demo.b(a: Int): Int` with one fact changed.

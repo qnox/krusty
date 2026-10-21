@@ -18,6 +18,14 @@ pub(crate) struct KlibBodyDeclarationModifiers {
 }
 
 impl KlibBodyDeclarationModifiers {
+    pub(crate) fn permits_ordinary_body(self) -> bool {
+        !self.is_inline
+            && !self.is_suspend
+            && !self.is_external
+            && !self.property_is_external
+            && matches!(self.modality, KotlinModality::Final | KotlinModality::Open)
+    }
+
     pub(crate) fn function(declaration: &KotlinFunction) -> Self {
         Self {
             is_inline: declaration.is_inline,
@@ -35,6 +43,56 @@ impl KlibBodyDeclarationModifiers {
             is_external: accessor.is_external,
             property_is_external: property.is_external,
             modality: accessor.modality,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_body_admission_requires_every_implementation_modifier() {
+        let ordinary = KlibBodyDeclarationModifiers {
+            is_inline: false,
+            is_suspend: false,
+            is_external: false,
+            property_is_external: false,
+            modality: KotlinModality::Final,
+        };
+        assert!(ordinary.permits_ordinary_body());
+        assert!(KlibBodyDeclarationModifiers {
+            modality: KotlinModality::Open,
+            ..ordinary
+        }
+        .permits_ordinary_body());
+        for excluded in [
+            KlibBodyDeclarationModifiers {
+                is_inline: true,
+                ..ordinary
+            },
+            KlibBodyDeclarationModifiers {
+                is_suspend: true,
+                ..ordinary
+            },
+            KlibBodyDeclarationModifiers {
+                is_external: true,
+                ..ordinary
+            },
+            KlibBodyDeclarationModifiers {
+                property_is_external: true,
+                ..ordinary
+            },
+            KlibBodyDeclarationModifiers {
+                modality: KotlinModality::Abstract,
+                ..ordinary
+            },
+            KlibBodyDeclarationModifiers {
+                modality: KotlinModality::Sealed,
+                ..ordinary
+            },
+        ] {
+            assert!(!excluded.permits_ordinary_body(), "{excluded:?}");
         }
     }
 }

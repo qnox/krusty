@@ -438,7 +438,7 @@ fn emit_analyzed_into<B: Backend>(
         if diags.has_errors() {
             continue;
         }
-        dependency_body_emission::emit_intrinsic_dependencies(
+        dependency_body_emission::emit_dependencies(
             &file,
             &symbols,
             &backend_module_facts,

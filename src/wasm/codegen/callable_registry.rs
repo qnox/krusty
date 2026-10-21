@@ -360,17 +360,7 @@ impl CallableRegistry {
 /// secondary delegation/body separately, so call discovery must include those exact roots while
 /// still excluding cloning-only inline templates.
 fn emitted_call_roots(ir: &IrFile) -> Vec<ExprId> {
-    let mut roots = ir
-        .functions
-        .iter()
-        .enumerate()
-        .filter(|(function, _)| {
-            !ir.inline_only_fns
-                .contains(&(*function as crate::ir::FunId))
-        })
-        .filter_map(|(_, function)| function.body)
-        .chain(ir.statics.iter().filter_map(|property| property.init))
-        .collect::<Vec<_>>();
+    let mut roots = crate::ir::emitted_body_roots(ir);
     for function in 0..ir.functions.len() {
         let function = function as crate::ir::FunId;
         if !emits_default_entry(ir, function) {
@@ -382,18 +372,6 @@ fn emitted_call_roots(ir: &IrFile) -> Vec<ExprId> {
                 .flatten()
                 .filter_map(|default| *default),
         );
-    }
-    for class in &ir.classes {
-        if class.has_primary_ctor {
-            roots.extend(class.super_arg_prelude.iter().copied());
-            roots.extend(class.super_args.iter().copied());
-            roots.extend(class.init_body);
-        }
-        for constructor in &class.secondary_ctors {
-            roots.extend(constructor.delegate_prelude.iter().copied());
-            roots.extend(constructor.delegate_args.iter().copied());
-            roots.extend(constructor.body);
-        }
     }
     roots
 }

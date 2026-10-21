@@ -396,6 +396,28 @@ pub(super) fn function_header_with_emitted_dispatch(
     arena: &KlibIrArena,
     function: &KlibIrFunction,
 ) -> Result<FunctionHeader, KlibBodyDeclineReason> {
+    raw_function_header(
+        selected,
+        HeaderPurpose::Body(emitted_singleton_dispatch),
+        arena,
+        function,
+    )
+}
+
+/// An external call retains its declaration's dispatch operand. It does not emit the raw body,
+/// so the receiver-erasure/body-read constraints of support function emission do not apply.
+#[derive(Clone, Copy)]
+pub(super) enum HeaderPurpose {
+    Body(Option<Ty>),
+    External,
+}
+
+pub(super) fn raw_function_header(
+    selected: Option<KlibBodyCallable<'_>>,
+    purpose: HeaderPurpose,
+    arena: &KlibIrArena,
+    function: &KlibIrFunction,
+) -> Result<FunctionHeader, KlibBodyDeclineReason> {
     if function.base.symbol.kind != KlibIrSymbolKind::Function {
         return Err(mismatch(
             "the serialized declaration's symbol is not a function".to_owned(),
@@ -423,23 +445,21 @@ pub(super) fn function_header_with_emitted_dispatch(
         }
     }
     let type_parameters = declared_type_parameters::bind(selected, arena, function)?;
-    header(
-        selected,
-        emitted_singleton_dispatch,
-        type_parameters,
-        arena,
-        function,
-    )
+    header(selected, purpose, type_parameters, arena, function)
 }
 
 fn header(
     selected: Option<KlibBodyCallable<'_>>,
-    emitted_singleton_dispatch: Option<Ty>,
+    purpose: HeaderPurpose,
     type_parameters: KlibTypeParameters,
     arena: &KlibIrArena,
     function: &KlibIrFunction,
 ) -> Result<FunctionHeader, KlibBodyDeclineReason> {
     let types = &type_parameters;
+    let emitted_singleton_dispatch = match purpose {
+        HeaderPurpose::Body(singleton) => singleton,
+        HeaderPurpose::External => None,
+    };
     // Validate the producer's qualified marker even for a header-only transitive callee. Such a
     // callee can be exported with its unread-receiver effect and selected by a later source
     // module, so deferring validation until a provider selection is present would publish an
@@ -458,63 +478,87 @@ fn header(
             ));
         }
     }
-    let dispatch_receiver = match (function.dispatch_receiver.as_ref(), selected) {
-        (None, Some(selected)) if !selected.is_top_level() => {
-            return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-                "a dispatch receiver",
-            ));
+    let dispatch_receiver = if matches!(purpose, HeaderPurpose::External) {
+        let receiver = function
+            .dispatch_receiver
+            .as_ref()
+            .map(|receiver| semantic_type(arena, types, receiver.ty))
+            .transpose()?;
+        if let Some(selected) = selected {
+            match (receiver, selected.is_member(), selected.declaration_owner()) {
+                (
+                    Some(receiver),
+                    true,
+                    Some(crate::types::SemanticCallableOwner::Classifier(owner)),
+                ) if receiver.kotlin_class_internal() == Some(owner) => {}
+                (None, false, _) if selected.is_top_level() => {}
+                _ => return Err(mismatch(
+                    "the external dispatch receiver disagrees with its selected declaration owner"
+                        .to_owned(),
+                )),
+            }
         }
-        (None, _) if emitted_singleton_dispatch.is_some() => {
-            return Err(mismatch(
-                "the emitted singleton contract has no serialized dispatch receiver".to_owned(),
-            ));
-        }
-        (Some(_), Some(selected)) if !selected.is_member() => {
-            return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-                "a dispatch receiver",
-            ));
-        }
-        (Some(_), None) if emitted_singleton_dispatch.is_none() => {
-            return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-                "a dispatch receiver",
-            ));
-        }
-        (Some(receiver), selected) => {
-            // A member body can be emitted with an erased dispatch slot only when its serialized
-            // body never observes that slot. The backend still accepts a source edge only when its
-            // exact dispatch expression is the provider-selected singleton; ordinary instances,
-            // inherited fake overrides, and bodies which read `this` remain unsupported.
-            if arena.body_reads_value(function, &receiver.base.symbol) {
+        receiver
+    } else {
+        match (function.dispatch_receiver.as_ref(), selected) {
+            (None, Some(selected)) if !selected.is_top_level() => {
                 return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-                    "a used dispatch receiver",
+                    "a dispatch receiver",
                 ));
             }
-            let serialized = semantic_type(arena, types, receiver.ty)?;
-            let selected_singleton = selected.and_then(|selected| {
-                selected
-                    .is_member()
-                    .then(|| selected.singleton_dispatch())
-                    .flatten()
-            });
-            if let (Some(selected), Some(emitted)) =
-                (selected_singleton, emitted_singleton_dispatch)
-            {
-                if selected != emitted {
-                    return Err(mismatch(
-                        "the selected and emitted singleton dispatch receivers disagree".to_owned(),
+            (None, _) if emitted_singleton_dispatch.is_some() => {
+                return Err(mismatch(
+                    "the emitted singleton contract has no serialized dispatch receiver".to_owned(),
+                ));
+            }
+            (Some(_), Some(selected)) if !selected.is_member() => {
+                return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                    "a dispatch receiver",
+                ));
+            }
+            (Some(_), None) if emitted_singleton_dispatch.is_none() => {
+                return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                    "a dispatch receiver",
+                ));
+            }
+            (Some(receiver), selected) => {
+                // A member body can be emitted with an erased dispatch slot only when its serialized
+                // body never observes that slot. The backend still accepts a source edge only when its
+                // exact dispatch expression is the provider-selected singleton; ordinary instances,
+                // inherited fake overrides, and bodies which read `this` remain unsupported.
+                if arena.body_reads_value(function, &receiver.base.symbol) {
+                    return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                        "a used dispatch receiver",
                     ));
                 }
-            }
-            let expected = selected_singleton.or(emitted_singleton_dispatch);
-            if expected != Some(serialized) {
-                return Err(mismatch(
+                let serialized = semantic_type(arena, types, receiver.ty)?;
+                let selected_singleton = selected.and_then(|selected| {
+                    selected
+                        .is_member()
+                        .then(|| selected.singleton_dispatch())
+                        .flatten()
+                });
+                if let (Some(selected), Some(emitted)) =
+                    (selected_singleton, emitted_singleton_dispatch)
+                {
+                    if selected != emitted {
+                        return Err(mismatch(
+                            "the selected and emitted singleton dispatch receivers disagree"
+                                .to_owned(),
+                        ));
+                    }
+                }
+                let expected = selected_singleton.or(emitted_singleton_dispatch);
+                if expected != Some(serialized) {
+                    return Err(mismatch(
                     "the serialized dispatch receiver disagrees with the selected or emitted singleton"
                         .to_owned(),
                 ));
+                }
+                Some(serialized)
             }
-            Some(serialized)
+            (None, _) => None,
         }
-        (None, _) => None,
     };
     let serialized = function
         .context_parameters

@@ -670,6 +670,25 @@ Property external status stays independent of the accessor's own external bit. O
 admission must require known facts and veto both external statuses; this contract does not itself
 enable a new emission root category.
 
+The ordinary-body emitter consumes these facts only for exact checked uses in structurally
+emitted bodies. It freezes provider realizations for transitive body-bearing declarations before
+lowering and does not allow an unselected callee to bypass the metadata contract via a bare raw
+header. The top-level/extension declaration-frame capability is independent of scalar shape,
+intrinsic adjacency and stdlib origin. Instance-storage capabilities remain target-owned.
+Target-specific default-wrapper and enum-entry-only roots still require a later inventory slice;
+the emitter does not scan all default/inline-template expressions as an approximation.
+
+Provider header evidence remains distinct from checked source-call obligations. Adding the exact
+declaration of a transitive primitive does not require an out-of-line export or suppress its
+existing common-IR builtin lowering. Conflicting declaration evidence still declines even when
+no source call selected that identity.
+
+Raw call-header authentication distinguishes an external declaration from an emitted support
+body. A bodyless external member retains its dispatch operand and authenticates its classifier
+against the selected declaration owner; it does not need the singleton receiver-erasure proof
+required to emit a member support body. Both purposes still check the same raw modifier, generic,
+parameter-role and result contracts. Target intrinsic leaves use the external declaration boundary.
+
 The KLIB provider retains each formal's exact normalized semantic type alongside the full generic
 signature. Both use the same metadata identities, enclosing bounds and bound-normalization helper;
 the frozen backend handoff copies the formal types unchanged. Full bounds can contain deeper

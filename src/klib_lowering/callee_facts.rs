@@ -7,7 +7,7 @@
 //! backend handoff froze them) must agree with the serialized header. A bare signature is never a
 //! key and an unrelated source selection is never an origin fallback.
 
-use crate::fx_hash::HashMap;
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::libraries::{KlibBodyCallable, KlibDependencyCallable};
 
@@ -15,6 +15,8 @@ use crate::libraries::{KlibBodyCallable, KlibDependencyCallable};
 #[derive(Default)]
 pub struct KlibCalleeFacts<'a> {
     callables: HashMap<&'a KlibDependencyCallable, IndexedKlibCallee<'a>>,
+    /// Header evidence is not a checked source call which requires an executable export.
+    selected: HashSet<&'a KlibDependencyCallable>,
 }
 
 enum IndexedKlibCallee<'a> {
@@ -37,24 +39,46 @@ impl<'a> KlibCalleeFacts<'a> {
     pub fn new(callables: impl IntoIterator<Item = KlibBodyCallable<'a>>) -> Self {
         let mut facts = Self::default();
         for callable in callables {
-            facts
-                .callables
-                .entry(callable.identity())
-                .and_modify(|fact| match fact {
-                    IndexedKlibCallee::Selected(selected)
-                        if selected[0].same_declaration_contract(callable) =>
-                    {
-                        if !selected.iter().any(|selected| {
-                            selected.singleton_dispatch() == callable.singleton_dispatch()
-                        }) {
-                            selected.push(callable);
-                        }
-                    }
-                    fact => *fact = IndexedKlibCallee::Ambiguous,
-                })
-                .or_insert_with(|| IndexedKlibCallee::Selected(vec![callable]));
+            facts.selected.insert(callable.identity());
+            facts.record(callable, true);
         }
         facts
+    }
+
+    /// Add exact provider header contracts without inventing source-call/export obligations.
+    pub(crate) fn with_declarations(
+        selected: impl IntoIterator<Item = KlibBodyCallable<'a>>,
+        declarations: impl IntoIterator<Item = KlibBodyCallable<'a>>,
+    ) -> Self {
+        let mut facts = Self::new(selected);
+        for declaration in declarations {
+            facts.record(declaration, false);
+        }
+        facts
+    }
+
+    pub(super) fn is_selected(&self, identity: &KlibDependencyCallable) -> bool {
+        self.selected.contains(identity)
+    }
+
+    fn record(&mut self, callable: KlibBodyCallable<'a>, call_edge: bool) {
+        self.callables
+            .entry(callable.identity())
+            .and_modify(|fact| match fact {
+                IndexedKlibCallee::Selected(selected)
+                    if selected[0].same_declaration_contract(callable) =>
+                {
+                    if call_edge
+                        && !selected.iter().any(|selected| {
+                            selected.singleton_dispatch() == callable.singleton_dispatch()
+                        })
+                    {
+                        selected.push(callable);
+                    }
+                }
+                fact => *fact = IndexedKlibCallee::Ambiguous,
+            })
+            .or_insert_with(|| IndexedKlibCallee::Selected(vec![callable]));
     }
 
     pub(super) fn get<'facts>(

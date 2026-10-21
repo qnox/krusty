@@ -17981,6 +17981,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   are not a non-inline declaration, and differing or missing facts cannot coalesce with a known
   declaration contract. Tests: `klib_lowering::tests::callee_headers`.
 
+- **An ordinary KLIB dependency body is selected by an emitted use, not an arena reference.**
+  The current category covers top-level/extension functions and their property accessors with
+  known non-inline, non-suspend, non-external concrete implementations. Structural emitted function,
+  static-initializer and constructor bodies contribute exact checked call/accessor identities;
+  orphan expressions and inline-only templates do not. Transitive body-bearing declarations need
+  exact provider metadata and agreeing raw headers. Closure failure is a compilation decline, not
+  permission to try an algorithm adapter. Authenticated intrinsic support closes separately.
+  Native property accesses use the selected accessor's exact export and declaration-owned ABI,
+  evaluating operands once. Instance-storage members retain their separate target capability;
+  generic-property substitutions and `super` accesses are not invented. Defaults-only and
+  enum-entry-only ordinary roots are not yet covered by this structural inventory.
+  Tests: `ir::emitted_body_roots`, `box_regressions/floatingSign.kt`.
+
 - **A KLIB inline function expands from its prepared body through the module inliner.** When the
   backend expands same-module inline calls in IR (Native, Wasm), every `inline` declaration of a
   dependency KLIB has its prepared-inline IR body decoded and, on its first call in a file, lowered

@@ -1,4 +1,4 @@
-//! Production lowering and emission of selected KLIB bodies which reach authenticated intrinsics.
+//! Production lowering and emission of exact selected KLIB dependency bodies.
 //!
 //! The semantic provider supplies one exact module-qualified body graph and its authenticated
 //! intrinsic declarations. Common lowering follows serialized call identities through that graph.
@@ -18,6 +18,8 @@ use crate::libraries::KlibDependencyCallable;
 use crate::resolve::PassTwoSymbols;
 use crate::types::{Ty, TyKind, TypeName};
 use std::collections::VecDeque;
+
+mod emitted_roots;
 
 /// Exact dependency support declarations already emitted into one target program.
 ///
@@ -49,9 +51,9 @@ impl DependencySupportState {
     }
 }
 
-/// Emit newly selected stdlib bodies with a direct authenticated-intrinsic capability once across
-/// the complete target program.
-pub(super) fn emit_intrinsic_dependencies<B: Backend>(
+/// Emit authenticated intrinsic support and concrete ordinary bodies selected by emitted uses.
+/// Each category closes and validates independently, once across the complete target program.
+pub(super) fn emit_dependencies<B: Backend>(
     source: &CheckedIrFile<'_>,
     symbols: &PassTwoSymbols,
     module_facts: &BackendModuleFacts,
@@ -95,179 +97,214 @@ pub(super) fn emit_intrinsic_dependencies<B: Backend>(
             roots.push(callable);
         }
     }
-    if roots.is_empty() {
-        return Vec::new();
-    }
-    let Some(mut externals) = rebound_externals(platform, &support_state.emitted, diags) else {
-        return Vec::new();
-    };
-    if !prepare_bodyless_externals(
-        platform,
-        bodies,
-        intrinsics,
-        &roots,
-        backend.realizes_bodyless_dependency_support(),
-        &mut externals,
-        diags,
-    ) {
-        return Vec::new();
-    }
-    let mut unit = DependencyBodyUnit::default();
-    for callable in roots {
-        if let Err(decline) = unit.lower_root_with_intrinsics_and_externals(
-            callable, bodies, &callees, intrinsics, &externals,
-        ) {
-            if !decline.is_internal_inconsistency() {
-                // A wrapper whose body uses a form lowering does not model yet is not support: the
-                // declined body left the unit as it was, and the backend declines its call sites.
-                crate::trace_compiler!("lower", "intrinsic support root declined: {decline}");
-                continue;
-            }
-            diags.error(
-                Span::new(0, 0),
-                format!(
-                    "internal error: cannot lower an authenticated KLIB intrinsic root: {decline}"
-                ),
-            );
+    let ordinary = match emitted_roots::ordinary_roots(source, bodies, intrinsics) {
+        Ok(roots) => roots,
+        Err(error) => {
+            diags.error(Span::new(0, 0), format!("internal error: {error}"));
             return Vec::new();
         }
-    }
-    if unit.callable_functions().next().is_none() {
-        return Vec::new();
-    }
-    if !links_emitted_support(unit.ir(), &externals) {
-        diags.error(
+    };
+    let mut artifacts = Vec::new();
+    for (requires_intrinsic_link, mut roots) in [(true, roots), (false, ordinary)] {
+        // Intrinsic support may have emitted an ordinary root transitively in the preceding unit.
+        roots.retain(|root| !support_state.emitted.contains_key(root.identity()));
+        if roots.is_empty() {
+            continue;
+        }
+        let Some(mut externals) = rebound_externals(platform, &support_state.emitted, diags) else {
+            return Vec::new();
+        };
+        if !prepare_bodyless_externals(
+            platform,
+            bodies,
+            intrinsics,
+            &roots,
+            backend.realizes_bodyless_dependency_support(),
+            &mut externals,
+            diags,
+        ) {
+            return Vec::new();
+        }
+        let ordinary_declarations = if requires_intrinsic_link {
+            Vec::new()
+        } else {
+            match emitted_roots::ordinary_declarations(
+                platform, bodies, intrinsics, &roots, &externals,
+            ) {
+                Ok(declarations) => declarations,
+                Err(error) => {
+                    diags.error(
+                        Span::new(0, 0),
+                        format!("cannot close a selected ordinary KLIB body: {error}"),
+                    );
+                    return Vec::new();
+                }
+            }
+        };
+        let ordinary_callees = KlibCalleeFacts::with_declarations(
+            selected.iter().copied(),
+            ordinary_declarations
+                .iter()
+                .filter_map(|declaration| declaration.klib_body_callable()),
+        );
+        let callees = if requires_intrinsic_link {
+            &callees
+        } else {
+            &ordinary_callees
+        };
+        let mut unit = DependencyBodyUnit::default();
+        for callable in roots {
+            if let Err(decline) = unit.lower_root_with_intrinsics_and_externals(
+                callable, bodies, callees, intrinsics, &externals,
+            ) {
+                if requires_intrinsic_link && !decline.is_internal_inconsistency() {
+                    // A wrapper whose body uses a form lowering does not model yet is not support: the
+                    // declined body left the unit as it was, and the backend declines its call sites.
+                    crate::trace_compiler!("lower", "intrinsic support root declined: {decline}");
+                    continue;
+                }
+                diags.error(
+                    Span::new(0, 0),
+                    format!("cannot lower a selected KLIB dependency body: {decline}"),
+                );
+                return Vec::new();
+            }
+        }
+        if unit.callable_functions().next().is_none() {
+            continue;
+        }
+        if requires_intrinsic_link && !links_emitted_support(unit.ir(), &externals) {
+            diags.error(
             Span::new(0, 0),
             "internal error: authenticated KLIB intrinsic roots lowered without an exact intrinsic or emitted-support edge",
         );
-        return Vec::new();
-    }
-    if let Err(error) = unit.ir().validate_determined_types() {
-        diags.error(
-            Span::new(0, 0),
-            format!(
-                "internal error: dependency intrinsic bodies have an undetermined type: {error:?}"
-            ),
-        );
-        return Vec::new();
-    }
-    if let Err(error) = unit.ir().validate_semantic_contracts() {
-        diags.error(
-            Span::new(0, 0),
-            format!(
-                "internal error: dependency intrinsic bodies violate common IR contracts: {error:?}"
-            ),
-        );
-        return Vec::new();
-    }
-
-    let mut exports = DependencyExportSignatures::default();
-    let closed = unit
-        .callable_functions()
-        // A reachable bodyless declaration remains an exact provider edge which the target may
-        // realize from its frozen callable fact. It is not emitted code and therefore cannot be
-        // published as a dependency export: an export is a trampoline to a body in this unit.
-        .filter(|(_, function)| {
-            crate::backend::has_standalone_dependency_code(unit.ir(), *function)
-        })
-        .map(|(identity, function)| (identity.clone(), function))
-        .collect::<Vec<_>>();
-    for (identity, function) in &closed {
-        exports.record_callable(*function, identity.clone());
-        if let Some(classifier) = unit.authenticated_singleton_classifier(identity) {
-            let inert_platform_singleton =
-                bodies.singleton_initialization_is_inert(&identity.module, classifier);
-            exports.record_singleton_member_receiver(
-                *function,
-                classifier,
-                !inert_platform_singleton,
-            );
+            return Vec::new();
         }
-        if let Some(&receiver) = unit.ir().singleton_extension_unread_receivers.get(function) {
-            let inert_platform_singleton = match receiver.kind() {
-                TyKind::Obj(classifier, arguments) if arguments.is_empty() => {
-                    bodies.singleton_initialization_is_inert(&identity.module, classifier)
-                }
-                _ => false,
-            };
-            exports.record_singleton_extension_unread_receiver(
-                *function,
-                receiver,
-                !inert_platform_singleton,
-            );
-        }
-    }
-    let mut published = Vec::with_capacity(closed.len());
-    for (identity, _) in &closed {
-        let Some((_external, realization)) = platform.external_callable_by_dependency(identity)
-        else {
+        if let Err(error) = unit.ir().validate_determined_types() {
             diags.error(
+                Span::new(0, 0),
+                format!("internal error: dependency bodies have an undetermined type: {error:?}"),
+            );
+            return Vec::new();
+        }
+        if let Err(error) = unit.ir().validate_semantic_contracts() {
+            diags.error(
+                Span::new(0, 0),
+                format!("internal error: dependency bodies violate common IR contracts: {error:?}"),
+            );
+            return Vec::new();
+        }
+
+        let mut exports = DependencyExportSignatures::default();
+        let closed = unit
+            .callable_functions()
+            // A reachable bodyless declaration remains an exact provider edge which the target may
+            // realize from its frozen callable fact. It is not emitted code and therefore cannot be
+            // published as a dependency export: an export is a trampoline to a body in this unit.
+            .filter(|(_, function)| {
+                crate::backend::has_standalone_dependency_code(unit.ir(), *function)
+            })
+            .map(|(identity, function)| (identity.clone(), function))
+            .collect::<Vec<_>>();
+        for (identity, function) in &closed {
+            exports.record_callable(*function, identity.clone());
+            if let Some(classifier) = unit.authenticated_singleton_classifier(identity) {
+                let inert_platform_singleton =
+                    bodies.singleton_initialization_is_inert(&identity.module, classifier);
+                exports.record_singleton_member_receiver(
+                    *function,
+                    classifier,
+                    !inert_platform_singleton,
+                );
+            }
+            if let Some(&receiver) = unit.ir().singleton_extension_unread_receivers.get(function) {
+                let inert_platform_singleton = match receiver.kind() {
+                    TyKind::Obj(classifier, arguments) if arguments.is_empty() => {
+                        bodies.singleton_initialization_is_inert(&identity.module, classifier)
+                    }
+                    _ => false,
+                };
+                exports.record_singleton_extension_unread_receiver(
+                    *function,
+                    receiver,
+                    !inert_platform_singleton,
+                );
+            }
+        }
+        let mut published = Vec::with_capacity(closed.len());
+        for (identity, _) in &closed {
+            let Some((_external, realization)) = platform.external_callable_by_dependency(identity)
+            else {
+                diags.error(
                 Span::new(0, 0),
                 "internal error: a lowered KLIB dependency body has no exact provider realization",
             );
-            return Vec::new();
-        };
-        if realization.dependency_callable.as_ref() != Some(identity) {
-            diags.error(
-                Span::new(0, 0),
-                "internal error: a KLIB dependency body realization changed its exact identity",
-            );
-            return Vec::new();
-        }
-        // The provider's stored realization is the undecorated declaration. Retain the singleton
-        // receiver of the exact checked edge variant which authenticated the serialized header;
-        // input order cannot decide the receiver contract published to later support units.
-        let singleton_dispatch = match (
-            unit.authenticated_singleton_dispatch(identity),
-            unit.authenticated_singleton_classifier(identity),
-        ) {
-            (Some(ty), Some(classifier)) => Some(PublishedSingletonDispatch { ty, classifier }),
-            (None, None) => None,
-            _ => {
+                return Vec::new();
+            };
+            if realization.dependency_callable.as_ref() != Some(identity) {
                 diags.error(
                     Span::new(0, 0),
+                    "internal error: a KLIB dependency body realization changed its exact identity",
+                );
+                return Vec::new();
+            }
+            // The provider's stored realization is the undecorated declaration. Retain the singleton
+            // receiver of the exact checked edge variant which authenticated the serialized header;
+            // input order cannot decide the receiver contract published to later support units.
+            let singleton_dispatch = match (
+                unit.authenticated_singleton_dispatch(identity),
+                unit.authenticated_singleton_classifier(identity),
+            ) {
+                (Some(ty), Some(classifier)) => Some(PublishedSingletonDispatch { ty, classifier }),
+                (None, None) => None,
+                _ => {
+                    diags.error(
+                    Span::new(0, 0),
                     "internal error: an authenticated singleton KLIB body lost its exact classifier",
+                );
+                    return Vec::new();
+                }
+            };
+            published.push((identity.clone(), singleton_dispatch));
+        }
+        let callables = match CheckedBackendCallables::freeze(unit.ir(), platform) {
+            Ok(callables) => callables,
+            Err(error) => {
+                diags.error(
+                    Span::new(0, 0),
+                    format!(
+                    "internal error: cannot freeze an already-emitted KLIB support call: {error:?}"
+                ),
                 );
                 return Vec::new();
             }
         };
-        published.push((identity.clone(), singleton_dispatch));
-    }
-    let callables = match CheckedBackendCallables::freeze(unit.ir(), platform) {
-        Ok(callables) => callables,
-        Err(error) => {
-            diags.error(
-                Span::new(0, 0),
-                format!(
-                    "internal error: cannot freeze an already-emitted KLIB support call: {error:?}"
-                ),
-            );
+        let ordinal = support_state.emitted.len();
+        let support_module = format!(
+            "{}$klib_body${}${ordinal}",
+            source.module_name,
+            source.source.raw()
+        );
+        let support = CheckedIrFile {
+            ir: unit.into_ir(),
+            kind: CheckedIrUnitKind::DependencySupport,
+            source: source.source,
+            classifiers: CheckedBackendClassifiers::new(module_facts, platform),
+            callables,
+            dependency_exports: exports,
+            native_plugins: symbols.native_plugins(),
+            module_name: &support_module,
+            stems: source.stems,
+            origins: source.origins,
+        };
+        let outputs = backend.lower_ir_file(support, state, diags);
+        if diags.has_errors() {
             return Vec::new();
         }
-    };
-    let ordinal = support_state.emitted.len();
-    let support_module = format!(
-        "{}$klib_intrinsic${}${ordinal}",
-        source.module_name,
-        source.source.raw()
-    );
-    let support = CheckedIrFile {
-        ir: unit.into_ir(),
-        kind: CheckedIrUnitKind::DependencySupport,
-        source: source.source,
-        classifiers: CheckedBackendClassifiers::new(module_facts, platform),
-        callables,
-        dependency_exports: exports,
-        native_plugins: symbols.native_plugins(),
-        module_name: &support_module,
-        stems: source.stems,
-        origins: source.origins,
-    };
-    let outputs = backend.lower_ir_file(support, state, diags);
-    if !diags.has_errors() {
         support_state.emitted.extend(published);
+        artifacts.extend(outputs);
     }
-    outputs
+    artifacts
 }
 
 fn rebound_externals(

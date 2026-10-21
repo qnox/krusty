@@ -1641,6 +1641,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     fn lowered_expression(&mut self, id: u32) -> Result<Option<Value>, Unsupported> {
+        if let Some(result) = match self.file.ir.expr(id) {
+            IrExpr::Checked(operation) => self.emitted_dependency_property(id, operation),
+            _ => None,
+        } {
+            return result;
+        }
         match self.file.ir.expr(id).clone() {
             IrExpr::Const(constant) => self.constant(&constant).map(Some),
             IrExpr::UnitInstance => Ok(None),

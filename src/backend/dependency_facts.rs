@@ -407,6 +407,16 @@ pub struct CheckedBackendCallables {
 }
 
 impl CheckedBackendCallables {
+    /// The exact declaration view for one emitted edge, retaining only its checked singleton.
+    pub(crate) fn klib_body_callable_at(
+        &self,
+        expression: crate::ir::ExprId,
+        target: ExternalCallableId,
+    ) -> Option<crate::libraries::KlibBodyCallable<'_>> {
+        self.callable(target)?
+            .klib_body_callable_with_singleton(self.singleton_dispatch(expression))
+    }
+
     /// Selected KLIB callables in provider-identity order. Dependency-body lowering consumes this
     /// frozen semantic view; deterministic ordering keeps generated support-unit symbols stable.
     pub(crate) fn klib_body_callables(&self) -> Vec<crate::libraries::KlibBodyCallable<'_>> {

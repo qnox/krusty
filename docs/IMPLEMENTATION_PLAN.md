@@ -5605,8 +5605,12 @@ non-inline callers, still reads the field directly. Test:
   enabled by this metadata producer change.
 - The frozen body declaration contract now retains known inline/suspend/external/modality facts
   and independent property externality. Ordinary raw headers reject disagreement with those facts;
-  selected variants with unknown or conflicting contracts cannot coalesce. Emitted-use ordinary
-  body admission remains the next step and must require known eligible modifiers explicitly.
+  selected variants with unknown or conflicting contracts cannot coalesce. Structural emitted-use
+  admission now requires known eligible top-level/extension contracts and exact transitive provider
+  declarations. Ordinary closure failure is fatal; intrinsic support retains its separate proof.
+  Native property access routes the exact accessor export through the canonical call ABI. Complete
+  target-specific default-wrapper/enum-root inventory and inline-accessor substitution flow remain
+  unfinished; no all-arena/default scan or helper-name algorithm was added.
 - Native dependency exports retain one emitted IR signature for both wrapper definitions and
   imports. Exact checked generic instantiation validates source operand roles independently of
   the canonical ABI; arguments/results use the existing target boxing and conversion boundary.
