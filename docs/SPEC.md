@@ -4332,6 +4332,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `klib_libraries::tests::analysis::an_omitted_constant_default_is_the_klib_parameter_default` and
   `…_constructor_default_is_the_klib_parameter_default`, plus
   `klib_libraries::parameter_defaults::tests`.
+- **KLIB collection roles come from authenticated platform declarations.** The selected platform
+  stdlib's sixteen canonical collection interfaces publish their existing collection kind and
+  read-only/mutable face. Publication validates an interface with the exact own and total type
+  parameter arity (two for map/entry faces, one otherwise), without an enclosing instance. A
+  malformed authenticated header rejects the provider with its full classifier identity; an
+  ordinary dependency with an identical name never receives a builtin role. Native iteration and
+  type-check consumers read these normalized facts without reconstructing roles from names.
+  This changes no metadata wire format. Tests:
+  `klib_libraries::tests::classes::collection_roles`; existing Native box-corpus iteration also
+  consumes the published roles, including `unsignedTypes/iterateOverListOfBoxedUnsignedValues.kt`.
 - **A KLIB member extension publishes both of its receivers.** Its classifier owns the implicit
   dispatch receiver, while the classifier member record retains the extension receiver after any
   context parameters and before its value parameters. The callable's source-argument signature

@@ -5401,6 +5401,11 @@ passes; a dependency classifier is still answered through its provider during em
   getter, the getter declaration's exact result type, so a backend types a dependency property
   read from the selected declaration rather than from its owner's or its own spelling, and whether
   the provider normalized it as its value class's underlying storage property.
+- ✅ KLIB collection classifier roles are normalized at publication from the authenticated platform
+  stdlib's canonical interface headers, with exact own/total parameter arity and no captured outer
+  instance. The existing collection kind/mutable-face facts serve Native consumers without name
+  recovery; ordinary same-named dependencies receive no role. Private provider tests cover this
+  boundary, and existing Native corpus iteration consumes the facts. No metadata wire-format change.
 - ☐ Freeze the referenced dependency classifier facts too. `CheckedBackendClassifiers` still holds
   the provider (`&dyn SymbolSource`) and answers a dependency classifier by asking it during
   emission (`backend/module_facts.rs`), so a backend is not yet provider-free; only callables and
