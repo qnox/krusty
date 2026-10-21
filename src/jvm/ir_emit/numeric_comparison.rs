@@ -183,19 +183,22 @@ impl Emitter<'_> {
             return None;
         };
         let IrExpr::Call {
-            callee:
-                Callee::Intrinsic {
-                    operation:
-                        crate::ir::IrIntrinsic::PrimitiveCompare {
-                            relational_operator: true,
-                            operand,
-                        },
-                    ..
-                },
+            callee: call_callee,
             dispatch_receiver: Some(receiver),
             args,
             ..
         } = self.ir.expr(compared)
+        else {
+            return None;
+        };
+        let Callee::Intrinsic {
+            operation:
+                crate::ir::IrIntrinsic::PrimitiveCompare {
+                    relational_operator: true,
+                    operand,
+                },
+            ..
+        } = &**call_callee
         else {
             return None;
         };

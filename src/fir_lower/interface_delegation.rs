@@ -695,7 +695,7 @@ fn delegated_call(
         ),
     };
     let expression = ir.add_expr(IrExpr::Call {
-        callee,
+        callee: Box::new(callee),
         dispatch_receiver: Some(receiver),
         args: arguments,
     });

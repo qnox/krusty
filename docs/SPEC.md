@@ -11329,6 +11329,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   factories and their `…$cp` accessor. krusty declared the cache members before the no-arg
   constructor. Test: `tests/serializable_noarg_constructor_order_e2e.rs` (ordered member lists and
   class bytes compared with kotlinc's).
+- **A value-class parameter keeps the no-arg convenience constructor.** A primary constructor
+  taking a value class is private behind its public `DefaultConstructorMarker` accessor, yet when
+  every parameter has a default kotlinc still adds `<init>()` at the primary's declared visibility
+  (public, or protected for a protected primary). Test:
+  `tests/value_class_parameter_no_arg_constructor_e2e.rs` (class bytes compared with kotlinc's).
 - **A hidden serializable primary's `…$cp` accessor follows its marker accessor.** When a
   `@Serializable` class's primary constructor takes a value class, kotlinc's accessor lowering
   declares the primary's `DefaultConstructorMarker` accessor, then
@@ -14560,6 +14565,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_generic_class_is_constructed_at_each_instantiation_from_another_file`,
   `an_inner_class_is_constructed_with_its_outer_instance`,
   `a_value_class_constructed_in_another_file_is_its_value`).
+- **Native: a member with one body is called in the file that declares its class.** A call to a
+  member function of a class or `object` declared in another file of the module, which no override
+  can replace (a final member of a class, a value class's member, or any member of an `object`),
+  is a direct call to the member's entry point, keyed by the checked callable identity exactly as a
+  top-level function is. The receiver is evaluated first, then the arguments in source order; a
+  value class's member takes the value, every other member the object. The call does not run the
+  declaring file's initializer: the receiver already exists. An `object` declared in another file
+  is reached through one entry point per object, named from its qualified name, which runs the
+  declaring file's top-level initializer and then answers the instance, constructing it on first
+  use. A member an override could replace, an interface member, and an inherited member reached
+  through a subclass declared elsewhere are not this call.
+  Tests: `tests/native_cross_file_e2e.rs`
+  (`a_final_member_function_is_called_in_the_file_that_declares_the_class`,
+  `a_member_call_evaluates_the_receiver_before_the_arguments`,
+  `a_generic_member_function_is_called_at_each_instantiation`,
+  `a_value_class_member_function_takes_the_value`,
+  `an_object_declared_in_another_file_is_constructed_once_and_called`,
+  `a_companion_member_is_called_from_another_file`).
 - **Native: the public C ABI is primitives, String, and a Unit result.** A public top-level
   function whose parameters are primitives or `String` and whose result is one of those types or
   `Unit` is declared in the module's C header and exported under that declaration. The export runs

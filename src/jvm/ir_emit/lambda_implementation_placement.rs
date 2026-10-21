@@ -17,9 +17,13 @@ fn implementation_edge(ir: &IrFile, expression: ExprId) -> Option<FunId> {
     match ir.expr(expression) {
         IrExpr::Lambda { impl_fn, .. } => Some(*impl_fn),
         IrExpr::Call {
-            callee: Callee::Local(function),
+            callee: call_callee,
             ..
-        } if ir.specialized_functions.contains_key(function) => Some(*function),
+        } if let Callee::Local(function) = &**call_callee
+            && ir.specialized_functions.contains_key(function) =>
+        {
+            Some(*function)
+        }
         _ => None,
     }
 }
@@ -235,7 +239,7 @@ mod tests {
         );
 
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(implementation),
+            callee: Box::new(Callee::Local(implementation)),
             dispatch_receiver: None,
             args: Vec::new(),
         });
@@ -263,7 +267,7 @@ mod tests {
         source_lambda(&mut ir, implementation);
 
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(implementation),
+            callee: Box::new(Callee::Local(implementation)),
             dispatch_receiver: None,
             args: Vec::new(),
         });
@@ -301,7 +305,7 @@ mod tests {
             },
         );
         let direct = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(implementation),
+            callee: Box::new(Callee::Local(implementation)),
             dispatch_receiver: None,
             args: Vec::new(),
         });
@@ -401,7 +405,7 @@ mod tests {
         );
 
         let direct = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(implementation),
+            callee: Box::new(Callee::Local(implementation)),
             dispatch_receiver: None,
             args: Vec::new(),
         });
@@ -470,7 +474,7 @@ mod tests {
         ir.lambda_own_params_from.insert(adapter, 0);
 
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(adapter),
+            callee: Box::new(Callee::Local(adapter)),
             dispatch_receiver: None,
             args: Vec::new(),
         });

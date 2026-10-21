@@ -215,12 +215,12 @@ pub(super) fn compare(
         )
     };
     let call = ir.add_expr(IrExpr::Call {
-        callee: Callee::Static {
+        callee: Box::new(Callee::Static {
             owner,
             name: name.to_string(),
             descriptor,
             inline: InlineKind::None,
-        },
+        }),
         dispatch_receiver: None,
         args: vec![left, right],
     });

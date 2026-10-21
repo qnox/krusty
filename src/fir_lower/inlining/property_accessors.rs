@@ -52,29 +52,37 @@ struct PropertyAccess {
 
 fn property_access(ir: &crate::ir::IrFile, site: ExprId) -> Option<PropertyAccess> {
     match ir.expr(site).clone() {
-        IrExpr::Checked(IrCheckedOperation::PropertyRead {
-            dispatch_receiver,
-            extension_receiver,
-            context_arguments,
-            ..
-        }) => Some(PropertyAccess {
-            dispatch_receiver,
-            extension_receiver,
-            context_arguments,
-            value: None,
-        }),
-        IrExpr::Checked(IrCheckedOperation::PropertyWrite {
-            dispatch_receiver,
-            extension_receiver,
-            context_arguments,
-            value,
-            ..
-        }) => Some(PropertyAccess {
-            dispatch_receiver,
-            extension_receiver,
-            context_arguments,
-            value: Some(value),
-        }),
+        IrExpr::Checked(ref checked_op)
+            if let IrCheckedOperation::PropertyRead {
+                dispatch_receiver,
+                extension_receiver,
+                context_arguments,
+                ..
+            } = &**checked_op =>
+        {
+            Some(PropertyAccess {
+                dispatch_receiver: *dispatch_receiver,
+                extension_receiver: *extension_receiver,
+                context_arguments: context_arguments.to_vec(),
+                value: None,
+            })
+        }
+        IrExpr::Checked(ref checked_op)
+            if let IrCheckedOperation::PropertyWrite {
+                dispatch_receiver,
+                extension_receiver,
+                context_arguments,
+                value,
+                ..
+            } = &**checked_op =>
+        {
+            Some(PropertyAccess {
+                dispatch_receiver: *dispatch_receiver,
+                extension_receiver: *extension_receiver,
+                context_arguments: context_arguments.to_vec(),
+                value: Some(*value),
+            })
+        }
         _ => None,
     }
 }
@@ -585,13 +593,15 @@ mod tests {
     use crate::types::Ty;
 
     fn property_read(ir: &mut IrFile) -> ExprId {
-        ir.add_expr(IrExpr::Checked(IrCheckedOperation::PropertyRead {
-            target: PropertyId::from_raw(0),
-            dispatch_receiver: None,
-            extension_receiver: None,
-            context_arguments: Vec::new(),
-            substitutions: Vec::new(),
-        }))
+        ir.add_expr(IrExpr::Checked(Box::new(
+            IrCheckedOperation::PropertyRead {
+                target: PropertyId::from_raw(0),
+                dispatch_receiver: None,
+                extension_receiver: None,
+                context_arguments: Vec::new(),
+                substitutions: Vec::new(),
+            },
+        )))
     }
 
     fn record_splice(ir: &mut IrFile, site: ExprId, accessor: DeclarationId) {

@@ -56,13 +56,13 @@ pub(super) fn add_cached_descriptor(
         let name = ir.add_expr(IrExpr::Const(IrConst::String(name.clone())));
         let optional = ir.add_expr(IrExpr::Const(IrConst::Boolean(*optional)));
         statements.push(ir.add_expr(IrExpr::Call {
-            callee: Callee::realized_virtual(
+            callee: Box::new(Callee::realized_virtual(
                 type_name("kotlinx/serialization/internal/PluginGeneratedSerialDescriptor"),
                 "addElement".to_string(),
                 "(Ljava/lang/String;Z)V".to_string(),
                 None,
                 false,
-            ),
+            )),
             dispatch_receiver: Some(receiver),
             args: vec![name, optional],
         }));
@@ -120,13 +120,13 @@ fn descriptor_access(
         field: "INSTANCE",
     });
     ir.add_expr(IrExpr::Call {
-        callee: Callee::realized_virtual(
+        callee: Box::new(Callee::realized_virtual(
             ir.classes[serializer_id as usize].fq_name_id(),
             "getDescriptor".to_string(),
             "()Lkotlinx/serialization/descriptors/SerialDescriptor;".to_string(),
             None,
             false,
-        ),
+        )),
         dispatch_receiver: Some(instance),
         args: vec![],
     })
@@ -190,12 +190,12 @@ fn multi_mask_check(
     });
     let descriptor = descriptor_access(ir, serializer_id, cached_descriptor);
     let report = ir.add_expr(IrExpr::Call {
-        callee: Callee::Static {
+        callee: Box::new(Callee::Static {
             owner: type_name("kotlinx/serialization/internal/PluginExceptionsKt"),
             name: "throwArrayMissingFieldException".to_string(),
             descriptor: "([I[ILkotlinx/serialization/descriptors/SerialDescriptor;)V".to_string(),
             inline: InlineKind::None,
-        },
+        }),
         dispatch_receiver: None,
         args: vec![seen_array, required_array, descriptor],
     });
@@ -363,12 +363,12 @@ pub(super) fn complete_deserialization_constructor(
         let required_arg = ir.add_expr(IrExpr::Const(IrConst::Int(required_mask)));
         let descriptor = descriptor_access(ir, serializer_id, cached_descriptor);
         let report = ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
+            callee: Box::new(Callee::Static {
                 owner: type_name("kotlinx/serialization/internal/PluginExceptionsKt"),
                 name: "throwMissingFieldException".to_string(),
                 descriptor: "(IILkotlinx/serialization/descriptors/SerialDescriptor;)V".to_string(),
                 inline: InlineKind::None,
-            },
+            }),
             dispatch_receiver: None,
             args: vec![seen_arg, required_arg, descriptor],
         });

@@ -1006,3 +1006,163 @@ fn a_number_returned_from_another_file_is_rendered_into_a_string_template() {
         "OK",
     );
 }
+
+#[test]
+fn a_final_member_function_is_called_in_the_file_that_declares_the_class() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                class Counter(var n: Int) {
+                    fun bump(by: Int): Int { n += by; return n }
+                    fun twice(): Int = n * 2
+                }
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String {
+                    val c = Counter(1)
+                    c.bump(20)
+                    return if (c.twice() == 42 && c.n == 21) "OK" else "FAIL ${c.n}"
+                }
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn a_member_call_evaluates_the_receiver_before_the_arguments() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                class Joiner(val head: String) {
+                    fun join(tail: String): String = head + tail
+                }
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                var trace = ""
+                fun box(): String {
+                    val joined = run { trace += "r"; Joiner("O") }.join(run { trace += "a"; "K" })
+                    return if (trace == "ra") joined else "FAIL $trace"
+                }
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn a_generic_member_function_is_called_at_each_instantiation() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                class Box<T>(val value: T) {
+                    fun swap(other: T): T = other
+                    fun get(): T = value
+                }
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String {
+                    val ints = Box(1)
+                    val strings = Box("O")
+                    return if (ints.swap(41) + ints.get() == 42) strings.get() + strings.swap("K") else "FAIL"
+                }
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn a_value_class_member_function_takes_the_value() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                @JvmInline
+                value class Meters(val amount: Int) {
+                    fun plus(other: Meters): Meters = Meters(amount + other.amount)
+                    fun render(): String = "${amount}m"
+                }
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String {
+                    val total = Meters(40).plus(Meters(2))
+                    return if (total.render() == "42m") "OK" else total.render()
+                }
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn an_object_declared_in_another_file_is_constructed_once_and_called() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                var constructions = 0
+                object Registry {
+                    private val names = mutableListOf<String>()
+                    init { constructions += 1 }
+                    fun add(name: String): Int { names.add(name); return names.size }
+                }
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String {
+                    Registry.add("O")
+                    val size = Registry.add("K")
+                    return if (size == 2 && constructions == 1) "OK" else "FAIL $size $constructions"
+                }
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn a_companion_member_is_called_from_another_file() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                class Id private constructor(val raw: Int) {
+                    companion object {
+                        fun of(raw: Int): Id = Id(raw)
+                    }
+                }
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String = if (Id.of(42).raw == 42) "OK" else "FAIL"
+            "#,
+        ),
+    ]);
+}

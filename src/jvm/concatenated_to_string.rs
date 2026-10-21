@@ -65,10 +65,14 @@ impl CallRoles {
     fn to_string_receiver(&self, ir: &IrFile, expression: ExprId) -> Option<ExprId> {
         let (receiver, callable) = match ir.expr(expression) {
             IrExpr::Call {
-                callee: Callee::Virtual { module_target, .. },
+                callee: call_callee,
                 dispatch_receiver: Some(receiver),
                 args,
-            } if args.is_empty() => (*receiver, *module_target),
+            } if let Callee::Virtual { module_target, .. } = &**call_callee
+                && args.is_empty() =>
+            {
+                (*receiver, *module_target)
+            }
             IrExpr::MethodCall {
                 class,
                 index,

@@ -80,9 +80,9 @@ fn destructuring_a_mutable_binding_or_a_call_keeps_its_container() {
         temporaries_initialized_by(&ir, |init| matches!(
             init,
             IrExpr::Call {
-                callee: Callee::Local(_),
+                callee: call_callee,
                 ..
-            }
+            } if matches!(&**call_callee, Callee::Local(_))
         )),
         1
     );

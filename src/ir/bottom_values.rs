@@ -211,13 +211,15 @@ mod tests {
     #[test]
     fn a_checked_nothing_property_read_diverges_until_realization() {
         let mut ir = IrFile::with_package(None);
-        let read = ir.add_expr(IrExpr::Checked(IrCheckedOperation::PropertyRead {
-            target: crate::fir::PropertyId::from_raw(0),
-            dispatch_receiver: None,
-            extension_receiver: None,
-            context_arguments: Vec::new(),
-            substitutions: Vec::new(),
-        }));
+        let read = ir.add_expr(IrExpr::Checked(Box::new(
+            IrCheckedOperation::PropertyRead {
+                target: crate::fir::PropertyId::from_raw(0),
+                dispatch_receiver: None,
+                extension_receiver: None,
+                context_arguments: Vec::new(),
+                substitutions: Vec::new(),
+            },
+        )));
         let completed = complete_bottom_value(&mut ir, read, Ty::Nothing);
         let IrExpr::BottomValue {
             producer,

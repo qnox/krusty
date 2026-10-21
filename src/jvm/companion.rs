@@ -1053,10 +1053,14 @@ fn moved_property_use(
             let operation = operation.unwrap_or(expression);
             Some((operation, local_property(realizations, operation)?, false))
         }
-        IrExpr::Checked(crate::ir::IrCheckedOperation::PropertyRead { target, .. }) => {
+        IrExpr::Checked(checked_op)
+            if let crate::ir::IrCheckedOperation::PropertyRead { target, .. } = &**checked_op =>
+        {
             Some((expression, *target, true))
         }
-        IrExpr::Checked(crate::ir::IrCheckedOperation::PropertyWrite { target, .. }) => {
+        IrExpr::Checked(checked_op)
+            if let crate::ir::IrCheckedOperation::PropertyWrite { target, .. } = &**checked_op =>
+        {
             Some((expression, *target, false))
         }
         _ => None,

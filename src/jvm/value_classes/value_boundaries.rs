@@ -114,9 +114,9 @@ pub(super) fn record_value_boundary(
                 if matches!(
                     &exprs[value as usize],
                     IrExpr::Call {
-                        callee: Callee::Intrinsic { .. },
+                        callee: call_callee,
                         ..
-                    }
+                    } if matches!(&**call_callee, Callee::Intrinsic { .. })
                 ) {
                     ops.push((value, BoxOp::unbox(value_class, parameter.is_nullable())));
                 }

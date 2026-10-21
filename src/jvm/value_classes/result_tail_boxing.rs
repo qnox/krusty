@@ -80,9 +80,13 @@ fn unboxed_vc_class(
 ) -> Option<TypeName> {
     match &exprs[id as usize] {
         IrExpr::Call {
-            callee: Callee::Static { owner, name, .. },
+            callee: call_callee,
             ..
-        } if name == "constructor-impl" || name == "unbox-impl" => value_class_name(*owner, under),
+        } if let Callee::Static { owner, name, .. } = &**call_callee
+            && (name == "constructor-impl" || name == "unbox-impl") =>
+        {
+            value_class_name(*owner, under)
+        }
         // A local call returning an unboxed value class — only considered when `calls` is set (the
         // `Any`-return case); the lambda case must NOT box these (they already satisfy `Object`).
         IrExpr::Call { callee, .. } if calls && callee.source_function().is_some() => match rets

@@ -511,7 +511,7 @@ impl Emitter<'_> {
                     self.ir.classes[*class as usize].fields[*index as usize].is_private()
                 }
                 IrExpr::Call { callee, .. } => {
-                    matches!(callee, Callee::Special { .. })
+                    matches!(&**callee, Callee::Special { .. })
                         || callee.source_function().is_some_and(|function| {
                             self.ir.method_visibility(function).is_private()
                         })

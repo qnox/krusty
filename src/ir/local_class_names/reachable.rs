@@ -48,9 +48,11 @@ impl IrFile {
             .filter_map(|(index, expr)| match expr {
                 IrExpr::Lambda { impl_fn, .. } => Some((index as ExprId, *impl_fn)),
                 IrExpr::Call {
-                    callee: Callee::Local(function),
+                    callee: call_callee,
                     ..
-                } if self.lambda_origins.contains_key(function) => {
+                } if let Callee::Local(function) = &**call_callee
+                    && self.lambda_origins.contains_key(function) =>
+                {
                     Some((index as ExprId, *function))
                 }
                 _ => None,
@@ -141,9 +143,13 @@ impl IrFile {
                 }
             } else if let Some(source) = match self.exprs[expression as usize] {
                 IrExpr::Call {
-                    callee: Callee::Local(function),
+                    callee: ref call_callee,
                     ..
-                } if self.lambda_origins.contains_key(&function) => Some(function),
+                } if let Callee::Local(function) = &**call_callee
+                    && self.lambda_origins.contains_key(function) =>
+                {
+                    Some(*function)
+                }
                 _ => None,
             } {
                 // Common inlining can consume the `Lambda` node while retaining a direct call to
@@ -277,12 +283,14 @@ fn extend_owned_implementation(
 
 fn retarget_direct_inline_implementation(expression: &mut IrExpr, source: FunId, target: FunId) {
     if let IrExpr::Call {
-        callee: Callee::Local(function),
+        callee: call_callee,
         ..
     } = expression
     {
-        if *function == source {
-            *function = target;
+        if let Callee::Local(function) = &mut **call_callee {
+            if *function == source {
+                *function = target;
+            }
         }
     }
 }

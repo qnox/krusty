@@ -526,16 +526,18 @@ fn expression_reified_parameters(
             );
         }
         IrExpr::Call {
-            callee:
-                crate::ir::Callee::Intrinsic {
-                    operation:
-                        crate::ir::IrIntrinsic::TypeOf { ty: classifier }
-                        | crate::ir::IrIntrinsic::EnumValueOf { classifier }
-                        | crate::ir::IrIntrinsic::EnumEntries { classifier },
-                    ..
-                },
+            callee: call_callee,
             ..
-        } => collect_type_reified_parameters(*classifier, parameters, &mut found),
+        } if let crate::ir::Callee::Intrinsic {
+            operation:
+                crate::ir::IrIntrinsic::TypeOf { ty: classifier }
+                | crate::ir::IrIntrinsic::EnumValueOf { classifier }
+                | crate::ir::IrIntrinsic::EnumEntries { classifier },
+            ..
+        } = &**call_callee =>
+        {
+            collect_type_reified_parameters(*classifier, parameters, &mut found)
+        }
         _ => {}
     }
     found
@@ -823,12 +825,12 @@ mod tests {
         )]);
         let mut ir = IrFile::default();
         let type_of = ir.add_expr(IrExpr::Call {
-            callee: crate::ir::Callee::Intrinsic {
+            callee: Box::new(crate::ir::Callee::Intrinsic {
                 operation: crate::ir::IrIntrinsic::TypeOf {
                     ty: Ty::obj_args("kotlin/collections/List", &[parameter_ty]),
                 },
                 ret: Ty::obj("kotlin/reflect/KType"),
-            },
+            }),
             dispatch_receiver: None,
             args: Vec::new(),
         });
@@ -855,17 +857,17 @@ mod tests {
             )],
         );
         let enum_entries = ir.add_expr(IrExpr::Call {
-            callee: crate::ir::Callee::Intrinsic {
+            callee: Box::new(crate::ir::Callee::Intrinsic {
                 operation: crate::ir::IrIntrinsic::EnumEntries {
                     classifier: parameter_ty,
                 },
                 ret: Ty::obj("kotlin/enums/EnumEntries"),
-            },
+            }),
             dispatch_receiver: None,
             args: Vec::new(),
         });
         let star = ir.add_expr(IrExpr::Call {
-            callee: crate::ir::Callee::Intrinsic {
+            callee: Box::new(crate::ir::Callee::Intrinsic {
                 operation: crate::ir::IrIntrinsic::TypeOf {
                     ty: Ty::obj_args(
                         "kotlin/collections/List",
@@ -873,7 +875,7 @@ mod tests {
                     ),
                 },
                 ret: Ty::obj("kotlin/reflect/KType"),
-            },
+            }),
             dispatch_receiver: None,
             args: Vec::new(),
         });

@@ -509,7 +509,7 @@ mod tests {
         let receiver = ir.add_expr(IrExpr::GetValue(7));
         let argument = ir.add_expr(IrExpr::GetValue(7));
         let selector = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(0),
+            callee: Box::new(Callee::Local(0)),
             dispatch_receiver: Some(receiver),
             args: vec![argument],
         });
@@ -522,7 +522,7 @@ mod tests {
         let mut ir = IrFile::default();
         let receiver = ir.add_expr(IrExpr::GetValue(7));
         let selector = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(0),
+            callee: Box::new(Callee::Local(0)),
             dispatch_receiver: None,
             args: vec![receiver],
         });

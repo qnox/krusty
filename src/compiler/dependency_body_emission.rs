@@ -393,10 +393,13 @@ fn links_emitted_support(
 ) -> bool {
     ir.exprs.iter().any(|expression| {
         let IrExpr::Call {
-            callee: Callee::External { target, .. },
+            callee: call_callee,
             ..
         } = expression
         else {
+            return false;
+        };
+        let Callee::External { target, .. } = &**call_callee else {
             return false;
         };
         emitted.values().any(|emitted| emitted.target() == *target)

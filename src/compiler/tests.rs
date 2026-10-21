@@ -86,10 +86,8 @@ impl Backend for ModuleCallRecordingBackend {
             .filter(|expression| {
                 matches!(
                     expression,
-                    crate::ir::IrExpr::Call {
-                        callee: crate::ir::Callee::Module { .. },
-                        ..
-                    }
+                    crate::ir::IrExpr::Call { callee, .. }
+                        if matches!(**callee, crate::ir::Callee::Module { .. })
                 )
             })
             .count();

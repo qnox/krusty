@@ -269,24 +269,24 @@ impl BodyLowering<'_> {
                 dispatch_receiver,
             } => {
                 let dispatch_receiver = self.receiver(*dispatch_receiver)?;
-                self.ir.add_expr(IrExpr::Checked(
+                self.ir.add_expr(IrExpr::Checked(Box::new(
                     crate::ir::IrCheckedOperation::LateinitFieldRead {
                         target: *target,
                         dispatch_receiver,
                     },
-                ))
+                )))
             }
             FirExprKind::BackingFieldRead {
                 target,
                 dispatch_receiver,
             } => {
                 let dispatch_receiver = self.receiver(*dispatch_receiver)?;
-                self.ir.add_expr(IrExpr::Checked(
+                self.ir.add_expr(IrExpr::Checked(Box::new(
                     crate::ir::IrCheckedOperation::BackingFieldRead {
                         target: *target,
                         dispatch_receiver,
                     },
-                ))
+                )))
             }
             FirExprKind::BackingFieldWrite {
                 target,
@@ -296,13 +296,13 @@ impl BodyLowering<'_> {
             } => {
                 let dispatch_receiver = self.receiver(*dispatch_receiver)?;
                 let value = self.expression_with_conversion(*value, *conversion)?;
-                self.ir.add_expr(IrExpr::Checked(
+                self.ir.add_expr(IrExpr::Checked(Box::new(
                     crate::ir::IrCheckedOperation::BackingFieldWrite {
                         target: *target,
                         dispatch_receiver,
                         value,
                     },
-                ))
+                )))
             }
             FirExprKind::PluginExpression {
                 plugin,
@@ -358,19 +358,21 @@ impl BodyLowering<'_> {
                 // checked type explicitly too.
                 self.ir.logical_types.insert(call, Ty::Int);
                 if let IrExpr::Call {
-                    callee:
-                        Callee::Intrinsic {
-                            operation:
-                                IrIntrinsic::PrimitiveCompare {
-                                    relational_operator,
-                                    ..
-                                },
-                            ..
-                        },
+                    callee: call_callee,
                     ..
                 } = &mut self.ir.exprs[call as usize]
                 {
-                    *relational_operator = true;
+                    if let Callee::Intrinsic {
+                        operation:
+                            IrIntrinsic::PrimitiveCompare {
+                                relational_operator,
+                                ..
+                            },
+                        ..
+                    } = &mut **call_callee
+                    {
+                        *relational_operator = true;
+                    }
                 }
                 let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
                 self.ir.add_expr(IrExpr::PrimitiveBinOp {
@@ -413,13 +415,13 @@ impl BodyLowering<'_> {
                 }
                 self.ir.logical_types.insert(lower, Ty::Int);
                 let end = self.expression(*upper_bound)?;
-                self.ir.add_expr(IrExpr::Checked(
+                self.ir.add_expr(IrExpr::Checked(Box::new(
                     crate::ir::IrCheckedOperation::ComparableRangeContains {
                         lower,
                         end,
                         negated: *negated,
                     },
-                ))
+                )))
             }
             FirExprKind::ClassLiteral { classifier, value } => {
                 self.checked_class_literal(*classifier, *value)?
@@ -1020,10 +1022,10 @@ impl BodyLowering<'_> {
                     FirIndexedAccessKind::String => IrIntrinsic::StringGet,
                 };
                 self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Intrinsic {
+                    callee: Box::new(Callee::Intrinsic {
                         operation,
                         ret: expression.ty.get(),
-                    },
+                    }),
                     dispatch_receiver: Some(receiver),
                     args: arguments,
                 })
@@ -1041,10 +1043,10 @@ impl BodyLowering<'_> {
                     .collect::<Result<Vec<_>, _>>()?;
                 arguments.push(self.expression_with_conversion(*value, *conversion)?);
                 self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Intrinsic {
+                    callee: Box::new(Callee::Intrinsic {
                         operation: IrIntrinsic::ArraySet,
                         ret: expression.ty.get(),
-                    },
+                    }),
                     dispatch_receiver: Some(receiver),
                     args: arguments,
                 })
@@ -1519,9 +1521,10 @@ impl BodyLowering<'_> {
                 && matches!(
                     self.ir.exprs[raw],
                     crate::ir::IrExpr::CallableReference(_)
-                        | crate::ir::IrExpr::Checked(
-                            crate::ir::IrCheckedOperation::PropertyReference { .. }
-                        )
+                ) || matches!(
+                    &self.ir.exprs[raw],
+                    crate::ir::IrExpr::Checked(checked_op)
+                        if matches!(&**checked_op, crate::ir::IrCheckedOperation::PropertyReference { .. })
                 )
         });
         let (Some(reference), None) = (references.next(), references.next()) else {
@@ -1818,7 +1821,10 @@ impl BodyLowering<'_> {
                     if target.suspend && !self.ir.suspend_funs.contains(impl_fn) {
                         self.ir.suspend_funs.push(*impl_fn);
                     }
-                    assert!(sam.replace(target).is_none(), "a lambda has one SAM target");
+                    assert!(
+                        sam.replace(Box::new(target)).is_none(),
+                        "a lambda has one SAM target"
+                    );
                     expression
                 } else {
                     self.sam_function_value_adapter(&conversion, expression)

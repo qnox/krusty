@@ -45,7 +45,7 @@ impl EmittedShape for Emitter<'_> {
                 let function = self.ir.classes[*class as usize].methods[*index as usize];
                 args.iter().all(Option::is_some) && !self.ir.suspend_funs.contains(&function)
             }
-            IrExpr::Call { callee, .. } => match callee {
+            IrExpr::Call { callee, .. } => match &**callee {
                 Callee::Local(function) | Callee::ClassStatic { function, .. } => {
                     !self.ir.suspend_funs.contains(function)
                 }
