@@ -123,7 +123,7 @@ KRUSTY_BIN=/absolute/path/to/krusty ./gradlew krustyCompile
 ## Supported build systems and compiler plugins
 
 krusty targets every Kotlin release listed in [`kotlin-versions`](kotlin-versions); the badge above
-shows the newest. Anything not listed here fails the build with an error instead of being skipped.
+shows the newest. On the command line, anything not listed here fails the build with an error instead of being skipped; the Gradle plugin reports it and leaves that compile task to kotlinc.
 
 ### Build systems
 
@@ -149,7 +149,7 @@ changing its plugin configuration.
 | no-arg (`plugin.noarg`, `plugin.jpa`) | Supported, with the `jpa` preset; `invokeInitializers=true` is not implemented. |
 | sam-with-receiver | Supported. |
 | KSP (KSP2) | Supported through a build system: under Gradle, KSP's own `kspKotlin` task runs the processors and krusty compiles what they generate (KSP's Gradle plugin needs Gradle 8 or newer); under the Kotlin Toolchain, processors from Maven artifacts run before the module compiles, but only their generated classes and resources are picked up; a processor that generates Kotlin or Java sources fails the module for now. The plain command line has no codegen host and rejects the KSP plugin. |
-| Compose, Parcelize, assignment, kapt and every other FIR/IR plugin | Not supported. Today the build fails with an error; the Gradle plugin is being changed to report the unsupported plugin and hand that compilation to kotlinc instead. |
+| Compose, Parcelize, assignment, kapt and every other FIR/IR plugin | Not supported. The command line fails with an error. The Gradle plugin reports the unsupported plugin and leaves that compile task to kotlinc, so the build still succeeds. |
 | Kotlin scripts (`.kts`) | Not supported. |
 
 ## Status
