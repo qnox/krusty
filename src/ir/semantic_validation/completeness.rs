@@ -51,9 +51,15 @@ impl IrFile {
         }
         for expression in &self.exprs {
             let referenced = match expression {
-                IrExpr::Checked(IrCheckedOperation::PropertyRead { target, .. })
-                | IrExpr::Checked(IrCheckedOperation::PropertyWrite { target, .. }) => *target,
-                IrExpr::Checked(IrCheckedOperation::PropertyReference { target, .. }) => {
+                IrExpr::Checked(checked_op)
+                    if let IrCheckedOperation::PropertyRead { target, .. }
+                    | IrCheckedOperation::PropertyWrite { target, .. } = &**checked_op =>
+                {
+                    *target
+                }
+                IrExpr::Checked(checked_op)
+                    if let IrCheckedOperation::PropertyReference { target, .. } = &**checked_op =>
+                {
                     match target {
                         FirPropertyReferenceTarget::Module(property)
                         | FirPropertyReferenceTarget::SpecializedModule { property, .. } => {

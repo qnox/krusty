@@ -51,9 +51,13 @@ pub(super) fn operand_nonnull(
             arg,
         } => non_null_ty(type_operand) || operand_nonnull(exprs, rets, fields, slots, *arg),
         IrExpr::Call {
-            callee: Callee::Static { name, .. },
+            callee: call_callee,
             ..
-        } if name == "constructor-impl" || name == "box-impl" => true,
+        } if let Callee::Static { name, .. } = &**call_callee
+            && (name == "constructor-impl" || name == "box-impl") =>
+        {
+            true
+        }
         IrExpr::Call { callee, .. } if callee.source_function().is_some() => rets
             .get(
                 callee

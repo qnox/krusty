@@ -29,10 +29,10 @@ impl BodyLowering<'_> {
         let lhs = self.expression(lhs)?;
         let rhs = self.expression(rhs)?;
         let equal = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Intrinsic {
+            callee: Box::new(Callee::Intrinsic {
                 operation: IrIntrinsic::Ieee754Equals { operand },
                 ret: Ty::Boolean,
-            },
+            }),
             dispatch_receiver: None,
             args: vec![lhs, rhs],
         });

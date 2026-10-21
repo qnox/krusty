@@ -313,7 +313,11 @@ impl IrFile {
     /// passed: the reference itself, or it adapted to the operator's declared parameter.
     pub fn is_delegated_property_operand(&self, expression: ExprId) -> bool {
         match self.expr(expression) {
-            IrExpr::Checked(IrCheckedOperation::PropertyReference { delegated, .. }) => *delegated,
+            IrExpr::Checked(checked_op)
+                if let IrCheckedOperation::PropertyReference { delegated, .. } = &**checked_op =>
+            {
+                *delegated
+            }
             IrExpr::LocalPropertyReference(_) => true,
             IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,

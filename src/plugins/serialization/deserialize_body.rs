@@ -107,11 +107,11 @@ impl ElementDecode<'_> {
             "decodeSerializableElement"
         };
         let raw = ir.add_expr(IrExpr::Call {
-            callee: virtual_iface(
+            callee: Box::new(virtual_iface(
                 "kotlinx/serialization/encoding/CompositeDecoder",
                 method,
                 "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/DeserializationStrategy;Ljava/lang/Object;)Ljava/lang/Object;",
-            ),
+            )),
             dispatch_receiver: Some(cdk),
             args: vec![dk, idxc, inst, prev],
         });
@@ -193,11 +193,11 @@ impl ElementDecode<'_> {
         } else {
             let (mname, mdesc) = decode_element_method(&ty).unwrap();
             ir.add_expr(IrExpr::Call {
-                callee: virtual_iface(
+                callee: Box::new(virtual_iface(
                     "kotlinx/serialization/encoding/CompositeDecoder",
                     mname,
                     mdesc,
-                ),
+                )),
                 dispatch_receiver: Some(cdk),
                 args: vec![dk, idxc],
             })
@@ -435,11 +435,11 @@ impl DeserializeBody<'_> {
             let d0 = this_desc(ir);
             let dec = ir.add_expr(IrExpr::GetValue(1));
             let begin = ir.add_expr(IrExpr::Call {
-                callee: virtual_iface(
+                callee: Box::new(virtual_iface(
                     "kotlinx/serialization/encoding/Decoder",
                     "beginStructure",
                     "(Lkotlinx/serialization/descriptors/SerialDescriptor;)Lkotlinx/serialization/encoding/CompositeDecoder;",
-                ),
+                )),
                 dispatch_receiver: Some(dec),
                 args: vec![d0],
             });
@@ -454,10 +454,10 @@ impl DeserializeBody<'_> {
                 // class's own interned identity, and `ClassStatic` leaves the name and the JVM
                 // descriptor to be formed at the JVM boundary from the declaration itself.
                 let read = ir.add_expr(IrExpr::Call {
-                    callee: crate::ir::Callee::ClassStatic {
+                    callee: Box::new(crate::ir::Callee::ClassStatic {
                         owner: ir.classes[foo_id as usize].fq_name_id(),
                         function: plan.accessor,
-                    },
+                    }),
                     dispatch_receiver: None,
                     args: vec![],
                 });
@@ -472,11 +472,11 @@ impl DeserializeBody<'_> {
             let didx = this_desc(ir);
             let cdi = composite(ir);
             let dei = ir.add_expr(IrExpr::Call {
-                callee: virtual_iface(
+                callee: Box::new(virtual_iface(
                     "kotlinx/serialization/encoding/CompositeDecoder",
                     "decodeElementIndex",
                     "(Lkotlinx/serialization/descriptors/SerialDescriptor;)I",
-                ),
+                )),
                 dispatch_receiver: Some(cdi),
                 args: vec![didx],
             });
@@ -549,11 +549,11 @@ impl DeserializeBody<'_> {
             // format that cannot promise it still takes the loop.
             let sequential_composite = ir.add_expr(IrExpr::GetValue(composite_local));
             let sequential = ir.add_expr(IrExpr::Call {
-                callee: virtual_iface(
+                callee: Box::new(virtual_iface(
                     "kotlinx/serialization/encoding/CompositeDecoder",
                     "decodeSequentially",
                     "()Z",
-                ),
+                )),
                 dispatch_receiver: Some(sequential_composite),
                 args: vec![],
             });
@@ -575,11 +575,11 @@ impl DeserializeBody<'_> {
             let dend = this_desc(ir);
             let cend = composite(ir);
             stmts.push(ir.add_expr(IrExpr::Call {
-                callee: virtual_iface(
+                callee: Box::new(virtual_iface(
                     "kotlinx/serialization/encoding/CompositeDecoder",
                     "endStructure",
                     "(Lkotlinx/serialization/descriptors/SerialDescriptor;)V",
-                ),
+                )),
                 dispatch_receiver: Some(cend),
                 args: vec![dend],
             }));

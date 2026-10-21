@@ -15,9 +15,11 @@ fn virtual_targets(ir: &IrFile) -> Vec<(String, Option<IrVirtualTarget>)> {
         .iter()
         .filter_map(|expression| match expression {
             IrExpr::Call {
-                callee: Callee::Virtual { name, target, .. },
+                callee: call_callee,
                 ..
-            } => Some((name.clone(), *target)),
+            } if let Callee::Virtual { name, target, .. } = &**call_callee => {
+                Some((name.clone(), *target))
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -31,11 +33,14 @@ fn super_calls(ir: &IrFile) -> Vec<(IrSuperCallKind, Option<ResolvedFunctionOver
         .iter()
         .filter_map(|expression| match expression {
             IrExpr::Call {
-                callee: Callee::Super {
-                    kind, declaration, ..
-                },
+                callee: call_callee,
                 ..
-            } => Some((*kind, *declaration)),
+            } if let Callee::Super {
+                kind, declaration, ..
+            } = &**call_callee =>
+            {
+                Some((*kind, *declaration))
+            }
             _ => None,
         })
         .collect()

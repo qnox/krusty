@@ -102,13 +102,13 @@ pub(super) fn resumed_carrier(
         type_operand: Ty::nullable(Ty::obj_name(classifier)),
     });
     let unboxed = ir.add_expr(IrExpr::Call {
-        callee: Callee::realized_virtual(
+        callee: Box::new(Callee::realized_virtual(
             classifier,
             "unbox-impl".to_string(),
             descriptor,
             None,
             false,
-        ),
+        )),
         dispatch_receiver: Some(boxed),
         args: Vec::new(),
     });
@@ -148,12 +148,12 @@ pub(super) fn boxed_carrier(
         type_operand: carrier,
     });
     let boxed = ir.add_expr(IrExpr::Call {
-        callee: Callee::Static {
+        callee: Box::new(Callee::Static {
             owner: classifier,
             name: "box-impl".to_string(),
             descriptor,
             inline: crate::libraries::InlineKind::None,
-        },
+        }),
         dispatch_receiver: None,
         args: vec![cast],
     });

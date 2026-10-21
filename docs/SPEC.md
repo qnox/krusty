@@ -11327,6 +11327,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   factories and their `…$cp` accessor. krusty declared the cache members before the no-arg
   constructor. Test: `tests/serializable_noarg_constructor_order_e2e.rs` (ordered member lists and
   class bytes compared with kotlinc's).
+- **A value-class parameter keeps the no-arg convenience constructor.** A primary constructor
+  taking a value class is private behind its public `DefaultConstructorMarker` accessor, yet when
+  every parameter has a default kotlinc still adds `<init>()` at the primary's declared visibility
+  (public, or protected for a protected primary). Test:
+  `tests/value_class_parameter_no_arg_constructor_e2e.rs` (class bytes compared with kotlinc's).
 - **A hidden serializable primary's `…$cp` accessor follows its marker accessor.** When a
   `@Serializable` class's primary constructor takes a value class, kotlinc's accessor lowering
   declares the primary's `DefaultConstructorMarker` accessor, then
@@ -14558,6 +14563,35 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_generic_class_is_constructed_at_each_instantiation_from_another_file`,
   `an_inner_class_is_constructed_with_its_outer_instance`,
   `a_value_class_constructed_in_another_file_is_its_value`).
+- **Native: a member with one body is called in the file that declares its class.** A call to a
+  member function of a class or `object` declared in another file of the module, which no override
+  can replace (a final member of a class, a value class's member, or any member of an `object`),
+  is a direct call to the member's entry point, keyed by the checked callable identity exactly as a
+  top-level function is. The receiver is evaluated first, then the arguments in source order; a
+  value class's member takes the value, every other member the object. The call does not run the
+  declaring file's initializer: the receiver already exists. An `object` declared in another file
+  is reached through one entry point per object, named from its qualified name, which runs the
+  declaring file's top-level initializer and then answers the instance, constructing it on first
+  use. A member an override could replace, an interface member, and an inherited member reached
+  through a subclass declared elsewhere are not this call.
+  Tests: `tests/native_cross_file_e2e.rs`
+  (`a_final_member_function_is_called_in_the_file_that_declares_the_class`,
+  `a_member_call_evaluates_the_receiver_before_the_arguments`,
+  `a_generic_member_function_is_called_at_each_instantiation`,
+  `a_value_class_member_function_takes_the_value`,
+  `an_object_declared_in_another_file_is_constructed_once_and_called`,
+  `a_companion_member_is_called_from_another_file`).
+- **Native: a class declared in another file is named by its module descriptor.** The runtime
+  type descriptor of a named source class is defined by its declaring file under one symbol per
+  class, named from the source module and the class's qualified name, so `is`, `!is`, `as`, `as?`
+  and a `catch` clause in another file of the module ask about the same descriptor the declaring
+  file stamps on the class's instances. A `when` over a sealed hierarchy declared elsewhere is
+  those checks. A local or anonymous class keeps a descriptor of its own file, since no other file
+  can name it.
+  Tests: `tests/native_cross_file_e2e.rs`
+  (`an_is_check_names_a_class_declared_in_another_file`,
+  `a_when_over_a_sealed_hierarchy_from_another_file_selects_its_branch`,
+  `an_exception_declared_in_another_file_is_caught_by_its_class`).
 - **Native: the public C ABI is primitives, String, and a Unit result.** A public top-level
   function whose parameters are primitives or `String` and whose result is one of those types or
   `Unit` is declared in the module's C header and exported under that declaration. The export runs
@@ -20113,3 +20147,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   stored before its constructor runs, as on the JVM. Tests: `wasm::codegen::tests`, the
   `wasm_*` regressions in `tests/kotlin_box_wasm_conformance.rs`, and
   `backend::class_tables::tests`.
+
+- **Wasm catch-only exception transport preserves the Throwable object.** Both Wasm targets use
+  one module-owned exception tag carrying the existing GC reference ABI. `throw` and a single
+  `catch (e: Throwable)` transfer the original object across functions and separately analyzed
+  module boundaries; a handler's own throw escapes that handler. Normal `try` results, return,
+  and loop branches retain their checked control-flow meaning. An explicitly selected platform
+  stdlib authenticates `Throwable()` and `Throwable(String?)` plus the exact nullable `message`
+  getter before publishing their callable identities. The Wasm carrier retains the supplied
+  message and a null cause; an identical ordinary dependency gets no compiler realization.
+  This slice does not realize cause-taking constructors, Throwable subclasses, other catch types,
+  multiple catches, or `finally`: unsupported forms still decline the entire compilation.
+  Arithmetic traps and foreign host exceptions do not become Kotlin exceptions implicitly.
+  Tests: shared `THROWABLE_TRANSPORT` and `TRY_NORMAL_COMPLETION` multimodule cases with the
+  kotlinc/JVM oracle and Native/Wasm matrix, provider `throwables::tests`, Wasm encoder tests,
+  and `wasm::codegen::tests::a_try_with_finally_still_declines_without_an_artifact`.

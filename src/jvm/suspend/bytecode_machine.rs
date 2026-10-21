@@ -264,9 +264,9 @@ pub(super) fn eligible_points(
         matches!(
             &ir.exprs[call as usize],
             IrExpr::Call {
-                callee: Callee::Special { .. },
+                callee: call_callee,
                 ..
-            }
+            } if matches!(&**call_callee, Callee::Special { .. })
         )
     });
     let class_member = !function.is_static

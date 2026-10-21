@@ -948,22 +948,25 @@ impl Walk<'_> {
     fn target(&self, expression: crate::ir::ExprId) -> Option<(StaticOwner, StaticAccessor)> {
         match self.ir.expr(expression) {
             IrExpr::Call {
-                callee: Callee::Local(function),
+                callee: call_callee,
                 ..
-            } if self.helper_access.foreign_owner(*function).is_none() => self
-                .ir
-                .class_static_local_functions
-                .get(function)
-                .copied()
-                .map(StaticOwner::Class)
-                .or_else(|| {
-                    (!self.class_member_fids.contains(function)).then_some(StaticOwner::Facade)
-                })
-                .map(|owner| (owner, StaticAccessor::Function(*function))),
+            } if let Callee::Local(function) = &**call_callee
+                && self.helper_access.foreign_owner(*function).is_none() =>
+            {
+                self.ir
+                    .class_static_local_functions
+                    .get(function)
+                    .copied()
+                    .map(StaticOwner::Class)
+                    .or_else(|| {
+                        (!self.class_member_fids.contains(function)).then_some(StaticOwner::Facade)
+                    })
+                    .map(|owner| (owner, StaticAccessor::Function(*function)))
+            }
             IrExpr::Call {
-                callee: Callee::ClassStatic { owner, function },
+                callee: call_callee,
                 ..
-            } => Some((
+            } if let Callee::ClassStatic { owner, function } = &**call_callee => Some((
                 StaticOwner::Class(*owner),
                 StaticAccessor::Function(*function),
             )),

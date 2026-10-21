@@ -50,7 +50,7 @@ pub(super) fn getter(
         },
     };
     let call = ir.add_expr(IrExpr::Call {
-        callee,
+        callee: Box::new(callee),
         dispatch_receiver: Some(receiver),
         args: vec![],
     });

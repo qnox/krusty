@@ -131,9 +131,9 @@ pub(super) fn realize(
         let id = u32::try_from(raw).expect("too many common IR expressions");
         let (plan_expression, owner, candidates) = match expression {
             IrExpr::Call {
-                callee: Callee::Virtual { owner, target, .. },
+                callee: call_callee,
                 ..
-            } => {
+            } if let Callee::Virtual { owner, target, .. } = &**call_callee => {
                 let candidates = match target {
                     Some(IrVirtualTarget::Function(target)) => {
                         function_candidates(ir, callables, *target)

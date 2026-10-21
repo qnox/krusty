@@ -451,10 +451,14 @@ mod tests {
         assert!(matches!(
             ir.expr(*expression),
             crate::ir::IrExpr::Call {
-                callee: crate::ir::Callee::External { target, .. },
+                callee,
                 dispatch_receiver: Some(_),
                 ..
-            } if *target == crate::fir::ExternalCallableId::from_raw(702)
+            } if matches!(
+                &**callee,
+                crate::ir::Callee::External { target, .. }
+                    if *target == crate::fir::ExternalCallableId::from_raw(702)
+            )
         ));
     }
 }

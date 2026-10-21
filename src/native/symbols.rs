@@ -102,6 +102,30 @@ pub(super) fn module_value_box_symbols(
     )
 }
 
+/// Symbol of the runtime type descriptor of a named source class, which the declaring file
+/// defines and every other file of the module names in a type check, a cast or a `catch`. Named
+/// from the exact source module and the class's qualified name, which every file holds.
+pub(super) fn module_descriptor_symbol(
+    module_name: &str,
+    classifier: crate::types::TypeName,
+) -> String {
+    let mut symbol = format!("kt_modtype_{}_", module_namespace(module_name));
+    mangle_name(&mut symbol, &classifier.render());
+    symbol
+}
+
+/// Symbol of the getter of an `object` declaration's instance, which the declaring file defines
+/// and every other file of the module calls to reach the object. Named from the exact source
+/// module and the object's qualified name, which every file holds.
+pub(super) fn module_singleton_symbol(
+    module_name: &str,
+    classifier: crate::types::TypeName,
+) -> String {
+    let mut symbol = format!("kt_modobj_{}_", module_namespace(module_name));
+    mangle_name(&mut symbol, &classifier.render());
+    symbol
+}
+
 /// Letters and digits stand for themselves; every other character, `_` included, is `_<hex>_`.
 fn mangle_name(out: &mut String, text: &str) {
     for character in text.chars() {
@@ -216,6 +240,9 @@ pub(super) struct Symbols {
     pub classes: Vec<String>,
     /// C symbol per IR function index.
     pub functions: Vec<String>,
+    /// Per IR function index, whether its symbol is the module symbol another file of the module
+    /// calls it by.
+    pub cross_file: Vec<bool>,
 }
 
 fn class_symbol_family(base: &str) -> [String; 6] {
@@ -246,16 +273,25 @@ pub(super) fn symbols(ir: &IrFile, module_name: &str, reserved: HashSet<String>)
     // and the link fails with a duplicate symbol that says nothing about the Kotlin name behind it.
     let mut taken: HashSet<String> = reserved;
     // Reserved before `unique` is built: that closure borrows `taken`, so these inserts cannot
-    // follow it. Top-level functions another file can name use the callable id. Methods keep the
-    // class symbol the per-file namer assigns; a cross-file member call is virtual.
+    // follow it. Every function another file can name uses the callable id: a top-level function,
+    // and a member, which another file calls directly when dispatch cannot select a different body.
     let mut functions = vec![String::new(); ir.functions.len()];
+    let mut cross_file = vec![false; ir.functions.len()];
     for (callable, function) in &ir.checked_callable_functions {
         let index = *function as usize;
         let Some(declared) = ir.functions.get(index) else {
             continue;
         };
-        if declared.dispatch_receiver.is_some() {
-            continue;
+        // A member of a local or anonymous class is reachable from no other file. Its callable
+        // identity can also be realized in more than one file, when an inline function that
+        // declares the class is expanded into a caller, so it keeps a per-file name.
+        if let Some(owner) = declared.dispatch_receiver {
+            let named = ir
+                .class_id_by_name(owner)
+                .is_some_and(|class| !ir.local_class_name_provenance.contains_key(&class));
+            if !named {
+                continue;
+            }
         }
         let symbol = module_function_symbol(module_name, *callable);
         taken.insert(symbol.clone());
@@ -267,6 +303,7 @@ pub(super) fn symbols(ir: &IrFile, module_name: &str, reserved: HashSet<String>)
             taken.insert(module_default_symbol(module_name, default_identity));
         }
         functions[index] = symbol;
+        cross_file[index] = true;
     }
     // A property's entry points are synthesized from its identity rather than being entries in
     // `functions`. Reserving them keeps a function from being handed the same spelling.
@@ -344,7 +381,11 @@ pub(super) fn symbols(ir: &IrFile, module_name: &str, reserved: HashSet<String>)
         };
         functions[index] = unique(base, &|name| vec![name.to_string()]);
     }
-    Symbols { classes, functions }
+    Symbols {
+        classes,
+        functions,
+        cross_file,
+    }
 }
 
 #[cfg(test)]

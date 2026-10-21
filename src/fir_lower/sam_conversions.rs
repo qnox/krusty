@@ -157,7 +157,7 @@ impl BodyLowering<'_> {
                 impl_fn: implementation,
                 arity,
                 captures: vec![function],
-                sam: Some(IrSamTarget {
+                sam: Some(Box::new(IrSamTarget {
                     classifier: conversion.classifier,
                     method: conversion.method.to_string(),
                     method_target: ir_sam_method(conversion.method_target),
@@ -188,7 +188,7 @@ impl BodyLowering<'_> {
                     nullable: conversion.nullable,
                     kotlin_interface: conversion.kotlin_interface,
                     parameter_identities: conversion.parameter_identities.to_vec(),
-                }),
+                })),
                 inline_body: None,
             }),
         )

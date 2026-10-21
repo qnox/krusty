@@ -130,7 +130,10 @@ pub(super) fn realize(
             });
             continue;
         }
-        let IrExpr::Checked(IrCheckedOperation::PropertyReference {
+        let IrExpr::Checked(checked_op) = ir.exprs[raw].clone() else {
+            continue;
+        };
+        let IrCheckedOperation::PropertyReference {
             target,
             delegated,
             binding,
@@ -138,7 +141,7 @@ pub(super) fn realize(
             extension_receiver,
             mutable,
             ..
-        }) = ir.exprs[raw].clone()
+        } = *checked_op
         else {
             continue;
         };

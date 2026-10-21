@@ -26,13 +26,13 @@ pub(super) fn realize_coroutine_context(ir: &mut IrFile, e: ExprId, continuation
         debug_assert!(dispatch_receiver.is_none());
         debug_assert!(args.is_empty());
         ir.exprs[read as usize] = IrExpr::Call {
-            callee: Callee::realized_virtual(
+            callee: Box::new(Callee::realized_virtual(
                 type_name("kotlin/coroutines/Continuation"),
                 "getContext".to_string(),
                 "()Lkotlin/coroutines/CoroutineContext;".to_string(),
                 None,
                 true,
-            ),
+            )),
             dispatch_receiver: Some(context_receiver),
             args: Vec::new(),
         };
@@ -53,15 +53,17 @@ pub(super) fn realize_coroutine_context(ir: &mut IrFile, e: ExprId, continuation
 
 fn collect_coroutine_context_reads(exprs: &[IrExpr], e: ExprId, reads: &mut Vec<ExprId>) {
     if let IrExpr::Call {
-        callee:
-            Callee::Intrinsic {
-                operation: crate::ir::IrIntrinsic::CoroutineContext,
-                ..
-            },
+        callee: call_callee,
         ..
-    } = exprs[e as usize]
+    } = &exprs[e as usize]
     {
-        reads.push(e);
+        if let Callee::Intrinsic {
+            operation: crate::ir::IrIntrinsic::CoroutineContext,
+            ..
+        } = **call_callee
+        {
+            reads.push(e);
+        }
     }
     for_each_child(exprs, e, &mut |child| {
         collect_coroutine_context_reads(exprs, child, reads)

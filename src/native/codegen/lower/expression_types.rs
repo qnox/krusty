@@ -94,9 +94,13 @@ impl BodyLowering<'_, '_, '_> {
             IrExpr::RefNew { .. }
             | IrExpr::Lambda { .. }
             | IrExpr::KClassLiteral { .. }
-            | IrExpr::LocalPropertyReference(_)
-            | IrExpr::Checked(IrCheckedOperation::PropertyReference { .. }) => any(),
-            IrExpr::Checked(IrCheckedOperation::PropertyRead { target, .. }) => {
+            | IrExpr::LocalPropertyReference(_) => any(),
+            IrExpr::Checked(checked_op)
+                if matches!(&**checked_op, IrCheckedOperation::PropertyReference { .. }) =>
+            {
+                any()
+            }
+            IrExpr::Checked(checked_op) if let IrCheckedOperation::PropertyRead { target, .. } = &**checked_op => {
                 match self.file.is_imported_property(target) {
                     // A property declared in another file: the type its getter entry point
                     // returns.
@@ -105,7 +109,7 @@ impl BodyLowering<'_, '_, '_> {
                 }
             }
             // A declaration's result, at the type the declaration gives it.
-            IrExpr::Call { callee, .. } => match callee {
+            IrExpr::Call { callee, .. } => match &**callee {
                 Callee::Local(function)
                 | Callee::LocalWithDefaults { function, .. }
                 | Callee::ClassStaticWithDefaults { function, .. } => {
@@ -147,11 +151,11 @@ impl BodyLowering<'_, '_, '_> {
             }
             // A `try` merges every arm at its result's carrier.
             IrExpr::Try { result, .. } => *result,
-            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+            IrExpr::Checked(checked_op) if let IrCheckedOperation::ExternalPropertyRead {
                 target,
                 receiver: Some(receiver),
                 ..
-            }) if self.runtime_property_answer(*target, *receiver).is_some() => {
+            } = &**checked_op && self.runtime_property_answer(*target, *receiver).is_some() => {
                 self.runtime_property_answer(*target, *receiver)?
             }
             // A node passing a value through hands it over as it received it. `x!!` takes the
@@ -176,15 +180,21 @@ impl BodyLowering<'_, '_, '_> {
             | IrExpr::EnumEntries { .. }
             | IrExpr::NewArray { .. }
             | IrExpr::Vararg { .. }
-            | IrExpr::CallableReference(_)
-            | IrExpr::Checked(IrCheckedOperation::RangeConstruction { .. }) => ir.named_type(id)?,
+            | IrExpr::CallableReference(_) => ir.named_type(id)?,
+            IrExpr::Checked(checked_op)
+                if matches!(&**checked_op, IrCheckedOperation::RangeConstruction { .. }) =>
+            {
+                ir.named_type(id)?
+            }
             // A `when` merges its arms at its checked type, an arithmetic operator is narrowed to
             // the result its selected operator declares, and a dependency property's other reads
             // answer at theirs.
             IrExpr::Block { value: None, .. }
             | IrExpr::When { .. }
-            | IrExpr::PrimitiveBinOp { .. }
-            | IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead { .. }) => {
+            | IrExpr::PrimitiveBinOp { .. } => self.checked_type(id)?,
+            IrExpr::Checked(checked_op)
+                if matches!(&**checked_op, IrCheckedOperation::ExternalPropertyRead { .. }) =>
+            {
                 self.checked_type(id)?
             }
             _ => return None,

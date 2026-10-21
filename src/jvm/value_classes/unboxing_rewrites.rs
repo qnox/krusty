@@ -14,7 +14,7 @@ pub(super) fn unbox_call(
     carrier: &Ty,
 ) -> ExprId {
     let call = ir.add_expr(IrExpr::Call {
-        callee: Callee::Virtual {
+        callee: Box::new(Callee::Virtual {
             owner,
             name: "unbox-impl".to_string(),
             descriptor: format!("(){}", desc(carrier)),
@@ -22,7 +22,7 @@ pub(super) fn unbox_call(
             interface: false,
             module_target: None,
             target: None,
-        },
+        }),
         dispatch_receiver: Some(receiver),
         args: vec![],
     });
@@ -42,7 +42,7 @@ pub(super) fn unbox_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under
     let u = under.get(&x).map(|t| erase(t, under)).unwrap_or(Ty::Error);
     let d = desc(&u);
     ir.exprs[id as usize] = IrExpr::Call {
-        callee: Callee::Virtual {
+        callee: Box::new(Callee::Virtual {
             owner: x,
             name: "unbox-impl".to_string(),
             descriptor: format!("(){d}"),
@@ -50,7 +50,7 @@ pub(super) fn unbox_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under
             interface: false,
             module_target: None,
             target: None,
-        },
+        }),
         dispatch_receiver: Some(cast),
         args: vec![],
     };
@@ -104,7 +104,7 @@ pub(super) fn unbox_wrap_nullable(
     let d = desc(&u);
     let unboxed = ir.exprs.len() as ExprId;
     ir.exprs.push(IrExpr::Call {
-        callee: Callee::Virtual {
+        callee: Box::new(Callee::Virtual {
             owner: x,
             name: "unbox-impl".to_string(),
             descriptor: format!("(){d}"),
@@ -112,7 +112,7 @@ pub(super) fn unbox_wrap_nullable(
             interface: false,
             module_target: None,
             target: None,
-        },
+        }),
         dispatch_receiver: Some(get_for_unbox),
         args: vec![],
     });

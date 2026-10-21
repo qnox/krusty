@@ -135,7 +135,7 @@ fn bound_parameters(ir: &IrFile, call: ExprId) -> BoundParameters<'_> {
         return BoundParameters::Declared(&signature.type_params);
     }
     let target = match ir.expr(call) {
-        IrExpr::Call { callee, .. } => match callee {
+        IrExpr::Call { callee, .. } => match &**callee {
             Callee::Module { target, .. } | Callee::ModuleWithDefaults { target, .. } => {
                 Some(*target)
             }
@@ -283,15 +283,17 @@ fn physical_parameters(ir: &IrFile, call: ExprId) -> Result<Option<Vec<Ty>>, Str
 fn source_function(ir: &IrFile, call: ExprId) -> Option<u32> {
     match ir.expr(call) {
         IrExpr::Call {
-            callee:
-                Callee::Local(function)
-                | Callee::LocalDefault(function)
-                | Callee::LocalWithDefaults { function, .. }
-                | Callee::ClassStatic { function, .. }
-                | Callee::ClassStaticDefault { function, .. }
-                | Callee::ClassStaticWithDefaults { function, .. },
+            callee: call_callee,
             ..
-        } => Some(*function),
+        } if let Callee::Local(function)
+        | Callee::LocalDefault(function)
+        | Callee::LocalWithDefaults { function, .. }
+        | Callee::ClassStatic { function, .. }
+        | Callee::ClassStaticDefault { function, .. }
+        | Callee::ClassStaticWithDefaults { function, .. } = &**call_callee =>
+        {
+            Some(*function)
+        }
         IrExpr::MethodCall { class, index, .. } => ir
             .classes
             .get(*class as usize)
@@ -736,7 +738,7 @@ mod tests {
 
     fn call_passing(ir: &mut IrFile, argument: crate::ir::ExprId) -> crate::ir::ExprId {
         ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(0),
+            callee: Box::new(Callee::Local(0)),
             dispatch_receiver: None,
             args: vec![argument],
         })

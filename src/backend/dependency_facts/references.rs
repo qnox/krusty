@@ -75,13 +75,15 @@ pub(super) fn external_super_callables(ir: &IrFile) -> BTreeSet<ExternalCallable
         .iter()
         .filter_map(|expression| match expression {
             IrExpr::Call {
-                callee:
-                    Callee::Super {
-                        declaration: Some(ResolvedFunctionOverrideTarget::External(declaration)),
-                        ..
-                    },
+                callee: call_callee,
                 ..
-            } => Some(*declaration),
+            } if let Callee::Super {
+                declaration: Some(ResolvedFunctionOverrideTarget::External(declaration)),
+                ..
+            } = &**call_callee =>
+            {
+                Some(*declaration)
+            }
             _ => None,
         })
         .collect()
