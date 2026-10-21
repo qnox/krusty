@@ -13534,7 +13534,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   root-package class is spelled `<root>.Token` there) and tests an `as?` before its `checkcast`.
   (`tests/type_intrinsics_e2e.rs`,
   `tests/native_function_type_checks_e2e.rs`,
-  `tests/multimodule_conformance_cases.rs`,
+  `tests/box_regressions/multimodule/multimoduleDependencyFunctionImplementationMarkers.kt`,
   `jvm::inliner::reified::tests::a_suspend_function_argument_tests_the_marker_and_the_jvm_arity`,
   `fir::body_check::local_function_tests::suspend_local_function_reference_keeps_its_suspend_function_type`.)
   Corpus: `coroutines/featureIntersection/suspendFunctionIsAs.kt`.
@@ -17583,8 +17583,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   module-qualified key, so an ordinary dependency cannot supply the default or body selected from
   an equal-signature friend declaration. Neither path treats the signature alone, package spelling,
   dependency order, or friend package as an origin. Tests:
-  `multimodule_conformance_cases::EQUAL_INTERNAL_SIGNATURES` through
-  `multimodule_conformance_cases::multimodule_cases_run_through_the_matrix_selected_backend`,
+  `tests/box_regressions/multimodule/multimoduleEqualInternalSignatures.kt` through the common box inventory,
   `klib_libraries::tests::classes::a_friend_classifier_is_not_hidden_by_an_equal_nonfriend_signature`,
   `klib_libraries::parameter_defaults::tests::equal_signatures_keep_each_modules_own_default`,
   `klib_lowering::tests::equal_internal_body_signatures_from_distinct_modules_remain_distinct`.
@@ -17608,8 +17607,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   classifier FQNs. Function/default-wrapper, property accessor, file initializer, constructor, and
   value-class box/unbox entry points therefore include the exact source module before their stable
   declaration component. File-local class/runtime symbols remain local linkage. Tests:
-  `multimodule_conformance_cases::{DEFAULT_CALLABLE_IDS, PROPERTY_IDS}` through
-  `multimodule_conformance_cases::multimodule_cases_run_through_the_matrix_selected_backend`, and
+  `tests/box_regressions/multimodule/{multimoduleDefaultCallableIds,multimodulePropertyIds}.kt`
+  through the common box inventory, and
   the Native-specific `native_module_abi_symbols_keep_same_named_internal_classifiers_distinct`.
 
 - **A KLIB body's call of a dependency function lowers that function too.** A call of a public
@@ -17840,7 +17839,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   non-suspend `FunctionN` of matching arity whose metadata modifier runs it in the caller's frame,
   and a body returning the lambda parameter itself publishes no plan. Tests:
   `klib_libraries::tests::native_prepared_also_and_apply_return_their_receiver_after_the_invocation`,
-  `multimodule_conformance_cases::RECEIVER_RETURNING_SCOPE_FUNCTIONS` (JVM, Native and Wasm,
+  `tests/box_regressions/multimodule/multimoduleReceiverReturningScopeFunctions.kt` (JVM, Native and Wasm,
   including a taken non-local `return` out of `also`).
 
 - **A KLIB `when` keeps its source form.** A `when` with an `else` (a final branch whose condition

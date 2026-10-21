@@ -499,31 +499,6 @@ fn focused_wasm_lane_available(lane: &WasmLane, stem: &str) -> bool {
     false
 }
 
-/// Run one case selected by the shared backend-neutral multimodule conformance inventory.
-pub(super) fn run_multimodule_case(
-    case: &super::multimodule_conformance_cases::Case,
-    target: WasmTarget,
-) -> Outcome {
-    let modules = krusty::conformance::split_modules(case.source).expect("valid module test shape");
-    let units = krusty::conformance::module_units(&modules);
-    let lane = WasmLane { target };
-    if let Some(reason) = lane.not_applicable(case.source) {
-        return Outcome::NotApplicable(reason);
-    }
-    if let Some(reason) = lane.unavailable() {
-        return Outcome::Harness(format!(
-            "required {} setup is unavailable: {reason}",
-            lane.label()
-        ));
-    }
-    lane.compile_modules_and_run(
-        &std::env::temp_dir(),
-        &format!("{}-{}", target.name(), case.stem),
-        &units,
-        case.source,
-    )
-}
-
 /// Run `src` directly against both Wasm targets' KLIBs and runtimes; every target must answer `OK`.
 /// Skips only where a directly invoked lane cannot run; target-owned harness passes require it.
 fn expect_wasm_box(src: &str, stem: &str) {

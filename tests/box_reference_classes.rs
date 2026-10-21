@@ -31,6 +31,41 @@ use super::common::{self, byte_dump};
 /// and mixed Java). It matches the module name krusty emits those cases under.
 pub const MAIN_MODULE: &str = "main";
 
+/// Establish an owned portable fixture's actual JVM result before judging any backend.
+pub fn checked_box(src: &str, stem: &str) -> Result<ReferenceClasses, String> {
+    if !krusty::conformance::backend_targeted(src, &["JVM", "JVM_IR"])
+        || krusty::conformance::backend_muted(src, &["JVM", "JVM_IR"])
+    {
+        return Err("owned portable box fixture may not skip the JVM oracle".into());
+    }
+    if krusty::toolchain::kotlinc_path().is_none() {
+        return Err("owned box fixture requires the configured reference Kotlin compiler".into());
+    }
+    let jdk = producing_jdk_modules()?;
+    let classpath = common::classpath_jars_for(src);
+    let reference = reference_compile(
+        src,
+        stem,
+        &classpath,
+        BoxJdk::Full { root: Some(&jdk) },
+        krusty::conformance::COROUTINE_HELPERS,
+    )?;
+    // Do not flatten: two distinct modules may emit the same JVM internal name.
+    let classes = reference
+        .qualified()
+        .map(|((_, name), bytes)| (name.to_owned(), bytes.to_vec()))
+        .collect::<Vec<_>>();
+    let box_class = common::find_box_class(&classes)
+        .ok_or_else(|| format!("{stem}: reference compiler emitted no box()"))?;
+    let answer = common::run_box(&classes, &box_class, &classpath);
+    if answer.as_deref() != Some("OK") {
+        return Err(format!(
+            "{stem}: reference box() must return OK, got {answer:?}"
+        ));
+    }
+    Ok(reference)
+}
+
 /// Bump when the on-disk cache layout or the comparison population changes — invalidates every
 /// cached entry. `v2` added per-module nesting and Java `.class` artifacts to `v1`'s flat tree.
 /// `v3` strips kotlinc diagnostic-test markers from the reference source, so marker-bearing cases
@@ -247,7 +282,11 @@ fn producing_jdk_identity() -> Result<&'static [u8], String> {
 /// [`common::selected_java_home`]'s `KRUSTY_REF_JAVA_HOME`-before-`JAVA_HOME` precedence instead of
 /// consulting the compiler-under-test's independently selected frontend toolchain.
 fn producing_jdk_modules() -> Result<PathBuf, String> {
-    let home = common::selected_java_home().ok_or_else(|| {
+    reference_jdk_modules(common::selected_java_home().as_deref())
+}
+
+fn reference_jdk_modules(home: Option<&str>) -> Result<PathBuf, String> {
+    let home = home.ok_or_else(|| {
         "no reference JDK is selected: set KRUSTY_REF_JAVA_HOME or JAVA_HOME".to_string()
     })?;
     let modules = Path::new(&home).join("lib").join("modules");
@@ -255,6 +294,22 @@ fn producing_jdk_modules() -> Result<PathBuf, String> {
         .is_file()
         .then_some(modules.clone())
         .ok_or_else(|| format!("reference JDK has no modules image: {}", modules.display()))
+}
+
+#[test]
+fn owned_oracle_requires_a_configured_reference_jdk() {
+    assert_eq!(
+        reference_jdk_modules(None),
+        Err("no reference JDK is selected: set KRUSTY_REF_JAVA_HOME or JAVA_HOME".into())
+    );
+    let missing = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/no-such-jdk");
+    assert_eq!(
+        reference_jdk_modules(missing.to_str()),
+        Err(format!(
+            "reference JDK has no modules image: {}",
+            missing.join("lib/modules").display()
+        ))
+    );
 }
 
 /// The on-disk directory of one reference inventory cache entry.

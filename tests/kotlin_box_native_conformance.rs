@@ -279,16 +279,15 @@ fn kotlin_codegen_box_native_conformance() {
     box_lane::run(&NativeLane { target: host() });
 }
 
-/// Run one case selected by the shared backend-neutral multimodule conformance inventory.
-pub(super) fn run_multimodule_case(case: &super::multimodule_conformance_cases::Case) -> Outcome {
-    if let Some(reason) = not_applicable(case.source) {
+fn run_native_abi_case(source: &str, stem: &str) -> Outcome {
+    if let Some(reason) = not_applicable(source) {
         return Outcome::NotApplicable(reason);
     }
     let Some(target) = host() else {
         return Outcome::Harness("required Native target/KLIB setup is unavailable".into());
     };
     let Some(answer) =
-        super::kotlin_native_multimodule_support::kotlin_native_multimodule_box(case.source)
+        super::kotlin_native_multimodule_support::kotlin_native_multimodule_box(source)
     else {
         return Outcome::Harness(
             "required pinned kotlinc-native module oracle is unavailable".into(),
@@ -297,33 +296,30 @@ pub(super) fn run_multimodule_case(case: &super::multimodule_conformance_cases::
     assert_eq!(
         answer, "OK",
         "{}: pinned kotlinc-native must run the exact KLIB module graph as OK",
-        case.stem
+        stem
     );
-    let modules = krusty::conformance::split_modules(case.source).expect("valid module test shape");
+    let modules = krusty::conformance::split_modules(source).expect("valid module test shape");
     let units = krusty::conformance::module_units(&modules);
     let lane = NativeLane {
         target: Some(target),
     };
     lane.compile_modules_and_run(
         &std::env::temp_dir(),
-        &format!("native-{}", case.stem),
+        &format!("native-{stem}"),
         &units,
-        case.source,
+        source,
     )
 }
 
 #[test]
 fn native_module_abi_symbols_keep_same_named_internal_classifiers_distinct() {
     // PLATFORM-SPECIFIC: Native value-class syntax and module-qualified runtime/box/unbox symbols.
-    let case = super::multimodule_conformance_cases::Case {
-        stem: "multimoduleNativeAbiSymbols",
-        source: "// TARGET_BACKEND: NATIVE\n\
+    let source = "// TARGET_BACKEND: NATIVE\n\
                  // MODULE: left\npackage shared\ninternal class Token(val value: String)\ninternal value class Packed(val value: String)\n\
                  // MODULE: right\npackage shared\ninternal class Token(val value: String)\ninternal value class Packed(val value: String)\n\
-                 // MODULE: main(left, right)\nfun box() = \"OK\"\n",
-    };
+                 // MODULE: main(left, right)\nfun box() = \"OK\"\n";
     assert_eq!(
-        run_multimodule_case(&case),
+        run_native_abi_case(source, "multimoduleNativeAbiSymbols"),
         Outcome::Pass,
         "Native ABI identities must remain distinct across the exact module graph"
     );

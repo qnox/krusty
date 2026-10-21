@@ -1,4 +1,0 @@
-# Portable multimodule cases expected to fail on wasm-js-klib.
-# Releases without their own file inherit this record.
-# Newly exercised here: previously hidden from Wasm by TARGET_BACKEND: NATIVE.
-multimoduleDependencyFunctionImplementationMarkers

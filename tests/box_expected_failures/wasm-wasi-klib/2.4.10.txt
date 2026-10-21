@@ -1,5 +1,6 @@
 # Kotlin 2.4.10 codegen/box files expected to fail on wasm-wasi-klib, relative to
 # compiler/testData/codegen/box. Later releases with no file of their own read this one.
+# Owned fixtures use regressions/<path relative to tests/box_regressions>.
 # Regenerate both exact inventories with KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local
 # wasm-wasi-klib run. The lists only shrink.
 annotations/annotationWithDefaultArgInDifferentModule.kt
@@ -5750,6 +5751,7 @@ regressions/lambdaAsLastExpressionInLambda.kt
 regressions/lambdaPostponeConstruction.kt
 regressions/lambdaWithTypeParameters.kt
 regressions/lambdaWrongReturnType.kt
+regressions/multimodule/multimoduleDependencyFunctionImplementationMarkers.kt
 regressions/noAssertionsWhenNullableTypeParameterReplacedWithIntersectionType.kt
 regressions/noCapturingForTypesWithTypeVariables.kt
 regressions/noResolutionRecursion.kt
