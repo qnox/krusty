@@ -617,6 +617,19 @@ Both lists lead with the superclass. The emitter then moves it to the slot that 
 in `ResolvedClassifierHeader` and lowering published as `IrFile::class_superclass_positions`, so the
 spellings move with it. Tests: `tests/metadata_supertype_order_e2e.rs`.
 
+## KLIB accessor declaration modifiers
+
+Property getter and setter words are decoded independently, including visibility, modality,
+non-default, external and inline status. An absent word takes only the shared property prefix
+(bits 0-5); an explicit zero remains zero. Property external (bit 14) is separate from accessor
+external (bit 7). Accessor inline is bit 8 and non-default is bit 6. Inline or external on a
+default accessor is rejected as inconsistent metadata. The semantic declaration keeps each
+accessor's own annotations (modern fields 15/16, BuiltIns fields 152/153, KLIB fields 177/178);
+`InlineOnly` obligation comes from the selected accessor, not the property's annotation list.
+Each accessor also carries the property's declaration-owned reified formal ordinals. These are
+existing schema facts, not new intrinsic markers or a metadata format change. This producer fix
+alone does not enable ordinary dependency-body or inline-accessor emission.
+
 ## Authenticated KLIB collection classifier roles
 
 Collection kind and read-only/mutable face are normalized provider facts, not new metadata fields.

@@ -1458,6 +1458,30 @@ fn semantic_function(
     Ok((member, declaration))
 }
 
+fn semantic_accessor_modifiers(
+    flags: Option<u64>,
+    property_flags: u64,
+    annotations: Vec<crate::types::TypeName>,
+    context: &str,
+) -> Result<metadata::KotlinAccessorModifiers, PackageFragmentDecodeError> {
+    use crate::metadata::property_flags;
+    let flags = flags.unwrap_or(property_flags & property_flags::ACCESSOR_DEFAULT_MASK);
+    let modifiers = metadata::KotlinAccessorModifiers {
+        visibility: metadata::declaration_visibility(flags),
+        modality: metadata::declaration_modality(flags),
+        is_default: flags & property_flags::ACCESSOR_IS_NOT_DEFAULT == 0,
+        is_inline: flags & property_flags::ACCESSOR_IS_INLINE != 0,
+        is_external: flags & property_flags::ACCESSOR_IS_EXTERNAL != 0,
+        annotations,
+    };
+    if modifiers.is_default && (modifiers.is_inline || modifiers.is_external) {
+        return Err(semantic_error(format!(
+            "{context} declares inline or external without a non-default accessor"
+        )));
+    }
+    Ok(modifiers)
+}
+
 fn semantic_property(
     body: &[u8],
     tables: &SemanticTables<'_>,
@@ -1465,7 +1489,9 @@ fn semantic_property(
 ) -> Result<(metadata::KotlinMember, metadata::KotlinProperty), PackageFragmentDecodeError> {
     validate_annotation_fields(
         body,
-        &[14, 15, 16, 33, 34, 35, 170, 177, 178, 181, 182, 183],
+        &[
+            14, 15, 16, 33, 34, 35, 152, 153, 170, 177, 178, 181, 182, 183,
+        ],
         tables.strings,
         tables.qnames,
         "property declaration",
@@ -1501,6 +1527,7 @@ fn semantic_property(
     let mut context_receivers = Vec::new();
     let mut context_params = Vec::new();
     let mut constant = None;
+    let mut getter_flags = None;
     let mut setter_flags = None;
     let mut setter_parameter_name = None;
     while !cursor.at_end() {
@@ -1579,6 +1606,7 @@ fn semantic_property(
                 constant = semantic_constant(value, tables.strings)?;
             }
             (11, 0) => modern_flags = Some(cursor.varint("property flags")?),
+            (7, 0) => getter_flags = Some(cursor.varint("property getter flags")?),
             (8, 0) => setter_flags = Some(cursor.varint("property setter flags")?),
             (6, 2) => {
                 let parameter = cursor.length_delimited("property setter parameter")?.0;
@@ -1691,8 +1719,33 @@ fn semantic_property(
         .map(|(_, _, kind)| *kind)
         .collect::<Vec<_>>();
     let visibility = metadata::declaration_visibility(flags);
-    // An absent setter flag word means the setter has its property's default flags.
-    let setter_visibility = setter_flags.map_or(visibility, metadata::declaration_visibility);
+    let accessor_annotations = |fields: &[u64]| {
+        self::annotation_applications(
+            body,
+            fields,
+            tables.strings,
+            tables.qnames,
+            "property accessor",
+        )
+        .map(|annotations| {
+            annotations
+                .into_iter()
+                .map(|annotation| annotation.identity)
+                .collect()
+        })
+    };
+    let getter_modifiers = semantic_accessor_modifiers(
+        getter_flags,
+        flags,
+        accessor_annotations(&[15, 152, 177])?,
+        "property getter",
+    )?;
+    let setter_modifiers = semantic_accessor_modifiers(
+        setter_flags,
+        flags,
+        accessor_annotations(&[16, 153, 178])?,
+        "property setter",
+    )?;
     let member = metadata::KotlinMember {
         name: name.clone(),
         receiver: receiver.clone(),
@@ -1730,7 +1783,9 @@ fn semantic_property(
         formals,
         visibility,
         modality: metadata::declaration_modality(flags),
-        setter_visibility,
+        getter_modifiers,
+        setter_modifiers,
+        is_external: flags & crate::metadata::property_flags::IS_EXTERNAL != 0,
         setter_parameter_name,
         is_var: flags & crate::metadata::property_flags::IS_VAR != 0,
         is_const: flags & crate::metadata::property_flags::IS_CONST != 0,
