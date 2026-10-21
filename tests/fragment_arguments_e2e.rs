@@ -362,6 +362,44 @@ fn a_common_signature_naming_a_platform_alias_is_kotlincs_unresolved_reference()
 }
 
 #[test]
+fn a_common_call_of_an_actual_only_member_is_kotlincs_unresolved_reference() {
+    rejected_in_common(
+        "package p\nexpect class Box()\nfun c() = Box().platformOnly()\n",
+        "package p\nactual class Box actual constructor() {\n    fun platformOnly() = 1\n}\n",
+    );
+}
+
+#[test]
+fn a_common_read_of_an_actual_only_property_is_kotlincs_unresolved_reference() {
+    rejected_in_common(
+        "package p\nexpect class Box()\nfun c() = Box().extra\n",
+        "package p\nactual class Box actual constructor() {\n    val extra = 1\n}\n",
+    );
+}
+
+#[test]
+fn a_common_call_of_an_actual_only_constructor_is_kotlincs_missing_parameter() {
+    rejected_in_common(
+        "package p\nexpect class Box()\nfun c() = Box(x = 1)\n",
+        "package p\nactual class Box actual constructor() {\n    constructor(x: Int) : this()\n}\n",
+    );
+}
+
+#[test]
+fn a_common_call_of_an_expect_member_binds_its_actual_as_kotlinc_does() {
+    let compiled = compile_sources(
+        "package p\nexpect class Box() {\n    fun shared(): Int\n}\nfun c() = Box().shared()\n",
+        "package p\nactual class Box actual constructor() {\n    actual fun shared() = 1\n    fun platformOnly() = shared()\n}\nfun j() = Box().platformOnly() + c()\n",
+        common_and_jvm,
+    );
+    assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
+    assert_eq!(
+        (compiled.krusty.0, &compiled.krusty.2),
+        (compiled.kotlinc.0, &compiled.kotlinc.2)
+    );
+}
+
+#[test]
 fn a_common_read_of_a_platform_object_is_kotlincs_unresolved_reference() {
     rejected_in_common(
         "package p\nfun c() { val value = PlatformOnly }\n",

@@ -237,6 +237,34 @@ impl<'a> StreamedModuleSymbols<'a> {
         self.index.annotation_targets()
     }
 
+    /// Whether this provider's source sees one current-module declaration.
+    fn sees_declaration(&self, declaration: Option<DeclarationId>) -> bool {
+        declaration.is_none_or(|declaration| {
+            let declared_in = self
+                .index
+                .declaration_anchor(declaration)
+                .map(|anchor| anchor.source.raw());
+            self.index
+                .source_sees(self.source_file, declared_in, Some(declaration))
+        })
+    }
+
+    /// A refined common fragment constructs an `actual` class only through the constructors its
+    /// `expect` declares.
+    fn with_visible_constructors(
+        &self,
+        classifier: std::sync::Arc<crate::libraries::LibraryType>,
+    ) -> std::sync::Arc<crate::libraries::LibraryType> {
+        let seen =
+            |constructor: &LibraryMember| self.sees_declaration(constructor.stable_declaration);
+        if classifier.constructors.iter().all(seen) {
+            return classifier;
+        }
+        let mut visible = (*classifier).clone();
+        visible.constructors.retain(seen);
+        std::sync::Arc::new(visible)
+    }
+
     /// Project one current-module classifier from finalized declaration headers.
     ///
     /// Every result is rebuilt from stable headers and declaration identities.
@@ -1834,6 +1862,14 @@ impl<'a> StreamedModuleSymbols<'a> {
 }
 
 impl SymbolSource for StreamedModuleSymbols<'_> {
+    fn sees_function(&self, function: &FunctionInfo) -> bool {
+        self.sees_declaration(function.stable_declaration)
+    }
+
+    fn sees_property(&self, property: &crate::libraries::PropertyInfo) -> bool {
+        self.sees_declaration(property.stable_declaration)
+    }
+
     fn type_variable_bounds(&self, name: &str) -> Vec<Ty> {
         self.type_parameter_bounds(name)
     }
@@ -1855,8 +1891,9 @@ impl SymbolSource for StreamedModuleSymbols<'_> {
             .as_ref()
             .map(|alias| alias.target)
             .or(ordinary_classifier);
-        let classifier =
-            stable_classifier_name.and_then(|internal| self.stable_classifier(internal));
+        let classifier = stable_classifier_name
+            .and_then(|internal| self.stable_classifier(internal))
+            .map(|classifier| self.with_visible_constructors(classifier));
         let mut functions = FunctionSet::default();
         let mut properties = PropertySet::default();
         functions

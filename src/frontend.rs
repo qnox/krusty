@@ -290,7 +290,7 @@ struct ActualizedHeaders {
     matched: crate::fx_hash::HashSet<crate::fir::DeclarationId>,
     /// The `actual` declarations that actualized something.
     targets: crate::fx_hash::HashSet<crate::fir::DeclarationId>,
-    /// Each top-level `actual` and the source of the `expect` it stands for.
+    /// Each `actual`, members included, and the source of the `expect` it stands for.
     expect_sources: Vec<crate::source::ExpectStandIn>,
     /// Expect-owned defaults, as stable provider→target work.
     defaults: Vec<crate::fir::DefaultArgumentProvider>,
@@ -334,14 +334,16 @@ fn actualize_headers_and_collect_inherited_defaults(
         .iter()
         .filter_map(|pair| {
             let anchor = headers.declarations.anchor(pair.expect)?;
-            anchor
-                .owner
-                .is_none()
-                .then(|| crate::source::ExpectStandIn {
-                    actual: pair.actual,
-                    alias: headers.type_alias_identity(pair.actual),
-                    expect_source: anchor.source.raw(),
-                })
+            Some(crate::source::ExpectStandIn {
+                actual: pair.actual,
+                // A nested alias is reached through its owner, which carries the visibility.
+                alias: anchor
+                    .owner
+                    .is_none()
+                    .then(|| headers.type_alias_identity(pair.actual))
+                    .flatten(),
+                expect_source: anchor.source.raw(),
+            })
         })
         .collect();
     let mut work = Vec::new();

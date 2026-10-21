@@ -87,6 +87,19 @@ pub trait SymbolSource {
         false
     }
 
+    /// Whether the source this provider resolves for sees a callable it published. A refined
+    /// common fragment does not see what only a platform fragment refining it declares, members of
+    /// an `actual` class included; every other provider sees all it publishes.
+    fn sees_function(&self, _function: &crate::libraries::FunctionInfo) -> bool {
+        true
+    }
+
+    /// Whether the source this provider resolves for sees a property it published. See
+    /// [`Self::sees_function`].
+    fn sees_property(&self, _property: &crate::libraries::PropertyInfo) -> bool {
+        true
+    }
+
     /// Return the complete declaration record for one `(namespace, name)` key. This is the sole
     /// declaration API. `Package(TypeName::ROOT)` is the default package. Providers may map the key to
     /// an already-interned classifier, but must not intern it merely because it was probed. Parallel
@@ -224,6 +237,18 @@ impl SymbolSource for CompositeSource<'_> {
         self.children
             .iter()
             .any(|child| child.api_withheld_callable(owner, name))
+    }
+
+    fn sees_function(&self, function: &crate::libraries::FunctionInfo) -> bool {
+        self.children
+            .iter()
+            .all(|child| child.sees_function(function))
+    }
+
+    fn sees_property(&self, property: &crate::libraries::PropertyInfo) -> bool {
+        self.children
+            .iter()
+            .all(|child| child.sees_property(property))
     }
 
     fn generated_serializer_singleton(&self, classifier: TypeName) -> Option<TypeName> {
@@ -408,6 +433,14 @@ impl SymbolSource for CachedCompositeSource<'_> {
 
     fn api_withheld_callable(&self, owner: TypeName, name: &str) -> bool {
         self.source.api_withheld_callable(owner, name)
+    }
+
+    fn sees_function(&self, function: &crate::libraries::FunctionInfo) -> bool {
+        self.source.sees_function(function)
+    }
+
+    fn sees_property(&self, property: &crate::libraries::PropertyInfo) -> bool {
+        self.source.sees_property(property)
     }
 
     fn external_callable(

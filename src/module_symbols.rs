@@ -1276,6 +1276,25 @@ fn source_property(
 }
 
 impl SymbolSource for ModuleSymbols<'_> {
+    fn sees_function(&self, function: &FunctionInfo) -> bool {
+        self.syms.source_fragments.sees(
+            self.source_file,
+            function
+                .source_key
+                .map(|(file, _)| file)
+                .or(function.source_file),
+            function.stable_declaration,
+        )
+    }
+
+    fn sees_property(&self, property: &PropertyInfo) -> bool {
+        self.syms.source_fragments.sees(
+            self.source_file,
+            property.source_key.map(|(file, _)| file),
+            property.stable_declaration,
+        )
+    }
+
     fn type_variable_bounds(&self, name: &str) -> Vec<Ty> {
         self.type_parameter_bounds(name)
     }
@@ -1629,34 +1648,20 @@ impl SymbolSource for ModuleSymbols<'_> {
         }
         // A refined common fragment sees only its own declarations and those of the fragments it
         // refines: the platform declarations that refine it are no candidates there.
-        let sees = |declared_in: Option<u32>, declaration| {
-            self.syms
-                .source_fragments
-                .sees(self.source_file, declared_in, declaration)
-        };
-        let classifier_hidden = classifier
-            .as_ref()
-            .is_some_and(|classifier| !sees(classifier.source_file, classifier.stable_declaration));
+        let classifier_hidden = classifier.as_ref().is_some_and(|classifier| {
+            !self.syms.source_fragments.sees(
+                self.source_file,
+                classifier.source_file,
+                classifier.stable_declaration,
+            )
+        });
         let (classifier_name, classifier_declaration, classifier) = if classifier_hidden {
             (None, None, None)
         } else {
             (classifier_name, classifier_declaration, classifier)
         };
-        overloads.retain(|function| {
-            sees(
-                function
-                    .source_key
-                    .map(|(file, _)| file)
-                    .or(function.source_file),
-                function.stable_declaration,
-            )
-        });
-        properties.retain(|property| {
-            sees(
-                property.source_key.map(|(file, _)| file),
-                property.stable_declaration,
-            )
-        });
+        overloads.retain(|function| self.sees_function(function));
+        properties.retain(|property| self.sees_property(property));
         let callables = match (overloads.is_empty(), properties.is_empty()) {
             (false, false) => Callables::Both {
                 functions: FunctionSet { overloads },

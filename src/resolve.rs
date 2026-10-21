@@ -34703,6 +34703,20 @@ impl<'a> CheckerModuleSymbols<'a> {
 }
 
 impl SymbolSource for CheckerModuleSymbols<'_> {
+    fn sees_function(&self, function: &crate::libraries::FunctionInfo) -> bool {
+        match self {
+            Self::Legacy(source) => source.sees_function(function),
+            Self::Streamed(source) => source.sees_function(function),
+        }
+    }
+
+    fn sees_property(&self, property: &crate::libraries::PropertyInfo) -> bool {
+        match self {
+            Self::Legacy(source) => source.sees_property(property),
+            Self::Streamed(source) => source.sees_property(property),
+        }
+    }
+
     fn type_variable_bounds(&self, name: &str) -> Vec<Ty> {
         self.type_parameter_bounds(name)
     }
