@@ -12,7 +12,8 @@ use super::demo_package::{
 use super::{base, local_symbol, lowered_body, public_symbol, validated};
 use crate::fir::ResolvedParameterIdentity;
 use crate::libraries::{
-    ExternalCallableKind, KlibDeclarationSignature, KlibDependencyCallable, SingletonDispatch,
+    ExternalCallableKind, GenericSig, KlibDeclarationSignature, KlibDependencyCallable,
+    SingletonDispatch,
 };
 use crate::metadata::id_signature::{
     callable_signature, metadata_class_signature, CallableShape, DeclarationContainer,
@@ -20,10 +21,10 @@ use crate::metadata::id_signature::{
 };
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrBody, KlibIrExprKind, KlibIrFunction, KlibIrMember, KlibIrNullability,
-    KlibIrParameter, KlibIrStatement, KlibIrType,
+    KlibIrParameter, KlibIrStatement, KlibIrType, KlibIrTypeParameter,
 };
 use crate::metadata::klib_ir::{KlibIrDeclarationTree, KlibIrSymbolKind};
-use crate::metadata::semantic::KotlinType;
+use crate::metadata::semantic::{KotlinType, KotlinTypeParameter, KotlinTypeParameterId};
 use crate::types::Ty;
 
 /// Every function of a unit as a backend reads its declaration.
@@ -102,6 +103,9 @@ struct Record {
     identities: [ResolvedParameterIdentity; 1],
     ret: Ty,
     identity: KlibDependencyCallable,
+    generic: Option<GenericSig>,
+    formals: Vec<Ty>,
+    reified: Vec<u32>,
 }
 
 impl Record {
@@ -115,6 +119,9 @@ impl Record {
                 .dependency_callable
                 .clone()
                 .expect("a signed dependency callable"),
+            generic: None,
+            formals: Vec::new(),
+            reified: Vec::new(),
         }
     }
 
@@ -127,6 +134,9 @@ impl Record {
                 ret: self.ret,
                 parameter_identities: &self.identities,
                 context_count: 0,
+                generic_signature: self.generic.as_ref(),
+                type_parameters: &self.formals,
+                reified_type_parameter_ordinals: &self.reified,
                 compiler_intrinsic: None,
             },
             None,
@@ -135,6 +145,421 @@ impl Record {
             Some(&self.identity),
         )
         .expect("signed")
+    }
+}
+
+/// A raw, unprepared identity body binds a producer symbol to a declaration-owned formal,
+/// even when metadata's interned formal identity differs from the producer's source spelling.
+fn generic_identity_header() -> (KlibIrArena, KlibIrFunction, Record) {
+    let demo = demo(&IDENTITY_AND_CALLER, identity_and_caller);
+    let mut record = Record::of_b(&demo);
+    let tree = function_tree(demo_signature(None, "b", &[], &[T::Int]), "b", false, 0, 1);
+    let KlibIrMember::Function(function) = tree.declaration else {
+        panic!("a function tree");
+    };
+    let mut function = tree.arena.function(function).clone();
+    let mut arena = tree.arena;
+    let bound = arena.push_type(T::NullableAny.klib());
+    let formal = local_symbol(KlibIrSymbolKind::TypeParameter, 80);
+    let ty = arena.push_type(KlibIrType::Simple {
+        classifier: formal.clone(),
+        nullability: KlibIrNullability::NotSpecified,
+        arguments: Vec::new(),
+        annotations: Vec::new(),
+        abbreviation: None,
+    });
+    function.type_parameters.push(KlibIrTypeParameter {
+        base: crate::metadata::klib_ir::tree::KlibIrDeclarationBase {
+            flags: 4, // Serialized IrFlags: invariant, non-reified.
+            ..base(formal)
+        },
+        name: "T".to_owned(),
+        supertypes: vec![bound],
+    });
+    function.regular_parameters[0].ty = ty;
+    function.return_type = ty;
+    let semantic = Ty::ty_param("declaration-owned-formal", T::NullableAny.semantic());
+    record.params = [semantic];
+    record.formals = vec![semantic];
+    record.ret = semantic;
+    record.generic = Some(GenericSig {
+        formals: vec!["declaration-owned-formal".to_owned()],
+        formal_bounds: vec![Vec::new()],
+        receiver: None,
+        params: vec![semantic],
+        ret: semantic,
+        return_policy: Default::default(),
+    });
+    (arena, function, record)
+}
+
+#[test]
+fn an_ordinary_generic_header_preserves_the_declared_formal_not_its_erasure() {
+    let (arena, function, record) = generic_identity_header();
+    let header = super::super::function_lowering::function_header(
+        Some(record.callable()),
+        &arena,
+        &function,
+    )
+    .unwrap_or_else(|reason| {
+        panic!("an ordinary generic header must bind its formals: {reason:?}")
+    });
+    assert_eq!(header.params(), record.params);
+    assert_eq!(header.result(), record.ret);
+    assert_eq!(header.body_result(), record.ret);
+    assert_eq!(header.erased(record.ret), record.ret);
+}
+
+#[test]
+fn an_ordinary_generic_header_checks_every_declared_upper_bound() {
+    let (mut arena, mut function, mut record) = generic_identity_header();
+    let string = arena.push_type(T::String.klib());
+    function.type_parameters[0].supertypes.push(string);
+    let generic = record.generic.as_mut().expect("generic");
+    generic.formal_bounds = vec![vec![T::NullableAny.semantic(), T::String.semantic()]];
+    super::super::function_lowering::function_header(Some(record.callable()), &arena, &function)
+        .unwrap_or_else(|reason| panic!("matching complete bounds: {reason:?}"));
+    record.generic.as_mut().expect("generic").formal_bounds[0][1] = T::Int.semantic();
+    let result = super::super::function_lowering::function_header(
+        Some(record.callable()),
+        &arena,
+        &function,
+    );
+    assert_eq!(
+        result.err(),
+        Some(KlibBodyDeclineReason::SignatureMismatch(
+            "type parameter 0 has different serialized and selected upper bounds".to_owned(),
+        ))
+    );
+}
+
+#[test]
+fn a_raw_generic_header_does_not_accept_a_prepared_erased_parameter() {
+    let (mut arena, mut function, record) = generic_identity_header();
+    function.regular_parameters[0].ty = arena.push_type(T::NullableAny.klib());
+    assert_eq!(
+        super::super::function_lowering::function_header(
+            Some(record.callable()),
+            &arena,
+            &function
+        )
+        .err(),
+        Some(KlibBodyDeclineReason::SignatureMismatch(format!(
+            "parameter 0 is {:?} serialized and {:?} selected",
+            T::NullableAny.semantic(),
+            record.params[0],
+        )))
+    );
+}
+
+#[test]
+fn reified_dependency_bodies_cannot_be_emitted_as_ordinary_generic_functions() {
+    let (arena, mut function, mut record) = generic_identity_header();
+    function.type_parameters[0].base.flags |= 8;
+    record.reified.push(0);
+    assert_eq!(
+        super::super::function_lowering::function_header(
+            Some(record.callable()),
+            &arena,
+            &function
+        )
+        .err(),
+        Some(KlibBodyDeclineReason::UnsupportedDeclaration(
+            "reified type parameters"
+        ))
+    );
+}
+
+#[test]
+fn selected_callee_contracts_include_all_generic_bounds_and_reification() {
+    let (_, _, record) = generic_identity_header();
+    let mut other = Record {
+        generic: record.generic.clone(),
+        ..Record::of_b(&demo(&IDENTITY_AND_CALLER, identity_and_caller))
+    };
+    other.params = record.params;
+    other.ret = record.ret;
+    other.formals = record.formals.clone();
+    assert!(record
+        .callable()
+        .same_declaration_contract(other.callable()));
+    other.reified.push(0);
+    assert!(!record
+        .callable()
+        .same_declaration_contract(other.callable()));
+    other.reified.clear();
+    other.generic.as_mut().expect("generic").formal_bounds[0].push(T::String.semantic());
+    assert!(!record
+        .callable()
+        .same_declaration_contract(other.callable()));
+}
+
+fn metadata_formal(name: &str, id: u64, bounds: Vec<KotlinType>) -> KotlinTypeParameter {
+    KotlinTypeParameter {
+        id: KotlinTypeParameterId(id),
+        name: name.to_owned(),
+        bounds,
+        variance: crate::types::TypeVariance::Invariant,
+        only_input: false,
+        reified: false,
+    }
+}
+
+fn metadata_parameter(name: &str, id: u64) -> KotlinType {
+    KotlinType::Param {
+        name: name.to_owned(),
+        id: KotlinTypeParameterId(id),
+        nullable: false,
+    }
+}
+
+/// Go through the real signed provider and frozen handoff, not a hand-built GenericSig: its full
+/// bounds and its parameter types have intentionally different finite self-reference depths.
+fn metadata_generic_record(formals: Vec<KotlinTypeParameter>) -> Record {
+    use crate::symbol_source::{SymbolNamespace, SymbolSource};
+    let mut function = super::coerce_declaration();
+    function.name = "b".to_owned();
+    function.receiver = None;
+    function.params = vec![metadata_parameter("T", 0)];
+    function.param_names = vec!["a".to_owned()];
+    function.ret = metadata_parameter("T", 0);
+    function.formals = formals;
+    let libraries = crate::klib_libraries::KlibLibraries::from_named_packages(
+        "demo",
+        vec![(
+            vec!["demo".to_owned()],
+            crate::metadata::semantic::KotlinPackage {
+                functions: vec![function],
+                ..Default::default()
+            },
+        )],
+    )
+    .expect("a signed generic declaration");
+    let symbols = libraries.symbols(
+        SymbolNamespace::Package(crate::types::type_name("demo")),
+        "b",
+    );
+    let [selected] = symbols.callables.functions() else {
+        panic!("one generic function");
+    };
+    let fact = super::frozen_function(&libraries, "demo", "b", None, &selected.callable.params);
+    Record {
+        name: "b",
+        params: [fact.params[0]],
+        ret: fact.ret,
+        identities: [ResolvedParameterIdentity::Source("a".into())],
+        identity: fact.dependency_callable.expect("named dependency"),
+        generic: fact.generic_sig.map(|signature| *signature),
+        formals: fact.klib_body_type_parameters.into_vec(),
+        reified: Vec::new(),
+    }
+}
+
+#[test]
+fn recursive_formals_keep_the_real_provider_normalization_through_the_frozen_handoff() {
+    let recursive = KotlinType::Class {
+        internal: "kotlin/Comparable".to_owned(),
+        args: vec![metadata_parameter("T", 0)],
+        nullable: false,
+        shape: Default::default(),
+    };
+    let record = metadata_generic_record(vec![metadata_formal("T", 0, vec![recursive])]);
+    let (mut arena, mut function, _) = generic_identity_header();
+    let formal = function.type_parameters[0].base.symbol.clone();
+    let ty = arena.push_type(KlibIrType::Simple {
+        classifier: formal,
+        nullability: KlibIrNullability::NotSpecified,
+        arguments: Vec::new(),
+        annotations: Vec::new(),
+        abbreviation: None,
+    });
+    let mut bound = T::String.klib();
+    let KlibIrType::Simple {
+        classifier,
+        arguments,
+        ..
+    } = &mut bound
+    else {
+        panic!("a class type");
+    };
+    *classifier = public_symbol(
+        KlibIrSymbolKind::Class,
+        metadata_class_signature(
+            MetadataContainer {
+                package: &["kotlin".to_owned()],
+                classes: &[],
+                native_interop_library: false,
+            },
+            MetadataClass {
+                name: "Comparable",
+                type_params: &[],
+                expect: false,
+            },
+        ),
+    );
+    arguments.push(crate::metadata::klib_ir::tree::KlibIrTypeArgument::Type {
+        variance: crate::metadata::klib_ir::tree::KlibIrVariance::Invariant,
+        ty,
+    });
+    function.type_parameters[0].supertypes = vec![arena.push_type(bound)];
+    let header = super::super::function_lowering::function_header(
+        Some(record.callable()),
+        &arena,
+        &function,
+    )
+    .unwrap_or_else(|reason| panic!("real recursive formal: {reason:?}"));
+    assert_eq!(header.params(), record.params);
+    assert_eq!(header.result(), record.ret);
+}
+
+#[test]
+fn a_forward_bound_binds_all_real_provider_formals_before_reading_any_bounds() {
+    let record = metadata_generic_record(vec![
+        metadata_formal("T", 0, vec![metadata_parameter("U", 1)]),
+        metadata_formal("U", 1, vec![T::String.kotlin()]),
+    ]);
+    let (mut arena, mut function, _) = generic_identity_header();
+    let symbol = local_symbol(KlibIrSymbolKind::TypeParameter, 81);
+    let ty = arena.push_type(KlibIrType::Simple {
+        classifier: symbol.clone(),
+        nullability: KlibIrNullability::NotSpecified,
+        arguments: Vec::new(),
+        annotations: Vec::new(),
+        abbreviation: None,
+    });
+    function.type_parameters[0].supertypes = vec![ty];
+    function.type_parameters.push(KlibIrTypeParameter {
+        base: crate::metadata::klib_ir::tree::KlibIrDeclarationBase {
+            flags: 4,
+            ..base(symbol)
+        },
+        name: "U".to_owned(),
+        supertypes: vec![arena.push_type(T::String.klib())],
+    });
+    let header = super::super::function_lowering::function_header(
+        Some(record.callable()),
+        &arena,
+        &function,
+    )
+    .unwrap_or_else(|reason| panic!("real forward-bound formals: {reason:?}"));
+    assert_eq!(header.params(), record.params);
+    assert_eq!(header.result(), record.ret);
+}
+
+#[test]
+fn generic_header_contract_mismatches_are_rejected_without_erasure_or_role_recovery() {
+    type Mutation = fn(&mut KlibIrFunction, &mut Record);
+    let cases: &[(&str, Mutation)] = &[
+        ("0 serialized type parameters, 1 selected", |function, _| {
+            function.type_parameters.clear()
+        }),
+        (
+            "the selected formal types are not parallel to its generic signature",
+            |_, record| record.formals.clear(),
+        ),
+        (
+            "the selected generic bounds are not parallel to its formals",
+            |_, record| record.generic.as_mut().unwrap().formal_bounds.clear(),
+        ),
+        (
+            "the selected generic bounds are not parallel to its formals",
+            |_, record| {
+                record
+                    .generic
+                    .as_mut()
+                    .unwrap()
+                    .formal_bounds
+                    .push(Vec::new())
+            },
+        ),
+        (
+            "the selected generic signature disagrees with its callable parameters or result",
+            |_, record| record.generic.as_mut().unwrap().ret = Ty::String,
+        ),
+        (
+            "the selected generic receiver disagrees with its callable parameter roles",
+            |_, record| {
+                let signature = record.generic.as_mut().unwrap();
+                signature.receiver = signature.params.pop();
+            },
+        ),
+        (
+            "type parameter 0 has different serialized and selected reification",
+            |function, _| function.type_parameters[0].base.flags |= 8,
+        ),
+        (
+            "type parameter 0 has different serialized and selected reification",
+            |_, record| record.reified.push(0),
+        ),
+        (
+            "the selected reified type-parameter ordinals are invalid",
+            |_, record| record.reified.push(1),
+        ),
+        (
+            "the selected reified type-parameter ordinals are invalid",
+            |_, record| record.reified.extend([0, 0]),
+        ),
+        (
+            "function type parameter 0 is not invariant",
+            |function, _| function.type_parameters[0].base.flags = 2,
+        ),
+        (
+            "function type parameter 0 is not invariant",
+            |function, _| function.type_parameters[0].base.flags = 6,
+        ),
+        (
+            "type parameter 0 has a different selected formal identity",
+            |_, record| record.formals[0] = Ty::String,
+        ),
+    ];
+    for &(message, mutate) in cases {
+        let (arena, mut function, mut record) = generic_identity_header();
+        mutate(&mut function, &mut record);
+        assert_eq!(
+            super::super::function_lowering::function_header(
+                Some(record.callable()),
+                &arena,
+                &function
+            )
+            .err(),
+            Some(KlibBodyDeclineReason::SignatureMismatch(message.to_owned())),
+            "{message}",
+        );
+    }
+}
+
+#[test]
+fn generic_headers_require_distinct_serialized_symbols_and_provider_formal_identities() {
+    for duplicate_provider in [false, true] {
+        let (arena, mut function, mut record) = generic_identity_header();
+        let mut second = function.type_parameters[0].clone();
+        second.name = "U".to_owned();
+        if duplicate_provider {
+            second.base.symbol = local_symbol(KlibIrSymbolKind::TypeParameter, 81);
+        }
+        function.type_parameters.push(second);
+        let name = if duplicate_provider {
+            "declaration-owned-formal"
+        } else {
+            "second-owned-formal"
+        };
+        let signature = record.generic.as_mut().unwrap();
+        signature.formals.push(name.to_owned());
+        signature.formal_bounds.push(Vec::new());
+        record
+            .formals
+            .push(Ty::ty_param(name, T::NullableAny.semantic()));
+        assert_eq!(
+            super::super::function_lowering::function_header(
+                Some(record.callable()),
+                &arena,
+                &function
+            )
+            .err(),
+            Some(KlibBodyDeclineReason::SignatureMismatch(
+                "type parameter 1 has no distinct serialized and selected identity".to_owned(),
+            )),
+        );
     }
 }
 
@@ -397,6 +822,11 @@ fn a_later_support_unit_selects_the_matching_singleton_edge_variant() {
     selected_record.name = "get".to_owned();
     selected_record.kind = ExternalCallableKind::Member;
     selected_record.params = vec![T::Int.semantic()];
+    selected_record
+        .generic_sig
+        .as_mut()
+        .expect("normalized signature")
+        .params = vec![T::Int.semantic()];
     selected_record.parameter_identities =
         vec![ResolvedParameterIdentity::Source("a".into())].into_boxed_slice();
     selected_record.singleton_dispatch = Some(SingletonDispatch {
@@ -649,13 +1079,16 @@ fn stdlib_calls_reach_header_declared_callees() {
     }
     assert_eq!(undeclared, Vec::<String>::new());
     assert_eq!(lowered_with_callees, Vec::<String>::new());
+    // Selected generic roots now pass their own declared headers and can reach unselected
+    // generic callees. These exact deeper-decline counts are measured on every manifest release;
+    // they are not expected-failure allowances for executable conformance tests.
     let expected =
         if crate::kotlin_version::target() >= crate::kotlin_version::KotlinVersion::V2_4_20 {
             vec![
                 ("it converts a value implicitly)", 1),
                 ("it declares a parameter default)", 27),
                 ("it declares a vararg parameter)", 10),
-                ("it declares type parameters)", 98),
+                ("it declares type parameters)", 173),
                 ("it uses a block of a compiler-introduced form)", 5),
                 ("it uses a call of a member function)", 59),
                 (
@@ -673,7 +1106,7 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it converts a value implicitly)", 1),
                 ("it declares a parameter default)", 20),
                 ("it declares a vararg parameter)", 10),
-                ("it declares type parameters)", 86),
+                ("it declares type parameters)", 155),
                 ("it uses a block of a compiler-introduced form)", 5),
                 ("it uses a call of a member function)", 59),
                 (

@@ -576,12 +576,14 @@ mod tests {
             nonvirtual_realization: None,
             overridden_call_realizations: Box::new([]),
             generic_sig: None,
+            reified_type_parameter_ordinals: Box::new([]),
             declaration_signature: None,
             dependency_callable: None,
             direct_c_function: None,
             klib_body_companion_receiver: Some(KlibBodyCompanionReceiver::new(type_name(
                 "kotlin/Float",
             ))),
+            klib_body_type_parameters: Box::new([]),
         }
     }
 

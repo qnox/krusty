@@ -90,13 +90,13 @@ pub use member_flags::LmFlags;
 pub(crate) use metadata_normalization::{
     associated_function_parameter_identities, associated_property_parameter_identities,
     classifier_shape, constructor_parameter_identities, constructor_parameter_list,
-    declared_constructor, declared_function, declared_nested_type_alias, declared_property,
-    declared_retention, declared_targets, declared_type_alias, enum_entries_getter, enum_value_of,
-    enum_values, function_generic_sig, function_parameter_identities, member_record,
-    only_input_type_formals, property_parameter_identities, reified_type_parameter_ordinals,
-    settle_no_arg_construction, CallablePlacement, ClassTypeParameters, EnclosingBounds,
-    FunctionParameterIdentities, PropertyAccessorNames, PropertyParameterIdentities,
-    TypeParameterIdentities,
+    declared_constructor, declared_formal_types, declared_function, declared_nested_type_alias,
+    declared_property, declared_retention, declared_targets, declared_type_alias,
+    enum_entries_getter, enum_value_of, enum_values, function_generic_sig,
+    function_parameter_identities, member_record, only_input_type_formals,
+    property_parameter_identities, reified_type_parameter_ordinals, settle_no_arg_construction,
+    CallablePlacement, ClassTypeParameters, EnclosingBounds, FunctionParameterIdentities,
+    PropertyAccessorNames, PropertyParameterIdentities, TypeParameterIdentities,
 };
 pub use scalar_instruction::{ScalarClass, ScalarComparison, ScalarInstruction};
 use std::borrow::Cow;

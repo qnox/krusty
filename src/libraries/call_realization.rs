@@ -108,6 +108,9 @@ pub struct KlibBodyCallable<'a> {
     ret: Ty,
     parameter_identities: &'a [crate::fir::ResolvedParameterIdentity],
     context_count: usize,
+    generic_signature: Option<&'a super::GenericSig>,
+    type_parameters: &'a [Ty],
+    reified_type_parameter_ordinals: &'a [u32],
     compiler_intrinsic: Option<CompilerIntrinsic>,
     /// Exact singleton dispatch receiver selected for this call edge. Common KLIB body lowering
     /// uses its semantic type to validate and consume the serialized receiver; target storage
@@ -131,6 +134,9 @@ pub(crate) struct KlibBodyCallableShape<'a> {
     pub(crate) ret: Ty,
     pub(crate) parameter_identities: &'a [crate::fir::ResolvedParameterIdentity],
     pub(crate) context_count: usize,
+    pub(crate) generic_signature: Option<&'a super::GenericSig>,
+    pub(crate) type_parameters: &'a [Ty],
+    pub(crate) reified_type_parameter_ordinals: &'a [u32],
     pub(crate) compiler_intrinsic: Option<CompilerIntrinsic>,
 }
 
@@ -149,6 +155,9 @@ impl<'a> KlibBodyCallable<'a> {
             ret,
             parameter_identities,
             context_count,
+            generic_signature,
+            type_parameters,
+            reified_type_parameter_ordinals,
             compiler_intrinsic,
         } = shape;
         Some(Self {
@@ -158,6 +167,9 @@ impl<'a> KlibBodyCallable<'a> {
             ret,
             parameter_identities,
             context_count,
+            generic_signature,
+            type_parameters,
+            reified_type_parameter_ordinals,
             compiler_intrinsic,
             singleton_dispatch: singleton.map(SingletonDispatch::ty),
             singleton_classifier: singleton.map(|dispatch| dispatch.classifier),
@@ -194,6 +206,18 @@ impl<'a> KlibBodyCallable<'a> {
         self.ret
     }
 
+    pub(crate) fn generic_signature(self) -> Option<&'a super::GenericSig> {
+        self.generic_signature
+    }
+
+    pub(crate) fn type_parameters(self) -> &'a [Ty] {
+        self.type_parameters
+    }
+
+    pub(crate) fn reified_type_parameter_ordinals(self) -> &'a [u32] {
+        self.reified_type_parameter_ordinals
+    }
+
     pub(crate) fn parameter_identities(self) -> &'a [crate::fir::ResolvedParameterIdentity] {
         self.parameter_identities
     }
@@ -224,6 +248,9 @@ impl<'a> KlibBodyCallable<'a> {
             && self.ret == other.ret
             && self.parameter_identities == other.parameter_identities
             && self.context_count == other.context_count
+            && self.generic_signature == other.generic_signature
+            && self.type_parameters == other.type_parameters
+            && self.reified_type_parameter_ordinals == other.reified_type_parameter_ordinals
             && self.compiler_intrinsic == other.compiler_intrinsic
             && self.companion_receiver == other.companion_receiver
             && self.declaration_owner == other.declaration_owner
@@ -273,6 +300,9 @@ pub struct ExternalCallableRealization {
     /// It is separate from source parameters because source lookup names the declaration through
     /// the classifier without a value receiver.
     pub(crate) klib_body_companion_receiver: Option<KlibBodyCompanionReceiver>,
+    /// Declaration-owned formal types, frozen before normalized full bounds can deepen their
+    /// finite self/forward references. Empty for declarations without KLIB generic body facts.
+    pub(crate) klib_body_type_parameters: Box<[Ty]>,
 }
 
 impl ExternalCallableRealization {
@@ -289,6 +319,9 @@ impl ExternalCallableRealization {
                 ret: self.callable.ret,
                 parameter_identities: &self.parameter_identities,
                 context_count: self.callable.context_count,
+                generic_signature: self.callable.generic_sig.as_deref(),
+                type_parameters: &self.klib_body_type_parameters,
+                reified_type_parameter_ordinals: &self.callable.reified_type_parameter_ordinals,
                 compiler_intrinsic: self.callable.compiler_intrinsic,
             },
             singleton,

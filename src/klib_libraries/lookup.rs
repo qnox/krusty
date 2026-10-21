@@ -191,7 +191,7 @@ pub(super) fn published_function(
         }
     }
     let kind = realization_kind(placement, function.kind == FnKind::Extension);
-    identities.assign_function(signed, kind, &mut function);
+    identities.assign_function(signed, kind, enclosing, &mut function);
     function
 }
 
@@ -242,7 +242,7 @@ pub(super) fn published_property(
         );
     }
     let kind = realization_kind(placement, property.receiver.is_some());
-    identities.assign_property(signed, kind, &mut property);
+    identities.assign_property(signed, kind, enclosing, &mut property);
     property
 }
 

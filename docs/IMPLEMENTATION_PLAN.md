@@ -5592,6 +5592,12 @@ non-inline callers, still reads the field directly. Test:
   `INLINE_TEXT_TRIM` is one shared dependency graph for whitespace, Unicode and empty inputs.
 - Remaining: publish collection-role facts for inherited iterators, validate every supported
   KLIB lane and remove the inline-template draft's new conformance regressions before landing.
+- Ordinary generic headers authenticate the exact provider-frozen formal types and every full
+  bound, including recursive/forward bounds, without prepared-inline erasure. Reification and
+  parameter roles must agree independently of the flattened operand types.
+- Remaining: replace ordinary helper-algorithm adapters with serialized dependency bodies, close
+  their exact call graphs, and carry one declared export ABI with argument/result coercions.
+  Header support alone does not widen executable roots or establish generic-call ABI correctness.
 
 ## KLIB writer — krusty compiles a module to a Kotlin library  ◐
 

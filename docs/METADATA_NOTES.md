@@ -647,6 +647,22 @@ does not acquire that operation. Native consumes the fact and the recorded recei
 and proves contiguous String/StringBuilder storage before invoking its existing trim runtime.
 Neither the serialized signature nor the callable is reconstructed from a backend spelling.
 
+## Ordinary KLIB generic declaration headers
+
+The KLIB provider retains each formal's exact normalized semantic type alongside the full generic
+signature. Both use the same metadata identities, enclosing bounds and bound-normalization helper;
+the frozen backend handoff copies the formal types unchanged. Full bounds can contain deeper
+finite self/forward references than the formal's primary bound, so consumers must not rebuild
+formal types from `GenericSig.formal_bounds`. Ordinary header lowering binds all serialized
+symbols first, then compares every bound and the complete selected parameter/result contract.
+Prepared-inline erasure is not accepted by this path.
+
+Serialized type-parameter flags use the active Kotlin `TypeParameterFlags` encoding, which
+delegates to `IrFlags`: annotations at bit 0, variance at bits 1 and 2, and reification at bit 3.
+Invariant non-reified formals have flags 4; invariant reified formals have flags 12. Ordinary
+function headers require invariant formals and exact raw/provider reification agreement before
+rejecting standalone emission of reified bodies. This changes no metadata wire format.
+
 ## Authenticated KLIB collection classifier roles
 
 The ordinary stdlib `Iterable<T>.collectionSizeOrDefault(Int): Int` helper receives a normalized

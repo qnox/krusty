@@ -764,6 +764,10 @@ fn coerce_fixture_with_companion_marker(
             .skip(1)
             .collect();
         fact.source_receiver = None;
+        fact.generic_sig
+            .as_mut()
+            .expect("normalized signature")
+            .receiver = None;
         fact.klib_body_companion_receiver =
             Some(KlibBodyCompanionReceiver::new(type_name("kotlin/Int")));
     }

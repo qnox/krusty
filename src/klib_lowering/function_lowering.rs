@@ -23,6 +23,8 @@ use crate::metadata::klib_ir::tree::{
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
 use crate::types::{Ty, TyKind, TypeName};
 
+mod declared_type_parameters;
+
 /// One parameter as the body reads it.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ParameterValue {
@@ -394,15 +396,21 @@ pub(super) fn function_header_with_emitted_dispatch(
     arena: &KlibIrArena,
     function: &KlibIrFunction,
 ) -> Result<FunctionHeader, KlibBodyDeclineReason> {
-    if !function.type_parameters.is_empty() {
-        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-            "type parameters",
+    if function.base.symbol.kind != KlibIrSymbolKind::Function {
+        return Err(mismatch(
+            "the serialized declaration's symbol is not a function".to_owned(),
         ));
     }
+    if function.constructor {
+        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+            "a constructor",
+        ));
+    }
+    let type_parameters = declared_type_parameters::bind(selected, arena, function)?;
     header(
         selected,
         emitted_singleton_dispatch,
-        KlibTypeParameters::default(),
+        type_parameters,
         arena,
         function,
     )
@@ -416,16 +424,6 @@ fn header(
     function: &KlibIrFunction,
 ) -> Result<FunctionHeader, KlibBodyDeclineReason> {
     let types = &type_parameters;
-    if function.base.symbol.kind != KlibIrSymbolKind::Function {
-        return Err(mismatch(
-            "the serialized declaration's symbol is not a function".to_owned(),
-        ));
-    }
-    if function.constructor {
-        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-            "a constructor",
-        ));
-    }
     // Validate the producer's qualified marker even for a header-only transitive callee. Such a
     // callee can be exported with its unread-receiver effect and selected by a later source
     // module, so deferring validation until a provider selection is present would publish an

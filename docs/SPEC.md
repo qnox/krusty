@@ -17697,6 +17697,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   through the common box inventory, and
   the Native-specific `native_module_abi_symbols_keep_same_named_internal_classifiers_distinct`.
 
+- **An ordinary KLIB generic header preserves its provider's declaration.** Serialized formal
+  symbols bind to the exact declaration-owned formal types frozen by the provider, not to source
+  spellings or types rebuilt from full upper bounds. Recursive and forward bounds have finite
+  semantic representations; normalizing a full bound and wrapping it again changes that
+  representation. Every serialized upper bound is checked separately against metadata's complete
+  bounds. Formal counts and identities, receiver roles, invariant function variance and exact
+  reification must agree; reified functions cannot be emitted as ordinary standalone functions.
+  Unlike prepared-inline headers, ordinary headers do not accept erased parameter/result types.
+  Tests: `callee_headers::recursive_formals_keep_the_real_provider_normalization_through_the_frozen_handoff`,
+  `a_forward_bound_binds_all_real_provider_formals_before_reading_any_bounds`, and
+  `generic_header_contract_mismatches_are_rejected_without_erasure_or_role_recovery`.
 - **A KLIB body's call of a dependency function lowers that function too.** A call of a public
   declaration is joined, by its exact module-qualified signature, to the callee's serialized
   declaration in the loaded trees (`KlibDeclarationBodies`, the join a body uses), and the callee is declared from

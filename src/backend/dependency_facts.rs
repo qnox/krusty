@@ -83,6 +83,7 @@ pub struct BackendCallableFact {
     pub nonvirtual_realization: Option<Box<NonvirtualCallRealization>>,
     pub overridden_call_realizations: Box<[crate::libraries::OverriddenCallRealization]>,
     pub generic_sig: Option<Box<GenericSig>>,
+    pub reified_type_parameter_ordinals: Box<[u32]>,
     /// Exact serialized-IR identity the provider published for this declaration, if any.
     pub declaration_signature: Option<KlibDeclarationSignature>,
     /// Exact KLIB module and declaration identity for target linkage, if this declaration came
@@ -92,6 +93,7 @@ pub struct BackendCallableFact {
     pub direct_c_function: Option<DirectCFunction>,
     /// Frozen KLIB-only receiver contract for an associated companion extension body.
     pub(crate) klib_body_companion_receiver: Option<KlibBodyCompanionReceiver>,
+    pub(crate) klib_body_type_parameters: Box<[Ty]>,
 }
 
 impl BackendCallableFact {
@@ -238,6 +240,9 @@ impl BackendCallableFact {
                 ret: self.ret,
                 parameter_identities: &self.parameter_identities,
                 context_count: self.context_count,
+                generic_signature: self.generic_sig.as_deref(),
+                type_parameters: &self.klib_body_type_parameters,
+                reified_type_parameter_ordinals: &self.reified_type_parameter_ordinals,
                 compiler_intrinsic: self.compiler_intrinsic,
             },
             singleton_dispatch,
@@ -286,10 +291,12 @@ mod tests {
             nonvirtual_realization: None,
             overridden_call_realizations: Box::new([]),
             generic_sig: None,
+            reified_type_parameter_ordinals: Box::new([]),
             declaration_signature: None,
             dependency_callable: None,
             direct_c_function: None,
             klib_body_companion_receiver: None,
+            klib_body_type_parameters: Box::new([]),
         };
         assert!(fact.matches_dependency_body_call(&params, Some(1), false));
         assert!(!fact.matches_dependency_body_call(&params, Some(0), false));
@@ -338,10 +345,12 @@ mod tests {
             nonvirtual_realization: None,
             overridden_call_realizations: Box::new([]),
             generic_sig: None,
+            reified_type_parameter_ordinals: Box::new([]),
             declaration_signature: None,
             dependency_callable: None,
             direct_c_function: None,
             klib_body_companion_receiver: None,
+            klib_body_type_parameters: Box::new([]),
         };
         assert!(fact.matches_dependency_body_call(&[Ty::Int], None, true));
         assert!(!fact.matches_dependency_body_call(&[Ty::Int], None, false));
@@ -545,6 +554,7 @@ impl CheckedBackendCallables {
                 let dependency_callable = realization.dependency_callable;
                 let direct_c_function = realization.direct_c_function;
                 let klib_body_companion_receiver = realization.klib_body_companion_receiver;
+                let klib_body_type_parameters = realization.klib_body_type_parameters;
                 let callable = realization.callable;
                 slot.insert(BackendCallableFact {
                     name: callable.name,
@@ -577,10 +587,12 @@ impl CheckedBackendCallables {
                     nonvirtual_realization: callable.nonvirtual_realization,
                     overridden_call_realizations: callable.overridden_call_realizations,
                     generic_sig: callable.generic_sig,
+                    reified_type_parameter_ordinals: callable.reified_type_parameter_ordinals,
                     declaration_signature,
                     dependency_callable,
                     direct_c_function,
                     klib_body_companion_receiver,
+                    klib_body_type_parameters,
                 })
             }
         };

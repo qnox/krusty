@@ -665,6 +665,23 @@ pub struct KlibIrTypeParameter {
     pub supertypes: Vec<KlibIrTypeId>,
 }
 
+impl KlibIrTypeParameter {
+    /// IrFlags stores HAS_ANNOTATIONS at bit 0, VARIANCE at bits 1..3, then IS_REIFIED.
+    /// This is the serialized IR layout, not metadata.proto's separate reified field.
+    pub(crate) fn is_reified(&self) -> bool {
+        self.base.flags & (1 << 3) != 0
+    }
+
+    pub(crate) fn variance(&self) -> Option<KlibIrVariance> {
+        match (self.base.flags >> 1) & 3 {
+            0 => Some(KlibIrVariance::In),
+            1 => Some(KlibIrVariance::Out),
+            2 => Some(KlibIrVariance::Invariant),
+            _ => None,
+        }
+    }
+}
+
 /// What a function's body is.
 #[derive(Clone, Debug, PartialEq)]
 pub enum KlibIrBody {

@@ -77,6 +77,7 @@ fn a_dependency_super_call_uses_its_frozen_nonvirtual_target() {
         dependency_callable: None,
         direct_c_function: None,
         klib_body_companion_receiver: None,
+        klib_body_type_parameters: Box::new([]),
     };
     let mut facts = CheckedBackendCallables::default();
     facts
