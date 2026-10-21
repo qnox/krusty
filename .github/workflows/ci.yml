@@ -824,6 +824,10 @@ jobs:
           if [ "${{ matrix.ksp }}" = true ]; then
             tests="$tests ksp2_generated_sources_compile_through_krusty"
           fi
+          # The Android Gradle plugin 9 needs Gradle 9; the runner image provides ANDROID_HOME.
+          case "${{ matrix.gradle }}" in
+            9.*) tests="$tests android_variants_compile_through_krusty" ;;
+          esac
           KRUSTY_GRADLE_BIN=$(command -v gradle) \
             ./krusty-build-tests --ignored $tests
 

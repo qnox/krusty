@@ -1607,6 +1607,189 @@ fun main() {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// An Android application and library built by the Android Gradle plugin's built-in Kotlin
+    /// (AGP 9, no `org.jetbrains.kotlin.android`). Each variant's Kotlin compile execs krusty with
+    /// android.jar first on the classpath, the variant's Java sources (generated BuildConfig
+    /// included) and its Java target; the library's unit tests then run the code krusty compiled.
+    /// Needs `ANDROID_HOME` and Gradle 9, so CI runs it on the Gradle 9 lanes.
+    #[test]
+    #[ignore = "downloads Gradle, the Android Gradle plugin and the Kotlin Gradle plugin"]
+    fn android_variants_compile_through_krusty() {
+        assert!(
+            std::env::var_os("ANDROID_HOME").is_some(),
+            "ANDROID_HOME must name an Android SDK"
+        );
+        let fixture = IntegrationFixture::new("krusty-android", write_android_build);
+        let (root, log) = (&fixture.root, &fixture.log);
+
+        let output = fixture
+            .build()
+            .tasks([":app:compileReleaseKotlin", ":lib:testDebugUnitTest"])
+            .run_output()
+            .unwrap_or_else(|error| panic!("{error}"));
+        let text = std::fs::read_to_string(log).expect("invocation log");
+        let runs = invocations(&text);
+        // :lib release and debug, :lib's unit tests, :app release.
+        assert_eq!(runs.len(), 4, "{text}");
+        let app = single_module_invocation(log, "app");
+        assert_eq!(
+            source_names(&app),
+            ["BuildConfig.java", "Formatter.java", "MainActivity.kt"],
+            "{app:?}"
+        );
+        let classpath = app
+            .windows(2)
+            .find(|pair| pair[0] == "-classpath")
+            .map(|pair| pair[1].split(':').collect::<Vec<_>>())
+            .expect("app classpath");
+        assert!(
+            classpath[0].ends_with("/platforms/android-36/android.jar"),
+            "{classpath:?}"
+        );
+        assert!(has_pair(&app, "-jvm-target", "17"), "{app:?}");
+        for class in [
+            "app/build/intermediates/built_in_kotlinc/release/compileReleaseKotlin/classes/sample/app/MainActivity.class",
+            "lib/build/intermediates/built_in_kotlinc/debugUnitTest/compileDebugUnitTestKotlin/classes/sample/lib/GreeterTest.class",
+        ] {
+            assert!(root.join(class).is_file(), "missing {class}");
+        }
+        assert_eq!(
+            output
+                .lines()
+                .filter(|line| line.trim() == "> Task :lib:testDebugUnitTest")
+                .count(),
+            1,
+            "{output}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    const AGP_VERSION: &str = "9.4.1";
+
+    fn write_android_build(root: &Path, plugin_version: &str, kgp_version: &str) {
+        let write = |rel: &str, body: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            let body = body
+                .replace("PLUGIN_VERSION", plugin_version)
+                .replace("KGP_VERSION", kgp_version)
+                .replace("AGP_VERSION", AGP_VERSION);
+            std::fs::write(path, body).expect("write");
+        };
+        write(
+            "settings.gradle.kts",
+            r#"
+pluginManagement {
+    repositories {
+        providers.gradleProperty("krusty.plugin.repository").orNull?.let {
+            maven { url = uri(it) }
+        }
+        google()
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
+
+dependencyResolutionManagement {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "android"
+include(":lib")
+include(":app")
+"#,
+        );
+        // AGP 9 compiles Kotlin through the Kotlin Gradle plugin it finds on the build classpath;
+        // the unapplied Kotlin Android plugin pins that version.
+        write(
+            "build.gradle.kts",
+            r#"
+plugins {
+    id("com.android.application") version "AGP_VERSION" apply false
+    id("com.android.library") version "AGP_VERSION" apply false
+    kotlin("android") version "KGP_VERSION" apply false
+    id("krusty") version "PLUGIN_VERSION" apply false
+}
+"#,
+        );
+        write(
+            "lib/build.gradle.kts",
+            r#"
+plugins {
+    id("com.android.library")
+    id("krusty")
+}
+
+android {
+    namespace = "sample.lib"
+    compileSdk = 36
+    defaultConfig { minSdk = 24 }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    testImplementation("junit:junit:4.13.2")
+}
+"#,
+        );
+        write(
+            "lib/src/main/kotlin/sample/lib/Greeter.kt",
+            "package sample.lib\n\ndata class Greeting(val who: String, val times: Int = 1)\n\nclass Greeter(private val prefix: String) {\n    fun greet(g: Greeting): String = (1..g.times).joinToString(\" \") { \"$prefix, ${g.who}!\" }\n}\n",
+        );
+        write(
+            "lib/src/test/kotlin/sample/lib/GreeterTest.kt",
+            "package sample.lib\n\nimport org.junit.Assert.assertEquals\nimport org.junit.Test\n\nclass GreeterTest {\n    @Test\n    fun greets() = assertEquals(\"Hi, a! Hi, a!\", Greeter(\"Hi\").greet(Greeting(\"a\", 2)))\n}\n",
+        );
+        write(
+            "app/build.gradle.kts",
+            r#"
+plugins {
+    id("com.android.application")
+    id("krusty")
+}
+
+android {
+    namespace = "sample.app"
+    compileSdk = 36
+    defaultConfig {
+        applicationId = "sample.app"
+        minSdk = 24
+        targetSdk = 36
+        buildConfigField("String", "GREETING", "\"Hello\"")
+    }
+    buildFeatures { buildConfig = true }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation(project(":lib"))
+}
+"#,
+        );
+        write(
+            "app/src/main/AndroidManifest.xml",
+            "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\">\n    <application android:label=\"Sample\" />\n</manifest>\n",
+        );
+        write(
+            "app/src/main/java/sample/app/Formatter.java",
+            "package sample.app;\n\npublic final class Formatter {\n    private Formatter() {}\n\n    public static String format(String s) {\n        return \"[\" + s + \"]\";\n    }\n}\n",
+        );
+        write(
+            "app/src/main/kotlin/sample/app/MainActivity.kt",
+            "package sample.app\n\nimport android.app.Activity\nimport android.os.Bundle\nimport sample.lib.Greeter\nimport sample.lib.Greeting\n\nclass MainActivity : Activity() {\n    override fun onCreate(savedInstanceState: Bundle?) {\n        super.onCreate(savedInstanceState)\n        title = Formatter.format(Greeter(BuildConfig.GREETING).greet(Greeting(\"Android\")))\n    }\n}\n",
+        );
+    }
+
     const KSP_VERSION: &str = "2.3.10";
 
     fn write_ksp2_build(root: &Path, plugin_version: &str, kgp_version: &str) {
