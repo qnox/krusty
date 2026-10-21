@@ -365,6 +365,7 @@ pub fn lower_file(
     }
     lowering.define_property_entry_points(file_init)?;
     lowering.define_constructor_entry_points(file_init)?;
+    lowering.define_singleton_entry_points(file_init)?;
     lowering.define_value_box_entry_points()?;
     let defines_entry = selected.is_some();
     let abi = match unit_kind {
@@ -563,12 +564,14 @@ impl<'a> FileLowering<'a> {
                 continue;
             }
             let signature = self.function_signature(index as crate::ir::FunId)?;
-            // A file-level function is reached across the module by its `kt_mod_` symbol, which
-            // stays hidden. The public C name, when there is one, is a separate export.
+            // A file-level function, and a member another file calls directly, is reached across
+            // the module by its `kt_mod_` symbol, which stays hidden. The public C name, when
+            // there is one, is a separate export.
             let linkage = match self.unit_kind {
                 crate::backend::CheckedIrUnitKind::DependencySupport => Linkage::Local,
                 crate::backend::CheckedIrUnitKind::Source
-                    if super::super::c_abi::is_file_level(self.ir, index) =>
+                    if super::super::c_abi::is_file_level(self.ir, index)
+                        || self.symbols.cross_file[index] =>
                 {
                     Linkage::Hidden
                 }

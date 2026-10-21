@@ -12,4 +12,5 @@
 
 mod constructors;
 mod properties;
+mod singletons;
 mod value_boxes;
