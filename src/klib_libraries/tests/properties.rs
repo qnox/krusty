@@ -26,7 +26,15 @@ fn property(name: &str, receiver: Option<KotlinType>, ty: KotlinType) -> KotlinP
         formals: Vec::new(),
         visibility: Visibility::Public,
         modality: crate::metadata::semantic::KotlinModality::Final,
-        setter_visibility: Visibility::Public,
+        getter_modifiers: crate::metadata::semantic::KotlinAccessorModifiers::default_for(
+            Visibility::Public,
+            crate::metadata::semantic::KotlinModality::Final,
+        ),
+        setter_modifiers: crate::metadata::semantic::KotlinAccessorModifiers::default_for(
+            Visibility::Public,
+            crate::metadata::semantic::KotlinModality::Final,
+        ),
+        is_external: false,
         setter_parameter_name: None,
         is_var: false,
         is_const: false,
@@ -459,7 +467,7 @@ fn a_const_property_keeps_its_compile_time_value_and_annotations() {
 #[test]
 fn a_private_setter_keeps_its_visibility_and_a_named_setter_value_its_name() {
     let mut guarded = counter();
-    guarded.setter_visibility = Visibility::Private;
+    guarded.setter_modifiers.visibility = Visibility::Private;
     guarded.setter_parameter_name = Some("next".to_owned());
     let libraries = libraries_of(&["p"], vec![guarded]);
     let counter = single_property(&libraries, "p", "counter");

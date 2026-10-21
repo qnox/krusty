@@ -110,6 +110,10 @@ A literal is an input occurrence of a nullable `@OnlyInputTypes` solution as wel
 (`tests/only_input_integer_literal_e2e.rs`).
 Public static fields are valid class-qualified property reads, including in inferred property
 initializers.
+A Java static field's `ConstantValue` makes it a compile-time constant only when the field is
+`final` (JLS §4.12.4): such a read inlines the value, while a non-final static that carries one, as
+every resource id in the Android Gradle plugin's compile `R.jar` does, stays a `getstatic`, as in
+kotlinc (`tests/java_nonfinal_constant_e2e.rs`).
 
 Public Java instance fields are valid value-qualified property reads. Selection uses the same
 classifier/property hierarchy for Java source stubs, compiled dependencies, and source/module
@@ -1930,6 +1934,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `CharSurrogateWhen`, and `CharSurrogateAnnotationArg` in `tests/feature_box_e2e.rs`, plus
   `cross_file_super_ctor_char_defaults_keep_utf16_code_units` in
   `tests/cross_file_ctor_default_e2e.rs` for the sibling-file handoff.
+- **Block comments nest, and an unclosed one is a syntax error at the end of the file.** Each
+  `/*` inside a block comment or KDoc opens another level that its own `*/` closes, so
+  ``/** wraps `/* */` */`` is one comment and `/* a /* b */ c */ val k` declares `k`. A comment still
+  open at the end of the file swallows the rest of the source; the compiler lexer reports kotlinc's
+  `syntax error: Unclosed comment.` at the end of the file (after any trailing newlines), once,
+  and nothing else for the swallowed text. The formatter's lexer keeps the comment text as written
+  and reports nothing. Tests: `tests/nested_block_comment_e2e.rs` (a box run against kotlinc, and
+  two exact kotlinc diagnostic comparisons: an unclosed nested comment and an unclosed comment
+  before trailing newlines); `ordinary_lexer_keeps_shebang_and_nests_block_comments` in
+  `src/lexer.rs`.
 - **A `Char` literal that is not exactly one UTF-16 code unit is REJECTED in the lexer.** The `i2c`
   truncation above is correct only because a *well-formed* literal is in the BMP, so the ill-formed ones
   have to be diagnosed rather than truncated: `const val E = '😀'` used to compile silently to
@@ -2251,6 +2265,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   moves to the source trampoline; the body-owned close line stays on the `$suspendImpl` carrier.
   A republished inherited member has no source here and keeps no line.
   Test: `tests/default_impls_forward_lines_e2e.rs`.
+
+  A `$DefaultImpls` forward of the interface's OWN member also copies that member's declared
+  annotations and its parameters' annotations, as kotlinc does. The constant pool is reserved in
+  kotlinc's order: the member's `RUNTIME` annotations, then `Ljava/lang/Deprecated;` (on a forward
+  to an `access$…$jd` bridge), then the member's `BINARY` (class-file, invisible) annotations, then
+  the nullability and parameter annotation types (an empty slot for the `$this` receiver, then each
+  user parameter's annotations). Each user parameter's annotations land on that parameter's
+  slot after `$this`. A forward of an INHERITED member that the interface republishes copies no
+  annotations. Test: `default_impls_forward_copies_the_member_and_parameter_annotations` in
+  `tests/default_impls_forward_lines_e2e.rs` compares the holder's bytes with kotlinc.
 
   `enable` (krusty's default) emits the full measured compatibility surface: a `public static
   synthetic access$<name>$jd` bridge on the interface per non-private body (an `invokespecial` on
@@ -14157,8 +14181,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   assertion under a coercion). A node that names its type in itself needs no record: a constant, a
   type operation's target, an intrinsic call's declared result, and a comparison or equality.
   `IrFile::checked_type` is that one contract; it never derives a parent's type from its children.
-  The Wasm backend declines a value without a checked type by name rather than inferring one.
-  Tests: the `wasm-js`/`wasm-wasi` box lanes.
+  A generic declaration-result boundary deliberately leaves its inner call without a logical
+  type: `call_declared_ret` records its declared result, while the outer coercion has the selected
+  checked type. Wasm consumes that exact declaration-result record only for such an untyped call;
+  an existing checked type still wins. A value missing both facts declines rather than inferring
+  a type from a callee or its operands. Tests: `an_untyped_call_uses_only_its_published_declared_result`,
+  `a_checked_call_keeps_its_checked_type_over_declared_provenance`, and the box lanes.
 - **An arithmetic operator's result is the selected operator's declared result, recorded once.**
   Kotlin's mixed numeric promotion (`Int.plus(Long): Long`, `Char.plus(Int): Char`,
   `Char.minus(Char): Int`, `Byte`/`Short` operands answering `Int`) is a fact of the operator the
@@ -17922,6 +17950,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Nothing?`; it lowers to the `null` constant typed as the null literal, as checked FIR records
   it. A `null` of another type is an inconsistency. Test:
   `control_forms::a_nullability_smart_cast_lowers_as_the_source_smart_cast_does`.
+
+- **KLIB accessor declaration modifiers are independent.** Getter and setter flag words are
+  independent. An absent word inherits only the property's annotation/visibility/modality prefix;
+  explicit zero does not inherit. Inline, external and non-default status belong to each accessor,
+  while property-level external status remains separate. An accessor's own `InlineOnly` annotation
+  strengthens its inline obligation; a property annotation or the other accessor's annotation
+  cannot do so. A default accessor claiming an inline or external implementation is inconsistent
+  metadata. Tests: `klib_libraries::tests::accessor_modifiers`.
 
 - **A KLIB `also`/`apply` call expands as an invocation that answers the receiver.** The direct
   lambda invocation plan of an exact `@InlineOnly` prepared-inline body accepts, besides one

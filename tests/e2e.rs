@@ -1262,6 +1262,8 @@ mod java_instance_e2e;
 #[path = "java_interface_mutable_collection_face_e2e.rs"]
 mod java_interface_mutable_collection_face_e2e;
 mod java_member_modules;
+#[path = "java_nonfinal_constant_e2e.rs"]
+mod java_nonfinal_constant_e2e;
 #[path = "java_self_bounded_constructor_e2e.rs"]
 mod java_self_bounded_constructor_e2e;
 #[path = "local_class_capture_order_e2e.rs"]
@@ -1565,6 +1567,8 @@ mod module_override_boxed_result_e2e;
 mod mpp_expect_actual_e2e;
 #[path = "mpp_requires_the_feature_e2e.rs"]
 mod mpp_requires_the_feature_e2e;
+#[path = "nested_block_comment_e2e.rs"]
+mod nested_block_comment_e2e;
 #[path = "nested_class_annotation_scope_e2e.rs"]
 mod nested_class_annotation_scope_e2e;
 #[path = "nested_inline_lambda_e2e.rs"]

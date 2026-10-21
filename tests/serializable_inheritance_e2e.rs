@@ -16,6 +16,8 @@ const SRC: &str = "import kotlinx.serialization.Serializable\n\
                    open class Parent(val a: Int, val b: String = \"x\")\n\
                    @Serializable\n\
                    class Child(val c: Long) : Parent(1)\n\
+                   @Serializable\n\
+                   class Tagged(val tags: List<String>) : Parent(2)\n\
                    fun box(): String {\n\
                    \x20   val text = Json.encodeToString(Child.serializer(), Child(5))\n\
                    \x20   if (text != \"{\\\"a\\\":1,\\\"c\\\":5}\") return text\n\
@@ -53,6 +55,12 @@ fn a_subclass_writes_its_parent_first_and_delegates_its_deserialization() {
 #[test]
 fn a_subclass_serializer_covers_the_inherited_elements() {
     assert_byte_identical("Child$$serializer");
+}
+
+/// The subclass's own `$childSerializers` is read after the parent's `write$Self` has run.
+#[test]
+fn a_subclass_reads_its_child_serializer_cache_after_the_parent_writes() {
+    assert_byte_identical("Tagged");
 }
 
 #[test]

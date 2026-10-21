@@ -202,6 +202,8 @@ pub(super) fn emit_inherited_default_surface(
                 lines: ForwardLines::default(),
                 varargs,
                 target,
+                // An inherited member is not declared here; its holder copies none of its source.
+                annotations: ForwardAnnotations::default(),
             },
         );
     }
@@ -311,6 +313,10 @@ pub(super) fn emit_own_member_forward(
             },
             varargs: method_access::varargs_access(ir, fid),
             target: JdHolderTarget::AccessBridge,
+            annotations: ForwardAnnotations {
+                declared: ir.function_annotations.get(&fid),
+                parameters: ir.fn_param_annotations.get(&fid).map_or(&[], Vec::as_slice),
+            },
         },
     );
 }
@@ -333,6 +339,16 @@ struct HolderForward<'a> {
     /// The member's own `ACC_VARARGS` when its last physical parameter is the declared vararg.
     varargs: u16,
     target: JdHolderTarget<'a>,
+    annotations: ForwardAnnotations<'a>,
+}
+
+/// The source annotations a forward copies from the member it stands for: kotlinc gives an own
+/// member's `$DefaultImpls` forward the member's declared and parameter annotations.
+#[derive(Clone, Copy, Default)]
+struct ForwardAnnotations<'a> {
+    declared: Option<&'a crate::ir::DeclarationAnnotations>,
+    /// One entry per declared parameter, without the holder's receiver.
+    parameters: &'a [crate::ir::DeclarationAnnotations],
 }
 
 /// The source lines of the declaration a forward stands for; 0 when it has none.
@@ -358,6 +374,7 @@ fn emit_holder_forward(cw: &mut ClassWriter, forward: HolderForward<'_>) {
         lines,
         varargs,
         target,
+        annotations,
     } = forward;
     assert_eq!(
         local_variable_names.len(),
@@ -372,29 +389,52 @@ fn emit_holder_forward(cw: &mut ClassWriter, forward: HolderForward<'_>) {
     let mut with_receiver = vec![Ty::obj_name(interface)];
     with_receiver.extend_from_slice(param_tys);
     let desc = method_descriptor(&with_receiver, ret);
-    cw.seed_utf8(member_name);
-    cw.seed_utf8(&desc);
-    if let Some(signature) = signature {
-        cw.seed_utf8(signature);
-    }
-    for (parameter, _) in reflected {
-        if let Some(parameter) = parameter {
-            cw.seed_utf8(parameter);
-        }
-    }
+    let declared = annotations.declared.cloned().unwrap_or_default();
+    let retained_where = |visible: bool| {
+        crate::ir::DeclarationAnnotations::new(
+            declared
+                .iter()
+                .filter(|annotation| {
+                    (annotation.retention != crate::types::AnnotationRetention::Binary) == visible
+                })
+                .cloned()
+                .collect(),
+        )
+    };
+    // kotlinc writes the member's RUNTIME annotations, then the forward's `@java.lang.Deprecated`,
+    // then the member's BINARY ones, before the compiler's nullability types.
+    cw.reserve_method_pool_with_annotations(
+        member_name,
+        &desc,
+        signature,
+        &[],
+        &retained_where(true),
+        reflected,
+    );
     let deprecated = matches!(target, JdHolderTarget::AccessBridge);
     if deprecated {
         cw.seed_utf8("Ljava/lang/Deprecated;");
     }
     let ret_ann = jd_nullability_annotation(&semantic_ret);
-    if let Some(annotation) = ret_ann {
-        cw.seed_utf8(annotation);
-    }
     let mut parameter_annotations = vec![Some("Lorg/jetbrains/annotations/NotNull;")];
     parameter_annotations.extend(semantic_params.iter().map(jd_nullability_annotation));
-    for annotation in parameter_annotations.iter().flatten() {
-        cw.seed_utf8(annotation);
-    }
+    let mut user_parameter_annotations = vec![crate::ir::DeclarationAnnotations::default()];
+    user_parameter_annotations.extend(annotations.parameters.iter().cloned());
+    let annotation_types = function_annotations::header_annotation_types(
+        ret_ann,
+        &user_parameter_annotations,
+        &parameter_annotations,
+        true,
+    );
+    let annotation_types: Vec<&str> = annotation_types.iter().map(String::as_str).collect();
+    cw.reserve_method_pool_with_annotations(
+        member_name,
+        &desc,
+        signature,
+        &annotation_types,
+        &retained_where(false),
+        &[],
+    );
 
     let argument_words = 1 + param_tys.iter().map(|ty| slot_words(*ty)).sum::<u16>();
     let mut code = CodeBuilder::new(argument_words);
@@ -457,6 +497,8 @@ fn emit_holder_forward(cw: &mut ClassWriter, forward: HolderForward<'_>) {
         slot += slot_words(*parameter);
     }
     cw.set_method_debug(member_name, &desc, None, &locals);
+    cw.set_method_annotations(member_name, &desc, &declared);
+    cw.set_method_param_annotations(member_name, &desc, &user_parameter_annotations);
     if deprecated {
         cw.mark_method_deprecated(member_name, &desc);
         cw.add_method_visible_marker_annotation(member_name, &desc, "Ljava/lang/Deprecated;");
