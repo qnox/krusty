@@ -1611,7 +1611,7 @@ fun main() {
     /// (AGP 9, no `org.jetbrains.kotlin.android`). Each variant's Kotlin compile execs krusty with
     /// android.jar first on the classpath, the variant's Java sources (generated BuildConfig
     /// included) and its Java target; the library's unit tests then run the code krusty compiled.
-    /// Needs `ANDROID_HOME` and Gradle 9, so CI runs it on the Gradle 9 lanes.
+    /// Needs `ANDROID_HOME` and Gradle 9.6 or newer (AGP 9.4), so CI runs it on those lanes.
     #[test]
     #[ignore = "downloads Gradle, the Android Gradle plugin and the Kotlin Gradle plugin"]
     fn android_variants_compile_through_krusty() {
