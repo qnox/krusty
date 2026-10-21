@@ -24,6 +24,7 @@ use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
 use crate::types::{Ty, TyKind, TypeName};
 
 mod declared_type_parameters;
+pub(super) mod vararg_parameters;
 
 /// One parameter as the body reads it.
 #[derive(Clone, Copy, Debug)]
@@ -198,6 +199,7 @@ pub(super) fn prepared_inline_header(
     } else {
         function.dispatch_receiver.as_ref()
     };
+    vararg_parameters::reject_dispatch_marker(dispatch_receiver)?;
     match (dispatch_receiver.is_some(), selected.is_member()) {
         (true, true) => {}
         (false, false) if selected.is_top_level() => {}
@@ -329,13 +331,21 @@ pub(super) fn prepared_inline_header(
     let first_slot = u32::from(receiver_slot.is_some());
     let mut defaults = Vec::with_capacity(serialized.len());
     let mut extension_receiver = false;
+    let mut varargs = vararg_parameters::VarargParameters::default();
     for (index, ((parameter, &ty), identity)) in
         serialized.iter().zip(declared).zip(identities).enumerate()
     {
-        if parameter.vararg_element_type.is_some() {
-            return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-                "a vararg parameter",
-            ));
+        if let Some(element) = parameter.vararg_element_type {
+            varargs.record(
+                index,
+                matches!(
+                    identity,
+                    ResolvedParameterIdentity::Source(_)
+                        | ResolvedParameterIdentity::Unnamed { .. }
+                ) && parameter.base.symbol.kind == KlibIrSymbolKind::ValueParameter,
+                semantic_type(arena, &type_parameters, parameter.ty)?,
+                semantic_type(arena, &type_parameters, element)?,
+            )?;
         }
         defaults.push(parameter.default_value);
         let receiver = matches!(identity, ResolvedParameterIdentity::ExtensionReceiver);
@@ -366,6 +376,7 @@ pub(super) fn prepared_inline_header(
             )));
         }
     }
+    varargs.authenticate(Some(selected), false)?;
     let erased_result = read_type(function.return_type, selected.ret())?;
     Ok(FunctionHeader {
         name: function.name.clone(),
@@ -473,6 +484,7 @@ fn header(
     function: &KlibIrFunction,
 ) -> Result<FunctionHeader, KlibBodyDeclineReason> {
     let types = &type_parameters;
+    vararg_parameters::reject_dispatch_marker(function.dispatch_receiver.as_ref())?;
     let emitted_singleton_dispatch = match purpose {
         HeaderPurpose::Body(singleton) => singleton,
         HeaderPurpose::External => None,
@@ -607,20 +619,27 @@ fn header(
     };
     let mut params = Vec::with_capacity(serialized.len());
     let mut identities = Vec::with_capacity(serialized.len());
-    for (role, parameter) in &serialized {
-        if parameter.vararg_element_type.is_some() {
-            return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-                "a vararg parameter",
-            ));
+    let mut varargs = vararg_parameters::VarargParameters::default();
+    for (index, (role, parameter)) in serialized.iter().enumerate() {
+        let packed = semantic_type(arena, types, parameter.ty)?;
+        if let Some(element) = parameter.vararg_element_type {
+            varargs.record(
+                index,
+                *role == SerializedRole::Value
+                    && parameter.base.symbol.kind == KlibIrSymbolKind::ValueParameter,
+                packed,
+                semantic_type(arena, types, element)?,
+            )?;
         }
         if parameter.default_value.is_some() {
             return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
                 "a parameter default",
             ));
         }
-        params.push(semantic_type(arena, types, parameter.ty)?);
+        params.push(packed);
         identities.push(serialized_identity(*role, parameter));
     }
+    varargs.authenticate(selected, function.companion_extension_class.is_some())?;
     let ret = semantic_type(arena, types, function.return_type)?;
     let identities = match selected {
         None => identities.into_iter().collect::<Option<Vec<_>>>().ok_or(

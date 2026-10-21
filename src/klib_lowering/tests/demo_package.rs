@@ -36,6 +36,7 @@ use crate::types::{Ty, Visibility};
 pub(super) enum T {
     DemoBox,
     Int,
+    IntArray,
     Double,
     Boolean,
     String,
@@ -55,6 +56,7 @@ impl T {
         match self {
             T::DemoBox => "Box",
             T::Int => "Int",
+            T::IntArray => "IntArray",
             T::Double => "Double",
             T::Boolean => "Boolean",
             T::String => "String",

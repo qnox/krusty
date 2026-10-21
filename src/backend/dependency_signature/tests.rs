@@ -106,6 +106,7 @@ fn frozen(signature: GenericSig) -> BackendCallableFact {
         klib_body_type_parameters: Box::new([]),
         klib_body_declaration_modifiers: None,
         klib_body_class_contract: None,
+        klib_body_vararg_index: None,
     }
 }
 

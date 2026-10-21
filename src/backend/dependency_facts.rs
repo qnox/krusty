@@ -97,6 +97,7 @@ pub struct BackendCallableFact {
     pub(crate) klib_body_declaration_modifiers:
         Option<crate::libraries::KlibBodyDeclarationModifiers>,
     pub(crate) klib_body_class_contract: Option<crate::libraries::KlibBodyClassContract>,
+    pub(crate) klib_body_vararg_index: Option<usize>,
 }
 
 impl BackendCallableFact {
@@ -243,6 +244,7 @@ impl BackendCallableFact {
                 ret: self.ret,
                 parameter_identities: &self.parameter_identities,
                 context_count: self.context_count,
+                vararg_index: self.klib_body_vararg_index,
                 generic_signature: self.generic_sig.as_deref(),
                 type_parameters: &self.klib_body_type_parameters,
                 reified_type_parameter_ordinals: &self.reified_type_parameter_ordinals,
@@ -306,6 +308,7 @@ mod tests {
             klib_body_type_parameters: Box::new([]),
             klib_body_declaration_modifiers: None,
             klib_body_class_contract: None,
+            klib_body_vararg_index: None,
         };
         assert!(fact.matches_dependency_body_call(&params, Some(1), false));
         assert!(!fact.matches_dependency_body_call(&params, Some(0), false));
@@ -362,6 +365,7 @@ mod tests {
             klib_body_type_parameters: Box::new([]),
             klib_body_declaration_modifiers: None,
             klib_body_class_contract: None,
+            klib_body_vararg_index: None,
         };
         assert!(fact.matches_dependency_body_call(&[Ty::Int], None, true));
         assert!(!fact.matches_dependency_body_call(&[Ty::Int], None, false));
@@ -578,6 +582,7 @@ impl CheckedBackendCallables {
                 let klib_body_type_parameters = realization.klib_body_type_parameters;
                 let klib_body_declaration_modifiers = realization.klib_body_declaration_modifiers;
                 let klib_body_class_contract = realization.klib_body_class_contract;
+                let klib_body_vararg_index = realization.klib_body_vararg_index;
                 let callable = realization.callable;
                 slot.insert(BackendCallableFact {
                     name: callable.name,
@@ -618,6 +623,7 @@ impl CheckedBackendCallables {
                     klib_body_type_parameters,
                     klib_body_declaration_modifiers,
                     klib_body_class_contract,
+                    klib_body_vararg_index,
                 })
             }
         };

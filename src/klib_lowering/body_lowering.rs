@@ -13,6 +13,7 @@
 
 use crate::fx_hash::{HashMap, HashSet};
 
+mod arrays;
 mod blocks;
 mod calls;
 mod class_literals;
@@ -388,7 +389,13 @@ impl<'a> BodyLowering<'a> {
                 let ty = self.ty(expression, "`try`")?;
                 (self.try_expression(*result, catches, *finally, ty)?, ty)
             }
-            KlibIrExprKind::Vararg { .. } => return unsupported("a vararg argument"),
+            KlibIrExprKind::Vararg {
+                element_type,
+                elements,
+            } => {
+                let ty = self.ty(expression, "a vararg array")?;
+                (self.vararg_array(*element_type, elements, ty)?, ty)
+            }
             KlibIrExprKind::FunctionExpression { .. } => return unsupported("a lambda"),
             KlibIrExprKind::DynamicMember { .. } => return unsupported("a dynamic member access"),
             KlibIrExprKind::DynamicOperator { .. } => return unsupported("a dynamic operator"),

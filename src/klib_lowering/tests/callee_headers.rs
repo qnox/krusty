@@ -246,6 +246,66 @@ fn matching_function_modifiers_survive_the_provider_and_frozen_handoff() {
 }
 
 #[test]
+fn dispatch_slots_cannot_carry_a_vararg_marker() {
+    use super::super::function_lowering::{
+        prepared_inline_header, raw_function_header, HeaderPurpose,
+    };
+    let demo = demo(&IDENTITY_AND_CALLER, identity_and_caller);
+    let mut fact = demo.facts["b"].clone();
+    let owner = crate::types::type_name("demo/Box");
+    let signature = demo_signature(Some("Box"), "b", &[], &[T::Int]);
+    fact.kind = ExternalCallableKind::Member;
+    fact.declaration_owner = Some(crate::types::SemanticCallableOwner::Classifier(owner));
+    fact.declaration_signature = Some(KlibDeclarationSignature::Public(signature.clone()));
+    fact.dependency_callable.as_mut().unwrap().declaration =
+        KlibDeclarationSignature::Public(signature.clone());
+    let tree = function_tree(signature, "b", true, 0, 1);
+    let KlibIrMember::Function(id) = tree.declaration else {
+        panic!("function")
+    };
+    let mut function = tree.arena.function(id).clone();
+    let selected = fact.klib_body_callable().unwrap();
+    raw_function_header(
+        Some(selected),
+        HeaderPurpose::External,
+        &tree.arena,
+        &function,
+    )
+    .unwrap();
+    prepared_inline_header(selected, &[], &tree.arena, &function).unwrap();
+    function
+        .dispatch_receiver
+        .as_mut()
+        .unwrap()
+        .vararg_element_type = Some(function.return_type);
+    let expected = Some(KlibBodyDeclineReason::SignatureMismatch(
+        "a serialized dispatch receiver carries a vararg marker".into(),
+    ));
+    assert_eq!(
+        raw_function_header(
+            Some(selected),
+            HeaderPurpose::External,
+            &tree.arena,
+            &function
+        )
+        .err(),
+        expected
+    );
+    assert_eq!(
+        prepared_inline_header(selected, &[], &tree.arena, &function).err(),
+        expected
+    );
+    let mut flattened = function;
+    let mut receiver = flattened.dispatch_receiver.take().unwrap();
+    receiver.base.symbol.kind = KlibIrSymbolKind::ValueParameter;
+    flattened.regular_parameters.insert(0, receiver);
+    assert_eq!(
+        prepared_inline_header(selected, &[], &tree.arena, &flattened).err(),
+        expected
+    );
+}
+
+#[test]
 fn missing_or_conflicting_modifier_facts_do_not_coalesce_selected_declarations() {
     let demo = demo(&IDENTITY_AND_CALLER, identity_and_caller);
     let original = &demo.facts["b"];
@@ -490,6 +550,7 @@ impl Record {
                 ret: self.ret,
                 parameter_identities: &self.identities,
                 context_count: 0,
+                vararg_index: None,
                 generic_signature: self.generic.as_ref(),
                 type_parameters: &self.formals,
                 reified_type_parameter_ordinals: &self.reified,
@@ -1444,15 +1505,14 @@ fn stdlib_calls_reach_header_declared_callees() {
             vec![
                 ("it converts a value implicitly)", 1),
                 ("it declares a parameter default)", 27),
-                ("it declares a vararg parameter)", 10),
                 ("it declares type parameters)", 173),
-                ("it uses a block of a compiler-introduced form)", 5),
+                ("it uses a block of a compiler-introduced form)", 6),
                 ("it uses a call of a member function)", 59),
                 (
                     "it uses a call of a member no library serializes, such as a fake override)",
                     10,
                 ),
-                ("it uses a call through a property accessor signature)", 20),
+                ("it uses a call through a property accessor signature)", 29),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a constructor call)", 2),
                 ("it uses a loop whose body is not a block)", 2),
@@ -1462,15 +1522,14 @@ fn stdlib_calls_reach_header_declared_callees() {
             vec![
                 ("it converts a value implicitly)", 1),
                 ("it declares a parameter default)", 20),
-                ("it declares a vararg parameter)", 10),
                 ("it declares type parameters)", 155),
-                ("it uses a block of a compiler-introduced form)", 5),
+                ("it uses a block of a compiler-introduced form)", 6),
                 ("it uses a call of a member function)", 59),
                 (
                     "it uses a call of a member no library serializes, such as a fake override)",
                     10,
                 ),
-                ("it uses a call through a property accessor signature)", 20),
+                ("it uses a call through a property accessor signature)", 29),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a constructor call)", 2),
                 ("it uses a loop whose body is not a block)", 2),

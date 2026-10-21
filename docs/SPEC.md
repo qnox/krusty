@@ -18022,6 +18022,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   capability; optional provider enrichment cannot invent a primitive when no provider is present.
   Tests: `klib_lowering::tests::primitive_calls`, `box_regressions/floatingSign.kt`.
 
+- **A KLIB vararg retains one packed array parameter.** The declaration's vararg position is
+  frozen independently of call-site specialization, in the same context/extension/value ordering
+  as its declared parameter types. Raw and prepared headers authenticate a unique regular value
+  marker, its exact position and its element through the same formal binder as the packed type.
+  Dispatch and extension/context receivers cannot be varargs; a specialized array has no type
+  arguments and a reference array has exactly one invariant or `out` element. The packed array
+  is non-null even when its element is nullable. Serialized vararg expressions lower to the same
+  common `Vararg` array node as checked source, preserving listed/spread operands once in source
+  order; calls do not unpack or repack an already packed parameter. Ordinary dependency units
+  without class-hierarchy evidence still decline implicit reference-array covariance; this does
+  not authorize erasure or invent a subtype relationship. Tests:
+  `klib_lowering::tests::varargs`, `dispatch_slots_cannot_carry_a_vararg_marker`.
+
 - **A KLIB inline function expands from its prepared body through the module inliner.** When the
   backend expands same-module inline calls in IR (Native, Wasm), every `inline` declaration of a
   dependency KLIB has its prepared-inline IR body decoded and, on its first call in a file, lowered

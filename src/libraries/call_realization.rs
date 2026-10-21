@@ -108,6 +108,8 @@ pub struct KlibBodyCallable<'a> {
     ret: Ty,
     parameter_identities: &'a [crate::fir::ResolvedParameterIdentity],
     context_count: usize,
+    /// Declaration-owned packed parameter position, including contexts and extension receiver.
+    vararg_index: Option<usize>,
     generic_signature: Option<&'a super::GenericSig>,
     type_parameters: &'a [Ty],
     reified_type_parameter_ordinals: &'a [u32],
@@ -136,6 +138,7 @@ pub(crate) struct KlibBodyCallableShape<'a> {
     pub(crate) ret: Ty,
     pub(crate) parameter_identities: &'a [crate::fir::ResolvedParameterIdentity],
     pub(crate) context_count: usize,
+    pub(crate) vararg_index: Option<usize>,
     pub(crate) generic_signature: Option<&'a super::GenericSig>,
     pub(crate) type_parameters: &'a [Ty],
     pub(crate) reified_type_parameter_ordinals: &'a [u32],
@@ -159,6 +162,7 @@ impl<'a> KlibBodyCallable<'a> {
             ret,
             parameter_identities,
             context_count,
+            vararg_index,
             generic_signature,
             type_parameters,
             reified_type_parameter_ordinals,
@@ -173,6 +177,7 @@ impl<'a> KlibBodyCallable<'a> {
             ret,
             parameter_identities,
             context_count,
+            vararg_index,
             generic_signature,
             type_parameters,
             reified_type_parameter_ordinals,
@@ -234,6 +239,10 @@ impl<'a> KlibBodyCallable<'a> {
         self.context_count
     }
 
+    pub(crate) fn vararg_index(self) -> Option<usize> {
+        self.vararg_index
+    }
+
     pub(crate) fn compiler_intrinsic(self) -> Option<CompilerIntrinsic> {
         self.compiler_intrinsic
     }
@@ -264,6 +273,7 @@ impl<'a> KlibBodyCallable<'a> {
             && self.ret == other.ret
             && self.parameter_identities == other.parameter_identities
             && self.context_count == other.context_count
+            && self.vararg_index == other.vararg_index
             && self.generic_signature == other.generic_signature
             && self.type_parameters == other.type_parameters
             && self.reified_type_parameter_ordinals == other.reified_type_parameter_ordinals
@@ -324,6 +334,7 @@ pub struct ExternalCallableRealization {
     /// Known declaration implementation modifiers; absent for providers without KLIB body facts.
     pub(crate) klib_body_declaration_modifiers: Option<super::KlibBodyDeclarationModifiers>,
     pub(crate) klib_body_class_contract: Option<super::KlibBodyClassContract>,
+    pub(crate) klib_body_vararg_index: Option<usize>,
 }
 
 impl ExternalCallableRealization {
@@ -340,6 +351,7 @@ impl ExternalCallableRealization {
                 ret: self.callable.ret,
                 parameter_identities: &self.parameter_identities,
                 context_count: self.callable.context_count,
+                vararg_index: self.klib_body_vararg_index,
                 generic_signature: self.callable.generic_sig.as_deref(),
                 type_parameters: &self.klib_body_type_parameters,
                 reified_type_parameter_ordinals: &self.callable.reified_type_parameter_ordinals,

@@ -15,6 +15,7 @@ use crate::types::{SemanticCallableOwner, TypeName};
 
 #[derive(Default)]
 struct BodyContract {
+    vararg_index: Option<usize>,
     companion_receiver: Option<KlibBodyCompanionReceiver>,
     type_parameters: Box<[crate::types::Ty]>,
     declaration_modifiers: Option<KlibBodyDeclarationModifiers>,
@@ -54,6 +55,13 @@ impl ExternalIdentities {
             signed.internal_friend,
             signed.module.as_deref(),
             BodyContract {
+                vararg_index: function.call_sig.vararg_index.map(|index| {
+                    index
+                        + usize::from(
+                            function.callable.source_receiver.is_some()
+                                && index >= function.callable.context_count,
+                        )
+                }),
                 companion_receiver,
                 declaration_modifiers: Some(KlibBodyDeclarationModifiers::function(
                     &signed.declaration,
@@ -90,6 +98,7 @@ impl ExternalIdentities {
             signed.internal_friend,
             signed.module.as_deref(),
             BodyContract {
+                vararg_index: None,
                 companion_receiver: companion_receiver.clone(),
                 declaration_modifiers: Some(KlibBodyDeclarationModifiers::accessor(
                     &signed.declaration,
@@ -121,6 +130,7 @@ impl ExternalIdentities {
                 signed.internal_friend,
                 signed.module.as_deref(),
                 BodyContract {
+                    vararg_index: None,
                     companion_receiver,
                     declaration_modifiers: Some(KlibBodyDeclarationModifiers::accessor(
                         &signed.declaration,
@@ -288,6 +298,7 @@ impl ExternalIdentities {
             klib_body_type_parameters: body.type_parameters,
             klib_body_declaration_modifiers: body.declaration_modifiers,
             klib_body_class_contract: None,
+            klib_body_vararg_index: body.vararg_index,
         });
         self.by_signature.borrow_mut().insert(key, identity);
     }

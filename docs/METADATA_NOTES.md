@@ -756,6 +756,17 @@ accessor/property membership and full function header before using that evidence
 publishes private implementation functions nor broadens ordinary instance-body emission. No wire
 format or Native runtime layout changes. Tests: `klib_lowering::tests::primitive_calls`.
 
+## Declaration-owned KLIB vararg coordinates
+
+Metadata value-parameter vararg indices include context parameters but exclude an extension
+receiver. The provider freezes the declaration index in its normalized parameter order, inserting
+the extension offset at the context boundary. Associated companion receivers remain a separate
+contract and are accounted for only when authenticating their actual serialized slot. The frozen
+body view never reads the callable's call-site-specialized `vararg_elem`/`vararg_index` fields.
+The declared packed parameter supplies its element; raw element markers use the same formal binder
+and must agree exactly. Prepared copies keep their existing checked declared/erased type boundary.
+No serialized layout or runtime ABI changes. Tests: `klib_lowering::tests::varargs`.
+
 ## Compiler-plugin declarations in a KLIB
 
 kotlinx.serialization is split like kotlinc's plugin: its frontend part declares what Kotlin code

@@ -5621,6 +5621,14 @@ non-inline callers, still reads the field directly. Test:
   walk stops; actual lowering consumes that same proof. Private array-length implementations are
   not made public or given helper-name exceptions. Ordinary instance bodies remain unsupported;
   target array representation and all existing-pass preservation gates still need validation.
+- Declaration-owned vararg positions survive provider and frozen handoffs separately from
+  call-site specialization. Raw/prepared headers authenticate the exact packed-array element and
+  regular-value slot, including context/extension coordinates; dispatch markers are rejected.
+  Serialized listed/spread operands lower to the existing common Vararg node without changing
+  dependency call arity. Header and source-IR round-trip tests cover this common boundary; complete
+  Native/Wasm preservation and generic target representation remain separate landing gates.
+  Ordinary-unit reference spreads need normalized subtype evidence for covariance; the real
+  Kotlin/Native producer leaves the narrower array uncast. No widening shortcut is admitted.
 - Native dependency exports retain one emitted IR signature for both wrapper definitions and
   imports. Exact checked generic instantiation validates source operand roles independently of
   the canonical ABI; arguments/results use the existing target boxing and conversion boundary.

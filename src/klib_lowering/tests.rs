@@ -10,6 +10,7 @@ mod demo_package;
 mod inline_templates;
 mod primitive_calls;
 mod returnable_blocks;
+mod varargs;
 
 use super::*;
 use crate::backend::{BackendCallableFact, CheckedBackendCallables};
@@ -341,6 +342,22 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
             "return@{:?} {}",
             ir.checked_return_depths.get(&expression),
             value.map_or(String::new(), |value| render(ir, value))
+        ),
+        IrExpr::Vararg {
+            array_type,
+            spreads,
+            elements,
+        } => format!(
+            "vararg<{}>[{}]",
+            type_name_of(*array_type),
+            elements
+                .iter()
+                .zip(spreads)
+                .map(|(element, spread)| {
+                    format!("{}{}", if *spread { "*" } else { "" }, render(ir, *element))
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
         ),
         IrExpr::When { branches } => {
             let branches = branches
