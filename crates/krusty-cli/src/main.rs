@@ -2,12 +2,12 @@
 //! lex+parse all files → collect signatures globally → for each file: typecheck → emit `.class` →
 //! drop the file's arenas. Output goes to a directory or a `.jar` (kotlinc `-d`).
 
-use std::io::Write;
 use std::path::Path;
 
 use krusty::diag::DiagSink;
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
+use krusty_cli::staged_output::StagedOutput;
 use krusty_cli::{cli, kotlinc_arguments};
 
 /// The compiler's allocation pattern (many short-lived vectors and strings) runs markedly faster on
@@ -182,12 +182,14 @@ fn compile_work_unit(unit: krusty_cli::worker::WorkUnit) -> Result<(), String> {
     // still has a declared output. Running the compiler would also demand a Kotlin distribution
     // the action does not have.
     if unit.sources.is_empty() {
-        write_jar(&unit.output_jar, &[]).map_err(|error| {
-            format!(
-                "krusty: cannot write output to {}: {error}\n",
-                unit.output_jar.display()
-            )
-        })?;
+        StagedOutput::new(&unit.output_jar)
+            .commit()
+            .map_err(|error| {
+                format!(
+                    "krusty: cannot write output to {}: {error}\n",
+                    unit.output_jar.display()
+                )
+            })?;
     } else {
         let opts = cli::parse(argv);
         let errors: Vec<&str> = opts
@@ -335,8 +337,23 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
     // A `-jvm-target` sets the emitted class-file version (kotlinc's `jvmToolchain(25)` ⇒ v69).
     // Absent, the backend keeps krusty's v52 default.
     let backend = opts.jvm_backend(cp);
-    let outputs =
-        krusty::compiler::emit_analyzed(analysis, &stems, &backend, &opts.module_name, &mut diags);
+    // Each file's classes are staged as soon as they are emitted rather than held for the whole
+    // module; nothing reaches `-d` unless the compilation succeeds.
+    let mut output = StagedOutput::new(&opts.dest);
+    let mut emitted = 0;
+    krusty::compiler::emit_analyzed_to(
+        analysis,
+        &stems,
+        &backend,
+        &opts.module_name,
+        &mut diags,
+        &mut |(rel, bytes)| {
+            if rel.ends_with(".class") {
+                emitted += 1;
+            }
+            output.write(&rel, &bytes);
+        },
+    );
 
     // Render each diagnostic against ITS OWN source file (by `Diagnostic::file`), once — not the
     // whole list against every file, which mis-attributed multi-file errors to the wrong source.
@@ -413,58 +430,13 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
     }
     eprint!("{}", diags.render_all(&rendered));
 
-    let emitted = outputs
-        .iter()
-        .filter(|(p, _)| p.ends_with(".class"))
-        .count();
-    let result = if opts.dest.extension().is_some_and(|e| e == "jar") {
-        write_jar(&opts.dest, &outputs)
-    } else {
-        write_dir(&opts.dest, &outputs)
-    };
-    result.map_err(|error| {
+    output.commit().map_err(|error| {
         format!(
             "krusty: cannot write output to {}: {error}\n",
             opts.dest.display()
         )
     })?;
     Ok(emitted)
-}
-
-fn write_dir(dir: &Path, outputs: &[(String, Vec<u8>)]) -> std::io::Result<()> {
-    for (rel, bytes) in outputs {
-        let path = dir.join(rel);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&path, bytes)?;
-    }
-    Ok(())
-}
-
-/// Write outputs into a `.jar` (a zip with a minimal manifest) — kotlinc `-d foo.jar`.
-fn write_jar(path: &Path, outputs: &[(String, Vec<u8>)]) -> std::io::Result<()> {
-    use zip::write::SimpleFileOptions;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let file = std::fs::File::create(path)?;
-    let mut zw = zip::ZipWriter::new(file);
-    let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-
-    zw.start_file("META-INF/MANIFEST.MF", opts)
-        .map_err(zip_io)?;
-    zw.write_all(b"Manifest-Version: 1.0\r\nCreated-By: krusty\r\n\r\n")?;
-    for (rel, bytes) in outputs {
-        zw.start_file(rel, opts).map_err(zip_io)?;
-        zw.write_all(bytes)?;
-    }
-    zw.finish().map_err(zip_io)?;
-    Ok(())
-}
-
-fn zip_io(e: zip::result::ZipError) -> std::io::Error {
-    std::io::Error::other(e)
 }
 
 fn file_stem(path: &str) -> String {
