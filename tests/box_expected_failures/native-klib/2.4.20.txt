@@ -987,7 +987,6 @@ inference/integerLiteralTypeInLamdaReturnType.kt
 inference/kt35684.kt
 inference/kt38664.kt
 inference/kt49838.kt
-inference/lastExpressionOfLambdaWithNothingConstraint.kt
 inference/overrideDefaultProperty.kt
 inference/overrideGenericDefaultMethod.kt
 inference/pcla/callableReferenceAndCoercionToUnit.kt
@@ -1026,7 +1025,6 @@ inline/defaultArgsLowering.kt
 inline/defaultArgsLoweringWithIntraModuleInliner.kt
 inline/defaultArgsMultipleModules.kt
 inline/fakeOverrideInlining.kt
-inline/inline13.kt
 inline/inline24.kt
 inline/inline26.kt
 inline/inline5.kt
@@ -1192,7 +1190,6 @@ ir/kt52677.kt
 ir/kt55318.kt
 ir/privateSignatures/enumEntryArguments.kt
 ir/recursiveGeneric.kt
-ir/recursiveGeneric2.kt
 ir/serializationRegressions/anonFakeOverride.kt
 ir/serializationRegressions/innerClassInEnumEntryClass.kt
 ir/serializationRegressions/useImportedMember.kt
@@ -1201,7 +1198,6 @@ jdk/arrayList.kt
 jdk/hashMap.kt
 jdk/iteratingOverHashMap.kt
 jdk/noStringToCharArray.kt
-kclass/kclass1.kt
 ktype/ktype1_basics1.kt
 ktype/ktype1_inner.kt
 ktype/nonReified_class.kt
@@ -1266,8 +1262,6 @@ multiplatform/k2/delegation/delegationToExpectInterface_withOverrideInDelegated.
 multiplatform/k2/delegation/delegationWithIntersection.kt
 multiplatform/k2/enumStaticMethods.kt
 multiplatform/k2/exhaustiveness/commonEnum.kt
-multiplatform/k2/exhaustiveness/commonSealedClass.kt
-multiplatform/k2/exhaustiveness/commonSealedInterface.kt
 multiplatform/k2/expectStatic.kt
 multiplatform/k2/extensionPropertiesOverloads.kt
 multiplatform/k2/hmpp/abstractExpectedActual2-2.kt
@@ -1330,7 +1324,6 @@ nameBasedDestructuring/shortFormFromSmartCast.kt
 nonLocalReturns/suspendConversion.kt
 nothingValue/nothingValueException.kt
 nullCheckOptimization/kt22410.kt
-nullCheckOptimization/trivialInstanceOf.kt
 objectIntrinsics/objects.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/accessFromInlineLambda.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/anonymousObjectInPropertyInitializer.kt
@@ -1534,7 +1527,6 @@ ranges/unsigned/literal/simpleRangeWithNonConstantEnds.kt
 ranges/unsigned/literal/simpleSteppedDownTo.kt
 ranges/unsigned/literal/simpleSteppedRange.kt
 reflection/classLiterals/annotationClassLiteral.kt
-reflection/classLiterals/nativeWithoutPackagePatching.kt
 reflection/classes/qualifiedNameOfStandardClasses.kt
 reflection/classes/qualifiedNameOfStandardClassesOther.kt
 reflection/constructors/constructorName.kt
@@ -1600,7 +1592,6 @@ regressions/kt68727.kt
 regressions/kt789.kt
 regressions/objectCaptureOuterConstructorProperty.kt
 regressions/resolvedCallForGetOperator.kt
-reified/callChain.kt
 reified/callableReferenceInlinedFunFromOtherModule.kt
 reified/capture.kt
 reified/catchParameter/nestedReifiedCatch.kt
@@ -1612,9 +1603,6 @@ reified/kt39256_privateInlineWithAnonymousObject.kt
 reified/lambda.kt
 reified/lambdaNameClash.kt
 reified/method.kt
-reified/multipleTypeParameters.kt
-reified/noValueParameters.kt
-reified/parameterSwap.kt
 reified/reifiedIntersectionType.kt
 reified/reifiedIntersectionTypeArgument.kt
 reified/reifiedIntersectionTypeArgumentCrossModule.kt
@@ -1622,8 +1610,6 @@ reified/reifiedTypeArgumentWithIntersectionTypeAsTypeArgument.kt
 reified/spreads.kt
 reified/vararg.kt
 reified/varargs.kt
-reified/withInlineTurnedOff.kt
-rtti/isReifiedObject.kt
 sam/constructors/sameWrapperClass2.kt
 sam/constructors/suspendSamConstructorAdaptation.kt
 sam/funInterfaceExtendsSuspendFunction.kt
@@ -1722,15 +1708,9 @@ typeErasure/funWithReifiedTypeParameterInsideInnerClass.kt
 typeErasure/funWithReifiedTypeParameterInsideNestedClass.kt
 typeErasure/funWithReifiedTypeParameterWithTwoUpperBounds.kt
 typeErasure/funWithReifiedTypeParameterWithUpperBound.kt
-typeErasure/funWithTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
-typeErasure/funWithTypeParameterInsideClass.kt
-typeErasure/funWithTypeParameterInsideInnerClass.kt
-typeErasure/funWithTypeParameterInsideNestedClass.kt
 typeErasure/outerClassWithTypeParameterAndChainOfInnerClassesWithTypeParameters.kt
 typeErasure/outerClassWithTypeParameterAndInlineFunctionWithReifiedTypeParameter.kt
-typeErasure/outerClassWithTypeParameterAndInlineFunctionWithTypeParameter.kt
 typeErasure/outerClassWithTypeParameterAndInnerClassWithTypeParameter.kt
-typeErasure/outerClassWithTypeParameterWithTwoUpperBounds.kt
 typeErasure/outerClassWithTypeParameterWithUpperBoundAndInlineFunctionWithReifiedTypeParameterWithTwoUpperBounds.kt
 typeErasure/twoFunWithReifiedTypeParametersInlineFunWithReifiedTypeParameters.kt
 typeErasure/twoFunWithReifiedTypeParametersInlineFunWithTwoTypeParameters.kt

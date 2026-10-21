@@ -650,3 +650,12 @@ order. A plugin-generated class and its members carry no file extension (`classF
 declaration: the JVM adds it to its own `@Metadata` record after the handoff.
 `klib_class_surface_e2e::serialization_plugin_declarations_match_kotlinc_native` compares the whole
 fragment with kotlinc-native's bytes.
+
+## Authenticated Throwable realization
+
+KLIB classifier and property records retain the selected platform-stdlib input's existing archive
+authority before constructor/accessor identities are published. The exact base `Throwable()` and
+`Throwable(String?)` signatures and immutable `message: String?` member may receive typed compiler
+realizations; an ordinary dependency with identical metadata may not. This does not rewrite Kotlin
+metadata or change source overload selection. Wasm owns the GC fields and exception tag; common IR
+keeps the selected constructor/getter identities and typed `Try` / `Throw` nodes.

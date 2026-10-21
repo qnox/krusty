@@ -70,6 +70,8 @@ pub(super) struct SignedFunction {
 /// A property joined with the identities its library serialized it and its accessors under, and
 /// its validated parameter identities.
 pub(super) struct SignedProperty {
+    /// Archive authority retained before an accessor's exact external identity is published.
+    pub(super) compiler_builtin_owner: bool,
     pub(super) declaration: KotlinProperty,
     pub(super) signature: KlibPublicIdSignature,
     pub(super) getter: KlibAccessorIdSignature,
@@ -247,6 +249,7 @@ pub(super) fn sign_property(
         )));
     }
     Ok(SignedProperty {
+        compiler_builtin_owner: false,
         declaration,
         signature,
         getter,

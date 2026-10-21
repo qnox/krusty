@@ -19,12 +19,18 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 mod default_arguments;
+mod exceptions;
 mod intrinsic_operations;
 mod objects;
 mod scalar_instructions;
 mod shared_cells;
 
 pub(super) use scalar_instructions::is_scalar_operation;
+
+pub(super) fn is_direct_operation(operation: crate::backend::BackendCompilerIntrinsic) -> bool {
+    is_scalar_operation(operation)
+        || operation == crate::backend::BackendCompilerIntrinsic::ThrowableMessage
+}
 
 use crate::backend::{BackendCallableFact, CheckedBackendCallables, DependencyExportSignatures};
 use crate::ir::{
@@ -824,7 +830,7 @@ impl<'a> Body<'a> {
                     (Some(value), Some(_)) => self.value(value, self.result)?,
                     (Some(value), None) => self.statement(value)?,
                     (None, Some(_)) => {
-                        return Err("a `return` of no value from a non-`Unit` function".into())
+                        return Err("a `return` of no value from a non-`Unit` function".into());
                     }
                     (None, None) => {}
                 }
@@ -942,6 +948,21 @@ impl<'a> Body<'a> {
                     .module_default(provider)
                     .ok_or_else(|| "an unregistered source default entry".to_string())?;
                 self.defaulted_call(function, params, defaults, &args)?;
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver,
+                args,
+            } if let Callee::External {
+                target,
+                ret,
+                defaults,
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self.is_throwable_message(*target) =>
+            {
+                self.throwable_message(dispatch_receiver, &args, *ret)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -1357,13 +1378,26 @@ impl<'a> Body<'a> {
                 internal,
                 args,
                 ctor_params,
+                external_target,
                 defaults,
                 ..
             } => {
-                if !defaults.is_empty() {
-                    return Err("a constructor call with omitted arguments".to_string());
-                }
-                self.construction(internal, &args, ctor_params.as_deref())?
+                self.new_object(
+                    internal,
+                    &args,
+                    ctor_params.as_deref(),
+                    external_target,
+                    &defaults,
+                )?;
+            }
+            IrExpr::Throw { operand } => self.throw_value(operand)?,
+            IrExpr::Try {
+                body,
+                catches,
+                finally,
+                result,
+            } => {
+                self.try_catch(body, &catches, finally, result)?;
             }
             IrExpr::GetField {
                 receiver,
@@ -1403,6 +1437,21 @@ impl<'a> Body<'a> {
                     && context_arguments.is_empty() =>
             {
                 self.property_read(*target, *dispatch_receiver)?
+            }
+            IrExpr::Checked(ref checked_op)
+                if let crate::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    dispatch: crate::ir::IrPropertyDispatch::Ordinary,
+                    receiver,
+                    arguments,
+                    parameters,
+                    result,
+                    source_receiver: Some(_),
+                } = &**checked_op
+                    && parameters.is_empty()
+                    && self.is_throwable_message_property(*target) =>
+            {
+                self.throwable_message(*receiver, arguments, *result)?;
             }
             IrExpr::Checked(ref checked_op)
                 if let crate::ir::IrCheckedOperation::PropertyWrite {
@@ -1617,7 +1666,7 @@ impl<'a> Body<'a> {
                 return Err(format!(
                     "a string template part of type `{}`",
                     describe(other)
-                ))
+                ));
             }
             None => return Ok(()),
         };
@@ -1733,6 +1782,18 @@ impl<'a> Body<'a> {
         let Some(result) = self.type_of(id)? else {
             return Err(format!("the operator {op:?} answering `Nothing`"));
         };
+        if matches!(op, IrBinOp::RefEq | IrBinOp::RefNe)
+            && matches!(carrier(left)?, Some(ValType::Ref { .. }))
+            && matches!(carrier(right)?, Some(ValType::Ref { .. }))
+        {
+            self.expression(lhs)?;
+            self.expression(rhs)?;
+            self.code.ref_eq();
+            if op == IrBinOp::RefNe {
+                self.code.op(EQZ32);
+            }
+            return Ok(());
+        }
         let shift = matches!(op, IrBinOp::Shl | IrBinOp::Shr | IrBinOp::Ushr);
         let unsigned = if shift {
             left.is_unsigned() || result.is_unsigned()

@@ -861,15 +861,36 @@ pub(super) fn run_multimodule_case(case: &super::multimodule_conformance_cases::
     {
         return;
     }
-    let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     let classpath = common::classpath_jars_for(case.source);
+    let reference = box_reference_classes::reference_compile(
+        case.source,
+        case.stem,
+        &classpath,
+        krusty::conformance::BoxJdk::Full {
+            root: Some(jdk.as_path()),
+        },
+        COROUTINE_HELPERS,
+    )
+    .unwrap_or_else(|error| panic!("{}: kotlinc module graph failed: {error}", case.stem));
+    let reference_classes = reference
+        .qualified()
+        .map(|((_, name), bytes)| (name.to_owned(), bytes.to_vec()))
+        .collect::<Vec<_>>();
+    let reference_box = find_box_class(&reference_classes)
+        .unwrap_or_else(|| panic!("{}: kotlinc module graph must emit box()", case.stem));
+    assert_eq!(
+        common::run_box(&reference_classes, &reference_box, &classpath),
+        Some("OK".to_string()),
+        "{}: kotlinc must run the exact module graph",
+        case.stem
+    );
     let classes = compile_module_test(case.source, &classpath, Some(jdk.as_path()), &|_| {})
         .unwrap_or_else(|| panic!("{}: JVM must compile the exact module graph", case.stem));
     let box_class = find_box_class(&classes.flat)
         .unwrap_or_else(|| panic!("{}: JVM module graph must emit box()", case.stem));
     assert_eq!(
-        common::run_box(&classes.flat, &box_class, std::slice::from_ref(&stdlib),),
+        common::run_box(&classes.flat, &box_class, &classpath),
         Some("OK".to_string()),
         "{}: JVM must run the exact separately compiled module graph",
         case.stem
