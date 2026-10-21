@@ -15,6 +15,8 @@ use super::{
 use crate::ir::IrFile;
 use crate::types::Ty;
 
+mod read_only_stubs;
+
 struct BridgeMethodHeader<'a> {
     bridge: &'a crate::ir::Bridge,
     packs_arguments: bool,
@@ -174,13 +176,15 @@ fn emit_interface_entry_checks(
 
 /// Emit `ACC_BRIDGE|ACC_SYNTHETIC` methods: each has the supertype's erased descriptor, adapts its
 /// arguments (type barrier / checkcast / unbox / numeric convert), delegates to the concrete override,
-/// and adapts the return value back (box / numeric convert).
+/// and adapts the return value back (box / numeric convert). A class's read-only collection stubs
+/// precede its bridges, and their throwing bridges follow the ordinary ones.
 pub(super) fn emit_bridges(
     ir: &IrFile,
     c: &crate::ir::IrClass,
     cw: &mut ClassWriter,
     env: &EmitEnv<'_>,
 ) {
+    read_only_stubs::emit_stubs(ir, c, cw, env);
     let class = ClassBridges::new(ir, c, env);
     for (bridge_index, b) in c.bridges.iter().enumerate() {
         // An interface entry stands beside its static member, which emits it.
@@ -188,15 +192,18 @@ pub(super) fn emit_bridges(
             continue;
         }
         let descriptor = method_descriptor(&jvm_tys(&b.erased_params), ir_ty_to_jvm(&b.erased_ret));
-        if env
-            .inherited_collection_bridges
-            .replaces_ordinary(c.fq_name_id(), &b.name, &descriptor)
-        {
+        if env.collection_members.inherited_bridges.replaces_ordinary(
+            c.fq_name_id(),
+            &b.name,
+            &descriptor,
+        ) {
             continue;
         }
         emit_bridge(&class, cw, bridge_index, b, None);
     }
-    for bridge in env.inherited_collection_bridges.for_class(c.fq_name_id()) {
+    read_only_stubs::emit_stub_bridges(c, cw, env);
+    let inherited = &env.collection_members.inherited_bridges;
+    for bridge in inherited.for_class(c.fq_name_id()) {
         emit_inherited_collection_bridge(ir, c, cw, bridge);
     }
 }

@@ -34,6 +34,8 @@ pub enum SkipReason {
     /// A lambda argument of an inline call carried no published parameter modifier and declared
     /// type, so whether the call inlines it is unknown.
     InlineParameters,
+    /// A read-only collection superclass lacks the exact semantic declaration its stubs need.
+    ReadOnlyCollectionStubs(String),
 }
 
 /// What the plugin pass of [`run_backend_passes`] runs: the native plugins the frontend ran for this
@@ -64,9 +66,9 @@ pub(crate) struct BackendPassFacts {
     override_results: crate::jvm::override_results::OverrideResults,
     /// Neutral-result guards on collection overrides whose descriptor needs no bridge.
     collection_method_entry_barriers: crate::jvm::collection_barriers::MethodEntryBarriers,
-    /// JVM-only bridges for mapped collection declarations inherited from a Java superclass.
-    inherited_collection_bridges:
-        crate::jvm::inherited_collection_bridges::InheritedCollectionBridges,
+    /// JVM-only collection members: bridges for mapped collection declarations inherited from a
+    /// Java superclass, and throwing stubs for a read-only collection face's mutable members.
+    collection_members: crate::jvm::read_only_collection_stubs::CollectionMemberPlans,
     /// What the property-reference pass selected for each synthesized reference class. The
     /// value-class pass consumes and extends it; nothing recovers these answers from a spelling.
     property_reference_realizations: crate::jvm::property_references::PropertyReferenceRealizations,
@@ -307,8 +309,18 @@ fn run_backend_passes_after_plugins(
         &facts.override_results,
         &mut facts.collection_method_entry_barriers,
     );
-    facts.inherited_collection_bridges =
-        crate::jvm::inherited_collection_bridges::select(ir, classpath, &facts.override_results);
+    facts.collection_members = crate::jvm::read_only_collection_stubs::CollectionMemberPlans {
+        inherited_bridges: crate::jvm::inherited_collection_bridges::select(
+            ir,
+            classpath,
+            &facts.override_results,
+        ),
+        read_only_stubs: crate::jvm::read_only_collection_stubs::select(
+            ir,
+            classpath,
+            classifiers,
+        )?,
+    };
     // The value-class pass reads same-module SOURCE value classes (internal name → sole-field
     // underlying) for its erasure/mangle map from the frontend symbols directly, NOT through the
     // resolver's library view (which would change the checker's construction/member resolution for
@@ -1109,7 +1121,7 @@ impl JvmBackend {
             function_argument_arrays: &pass_facts.function_argument_arrays,
             override_results: &pass_facts.override_results,
             collection_method_entry_barriers: &pass_facts.collection_method_entry_barriers,
-            inherited_collection_bridges: &pass_facts.inherited_collection_bridges,
+            collection_members: &pass_facts.collection_members,
         };
         let classes = crate::jvm::ir_emit::emit_all_with_checked_classifiers(
             &ir,
@@ -1193,6 +1205,13 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
             );
             return;
         }
+        SkipReason::ReadOnlyCollectionStubs(detail) => {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                format!("krusty: cannot realize read-only collection stubs: {detail}"),
+            );
+            return;
+        }
         SkipReason::MemberDispatch(classifier) => {
             diags.error(
                 crate::diag::Span::new(0, 0),
@@ -1213,6 +1232,7 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
         | SkipReason::SuperCalls
         | SkipReason::CallArguments(_)
         | SkipReason::InlineParameters
+        | SkipReason::ReadOnlyCollectionStubs(_)
         | SkipReason::MemberDispatch(_) => {
             unreachable!()
         }

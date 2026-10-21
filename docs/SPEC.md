@@ -12643,6 +12643,32 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   of `addAll` is the method the caller hits. Tests: `tests/collection_bridge_barrier_e2e.rs`.
   Corpus: `inlineClasses/inlineClassCollection/*` (collection, list and map, with their `Generic`
   forms, and `inlineMutableCollectionBulkAdd`).
+- **A read-only iterator realizes its mutable members as throwing stubs.** Kotlin's `Iterator` and
+  `ListIterator` map onto `java.util.Iterator`/`ListIterator`, whose `remove`, `set` and `add` a
+  Java caller can reach. Like kotlinc's `CollectionStubMethodLowering`, a class (abstract,
+  anonymous and enum classes included, interfaces not) that strictly extends a read-only face
+  without its mutable counterpart gets a `public` method for each member the mutable declaration
+  itself declares in `.kotlin_builtins`, substituted with the face's type arguments, unless the
+  class declares a member of that name and parameter shape (abstract or not) or inherits a
+  non-abstract one from a superclass or an interface default. Each throws
+  `UnsupportedOperationException("Operation is not supported for read-only collection")`, has a
+  `this`-and-parameters `LocalVariableTable` named after the mutable declaration, no line numbers,
+  and a generic `Signature` when one differs from its descriptor (`set(TT;)V`). Only the most
+  specific related face counts (`ListIterator` over `Iterator`). Because `MutableListIterator`
+  redeclares `next` and `hasNext`, an abstract `ListIterator` that implements neither gets stubs
+  for them too (KT-36724). The stubs follow the declared members in the mutable declaration's
+  order. A stub whose descriptor differs from the mutable declaration's erasure (`set(I)V` of a
+  `ListIterator<Int>`) also gets an `ACC_PUBLIC|ACC_BRIDGE|ACC_SYNTHETIC` throwing bridge
+  (`set(Ljava/lang/Object;)V`), placed after the ordinary bridges. A subclass does not repeat a
+  stub a superclass already realizes, but it does when an abstract superclass declares the member
+  abstract. Abstract superclass declarations are compared after applying the superclass's type
+  arguments in the child context: `Base<T>.set(T)` suppresses the parent's stub but not an applied
+  child's `set(String)` stub and erased bridge. A concrete generic intermediate's existing stub is
+  still inherited rather than repeated. The stubs never enter Kotlin metadata. The collection faces
+  (`Iterable`, `Collection`, `List`, `Set`, `Map`, `Map.Entry`), with `removeAt`, the lifted
+  `iterator` result types, the JDK members and `toArray`, follow in later slices. Tests:
+  `tests/read_only_iterator_stubs_e2e.rs`. Corpus: `objects/useAnonymousObjectAsIterator.kt`,
+  `builtinStubMethods/customReadOnlyIterator.kt`.
 - **A nested value class over a reference carrier is read as its carrier.** In `ZN(val z: Z1?)`
   with `Z1(val x: En)`, `Z1?` is carried as `En?`, so `zn.z` and `zn.z!!` already are `Z1`'s
   carrier and `.x` of them is that carrier itself, with no cast. krusty took the unboxed property

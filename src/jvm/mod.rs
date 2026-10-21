@@ -87,6 +87,7 @@ mod property_references;
 pub mod property_storage;
 pub(crate) mod protected_dependency_calls;
 mod ranges;
+mod read_only_collection_stubs;
 #[cfg(test)]
 pub(crate) mod realization_test_support;
 mod reified_anonymous;
