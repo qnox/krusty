@@ -2,6 +2,8 @@
 import { SEO } from "astro-seo";
 
 const repo = "https://github.com/qnox/krusty";
+const news = "https://x.com/qnox";
+const xHandle = "@qnox";
 const title = "krusty: a Kotlin compiler written in Rust";
 const description =
   "krusty is a Kotlin compiler written in Rust. Built as a drop-in replacement for kotlinc on the JVM: for the supported Kotlin subset, kotlinc-compatible flags and .class files that aim to be byte-for-byte identical to kotlinc's.";
@@ -37,7 +39,7 @@ const jsonLd = {
         optional: { description, siteName: "krusty" },
         image: { type: "image/png", width: 1200, height: 630, alt: cardAlt },
       }}
-      twitter={{ card: "summary_large_image", title, description, image: card, imageAlt: cardAlt }}
+      twitter={{ card: "summary_large_image", site: xHandle, creator: xHandle, title, description, image: card, imageAlt: cardAlt }}
       extend={{
         link: [
           { rel: "icon", href: "/favicon.ico", sizes: "16x16 32x32 48x48" },
@@ -111,7 +113,7 @@ krusty -cp deps.jar:classes/ App.kt -d out/  # with a classpath</code></pre>
       </p>
     </main>
     <footer>
-      Apache-2.0 · <a href={repo}>github.com/qnox/krusty</a> · Kotlin is a trademark of JetBrains; krusty is an independent project.
+      Apache-2.0 · <a href={repo}>github.com/qnox/krusty</a> · News: <a href={news}>{xHandle} on X</a> · Kotlin is a trademark of JetBrains; krusty is an independent project.
     </footer>
   </body>
 </html>

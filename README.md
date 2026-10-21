@@ -42,7 +42,7 @@ paired `.class` file over the longer file length. The Native conformance badge i
 the share of Native-applicable cases that compile against the Kotlin/Native stdlib KLIB, link, run,
 and return `OK`.
 
-[Website](https://krustythecompiler.dev) · [Download](https://github.com/qnox/krusty/releases/latest) · [Sponsor](https://github.com/sponsors/qnox)
+[Website](https://krustythecompiler.dev) · [Download](https://github.com/qnox/krusty/releases/latest) · [News: @qnox on X](https://x.com/qnox) · [Sponsor](https://github.com/sponsors/qnox)
 
 ## Install
 
