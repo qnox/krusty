@@ -4,6 +4,7 @@
 //! extensions it declares, and its `companion { … }` block members. Inherited members are core's
 //! hierarchy walk over the direct supertypes the record lists.
 
+use super::builtin_realizations;
 use super::classifier_signatures::{SignedClassifier, SignedConstructor};
 use super::external_identities::ExternalIdentities;
 use super::inventory::PackageInventory;

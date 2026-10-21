@@ -581,7 +581,26 @@ pub const TRY_NORMAL_COMPLETION: Case = Case {
              }\n",
 };
 
+/// Calls the collection protocol directly, without depending on a stdlib inline template.
+pub const DIRECT_COLLECTION_ITERATOR: Case = Case {
+    stem: "multimoduleDirectCollectionIterator",
+    source: "// MODULE: lib\n\
+             // FILE: values.kt\n\
+             @OptIn(ExperimentalUnsignedTypes::class)\n\
+             fun unsignedValues(): Iterable<UByte> = ubyteArrayOf(1u, 255u)\n\
+             // MODULE: main(lib)\n\
+             // FILE: main.kt\n\
+             fun box(): String {\n\
+             \x20   val iterator = unsignedValues().iterator()\n\
+             \x20   if (!iterator.hasNext() || iterator.next() != 1.toUByte()) return \"first\"\n\
+             \x20   if (!iterator.hasNext() || iterator.next() != 255.toUByte()) return \"second\"\n\
+             \x20   if (iterator.hasNext()) return \"end\"\n\
+             \x20   return \"OK\"\n\
+             }\n",
+};
+
 pub const ALL: &[Case] = &[
+    DIRECT_COLLECTION_ITERATOR,
     INLINE_TEXT_TRIM,
     INLINE_STDLIB_REPEAT,
     THROWABLE_TRANSPORT,
