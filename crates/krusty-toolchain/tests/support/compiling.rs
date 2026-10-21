@@ -16,7 +16,10 @@
 //! `recorder: <module> begins` on stderr, sleeps that many seconds, prints
 //! `recorder: <module> ends` on stderr and `recorder: compiled <module>` on stdout. The module
 //! `KRUSTY_RECORDER_FAIL_LATE` names instead prints `recorder: failing <module> late` on stderr
-//! after its sleep and exits with status 4. It records no `compilation-fingerprint` request: it
+//! after its sleep and exits with status 4. `KRUSTY_RECORDER_FAILURE_COMPANION` names a module
+//! whose start the failing module waits for, and which waits for the failure's end before continuing.
+//! Both waits are bounded; event markers are published after the corresponding event is recorded.
+//! It records no `compilation-fingerprint` request: it
 //! answers one with the contents of the file named for the module in the directory
 //! `KRUSTY_RECORDER_FINGERPRINTS` names, and fails one when there is none.
 //!
@@ -121,6 +124,20 @@ if [ \"${1:-}\" = compilation-fingerprint ]; then
 fi
 event() {
   if [ -n \"${KRUSTY_EVENTS:-}\" ]; then printf '%s %s\\n' \"$1\" \"$module\" >> \"$KRUSTY_EVENTS\"; fi
+  if [ -n \"${KRUSTY_RECORDER_FAILURE_COMPANION:-}\" ]; then
+    touch \"$KRUSTY_EVENTS.$module.$1\"
+  fi
+}
+wait_for_event() {
+  attempts=0
+  until [ -f \"$KRUSTY_EVENTS.$1.$2\" ]; do
+    if [ \"$attempts\" -ge 3000 ]; then
+      echo \"recorder: $module timed out waiting for $2 $1\" >&2
+      exit 6
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.01
+  done
 }
 event start
 until mkdir \"$KRUSTY_RECORD.lock\" 2>/dev/null; do sleep 0.01; done
@@ -130,9 +147,15 @@ until mkdir \"$KRUSTY_RECORD.lock\" 2>/dev/null; do sleep 0.01; done
 } >> \"$KRUSTY_RECORD\"
 rmdir \"$KRUSTY_RECORD.lock\"
 if [ -n \"${KRUSTY_RECORDER_FAIL:-}\" ] && [ \"$module\" = \"$KRUSTY_RECORDER_FAIL\" ]; then
+  if [ -n \"${KRUSTY_RECORDER_FAILURE_COMPANION:-}\" ]; then
+    wait_for_event \"$KRUSTY_RECORDER_FAILURE_COMPANION\" start
+  fi
   echo \"recorder: failing $module\" >&2
   event end
   exit 3
+fi
+if [ \"$module\" = \"${KRUSTY_RECORDER_FAILURE_COMPANION:-}\" ]; then
+  wait_for_event \"$KRUSTY_RECORDER_FAIL\" end
 fi
 if [ -n \"${KRUSTY_RECORDER_SLEEP:-}\" ]; then
   echo \"recorder: $module begins\" >&2
@@ -218,6 +241,7 @@ pub fn environment(command: &mut Command, directory: &Path, krusty: &Path) {
         .env_remove("KRUSTY_RECORDER_FAIL")
         .env_remove("KRUSTY_RECORDER_SLEEP")
         .env_remove("KRUSTY_RECORDER_FAIL_LATE")
+        .env_remove("KRUSTY_RECORDER_FAILURE_COMPANION")
         .env_remove("KRUSTY_EVENTS")
         .env_remove("AMPER_SHARED_CACHE_DIR")
         .env_remove("M2_HOME");
