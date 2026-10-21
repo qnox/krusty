@@ -376,13 +376,14 @@ impl Checker<'_> {
                         {
                             return None;
                         }
-                        let call_sig = crate::libraries::CallSig {
-                            param_defaults: declared.param_defaults,
-                            required: declared.required,
-                            vararg: declared.vararg(),
-                            vararg_index: declared.vararg_index,
-                            ..crate::libraries::CallSig::default()
-                        };
+                        let call_sig =
+                            crate::libraries::CallSig::from(crate::libraries::CallShape {
+                                param_defaults: declared.param_defaults,
+                                required: declared.required,
+                                vararg: declared.vararg(),
+                                vararg_index: declared.vararg_index,
+                                ..crate::libraries::CallShape::default()
+                            });
                         let mut plan = self.callable_ref_parameter_plan(
                             &value_parameters,
                             &call_sig,

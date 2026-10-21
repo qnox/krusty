@@ -46,6 +46,7 @@ pub use call_realization::{
     KlibDependencyCallable, NonvirtualCallRealization, OverriddenCallKind,
     OverriddenCallRealization,
 };
+pub use call_sig::{CallShape, CallSig};
 pub use callable_scope_rung::CallableScopeRung;
 pub(crate) use classifier_callables::constructor_generic_signature;
 pub use classifier_callables::BoundInnerConstructor;
@@ -1066,67 +1067,6 @@ pub enum FnKind {
     TopLevel,
 }
 
-/// The source-level call shape of one overload — the call-site facts the CHECKER needs that the erased
-/// emit `descriptor` drops. Parallel to the LOGICAL parameter list (the receiver is NOT included, even
-/// for an extension whose `callable.params` prepends it). Empty/zero `Default` means "not provided by
-/// this source"; the federated consumer falls back as it did before the consolidation.
-#[derive(Clone, Default, Debug)]
-pub struct CallSig {
-    /// Function type parameters annotated with Kotlin's internal `@OnlyInputTypes`.
-    ///
-    /// This is an inference policy, not parameter nullability: the inferred value of each named
-    /// formal must be one of the proper types contributed by a call input (receiver, value
-    /// argument, or expected result). Keeping the declaration-owned names here lets every provider
-    /// expose the same rule without teaching resolution about stdlib function names.
-    pub only_input_type_formals: Vec<String>,
-    /// Declaration type-parameter ordinals carrying Kotlin's `reified` modifier. This is provider-
-    /// normalized callable capability; call lowering uses it to distinguish a runtime reified
-    /// argument from an ordinary substitution without inspecting source names.
-    pub reified_type_parameter_ordinals: Vec<u32>,
-    /// Parameter names, parallel to the logical params — maps named arguments (`f(x = 1)`) to positions.
-    pub param_names: Vec<String>,
-    /// Provider-published semantic identities parallel to the logical parameter list. Context
-    /// roles are typed at the declaration boundary; consumers never rediscover them from `_`, an
-    /// empty metadata name, or another spelling convention.
-    pub parameter_identities: Vec<crate::fir::ResolvedParameterIdentity>,
-    /// Per logical param: whether it has a default value (so it may be omitted). Parallel to the params.
-    pub param_defaults: ParamFlags,
-    /// Per logical parameter: the declared type is annotated with Kotlin's internal `@Exact`, so
-    /// applicability requires equality after generic substitution rather than ordinary subtyping.
-    pub exact_params: ParamFlags,
-    /// Per logical parameter: the declared type carries Kotlin's internal `@NoInfer`, so the
-    /// argument is checked for applicability after inference but contributes no type-variable
-    /// constraint itself.
-    pub no_infer_params: ParamFlags,
-    /// Per logical parameter, the resolved declaration carries
-    /// `kotlin.internal.ImplicitIntegerCoercion`.
-    pub implicit_integer_coercion: ParamFlags,
-    /// Per logical param: if it is a function type `(A, B) -> R`, its inner param types `[A, B]` (to type
-    /// a lambda argument's `it`/params); otherwise empty. Parallel to the params.
-    pub lambda_param_types: Vec<Vec<Ty>>,
-    /// Per logical param: `Some(receiver)` when the parameter is a receiver function type
-    /// `Receiver.(...) -> R`. The checker binds that receiver as lambda `this` while using
-    /// `lambda_param_types` for the receiver/value parameters recovered from the generic signature.
-    pub lambda_receivers: Vec<Option<Ty>>,
-    /// Per logical param: whether it is a receiver function type, even when metadata cannot name a
-    /// concrete receiver class because the receiver is a type parameter (`T.() -> R`).
-    pub lambda_receiver_params: ParamFlags,
-    /// Leading context receiver count for each function-typed parameter.
-    pub lambda_context_counts: Vec<usize>,
-    /// Per logical param: its `crossinline`/`noinline` modifier ([`InlineParameterModifier`]).
-    /// Parallel to the params; empty when the source publishes none.
-    pub inline_modifiers: Vec<InlineParameterModifier>,
-    /// Per logical Java parameter, whether nullable arguments are accepted.
-    pub platform_nullable_params: ParamFlags,
-    /// Java signature enhancement of the declared result's nullability.
-    pub result_enhancement: ResultEnhancement,
-    /// Minimum arguments a caller must supply (params beyond this have defaults). 0 by default.
-    pub required: usize,
-    /// True if a logical param is `vararg` (callers pack values into its array).
-    pub vararg: bool,
-    pub vararg_index: Option<usize>,
-}
-
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct ParamList {
     pub visibility: Visibility,
@@ -1374,7 +1314,7 @@ impl CallSig {
                 }
             })
             .collect();
-        CallSig {
+        CallSig::from(CallShape {
             parameter_identities: param_names
                 .iter()
                 .enumerate()
@@ -1398,7 +1338,7 @@ impl CallSig {
             vararg: vararg_index.is_some(),
             vararg_index,
             ..Default::default()
-        }
+        })
     }
 
     pub fn metadata_member(
@@ -1463,7 +1403,7 @@ impl CallSig {
         } else {
             Vec::new()
         };
-        CallSig {
+        CallSig::from(CallShape {
             required: required_arity(param_count, &defaults),
             parameter_identities: (0..param_count)
                 .map(
@@ -1482,7 +1422,7 @@ impl CallSig {
             vararg: vararg_index.is_some(),
             vararg_index,
             ..Default::default()
-        }
+        })
     }
 
     /// Insert a typed extension-receiver identity into this provider-published logical list.

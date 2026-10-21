@@ -63,13 +63,13 @@ impl Checker<'_> {
                     &expected.params,
                     expected.ret,
                 )?;
-                let call_sig = crate::libraries::CallSig {
+                let call_sig = crate::libraries::CallSig::from(crate::libraries::CallShape {
                     param_defaults: signature.param_defaults,
                     required: signature.required,
                     vararg: signature.vararg(),
                     vararg_index: signature.vararg_index,
-                    ..crate::libraries::CallSig::default()
-                };
+                    ..crate::libraries::CallShape::default()
+                });
                 let plan =
                     self.callable_ref_parameter_plan(&params, &call_sig, &expected.params)?;
                 if !self.callable_ref_is_compatible(

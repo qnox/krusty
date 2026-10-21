@@ -338,13 +338,13 @@ impl crate::symbol_source::SymbolSource for ExistingLibrary {
         *lambda_receivers.last_mut().unwrap() = Some(lambda_receiver);
         let mut lambda_receiver_params = vec![false; value_params.len()];
         *lambda_receiver_params.last_mut().unwrap() = true;
-        function.call_sig = CallSig {
+        function.call_sig = crate::libraries::CallSig::from(crate::libraries::CallShape {
             lambda_param_types,
             lambda_receivers,
             lambda_receiver_params: lambda_receiver_params.into(),
             required: value_params.len(),
-            ..CallSig::default()
-        };
+            ..crate::libraries::CallShape::default()
+        });
         function.generic_sig = Some(GenericSig {
             formals: Vec::new(),
             formal_bounds: Vec::new(),

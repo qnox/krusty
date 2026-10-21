@@ -5230,11 +5230,11 @@ mod tests {
         callable.default_call = true;
         FunctionInfo {
             ret: crate::libraries::ReturnInfo::new(false, Some(Ty::UInt)),
-            call_sig: CallSig {
+            call_sig: CallSig::from(CallShape {
                 required: 0,
                 param_defaults: vec![true].into(),
                 ..Default::default()
-            },
+            }),
             ..FunctionInfo::plain(FnKind::TopLevel, None, callable)
         }
     }

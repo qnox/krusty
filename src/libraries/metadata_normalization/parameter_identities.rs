@@ -1,7 +1,7 @@
 //! Source identities of a decoded declaration's parameters.
 
 use crate::fir::ResolvedParameterIdentity;
-use crate::libraries::CallSig;
+use crate::libraries::{CallShape, CallSig};
 use crate::metadata::semantic::{KotlinConstructor, KotlinFunction, KotlinProperty};
 use crate::types::ContextParameterKind;
 
@@ -88,10 +88,10 @@ fn identities_of_function(
         })
         .collect();
     let receiver = usize::from(has_receiver_parameter);
-    let physical = CallSig {
+    let physical = CallSig::from(CallShape {
         parameter_identities: arguments.clone(),
-        ..CallSig::default()
-    }
+        ..CallShape::default()
+    })
     .physical_parameter_identities(
         function.params.len() + receiver,
         function.context_count,

@@ -15,8 +15,8 @@ use crate::ast::*;
 use crate::diag::{DiagSink, DiagnosticIdentity, DiagnosticKind, Span};
 use crate::libraries::{
     map_call_args, required_arity, AnnotationParameterPolicy, AnnotationPositionalPolicy,
-    CallArgMappingError, CallArgMappingFailure, CallSig, EmptySymbolSource, GenericReturnPolicy,
-    GenericSig, InlineKind, Origin, ParamList, SemanticPlatform,
+    CallArgMappingError, CallArgMappingFailure, CallShape, CallSig, EmptySymbolSource,
+    GenericReturnPolicy, GenericSig, InlineKind, Origin, ParamList, SemanticPlatform,
 };
 use crate::names::{property_getter_name, property_setter_name, COMPANION_OBJECT_NAME};
 use crate::symbol_resolver::{CallArgKind, InheritedNestedClassifier};
@@ -26213,11 +26213,11 @@ fun box(): String {
                             descriptor,
                         ),
                     );
-                    info.call_sig = CallSig {
+                    info.call_sig = CallSig::from(CallShape {
                         param_names: names.into_iter().map(str::to_string).collect(),
                         required: 2,
                         ..Default::default()
-                    };
+                    });
                     info
                 };
                 return std::rc::Rc::new(crate::libraries::ResolvedSymbols {
@@ -26373,7 +26373,7 @@ fun box(): String {
                 // the real Kotlin metadata provider does.
                 info.flags.operator = true;
             }
-            info.call_sig = CallSig {
+            info.call_sig = CallSig::from(CallShape {
                 param_names: if matches!(name, "knownTop" | "knownPair" | "mixExt" | "typedExt") {
                     vec!["a".to_string(), "b".to_string()]
                 } else if name == "getValue" {
@@ -26390,7 +26390,7 @@ fun box(): String {
                     _ => 1,
                 },
                 ..Default::default()
-            };
+            });
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                 builtin_classifier: false,
                 classifier_name: None,
@@ -26570,12 +26570,12 @@ fun box(): String {
                     );
                     exists.owner = Some(crate::types::type_name("test/Factory"));
                     exists.external_identity = Some(crate::fir::ExternalCallableId::from_raw(99));
-                    exists.call_sig = CallSig {
+                    exists.call_sig = CallSig::from(CallShape {
                         required: 1,
                         vararg: true,
                         vararg_index: Some(1),
-                        ..CallSig::default()
-                    };
+                        ..CallShape::default()
+                    });
                     companion.push(exists);
                     companion
                 } else {
@@ -26910,7 +26910,7 @@ fun box(): String {
                         Some(Ty::String),
                         callable,
                     );
-                    info.call_sig = CallSig {
+                    info.call_sig = CallSig::from(CallShape {
                         param_names: if defaults.len() == 1 {
                             vec!["a".to_string()]
                         } else {
@@ -26919,7 +26919,7 @@ fun box(): String {
                         param_defaults: defaults.into(),
                         required: 1,
                         ..Default::default()
-                    };
+                    });
                     if has_defaults {
                         info.callable.default_realization =
                             Some(Box::new(crate::libraries::DefaultCallRealization {
@@ -37339,13 +37339,13 @@ impl<'a> Checker<'a> {
                 ) else {
                     return false;
                 };
-                let call_sig = CallSig {
+                let call_sig = CallSig::from(CallShape {
                     param_defaults: signature.param_defaults,
                     required: signature.required,
                     vararg: signature.vararg(),
                     vararg_index: signature.vararg_index,
-                    ..CallSig::default()
-                };
+                    ..CallShape::default()
+                });
                 self.callable_ref_parameter_plan(&params, &call_sig, &expected.params)
                     .is_some()
                     && self.callable_ref_is_compatible(
@@ -40816,13 +40816,13 @@ impl<'a> Checker<'a> {
         let Some(generic) = signature.generic_sig.as_ref() else {
             return Some(Self::local_function_reference_shape(signature, receiver));
         };
-        let call_sig = CallSig {
+        let call_sig = CallSig::from(CallShape {
             param_defaults: signature.param_defaults,
             required: signature.required,
             vararg: signature.vararg(),
             vararg_index: signature.vararg_index,
-            ..CallSig::default()
-        };
+            ..CallShape::default()
+        });
         let source = self.fed_source();
         let specialized = callable_reference_selection::specialize_generic_signature(
             &source,
@@ -43690,7 +43690,7 @@ impl<'a> Checker<'a> {
                     external_identity: constructor.external_identity,
                 },
                 context_count: constructor.context_count,
-                param_names: call_sig.param_names,
+                param_names: call_sig.param_names.clone(),
                 defaults: call_sig.param_defaults.to_vec(),
                 vararg: call_sig.vararg_index,
                 supports_default_abi: constructor.stable_declaration.is_some()
@@ -46011,14 +46011,14 @@ impl<'a> Checker<'a> {
         arguments: &[ExprId],
         argument_names: &[Option<String>],
     ) -> Result<Vec<usize>, CallArgMappingFailure> {
-        let signature = CallSig {
+        let signature = CallSig::from(CallShape {
             param_names: parameters.names.clone(),
             param_defaults: parameters.defaults,
             required: required_arity(parameters.names.len(), &parameters.defaults),
             vararg: parameters.vararg.is_some(),
             vararg_index: parameters.vararg,
-            ..CallSig::default()
-        };
+            ..CallShape::default()
+        });
         call_argument_parameter_indices_result(
             arguments.len(),
             parameters.names.len(),
@@ -65202,7 +65202,7 @@ impl<'a> Checker<'a> {
             receiver_ty,
             physical_receiver,
             signature,
-            reified_type_parameter_ordinals: call_sig.reified_type_parameter_ordinals,
+            reified_type_parameter_ordinals: call_sig.reified_type_parameter_ordinals.clone(),
             physical_params,
             physical_name: member
                 .physical_name

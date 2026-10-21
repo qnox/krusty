@@ -35,7 +35,7 @@ impl MemberExtensionConventionDiagnosticCandidate {
             params: shape.declared_params.clone(),
             context_count: signature.context_count,
             ret: apply_inference_bindings(declared_ret, &shape.class_bindings),
-            parameter_names: signature.call_sig().param_names,
+            parameter_names: signature.call_sig().param_names.clone(),
         }
     }
 }
@@ -352,7 +352,7 @@ pub(super) fn candidate(
         ret: instantiated.ret,
         physical_ret: shape.function.signature.ret,
         call_sig: instantiated.call_sig,
-        diagnostic_param_names: shape.function.signature.call_sig().param_names,
+        diagnostic_param_names: shape.function.signature.call_sig().param_names.clone(),
         physical_vararg_index: instantiated.physical_vararg_index,
         argument_parameters: instantiated.argument_parameters,
         visibility: shape.function.signature.visibility,

@@ -1601,7 +1601,7 @@ mod tests {
         select_fixed_or_more_specific_vararg, CandidateSelectionWithTies,
         ReceiverFunctionSelection, SelectedReceiverFunction,
     };
-    use crate::libraries::{CallSig, FnKind, FunctionInfo, LibraryCallable};
+    use crate::libraries::{CallShape, CallSig, FnKind, FunctionInfo, LibraryCallable};
     use crate::types::Ty;
 
     fn candidate(name: &str, parameter: Ty, vararg: bool) -> FunctionInfo {
@@ -1615,12 +1615,12 @@ mod tests {
         );
         let mut candidate = FunctionInfo::plain(FnKind::TopLevel, None, callable);
         if vararg {
-            candidate.call_sig = CallSig {
+            candidate.call_sig = CallSig::from(CallShape {
                 required: 1,
                 vararg: true,
                 vararg_index: Some(0),
                 ..Default::default()
-            };
+            });
         }
         candidate
     }
