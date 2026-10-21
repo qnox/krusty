@@ -7,6 +7,7 @@ pub(crate) mod coroutines;
 pub(crate) mod counted_loops;
 mod dependency_facts;
 mod dependency_metadata;
+mod dependency_signature;
 mod entry;
 pub(crate) mod local_properties;
 mod module_facts;
@@ -25,6 +26,9 @@ pub(crate) use dependency_metadata::{
 pub use dependency_metadata::{
     DependencyExportSignatures, DependencyMemberReceiver, DependencyMetadata,
     SingletonExtensionUnreadReceiver, SingletonMemberReceiver,
+};
+pub(crate) use dependency_signature::{
+    instantiate_dependency_signature, DependencyFunctionSignature,
 };
 
 /// The parameter form [`Entry::selected`] reports beside the selected function.

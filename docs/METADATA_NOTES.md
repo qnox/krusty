@@ -657,6 +657,11 @@ formal types from `GenericSig.formal_bounds`. Ordinary header lowering binds all
 symbols first, then compares every bound and the complete selected parameter/result contract.
 Prepared-inline erasure is not accepted by this path.
 
+Native linkage retains the actual emitted IR signature beside each exact dependency export.
+Provider generic signatures and checked external-formal substitutions validate source operand
+roles separately; specializing a call never changes the published symbol's physical signature.
+No serialized metadata format or formal identity is rewritten to achieve ABI coercion.
+
 Serialized type-parameter flags use the active Kotlin `TypeParameterFlags` encoding, which
 delegates to `IrFlags`: annotations at bit 0, variance at bits 1 and 2, and reification at bit 3.
 Invariant non-reified formals have flags 4; invariant reified formals have flags 12. Ordinary

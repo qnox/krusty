@@ -5595,9 +5595,14 @@ non-inline callers, still reads the field directly. Test:
 - Ordinary generic headers authenticate the exact provider-frozen formal types and every full
   bound, including recursive/forward bounds, without prepared-inline erasure. Reification and
   parameter roles must agree independently of the flattened operand types.
-- Remaining: replace ordinary helper-algorithm adapters with serialized dependency bodies, close
-  their exact call graphs, and carry one declared export ABI with argument/result coercions.
-  Header support alone does not widen executable roots or establish generic-call ABI correctness.
+- Native dependency exports retain one emitted IR signature for both wrapper definitions and
+  imports. Exact checked generic instantiation validates source operand roles independently of
+  the canonical ABI; arguments/results use the existing target boxing and conversion boundary.
+  The shared generic dependency fixture covers repeated Int/String/Long instantiations and
+  source/serialized extension calls with argument and callee effects.
+- Remaining: validate the declared-ABI path across the conformance gates, replace ordinary
+  helper-algorithm adapters with serialized dependency bodies, and close their exact call graphs.
+  Header support alone does not widen executable roots; Wasm generic representation is unfinished.
 
 ## KLIB writer — krusty compiles a module to a Kotlin library  ◐
 

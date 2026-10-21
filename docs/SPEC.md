@@ -17708,6 +17708,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `callee_headers::recursive_formals_keep_the_real_provider_normalization_through_the_frozen_handoff`,
   `a_forward_bound_binds_all_real_provider_formals_before_reading_any_bounds`, and
   `generic_header_contract_mismatches_are_rejected_without_erasure_or_role_recovery`.
+- **A Native dependency export has one declaration-owned ABI across generic instantiations.**
+  The emitted IR function's parameter and result types, including a retained class dispatch
+  receiver, determine its exported wrapper and every later import. Checked substitutions bind
+  only the exact selected external declaration's formal ordinals; foreign, missing, repeated,
+  out-of-range or reified bindings cannot instantiate an ordinary export. Instantiated types
+  validate the checked operand roles and context/extension coordinates, but do not replace the
+  emitted signature. Operands are evaluated once and coerced into its carriers; its result is
+  converted back to the checked call type. Tests: `backend::dependency_signature::tests`,
+  `an_instantiated_dependency_call_cannot_change_its_parameter_types`, and the shared
+  `tests/box_regressions/genericDependencyAbi.kt` (ordinary and extension calls at Int/String/Long).
 - **A KLIB body's call of a dependency function lowers that function too.** A call of a public
   declaration is joined, by its exact module-qualified signature, to the callee's serialized
   declaration in the loaded trees (`KlibDeclarationBodies`, the join a body uses), and the callee is declared from
