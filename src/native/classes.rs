@@ -349,7 +349,7 @@ fn any_member_symbol(root: &IrClass, member: AnyMember) -> &'static str {
 /// `values` must be the module-wide answer ([`NativeValueClasses::of_module_classes`]), so the
 /// numbering does not depend on which file asks.
 pub(super) fn module_plan(
-    classes: &crate::backend::module_classes::ModuleClasses,
+    classes: &crate::backend::class_tables::module_classes::ModuleClasses,
     values: &NativeValueClasses,
 ) -> ModuleSlotPlan {
     ModuleSlotPlan::build(classes, &NativeRepresentation(values))

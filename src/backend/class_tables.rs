@@ -39,6 +39,7 @@ pub(crate) mod fixtures;
 mod hierarchy;
 mod interface_slots;
 mod members;
+pub(crate) mod module_classes;
 pub(crate) mod module_slots;
 mod planned_vtable;
 #[cfg(test)]

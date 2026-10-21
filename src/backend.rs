@@ -9,7 +9,6 @@ mod dependency_facts;
 mod dependency_metadata;
 mod entry;
 pub(crate) mod local_properties;
-pub(crate) mod module_classes;
 mod module_facts;
 
 #[cfg(test)]

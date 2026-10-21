@@ -242,7 +242,8 @@ impl Backend for CraneliftBackend {
         {
             let classes = file.classifiers.module().classes();
             let plan = match super::value_classes::NativeValueClasses::of_module_classes(
-                classes,
+                classes.iter().map(|(name, _)| name),
+                classes.iter().flat_map(|(_, class)| class.carried_types()),
                 &file.classifiers,
             ) {
                 Ok(values) => super::classes::module_plan(classes, &values),

@@ -13,9 +13,9 @@
 //! members takes their fixed slots, and `invoke` over a function type the fixed function slot.
 //! Interface members are numbered elsewhere.
 
-use crate::fx_hash::HashMap;
+use crate::fx_hash::{HashMap, HashSet};
 
-use crate::backend::module_classes::{ModuleClass, ModuleClasses, ModuleMember};
+use super::module_classes::{ModuleClass, ModuleClasses, ModuleMember};
 use crate::fir::{
     CallableId, PropertyId, ResolvedFunctionOverrideTarget, ResolvedPropertyOverrideTarget,
 };
@@ -164,7 +164,19 @@ impl Planner<'_> {
             }
             None => None,
         };
+        // One fixed function slot holds one `invoke`: a class overriding the `invoke` of two
+        // function types, named directly or through interfaces, declines as `class_vtable` does.
+        let function_types = class
+            .function_overrides
+            .iter()
+            .filter(|edge| {
+                edge.overridden_role == Some(SemanticCallRole::KotlinFunctionInvoke)
+                    && matches!(edge.overridden, ResolvedFunctionOverrideTarget::External(_))
+            })
+            .map(|edge| edge.overridden_owner)
+            .collect::<HashSet<_>>();
         if class.function_type_arities.len() > 1
+            || function_types.len() > 1
             || class.function_type_arities.iter().any(|&arity| arity > 22)
         {
             return Err(format!(

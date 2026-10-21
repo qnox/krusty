@@ -56,6 +56,7 @@ pub(crate) enum ModuleMember {
 #[derive(Debug)]
 pub(crate) struct ModuleFunctionOverride {
     pub(crate) implementation: CallableId,
+    pub(crate) overridden_owner: TypeName,
     pub(crate) overridden: ResolvedFunctionOverrideTarget,
     pub(crate) overridden_is_interface: bool,
     pub(crate) overridden_role: Option<SemanticCallRole>,
@@ -142,6 +143,7 @@ impl ModuleClasses {
                     };
                     Some(ModuleFunctionOverride {
                         implementation,
+                        overridden_owner: edge.overridden_owner,
                         overridden: edge.overridden,
                         overridden_is_interface: edge.overridden_is_interface,
                         overridden_role: edge.overridden_semantic_role,

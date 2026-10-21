@@ -177,7 +177,7 @@ pub struct BackendModuleFacts {
     /// Each source's checked file-annotation applications, for sources that declare any.
     file_annotations: HashMap<crate::fir::SourceFileId, Box<[crate::types::ResolvedAnnotation]>>,
     /// The dispatch shape of every named class, for a target that numbers slots itself.
-    classes: super::module_classes::ModuleClasses,
+    classes: super::class_tables::module_classes::ModuleClasses,
 }
 
 impl BackendModuleFacts {
@@ -452,12 +452,13 @@ impl BackendModuleFacts {
     /// These facts with the dispatch shape of every named class of `index`, which only a target
     /// that numbers dispatch slots itself reads ([`Backend::numbers_slots`](super::Backend)).
     pub(crate) fn with_classes(mut self, index: &crate::fir::ResolvedModuleIndex) -> Self {
-        self.classes = super::module_classes::ModuleClasses::from_resolved_index(index);
+        self.classes =
+            super::class_tables::module_classes::ModuleClasses::from_resolved_index(index);
         self
     }
 
     /// The dispatch shape of every named class of the module, when the target asked for it.
-    pub(crate) fn classes(&self) -> &super::module_classes::ModuleClasses {
+    pub(crate) fn classes(&self) -> &super::class_tables::module_classes::ModuleClasses {
         &self.classes
     }
 

@@ -121,19 +121,17 @@ impl NativeValueClasses {
         )
     }
 
-    /// The value classes among every classifier the members of the module's named classes carry,
-    /// read from the checked declarations alone: one answer every file shares, which a dispatch
-    /// numbering that spans files needs.
+    /// The value classes among `classes` and every classifier the types in `carried` name, read
+    /// from the checked declarations alone: given the module's named classes and what their members
+    /// carry, one answer every file shares, which a dispatch numbering that spans files needs.
     pub(super) fn of_module_classes(
-        classes: &crate::backend::module_classes::ModuleClasses,
+        classes: impl IntoIterator<Item = TypeName>,
+        carried: impl IntoIterator<Item = Ty>,
         facts: &dyn ClassifierFactSource,
     ) -> Result<Self, String> {
-        let mut pending = Vec::new();
-        for (name, class) in classes.iter() {
-            pending.push(name);
-            for ty in class.carried_types() {
-                crate::ir::referenced_classifiers::collect_classifier_names(ty, &mut pending);
-            }
+        let mut pending: Vec<TypeName> = classes.into_iter().collect();
+        for ty in carried {
+            crate::ir::referenced_classifiers::collect_classifier_names(ty, &mut pending);
         }
         Self::probe(pending, |_| None, |_| false, facts)
     }
