@@ -12494,7 +12494,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `ListIterator<Int>`) also gets an `ACC_PUBLIC|ACC_BRIDGE|ACC_SYNTHETIC` throwing bridge
   (`set(Ljava/lang/Object;)V`), placed after the ordinary bridges. A subclass does not repeat a
   stub a superclass already realizes, but it does when an abstract superclass declares the member
-  abstract. The stubs never enter Kotlin metadata. The collection faces
+  abstract. Abstract superclass declarations are compared after applying the superclass's type
+  arguments in the child context: `Base<T>.set(T)` suppresses the parent's stub but not an applied
+  child's `set(String)` stub and erased bridge. A concrete generic intermediate's existing stub is
+  still inherited rather than repeated. The stubs never enter Kotlin metadata. The collection faces
   (`Iterable`, `Collection`, `List`, `Set`, `Map`, `Map.Entry`), with `removeAt`, the lifted
   `iterator` result types, the JDK members and `toArray`, follow in later slices. Tests:
   `tests/read_only_iterator_stubs_e2e.rs`. Corpus: `objects/useAnonymousObjectAsIterator.kt`,

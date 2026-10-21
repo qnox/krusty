@@ -34,6 +34,8 @@ pub enum SkipReason {
     /// A lambda argument of an inline call carried no published parameter modifier and declared
     /// type, so whether the call inlines it is unknown.
     InlineParameters,
+    /// A read-only collection superclass lacks the exact semantic declaration its stubs need.
+    ReadOnlyCollectionStubs(String),
 }
 
 /// What the plugin pass of [`run_backend_passes`] runs: the native plugins the frontend ran for this
@@ -313,7 +315,11 @@ fn run_backend_passes_after_plugins(
             classpath,
             &facts.override_results,
         ),
-        read_only_stubs: crate::jvm::read_only_collection_stubs::select(ir, classpath, classifiers),
+        read_only_stubs: crate::jvm::read_only_collection_stubs::select(
+            ir,
+            classpath,
+            classifiers,
+        )?,
     };
     // The value-class pass reads same-module SOURCE value classes (internal name → sole-field
     // underlying) for its erasure/mangle map from the frontend symbols directly, NOT through the
@@ -1199,6 +1205,13 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
             );
             return;
         }
+        SkipReason::ReadOnlyCollectionStubs(detail) => {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                format!("krusty: cannot realize read-only collection stubs: {detail}"),
+            );
+            return;
+        }
         SkipReason::MemberDispatch(classifier) => {
             diags.error(
                 crate::diag::Span::new(0, 0),
@@ -1219,6 +1232,7 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
         | SkipReason::SuperCalls
         | SkipReason::CallArguments(_)
         | SkipReason::InlineParameters
+        | SkipReason::ReadOnlyCollectionStubs(_)
         | SkipReason::MemberDispatch(_) => {
             unreachable!()
         }

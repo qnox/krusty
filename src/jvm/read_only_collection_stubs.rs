@@ -13,6 +13,7 @@
 use crate::backend::BackendClassifierSource;
 use crate::fx_hash::{HashMap, HashSet};
 use crate::ir::{IrClass, IrFile};
+use crate::jvm::backend::SkipReason;
 use crate::jvm::classpath::Classpath;
 use crate::jvm::inherited_collection_bridges::InheritedCollectionBridges;
 use crate::jvm::jvm_class_map::{
@@ -95,7 +96,7 @@ pub(super) fn select(
     ir: &IrFile,
     classpath: &Classpath,
     classifiers: &dyn BackendClassifierSource,
-) -> ReadOnlyCollectionStubs {
+) -> Result<ReadOnlyCollectionStubs, SkipReason> {
     let mut result = ReadOnlyCollectionStubs::default();
     for class_index in 0..ir.classes.len() {
         if !crate::jvm::override_results::realizes_overrides(ir, class_index) {
@@ -105,12 +106,12 @@ pub(super) fn select(
         if class.is_interface || class.is_annotation {
             continue;
         }
-        let stubs = class_stubs(ir, classpath, classifiers, class);
+        let stubs = class_stubs(ir, classpath, classifiers, class)?;
         if !stubs.is_empty() {
             result.by_class.insert(class.fq_name_id(), stubs);
         }
     }
-    result
+    Ok(result)
 }
 
 /// A read-only face that applies to a class, with its mutable counterpart.
@@ -126,9 +127,9 @@ fn class_stubs(
     classpath: &Classpath,
     classifiers: &dyn BackendClassifierSource,
     class: &IrClass,
-) -> Vec<ReadOnlyStub> {
+) -> Result<Vec<ReadOnlyStub>, SkipReason> {
     let Some(hierarchy) = ir.classifier_hierarchies.get(&class.fq_name_id()) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let supertypes: Vec<TypeName> = hierarchy
         .iter()
@@ -153,12 +154,12 @@ fn class_stubs(
     let faces = applicable_faces(classpath, &supertypes);
     let candidates = own_stubs(&faces);
     if candidates.is_empty() {
-        return candidates;
+        return Ok(candidates);
     }
 
     // kotlinc's `computeStubsForSuperClasses`: a stub a superclass already realizes, built in this
     // class's substitution context, is not repeated.
-    let chain = superclass_chain(ir, classpath, classifiers, class);
+    let chain = superclass_chain(ir, classpath, classifiers, class, &candidates)?;
     let mut present: HashSet<(String, String)> = HashSet::default();
     for superclass in &chain {
         let faces = applicable_faces(classpath, &superclass.supertypes);
@@ -170,11 +171,11 @@ fn class_stubs(
     }
 
     let implemented = implemented_members(ir, class, &chain);
-    candidates
+    Ok(candidates
         .into_iter()
         .filter(|stub| present.insert((stub.name.clone(), stub.descriptor())))
         .filter(|stub| !implemented.contains(&stub.parameter_key()))
-        .collect()
+        .collect())
 }
 
 /// kotlinc's `computeStubsForCollectionClasses`: each read-only face the class strictly extends
@@ -300,12 +301,45 @@ struct Superclass {
     implemented_members: HashSet<(String, String)>,
 }
 
+fn abstract_superclass_bindings(
+    owner: TypeName,
+    formals: Vec<String>,
+    applied: Ty,
+) -> Result<HashMap<String, Ty>, SkipReason> {
+    let arguments = applied.non_null().type_args();
+    if formals.len() != arguments.len() {
+        return Err(SkipReason::ReadOnlyCollectionStubs(format!(
+            "abstract superclass {} declares {} type parameters but its checked application has {} arguments",
+            owner.render(), formals.len(), arguments.len()
+        )));
+    }
+    Ok(formals.into_iter().zip(arguments.iter().copied()).collect())
+}
+
 fn superclass_chain(
     ir: &IrFile,
     classpath: &Classpath,
     classifiers: &dyn BackendClassifierSource,
     class: &IrClass,
-) -> Vec<Superclass> {
+    candidates: &[ReadOnlyStub],
+) -> Result<Vec<Superclass>, SkipReason> {
+    let relevant = |name: &str, count: usize| {
+        candidates
+            .iter()
+            .any(|stub| stub.name == name && stub.parameters.len() == count)
+    };
+    let applied = |owner: TypeName| {
+        ir.classifier_hierarchies
+            .get(&class.fq_name_id())
+            .and_then(|hierarchy| hierarchy.iter().find(|entry| entry.classifier == owner))
+            .map(|entry| entry.applied)
+            .ok_or_else(|| {
+                SkipReason::ReadOnlyCollectionStubs(format!(
+                    "missing checked applied superclass {}",
+                    owner.render()
+                ))
+            })
+    };
     let mut chain = Vec::new();
     let mut current = class.superclass;
     let mut seen = HashSet::default();
@@ -326,8 +360,8 @@ fn superclass_chain(
                 abstract_members: HashSet::default(),
                 implemented_members: HashSet::default(),
             };
-            for &function in &source.methods {
-                let function = &ir.functions[function as usize];
+            for &function_id in &source.methods {
+                let function = &ir.functions[function_id as usize];
                 if function.is_static {
                     continue;
                 }
@@ -337,8 +371,40 @@ fn superclass_chain(
                 );
                 if function.body.is_some() {
                     superclass.implemented_members.insert(key);
-                } else if source.is_abstract {
-                    superclass.abstract_members.insert(key);
+                } else if source.is_abstract && relevant(&function.name, function.params.len()) {
+                    let mut formals = match ir.class_signature_name(current) {
+                        Some(signature) => signature
+                            .type_params
+                            .iter()
+                            .map(|parameter| parameter.semantic_name.clone())
+                            .collect::<Vec<_>>(),
+                        None if source.type_params.is_empty() => Vec::new(),
+                        None => {
+                            return Err(SkipReason::ReadOnlyCollectionStubs(format!(
+                                "missing checked generic superclass declaration {}",
+                                current.render()
+                            )));
+                        }
+                    };
+                    formals.extend(source.captured_type_params.iter().cloned());
+                    let bindings =
+                        abstract_superclass_bindings(current, formals, applied(current)?)?;
+                    // Common lowering records every class-parameter-dependent declaration here.
+                    // Without that record the function types are unchanged declaration types;
+                    // this is not recovery of a missing generic signature from erased parameters.
+                    let parameters = match ir.member_semantic_sigs.get(&function_id) {
+                        Some((parameters, _)) => parameters,
+                        None => &function.params,
+                    };
+                    superclass.abstract_members.insert((
+                        function.name.clone(),
+                        parameter_descriptor(
+                            &parameters
+                                .iter()
+                                .map(|parameter| ty_subst(*parameter, &bindings))
+                                .collect::<Vec<_>>(),
+                        ),
+                    ));
                 }
             }
             chain.push(superclass);
@@ -366,6 +432,58 @@ fn superclass_chain(
             {
                 continue;
             }
+            if is_kotlin && is_abstract && method.access & ACC_ABSTRACT != 0 {
+                // Property accessors and unrelated abstract members cannot suppress these
+                // function stubs. Only a candidate's physical method name is lookup input here.
+                if !candidates.iter().any(|stub| stub.name == method.name) {
+                    continue;
+                }
+                let missing = || {
+                    SkipReason::ReadOnlyCollectionStubs(format!(
+                        "missing exact semantic abstract declaration {}.{}{}",
+                        current.render(),
+                        method.name,
+                        method.descriptor
+                    ))
+                };
+                let declaration = info
+                    .meta
+                    .class_functions
+                    .iter()
+                    .find(|declaration| {
+                        declaration.jvm_name == method.name
+                            && declaration.jvm_desc == Some(method.descriptor.as_str())
+                    })
+                    .ok_or_else(missing)?;
+                let signature = declaration.generic_sig.as_ref().ok_or_else(missing)?;
+                let count = signature.params.len()
+                    + usize::from(signature.receiver.is_some())
+                    + usize::from(declaration.is_suspend());
+                if !relevant(&method.name, count) {
+                    continue;
+                }
+                // Metadata publishes own formals here. A captured-layout mismatch must be
+                // reported explicitly, never truncated into a partial substitution.
+                let bindings = abstract_superclass_bindings(
+                    current,
+                    info.meta.class_type_parameters.type_params().clone(),
+                    applied(current)?,
+                )?;
+                superclass.abstract_members.insert((
+                    method.name.clone(),
+                    parameter_descriptor(
+                        &signature
+                            .receiver
+                            .iter()
+                            .chain(&signature.params)
+                            .map(|parameter| ty_subst(*parameter, &bindings))
+                            .collect::<Vec<_>>(),
+                    ),
+                ));
+                continue;
+            }
+            // Concrete realizations (including generated stubs) and Java methods keep their
+            // existing physical-member accounting, separate from Kotlin abstract declarations.
             let Some(parameters) = method.descriptor.split_once(')').map(|(params, _)| params)
             else {
                 continue;
@@ -383,7 +501,7 @@ fn superclass_chain(
         };
         current = next;
     }
-    chain
+    Ok(chain)
 }
 
 /// Every classifier a dependency classifier extends, through its published direct supertypes.

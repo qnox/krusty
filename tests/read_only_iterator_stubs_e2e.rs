@@ -136,6 +136,68 @@ fn read_only_iterator_stubs_are_byte_identical_to_kotlinc() {
     }
 }
 
+const APPLIED_SUPERCLASSES: &str = r#"package applied
+
+abstract class GenericBase<T> : ListIterator<T> {
+    abstract fun set(value: T)
+}
+
+abstract class AbstractMiddle<T> : GenericBase<T>() {
+    abstract override fun set(value: T)
+}
+
+abstract class StubMiddle<U> : GenericBase<U>()
+"#;
+
+const APPLIED_CHILDREN: &str = r#"
+abstract class DirectStrings : GenericBase<String>()
+
+abstract class Strings : AbstractMiddle<String>()
+
+abstract class Ints : AbstractMiddle<Int>()
+
+abstract class InheritsStub : StubMiddle<String>()
+"#;
+
+#[test]
+fn applied_abstract_superclass_iterator_stubs_are_byte_identical_to_kotlinc() {
+    let source = format!("{APPLIED_SUPERCLASSES}{APPLIED_CHILDREN}");
+    for class in [
+        "GenericBase",
+        "AbstractMiddle",
+        "StubMiddle",
+        "DirectStrings",
+        "Strings",
+        "Ints",
+        "InheritsStub",
+    ] {
+        common::byte_diff_against_kotlinc_cp(
+            "AppliedIteratorSuperclass",
+            &source,
+            &format!("applied/{class}"),
+            &[common::stdlib_jar()],
+        )
+        .expect("reference kotlinc is provisioned")
+        .unwrap_or_else(|diff| panic!("{class} differs from kotlinc: {diff}"));
+    }
+}
+
+#[test]
+fn applied_dependency_abstract_superclass_iterator_stubs_are_byte_identical_to_kotlinc() {
+    let source = format!("package applied\n{APPLIED_CHILDREN}");
+    for class in ["DirectStrings", "Strings", "Ints", "InheritsStub"] {
+        common::class_bytes_diff_against_kotlinc(
+            "AppliedDependencyIteratorSuperclass",
+            &[("GenericBase.kt", APPLIED_SUPERCLASSES)],
+            &source,
+            &format!("applied/{class}"),
+            "set",
+        )
+        .expect("reference kotlinc is provisioned")
+        .unwrap_or_else(|diff| panic!("{class} differs from kotlinc: {diff}"));
+    }
+}
+
 /// A Kotlin cast to the mutable face fails on a read-only class, so the stubs are reached the way
 /// a Java caller reaches them: through the JVM method itself.
 #[test]
