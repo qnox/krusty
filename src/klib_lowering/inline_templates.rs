@@ -364,6 +364,7 @@ impl CallLinker for TemplateCalls<'_> {
             target,
             classifier,
             params: realization.callable.params.clone(),
+            semantic_role: realization.callable.semantic_role,
         })
     }
 

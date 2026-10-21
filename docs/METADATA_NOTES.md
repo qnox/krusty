@@ -645,6 +645,14 @@ Neither the serialized signature nor the callable is reconstructed from a backen
 
 ## Authenticated KLIB collection classifier roles
 
+The selected stdlib's size-only `Array<T>` constructor also publishes a semantic allocation role,
+after checking its class formal and full constructor signature. The role survives ordinary
+constructor realization and lets prepared inline bodies lower allocation to the same `NewArray`
+operation as source arrays. It is not an annotation synthesized onto the serialized declaration,
+and an ordinary dependency with the same spelling has no authority to publish it. Getter calls in
+prepared bodies retain the exact selected property's normalized name independently of the
+accessor's physical spelling (`Collection.size` versus `<get-size>`). No metadata fields change.
+
 Collection kind and read-only/mutable face are normalized provider facts, not new metadata fields.
 The compilation-selected platform stdlib authenticates the sixteen canonical collection interface
 headers; publication validates their interface kind, own/total type-parameter arity, and absence of

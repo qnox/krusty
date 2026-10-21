@@ -83,6 +83,75 @@ fn array_sum_template_keeps_its_selected_receiver_contract() {
 }
 
 #[test]
+fn collection_to_typed_array_uses_the_selected_array_allocation() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let symbols = libraries.symbols(
+        SymbolNamespace::Package(type_name("kotlin/collections")),
+        "toTypedArray",
+    );
+    let selected = symbols
+        .callables
+        .functions()
+        .iter()
+        .filter(|function| {
+            function.semantic_receiver().is_some_and(|receiver| {
+                receiver.obj_internal() == Some(type_name("kotlin/collections/Collection"))
+            })
+        })
+        .collect::<Vec<_>>();
+    let [selected] = selected.as_slice() else {
+        panic!("expected one Collection.toTypedArray declaration");
+    };
+    let selected = libraries
+        .external_callable(
+            selected
+                .callable
+                .external_identity
+                .expect("provider identity"),
+        )
+        .expect("the selected declaration is realized");
+    let mut ir = IrFile::default();
+    template(&mut ir, &libraries, &selected)
+        .unwrap_or_else(|decline| panic!("Collection.toTypedArray: {decline}"));
+    let array = libraries
+        .classifier(crate::types::wk::array())
+        .expect("Array declaration");
+    let constructors = array
+        .constructors
+        .iter()
+        .filter(|constructor| constructor.params == [Ty::Int])
+        .collect::<Vec<_>>();
+    let [constructor] = constructors.as_slice() else {
+        panic!("expected one Array allocation constructor");
+    };
+    let realized = libraries
+        .external_callable(constructor.external_identity.expect("constructor identity"))
+        .expect("the selected constructor is realized");
+    assert_eq!(
+        realized.callable.semantic_role,
+        Some(crate::types::SemanticCallRole::KotlinArrayAllocation)
+    );
+    let allocations = ir
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::NewArray { array_type, .. } => Some(*array_type),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        allocations,
+        vec![Ty::array(Ty::nullable(Ty::obj_name(
+            crate::types::wk::any()
+        )))]
+    );
+    validated(&ir);
+}
+
+#[test]
 fn unsigned_array_iteration_template_keeps_its_selected_receiver_contract() {
     extension_template(
         "kotlin/collections",

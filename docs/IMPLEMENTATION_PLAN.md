@@ -5576,6 +5576,11 @@ non-inline callers, still reads the field directly. Test:
   contract. Exact header inventories pass for every manifest release.
 - Native range-builder roles accept both checked extension-receiver operand layouts through one
   representation path, rejecting malformed coordinates rather than retrying by spelling.
+- Prefix/postfix increment blocks retain their ordered serialized statements and snapshot mutable
+  reads. Selected collection properties retain their normalized identity across accessor spellings;
+  authenticated size-only `Array<T>` constructors lower to common array allocation, with the
+  constructor role preserved through provider normalization. Initializer locals take slots before
+  the containing declaration, matching checked FIR and preventing slot aliasing.
 - The selected stdlib `CharSequence.trim(): CharSequence` extension carries an authenticated
   provider operation. Native realizes only receivers proven to use its contiguous String or
   StringBuilder storage; an arbitrary CharSequence still declines before entering the runtime.

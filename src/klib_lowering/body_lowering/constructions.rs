@@ -67,6 +67,29 @@ impl BodyLowering<'_> {
                 None => defaults.push(ordinal as u32),
             }
         }
+        match linked.semantic_role {
+            Some(crate::types::SemanticCallRole::KotlinArrayAllocation) => {
+                if linked.classifier != crate::types::wk::array()
+                    || !ty.is_reference_array()
+                    || !matches!(ty.kind(), TyKind::Obj(_, arguments) if arguments.len() == 1)
+                    || linked.params != [Ty::Int]
+                    || !defaults.is_empty()
+                {
+                    return Err(mismatch(
+                        "an array allocation has another constructor shape",
+                    ));
+                }
+                let [size] = args.as_slice() else {
+                    return Err(mismatch("an array allocation does not supply its size"));
+                };
+                return Ok(self.ir.add_expr(IrExpr::NewArray {
+                    array_type: ty,
+                    size: *size,
+                }));
+            }
+            Some(_) => return unsupported("an unmodelled constructor semantic role"),
+            None => {}
+        }
         Ok(self.ir.add_expr(IrExpr::New {
             internal: linked.classifier,
             args,

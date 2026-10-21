@@ -132,6 +132,12 @@ pub(super) fn published_constructor(
         classifier.compiler_builtin_owner,
         &mut member,
     );
+    builtin_realizations::realize_array_constructor(
+        identity,
+        classifier.compiler_builtin_owner,
+        &classifier.shape,
+        &mut member,
+    );
     identities.assign_constructor(
         &constructor.signature,
         &constructor.parameters,

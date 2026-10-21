@@ -368,6 +368,27 @@ fn increment_blocks_keep_their_ordered_effects_and_selected_value() {
 }
 
 #[test]
+fn a_local_initializer_cannot_reuse_its_containing_declarations_slot() {
+    let demo = demo(&[("f", &[T::Boolean, T::Int], T::Int)], |_, body| {
+        let argument = body.param(1);
+        let (inner, inner_symbol) = body.val(T::Int, argument);
+        let read = body.get(&inner_symbol, T::Int);
+        let block = body.block(vec![inner, KlibIrStatement::Expression(read)], T::Int);
+        let condition = body.param(0);
+        let otherwise = body.otherwise();
+        let zero = body.int(0);
+        let initializer = body.branches("IF", vec![(condition, block), (otherwise, zero)], T::Int);
+        let (outer, outer_symbol) = body.val(T::Int, initializer);
+        let result = body.get(&outer_symbol, T::Int);
+        Some(vec![outer, body.ret(result)])
+    });
+    assert_eq!(
+        lowered_f(&demo),
+        source_body("fun f(a: Boolean, b: Int): Int {\n val x = if (a) { val y = b; y } else 0\n return x\n}\n", "f", 2)
+    );
+}
+
+#[test]
 fn an_unmodelled_expression_block_origin_still_declines() {
     let demo = demo(&[("f", &[], T::Int)], |_, body| {
         let one = body.int(1);

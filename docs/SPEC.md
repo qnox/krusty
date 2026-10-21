@@ -4332,6 +4332,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `klib_libraries::tests::analysis::an_omitted_constant_default_is_the_klib_parameter_default` and
   `…_constructor_default_is_the_klib_parameter_default`, plus
   `klib_libraries::parameter_defaults::tests`.
+- **Native collection property reads retain their selected property identity.** A `Collection.size`
+  read in a serialized inline body uses the frozen property's normalized name and its exact
+  getter's declaring collection face, parameter list and result type. An accessor's physical
+  spelling, such as KLIB's `<get-size>`, does not change which property was selected. This does
+  not make a same-named property on a dependency subtype a runtime collection operation.
+  Test: shared box fixture `collectionSizeInInlineBody.kt` (JVM oracle, receiver evaluated once,
+  copied elements and empty collection).
+
+- **An authenticated size-only KLIB array constructor lowers to array allocation.** The selected
+  platform stdlib's boxed `Array<T>` class and its exact `<init>(Int)` declaration publish an array
+  allocation role only after validating class arity, the linked generic class application and the
+  complete constructor shape. Constructor normalization preserves that role. Common body lowering
+  consumes it as `NewArray`, using the recorded element type and supplied size, rather than an
+  ordinary dependency-object construction. Missing sizes and malformed role-bearing calls decline;
+  an identical ordinary dependency gains no role. Tests:
+  `builtin_realizations::arrays::tests`,
+  `collection_to_typed_array_uses_the_selected_array_allocation`, and the shared
+  `collectionSizeInInlineBody.kt` fixture.
+
 - **KLIB collection roles come from authenticated platform declarations.** The selected platform
   stdlib's sixteen canonical collection interfaces publish their existing collection kind and
   read-only/mutable face. Publication validates an interface with the exact own and total type
@@ -17850,6 +17869,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `local_variables_lower_as_the_source_declarations_do`,
   `unmodelled_local_variables_decline_by_form`,
   `stdlib_local_variable_flags_have_the_decoded_layout`.
+
+  Locals declared inside an initializer take their slots before the containing declaration, as
+  checked FIR lowering orders them. The containing symbol becomes visible only after its
+  initializer is lowered. Selecting its slot earlier could alias a nested precondition temporary
+  and make an array-valued local read back the integer size. Test:
+  `control_forms::a_local_initializer_cannot_reuse_its_containing_declarations_slot`.
 
 - **KLIB increment blocks preserve their serialized effects and value.** `PREFIX_INCR`,
   `PREFIX_DECR`, `POSTFIX_INCR` and `POSTFIX_DECR` blocks contain the selected operation and

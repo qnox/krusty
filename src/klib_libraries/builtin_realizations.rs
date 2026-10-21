@@ -5,6 +5,7 @@
 //! the declaration modifiers, never a spelling alone, and never a target's own intrinsic
 //! annotation. A declaration the rules do not name is realized by its serialized IR body.
 
+mod arrays;
 mod library_helpers;
 
 use crate::libraries::builtin_declaration::{semantic_call_role, BuiltinMemberDeclaration};
@@ -15,6 +16,7 @@ use crate::types::TypeName;
 
 mod throwables;
 
+pub(super) use arrays::realize_array_constructor;
 pub(super) use throwables::{realize_constructor, realize_throwable_property};
 
 /// Attach the operation the member `function` of `owner` denotes, if it is a builtin one.

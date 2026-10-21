@@ -96,6 +96,7 @@ pub(super) struct LinkedConstructor {
     pub(super) target: crate::fir::ExternalCallableId,
     pub(super) classifier: TypeName,
     pub(super) params: Vec<Ty>,
+    pub(super) semantic_role: Option<crate::types::SemanticCallRole>,
 }
 
 /// The dependency property a call of one of its accessors reads or writes, as a source access of
@@ -594,7 +595,6 @@ impl<'a> BodyLowering<'a> {
     fn variable(&mut self, id: KlibIrVariableId) -> Lowered<ExprId> {
         let variable = self.arena.variable(id);
         let ty = semantic_type(self.arena, self.header.type_parameters(), variable.ty)?;
-        let local = self.locals.slot(variable, ty)?;
         let initializer =
             variable
                 .initializer
@@ -602,6 +602,9 @@ impl<'a> BodyLowering<'a> {
                     "a variable without an initializer",
                 ))?;
         let init = self.operand(initializer, ty)?;
+        // Initializers can declare locals of their own. Allocate the enclosing declaration only
+        // after those locals, as checked FIR does, and keep its symbol invisible until then.
+        let local = self.locals.slot(variable, ty)?;
         self.locals.declare(&variable.base.symbol, local)?;
         Ok(self.ir.add_expr(IrExpr::Variable {
             index: local.index,
