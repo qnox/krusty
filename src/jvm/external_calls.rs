@@ -877,6 +877,10 @@ pub(super) fn realize(
                 unreachable!("a target KLIB library helper cannot reach JVM call realization")
             }
             Some(
+                crate::libraries::CompilerIntrinsic::ThrowableConstructor { .. }
+                | crate::libraries::CompilerIntrinsic::ThrowableMessage,
+            ) => unreachable!("target KLIB Throwable storage cannot reach JVM call realization"),
+            Some(
                 crate::libraries::CompilerIntrinsic::ArraySize
                 | crate::libraries::CompilerIntrinsic::FloatingIsNaN { .. }
                 | crate::libraries::CompilerIntrinsic::FloatingIsInfinite { .. }

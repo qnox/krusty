@@ -15,6 +15,13 @@ pub enum ResultFailureIntrinsic {
 /// grants intrinsic behavior from a coincidental source name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompilerIntrinsic {
+    /// An authenticated platform-stdlib `Throwable()` or `Throwable(String?)` constructor.
+    /// The target owns the object's storage, including the supplied nullable message.
+    ThrowableConstructor {
+        message: bool,
+    },
+    /// The authenticated `Throwable.message: String?` getter, not a same-named user property.
+    ThrowableMessage,
     /// Reinterpret one scalar's bits as the equal-width floating or integral scalar selected by
     /// the authenticated declaration. Checked FIR/IR records both semantic endpoint types.
     ReinterpretBits,

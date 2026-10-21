@@ -21,6 +21,7 @@ use crate::fx_hash::HashMap;
 use super::encode::{
     BlockType, Code, CompositeType, FieldType, Function, HeapType, Module, StorageType, ValType,
 };
+use super::exception_transport::ExceptionTransport;
 use super::host::Host;
 use super::objects::ObjectRoot;
 
@@ -48,6 +49,7 @@ pub(super) struct Runtime {
     pub(super) i64_div: u32,
     /// The object model's root types and `kotlin.Any`'s members.
     pub(super) objects: ObjectRoot,
+    pub(super) exceptions: ExceptionTransport,
     /// Offsets of string constants already in the data segment.
     constants: HashMap<Vec<u16>, u32>,
 }
@@ -84,6 +86,9 @@ impl Runtime {
     /// run after every import is declared and before any program function.
     pub(super) fn start(module: &mut Module, host: &Host) -> Self {
         let (chars, string) = Self::declare_types(module);
+        let mut objects = ObjectRoot::declare(module, ValType::nullable(string));
+        let exceptions =
+            ExceptionTransport::declare(module, &mut objects, ValType::nullable(string));
         let mut runtime = Self {
             chars,
             string,
@@ -97,7 +102,8 @@ impl Runtime {
             write_string: module.declare(),
             i32_div: module.declare(),
             i64_div: module.declare(),
-            objects: ObjectRoot::declare(module, ValType::nullable(string)),
+            objects,
+            exceptions,
             constants: HashMap::default(),
         };
         runtime.define_string_equals(module);

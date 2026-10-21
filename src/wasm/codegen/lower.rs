@@ -19,12 +19,18 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 mod default_arguments;
+mod exceptions;
 mod intrinsic_operations;
 mod objects;
 mod scalar_instructions;
 mod shared_cells;
 
 pub(super) use scalar_instructions::is_scalar_operation;
+
+pub(super) fn is_direct_operation(operation: crate::libraries::CompilerIntrinsic) -> bool {
+    is_scalar_operation(operation)
+        || operation == crate::libraries::CompilerIntrinsic::ThrowableMessage
+}
 
 use crate::backend::{BackendCallableFact, CheckedBackendCallables, DependencyExportSignatures};
 use crate::ir::{
@@ -944,6 +950,19 @@ impl<'a> Body<'a> {
                 callee:
                     Callee::External {
                         target,
+                        ret,
+                        defaults,
+                        ..
+                    },
+                dispatch_receiver,
+                args,
+            } if defaults.is_empty() && self.is_throwable_message(target) => {
+                self.throwable_message(dispatch_receiver, &args, ret)?;
+            }
+            IrExpr::Call {
+                callee:
+                    Callee::External {
+                        target,
                         params,
                         ret,
                         defaults,
@@ -1348,13 +1367,26 @@ impl<'a> Body<'a> {
                 internal,
                 args,
                 ctor_params,
+                external_target,
                 defaults,
                 ..
             } => {
-                if !defaults.is_empty() {
-                    return Err("a constructor call with omitted arguments".to_string());
-                }
-                self.construction(internal, &args, ctor_params.as_deref())?
+                self.new_object(
+                    internal,
+                    &args,
+                    ctor_params.as_deref(),
+                    external_target,
+                    &defaults,
+                )?;
+            }
+            IrExpr::Throw { operand } => self.throw_value(operand)?,
+            IrExpr::Try {
+                body,
+                catches,
+                finally,
+                result,
+            } => {
+                self.try_catch(body, &catches, finally, result)?;
             }
             IrExpr::GetField {
                 receiver,
@@ -1390,6 +1422,17 @@ impl<'a> Body<'a> {
                 context_arguments,
                 ..
             }) if context_arguments.is_empty() => self.property_read(target, dispatch_receiver)?,
+            IrExpr::Checked(crate::ir::IrCheckedOperation::ExternalPropertyRead {
+                target,
+                dispatch: crate::ir::IrPropertyDispatch::Ordinary,
+                receiver,
+                arguments,
+                parameters,
+                result,
+                source_receiver: Some(_),
+            }) if parameters.is_empty() && self.is_throwable_message_property(target) => {
+                self.throwable_message(receiver, &arguments, result)?;
+            }
             IrExpr::Checked(crate::ir::IrCheckedOperation::PropertyWrite {
                 target,
                 dispatch_receiver,
@@ -1708,6 +1751,18 @@ impl<'a> Body<'a> {
         let Some(result) = self.type_of(id)? else {
             return Err(format!("the operator {op:?} answering `Nothing`"));
         };
+        if matches!(op, IrBinOp::RefEq | IrBinOp::RefNe)
+            && matches!(carrier(left)?, Some(ValType::Ref { .. }))
+            && matches!(carrier(right)?, Some(ValType::Ref { .. }))
+        {
+            self.expression(lhs)?;
+            self.expression(rhs)?;
+            self.code.ref_eq();
+            if op == IrBinOp::RefNe {
+                self.code.op(EQZ32);
+            }
+            return Ok(());
+        }
         let shift = matches!(op, IrBinOp::Shl | IrBinOp::Shr | IrBinOp::Ushr);
         let unsigned = if shift {
             left.is_unsigned() || result.is_unsigned()

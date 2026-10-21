@@ -5549,7 +5549,12 @@ non-inline callers, still reads the field directly. Test:
 - Known gap: `x as? C` on a value smart-cast earlier in the body lowers to a `When` with no
   checked type, which Wasm declines rather than infer one.
 - Not yet selectable from the CLI: a user-facing wasm target waits on that klib platform.
-- Next: exceptions on wasm EH, enums and companions on the class tables, and further target-KLIB
+- Catch-only EH: a module-owned tag carries the same Throwable reference across calls/modules.
+  The selected stdlib's exact `Throwable()` / `Throwable(String?)` and nullable `message` getter
+  receive authenticated physical-realization roles. Shared multimodule fixtures cover message,
+  identity, rethrow and normal control flow; unsupported catch types and finally still decline.
+- Next: the Throwable hierarchy and remaining constructor/accessor forms, typed catch dispatch,
+  finally, enums and companions on the class tables, and further target-KLIB
   library bodies/intrinsics keyed by the selected declaration.
 
 ## Prepared KLIB inline return frames  🚧

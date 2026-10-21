@@ -13,6 +13,7 @@
 
 mod codegen;
 mod encode;
+mod exception_transport;
 mod host;
 mod objects;
 mod runtime;

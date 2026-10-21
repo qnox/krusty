@@ -221,9 +221,9 @@ impl CallableRegistry {
                     })?;
                     if callable
                         .compiler_intrinsic
-                        .is_some_and(super::lower::is_scalar_operation)
+                        .is_some_and(super::lower::is_direct_operation)
                     {
-                        // Emission replaces the call with the instruction; there is no code to call.
+                        // Emission realizes this exact operation; there is no dependency entry.
                         continue;
                     }
                     let supported_shape = callable.matches_dependency_body_call(

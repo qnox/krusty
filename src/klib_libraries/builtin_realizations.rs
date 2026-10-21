@@ -13,6 +13,10 @@ use crate::libraries::builtin_top_level_realization as package_rules;
 use crate::libraries::{FunctionInfo, MemberRealization, PropertyInfo};
 use crate::types::TypeName;
 
+mod throwables;
+
+pub(super) use throwables::{realize_constructor, realize_throwable_property};
+
 /// Attach the operation the member `function` of `owner` denotes, if it is a builtin one.
 pub(super) fn realize_member(owner: TypeName, function: &mut FunctionInfo) {
     let (params, ret) = match &function.generic_sig {

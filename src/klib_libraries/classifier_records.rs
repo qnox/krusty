@@ -126,6 +126,11 @@ pub(super) fn published_constructor(
         &constructor.parameters,
     );
     member.default_values = constructor.defaults.clone();
+    builtin_realizations::realize_constructor(
+        identity,
+        classifier.compiler_builtin_owner,
+        &mut member,
+    );
     identities.assign_constructor(
         &constructor.signature,
         &constructor.parameters,

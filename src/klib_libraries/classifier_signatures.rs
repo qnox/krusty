@@ -34,6 +34,8 @@ pub(super) struct SignedClassifier {
     pub(super) signature: KlibPublicIdSignature,
     pub(super) expect: bool,
     pub(super) native_interop_library: bool,
+    /// This declaration belongs to the explicitly selected platform stdlib input.
+    pub(super) compiler_builtin_owner: bool,
     /// The class's shape without its callables.
     pub(super) shape: LibraryType,
     /// Exact declaring KLIB module identity, when this classifier came from an archive.
@@ -234,6 +236,7 @@ pub(super) fn sign_package_classes(
                 Some(type_parameters.identities()),
                 internal_friend,
             )?;
+            signed.compiler_builtin_owner = compiler_builtin_owner;
             signed.module = module.map(str::to_owned);
             if !declared.insert((module.map(str::to_owned), signed.signature.clone())) {
                 continue;
@@ -258,6 +261,7 @@ pub(super) fn sign_package_classes(
                 signature: metadata_class_signature(around, *own),
                 expect: class.is_expect,
                 native_interop_library,
+                compiler_builtin_owner,
                 shape,
                 module: module.map(str::to_owned),
                 modality: class.modality,
