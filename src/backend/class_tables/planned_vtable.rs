@@ -127,10 +127,40 @@ pub(super) fn planned_class_table(
             },
         });
     }
-    // The parent's keys stay, the interface spellings its members registered among them.
+    // Every member the IR dispatches has to be one the plan numbered; a method the headers do not
+    // declare would sit at a number no other file knows about. A forwarder of `I by d` is the one
+    // exception: it implements interface members alone, which no class number names, so it takes a
+    // number past the planned ones, where no other file reads. A subclass gives the forwarders it
+    // inherits numbers past its own planned ones in turn, so the parent's keys and bridges are
+    // renumbered before this class's planned keys join them.
+    let planned_len = vtable.len() as u32;
+    let moved = |slot: &mut u32| {
+        if *slot >= planned.inherited {
+            *slot = *slot - planned.inherited + planned_len;
+        }
+    };
     let mut slots: HashMap<SlotKey, u32> = parent
         .map(|parent| parent.slots.clone())
         .unwrap_or_default();
+    let mut interface_bridges = parent
+        .map(|parent| parent.interface_bridges.clone())
+        .unwrap_or_default();
+    if let Some(parent) = parent {
+        slots.values_mut().for_each(moved);
+        for bridge in interface_bridges.values_mut() {
+            match bridge {
+                Slot::Bridge {
+                    target_slot: Some(slot),
+                    ..
+                }
+                | Slot::AccessorBridge {
+                    target_slot: slot, ..
+                } => moved(slot),
+                _ => {}
+            }
+        }
+        vtable.extend(parent.vtable[planned.inherited as usize..].iter().cloned());
+    }
     slots.extend(AnyMember::ALL.map(|member| (SlotKey::Any(member.slot()), member.slot())));
     for (key, &slot) in &planned.slots {
         let key = match *key {
@@ -143,44 +173,6 @@ pub(super) fn planned_class_table(
             }
         };
         slots.insert(key, slot);
-    }
-
-    // Every member the IR dispatches has to be one the plan numbered; a method the headers do not
-    // declare would sit at a number no other file knows about. A forwarder of `I by d` is the one
-    // exception: it implements interface members alone, which no class number names, so it takes a
-    // number past the planned ones, where no other file reads. A subclass gives the forwarders it
-    // inherits numbers past its own planned ones in turn.
-    let mut interface_bridges = parent
-        .map(|parent| parent.interface_bridges.clone())
-        .unwrap_or_default();
-    if let Some(parent) = parent {
-        for (inherited, entry) in parent
-            .vtable
-            .iter()
-            .enumerate()
-            .skip(planned.inherited as usize)
-        {
-            let moved = vtable.len() as u32;
-            vtable.push(entry.clone());
-            let inherited = inherited as u32;
-            for slot in slots.values_mut() {
-                if *slot == inherited {
-                    *slot = moved;
-                }
-            }
-            for bridge in interface_bridges.values_mut() {
-                match bridge {
-                    Slot::Bridge {
-                        target_slot: Some(slot),
-                        ..
-                    }
-                    | Slot::AccessorBridge {
-                        target_slot: slot, ..
-                    } if *slot == inherited => *slot = moved,
-                    _ => {}
-                }
-            }
-        }
     }
     let overridden = overridden_functions(ir, class)?;
     for &fid in &class.methods {

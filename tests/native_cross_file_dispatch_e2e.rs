@@ -222,3 +222,40 @@ fn a_delegated_member_replaces_the_inherited_class_member() {
         ),
     ]);
 }
+
+#[test]
+fn a_subclass_member_keeps_its_number_beside_an_inherited_forwarder() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                interface Named {
+                    fun name(): String
+                }
+                class Fixed(private val text: String) : Named {
+                    override fun name(): String = text
+                }
+                open class Base(named: Named) : Named by named
+                open class Derived(named: Named) : Base(named) {
+                    open fun extra(): String = "extra"
+                }
+                class Leaf : Derived(Fixed("leaf")) {
+                    override fun extra(): String = "more"
+                }
+                fun describe(named: Named): String = named.name()
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String {
+                    val derived: Derived = Leaf()
+                    val result = derived.extra() + describe(derived) + Derived(Fixed("d")).extra()
+                    return if (result == "moreleafextra") "OK" else result
+                }
+            "#,
+        ),
+    ]);
+}
