@@ -1958,6 +1958,8 @@ mod native_value_classes_e2e;
 mod native_vararg_constructor_e2e;
 #[path = "native_virtual_call_result_e2e.rs"]
 mod native_virtual_call_result_e2e;
+#[path = "native_virtual_selection_e2e.rs"]
+mod native_virtual_selection_e2e;
 #[path = "native_walkable_collection_e2e.rs"]
 mod native_walkable_collection_e2e;
 #[path = "native_walkable_text_e2e.rs"]
