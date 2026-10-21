@@ -190,11 +190,10 @@ fn repeat_uses_the_canonical_declaration_of_its_inherited_iterator() {
     assert_eq!(function.ret, selected.callable.ret);
     assert!(ir.inline_only_fns.contains(&template.function));
     assert!(ir.exprs.iter().any(|expression| {
-        let IrExpr::Call {
-            callee: Callee::External { target, .. },
-            ..
-        } = expression
-        else {
+        let IrExpr::Call { callee, .. } = expression else {
+            return false;
+        };
+        let Callee::External { target, .. } = callee.as_ref() else {
             return false;
         };
         let callable = libraries
@@ -412,21 +411,24 @@ fn a_dependency_property_read_reads_the_provider_property() {
         .exprs
         .iter()
         .filter_map(|expression| match expression {
-            IrExpr::Checked(crate::ir::IrCheckedOperation::ExternalPropertyRead {
-                target,
-                dispatch: crate::ir::IrPropertyDispatch::Ordinary,
-                receiver: Some(_),
-                arguments,
-                parameters,
-                result,
-                source_receiver,
-            }) => Some((
-                *target,
-                arguments.len(),
-                parameters.clone(),
-                *result,
-                *source_receiver,
-            )),
+            IrExpr::Checked(operation) => match operation.as_ref() {
+                crate::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    dispatch: crate::ir::IrPropertyDispatch::Ordinary,
+                    receiver: Some(_),
+                    arguments,
+                    parameters,
+                    result,
+                    source_receiver,
+                } => Some((
+                    *target,
+                    arguments.len(),
+                    parameters.clone(),
+                    *result,
+                    *source_receiver,
+                )),
+                _ => None,
+            },
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -488,16 +490,18 @@ fn a_member_of_a_generic_class_is_called_at_its_receiver_type_arguments() {
         .iter()
         .filter_map(|expression| match expression {
             IrExpr::Call {
-                callee:
-                    Callee::External {
-                        target,
-                        params,
-                        ret,
-                        ..
-                    },
+                callee,
                 dispatch_receiver: Some(_),
                 args,
-            } => Some((*target, params.clone(), *ret, args.len())),
+            } => match callee.as_ref() {
+                Callee::External {
+                    target,
+                    params,
+                    ret,
+                    ..
+                } => Some((*target, params.clone(), *ret, args.len())),
+                _ => None,
+            },
             _ => None,
         })
         .collect::<Vec<_>>();

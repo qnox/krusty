@@ -2756,6 +2756,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if super::super::super::intrinsics::is_stateless_runtime_object(classifier) {
             return Ok(Some(self.builder.ins().iconst(types::I64, 0)));
         }
+        if let Some(instance) = self.module_singleton(classifier)? {
+            return Ok(Some(instance));
+        }
         let class = self.file.class_of(classifier, "the object")?;
         let Some((_, getter)) = self.file.classes[class as usize].singleton else {
             return Err(declined!(
