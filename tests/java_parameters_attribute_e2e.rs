@@ -718,3 +718,32 @@ fn java_parameters_interns_suspend_lambda_names_in_kotlinc_order() {
         ],
     );
 }
+
+/// A `MethodParameters` name the class has already interned keeps that entry: a constructor
+/// parameter spelled like its class, a suspend lambda capture `result` whose `$result` field
+/// precedes `invokeSuspend`'s own `$result`, and the parameters of a local function lifted into a
+/// suspend lambda's class spelled like its `@DebugMetadata` element names (`l`, `n`).
+#[test]
+fn java_parameters_reuses_names_interned_earlier() {
+    assert_byte_parity(
+        "JavaParametersNameCollisions",
+        "package demo\n\
+        class email(val email: String, val role: String = \"viewer\")\n\
+        suspend fun step(s: String): String = s\n\
+        fun <T> runIt(block: suspend () -> T): Any = block\n\
+        class Caller {\n\
+        \x20 fun test(result: String) = runIt { step(result) }\n\
+        \x20 fun lifted(seed: String) = runIt {\n\
+        \x20\x20 fun join(l: String, n: Int) = l + n\n\
+        \x20\x20 val first = step(seed)\n\
+        \x20\x20 join(first, step(first).length)\n\
+        \x20 }\n\
+        }\n",
+        &[
+            "demo/email",
+            "demo/Caller",
+            "demo/Caller$test$1",
+            "demo/Caller$lifted$1",
+        ],
+    );
+}
