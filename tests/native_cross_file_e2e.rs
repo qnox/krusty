@@ -1166,3 +1166,89 @@ fn a_companion_member_is_called_from_another_file() {
         ),
     ]);
 }
+
+#[test]
+fn an_is_check_names_a_class_declared_in_another_file() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                class Plain
+                interface Shape
+                class Circle : Shape
+                fun make(which: Int): Any = if (which == 0) Plain() else Circle()
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String {
+                    val plain = make(0)
+                    val circle = make(1)
+                    if (plain !is Plain || circle is Plain) return "FAIL plain"
+                    if (circle !is Shape || plain is Shape) return "FAIL shape"
+                    val cast = circle as? Circle ?: return "FAIL cast"
+                    return if (cast is Circle) "OK" else "FAIL"
+                }
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn a_when_over_a_sealed_hierarchy_from_another_file_selects_its_branch() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                sealed interface Event
+                class Started(val id: Int) : Event
+                class Stopped(val reason: String) : Event
+                fun event(which: Int): Event = if (which == 0) Started(7) else Stopped("K")
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun describe(event: Event): String = when (event) {
+                    is Started -> if (event.id == 7) "O" else "FAIL"
+                    is Stopped -> event.reason
+                }
+                fun box(): String = describe(event(0)) + describe(event(1))
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn an_exception_declared_in_another_file_is_caught_by_its_class() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                class Refused(message: String) : RuntimeException(message)
+                fun refuse(): Nothing = throw Refused("OK")
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String {
+                    try {
+                        refuse()
+                    } catch (e: IllegalStateException) {
+                        return "FAIL wrong clause"
+                    } catch (e: Refused) {
+                        return e.message ?: "FAIL no message"
+                    }
+                }
+            "#,
+        ),
+    ]);
+}
