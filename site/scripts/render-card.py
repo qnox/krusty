@@ -5,7 +5,7 @@ src/pages/index.astro point at. Needs Pillow and the Inter fonts
 from PIL import Image, ImageDraw, ImageFont
 
 W, H = 1200, 630
-BG, LAVENDER, FG, MUTED, ACCENT = (251, 251, 253), (235, 232, 250), (27, 26, 31), (93, 90, 102), (127, 82, 255)
+BG, LAVENDER, FG, MUTED, ACCENT = (251, 251, 253), (214, 204, 255), (27, 26, 31), (93, 90, 102), (127, 82, 255)
 FONTS = "/usr/share/fonts/opentype/inter/"
 TAGLINE = "A Kotlin compiler written in Rust"
 DESCRIPTION = (
