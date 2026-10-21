@@ -6,10 +6,10 @@
 use super::common;
 
 fn byte_identical(name: &str, src: &str, class: &str) {
-    match common::byte_diff_against_kotlinc_cp(name, src, class, &[common::stdlib_jar()]) {
-        None => eprintln!("skip ({name}: reference toolchain unavailable)"),
-        Some(Ok(())) => {}
-        Some(Err(e)) => panic!("{e}"),
+    let comparison = common::byte_diff_against_kotlinc_cp(name, src, class, &[common::stdlib_jar()])
+        .expect("reference class comparison must be available");
+    if let Err(e) = comparison {
+        panic!("{e}");
     }
 }
 
