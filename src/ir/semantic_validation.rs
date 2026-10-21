@@ -323,7 +323,7 @@ fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
             }
             Ok(())
         }
-        IrExpr::Lambda { sam, .. } => sam.as_ref().map_or(Ok(()), validate_sam),
+        IrExpr::Lambda { sam, .. } => sam.as_deref().map_or(Ok(()), validate_sam),
         IrExpr::InvokeFunction { params, ret, .. } => {
             reject_all("function-value parameter", params.iter().copied())?;
             reject("function-value result", *ret)
@@ -913,14 +913,14 @@ mod tests {
     fn rejects_an_undetermined_nested_operation_type() {
         let mut ir = IrFile::default();
         ir.exprs.push(IrExpr::Call {
-            callee: Callee::CrossFile {
+            callee: Box::new(Callee::CrossFile {
                 facade: crate::types::type_name("OtherKt"),
                 name: "broken".to_owned(),
                 params: vec![Ty::String],
                 ret: Ty::Error,
                 module_target: None,
                 module_default_call: false,
-            },
+            }),
             dispatch_receiver: None,
             args: Vec::new(),
         });
@@ -941,7 +941,7 @@ mod tests {
             impl_fn: 0,
             arity: 0,
             captures: Vec::new(),
-            sam: Some(nullable_sam_target()),
+            sam: Some(Box::new(nullable_sam_target())),
             inline_body: None,
         });
 
@@ -966,7 +966,7 @@ mod tests {
             impl_fn: 0,
             arity: 0,
             captures: vec![capture],
-            sam: Some(sam),
+            sam: Some(Box::new(sam)),
             inline_body: None,
         });
 
@@ -988,7 +988,7 @@ mod tests {
             impl_fn: 0,
             arity: 0,
             captures: vec![capture],
-            sam: Some(nullable_sam_target()),
+            sam: Some(Box::new(nullable_sam_target())),
             inline_body: None,
         });
 

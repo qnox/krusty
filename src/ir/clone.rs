@@ -105,7 +105,7 @@ fn remap_argument(argument: &mut IrCheckedArgument, map: &mut impl FnMut(ExprId)
 /// both this function and `for_each_child` before the compiler builds.
 fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) -> ExprId) {
     match expression {
-        IrExpr::Checked(operation) => match operation {
+        IrExpr::Checked(operation) => match &mut **operation {
             IrCheckedOperation::Call {
                 dispatch_receiver,
                 extension_receiver,
@@ -797,7 +797,7 @@ mod tests {
             extension_receiver_parameter: None,
         };
         let source = ir.add_expr(super::super::IrExpr::Call {
-            callee: callee.clone(),
+            callee: Box::new(callee.clone()),
             dispatch_receiver: Some(receiver),
             args: Vec::new(),
         });
@@ -815,7 +815,7 @@ mod tests {
         else {
             panic!("the copy of a call is a call");
         };
-        assert_eq!(copied, &callee);
+        assert_eq!(&**copied, &callee);
         assert_eq!(Some(copied_receiver), copies.get(&receiver));
         assert!(args.is_empty());
         assert_eq!(

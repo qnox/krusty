@@ -246,7 +246,6 @@ binaryOp/kt11163.kt
 binaryOp/kt11163_properIeee754comparisons.kt
 binaryOp/kt23030_properIeee754comparisons.kt
 binaryOp/kt44402.kt
-binaryOp/kt6747_identityEquals.kt
 binaryOp/primitiveEqualsSafeCall.kt
 boxing/boxBoolean.kt
 boxing/box_cache0.kt
@@ -844,7 +843,6 @@ classes/extensionFunWithDefaultParam.kt
 classes/extensionOnNamedClassObject.kt
 classes/implementComparableInSubclass.kt
 classes/inheritance.kt
-classes/inheritedInnerClass.kt
 classes/initializerBlockDImpl.kt
 classes/inner/instantiateInDerived.kt
 classes/inner/instantiateInDerivedLabeled.kt
@@ -1344,7 +1342,6 @@ controlStructures/forInSmartCastToArray.kt
 controlStructures/forNullableCharInString.kt
 controlStructures/forUserType.kt
 controlStructures/ifIncompatibleBranches.kt
-controlStructures/kt1441.kt
 controlStructures/kt14839.kt
 controlStructures/kt15726.kt
 controlStructures/kt1688.kt
@@ -2287,7 +2284,6 @@ diagnostics/functions/tailRecursion/recursiveCallInLambda.kt
 diagnostics/functions/tailRecursion/returnInCatch.kt
 diagnostics/functions/tailRecursion/returnInFinally.kt
 diagnostics/functions/tailRecursion/returnInIfInFinally.kt
-diagnostics/functions/tailRecursion/returnInTry.kt
 diagnostics/functions/tailRecursion/shortCircuit.kt
 diagnostics/functions/tailRecursion/tailCallInBlockInParentheses.kt
 diagnostics/functions/tailRecursion/tailRecursionInFinally.kt
@@ -4772,7 +4768,6 @@ primitiveTypes/equalityWithObject/objectWithAsymmetricEqualsEqPrimitive.kt
 primitiveTypes/equalityWithObject/whenIntAsNullableAny.kt
 primitiveTypes/equalityWithObject/whenNullableBoxed.kt
 primitiveTypes/equalsHashCodeToString.kt
-primitiveTypes/kt1055.kt
 primitiveTypes/kt1093.kt
 primitiveTypes/kt13023.kt
 primitiveTypes/kt14868.kt
@@ -6237,7 +6232,6 @@ typeMapping/kt2831.kt
 typeMapping/kt3286.kt
 typeMapping/kt3863.kt
 typeMapping/kt3976.kt
-typeMapping/nullNothing.kt
 typeMapping/nullableNothing.kt
 typealias/abbreviationWithCapturedType.kt
 typealias/callTypeAliasWithInnerRhsInStaticScope.kt

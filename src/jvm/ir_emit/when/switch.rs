@@ -314,11 +314,35 @@ impl Emitter<'_> {
         if emission.is_stmt {
             self.emit(body, code);
             !self.discarding_diverges(body)
+        } else if matches!(self.ir.expr(body), IrExpr::Block { stmts, value } if stmts.is_empty() && value.is_none())
+        {
+            // An empty arm of a `Unit` switch has no statement to carry a line: kotlinc
+            // materializes its `Unit` on the line before it.
+            let unit = self.cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
+            code.getstatic(unit, 1);
+            true
+        } else if emission.result_ty == Ty::obj("kotlin/Unit") && !self.yields_unit(body) {
+            // A `when` ending in an open `else -> if` is `Unit` without changing its other arms'
+            // types: kotlinc discards such an arm's value and materializes the join's `Unit`.
+            self.emit(body, code);
+            let completes = !self.discarding_diverges(body);
+            if completes {
+                let unit = self.cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
+                code.getstatic(unit, 1);
+            }
+            completes
         } else {
             self.emit_value(body, code);
             self.adapt_physical_operand_for(body, self.value_ty(body), emission.result_ty, code);
             !self.diverges(body)
         }
+    }
+
+    /// Whether `body`'s own value is `Unit` (or never completes), so it materializes the `Unit` a
+    /// switch arm yields itself.
+    fn yields_unit(&self, body: u32) -> bool {
+        let ty = self.value_ty(body);
+        ty == Ty::Unit || ty == Ty::obj("kotlin/Unit") || ty == Ty::Nothing
     }
 }
 

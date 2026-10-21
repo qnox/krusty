@@ -439,28 +439,32 @@ pub(super) fn cross_owner_member_calls(
                     Some(*receiver),
                 )),
                 IrExpr::Call {
-                    callee: Callee::Static { owner, .. },
+                    callee: call_callee,
                     ..
-                } => ir.jvm_member_targets.get(&expression).map(|&function| {
-                    let class = ir.class_id_by_name(*owner);
-                    (
-                        class.expect("a realized member's owner is in this file"),
-                        function,
-                        None,
-                    )
-                }),
+                } if let Callee::Static { owner, .. } = &**call_callee => {
+                    ir.jvm_member_targets.get(&expression).map(|&function| {
+                        let class = ir.class_id_by_name(*owner);
+                        (
+                            class.expect("a realized member's owner is in this file"),
+                            function,
+                            None,
+                        )
+                    })
+                }
                 IrExpr::Call {
-                    callee: Callee::Virtual { owner, .. },
+                    callee: call_callee,
                     dispatch_receiver: Some(receiver),
                     ..
-                } => ir.jvm_member_targets.get(&expression).map(|&function| {
-                    let class = ir.class_id_by_name(*owner);
-                    (
-                        class.expect("a realized member's owner is in this file"),
-                        function,
-                        Some(*receiver),
-                    )
-                }),
+                } if let Callee::Virtual { owner, .. } = &**call_callee => {
+                    ir.jvm_member_targets.get(&expression).map(|&function| {
+                        let class = ir.class_id_by_name(*owner);
+                        (
+                            class.expect("a realized member's owner is in this file"),
+                            function,
+                            Some(*receiver),
+                        )
+                    })
+                }
                 IrExpr::PropertyRead {
                     owner,
                     receiver,
@@ -591,20 +595,22 @@ pub(super) fn cross_owner_member_calls(
                     );
                     let (name, target_parameters, result, receiver) = match ir.expr(expression) {
                         IrExpr::Call {
-                            callee:
-                                Callee::Virtual {
-                                    name,
-                                    params: Some((parameters, result)),
-                                    ..
-                                },
+                            callee: call_callee,
                             dispatch_receiver: Some(receiver),
                             ..
-                        } => (
-                            name.clone(),
-                            parameters.iter().map(jvm_declared_ty).collect(),
-                            jvm_declared_ty(result),
-                            Some(*receiver),
-                        ),
+                        } if let Callee::Virtual {
+                            name,
+                            params: Some((parameters, result)),
+                            ..
+                        } = &**call_callee =>
+                        {
+                            (
+                                name.clone(),
+                                parameters.iter().map(jvm_declared_ty).collect(),
+                                jvm_declared_ty(result),
+                                Some(*receiver),
+                            )
+                        }
                         _ => {
                             crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
                                 stack.push(child)
@@ -670,10 +676,10 @@ pub(super) fn cross_owner_member_calls(
                 if visibility == crate::types::Visibility::Protected {
                     let (name, result, receiver) = match ir.expr(expression) {
                         IrExpr::Call {
-                            callee: Callee::Virtual { name, .. },
+                            callee: call_callee,
                             dispatch_receiver: Some(receiver),
                             ..
-                        } => (
+                        } if let Callee::Virtual { name, .. } = &**call_callee => (
                             name.clone(),
                             if *write { Ty::Unit } else { property.ty },
                             Some(*receiver),
@@ -732,41 +738,43 @@ pub(super) fn cross_owner_member_calls(
                     ir.jvm_protected_dependency_calls.get(&expression).cloned()
                 {
                     if let IrExpr::Call {
-                        callee: Callee::Virtual { .. },
+                        callee: call_callee,
                         dispatch_receiver: Some(_),
                         ..
                     } = ir.expr(expression)
                     {
-                        // A dependency member's protected accessor belongs to the lexical source
-                        // subclass. The receiver's realized JVM type may be the dependency owner,
-                        // and expression-owner spellings may name the anonymous caller; neither is
-                        // an alternate source of subclass identity.
-                        let bridge_owner = caller.and_then(|caller| {
-                            enclosing_protected_subclass(ir, caller, dependency.owner)
-                        });
-                        if let Some(bridge_owner) = bridge_owner {
-                            crate::trace_compiler!(
+                        if let Callee::Virtual { .. } = &**call_callee {
+                            // A dependency member's protected accessor belongs to the lexical source
+                            // subclass. The receiver's realized JVM type may be the dependency owner,
+                            // and expression-owner spellings may name the anonymous caller; neither is
+                            // an alternate source of subclass identity.
+                            let bridge_owner = caller.and_then(|caller| {
+                                enclosing_protected_subclass(ir, caller, dependency.owner)
+                            });
+                            if let Some(bridge_owner) = bridge_owner {
+                                crate::trace_compiler!(
                                 "emit",
                                 "protected dependency bridge expression={expression} owner={} target_owner={}",
                                 bridge_owner,
                                 dependency.owner
                             );
-                            let parameters = dependency
-                                .parameters
-                                .iter()
-                                .map(jvm_declared_ty)
-                                .collect::<Vec<_>>();
-                            protected.insert(
-                                expression,
-                                ProtectedMemberAccessBridge {
-                                    owner: bridge_owner,
-                                    name: dependency.name,
-                                    target_parameters: parameters.clone(),
-                                    bridge_parameters: parameters,
-                                    result: jvm_declared_ty(&dependency.result),
-                                    parameter_names: dependency.parameter_names.into_vec(),
-                                },
-                            );
+                                let parameters = dependency
+                                    .parameters
+                                    .iter()
+                                    .map(jvm_declared_ty)
+                                    .collect::<Vec<_>>();
+                                protected.insert(
+                                    expression,
+                                    ProtectedMemberAccessBridge {
+                                        owner: bridge_owner,
+                                        name: dependency.name,
+                                        target_parameters: parameters.clone(),
+                                        bridge_parameters: parameters,
+                                        result: jvm_declared_ty(&dependency.result),
+                                        parameter_names: dependency.parameter_names.into_vec(),
+                                    },
+                                );
+                            }
                         }
                     }
                 }

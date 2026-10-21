@@ -98,10 +98,13 @@ fn rename_bound_calls(ir: &mut IrFile, class: u32, property: u32, getter: &str) 
             panic!("synthesized accessor binding {call} does not name an expression");
         };
         let IrExpr::Call {
-            callee: Callee::Virtual { name, .. },
+            callee: call_callee,
             ..
         } = expression
         else {
+            panic!("synthesized accessor binding {call} is not a virtual call");
+        };
+        let Callee::Virtual { name, .. } = &mut **call_callee else {
             panic!("synthesized accessor binding {call} is not a virtual call");
         };
         *name = getter.to_string();
@@ -273,7 +276,7 @@ mod tests {
 
     fn virtual_getter(name: &str) -> IrExpr {
         IrExpr::Call {
-            callee: Callee::Virtual {
+            callee: Box::new(Callee::Virtual {
                 owner: type_name("sample/Foo"),
                 name: name.to_string(),
                 descriptor: "()Ljava/lang/Object;".to_string(),
@@ -281,7 +284,7 @@ mod tests {
                 interface: false,
                 module_target: None,
                 target: None,
-            },
+            }),
             dispatch_receiver: None,
             args: Vec::new(),
         }
@@ -300,10 +303,13 @@ mod tests {
         );
         rename_bound_calls(&mut ir, 0, 0, "getResult-impl");
         let IrExpr::Call {
-            callee: Callee::Virtual { name, .. },
+            callee: call_callee,
             ..
         } = &ir.exprs[call as usize]
         else {
+            panic!("the bound call stayed virtual");
+        };
+        let Callee::Virtual { name, .. } = &**call_callee else {
             panic!("the bound call stayed virtual");
         };
         assert_eq!(name, "getResult-impl");
@@ -327,7 +333,7 @@ mod tests {
     fn a_replaced_accessor_call_retires_its_binding() {
         let mut ir = IrFile::default();
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(0),
+            callee: Box::new(Callee::Local(0)),
             dispatch_receiver: None,
             args: Vec::new(),
         });
@@ -344,9 +350,9 @@ mod tests {
             matches!(
                 &ir.exprs[call as usize],
                 IrExpr::Call {
-                    callee: Callee::Local(0),
+                    callee: call_callee,
                     ..
-                }
+                } if matches!(&**call_callee, Callee::Local(0))
             ),
             "a retired binding is not renamed"
         );
@@ -357,7 +363,7 @@ mod tests {
     fn a_bound_call_that_is_not_virtual_is_not_left_plain() {
         let mut ir = IrFile::default();
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(0),
+            callee: Box::new(Callee::Local(0)),
             dispatch_receiver: None,
             args: Vec::new(),
         });

@@ -311,16 +311,18 @@ fn reified_substitution_values(ir: &crate::ir::IrFile, class: u32) -> Vec<Ty> {
             continue;
         }
         if let IrExpr::Call {
-            callee: crate::ir::Callee::External { substitutions, .. },
+            callee: call_callee,
             ..
         } = ir.expr(expression)
         {
-            values.extend(
-                substitutions
-                    .iter()
-                    .filter(|substitution| substitution.reified)
-                    .map(|substitution| substitution.value),
-            );
+            if let crate::ir::Callee::External { substitutions, .. } = &**call_callee {
+                values.extend(
+                    substitutions
+                        .iter()
+                        .filter(|substitution| substitution.reified)
+                        .map(|substitution| substitution.value),
+                );
+            }
         }
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
     }

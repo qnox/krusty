@@ -725,7 +725,7 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             callee,
             dispatch_receiver,
             args,
-        } => match callee {
+        } => match &**callee {
             Callee::Local(fid) => {
                 let name = emitted_callable_name(ir, *fid);
                 format!("{}({})", name, emit_args(ir, args, inst))
@@ -1361,14 +1361,14 @@ mod tests {
         let mut ir = IrFile::default();
         let receiver = ir.add_expr(IrExpr::GetValue(0));
         let special = ir.add_expr(IrExpr::Call {
-            callee: Callee::Special {
+            callee: Box::new(Callee::Special {
                 owner: "Base".into(),
                 name: "value".to_string(),
                 descriptor: "()I".to_string(),
                 interface: false,
                 source_member: None,
                 source: None,
-            },
+            }),
             dispatch_receiver: Some(receiver),
             args: Vec::new(),
         });
@@ -1392,10 +1392,10 @@ mod tests {
 
         let argument = ir.add_expr(IrExpr::Const(IrConst::Null));
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::ClassStatic {
+            callee: Box::new(Callee::ClassStatic {
                 owner: "Outer".into(),
                 function: bridge,
-            },
+            }),
             dispatch_receiver: None,
             args: vec![argument],
         });
@@ -1440,7 +1440,7 @@ mod tests {
             param_checks: vec![],
         });
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(0),
+            callee: Box::new(Callee::Local(0)),
             dispatch_receiver: None,
             args: vec![],
         });
@@ -1458,7 +1458,7 @@ mod tests {
             param_checks: vec![],
         });
         if let IrExpr::Call { callee, .. } = &mut ir.exprs[call as usize] {
-            *callee = Callee::Local(copy);
+            **callee = Callee::Local(copy);
         }
         ir.fn_source_names.insert(source, "box".to_string());
         ir.specialized_functions.insert(
@@ -1498,20 +1498,20 @@ mod tests {
         let uint_left = ir.add_expr(IrExpr::Const(IrConst::UInt(0x8000_0000)));
         let uint_right = ir.add_expr(IrExpr::Const(IrConst::UInt(0x7fff_ffff)));
         let uint = ir.add_expr(IrExpr::Call {
-            callee: Callee::Intrinsic {
+            callee: Box::new(Callee::Intrinsic {
                 operation: IrIntrinsic::UnsignedCompare { operand: Ty::UInt },
                 ret: Ty::Int,
-            },
+            }),
             dispatch_receiver: None,
             args: vec![uint_left, uint_right],
         });
         let ulong_left = ir.add_expr(IrExpr::Const(IrConst::ULong(0x8000_0000_0000_0000)));
         let ulong_right = ir.add_expr(IrExpr::Const(IrConst::ULong(0x7fff_ffff_ffff_ffff)));
         let ulong = ir.add_expr(IrExpr::Call {
-            callee: Callee::Intrinsic {
+            callee: Box::new(Callee::Intrinsic {
                 operation: IrIntrinsic::UnsignedCompare { operand: Ty::ULong },
                 ret: Ty::Int,
-            },
+            }),
             dispatch_receiver: None,
             args: vec![ulong_left, ulong_right],
         });

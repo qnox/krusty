@@ -348,10 +348,10 @@ impl Realizer<'_> {
         }
         self.add_checked(
             IrExpr::Call {
-                callee: Callee::Intrinsic {
+                callee: Box::new(Callee::Intrinsic {
                     operation: IrIntrinsic::UnsignedCompare { operand: ty },
                     ret: Ty::Int,
-                },
+                }),
                 dispatch_receiver: None,
                 args: vec![value, bound],
             },

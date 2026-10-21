@@ -1006,3 +1006,249 @@ fn a_number_returned_from_another_file_is_rendered_into_a_string_template() {
         "OK",
     );
 }
+
+#[test]
+fn a_final_member_function_is_called_in_the_file_that_declares_the_class() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                class Counter(var n: Int) {
+                    fun bump(by: Int): Int { n += by; return n }
+                    fun twice(): Int = n * 2
+                }
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String {
+                    val c = Counter(1)
+                    c.bump(20)
+                    return if (c.twice() == 42 && c.n == 21) "OK" else "FAIL ${c.n}"
+                }
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn a_member_call_evaluates_the_receiver_before_the_arguments() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                class Joiner(val head: String) {
+                    fun join(tail: String): String = head + tail
+                }
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                var trace = ""
+                fun box(): String {
+                    val joined = run { trace += "r"; Joiner("O") }.join(run { trace += "a"; "K" })
+                    return if (trace == "ra") joined else "FAIL $trace"
+                }
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn a_generic_member_function_is_called_at_each_instantiation() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                class Box<T>(val value: T) {
+                    fun swap(other: T): T = other
+                    fun get(): T = value
+                }
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String {
+                    val ints = Box(1)
+                    val strings = Box("O")
+                    return if (ints.swap(41) + ints.get() == 42) strings.get() + strings.swap("K") else "FAIL"
+                }
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn a_value_class_member_function_takes_the_value() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                @JvmInline
+                value class Meters(val amount: Int) {
+                    fun plus(other: Meters): Meters = Meters(amount + other.amount)
+                    fun render(): String = "${amount}m"
+                }
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String {
+                    val total = Meters(40).plus(Meters(2))
+                    return if (total.render() == "42m") "OK" else total.render()
+                }
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn an_object_declared_in_another_file_is_constructed_once_and_called() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                var constructions = 0
+                object Registry {
+                    private val names = mutableListOf<String>()
+                    init { constructions += 1 }
+                    fun add(name: String): Int { names.add(name); return names.size }
+                }
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String {
+                    Registry.add("O")
+                    val size = Registry.add("K")
+                    return if (size == 2 && constructions == 1) "OK" else "FAIL $size $constructions"
+                }
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn a_companion_member_is_called_from_another_file() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                class Id private constructor(val raw: Int) {
+                    companion object {
+                        fun of(raw: Int): Id = Id(raw)
+                    }
+                }
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String = if (Id.of(42).raw == 42) "OK" else "FAIL"
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn an_is_check_names_a_class_declared_in_another_file() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                class Plain
+                interface Shape
+                class Circle : Shape
+                fun make(which: Int): Any = if (which == 0) Plain() else Circle()
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String {
+                    val plain = make(0)
+                    val circle = make(1)
+                    if (plain !is Plain || circle is Plain) return "FAIL plain"
+                    if (circle !is Shape || plain is Shape) return "FAIL shape"
+                    val cast = circle as? Circle ?: return "FAIL cast"
+                    return if (cast is Circle) "OK" else "FAIL"
+                }
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn a_when_over_a_sealed_hierarchy_from_another_file_selects_its_branch() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                sealed interface Event
+                class Started(val id: Int) : Event
+                class Stopped(val reason: String) : Event
+                fun event(which: Int): Event = if (which == 0) Started(7) else Stopped("K")
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun describe(event: Event): String = when (event) {
+                    is Started -> if (event.id == 7) "O" else "FAIL"
+                    is Stopped -> event.reason
+                }
+                fun box(): String = describe(event(0)) + describe(event(1))
+            "#,
+        ),
+    ]);
+}
+
+#[test]
+fn an_exception_declared_in_another_file_is_caught_by_its_class() {
+    expect_portable_sources(&[
+        (
+            "defs",
+            r#"
+                package demo
+                class Refused(message: String) : RuntimeException(message)
+                fun refuse(): Nothing = throw Refused("OK")
+            "#,
+        ),
+        (
+            "box",
+            r#"
+                package demo
+                fun box(): String {
+                    try {
+                        refuse()
+                    } catch (e: IllegalStateException) {
+                        return "FAIL wrong clause"
+                    } catch (e: Refused) {
+                        return e.message ?: "FAIL no message"
+                    }
+                }
+            "#,
+        ),
+    ]);
+}

@@ -63,10 +63,10 @@ impl BodyLowering<'_> {
             .collect::<Option<Vec<ExprId>>>()
             .ok_or(FirLoweringFailure::UnsupportedIntrinsicCall)?;
         Ok(self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Intrinsic {
+            callee: Box::new(Callee::Intrinsic {
                 operation: IrIntrinsic::Assert { mode },
                 ret: Ty::Unit,
-            },
+            }),
             dispatch_receiver: None,
             args,
         }))

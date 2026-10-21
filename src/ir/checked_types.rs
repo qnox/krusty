@@ -46,9 +46,13 @@ impl IrFile {
                         declare(catch.var, catch.ty);
                     }
                 }
-                IrExpr::Checked(IrCheckedOperation::RangeLoop {
-                    variable, counter, ..
-                }) => declare(*variable, *counter),
+                IrExpr::Checked(checked_op)
+                    if let IrCheckedOperation::RangeLoop {
+                        variable, counter, ..
+                    } = &**checked_op =>
+                {
+                    declare(*variable, *counter)
+                }
                 _ => {}
             }
         }
@@ -79,13 +83,17 @@ impl IrFile {
                 }
             },
             IrExpr::Call {
-                callee: Callee::Intrinsic { ret, .. },
+                callee: call_callee,
                 ..
-            } => *ret,
+            } if let Callee::Intrinsic { ret, .. } = &**call_callee => *ret,
             // These property-read nodes carry the checker-selected logical result. A later
             // backend decides whether the physical realization is a field or an accessor.
             IrExpr::PropertyRead { ty, .. } => *ty,
-            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead { result, .. }) => *result,
+            IrExpr::Checked(checked_op)
+                if let IrCheckedOperation::ExternalPropertyRead { result, .. } = &**checked_op =>
+            {
+                *result
+            }
             IrExpr::PrimitiveBinOp { op, .. } if op.yields_boolean() => Ty::Boolean,
             IrExpr::Equality { .. } => Ty::Boolean,
             IrExpr::PrimitiveNeg { ty, .. } => *ty,
@@ -108,7 +116,11 @@ impl IrFile {
             IrExpr::EnumSwitchOrdinal { .. } | IrExpr::EnumSwitchKey { .. } => Ty::Int,
             IrExpr::NewArray { array_type, .. } | IrExpr::Vararg { array_type, .. } => *array_type,
             IrExpr::CallableReference(reference) => reference.function_type,
-            IrExpr::Checked(IrCheckedOperation::RangeConstruction { result, .. }) => *result,
+            IrExpr::Checked(checked_op)
+                if let IrCheckedOperation::RangeConstruction { result, .. } = &**checked_op =>
+            {
+                *result
+            }
             _ => return None,
         })
     }
@@ -188,7 +200,7 @@ mod tests {
         });
         let start = file.add_expr(IrExpr::Const(IrConst::Long(0)));
         let end = file.add_expr(IrExpr::Const(IrConst::Long(1)));
-        let loop_ = file.add_expr(IrExpr::Checked(IrCheckedOperation::RangeLoop {
+        let loop_ = file.add_expr(IrExpr::Checked(Box::new(IrCheckedOperation::RangeLoop {
             variable: 8,
             variable_name: None,
             counter: Ty::Long,
@@ -201,7 +213,7 @@ mod tests {
             body: unit,
             label: "loop".to_string(),
             with_index: None,
-        }));
+        })));
         let root = file.add_expr(IrExpr::Block {
             stmts: vec![local, guarded, loop_],
             value: None,

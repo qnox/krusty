@@ -66,12 +66,12 @@ pub(super) fn emit_plain_enum_serializer(ir: &mut IrFile, plan: PlainEnumSeriali
 /// explicit `checkcast` — so emit one.
 pub(super) fn enum_values_array(ir: &mut IrFile, classifier: TypeName) -> ExprId {
     let values = ir.add_expr(IrExpr::Call {
-        callee: Callee::Static {
+        callee: Box::new(Callee::Static {
             owner: classifier,
             name: "values".to_string(),
             descriptor: format!("()[L{classifier};"),
             inline: InlineKind::None,
-        },
+        }),
         dispatch_receiver: None,
         args: vec![],
     });
@@ -129,14 +129,14 @@ fn factory_call_with_names(
     // selects `createAnnotatedEnumSerializer`, whose null name elements mean “use that spelling”.
     if entry_serial_names.iter().all(Option::is_none) {
         return ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
+            callee: Box::new(Callee::Static {
                 owner: type_name("kotlinx/serialization/internal/EnumsKt"),
                 name: "createSimpleEnumSerializer".to_string(),
                 descriptor:
                     "(Ljava/lang/String;[Ljava/lang/Enum;)Lkotlinx/serialization/KSerializer;"
                         .to_string(),
                 inline: InlineKind::None,
-            },
+            }),
             dispatch_receiver: None,
             args: vec![name, enums],
         });
@@ -175,12 +175,12 @@ fn factory_call_with_names(
     });
     let class_annotations = ir.add_expr(IrExpr::Const(IrConst::Null));
     ir.add_expr(IrExpr::Call {
-        callee: Callee::Static {
+        callee: Box::new(Callee::Static {
             owner: type_name("kotlinx/serialization/internal/EnumsKt"),
             name: "createAnnotatedEnumSerializer".to_string(),
             descriptor: ANNOTATED_ENUM_SERIALIZER_DESCRIPTOR.to_string(),
             inline: InlineKind::None,
-        },
+        }),
         dispatch_receiver: None,
         args: vec![
             name,
@@ -256,11 +256,15 @@ mod tests {
         let enums = ir.add_expr(IrExpr::Const(IrConst::Null));
         let simple = factory_call(&mut ir, class, name_expr, enums);
         let IrExpr::Call {
-            callee: Callee::Static {
-                name: callee_name, ..
-            },
+            callee: call_callee,
             ..
         } = ir.expr(simple)
+        else {
+            panic!("enum serializer factory must be a static call")
+        };
+        let Callee::Static {
+            name: callee_name, ..
+        } = &**call_callee
         else {
             panic!("enum serializer factory must be a static call")
         };
@@ -269,12 +273,16 @@ mod tests {
         ir.classes[class as usize].field_annotations = vec![retained_serial_name(SERIAL_NAME_FQ)];
         let annotated = factory_call(&mut ir, class, name_expr, enums);
         let IrExpr::Call {
-            callee: Callee::Static {
-                name: callee_name, ..
-            },
+            callee: call_callee,
             args,
             ..
         } = ir.expr(annotated)
+        else {
+            panic!("enum serializer factory must be a static call")
+        };
+        let Callee::Static {
+            name: callee_name, ..
+        } = &**call_callee
         else {
             panic!("enum serializer factory must be a static call")
         };

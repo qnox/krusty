@@ -224,7 +224,7 @@ impl BodyLowering<'_> {
             };
             Ok(self
                 .ir
-                .add_expr(IrExpr::CallableReference(IrCallableReference {
+                .add_expr(IrExpr::CallableReference(Box::new(IrCallableReference {
                     target: IrCallableReferenceTarget::FunctionInvoke,
                     adapter: wrapper,
                     captures: Vec::new(),
@@ -238,7 +238,7 @@ impl BodyLowering<'_> {
                     declaration_suspend: target_suspend,
                     adaptation: None,
                     reflection_owner: None,
-                })))
+                }))))
         } else {
             let lambda = self.ir.add_expr(IrExpr::Lambda {
                 impl_fn: wrapper,

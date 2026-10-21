@@ -371,7 +371,7 @@ pub(super) fn install_inherited_type_parameter_serializers(
 ) {
     let this = ir.add_expr(IrExpr::GetValue(0));
     let inherited = ir.add_expr(IrExpr::Call {
-        callee: Callee::Super {
+        callee: Box::new(Callee::Super {
             owner: crate::types::type_name(super::GENERATED_SERIALIZER_FQ),
             dispatch_owner: owner,
             enclosing_dispatch: false,
@@ -385,7 +385,7 @@ pub(super) fn install_inherited_type_parameter_serializers(
             declaration: None,
             defaults: Vec::new(),
             source_member: None,
-        },
+        }),
         dispatch_receiver: Some(this),
         args: Vec::new(),
     });
@@ -647,20 +647,23 @@ mod tests {
             panic!("default delegation does not return its call");
         };
         let IrExpr::Call {
-            callee:
-                Callee::Super {
-                    owner: super_owner,
-                    dispatch_owner,
-                    params,
-                    ret,
-                    interface,
-                    realization,
-                    descriptor,
-                    ..
-                },
+            callee: call_callee,
             dispatch_receiver: Some(_),
             args,
         } = ir.expr(*call)
+        else {
+            panic!("default delegation is not a semantic super-member call");
+        };
+        let Callee::Super {
+            owner: super_owner,
+            dispatch_owner,
+            params,
+            ret,
+            interface,
+            realization,
+            descriptor,
+            ..
+        } = &**call_callee
         else {
             panic!("default delegation is not a semantic super-member call");
         };
@@ -686,9 +689,9 @@ mod tests {
         assert!(!ir.exprs.iter().any(|expression| matches!(
             expression,
             IrExpr::Call {
-                callee: Callee::Special { .. },
+                callee: call_callee,
                 ..
-            }
+            } if matches!(&**call_callee, Callee::Special { .. })
         )));
     }
 

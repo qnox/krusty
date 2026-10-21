@@ -90,10 +90,10 @@ fun pick(): List<P> = listOf(A()) + listOf(B())\n"
         .exprs
         .iter()
         .filter_map(|expression| match expression {
-            krusty::ir::IrExpr::Call {
-                callee: krusty::ir::Callee::External { params, ret, .. },
-                ..
-            } => Some((params.clone(), *ret)),
+            krusty::ir::IrExpr::Call { callee, .. } => match &**callee {
+                krusty::ir::Callee::External { params, ret, .. } => Some((params.clone(), *ret)),
+                _ => None,
+            },
             _ => None,
         })
         .collect::<Vec<_>>();

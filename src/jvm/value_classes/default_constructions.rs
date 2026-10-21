@@ -34,11 +34,11 @@ impl DefaultConstruction {
         ir.record_erased_value_construction(construction, owner, underlying);
         match function {
             Some(function) => IrExpr::Call {
-                callee: Callee::ClassStaticWithDefaults {
+                callee: Box::new(Callee::ClassStaticWithDefaults {
                     owner,
                     function,
                     defaults: omitted,
-                },
+                }),
                 dispatch_receiver: None,
                 args,
             },
@@ -87,12 +87,12 @@ fn sibling_call(
     ir.call_declared_params.insert(construction, boundary);
     let parameters: String = parameters.iter().map(desc).collect();
     IrExpr::Call {
-        callee: Callee::Static {
+        callee: Box::new(Callee::Static {
             owner,
             name: "constructor-impl$default".to_string(),
             descriptor: format!("({parameters}){}", desc(&underlying)),
             inline: InlineKind::None,
-        },
+        }),
         dispatch_receiver: None,
         args,
     }

@@ -67,13 +67,14 @@ impl NativeValueClasses {
         // the call shapes a JVM needs; a native program also realizes the dependency members its
         // runtime answers, so their signatures are part of what it references.
         for expression in &ir.exprs {
-            if let crate::ir::IrExpr::Call {
-                callee: crate::ir::Callee::External { params, ret, .. },
-                ..
-            } = expression
-            {
-                for ty in params.iter().chain([ret]) {
-                    crate::ir::referenced_classifiers::collect_classifier_names(*ty, &mut pending);
+            if let crate::ir::IrExpr::Call { callee, .. } = expression {
+                if let crate::ir::Callee::External { params, ret, .. } = &**callee {
+                    for ty in params.iter().chain([ret]) {
+                        crate::ir::referenced_classifiers::collect_classifier_names(
+                            *ty,
+                            &mut pending,
+                        );
+                    }
                 }
             }
         }

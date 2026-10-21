@@ -3,6 +3,7 @@
 
 mod accessor_names;
 mod aggregate_boundaries;
+mod body_scopes;
 mod boxed_generic_overrides;
 mod boxedness;
 mod boxing_rewrites;
@@ -58,6 +59,7 @@ use crate::jvm::operation_relocation::clone_below_representation_wrapper;
 use crate::jvm::physical_type::ir_ty_to_jvm;
 use crate::libraries::InlineKind;
 use crate::types::{existing_type_name, type_name, SemanticCallRole, Ty, TyKind, TypeName};
+use body_scopes::{append_inline_body_scopes, collect_reachable, collect_reachable_scoped};
 use boxing_rewrites::{box_wrap, box_wrap_nullable, to_string_wrap};
 use call_results::CallTypes;
 pub(crate) use class_annotations::class_file_annotations;
@@ -171,14 +173,16 @@ pub(crate) fn lower_value_classes(
                 name
             ),
             IrExpr::Call {
-                callee: Callee::Virtual { owner, name, .. },
+                callee: call_callee,
                 ..
-            } => crate::trace_compiler!(
-                "value_classes",
-                "input virtual call {id}: {}.{}",
-                owner,
-                name
-            ),
+            } if let Callee::Virtual { owner, name, .. } = &**call_callee => {
+                crate::trace_compiler!(
+                    "value_classes",
+                    "input virtual call {id}: {}.{}",
+                    owner,
+                    name
+                )
+            }
             _ => {}
         }
     }
@@ -1028,13 +1032,13 @@ pub(crate) fn lower_value_classes(
         for id in targets {
             let get = ir.add_expr(IrExpr::GetValue(slot));
             ir.exprs[id as usize] = IrExpr::Call {
-                callee: Callee::realized_virtual(
+                callee: Box::new(Callee::realized_virtual(
                     x,
                     "unbox-impl".to_string(),
                     format!("(){}", desc(&u)),
                     None,
                     false,
-                ),
+                )),
                 dispatch_receiver: Some(get),
                 args: vec![],
             };
@@ -1088,40 +1092,43 @@ pub(crate) fn lower_value_classes(
     if !callable_under.is_empty() {
         for (id, e) in ir.exprs.iter_mut().enumerate() {
             if let IrExpr::Call {
-                callee:
-                    Callee::Virtual {
-                        owner,
-                        name,
-                        params: Some((params, ret)),
-                        ..
-                    },
+                callee: call_callee,
                 dispatch_receiver,
                 ..
             } = e
             {
-                let id = id as ExprId;
-                let is_suspend = ir.suspend_calls.contains_key(&id);
-                // The underlying property's getter is no static implementation: it is the carrier.
-                if dispatch_receiver.is_some()
-                    && module_value_classes.contains_key(owner)
-                    && !cls_by_name.contains_key(owner)
-                    && vc_getters.get(owner) != Some(name)
+                if let Callee::Virtual {
+                    owner,
+                    name,
+                    params: Some((params, ret)),
+                    ..
+                } = &mut **call_callee
                 {
-                    let impl_name =
-                        vc_member_impl_name(name, params, ret, &callable_under, is_suspend);
-                    sibling_member_impls.insert(id, impl_name);
-                    ir.call_declared_params
-                        .entry(id)
-                        .or_insert_with(|| params.clone().into_boxed_slice());
+                    let id = id as ExprId;
+                    let is_suspend = ir.suspend_calls.contains_key(&id);
+                    // The underlying property's getter is no static implementation: it is the carrier.
+                    if dispatch_receiver.is_some()
+                        && module_value_classes.contains_key(owner)
+                        && !cls_by_name.contains_key(owner)
+                        && vc_getters.get(owner) != Some(name)
+                    {
+                        let impl_name =
+                            vc_member_impl_name(name, params, ret, &callable_under, is_suspend);
+                        sibling_member_impls.insert(id, impl_name);
+                        ir.call_declared_params
+                            .entry(id)
+                            .or_insert_with(|| params.clone().into_boxed_slice());
+                    }
+                    let mangled =
+                        vc_mangle_once(name, params, ret, &callable_under, false, is_suspend);
+                    if &mangled != name {
+                        *name = mangled;
+                    }
+                    for p in params.iter_mut() {
+                        *p = erase(p, &under);
+                    }
+                    *ret = erase(ret, &under);
                 }
-                let mangled = vc_mangle_once(name, params, ret, &callable_under, false, is_suspend);
-                if &mangled != name {
-                    *name = mangled;
-                }
-                for p in params.iter_mut() {
-                    *p = erase(p, &under);
-                }
-                *ret = erase(ret, &under);
             }
         }
         let mut module_physical_parameters = Vec::new();
@@ -1130,7 +1137,7 @@ pub(crate) fn lower_value_classes(
                 continue;
             };
             let (name, params, ret, module_target, module_default_call, semantic_default) =
-                match callee {
+                match &mut **callee {
                     Callee::CrossFile {
                         name,
                         params,
@@ -1809,13 +1816,14 @@ pub(crate) fn lower_value_classes(
             VcCtorDefault(default_constructions::DefaultConstruction),
         }
         if let IrExpr::Call {
-            callee: Callee::Virtual { owner, name, .. },
+            callee: call_callee,
             dispatch_receiver: Some(receiver),
             args,
         } = &ir.exprs[i]
         {
-            if name == "equals" {
-                crate::trace_compiler!(
+            if let Callee::Virtual { owner, name, .. } = &**call_callee {
+                if name == "equals" {
+                    crate::trace_compiler!(
                     "value_classes",
                     "equals candidate {id} owner={owner} known={} receiver={receiver} repr={} unboxed={:?} semantic={:?} physical={:?} args={:?}",
                     callable_under.contains_key(owner),
@@ -1835,6 +1843,7 @@ pub(crate) fn lower_value_classes(
                         ))
                         .collect::<Vec<_>>()
                 );
+                }
             }
         }
         // A value-class callee still shaped as a function-value call has no selected member.
@@ -1887,12 +1896,12 @@ pub(crate) fn lower_value_classes(
                     };
                     Some(Rw::ValueConstruction {
                         expr: IrExpr::Call {
-                            callee: Callee::Static {
+                            callee: Box::new(Callee::Static {
                                 owner,
                                 name: "constructor-impl".to_string(),
                                 descriptor: format!("({params}){ret}"),
                                 inline: InlineKind::None,
-                            },
+                            }),
                             dispatch_receiver: None,
                             args: args.clone(),
                         },
@@ -1940,12 +1949,12 @@ pub(crate) fn lower_value_classes(
                 let owner_rendered = fq_name.render();
                 Some(Rw::BoxedValue {
                     expr: IrExpr::Call {
-                        callee: Callee::Static {
+                        callee: Box::new(Callee::Static {
                             owner: fq_name,
                             name: "box-impl".to_string(),
                             descriptor: format!("({})L{owner_rendered};", desc(&u)),
                             inline: InlineKind::None,
-                        },
+                        }),
                         dispatch_receiver: None,
                         args: vec![*arg],
                     },
@@ -1992,16 +2001,17 @@ pub(crate) fn lower_value_classes(
             // A sole-property access resolved to `invokevirtual X.getV()` (e.g. inside another value
             // class's `init` block) — rewrite like the indexed getter.
             IrExpr::Call {
-                callee:
-                    Callee::Virtual {
-                        owner,
-                        name,
-                        params,
-                        ..
-                    },
+                callee: call_callee,
                 dispatch_receiver: Some(receiver),
                 ..
-            } if vc_getters.get(owner).is_some_and(|g| g == name) => {
+            } if let Callee::Virtual {
+                owner,
+                name,
+                params,
+                ..
+            } = &**call_callee
+                && (vc_getters.get(owner).is_some_and(|g| g == name)) =>
+            {
                 value_class_name(*owner, &under).map(|owner| Rw::Prop {
                     receiver: *receiver,
                     owner,
@@ -2014,10 +2024,12 @@ pub(crate) fn lower_value_classes(
             // the value class's static `equals-impl(U, Object)` entry point, whose first parameter is
             // the carrier and whose second parameter is boxed by the normal call-boundary pass below.
             IrExpr::Call {
-                callee: Callee::Virtual { owner, name, .. },
+                callee: call_callee,
                 dispatch_receiver: Some(receiver),
                 args,
-            } if name == "equals" && args.len() == 1 && callable_under.contains_key(owner) => {
+            } if let Callee::Virtual { owner, name, .. } = &**call_callee
+                && (name == "equals" && args.len() == 1 && callable_under.contains_key(owner)) =>
+            {
                 match repr_ctx.unboxed_value_class(*receiver, &callable_under) {
                     Some(receiver_class) if receiver_class == *owner => {
                         let argument = args[0];
@@ -2036,7 +2048,7 @@ pub(crate) fn lower_value_classes(
                                 .map(|ty| erase(ty, &callable_under))
                                 .unwrap_or(Ty::Error);
                             Some(Rw::Ctor(IrExpr::Call {
-                                callee: Callee::Static {
+                                callee: Box::new(Callee::Static {
                                     owner: *owner,
                                     name: "equals-impl".to_string(),
                                     descriptor: format!(
@@ -2044,7 +2056,7 @@ pub(crate) fn lower_value_classes(
                                         desc(&underlying)
                                     ),
                                     inline: InlineKind::None,
-                                },
+                                }),
                                 dispatch_receiver: None,
                                 args: vec![*receiver, argument],
                             }))
@@ -2057,60 +2069,63 @@ pub(crate) fn lower_value_classes(
             // Once a computed value-class accessor becomes static `getX-impl(U)`, preserve that
             // selected declaration while adapting its dispatch receiver to parameter zero.
             IrExpr::Call {
-                callee:
-                    Callee::Virtual {
-                        owner,
-                        name,
-                        params,
-                        module_target,
-                        ..
-                    },
+                callee: call_callee,
                 dispatch_receiver: Some(receiver),
                 args,
-            } if under.contains_key(owner) => match cls_by_name.get(owner) {
-                Some(class) => {
-                    let expected = format!("{name}-impl");
-                    ir.classes[*class].methods.iter().copied().find_map(|fid| {
-                        let function = ir.functions.get(fid as usize)?;
-                        (function.is_static
-                            && (function.name == *name || function.name == expected))
-                            .then(|| Rw::ImplCall {
-                                receiver: *receiver,
-                                owner: *owner,
-                                name: function.name.clone(),
-                                parameters: function.params.clone(),
-                                result: function.ret,
-                                args: args.iter().copied().map(Some).collect(),
-                                extension_receiver: ir.extension_receiver_fns.contains(&fid),
-                                function: Some(fid),
-                                module_target: None,
-                                declared_parameters: None,
-                            })
-                    })
-                }
-                // A member of a sibling file's value class: its static implementation takes the
-                // erased carrier at parameter zero, followed by the member's (already erased)
-                // declared parameters. Every argument is supplied — a call omitting a defaulted
-                // argument is a `ModuleWithDefaults` call, never this virtual form.
-                None => sibling_member_impls.get(&id).map(|impl_name| {
-                    let (declared, result) = params
-                        .clone()
-                        .expect("a sibling value-class member call retains its declared signature");
-                    let carrier = erase(&under[owner], &under);
-                    Rw::ImplCall {
-                        receiver: *receiver,
-                        owner: *owner,
-                        name: impl_name.clone(),
-                        parameters: std::iter::once(carrier).chain(declared).collect(),
-                        result,
-                        args: args.iter().copied().map(Some).collect(),
-                        extension_receiver: false,
-                        function: None,
-                        module_target: *module_target,
-                        declared_parameters: None,
+            } if let Callee::Virtual {
+                owner,
+                name,
+                params,
+                module_target,
+                ..
+            } = &**call_callee
+                && (under.contains_key(owner)) =>
+            {
+                match cls_by_name.get(owner) {
+                    Some(class) => {
+                        let expected = format!("{name}-impl");
+                        ir.classes[*class].methods.iter().copied().find_map(|fid| {
+                            let function = ir.functions.get(fid as usize)?;
+                            (function.is_static
+                                && (function.name == *name || function.name == expected))
+                                .then(|| Rw::ImplCall {
+                                    receiver: *receiver,
+                                    owner: *owner,
+                                    name: function.name.clone(),
+                                    parameters: function.params.clone(),
+                                    result: function.ret,
+                                    args: args.iter().copied().map(Some).collect(),
+                                    extension_receiver: ir.extension_receiver_fns.contains(&fid),
+                                    function: Some(fid),
+                                    module_target: None,
+                                    declared_parameters: None,
+                                })
+                        })
                     }
-                }),
-            },
+                    // A member of a sibling file's value class: its static implementation takes the
+                    // erased carrier at parameter zero, followed by the member's (already erased)
+                    // declared parameters. Every argument is supplied — a call omitting a defaulted
+                    // argument is a `ModuleWithDefaults` call, never this virtual form.
+                    None => sibling_member_impls.get(&id).map(|impl_name| {
+                        let (declared, result) = params.clone().expect(
+                            "a sibling value-class member call retains its declared signature",
+                        );
+                        let carrier = erase(&under[owner], &under);
+                        Rw::ImplCall {
+                            receiver: *receiver,
+                            owner: *owner,
+                            name: impl_name.clone(),
+                            parameters: std::iter::once(carrier).chain(declared).collect(),
+                            result,
+                            args: args.iter().copied().map(Some).collect(),
+                            extension_receiver: false,
+                            function: None,
+                            module_target: *module_target,
+                            declared_parameters: None,
+                        }
+                    }),
+                }
+            }
             // A zero-arg `Any`-override dispatched VIRTUALLY on the value class itself (`id.hashCode()`
             // / `id.toString()` — e.g. a data class hashing its value-class field on the field's own
             // class, kotlinc's per-field shape) → the static `-impl` over the unboxed underlying
@@ -2118,12 +2133,13 @@ pub(crate) fn lower_value_classes(
             // becomes the static's sole argument (the unboxed `$this` — a `Static` callee's
             // `dispatch_receiver` is only consumed by the splice path, never plain emission).
             IrExpr::Call {
-                callee: Callee::Virtual { owner, name, .. },
+                callee: call_callee,
                 dispatch_receiver: Some(receiver),
                 args,
-            } if args.is_empty()
-                && (name == "hashCode" || name == "toString")
-                && is_value_class_internal(*owner, &under) =>
+            } if let Callee::Virtual { owner, name, .. } = &**call_callee
+                && (args.is_empty()
+                    && (name == "hashCode" || name == "toString")
+                    && is_value_class_internal(*owner, &under)) =>
             {
                 let u = under
                     .get(owner)
@@ -2135,12 +2151,12 @@ pub(crate) fn lower_value_classes(
                     "Ljava/lang/String;"
                 };
                 Some(Rw::Ctor(IrExpr::Call {
-                    callee: Callee::Static {
+                    callee: Box::new(Callee::Static {
                         owner: *owner,
                         name: format!("{name}-impl"),
                         descriptor: format!("({}){ret}", desc(&u)),
                         inline: InlineKind::None,
-                    },
+                    }),
                     dispatch_receiver: None,
                     args: vec![*receiver],
                 }))
@@ -2176,12 +2192,12 @@ pub(crate) fn lower_value_classes(
                     .map(|t| erase(t, &under))
                     .unwrap_or(Ty::Error);
                 Some(Rw::Ctor(IrExpr::Call {
-                    callee: Callee::Static {
+                    callee: Box::new(Callee::Static {
                         owner: value_class,
                         name: name.to_owned(),
                         descriptor: format!("({}){ret}", desc(&u)),
                         inline: InlineKind::None,
-                    },
+                    }),
                     dispatch_receiver: None,
                     args: vec![*receiver],
                 }))
@@ -2472,12 +2488,12 @@ pub(crate) fn lower_value_classes(
                     ir_method_desc(&parameters, &result)
                 };
                 Some(IrExpr::Call {
-                    callee: Callee::Static {
+                    callee: Box::new(Callee::Static {
                         owner,
                         name,
                         descriptor,
                         inline: InlineKind::None,
-                    },
+                    }),
                     dispatch_receiver: None,
                     args: call_args,
                 })
@@ -2992,7 +3008,7 @@ pub(crate) fn lower_value_classes(
                 ..
             } = &ir.exprs[id as usize]
             {
-                let boxes = match callee {
+                let boxes = match &**callee {
                     Callee::Virtual { owner, params, .. } => {
                         !is_value_class_internal(*owner, &under) || params.is_some()
                     }
@@ -3015,19 +3031,23 @@ pub(crate) fn lower_value_classes(
             // it (a `FunctionN.invoke` result, a boxed local, a boxed member arg) must unbox. `box-impl` /
             // `constructor-impl` are static with no receiver; `unbox-impl` takes the box itself — both excluded.
             if let IrExpr::Call {
-                callee: Callee::Static { owner, name, .. } | Callee::Virtual { owner, name, .. },
+                callee: call_callee,
                 dispatch_receiver: Some(recv),
                 ..
             } = &ir.exprs[id as usize]
             {
-                if is_value_class_internal(*owner, &under)
-                    && name.contains("-impl")
-                    && name != "unbox-impl"
-                    && name != "box-impl"
-                    && name != "constructor-impl"
+                if let Callee::Static { owner, name, .. } | Callee::Virtual { owner, name, .. } =
+                    &**call_callee
                 {
-                    if let Repr::Boxed(x) = repr_ctx.repr(*recv) {
-                        ops.push((*recv, BoxOp::Unbox(x)));
+                    if is_value_class_internal(*owner, &under)
+                        && name.contains("-impl")
+                        && name != "unbox-impl"
+                        && name != "box-impl"
+                        && name != "constructor-impl"
+                    {
+                        if let Repr::Boxed(x) = repr_ctx.repr(*recv) {
+                            ops.push((*recv, BoxOp::Unbox(x)));
+                        }
                     }
                 }
             }
@@ -3123,7 +3143,7 @@ pub(crate) fn lower_value_classes(
                         .expect("guarded same-file function call");
                     let mut parameters = orig_params[function as usize].clone();
                     if matches!(
-                        callee,
+                        &**callee,
                         Callee::LocalDefault(_)
                             | Callee::ClassStaticDefault { .. }
                             | Callee::LocalWithDefaults { .. }
@@ -3140,7 +3160,7 @@ pub(crate) fn lower_value_classes(
                             }
                         }
                     }
-                    let omitted = match callee {
+                    let omitted = match &**callee {
                         Callee::LocalWithDefaults { defaults, .. }
                         | Callee::ClassStaticWithDefaults { defaults, .. } => {
                             Some(defaults.as_ref())
@@ -3167,30 +3187,31 @@ pub(crate) fn lower_value_classes(
                 // Adapt each one against the provider declaration parameter that remains after
                 // removing omitted ordinals; JVM placeholders are created only after this pass.
                 IrExpr::Call {
-                    callee:
-                        Callee::ModuleWithDefaults {
-                            target,
-                            default_provider,
-                            defaults,
-                            ..
-                        },
+                    callee: call_callee,
                     args,
                     ..
-                } => args
-                    .iter()
-                    .zip(default_calls::supplied_provider_parameters(
-                        ir,
-                        *target,
-                        *default_provider,
-                        defaults,
-                    ))
-                    .map(|(argument, parameter)| {
-                        (
-                            repr_ctx.through_erased_generic_coercion(*argument).0,
-                            parameter,
-                        )
-                    })
-                    .collect(),
+                } if let Callee::ModuleWithDefaults {
+                    target,
+                    default_provider,
+                    defaults,
+                    ..
+                } = &**call_callee =>
+                {
+                    args.iter()
+                        .zip(default_calls::supplied_provider_parameters(
+                            ir,
+                            *target,
+                            *default_provider,
+                            defaults,
+                        ))
+                        .map(|(argument, parameter)| {
+                            (
+                                repr_ctx.through_erased_generic_coercion(*argument).0,
+                                parameter,
+                            )
+                        })
+                        .collect()
+                }
                 // A sibling-source call has already crossed from its stable `Module` identity into
                 // the JVM `CrossFile` realization. Its retained finalized declaration signature is
                 // still the authoritative representation boundary: a concrete value class selected
@@ -3198,44 +3219,46 @@ pub(crate) fn lower_value_classes(
                 // member `$default` bridge additionally leads with its dispatch receiver and trails
                 // with masks/marker; neither is a Kotlin declaration parameter.
                 IrExpr::Call {
-                    callee:
-                        Callee::CrossFile {
-                            module_target: Some(target),
-                            module_default_call,
-                            ..
-                        },
+                    callee: call_callee,
                     args,
                     ..
-                } => ir
-                    .referenced_module_callables
-                    .get(target)
-                    .map(|callable| {
-                        let offset = usize::from(*module_default_call && callable.owner.is_some());
-                        args.iter()
-                            .skip(offset)
-                            .zip(callable.parameters.iter())
-                            .map(|(argument, parameter)| {
-                                (
-                                    repr_ctx.through_erased_generic_coercion(*argument).0,
-                                    *parameter,
-                                )
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
+                } if let Callee::CrossFile {
+                    module_target: Some(target),
+                    module_default_call,
+                    ..
+                } = &**call_callee =>
+                {
+                    ir.referenced_module_callables
+                        .get(target)
+                        .map(|callable| {
+                            let offset =
+                                usize::from(*module_default_call && callable.owner.is_some());
+                            args.iter()
+                                .skip(offset)
+                                .zip(callable.parameters.iter())
+                                .map(|(argument, parameter)| {
+                                    (
+                                        repr_ctx.through_erased_generic_coercion(*argument).0,
+                                        *parameter,
+                                    )
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                }
                 // `Array<T>.set(index, value)` stores into the receiver array's semantic element
                 // slot. Reference arrays of value classes keep boxed elements, so the value-class
                 // boundary belongs here alongside call parameters and fields. The receiver is often
                 // a generated local read; recover its pre-erasure type from the function slot map.
                 IrExpr::Call {
-                    callee:
-                        Callee::Intrinsic {
-                            operation: crate::ir::IrIntrinsic::ArraySet,
-                            ..
-                        },
+                    callee: call_callee,
                     dispatch_receiver: Some(array),
                     args,
-                } => {
+                } if let Callee::Intrinsic {
+                    operation: crate::ir::IrIntrinsic::ArraySet,
+                    ..
+                } = &**call_callee =>
+                {
                     let element =
                         array_element_type(&ir.exprs, repr_ctx.slots, &ir.logical_types, *array);
                     crate::trace_compiler!(
@@ -4131,19 +4154,28 @@ fn repr(context: &ReprCtx<'_>, id: ExprId) -> Repr {
             repr_of_ty(&field_getters[&(*class, *index)], under)
         }
         IrExpr::Call {
-            callee: Callee::Static { owner, name, .. },
+            callee: call_callee,
             ..
-        } if name == "constructor-impl" || name == "unbox-impl" => {
+        } if let Callee::Static { owner, name, .. } = &**call_callee
+            && (name == "constructor-impl" || name == "unbox-impl") =>
+        {
             value_class_name(*owner, under).map_or(Repr::NotVc, Repr::Unboxed)
         }
         IrExpr::Call {
-            callee: Callee::Static { owner, name, .. } | Callee::Virtual { owner, name, .. },
+            callee: call_callee,
             ..
-        } if name == "box-impl" => value_class_name(*owner, under).map_or(Repr::NotVc, Repr::Boxed),
+        } if let Callee::Static { owner, name, .. } | Callee::Virtual { owner, name, .. } =
+            &**call_callee
+            && (name == "box-impl") =>
+        {
+            value_class_name(*owner, under).map_or(Repr::NotVc, Repr::Boxed)
+        }
         IrExpr::Call {
-            callee: Callee::Virtual { owner, name, .. },
+            callee: call_callee,
             ..
-        } if name == "unbox-impl" => {
+        } if let Callee::Virtual { owner, name, .. } = &**call_callee
+            && (name == "unbox-impl") =>
+        {
             value_class_name(*owner, under).map_or(Repr::NotVc, Repr::Unboxed)
         }
         // Any already-selected call whose declaration returns a value class yields that declaration's
@@ -4351,9 +4383,13 @@ fn boxed_vc(t: &Ty, under: &Under) -> Option<TypeName> {
 fn is_unboxed_vc(exprs: &[IrExpr], id: ExprId, x: TypeName) -> bool {
     match &exprs[id as usize] {
         IrExpr::Call {
-            callee: Callee::Static { owner, name, .. },
+            callee: call_callee,
             ..
-        } if *owner == x && (name == "constructor-impl" || name == "unbox-impl") => true,
+        } if let Callee::Static { owner, name, .. } = &**call_callee
+            && (*owner == x && (name == "constructor-impl" || name == "unbox-impl")) =>
+        {
+            true
+        }
         IrExpr::Block { value: Some(v), .. } => is_unboxed_vc(exprs, *v, x),
         _ => false,
     }
@@ -4655,71 +4691,6 @@ fn desc(t: &Ty) -> String {
 
 fn ir_method_desc(params: &[Ty], ret: &Ty) -> String {
     crate::jvm::method_descriptors::ir_method_desc(params, ret)
-}
-
-/// Collect every `ExprId` reachable from `root` (a function body), so rewrites stay within bodies that
-/// own value-class values unboxed.
-fn collect_reachable(exprs: &[IrExpr], root: ExprId, out: &mut HashSet<ExprId>) {
-    if !out.insert(root) {
-        return;
-    }
-    crate::ir::for_each_child(exprs, root, &mut |c| collect_reachable(exprs, c, out));
-}
-
-/// Add every retained lambda inline body reachable from `bodies` as its own lexical value-slot scope.
-/// The standalone `impl_fn` body and the value-producing `inline_body` are distinct expression DAGs,
-/// but both use the lambda implementation's numbering. JVM inline splicing can emit the latter even
-/// when the implementation method is also emitted, so representation rewrites must visit both copies.
-fn append_inline_body_scopes(
-    ir: &IrFile,
-    bodies: &mut Vec<(ExprId, HashMap<u32, Ty>)>,
-    slot_types: &[HashMap<u32, Ty>],
-    own_parameters: &inline_body_slots::OwnParameters,
-) {
-    let mut known_roots: HashSet<ExprId> = bodies.iter().map(|(root, _)| *root).collect();
-    let mut cursor = 0;
-    while cursor < bodies.len() {
-        let root = bodies[cursor].0;
-        cursor += 1;
-        let mut reachable = HashSet::default();
-        collect_reachable_scoped(&ir.exprs, root, &mut reachable);
-        for expression in reachable {
-            let IrExpr::Lambda {
-                impl_fn,
-                inline_body: Some(inline_body),
-                ..
-            } = &ir.exprs[expression as usize]
-            else {
-                continue;
-            };
-            if known_roots.insert(*inline_body) {
-                if let Some(slots) = slot_types.get(*impl_fn as usize) {
-                    let slots = own_parameters.unboxed(*impl_fn, slots.clone());
-                    bodies.push((*inline_body, slots));
-                }
-            }
-        }
-    }
-}
-
-/// Like [`collect_reachable], but never descends into a lambda's body — only its captures. Both a
-/// closure's standalone implementation body and its retained inline body have their own value-index
-/// numbering and slot types. Reaching either from the enclosing scope would let representation
-/// analysis interpret those indices using the wrong lexical frame. Callers that also transform
-/// retained inline bodies add them as independent roots with [`append_inline_body_scopes`].
-fn collect_reachable_scoped(exprs: &[IrExpr], root: ExprId, out: &mut HashSet<ExprId>) {
-    if !out.insert(root) {
-        return;
-    }
-    if let IrExpr::Lambda { captures, .. } = &exprs[root as usize] {
-        for &c in captures {
-            collect_reachable_scoped(exprs, c, out);
-        }
-        return;
-    }
-    crate::ir::for_each_child(exprs, root, &mut |c| {
-        collect_reachable_scoped(exprs, c, out)
-    });
 }
 
 #[cfg(test)]

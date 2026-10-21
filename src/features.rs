@@ -10,6 +10,18 @@ use crate::kotlin_version::KotlinVersion;
 use crate::language_version::LanguageVersion;
 
 pub(crate) mod deprecation_cycle_messages;
+
+const LANGUAGE_DIRECTIVE: &str = "// LANGUAGE:";
+const ASSERTIONS_MODE_DIRECTIVE: &str = "// ASSERTIONS_MODE:";
+const EXPLICIT_API_MODE_DIRECTIVE: &str = "// EXPLICIT_API_MODE:";
+const OPT_IN_DIRECTIVE: &str = "// OPT_IN:";
+/// Every line prefix [`LangFeatures::apply_source_directives`] reads.
+const SOURCE_DIRECTIVES: [&str; 4] = [
+    LANGUAGE_DIRECTIVE,
+    ASSERTIONS_MODE_DIRECTIVE,
+    EXPLICIT_API_MODE_DIRECTIVE,
+    OPT_IN_DIRECTIVE,
+];
 mod deprecation_migrations;
 mod language_versions;
 mod table;
@@ -366,26 +378,43 @@ impl LangFeatures {
         }
     }
 
+    /// The features `src` compiles under: these, with its directives applied. A source without
+    /// directives borrows these instead of copying them.
+    pub fn for_source(&self, src: &str) -> std::borrow::Cow<'_, LangFeatures> {
+        let has_directive = src.lines().any(|line| {
+            let line = line.trim_start();
+            SOURCE_DIRECTIVES
+                .iter()
+                .any(|directive| line.starts_with(directive))
+        });
+        if !has_directive {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        let mut features = self.clone();
+        features.apply_source_directives(src);
+        std::borrow::Cow::Owned(features)
+    }
+
     /// Collect every `// LANGUAGE:` directive in a source file. This is how the kotlinc test
     /// infrastructure (and thus our conformance harness) specifies the flags a test compiles under.
     pub fn apply_source_directives(&mut self, src: &str) {
         for line in src.lines() {
             let l = line.trim_start();
-            if let Some(rest) = l.strip_prefix("// LANGUAGE:") {
+            if let Some(rest) = l.strip_prefix(LANGUAGE_DIRECTIVE) {
                 self.apply_directive(rest);
             }
             // `// ASSERTIONS_MODE: always-enable|always-disable` — kotlinc's `-Xassertions` mode for the
             // `assert(...)` intrinsic (modeled as pseudo-features so it flows like any other directive).
-            if let Some(rest) = l.strip_prefix("// ASSERTIONS_MODE:") {
+            if let Some(rest) = l.strip_prefix(ASSERTIONS_MODE_DIRECTIVE) {
                 self.apply_assertions_mode(rest.trim());
             }
             // `// EXPLICIT_API_MODE: STRICT|WARNING` — kotlinc's `-Xexplicit-api` analysis mode,
             // carried the same way.
-            if let Some(rest) = l.strip_prefix("// EXPLICIT_API_MODE:") {
+            if let Some(rest) = l.strip_prefix(EXPLICIT_API_MODE_DIRECTIVE) {
                 self.apply_explicit_api_mode(&rest.trim().to_ascii_lowercase());
             }
             // `// OPT_IN: a.B, c.D` — the test infrastructure's spelling of `-opt-in` per marker.
-            if let Some(rest) = l.strip_prefix("// OPT_IN:") {
+            if let Some(rest) = l.strip_prefix(OPT_IN_DIRECTIVE) {
                 for marker in rest.split([' ', ',', '\t']).filter(|s| !s.is_empty()) {
                     self.opt_in(marker);
                 }
@@ -433,6 +462,32 @@ impl LangFeatures {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_source_without_directives_borrows_the_module_features() {
+        let module = LangFeatures::new();
+        let features = module.for_source("fun answer(): Int = 42\n");
+        assert!(matches!(features, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn a_source_with_directives_applies_them_to_a_copy() {
+        let module = LangFeatures::new();
+        let features = module.for_source(
+            "  // LANGUAGE: +NameBasedDestructuring\n// OPT_IN: example.Marker\nfun f() {}\n",
+        );
+        let mut expected = LangFeatures::new();
+        expected.apply_directive("+NameBasedDestructuring");
+        expected.opt_in("example.Marker");
+        assert!(matches!(features, std::borrow::Cow::Owned(_)));
+        assert_eq!(*features, expected);
+        for directive in SOURCE_DIRECTIVES {
+            assert!(matches!(
+                module.for_source(&format!("{directive} x\n")),
+                std::borrow::Cow::Owned(_)
+            ));
+        }
+    }
 
     #[test]
     fn directive_enables_and_disables() {

@@ -163,7 +163,9 @@ pub(super) fn value_indices(expression: &IrExpr) -> Vec<u32> {
         | IrExpr::SetValue { var: index, .. }
         | IrExpr::Variable { index, .. } => vec![*index],
         IrExpr::Try { catches, .. } => catches.iter().map(|catch| catch.var).collect(),
-        IrExpr::Checked(crate::ir::IrCheckedOperation::RangeLoop { variable, .. }) => {
+        IrExpr::Checked(checked_op)
+            if let crate::ir::IrCheckedOperation::RangeLoop { variable, .. } = &**checked_op =>
+        {
             vec![*variable]
         }
         _ => Vec::new(),

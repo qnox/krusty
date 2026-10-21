@@ -8,7 +8,8 @@ mod java_hash_map;
 mod switch;
 
 /// Whether a discarded `when` still joins a value, as kotlinc's `visitWhen` has it: only a `when`
-/// that is not exhaustive, or whose type is `Unit`, discards each branch's value in the branch.
+/// that is not exhaustive, or whose type is `Unit`, discards each branch's value in the branch
+/// (outside a switch: see [`Emitter::is_unit_switch`]).
 /// Any other materializes every branch at its type, and the statement discarding the `when` pops
 /// the joined value once; `PopBackwardPropagation` then drops that `pop` where the branches'
 /// pushes are cheap enough to drop with it. Whether a `when` or `if` ending in an `else if` chain
@@ -216,6 +217,46 @@ impl Emitter<'_> {
         discarded: bool,
         code: &mut CodeBuilder,
     ) {
+        self.emit_when_as(expression, branches, discarded, false, code);
+    }
+
+    /// Whether `expression` is an exhaustive `Unit` `when` that dispatches through a switch.
+    /// kotlinc's `SwitchGenerator` materializes every arm of one, `Unit` included, so in statement
+    /// position the joined `Unit` is popped (`PopBackwardPropagation` drops both where the method
+    /// is small enough for it).
+    pub(super) fn is_unit_switch(&self, expression: u32) -> bool {
+        let IrExpr::When { branches } = self.ir.expr(expression) else {
+            return false;
+        };
+        let has_else = branches.iter().any(|(c, _)| c.is_none());
+        let exhaustive_result = self.ir.whens.exhaustive.get(&expression).copied();
+        let result_ty = exhaustive_result
+            .map(|result| ir_ty_to_jvm(&result))
+            .unwrap_or_else(|| self.value_ty_of_when(branches));
+        (has_else || exhaustive_result.is_some())
+            && result_ty == Ty::Unit
+            && !self.machine_suspensions.contains_key(&expression)
+            && self.switch_plan(branches).is_some()
+    }
+
+    /// A statement [`Self::is_unit_switch`] `when` that leaves its joined `Unit` on the stack: the
+    /// last statement of a block, whose `Unit` value kotlinc discards after the block's locals
+    /// end.
+    pub(super) fn emit_unit_switch_value(&mut self, expression: u32, code: &mut CodeBuilder) {
+        let IrExpr::When { branches } = self.ir.expr(expression).clone() else {
+            unreachable!("a unit switch is a `when`");
+        };
+        self.emit_when_as(expression, &branches, true, true, code);
+    }
+
+    fn emit_when_as(
+        &mut self,
+        expression: u32,
+        branches: &[(Option<u32>, u32)],
+        discarded: bool,
+        keeps_unit: bool,
+        code: &mut CodeBuilder,
+    ) {
         let end = code.new_label();
         // Each branch starts at the pre-condition height, not the linear counter left by the prior
         // body. Resetting at `next` prevents a phantom operand in later branch bodies.
@@ -246,6 +287,12 @@ impl Emitter<'_> {
         // of comparisons. Everything above (the result type, the statement/value decision, the entry
         // height) applies unchanged; only the dispatch differs.
         if let Some(mut plan) = self.switch_plan(branches) {
+            let (is_stmt, result_ty, keeps_value, terminal_target) =
+                if discarded && exhaustive && result_ty == Ty::Unit {
+                    (false, Ty::obj("kotlin/Unit"), !keeps_unit, None)
+                } else {
+                    (is_stmt, result_ty, keeps_value, terminal_target)
+                };
             if !has_else && exhaustive_result.is_some() {
                 plan.no_branch_matched = Some(self.ir.whens.source_lines.get(&expression).copied());
             }

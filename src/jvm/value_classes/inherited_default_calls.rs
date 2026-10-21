@@ -106,13 +106,15 @@ impl InheritedDefaultStatics {
             .iter()
             .filter_map(|expression| match expression {
                 IrExpr::Call {
-                    callee:
-                        Callee::Virtual {
-                            target: Some(target),
-                            ..
-                        },
+                    callee: call_callee,
                     ..
-                } => Some(InheritedMember::from_virtual(*target)),
+                } if let Callee::Virtual {
+                    target: Some(target),
+                    ..
+                } = &**call_callee =>
+                {
+                    Some(InheritedMember::from_virtual(*target))
+                }
                 IrExpr::PropertyRead {
                     operation: Some(operation),
                     ..
@@ -198,18 +200,20 @@ impl InheritedDefaultStatics {
     ) -> Option<InheritedDefaultCall<'a>> {
         let (member, receiver, args) = match call {
             IrExpr::Call {
-                callee:
-                    Callee::Virtual {
-                        target: Some(target),
-                        ..
-                    },
+                callee: call_callee,
                 dispatch_receiver: Some(receiver),
                 args,
-            } => (
-                InheritedMember::from_virtual(*target),
-                *receiver,
-                args.clone(),
-            ),
+            } if let Callee::Virtual {
+                target: Some(target),
+                ..
+            } = &**call_callee =>
+            {
+                (
+                    InheritedMember::from_virtual(*target),
+                    *receiver,
+                    args.clone(),
+                )
+            }
             IrExpr::MethodCall {
                 class,
                 index,

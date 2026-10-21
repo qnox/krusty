@@ -64,9 +64,9 @@ fn a_call_of_a_dependency_function_lowers_its_callee_into_the_unit() {
         .iter()
         .filter_map(|expression| match expression {
             crate::ir::IrExpr::Call {
-                callee: crate::ir::Callee::Local(callee),
+                callee: call_callee,
                 ..
-            } => Some(*callee),
+            } if let crate::ir::Callee::Local(callee) = &**call_callee => Some(*callee),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -93,9 +93,9 @@ fn overlapping_roots_share_their_transitive_callee_when_selected_in_reverse_orde
         .iter()
         .filter_map(|expression| match expression {
             crate::ir::IrExpr::Call {
-                callee: crate::ir::Callee::Local(callee),
+                callee: call_callee,
                 ..
-            } => Some(*callee),
+            } if let crate::ir::Callee::Local(callee) = &**call_callee => Some(*callee),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -132,9 +132,9 @@ fn a_later_support_unit_links_an_exact_callee_emitted_by_an_earlier_unit() {
         .iter()
         .filter_map(|expression| match expression {
             crate::ir::IrExpr::Call {
-                callee: crate::ir::Callee::External { target, .. },
+                callee: call_callee,
                 ..
-            } => Some(*target),
+            } if let crate::ir::Callee::External { target, .. } = &**call_callee => Some(*target),
             _ => None,
         })
         .collect::<Vec<_>>();

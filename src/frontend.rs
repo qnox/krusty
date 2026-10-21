@@ -49,7 +49,7 @@ pub struct SourceSetAnalysis {
     pub symbols: FrontendSymbols,
     pub types: Vec<Option<FrontendTypeInfo>>,
     parse_errors: Vec<bool>,
-    pub(crate) reparse_sources: Vec<ReparseSource>,
+    pub(crate) reparse_sources: ReparseSources,
     pub(crate) streamed: Option<StreamedPassState>,
 }
 
@@ -63,7 +63,7 @@ pub struct StreamingSourceSetAnalysis {
     /// platform may consume it.
     pub(crate) target: CompilationTarget,
     pub(crate) symbols: crate::resolve::PassTwoSymbols,
-    pub(crate) reparse_sources: Vec<ReparseSource>,
+    pub(crate) reparse_sources: ReparseSources,
     pub(crate) streamed: Option<StreamedPassState>,
 }
 
@@ -97,16 +97,45 @@ pub(crate) struct ReparseSource {
     kind: SourceKind,
     is_common: bool,
     text: Box<str>,
-    features: LangFeatures,
     #[cfg(test)]
     parse_count: std::cell::Cell<usize>,
     #[cfg(test)]
     released_before_collection: bool,
 }
 
+/// The sources Pass 2 reparses, with the module's features they compile under. A source's own
+/// directives are applied when it is reparsed, so no source holds a copy of the module's features.
+pub(crate) struct ReparseSources {
+    features: LangFeatures,
+    sources: Vec<ReparseSource>,
+}
+
+impl ReparseSources {
+    pub(crate) fn new(features: LangFeatures) -> Self {
+        ReparseSources {
+            features,
+            sources: Vec::new(),
+        }
+    }
+
+    /// The module's features, before any source's directives.
+    pub(crate) fn features(&self) -> &LangFeatures {
+        &self.features
+    }
+}
+
+impl std::ops::Deref for ReparseSources {
+    type Target = [ReparseSource];
+
+    fn deref(&self) -> &[ReparseSource] {
+        &self.sources
+    }
+}
+
 impl ReparseSource {
     pub(crate) fn visit_declaration_units(
         &self,
+        module_features: &LangFeatures,
         diags: &mut DiagSink,
         mut visit: impl FnMut(File, &mut DiagSink),
     ) {
@@ -123,7 +152,7 @@ impl ReparseSource {
             &self.text,
             &tokens,
             diags,
-            &self.features,
+            &module_features.for_source(&self.text),
             |mut file, diags| {
                 file.is_common = self.is_common;
                 record_local_class_name_provenance_with_counters(
@@ -148,8 +177,10 @@ impl ReparseSource {
         self.kind == SourceKind::Java
     }
 
-    pub(crate) fn recursive_type_of(&self) -> bool {
-        self.features.has("JvmSupportRecursiveTypeOf")
+    pub(crate) fn recursive_type_of(&self, module_features: &LangFeatures) -> bool {
+        module_features
+            .for_source(&self.text)
+            .has("JvmSupportRecursiveTypeOf")
     }
 
     pub(crate) fn source_line_count(&self) -> u32 {
@@ -167,6 +198,7 @@ impl ReparseSource {
     /// Pass-1 parser coordinate or signature graph survives. Java bodies remain owned by javac.
     pub(crate) fn visit_diagnostic_units(
         &self,
+        module_features: &LangFeatures,
         diags: &mut DiagSink,
         mut visit: impl FnMut(File, &mut DiagSink),
     ) {
@@ -175,11 +207,12 @@ impl ReparseSource {
             // still recover diagnostics through the same bounded Pass-2 parser used by successful
             // modules. Keeping the whole reparsed file alive here would make error recovery a hidden
             // non-streaming architecture.
-            SourceKind::Kotlin => self.visit_declaration_units(diags, visit),
+            SourceKind::Kotlin => self.visit_declaration_units(module_features, diags, visit),
             SourceKind::KotlinScript => {
                 #[cfg(test)]
                 self.parse_count.set(self.parse_count.get() + 1);
-                let mut file = parse_source_kind(&self.text, self.kind, &self.features, diags);
+                let features = module_features.for_source(&self.text);
+                let mut file = parse_source_kind(&self.text, self.kind, &features, diags);
                 file.is_common = self.is_common;
                 visit(file, diags);
             }
@@ -1046,7 +1079,8 @@ where
     // compiler stops before actualization once one exists, so the unmatched-expect report below is
     // skipped for the WHOLE compilation rather than per file.
     let mut expect_bodies_rejected = false;
-    let mut reparse_sources = Vec::with_capacity(sources.len());
+    let mut reparse_sources = ReparseSources::new(project_features.clone());
+    reparse_sources.sources.reserve_exact(sources.len());
     let mut pass1_builder = crate::fir::HeaderInventoryBuilder::default();
     let mut signature_constraints = crate::fir::SignatureConstraintExtractor::default();
     let mut source_contracts = Vec::new();
@@ -1056,19 +1090,17 @@ where
     // expect/default body be released before actualization has harvested it.
     let multiplatform = project_features.has("MultiPlatformProjects")
         || sources.iter().any(|source| {
-            let mut features = project_features.clone();
-            features.apply_source_directives(source.text);
-            features.has("MultiPlatformProjects")
+            project_features
+                .for_source(source.text)
+                .has("MultiPlatformProjects")
         });
     for (index, source) in sources.iter().enumerate() {
         diags.set_file(index as u32);
-        let mut features = project_features.clone();
-        features.apply_source_directives(source.text);
-        reparse_sources.push(ReparseSource {
+        let features = project_features.for_source(source.text);
+        reparse_sources.sources.push(ReparseSource {
             kind: source.kind,
             is_common: source.is_common,
             text: source.text.into(),
-            features: features.clone(),
             #[cfg(test)]
             parse_count: std::cell::Cell::new(0),
             #[cfg(test)]
@@ -1171,6 +1203,7 @@ where
                 #[cfg(test)]
                 {
                     reparse_sources
+                        .sources
                         .last_mut()
                         .expect("the active source owns reparse state")
                         .released_before_collection = true;
@@ -1312,7 +1345,7 @@ where
         if !retain_inspection_analysis {
             for (file, _source) in files
                 .iter_mut()
-                .zip(&mut reparse_sources)
+                .zip(&mut reparse_sources.sources)
                 .take(inferred_count)
             {
                 retained_syntax::compact(file);

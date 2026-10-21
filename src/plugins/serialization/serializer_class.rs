@@ -418,13 +418,13 @@ pub(super) fn complete(
         let is_optional = foo_optional.get(i).copied().unwrap_or(false);
         let opt = ir.add_expr(IrExpr::Const(IrConst::Boolean(is_optional)));
         init_stmts.push(ir.add_expr(IrExpr::Call {
-            callee: Callee::realized_virtual(
+            callee: Box::new(Callee::realized_virtual(
                 type_name(descriptor_internal),
                 "addElement".to_string(),
                 "(Ljava/lang/String;Z)V".to_string(),
                 None,
                 false,
-            ),
+            )),
             dispatch_receiver: Some(d),
             args: vec![nm, opt],
         }));

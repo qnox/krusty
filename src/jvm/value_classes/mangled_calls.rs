@@ -44,7 +44,7 @@ pub(super) fn rename(
     let mut declared_parameters = Vec::new();
     for (index, e) in ir.exprs.iter_mut().enumerate() {
         if let IrExpr::Call { callee, .. } = e {
-            let selected = match &*callee {
+            let selected = match &**callee {
                 Callee::Special {
                     source: Some(source),
                     ..
@@ -61,7 +61,7 @@ pub(super) fn rename(
             if let Some((mangled, declaration)) =
                 selected.and_then(|selected| declarations.get(&selected))
             {
-                match callee {
+                match &mut **callee {
                     Callee::Special {
                         name,
                         descriptor: call_descriptor,
@@ -116,7 +116,7 @@ mod tests {
         ir.checked_callable_functions.insert(source, function);
 
         let source_call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual {
+            callee: Box::new(Callee::Virtual {
                 owner,
                 name: "selected".to_string(),
                 descriptor: "()Ljava/lang/Object;".to_string(),
@@ -126,12 +126,12 @@ mod tests {
                 target: Some(IrVirtualTarget::Function(
                     ResolvedFunctionOverrideTarget::Module(source),
                 )),
-            },
+            }),
             dispatch_receiver: None,
             args: Vec::new(),
         });
         let external_call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual {
+            callee: Box::new(Callee::Virtual {
                 // Physical dispatch was retargeted to the source receiver class, but the selected
                 // declaration remains the dependency callable and owns this descriptor.
                 owner,
@@ -143,7 +143,7 @@ mod tests {
                 target: Some(IrVirtualTarget::Function(
                     ResolvedFunctionOverrideTarget::External(external),
                 )),
-            },
+            }),
             dispatch_receiver: None,
             args: Vec::new(),
         });
@@ -158,11 +158,14 @@ mod tests {
 
         let call = |expression| match ir.expr(expression) {
             IrExpr::Call {
-                callee: Callee::Virtual {
-                    name, descriptor, ..
-                },
+                callee: call_callee,
                 ..
-            } => (name.as_str(), descriptor.as_str()),
+            } if let Callee::Virtual {
+                name, descriptor, ..
+            } = &**call_callee =>
+            {
+                (name.as_str(), descriptor.as_str())
+            }
             other => panic!("expected a virtual call, got {other:?}"),
         };
         assert_eq!(

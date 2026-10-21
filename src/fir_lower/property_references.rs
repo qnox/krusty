@@ -140,30 +140,29 @@ impl BodyLowering<'_> {
         };
 
         let read = match target {
-            FirPropertyReferenceTarget::Module(target) => {
-                self.ir
-                    .add_expr(IrExpr::Checked(IrCheckedOperation::PropertyRead {
-                        target: *target,
-                        dispatch_receiver,
-                        extension_receiver,
-                        context_arguments: Vec::new(),
-                        substitutions: Vec::new(),
-                    }))
-            }
+            FirPropertyReferenceTarget::Module(target) => self.ir.add_expr(IrExpr::Checked(
+                Box::new(IrCheckedOperation::PropertyRead {
+                    target: *target,
+                    dispatch_receiver,
+                    extension_receiver,
+                    context_arguments: Vec::new(),
+                    substitutions: Vec::new(),
+                }),
+            )),
             FirPropertyReferenceTarget::SpecializedModule {
                 property,
                 getter_inline_splice,
                 ..
             } => {
-                let read = self
-                    .ir
-                    .add_expr(IrExpr::Checked(IrCheckedOperation::PropertyRead {
+                let read = self.ir.add_expr(IrExpr::Checked(Box::new(
+                    IrCheckedOperation::PropertyRead {
                         target: *property,
                         dispatch_receiver,
                         extension_receiver,
                         context_arguments: Vec::new(),
                         substitutions: super::checked::lower_substitutions(substitutions),
-                    }));
+                    },
+                )));
                 self.record_inline_property_splice(read, getter_inline_splice);
                 read
             }

@@ -404,16 +404,24 @@ pub(crate) fn entry_frame(
 
 /// Slot-indexed locals in the form a frame carries them.
 pub(crate) fn frame_locals(slots: &[VerificationType]) -> Vec<VerificationType> {
-    let mut locals = Vec::with_capacity(slots.len());
-    let mut slot = 0;
-    while slot < slots.len() {
-        let value = slots[slot].clone();
-        slot += if value.is_wide() { 2 } else { 1 };
-        locals.push(value);
-    }
-    while locals.last() == Some(&VerificationType::Top) {
-        locals.pop();
-    }
+    // A class keeps its methods' frames until it is written, so each holds exactly its entries:
+    // the slots up to the last non-`top` one, a wide value counted once.
+    let used = slots.len()
+        - slots
+            .iter()
+            .rev()
+            .take_while(|value| **value == VerificationType::Top)
+            .count();
+    let entries = || {
+        let mut slot = 0;
+        std::iter::from_fn(move || {
+            let value = slots[..used].get(slot)?;
+            slot += if value.is_wide() { 2 } else { 1 };
+            Some(value)
+        })
+    };
+    let mut locals = Vec::with_capacity(entries().count());
+    locals.extend(entries().cloned());
     locals
 }
 
@@ -719,5 +727,14 @@ mod tests {
             frame_locals(&[Integer, Long, Top, Top, Double, Top, Top, Top]),
             vec![Integer, Long, Top, Double]
         );
+    }
+
+    /// A class holds every method's frames until it is written, so a frame's locals carry no
+    /// spare capacity for the slots its trailing `top`s and wide halves dropped.
+    #[test]
+    fn frame_locals_hold_exactly_their_entries() {
+        use VerificationType::*;
+        let locals = frame_locals(&[Integer, Long, Top, Top, Double, Top, Top, Top]);
+        assert_eq!(locals.capacity(), locals.len());
     }
 }
