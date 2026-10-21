@@ -153,7 +153,9 @@ pub(crate) fn inherited_default_bridges(
         let erased_ret = crate::jvm::method_descriptors::jvm_declared_ty(&declared.physical_ret);
         let concrete_ret =
             crate::jvm::method_descriptors::jvm_declared_ty(&specialized.physical_ret);
-        if erased == concrete && erased_ret == concrete_ret {
+        let name = inherited_member_jvm_name(ir, callables, default);
+        let realization = inherited_realization_jvm_name(ir, callables, default);
+        if name == realization && erased == concrete && erased_ret == concrete_ret {
             continue;
         }
         // A value class the substitution carries unboxed stays the value class here: the
@@ -172,8 +174,6 @@ pub(crate) fn inherited_default_bridges(
             Some(_) => default.applied_result,
             None => specialized.physical_ret,
         };
-        let name = inherited_member_jvm_name(ir, callables, default);
-        let realization = inherited_realization_jvm_name(ir, callables, default);
         let kind = match default.name {
             crate::fir::InheritedMemberName::Function(_) => BridgeKind::Function,
             crate::fir::InheritedMemberName::PropertyGetter(_) => BridgeKind::PropertyGetter,
@@ -255,11 +255,12 @@ pub(crate) fn specialized_super_entry(
                 crate::jvm::value_classes::specialized_member_types(ir, callables, default);
             let params = crate::jvm::method_descriptors::jvm_tys(&specialized.physical_params);
             let ret = crate::jvm::method_descriptors::jvm_declared_ty(&specialized.physical_ret);
-            let unchanged = params
-                == crate::jvm::method_descriptors::jvm_tys(&declared.physical_params)
+            let name = inherited_realization_jvm_name(ir, callables, default);
+            let unchanged = name == inherited_member_jvm_name(ir, callables, default)
+                && params == crate::jvm::method_descriptors::jvm_tys(&declared.physical_params)
                 && ret == crate::jvm::method_descriptors::jvm_declared_ty(&declared.physical_ret);
             return (!unchanged).then(|| SpecializedSuperEntry {
-                name: inherited_realization_jvm_name(ir, callables, default),
+                name,
                 descriptor: crate::jvm::names::method_descriptor(&params, ret),
                 value_class_signature: crate::jvm::value_classes::substitutes_value_class(
                     ir, default,

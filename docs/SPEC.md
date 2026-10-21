@@ -2305,6 +2305,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   substituted value-class result is never re-boxed to a wrapper, while another substituted
   primitive result alongside it still is (`Integer f-IQRRRT4(int)` for `U<Z, Int>`). The erased
   bridge keeps the declaration's own name and descriptor and unboxes into the typed forwarder.
+  An `Any` carrier leaves the descriptor unchanged but still changes the mangled name: method
+  identity includes BOTH, so the erased bridge remains necessary and an overriding `super` call
+  selects the mangled forwarder
+  (`tests/jvm_default_mode_e2e.rs::an_any_carrier_default_keeps_distinct_physical_method_identities`,
+  `an_any_carrier_default_runs_through_its_bridge_and_overriding_super_call`).
   A value class's static takes the same mangled name (`foo--h0D71M(JJ)`, never `foo-impl`), boxes
   its carrier and arguments and calls the erased entry; a call on the value class selects it with
   carrier arguments. The forwarder labels an extension receiver after its own escaped name

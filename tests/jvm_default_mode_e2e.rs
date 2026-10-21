@@ -1563,3 +1563,47 @@ fun box(): String {
         assert_eq!(result, "OK", "{mode:?}");
     }
 }
+
+const ANY_CARRIER_DEFAULT: &str = r#"
+@JvmInline value class V(val x: Any)
+interface I<T> { fun f(v: T): String = "OK" }
+open class D : I<V>
+class E : D() {
+    override fun f(v: V): String = "E" + super.f(v)
+}
+fun box(): String {
+    val value = V("value")
+    val inherited: I<V> = D()
+    if (inherited.f(value) != "OK") return "erased interface"
+    val overridden: I<V> = E()
+    if (overridden.f(value) != "EOK") return "overriding super"
+    return "OK"
+}
+"#;
+
+/// An `Any` carrier keeps the erased descriptor but changes the JVM name: both physical entries
+/// must exist, and an overriding `super` call must name the mangled forwarder rather than its bridge.
+#[test]
+fn an_any_carrier_default_keeps_distinct_physical_method_identities() {
+    let ours = compile_source(JvmDefaultMode::Disable, ANY_CARRIER_DEFAULT, "AnyCarrier");
+    let reference = compile_reference_source("disable", ANY_CARRIER_DEFAULT, "AnyCarrier");
+    for name in ["D", "E"] {
+        let ours = &ours.iter().find(|(class, _)| class == name).unwrap().1;
+        let reference = &reference.iter().find(|(class, _)| class == name).unwrap().1;
+        assert_eq!(
+            ours,
+            reference,
+            "{}",
+            common::exact_class_difference(name, reference, ours)
+        );
+    }
+}
+
+#[test]
+fn an_any_carrier_default_runs_through_its_bridge_and_overriding_super_call() {
+    common::expect_box_same_as_kotlinc_with_args(
+        ANY_CARRIER_DEFAULT,
+        "AnyCarrierDefault",
+        &["-jvm-default=disable"],
+    );
+}
