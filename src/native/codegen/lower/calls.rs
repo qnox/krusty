@@ -264,6 +264,74 @@ impl BodyLowering<'_, '_, '_> {
         Ok(self.builder.inst_results(call).first().copied())
     }
 
+    /// A member function of a class declared in another file of this module, where dispatch has
+    /// only one body to select: an import of the member's `module_function_symbol` and a direct
+    /// call, the receiver first. The declaring file defines that symbol for the member. A member
+    /// an override could replace dispatches instead, and declines here.
+    pub(super) fn module_member_call(
+        &mut self,
+        owner: TypeName,
+        target: crate::fir::CallableId,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<Option<Value>, Unsupported> {
+        let Some(record) = self.file.ir.referenced_module_callables.get(&target) else {
+            return Err(declined!(
+                "a member call into `{}` with no module record",
+                owner.render()
+            ));
+        };
+        let name = &*record.name;
+        if record.owner != Some(owner) {
+            return Err(declined!(
+                "an inherited member of `{}` declared in another file (`{name}`)",
+                owner.render()
+            ));
+        }
+        use crate::fir::DeclarationFlags as Flags;
+        let overridable = record.flags.has(Flags::OPEN)
+            || record.flags.has(Flags::ABSTRACT)
+            || (record.flags.has(Flags::OVERRIDE) && !record.flags.has(Flags::FINAL));
+        // An `object` has no subclass, so each of its members has exactly one body.
+        let single_body = match record.owner_kind {
+            Some(crate::ir::IrClassifierKind::Object) => true,
+            Some(crate::ir::IrClassifierKind::Class) => {
+                !overridable || self.file.values.is_value_class(owner)
+            }
+            _ => false,
+        };
+        if !single_body {
+            return Err(declined!(
+                "a virtual call to a member of `{}`, which is not declared in this file",
+                owner.render()
+            ));
+        }
+        // The receiver crosses as the declaring file's member takes it: a value class's member
+        // takes the value, every other member the object.
+        let receiver_ty = if self.file.values.is_value_class(owner) {
+            Ty::obj_name(owner)
+        } else {
+            any()
+        };
+        let mut params = Vec::with_capacity(record.parameters.len() + 1);
+        params.push(receiver_ty);
+        params.extend(record.parameters.iter().copied());
+        let ret = record.result;
+        let symbol =
+            super::super::super::symbols::module_function_symbol(self.file.module_name, target);
+        let id = self.file.import(&symbol, &params, ret)?;
+        let mut operands = Vec::with_capacity(args.len() + 1);
+        operands.push(receiver);
+        operands.extend_from_slice(args);
+        let arguments = self.arguments(&operands, &params)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let func_ref = self.func_ref(id);
+        let call = self.emit_call(func_ref, &arguments)?;
+        Ok(self.builder.inst_results(call).first().copied())
+    }
+
     /// Run the defining file's top-level initializers before using anything it exports.
     pub(super) fn initialize_defining_file(
         &mut self,
@@ -364,11 +432,17 @@ impl BodyLowering<'_, '_, '_> {
                 owner,
                 name,
                 params,
+                module_target,
                 ..
             } => {
                 let Some(receiver) = dispatch_receiver else {
                     return Err(declined!("a virtual call without a receiver (`{name}`)"));
                 };
+                if let (None, Some(target)) =
+                    (self.file.ir.class_id_by_name(*owner), *module_target)
+                {
+                    return self.module_member_call(*owner, target, receiver, args);
+                }
                 self.virtual_call(*owner, name, params.as_ref(), receiver, args)
             }
             Callee::Special {
