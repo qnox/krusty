@@ -2514,6 +2514,8 @@ mod sibling_value_class_members_e2e;
 #[path = "sibling_value_class_serialization_e2e.rs"]
 mod sibling_value_class_serialization_e2e;
 mod smart_cast_modules;
+#[path = "value_class_parameter_no_arg_constructor_e2e.rs"]
+mod value_class_parameter_no_arg_constructor_e2e;
 smart_cast_modules::declare!();
 #[path = "source_fallback_companion_props_e2e.rs"]
 mod source_fallback_companion_props_e2e;
