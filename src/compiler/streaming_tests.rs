@@ -105,7 +105,7 @@ fn empty_signature_recovery_analysis() -> StreamingSourceSetAnalysis {
     StreamingSourceSetAnalysis {
         target: CompilationTarget::Jvm,
         symbols,
-        reparse_sources: Vec::new(),
+        reparse_sources: crate::frontend::ReparseSources::new(crate::features::LangFeatures::new()),
         streamed: Some(crate::frontend::StreamedPassState {
             module: crate::fir::FrontendModule::new(
                 crate::fir::ResolvedModuleIndex::default(),

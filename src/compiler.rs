@@ -35,9 +35,33 @@ pub fn emit_analyzed<B: Backend>(
     module_name: &str,
     diags: &mut DiagSink,
 ) -> Vec<Artifact> {
+    let mut outputs = Vec::new();
+    emit_analyzed_to(
+        analysis,
+        stems,
+        backend,
+        module_name,
+        diags,
+        &mut |artifact| outputs.push(artifact),
+    );
+    outputs
+}
+
+/// [`emit_analyzed`], handing each artifact to `sink` as soon as its source file is emitted instead
+/// of holding the whole module's output. The sink sees artifacts in the order `emit_analyzed`
+/// returns them, and must not publish them before the caller has checked `diags`: a later file can
+/// still fail the compilation.
+pub fn emit_analyzed_to<B: Backend>(
+    analysis: impl Into<StreamingSourceSetAnalysis>,
+    stems: &[String],
+    backend: &B,
+    module_name: &str,
+    diags: &mut DiagSink,
+    sink: &mut dyn FnMut(Artifact),
+) {
     let mut state = B::State::default();
     let mut dependency_support = dependency_body_emission::DependencySupportState::default();
-    let mut outputs = emit_analyzed_into(
+    emit_analyzed_into(
         analysis,
         stems,
         backend,
@@ -48,24 +72,29 @@ pub fn emit_analyzed<B: Backend>(
         PassTwoHooks {
             before_target: &mut |_, _| {},
             checked_bodies: &mut NoObserver,
+            artifacts: sink,
         },
     );
     if !diags.has_errors() {
         backend.check_module(&state, diags);
     }
     if !diags.has_errors() {
-        outputs.extend(backend.finalize(state, module_name));
+        backend
+            .finalize(state, module_name)
+            .into_iter()
+            .for_each(sink);
     }
-    outputs
 }
 
-/// What a caller of [`emit_analyzed_into`] sees of Pass 2 besides its artifacts.
+/// What a caller of [`emit_analyzed_into`] sees of Pass 2.
 struct PassTwoHooks<'a> {
     /// Observes each immutable checked file and may attach dependency-export facts before target
     /// representation consumes it.
     before_target: &'a mut dyn FnMut(&mut CheckedIrFile<'_>, &mut DiagSink),
     /// Sees each checked body before common lowering consumes it.
     checked_bodies: &'a mut dyn CheckedBodyObserver,
+    /// Receives each source file's target artifacts once that file is emitted.
+    artifacts: &'a mut dyn FnMut(Artifact),
 }
 
 /// Lower one separately analyzed source module into an existing backend state. Backend
@@ -80,10 +109,11 @@ fn emit_analyzed_into<B: Backend>(
     diags: &mut DiagSink,
     dependency_support: &mut dependency_body_emission::DependencySupportState,
     hooks: PassTwoHooks<'_>,
-) -> Vec<Artifact> {
+) {
     let PassTwoHooks {
         before_target,
         checked_bodies,
+        artifacts,
     } = hooks;
     let _supertype_projection = crate::resolve::SupertypeProjectionCache::enter();
     let StreamingSourceSetAnalysis {
@@ -102,7 +132,7 @@ fn emit_analyzed_into<B: Backend>(
                 backend.compilation_target()
             ),
         );
-        return Vec::new();
+        return;
     }
     let Some(streamed) = streamed else {
         crate::trace_compiler!(
@@ -115,7 +145,7 @@ fn emit_analyzed_into<B: Backend>(
                 "internal error: module signatures were not finalized before body lowering",
             );
         }
-        return Vec::new();
+        return;
     };
     let mut symbols = symbols;
     let crate::frontend::StreamedPassState {
@@ -124,7 +154,7 @@ fn emit_analyzed_into<B: Backend>(
     } = streamed;
     if diagnostic_recovery || diags.has_errors() {
         recover_pass_two_diagnostics(&reparse_sources, &mut symbols, module, diags);
-        return Vec::new();
+        return;
     }
     debug_assert!(
         module.index().declaration_count() >= module.index().len(),
@@ -135,7 +165,7 @@ fn emit_analyzed_into<B: Backend>(
             Span::new(0, 0),
             "internal error: source files, stems, and checked types have different lengths",
         );
-        return Vec::new();
+        return;
     }
     if let Some(index) = reparse_sources.iter().position(|source| source.is_script()) {
         diags.set_file(index as u32);
@@ -143,7 +173,7 @@ fn emit_analyzed_into<B: Backend>(
             Span::new(0, 0),
             "Kotlin scripts can be analyzed but cannot be emitted",
         );
-        return Vec::new();
+        return;
     }
     let (mut index, mut inline_bodies, mut default_arguments, mut source_map) = module.into_parts();
     let backend_module_facts = match crate::backend::BackendModuleFacts::from_resolved_index(&index)
@@ -156,7 +186,7 @@ fn emit_analyzed_into<B: Backend>(
                     "internal error: cannot freeze finalized backend classifier facts: {error:?}"
                 ),
             );
-            return Vec::new();
+            return;
         }
     };
     let source_line_counts = reparse_sources
@@ -177,7 +207,6 @@ fn emit_analyzed_into<B: Backend>(
         source_map: &source_map,
         sources: &observed_sources,
     });
-    let mut outputs = Vec::new();
     for (raw_source, source) in reparse_sources.iter().enumerate() {
         // Java declaration headers participated in Pass 1 through the platform provider. Java
         // executable bodies belong to javac and are never reparsed or lowered as Kotlin units.
@@ -202,7 +231,7 @@ fn emit_analyzed_into<B: Backend>(
             .map(|package| package.render().replace('/', "."));
         let mut ir = crate::ir::IrFile::with_package(package);
         ir.set_same_module_inlining(backend.same_module_inlining());
-        ir.recursive_type_of = source.recursive_type_of();
+        ir.recursive_type_of = source.recursive_type_of(reparse_sources.features());
         ir.source_debug =
             crate::ir::SourceDebug::from_map(&source_map, source_id, &source_line_counts);
         let mut sink = match crate::fir_lower::CommonIrBodySink::new(&index, source_id, &mut ir) {
@@ -255,7 +284,7 @@ fn emit_analyzed_into<B: Backend>(
         let mut source_failed = false;
         let mut source_rejected = false;
         let source_diagnostics = diags.diags.len();
-        source.visit_declaration_units(diags, |active_file, diags| {
+        source.visit_declaration_units(reparse_sources.features(), diags, |active_file, diags| {
             if source_failed {
                 return;
             }
@@ -409,7 +438,7 @@ fn emit_analyzed_into<B: Backend>(
         if diags.has_errors() {
             continue;
         }
-        outputs.extend(dependency_body_emission::emit_intrinsic_dependencies(
+        dependency_body_emission::emit_intrinsic_dependencies(
             &file,
             &symbols,
             &backend_module_facts,
@@ -417,17 +446,21 @@ fn emit_analyzed_into<B: Backend>(
             state,
             dependency_support,
             diags,
-        ));
+        )
+        .into_iter()
+        .for_each(&mut *artifacts);
         if diags.has_errors() {
             continue;
         }
-        outputs.extend(backend.lower_ir_file(file, state, diags));
+        backend
+            .lower_ir_file(file, state, diags)
+            .into_iter()
+            .for_each(&mut *artifacts);
     }
     assert!(
         default_arguments.is_empty(),
         "Pass 2 must consume every checked signature default"
     );
-    outputs
 }
 
 /// Lowers for whatever target the analysis was checked for: common IR is target-neutral.
@@ -484,7 +517,7 @@ pub(crate) fn lower_analyzed_observing(
     let analysis = analysis.into();
     let backend = DiscardCommonIr(analysis.target);
     let mut dependency_support = dependency_body_emission::DependencySupportState::default();
-    let outputs = emit_analyzed_into(
+    emit_analyzed_into(
         analysis,
         stems,
         &backend,
@@ -495,11 +528,10 @@ pub(crate) fn lower_analyzed_observing(
         PassTwoHooks {
             before_target: &mut |_, _| {},
             checked_bodies: observer,
+            artifacts: &mut |_| {
+                panic!("lowering without a target must not produce target artifacts")
+            },
         },
-    );
-    assert!(
-        outputs.is_empty(),
-        "lowering without a target must not produce target artifacts"
     );
 }
 
@@ -1189,33 +1221,37 @@ pub fn check_frontend_only(
             diags.set_file(raw_source as u32);
             let diagnostics_start = diags.diags.len();
             let streamed_cache = crate::fir::StreamedModuleProjectionCache::default();
-            source.visit_diagnostic_units(diags, |active_file, diags| {
-                let mut cursor = crate::fir::ActiveSourceCursor::new(source_id, &index);
-                let active = match cursor.bind_next(&active_file, source_id, &index) {
-                    Ok(active) if cursor.is_finished() => active,
-                    Ok(_) | Err(_) => {
-                        diags.error(
+            source.visit_diagnostic_units(
+                reparse_sources.features(),
+                diags,
+                |active_file, diags| {
+                    let mut cursor = crate::fir::ActiveSourceCursor::new(source_id, &index);
+                    let active = match cursor.bind_next(&active_file, source_id, &index) {
+                        Ok(active) if cursor.is_finished() => active,
+                        Ok(_) | Err(_) => {
+                            diags.error(
                             Span::new(0, 0),
                             "internal error: script declarations did not bind to the stable module",
                         );
-                        return;
-                    }
-                };
-                let selected_spans = crate::fx_hash::HashSet::default();
-                let selected_bodies = crate::fx_hash::HashSet::default();
-                drop(crate::resolve::check_selected_declarations_in_pass_two(
-                    &active_file,
-                    raw_source as u32,
-                    &selected_spans,
-                    &selected_spans,
-                    &active,
-                    &selected_bodies,
-                    &mut symbols,
-                    &index,
-                    &streamed_cache,
-                    diags,
-                ));
-            });
+                            return;
+                        }
+                    };
+                    let selected_spans = crate::fx_hash::HashSet::default();
+                    let selected_bodies = crate::fx_hash::HashSet::default();
+                    drop(crate::resolve::check_selected_declarations_in_pass_two(
+                        &active_file,
+                        raw_source as u32,
+                        &selected_spans,
+                        &selected_spans,
+                        &active,
+                        &selected_bodies,
+                        &mut symbols,
+                        &index,
+                        &streamed_cache,
+                        diags,
+                    ));
+                },
+            );
             let reported = diags.diags[diagnostics_start..]
                 .iter()
                 .find(|diagnostic| diagnostic.severity == crate::diag::Severity::Error);
@@ -1250,7 +1286,7 @@ pub fn check_frontend_only(
         let source_diagnostic_start = diags.diags.len();
         let mut source_failed = false;
         let mut source_rejected = false;
-        source.visit_declaration_units(diags, |active_file, diags| {
+        source.visit_declaration_units(reparse_sources.features(), diags, |active_file, diags| {
             if source_failed {
                 return;
             }

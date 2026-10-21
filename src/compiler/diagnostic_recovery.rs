@@ -9,7 +9,7 @@ use crate::diag::{DiagSink, Span};
 /// diagnostics in ordinary bodies. This path discards its AST-keyed result immediately and never
 /// invokes common lowering or a backend.
 pub(super) fn recover_pass_two_diagnostics(
-    reparse_sources: &[crate::frontend::ReparseSource],
+    reparse_sources: &crate::frontend::ReparseSources,
     symbols: &mut crate::resolve::PassTwoSymbols,
     module: crate::fir::FrontendModule,
     diags: &mut DiagSink,
@@ -23,7 +23,7 @@ pub(super) fn recover_pass_two_diagnostics(
         diags.set_file(raw_source as u32);
         let streamed_cache = crate::fir::StreamedModuleProjectionCache::default();
         let mut declaration_cursor = crate::fir::ActiveSourceCursor::new(source_id, &index);
-        source.visit_diagnostic_units(diags, |active_file, diags| {
+        source.visit_diagnostic_units(reparse_sources.features(), diags, |active_file, diags| {
             let active = match declaration_cursor.bind_next(&active_file, source_id, &index) {
                 Ok(active) => active,
                 Err(error) => {
