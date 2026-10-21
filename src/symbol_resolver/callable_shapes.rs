@@ -133,6 +133,7 @@ mod tests {
             declared_callables: Default::default(),
             declared_callable_order: Vec::new(),
             members: Vec::new(),
+            methods_as_declarations: false,
             companion: Vec::new(),
             constants: Default::default(),
             sam_eligible: false,

@@ -9,6 +9,8 @@
 
 mod classifier_member_signatures;
 
+use std::borrow::Cow;
+
 use crate::frontend::{FrontendClassSig, FrontendDeclaredPropertySig, FrontendSymbols, Signature};
 use crate::fx_hash::HashMap;
 use crate::libraries::{
@@ -166,28 +168,15 @@ impl<'a> ModuleSymbols<'a> {
     }
 
     fn type_shape_for(&self, c: &'a FrontendClassSig) -> LibraryType {
-        let mut members: Vec<LibraryMember> = c
-            .methods
-            .iter()
-            .flat_map(|(n, sigs)| {
-                sigs.iter().map(move |s| {
-                    let mut member = lib_member(n, s, c.internal_name(), c.is_interface());
-                    member.generic_sig = classifier_member_generic_signature(
-                        c,
-                        member.generic_sig.take(),
-                        None,
-                        &member.params,
-                        member.ret,
-                    );
-                    member
-                })
-            })
-            .collect();
+        // Ordinary methods are published once, as their `declared_callables` declarations below;
+        // `LibraryType::member_records` projects their flat records on demand.
+        let mut members: Vec<LibraryMember> = Vec::new();
         // Class-body extensions are declarations of the classifier just like ordinary methods, even
-        // though their source call shape has a second (extension) receiver. Put them in the shared type
-        // shape and mark that distinction explicitly, so a consumer of the federated SymbolSource never
-        // has to ask whether this classifier came from the current module or a dependency. The leading
-        // receiver in `params` mirrors the physical instance-method ABI used by compiled providers.
+        // though their source call shape has a second (extension) receiver. Keep their flat record in
+        // the shared type shape and mark that distinction explicitly, so a consumer of the federated
+        // SymbolSource never has to ask whether this classifier came from the current module or a
+        // dependency. The leading receiver in `params` mirrors the physical instance-method ABI used
+        // by compiled providers.
         for (name, overloads) in &c.member_ext_funs {
             for extension in overloads {
                 let mut member = lib_member(
@@ -462,6 +451,7 @@ impl<'a> ModuleSymbols<'a> {
             declared_callables: HashMap::default(),
             declared_callable_order: Vec::new(),
             members,
+            methods_as_declarations: true,
             companion,
             // A completed source classifier is also the provider record consumed by later
             // modules. Preserve the Pass-1 constant payload here: annotation folding in a
@@ -645,13 +635,7 @@ impl<'a> ModuleSymbols<'a> {
             // Synthetic source companion classifiers are still module-owned and publish their
             // members through the same record as every ordinary source classifier.
             if let Some(shape) = self.classifier_record(internal) {
-                out.extend(
-                    shape
-                        .members
-                        .iter()
-                        .filter(|member| member.name == name)
-                        .cloned(),
-                );
+                out.extend(shape.member_records_named(name).map(Cow::into_owned));
             }
             return; // a classpath supertype — not owned by the module source
         };
@@ -2724,9 +2708,14 @@ mod tests {
         let t = m.classifier(type_name("demo/Point")).expect("shape");
         assert_eq!(t.constructors.len(), 1);
         assert_eq!(t.constructors[0].params, vec![Ty::Int, Ty::Int]);
-        assert_eq!(t.members.len(), 1);
-        assert_eq!(t.members[0].name, "sum");
-        assert_eq!(t.members[0].ret, Ty::Int);
+        // The method is stored once, as its declaration; the flat record is its projection.
+        assert!(t.methods_as_declarations);
+        assert!(t.members.is_empty());
+        let members = t.member_records().collect::<Vec<_>>();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].name, "sum");
+        assert_eq!(members[0].ret, Ty::Int);
+        assert_eq!(members[0].owner, Some(type_name("demo/Point")));
         assert_eq!(
             t.supertypes.to_vec(),
             vec!["demo/Shape".to_string(), "kotlin/Any".to_string()]

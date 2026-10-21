@@ -194,6 +194,7 @@ impl ExistingLibrary {
                 declared_callables,
                 declared_callable_order: Vec::new(),
                 members: Vec::new(),
+                methods_as_declarations: false,
                 companion: Vec::new(),
                 constants: crate::fx_hash::HashMap::default(),
                 sam_eligible: false,

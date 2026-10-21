@@ -642,6 +642,7 @@ mod tests {
                     declared_callables,
                     declared_callable_order: Vec::new(),
                     members: vec![],
+                    methods_as_declarations: false,
                     companion: vec![],
                     constants: crate::fx_hash::HashMap::default(),
                     sam_eligible: false,

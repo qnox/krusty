@@ -1387,13 +1387,13 @@ pub struct ResolvedModuleIndex {
     /// Stable declaration-stream ordinal computed while Pass-1 anchors are live. This is used for
     /// deterministic declaration/metadata ordering and Pass-2 rebinding, never for executable
     /// class initialization (which has its own semantic ordinal in the declaration header).
-    source_orders: HashMap<DeclarationId, u32>,
+    source_orders: super::DeclarationTable<u32>,
     /// The generated-class position each `suspend` function's continuation holds in its scope's
     /// `$N` sequence, 1-based in declaration order. Computed once, by the pass that numbers the
     /// sequence; every consumer reads it rather than deriving a second answer.
     continuation_ordinals: HashMap<DeclarationId, u32>,
     pub(super) local_class_name_provenance: HashMap<DeclarationId, super::LocalClassNameProvenance>,
-    declaration_headers: HashMap<DeclarationId, ResolvedDeclarationHeader>,
+    declaration_headers: super::DeclarationTable<ResolvedDeclarationHeader>,
     /// Declarations whose header carries `LOCAL_CLASS`, in declaration-id order. Local-signature
     /// publication selects from these once per checked body group; asking the whole inventory
     /// each time was linear in the module per body, i.e. quadratic.
@@ -1658,15 +1658,15 @@ impl ResolvedModuleIndex {
             "Pass 2 may intern only body-local declarations"
         );
         let declaration = self.declarations.intern(anchor);
-        if !self.source_orders.contains_key(&declaration) {
+        if !self.source_orders.contains_key(declaration) {
             if let Some(order) = anchor
                 .owner
-                .and_then(|owner| self.source_orders.get(&owner).copied())
+                .and_then(|owner| self.source_orders.get(owner).copied())
             {
                 self.source_orders.insert(declaration, order);
             }
         }
-        if !self.declaration_headers.contains_key(&declaration) {
+        if !self.declaration_headers.contains_key(declaration) {
             self.publish_declaration_header(declaration, header, Some(emission_name));
         }
         declaration
@@ -1805,7 +1805,7 @@ impl ResolvedModuleIndex {
         spellings: crate::spelling::DeferredDeclaredSpellings,
     ) {
         assert!(
-            self.declaration_headers.contains_key(&declaration),
+            self.declaration_headers.contains_key(declaration),
             "deferred written occurrences require a stable declaration inventory entry"
         );
         assert!(
@@ -1826,7 +1826,7 @@ impl ResolvedModuleIndex {
         spellings: crate::spelling::DeclaredSpellings,
     ) {
         assert!(
-            self.declaration_headers.contains_key(&declaration),
+            self.declaration_headers.contains_key(declaration),
             "declaration spellings require a published semantic header"
         );
         assert!(
@@ -1877,7 +1877,7 @@ impl ResolvedModuleIndex {
         &self,
         declaration: DeclarationId,
     ) -> Option<ResolvedDeclarationHeader> {
-        self.declaration_headers.get(&declaration).copied()
+        self.declaration_headers.get(declaration).copied()
     }
 
     pub(crate) fn declaration_suppresses_invisible_reference(
@@ -1938,7 +1938,7 @@ impl ResolvedModuleIndex {
     ) {
         let header = self
             .declaration_headers
-            .get_mut(&declaration)
+            .get_mut(declaration)
             .expect("inherited visibility requires a finalized declaration header");
         header.visibility = visibility;
     }
@@ -1951,7 +1951,7 @@ impl ResolvedModuleIndex {
         optional_declaration_usage: bool,
     ) {
         assert!(
-            self.declaration_headers.contains_key(&declaration),
+            self.declaration_headers.contains_key(declaration),
             "visibility suppression requires a finalized declaration header"
         );
         if invisible_reference {
@@ -2347,7 +2347,7 @@ impl ResolvedModuleIndex {
             Some(Some(existing)) => {
                 let is_source_classifier = |declaration| {
                     self.declaration_headers
-                        .get(&declaration)
+                        .get(declaration)
                         .is_some_and(|header| {
                             header.kind == DeclarationKind::Classifier
                                 && !header.flags.has(DeclarationFlags::COMPILER_GENERATED)
@@ -2934,12 +2934,9 @@ impl ResolvedModuleIndex {
                 .values()
                 .map(|declarations| declarations.len() * std::mem::size_of::<DeclarationId>())
                 .sum::<usize>()
-            + self.source_orders.len()
-                * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<u32>())
+            + self.source_orders.storage_payload_bytes()
             + self.package_function_origins.storage_payload_bytes()
-            + self.declaration_headers.len()
-                * (std::mem::size_of::<DeclarationId>()
-                    + std::mem::size_of::<ResolvedDeclarationHeader>())
+            + self.declaration_headers.storage_payload_bytes()
             + self.local_class_declarations.len() * std::mem::size_of::<DeclarationId>()
             + self.body_local_ownership.storage_payload_bytes()
             + self.actualized_away_declarations.len() * std::mem::size_of::<DeclarationId>()
