@@ -7,11 +7,8 @@ from PIL import Image, ImageDraw, ImageFont
 W, H = 1200, 630
 BG, LAVENDER, FG, MUTED, ACCENT = (251, 251, 253), (214, 204, 255), (27, 26, 31), (93, 90, 102), (127, 82, 255)
 FONTS = "/usr/share/fonts/opentype/inter/"
-TAGLINE = "A Kotlin compiler written in Rust"
-DESCRIPTION = (
-    "A drop-in replacement for kotlinc on the JVM: for the supported Kotlin subset, "
-    "kotlinc-compatible flags and .class files that aim to be byte-for-byte identical to kotlinc's."
-)
+TAGLINE = "The Kotlin compiler in Rust."
+SUBLINE = "A drop-in replacement for kotlinc."
 FOOTER = "krustythecompiler.dev  ·  github.com/qnox/krusty  ·  Apache-2.0"
 
 img = Image.new("RGB", (W, H), BG)
@@ -27,26 +24,14 @@ img.paste(crab, (W - crab.width - 60, (H - crab.height) // 2), crab)
 assert W - crab.width - 60 > TEXT_RIGHT + 20
 
 h1 = ImageFont.truetype(FONTS + "Inter-ExtraBold.otf", 104)
-h2 = ImageFont.truetype(FONTS + "Inter-SemiBold.otf", 34)
-body = ImageFont.truetype(FONTS + "Inter-Regular.otf", 27)
+h2 = ImageFont.truetype(FONTS + "Inter-SemiBold.otf", 38)
+body = ImageFont.truetype(FONTS + "Inter-Regular.otf", 32)
 small = ImageFont.truetype(FONTS + "Inter-Medium.otf", 24)
 
 x = 80
-draw.text((x, 120), "krusty", font=h1, fill=FG)
+draw.text((x, 150), "krusty", font=h1, fill=FG)
 assert draw.textlength(TAGLINE, font=h2) <= TEXT_RIGHT - x
-draw.text((x, 250), TAGLINE, font=h2, fill=ACCENT)
-lines, line = [], ""
-for word in DESCRIPTION.split():
-    candidate = f"{line} {word}".strip()
-    if draw.textlength(candidate, font=body) > TEXT_RIGHT - x:
-        lines.append(line)
-        line = word
-    else:
-        line = candidate
-lines.append(line)
-y = 320
-for text in lines:
-    draw.text((x, y), text, font=body, fill=FG)
-    y += 40
+draw.text((x, 290), TAGLINE, font=h2, fill=ACCENT)
+draw.text((x, 345), SUBLINE, font=body, fill=FG)
 draw.text((x, H - 80), FOOTER, font=small, fill=MUTED)
 img.save("public/card.png", optimize=True)
