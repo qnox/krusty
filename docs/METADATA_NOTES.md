@@ -617,6 +617,17 @@ Both lists lead with the superclass. The emitter then moves it to the slot that 
 in `ResolvedClassifierHeader` and lowering published as `IrFile::class_superclass_positions`, so the
 spellings move with it. Tests: `tests/metadata_supertype_order_e2e.rs`.
 
+## Authenticated KLIB collection classifier roles
+
+Collection kind and read-only/mutable face are normalized provider facts, not new metadata fields.
+The compilation-selected platform stdlib authenticates the sixteen canonical collection interface
+headers; publication validates their interface kind, own/total type-parameter arity, and absence of
+an enclosing instance before recording the existing `MappedCollection` role. An identical name in
+an ordinary dependency grants no role. Consumers read that fact rather than infer it from spelling.
+Native 2.4.21 metadata declares one own parameter for iterable/iterator/collection/list/set faces
+and two for map/entry faces, including the static nested `Map.Entry` and `MutableMap.MutableEntry`.
+This changes no metadata wire format. Tests: `klib_libraries::tests::classes::collection_roles`.
+
 ## Compiler-plugin declarations in a KLIB
 
 kotlinx.serialization is split like kotlinc's plugin: its frontend part declares what Kotlin code

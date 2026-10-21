@@ -4,8 +4,9 @@
 //! from the platform's builtin class map, and a function classifier's arity from its declared
 //! callable signature. Consumers read the published role; they never recover it from a name.
 
-/// Which Kotlin collection classifier a mapped builtin is: kotlinc's `JavaToKotlinClassMap` pairs
-/// each read-only and mutable face with one platform collection interface.
+/// Which Kotlin collection interface a platform builtin represents. A platform's authenticated
+/// builtin map pairs its read-only and mutable faces; on JVM this is kotlinc's
+/// `JavaToKotlinClassMap`, while a KLIB provider validates its selected stdlib's interface headers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum CollectionKind {
     Iterator,
