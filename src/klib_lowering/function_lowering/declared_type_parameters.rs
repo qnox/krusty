@@ -11,12 +11,13 @@ pub(super) fn bind(
     selected: Option<KlibBodyCallable<'_>>,
     arena: &KlibIrArena,
     function: &KlibIrFunction,
+    mut types: KlibTypeParameters,
 ) -> Result<KlibTypeParameters, KlibBodyDeclineReason> {
     let Some(selected) = selected else {
         // A header-only generic declaration needs its producer-qualified provider formals before
         // it can be emitted. Never manufacture semantic identities from serialized source names.
         return if function.type_parameters.is_empty() {
-            Ok(KlibTypeParameters::default())
+            Ok(types)
         } else {
             Err(KlibBodyDeclineReason::UnsupportedDeclaration(
                 "type parameters",
@@ -77,7 +78,6 @@ pub(super) fn bind(
             ));
         }
     }
-    let mut types = KlibTypeParameters::default();
     let mut identities = HashSet::default();
     for (index, parameter) in function.type_parameters.iter().enumerate() {
         let signature = generic.expect("a nonempty formal list has a selected generic signature");

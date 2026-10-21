@@ -21,6 +21,7 @@ mod ir_builtins;
 mod klib_types;
 mod local_values;
 mod lowering_checkpoint;
+mod primitive_calls;
 #[cfg(test)]
 mod tests;
 

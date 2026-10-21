@@ -13,6 +13,7 @@ use crate::fx_hash::{HashMap, HashSet};
 
 use crate::klib::KlibManifest;
 use crate::libraries::{KlibDeclarationSignature, KlibDependencyCallable};
+use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrBody, KlibIrExprKind, KlibIrFunction, KlibIrMember, KlibIrStatement,
     KlibIrType,
@@ -29,6 +30,12 @@ pub struct KlibDeclarationBodies {
     /// The producer-declared module graph. These are manifest `depends` edges, not the roles the
     /// current compilation assigned its inputs.
     dependencies: HashMap<String, Vec<String>>,
+}
+
+pub(crate) struct KlibClassMember<'a> {
+    pub(crate) arena: &'a KlibIrArena,
+    pub(crate) class: &'a crate::metadata::klib_ir::tree::KlibIrClass,
+    pub(crate) function: &'a KlibIrFunction,
 }
 
 impl Default for KlibDeclarationBodies {
@@ -134,6 +141,74 @@ impl std::fmt::Display for KlibDeclarationBodiesError {
 impl std::error::Error for KlibDeclarationBodiesError {}
 
 impl KlibDeclarationBodies {
+    /// Exactly one raw class header in this module with the requested primitive function/getter
+    /// as a direct member. The current property primitives are reads: a getter stored in a setter
+    /// slot grants no authority. Equal names in other archives and inherited members do not join.
+    pub(crate) fn primitive_member_header(
+        &self,
+        identity: &KlibDependencyCallable,
+        signature: &KlibPublicIdSignature,
+    ) -> Result<Option<KlibClassMember<'_>>, &'static str> {
+        let Some(&library) = self.modules.get(&identity.module) else {
+            return Ok(None);
+        };
+        let mut found = None;
+        for tree in self.libraries[library].trees() {
+            let mut pending = vec![&tree.declaration];
+            while let Some(member) = pending.pop() {
+                let class = match member {
+                    KlibIrMember::Class(id) => tree.arena.class(*id),
+                    KlibIrMember::EnumEntry(entry) => {
+                        let Some(id) = entry.class else { continue };
+                        tree.arena.class(id)
+                    }
+                    _ => continue,
+                };
+                pending.extend(class.members.iter());
+                if class.base.symbol.signature != KlibIrSignature::Public(signature.clone()) {
+                    continue;
+                }
+                if found.is_some() {
+                    return Err("duplicate serialized class headers");
+                }
+                found = Some((&tree.arena, class));
+            }
+        }
+        let Some((arena, class)) = found else {
+            return Ok(None);
+        };
+        let target = ir_signature(&identity.declaration);
+        let functions = class
+            .members
+            .iter()
+            .flat_map(|member| match (&identity.declaration, member) {
+                (KlibDeclarationSignature::Public(_), KlibIrMember::Function(id)) => {
+                    [Some(*id), None]
+                }
+                (
+                    KlibDeclarationSignature::Accessor(accessor),
+                    KlibIrMember::Property(property),
+                ) if property.base.symbol.kind == KlibIrSymbolKind::Property
+                    && property.base.symbol.signature
+                        == KlibIrSignature::Public(accessor.property().clone()) =>
+                {
+                    [property.getter, None]
+                }
+                _ => [None, None],
+            })
+            .flatten()
+            .filter(|id| arena.function(*id).base.symbol.signature == target)
+            .collect::<Vec<_>>();
+        let [function] = functions.as_slice() else {
+            return Err("the serialized callable is not a unique direct class member");
+        };
+        Ok(Some(KlibClassMember {
+            arena,
+            class,
+            function: arena.function(*function),
+        }))
+    }
+
     /// Index each named module's decoded trees. Every module occurs once; unrelated modules may
     /// legally publish equal internal signatures.
     #[cfg(test)]

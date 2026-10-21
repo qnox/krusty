@@ -287,6 +287,7 @@ impl ExternalIdentities {
             klib_body_companion_receiver: body.companion_receiver,
             klib_body_type_parameters: body.type_parameters,
             klib_body_declaration_modifiers: body.declaration_modifiers,
+            klib_body_class_contract: None,
         });
         self.by_signature.borrow_mut().insert(key, identity);
     }

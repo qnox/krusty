@@ -18006,6 +18006,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_previously_retained_builtin_edge_is_not_folded_without_a_current_source_call`, plus
   `box_regressions/floatingSign.kt`.
 
+- **A normalized KLIB member primitive is a common operation, not its private implementation.**
+  The provider's effective primitive realization survives both frozen declaration views. Before
+  closure treats it as a leaf, common lowering authenticates the exact module, full class and
+  member signatures, direct accessor/property membership, declaration modifiers and call shape.
+  Class formals retain provider-owned finite identities, full bounds and variance; all raw symbols
+  bind before bounds are checked, and the serialized receiver must actually use those formals.
+  The current capability covers scalar unary identity/negation and array/string length. The actual
+  body lowerer consumes the same proof as both graph walks, validates operands, and evaluates the
+  receiver once. Byte/Short unary operands promote before realization; floating negation uses
+  `PrimitiveNeg`, never subtraction from zero. Source selections, ambiguity and retained exports
+  keep their declaration obligations. A malformed known primitive is an error, not permission to
+  inspect private implementation helpers. Ordinary member-body emission and target representation
+  remain separate capabilities. Intrinsic support retains its existing body-bearing raw-header
+  capability; optional provider enrichment cannot invent a primitive when no provider is present.
+  Tests: `klib_lowering::tests::primitive_calls`, `box_regressions/floatingSign.kt`.
+
 - **A KLIB inline function expands from its prepared body through the module inliner.** When the
   backend expands same-module inline calls in IR (Native, Wasm), every `inline` declaration of a
   dependency KLIB has its prepared-inline IR body decoded and, on its first call in a file, lowered

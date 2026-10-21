@@ -593,6 +593,31 @@ impl PackageInventory {
             })
     }
 
+    /// The actual declaration container, joined by exact callable identity, not a classifier
+    /// spelling recovered from its receiver. Associated declarations are not instance members.
+    pub(super) fn dependency_declaring_class(
+        &self,
+        identity: &crate::libraries::KlibDependencyCallable,
+    ) -> Option<(TypeName, &SignedClassifier)> {
+        self.classifiers.iter().find_map(|(&owner, class)| {
+            if class.module.as_deref() != Some(identity.module.as_str()) {
+                return None;
+            }
+            let declares = match &identity.declaration {
+                crate::libraries::KlibDeclarationSignature::Public(signature) => class
+                    .functions
+                    .iter()
+                    .any(|function| &function.signature == signature),
+                crate::libraries::KlibDeclarationSignature::Accessor(accessor) => {
+                    class.properties.iter().any(|property| {
+                        &property.getter == accessor || property.setter.as_ref() == Some(accessor)
+                    })
+                }
+            };
+            declares.then_some((owner, class))
+        })
+    }
+
     /// The constructor serialized under exactly `identity`, with the class that declares it.
     pub(super) fn dependency_constructor(
         &self,

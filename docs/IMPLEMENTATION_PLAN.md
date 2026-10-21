@@ -5614,8 +5614,13 @@ non-inline callers, still reads the field directly. Test:
 - Dependency graph preparation and actual common body lowering share one exact builtin call
   disposition. Common operations need neither an emitted callee body nor a provider handle;
   selected source declarations, ambiguous contracts and previous external exports retain their
-  declaration obligations. Missing non-builtin provider realizations remain failures, including
-  the separately diagnosed Native array-length leaf.
+  declaration obligations. Missing non-builtin provider realizations remain failures.
+- Provider-normalized scalar unary and array/string-length operations now retain their effective
+  member realization through both frozen views. One common capability authenticates exact raw
+  class/member headers, accessor membership and provider-owned class formals before either closure
+  walk stops; actual lowering consumes that same proof. Private array-length implementations are
+  not made public or given helper-name exceptions. Ordinary instance bodies remain unsupported;
+  target array representation and all existing-pass preservation gates still need validation.
 - Native dependency exports retain one emitted IR signature for both wrapper definitions and
   imports. Exact checked generic instantiation validates source operand roles independently of
   the canonical ABI; arguments/results use the existing target boxing and conversion boundary.

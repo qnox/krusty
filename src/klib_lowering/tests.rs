@@ -8,6 +8,7 @@ mod callee_headers;
 mod control_forms;
 mod demo_package;
 mod inline_templates;
+mod primitive_calls;
 mod returnable_blocks;
 
 use super::*;
@@ -405,6 +406,22 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("invoke({operands})")
+        }
+        IrExpr::Call {
+            callee,
+            dispatch_receiver,
+            args,
+        } if let Callee::Intrinsic { operation, ret } = &**callee => {
+            let receiver = dispatch_receiver.map_or(String::new(), |receiver| render(ir, receiver));
+            let arguments = args
+                .iter()
+                .map(|argument| render(ir, *argument))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "intrinsic {operation:?}: {} receiver[{receiver}]({arguments})",
+                type_name_of(*ret)
+            )
         }
         IrExpr::Variable {
             index,

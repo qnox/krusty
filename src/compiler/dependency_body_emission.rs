@@ -120,6 +120,35 @@ pub(super) fn emit_dependencies<B: Backend>(
             callees: &callees,
             target_realizes_bodyless: backend.realizes_bodyless_dependency_support(),
         };
+        let declarations = match emitted_roots::declarations(
+            platform,
+            bodies,
+            intrinsics,
+            &roots,
+            &externals,
+            &capabilities,
+            !requires_intrinsic_link,
+        ) {
+            Ok(declarations) => declarations,
+            Err(error) => {
+                diags.error(
+                    Span::new(0, 0),
+                    format!("cannot close a selected ordinary KLIB body: {error}"),
+                );
+                return Vec::new();
+            }
+        };
+        let callees = KlibCalleeFacts::with_declarations(
+            selected.iter().copied(),
+            declarations
+                .iter()
+                .filter_map(|declaration| declaration.klib_body_callable()),
+        );
+        let capabilities = DependencyLeafCapabilities {
+            unit: &unit,
+            callees: &callees,
+            target_realizes_bodyless: backend.realizes_bodyless_dependency_support(),
+        };
         if !prepare_bodyless_externals(
             platform,
             bodies,
@@ -131,41 +160,9 @@ pub(super) fn emit_dependencies<B: Backend>(
         ) {
             return Vec::new();
         }
-        let ordinary_declarations = if requires_intrinsic_link {
-            Vec::new()
-        } else {
-            match emitted_roots::ordinary_declarations(
-                platform,
-                bodies,
-                intrinsics,
-                &roots,
-                &externals,
-                |identity| capabilities.folds_common_builtin(identity),
-            ) {
-                Ok(declarations) => declarations,
-                Err(error) => {
-                    diags.error(
-                        Span::new(0, 0),
-                        format!("cannot close a selected ordinary KLIB body: {error}"),
-                    );
-                    return Vec::new();
-                }
-            }
-        };
-        let ordinary_callees = KlibCalleeFacts::with_declarations(
-            selected.iter().copied(),
-            ordinary_declarations
-                .iter()
-                .filter_map(|declaration| declaration.klib_body_callable()),
-        );
-        let callees = if requires_intrinsic_link {
-            &callees
-        } else {
-            &ordinary_callees
-        };
         for callable in roots {
             if let Err(decline) = unit.lower_root_with_intrinsics_and_externals(
-                callable, bodies, callees, intrinsics, &externals,
+                callable, bodies, &callees, intrinsics, &externals,
             ) {
                 if requires_intrinsic_link && !decline.is_internal_inconsistency() {
                     // A wrapper whose body uses a form lowering does not model yet is not support: the
@@ -390,6 +387,17 @@ fn prepare_bodyless_externals(
             }
             if capabilities.folds_common_builtin(&callee) {
                 continue;
+            }
+            match capabilities.callees.common_primitive(&callee, bodies) {
+                Ok(Some(_)) => continue,
+                Ok(None) => {}
+                Err(reason) => {
+                    diags.error(
+                        Span::new(0, 0),
+                        format!("invalid common KLIB primitive: {reason:?}"),
+                    );
+                    return false;
+                }
             }
             if intrinsics.get(&callee).is_some() {
                 // A target intrinsic is called through its provider handle like a bodyless

@@ -745,6 +745,17 @@ Native 2.4.21 metadata declares one own parameter for iterable/iterator/collecti
 and two for map/entry faces, including the static nested `Map.Entry` and `MutableMap.MutableEntry`.
 This changes no metadata wire format. Tests: `klib_libraries::tests::classes::collection_roles`.
 
+## Authenticated KLIB primitive headers
+
+KLIB body-callable views retain the effective compiler operation from either the callable or its
+normalized member realization. Instance members also freeze their exact declaring module/class
+signature and the original class-formal types, full bounds, variance and own/captured count from
+the signed classifier. This is provider-owned header evidence, not a later classifier-name lookup.
+Common primitive lowering binds the actual raw class symbols and checks the serialized receiver,
+accessor/property membership and full function header before using that evidence. It neither
+publishes private implementation functions nor broadens ordinary instance-body emission. No wire
+format or Native runtime layout changes. Tests: `klib_lowering::tests::primitive_calls`.
+
 ## Compiler-plugin declarations in a KLIB
 
 kotlinx.serialization is split like kotlinc's plugin: its frontend part declares what Kotlin code

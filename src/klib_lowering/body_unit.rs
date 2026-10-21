@@ -419,6 +419,43 @@ struct Linker<'u, 's> {
 }
 
 impl CallLinker for Linker<'_, '_> {
+    fn common_primitive(
+        &self,
+        signature: &KlibDeclarationSignature,
+    ) -> Result<Option<super::primitive_calls::CommonPrimitiveCall>, KlibBodyDeclineReason> {
+        // Keep the existing public-call obligation and canonical ambiguity diagnostics. A
+        // positive primitive capability does not own selection or producer-origin failures.
+        if let KlibDeclarationSignature::Public(callee) = signature {
+            if self.requires_declaration(callee)? {
+                return Ok(None);
+            }
+        }
+        let identity = match self
+            .sources
+            .bodies
+            .callee_origin(&self.active_module, signature)
+        {
+            KlibCalleeOrigin::Exact(identity) => identity,
+            KlibCalleeOrigin::Missing => return Ok(None),
+            KlibCalleeOrigin::Ambiguous => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "ambiguous producer origin for a primitive declaration".to_owned(),
+                ))
+            }
+        };
+        let primitive = self
+            .sources
+            .callees
+            .common_primitive(&identity, self.sources.bodies)?;
+        Ok(
+            if self.sources.externals.contains_key(&identity) || &identity == self.root.identity() {
+                None
+            } else {
+                primitive
+            },
+        )
+    }
+
     fn is_subtype(&self, sub: Ty, sup: Ty) -> bool {
         // A support unit has no semantic model of the classes its body names.
         sub == sup

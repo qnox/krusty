@@ -56,7 +56,13 @@ impl BodyLowering<'_> {
                 }
                 return self.dependency_call(callee, access, ty);
             }
-            BuiltinCallDisposition::Dependency => return self.dependency_call(callee, access, ty),
+            BuiltinCallDisposition::Dependency => {
+                let signature = crate::libraries::KlibDeclarationSignature::Public(callee.clone());
+                if let Some(primitive) = self.linker.common_primitive(&signature)? {
+                    return self.primitive_call(primitive, access, ty);
+                }
+                return self.dependency_call(callee, access, ty);
+            }
         };
         if operator == BuiltinOperator::CheckNotNull {
             return self.not_null_assertion(access, ty);
@@ -75,6 +81,60 @@ impl BodyLowering<'_> {
             }
             equality => self.equality(access, equality, ty, false),
         }
+    }
+
+    fn primitive_call(
+        &mut self,
+        primitive: super::super::primitive_calls::CommonPrimitiveCall,
+        access: &KlibIrMemberAccess,
+        ty: Ty,
+    ) -> Lowered<ExprId> {
+        use super::super::primitive_calls::CommonPrimitive;
+        if !access.type_arguments.is_empty() {
+            return Err(mismatch("a common primitive is called with type arguments"));
+        }
+        let operands = self.call_operands(
+            access,
+            ty,
+            CalleeShape {
+                receiver: Some(primitive.receiver),
+                params: &[],
+                ret: primitive.ret,
+                context_count: 0,
+                class_type_parameters: &primitive.class_type_parameters,
+            },
+        )?;
+        let receiver = operands
+            .receiver
+            .expect("a validated primitive has dispatch");
+        Ok(match primitive.operation {
+            CommonPrimitive::Unary(operation) => {
+                // Match checked FIR's selected promotion before unary realization. In particular,
+                // negate is an IEEE unary operation, never subtraction from positive zero.
+                let operand = if primitive.receiver == primitive.ret {
+                    receiver
+                } else {
+                    self.coercion(receiver, primitive.ret)
+                };
+                match operation {
+                    crate::libraries::PrimitiveUnaryIntrinsic::Identity => operand,
+                    crate::libraries::PrimitiveUnaryIntrinsic::Negate => {
+                        self.ir.add_expr(IrExpr::PrimitiveNeg {
+                            operand,
+                            ty: primitive.ret,
+                        })
+                    }
+                }
+            }
+            CommonPrimitive::Intrinsic(intrinsic) => self.ir.add_expr(IrExpr::Call {
+                callee: Box::new(Callee::Intrinsic {
+                    operation: intrinsic,
+                    ret: primitive.ret,
+                }),
+                dispatch_receiver: Some(receiver),
+                args: Vec::new(),
+            }),
+        })
     }
 
     /// `operand!!`, lowered as checked FIR lowers the source assertion: the operand, checked for
@@ -395,6 +455,10 @@ impl BodyLowering<'_> {
     ) -> Lowered<ExprId> {
         if !access.type_arguments.is_empty() {
             return unsupported("an access of a generic property");
+        }
+        let signature = crate::libraries::KlibDeclarationSignature::Accessor(accessor.clone());
+        if let Some(primitive) = self.linker.common_primitive(&signature)? {
+            return self.primitive_call(primitive, access, ty);
         }
         let linked = self.linker.link_accessor(accessor)?;
         let CallOperands {

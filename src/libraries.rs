@@ -24,6 +24,7 @@ pub(crate) mod function_classifiers;
 mod generic_signature;
 mod inline_body;
 mod inline_kind;
+mod klib_body_class;
 mod member_flags;
 mod member_records;
 mod metadata_normalization;
@@ -88,6 +89,7 @@ pub use inline_body::{
     InlineCollectionCapacity, InlineCollectionLocalNames, InlineIterationIndex,
     InlineIterationTraversal,
 };
+pub(crate) use klib_body_class::{KlibBodyClassContract, KlibBodyClassParameters};
 pub use member_flags::LmFlags;
 pub(crate) use metadata_normalization::{
     associated_function_parameter_identities, associated_property_parameter_identities,

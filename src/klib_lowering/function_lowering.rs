@@ -418,6 +418,22 @@ pub(super) fn raw_function_header(
     arena: &KlibIrArena,
     function: &KlibIrFunction,
 ) -> Result<FunctionHeader, KlibBodyDeclineReason> {
+    raw_function_header_with_class(
+        selected,
+        purpose,
+        arena,
+        function,
+        KlibTypeParameters::default(),
+    )
+}
+
+pub(super) fn raw_function_header_with_class(
+    selected: Option<KlibBodyCallable<'_>>,
+    purpose: HeaderPurpose,
+    arena: &KlibIrArena,
+    function: &KlibIrFunction,
+    class_parameters: KlibTypeParameters,
+) -> Result<FunctionHeader, KlibBodyDeclineReason> {
     if function.base.symbol.kind != KlibIrSymbolKind::Function {
         return Err(mismatch(
             "the serialized declaration's symbol is not a function".to_owned(),
@@ -444,7 +460,8 @@ pub(super) fn raw_function_header(
             ));
         }
     }
-    let type_parameters = declared_type_parameters::bind(selected, arena, function)?;
+    let type_parameters =
+        declared_type_parameters::bind(selected, arena, function, class_parameters)?;
     header(selected, purpose, type_parameters, arena, function)
 }
 

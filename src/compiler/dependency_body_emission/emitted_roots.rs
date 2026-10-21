@@ -13,13 +13,14 @@ use std::collections::VecDeque;
 /// Freeze declaration contracts along the exact producer graph before ordinary body lowering.
 /// A body-bearing callee cannot regain the legacy header-only path merely because source FIR did
 /// not also select it. Intrinsic/bodyless leaves retain their separately authenticated boundary.
-pub(super) fn ordinary_declarations(
+pub(super) fn declarations(
     platform: &dyn SemanticPlatform,
     bodies: &KlibDeclarationBodies,
     intrinsics: &KlibIntrinsicFacts,
     roots: &[KlibBodyCallable<'_>],
     externals: &HashMap<KlibDependencyCallable, super::EmittedDependencyCallable>,
-    folds_common_builtin: impl Fn(&KlibDependencyCallable) -> bool,
+    capabilities: &super::DependencyLeafCapabilities<'_>,
+    requires_ordinary: bool,
 ) -> Result<Vec<ExternalCallableRealization>, String> {
     let mut pending = roots
         .iter()
@@ -33,21 +34,45 @@ pub(super) fn ordinary_declarations(
         }
         // Positive common-lowering capability, never a missing-provider fallback. Earlier emitted
         // exports remain exact external edges and retain their declaration authentication.
-        if !externals.contains_key(&identity) && folds_common_builtin(&identity) {
+        if !externals.contains_key(&identity) && capabilities.folds_common_builtin(&identity) {
             continue;
         }
-        let (_, realization) = platform
-            .external_callable_by_dependency(&identity)
-            .ok_or_else(|| {
-                format!("an ordinary KLIB body has no exact provider declaration: {identity:?}")
-            })?;
+        // Intrinsic support already admits body-bearing raw headers without a source/provider
+        // selection. Optional enrichment does not invent a primitive on a miss. Ordinary bodies,
+        // retained exports, and target-intrinsic/bodyless leaves still require their provider.
+        let raw_header_capability = !requires_ordinary
+            && !externals.contains_key(&identity)
+            && intrinsics.get(&identity).is_none()
+            && bodies.function_has_body(&identity) == Some(true);
+        let realization = match platform.external_callable_by_dependency(&identity) {
+            Some((_, realization)) => realization,
+            None if raw_header_capability => {
+                pending.extend(bodies.direct_callees(&identity));
+                continue;
+            }
+            None => {
+                return Err(format!(
+                    "a KLIB dependency has no required exact provider declaration: {identity:?}"
+                ))
+            }
+        };
         if realization.dependency_callable.as_ref() != Some(&identity) {
             return Err("an ordinary KLIB body provider changed its exact identity".to_owned());
         }
+        let selected = realization
+            .klib_body_callable()
+            .ok_or("a dependency provider has no KLIB body contract")?;
+        let primitive = capabilities
+            .callees
+            .with_declaration(selected)
+            .common_primitive(&identity, bodies)
+            .map_err(|reason| format!("an invalid common primitive declaration: {reason:?}"))?;
         let emits_body = !externals.contains_key(&identity)
+            && primitive.is_none()
             && intrinsics.get(&identity).is_none()
             && bodies.function_has_body(&identity) == Some(true);
-        if emits_body
+        if requires_ordinary
+            && emits_body
             && (!matches!(
                 realization.kind,
                 ExternalCallableKind::TopLevel | ExternalCallableKind::Extension

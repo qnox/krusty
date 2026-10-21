@@ -191,7 +191,20 @@ impl SymbolSource for KlibLibraries {
         &self,
         identity: crate::fir::ExternalCallableId,
     ) -> Option<crate::libraries::ExternalCallableRealization> {
-        self.identities.realization(identity)
+        let mut realization = self.identities.realization(identity)?;
+        if let Some((owner, class)) = realization
+            .dependency_callable
+            .as_ref()
+            .and_then(|identity| self.inventory.dependency_declaring_class(identity))
+        {
+            realization.klib_body_class_contract = Some(crate::libraries::KlibBodyClassContract {
+                module: class.module.clone()?,
+                signature: class.signature.clone(),
+                classifier: owner,
+                parameters: class.type_parameters.klib_body_parameters(),
+            });
+        }
+        Some(realization)
     }
 
     fn external_callable_by_dependency(
@@ -205,7 +218,12 @@ impl SymbolSource for KlibLibraries {
         // constructor.
         let external =
             if let Some((placement, signed)) = self.inventory.dependency_function(identity) {
-                lookup::published_function(&self.identities, signed, placement, &Default::default())
+                let package = crate::libraries::EnclosingBounds::default();
+                let enclosing = self
+                    .inventory
+                    .dependency_declaring_class(identity)
+                    .map_or(&package, |(_, class)| class.type_parameters.enclosing());
+                lookup::published_function(&self.identities, signed, placement, enclosing)
                     .callable
                     .external_identity?
             } else if let Some((placement, signed, classifier)) =
@@ -238,7 +256,7 @@ impl SymbolSource for KlibLibraries {
                 )
                 .external_identity?
             };
-        let realization = self.identities.realization(external)?;
+        let realization = self.external_callable(external)?;
         (realization.dependency_callable.as_ref() == Some(identity))
             .then_some((external, realization))
     }

@@ -113,6 +113,7 @@ pub struct KlibBodyCallable<'a> {
     reified_type_parameter_ordinals: &'a [u32],
     compiler_intrinsic: Option<CompilerIntrinsic>,
     declaration_modifiers: Option<super::KlibBodyDeclarationModifiers>,
+    class_contract: Option<&'a super::KlibBodyClassContract>,
     /// Exact singleton dispatch receiver selected for this call edge. Common KLIB body lowering
     /// uses its semantic type to validate and consume the serialized receiver; target storage
     /// remains outside this target-free contract.
@@ -140,6 +141,7 @@ pub(crate) struct KlibBodyCallableShape<'a> {
     pub(crate) reified_type_parameter_ordinals: &'a [u32],
     pub(crate) compiler_intrinsic: Option<CompilerIntrinsic>,
     pub(crate) declaration_modifiers: Option<super::KlibBodyDeclarationModifiers>,
+    pub(crate) class_contract: Option<&'a super::KlibBodyClassContract>,
 }
 
 impl<'a> KlibBodyCallable<'a> {
@@ -162,6 +164,7 @@ impl<'a> KlibBodyCallable<'a> {
             reified_type_parameter_ordinals,
             compiler_intrinsic,
             declaration_modifiers,
+            class_contract,
         } = shape;
         Some(Self {
             name,
@@ -175,6 +178,7 @@ impl<'a> KlibBodyCallable<'a> {
             reified_type_parameter_ordinals,
             compiler_intrinsic,
             declaration_modifiers,
+            class_contract,
             singleton_dispatch: singleton.map(SingletonDispatch::ty),
             singleton_classifier: singleton.map(|dispatch| dispatch.classifier),
             companion_receiver,
@@ -242,6 +246,10 @@ impl<'a> KlibBodyCallable<'a> {
         self.declaration_modifiers
     }
 
+    pub(crate) fn class_contract(self) -> Option<&'a super::KlibBodyClassContract> {
+        self.class_contract
+    }
+
     pub(crate) fn singleton_classifier(self) -> Option<TypeName> {
         self.singleton_classifier
     }
@@ -261,6 +269,7 @@ impl<'a> KlibBodyCallable<'a> {
             && self.reified_type_parameter_ordinals == other.reified_type_parameter_ordinals
             && self.compiler_intrinsic == other.compiler_intrinsic
             && self.declaration_modifiers == other.declaration_modifiers
+            && self.class_contract == other.class_contract
             && self.companion_receiver == other.companion_receiver
             && self.declaration_owner == other.declaration_owner
             && self.identity == other.identity
@@ -314,6 +323,7 @@ pub struct ExternalCallableRealization {
     pub(crate) klib_body_type_parameters: Box<[Ty]>,
     /// Known declaration implementation modifiers; absent for providers without KLIB body facts.
     pub(crate) klib_body_declaration_modifiers: Option<super::KlibBodyDeclarationModifiers>,
+    pub(crate) klib_body_class_contract: Option<super::KlibBodyClassContract>,
 }
 
 impl ExternalCallableRealization {
@@ -333,8 +343,12 @@ impl ExternalCallableRealization {
                 generic_signature: self.callable.generic_sig.as_deref(),
                 type_parameters: &self.klib_body_type_parameters,
                 reified_type_parameter_ordinals: &self.callable.reified_type_parameter_ordinals,
-                compiler_intrinsic: self.callable.compiler_intrinsic,
+                compiler_intrinsic: self
+                    .callable
+                    .compiler_intrinsic
+                    .or(self.callable.member_realization.compiler_intrinsic()),
                 declaration_modifiers: self.klib_body_declaration_modifiers,
+                class_contract: self.klib_body_class_contract.as_ref(),
             },
             singleton,
             self.klib_body_companion_receiver.as_ref(),

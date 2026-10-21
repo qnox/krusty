@@ -483,6 +483,7 @@ impl Record {
     fn callable(&self) -> KlibCallable<'_> {
         KlibCallable::new(
             crate::libraries::KlibBodyCallableShape {
+                class_contract: None,
                 name: self.name,
                 kind: ExternalCallableKind::TopLevel,
                 params: &self.params,

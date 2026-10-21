@@ -64,6 +64,15 @@ pub(super) struct LinkedCallee {
 
 /// Joins the calls a body makes of public dependency declarations to the functions they invoke.
 pub(super) trait CallLinker {
+    /// The same authenticated primitive call shape that dependency planning treats as a leaf.
+    /// Template linkers retain their ordinary checked external-call boundary by default.
+    fn common_primitive(
+        &self,
+        _callee: &crate::libraries::KlibDeclarationSignature,
+    ) -> Lowered<Option<super::primitive_calls::CommonPrimitiveCall>> {
+        Ok(None)
+    }
+
     /// Whether a checked source edge or retained external export needs this exact declaration.
     /// Such calls must remain callable edges; only a compiler builtin without either obligation
     /// may be folded into a common-IR operation.

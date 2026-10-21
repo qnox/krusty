@@ -184,6 +184,10 @@ review explanation tied to an active migration plan.
   singleton variants; they still participate fully in declaration authentication and ambiguity.
   Dependency prewalks and actual lowering share the same common-operation decision. Retained
   external exports remain callable edges, even without a source selection in the current file.
+  Raw accessor authentication proves the exact declaring class and property group, as well as
+  the selected getter/setter slot. Matching a function signature alone does not prove membership.
+  Positive primitive queries do not preempt function-invocation/builtin priority or replace the
+  canonical producer-origin and selected-declaration ambiguity diagnostics.
 - Common FIR/IR lowering records debug-local source identity, semantic role, and inline-frame
   provenance. It must not format JVM/kotlinc synthetic local spellings such as `$iv`, `_u24`, or a
   `$lambda$N` implementation name; the JVM debug-info boundary owns those conventions.
