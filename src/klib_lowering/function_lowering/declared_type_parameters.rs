@@ -1,8 +1,8 @@
 //! Declaration-owned formals of ordinary (not prepared-inline) serialized function bodies.
 
+use super::super::klib_types::{semantic_type, KlibTypeParameters};
 use super::{mismatch, KlibBodyCallable, KlibBodyDeclineReason, KlibIrArena, KlibIrFunction};
 use crate::fx_hash::HashSet;
-use crate::klib_lowering::klib_types::{semantic_type, KlibTypeParameters};
 use crate::metadata::klib_ir::tree::KlibIrVariance;
 use crate::metadata::klib_ir::KlibIrSymbolKind;
 use crate::types::{Ty, TyKind};

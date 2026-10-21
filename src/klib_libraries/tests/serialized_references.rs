@@ -1,13 +1,13 @@
 //! A serialized fake-override reference is not a new provider declaration.
 
+use super::super::serialized_references::{
+    normalize_reference, KlibReferenceBinding, KlibReferenceDispatch, KlibReferenceOrigin,
+};
 use super::implementation_inventory::{
     declaration_ir_tree, declaration_ir_tree_kind, declaration_tree, fixture_class,
     fixture_property, identity, inventory, property_identity,
 };
 use super::*;
-use crate::klib_libraries::serialized_references::{
-    normalize_reference, KlibReferenceBinding, KlibReferenceDispatch, KlibReferenceOrigin,
-};
 use crate::libraries::KlibDependencyCallable;
 use crate::metadata::id_signature::{MetadataAccessor, MetadataClass};
 use crate::metadata::klib_ir::tree::{

@@ -466,6 +466,14 @@ mod tests {
                 let mut budget = provider.to_vec();
                 budget.extend(["compilation_target", "diag", "frontend", "toolchain"]);
                 assert_allowed_crate_modules_in_file(&path, &budget);
+            } else if path == source_path("src/klib_libraries/serialized_references.rs") {
+                // Reference binding freezes a complete serialized signature through the shared
+                // declaration-only `member_declarations_in_hierarchy` projection before
+                // publication. This is core hierarchy reuse, not source overload selection;
+                // ordinary provider modules still cannot depend on the resolver.
+                let mut budget = provider.to_vec();
+                budget.push("symbol_resolver");
+                assert_allowed_crate_modules_in_file(&path, &budget);
             } else {
                 assert_allowed_crate_modules_in_file(&path, &provider);
             }
