@@ -421,6 +421,9 @@ fn check_body_unit_with_parameters_and_defaults(
         checker.body.push_root(statement);
     }
     checker.body.finalize_capture_forwarding();
+    checker
+        .body
+        .order_nested_capture_parameters(checker.origins);
     // Convert transient parser coordinates into line-only output facts before this bounded syntax
     // unit is released. Checked/default/inline FIR may carry the resulting numbers, but never a
     // file offset or AST identity.

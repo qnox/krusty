@@ -13,6 +13,8 @@ pub use value_parameters::{FirDefaultValue, FirValueParameter, FirVarargParamete
 pub(crate) mod debug_lines;
 pub use debug_lines::{FirExpressionDebugLines, FirStatementDebugLines};
 mod capture_order;
+mod capture_parameters;
+pub use capture_parameters::FirCaptureParameter;
 mod class_captures;
 pub(crate) use class_captures::{
     ClassBodyContext, ClassCaptureBinding, ClassCaptureIdentity, ClassReceiverCaptureSource,
@@ -1824,6 +1826,9 @@ pub struct FirBody {
     captures: Vec<FirCapture>,
     capture_declaration_ordinals: Box<[u32]>,
     implicit_receiver_captures: Vec<FirImplicitReceiverCapture>,
+    /// The lifted capture parameters' physical order, when it is not the values then the receivers
+    /// (see [`capture_parameters`]).
+    capture_parameters: Box<[FirCaptureParameter]>,
     sam_conversions: Vec<FirSamConversion>,
     platform_narrowings: Vec<FirPlatformNarrowing>,
     control_targets: Vec<FirControlTarget>,
@@ -1888,6 +1893,7 @@ impl FirBody {
             captures: Vec::new(),
             capture_declaration_ordinals: Box::default(),
             implicit_receiver_captures: Vec::new(),
+            capture_parameters: Box::default(),
             sam_conversions: Vec::new(),
             platform_narrowings: Vec::new(),
             control_targets: Vec::new(),
@@ -2853,6 +2859,7 @@ impl FirBody {
             + self.type_parameter_payload_bytes()
             + self.captures.len() * std::mem::size_of::<FirCapture>()
             + self.capture_declaration_ordinals.len() * std::mem::size_of::<u32>()
+            + self.capture_parameters.len() * std::mem::size_of::<FirCaptureParameter>()
             + self.implicit_receiver_captures.len()
                 * std::mem::size_of::<FirImplicitReceiverCapture>()
             + self
