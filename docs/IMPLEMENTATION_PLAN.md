@@ -5603,6 +5603,10 @@ non-inline callers, still reads the field directly. Test:
   provider normalization. Remaining ordinary-body admission must authenticate those declaration
   modifiers against the serialized function before selecting an emitted-use root; it is not yet
   enabled by this metadata producer change.
+- The frozen body declaration contract now retains known inline/suspend/external/modality facts
+  and independent property externality. Ordinary raw headers reject disagreement with those facts;
+  selected variants with unknown or conflicting contracts cannot coalesce. Emitted-use ordinary
+  body admission remains the next step and must require known eligible modifiers explicitly.
 - Native dependency exports retain one emitted IR signature for both wrapper definitions and
   imports. Exact checked generic instantiation validates source operand roles independently of
   the canonical ABI; arguments/results use the existing target boxing and conversion boundary.

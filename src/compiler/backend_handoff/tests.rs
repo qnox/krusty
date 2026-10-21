@@ -786,6 +786,7 @@ fn selected_singletons_are_frozen_per_call_edge_not_on_the_provider_base_record(
             direct_c_function: None,
             klib_body_companion_receiver: None,
             klib_body_type_parameters: Box::new([]),
+            klib_body_declaration_modifiers: None,
         },
     };
 
@@ -958,6 +959,7 @@ fn a_plugin_added_dependency_super_call_is_frozen_once() {
         direct_c_function: None,
         klib_body_companion_receiver: None,
         klib_body_type_parameters: Box::new([]),
+        klib_body_declaration_modifiers: None,
     };
     let queries = std::cell::Cell::new(0);
     facts

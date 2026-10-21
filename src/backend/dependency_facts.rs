@@ -94,6 +94,8 @@ pub struct BackendCallableFact {
     /// Frozen KLIB-only receiver contract for an associated companion extension body.
     pub(crate) klib_body_companion_receiver: Option<KlibBodyCompanionReceiver>,
     pub(crate) klib_body_type_parameters: Box<[Ty]>,
+    pub(crate) klib_body_declaration_modifiers:
+        Option<crate::libraries::KlibBodyDeclarationModifiers>,
 }
 
 impl BackendCallableFact {
@@ -244,6 +246,7 @@ impl BackendCallableFact {
                 type_parameters: &self.klib_body_type_parameters,
                 reified_type_parameter_ordinals: &self.reified_type_parameter_ordinals,
                 compiler_intrinsic: self.compiler_intrinsic,
+                declaration_modifiers: self.klib_body_declaration_modifiers,
             },
             singleton_dispatch,
             self.klib_body_companion_receiver.as_ref(),
@@ -297,6 +300,7 @@ mod tests {
             direct_c_function: None,
             klib_body_companion_receiver: None,
             klib_body_type_parameters: Box::new([]),
+            klib_body_declaration_modifiers: None,
         };
         assert!(fact.matches_dependency_body_call(&params, Some(1), false));
         assert!(!fact.matches_dependency_body_call(&params, Some(0), false));
@@ -351,6 +355,7 @@ mod tests {
             direct_c_function: None,
             klib_body_companion_receiver: None,
             klib_body_type_parameters: Box::new([]),
+            klib_body_declaration_modifiers: None,
         };
         assert!(fact.matches_dependency_body_call(&[Ty::Int], None, true));
         assert!(!fact.matches_dependency_body_call(&[Ty::Int], None, false));
@@ -555,6 +560,7 @@ impl CheckedBackendCallables {
                 let direct_c_function = realization.direct_c_function;
                 let klib_body_companion_receiver = realization.klib_body_companion_receiver;
                 let klib_body_type_parameters = realization.klib_body_type_parameters;
+                let klib_body_declaration_modifiers = realization.klib_body_declaration_modifiers;
                 let callable = realization.callable;
                 slot.insert(BackendCallableFact {
                     name: callable.name,
@@ -593,6 +599,7 @@ impl CheckedBackendCallables {
                     direct_c_function,
                     klib_body_companion_receiver,
                     klib_body_type_parameters,
+                    klib_body_declaration_modifiers,
                 })
             }
         };

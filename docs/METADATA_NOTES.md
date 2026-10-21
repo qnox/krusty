@@ -660,6 +660,16 @@ Each accessor also carries the property's declaration-owned reified formal ordin
 existing schema facts, not new intrinsic markers or a metadata format change. This producer fix alone does not
 enable ordinary dependency-body emission.
 
+The KLIB body contract separately freezes known implementation modifiers from each exact signed
+function or accessor. Constructors and providers without such a contract keep `None`, not an
+invented non-inline default. Known modifiers survive provider realization and the checked backend
+handoff, participate in declaration-contract equality, and authenticate raw function headers.
+Serialized IR FunctionFlags use inline bit 10, external bit 12, suspend bit 13 and modality bits
+4-5; these happen to share metadata function encoding, not the shorter accessor encoding.
+Property external status stays independent of the accessor's own external bit. Ordinary-body
+admission must require known facts and veto both external statuses; this contract does not itself
+enable a new emission root category.
+
 The KLIB provider retains each formal's exact normalized semantic type alongside the full generic
 signature. Both use the same metadata identities, enclosing bounds and bound-normalization helper;
 the frozen backend handoff copies the formal types unchanged. Full bounds can contain deeper

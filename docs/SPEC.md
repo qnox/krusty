@@ -17974,6 +17974,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   cannot do so. A default accessor claiming an inline or external implementation is inconsistent
   metadata. Tests: `klib_libraries::tests::accessor_modifiers`.
 
+- **A selected ordinary KLIB header authenticates known declaration modifiers.** The provider
+  freezes inline, suspend, external and modality facts from the selected declaration; the backend
+  handoff preserves them unchanged. Its serialized function word must agree before body lowering.
+  Property-level externality remains separate from an accessor's own external word. Missing facts
+  are not a non-inline declaration, and differing or missing facts cannot coalesce with a known
+  declaration contract. Tests: `klib_lowering::tests::callee_headers`.
+
 - **A KLIB inline function expands from its prepared body through the module inliner.** When the
   backend expands same-module inline calls in IR (Native, Wasm), every `inline` declaration of a
   dependency KLIB has its prepared-inline IR body decoded and, on its first call in a file, lowered

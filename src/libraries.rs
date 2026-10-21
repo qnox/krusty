@@ -18,6 +18,7 @@ mod core_builtins;
 mod default_value;
 mod dependency_access_policy;
 mod dependency_body_contract;
+mod dependency_body_modifiers;
 mod enhanced_nullability;
 pub(crate) mod function_classifiers;
 mod generic_signature;
@@ -59,6 +60,7 @@ pub use dependency_body_contract::DependencyBodyFacts;
 pub(crate) use dependency_body_contract::{
     DependencyBodyProviderRole, DependencyBodyProviderSnapshot, DependencyBodySnapshot,
 };
+pub(crate) use dependency_body_modifiers::KlibBodyDeclarationModifiers;
 pub use enhanced_nullability::{enhance_from_overridden, EnhancedResult, TypeEnhancement};
 pub use inline_kind::InlineKind;
 pub use param_flags::ParamFlags;

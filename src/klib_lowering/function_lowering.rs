@@ -406,6 +406,22 @@ pub(super) fn function_header_with_emitted_dispatch(
             "a constructor",
         ));
     }
+    if let Some(modifiers) = selected.and_then(KlibBodyCallable::declaration_modifiers) {
+        // Serialized FunctionFlags reuse the function declaration prefix. Accessor metadata has
+        // a different inline/external layout and has already been normalized by its provider.
+        use crate::metadata::function_flags;
+        let flags = function.base.flags;
+        if modifiers.is_inline != (flags & function_flags::IS_INLINE != 0)
+            || modifiers.is_suspend != (flags & function_flags::IS_SUSPEND != 0)
+            || modifiers.is_external != (flags & function_flags::IS_EXTERNAL != 0)
+            || modifiers.modality != crate::metadata::semantic::declaration_modality(flags)
+        {
+            return Err(mismatch(
+                "the serialized function modifiers disagree with its selected declaration"
+                    .to_owned(),
+            ));
+        }
+    }
     let type_parameters = declared_type_parameters::bind(selected, arena, function)?;
     header(
         selected,

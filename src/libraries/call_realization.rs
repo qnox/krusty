@@ -112,6 +112,7 @@ pub struct KlibBodyCallable<'a> {
     type_parameters: &'a [Ty],
     reified_type_parameter_ordinals: &'a [u32],
     compiler_intrinsic: Option<CompilerIntrinsic>,
+    declaration_modifiers: Option<super::KlibBodyDeclarationModifiers>,
     /// Exact singleton dispatch receiver selected for this call edge. Common KLIB body lowering
     /// uses its semantic type to validate and consume the serialized receiver; target storage
     /// remains outside this target-free contract.
@@ -138,6 +139,7 @@ pub(crate) struct KlibBodyCallableShape<'a> {
     pub(crate) type_parameters: &'a [Ty],
     pub(crate) reified_type_parameter_ordinals: &'a [u32],
     pub(crate) compiler_intrinsic: Option<CompilerIntrinsic>,
+    pub(crate) declaration_modifiers: Option<super::KlibBodyDeclarationModifiers>,
 }
 
 impl<'a> KlibBodyCallable<'a> {
@@ -159,6 +161,7 @@ impl<'a> KlibBodyCallable<'a> {
             type_parameters,
             reified_type_parameter_ordinals,
             compiler_intrinsic,
+            declaration_modifiers,
         } = shape;
         Some(Self {
             name,
@@ -171,6 +174,7 @@ impl<'a> KlibBodyCallable<'a> {
             type_parameters,
             reified_type_parameter_ordinals,
             compiler_intrinsic,
+            declaration_modifiers,
             singleton_dispatch: singleton.map(SingletonDispatch::ty),
             singleton_classifier: singleton.map(|dispatch| dispatch.classifier),
             companion_receiver,
@@ -234,6 +238,10 @@ impl<'a> KlibBodyCallable<'a> {
         self.singleton_dispatch
     }
 
+    pub(crate) fn declaration_modifiers(self) -> Option<super::KlibBodyDeclarationModifiers> {
+        self.declaration_modifiers
+    }
+
     pub(crate) fn singleton_classifier(self) -> Option<TypeName> {
         self.singleton_classifier
     }
@@ -252,6 +260,7 @@ impl<'a> KlibBodyCallable<'a> {
             && self.type_parameters == other.type_parameters
             && self.reified_type_parameter_ordinals == other.reified_type_parameter_ordinals
             && self.compiler_intrinsic == other.compiler_intrinsic
+            && self.declaration_modifiers == other.declaration_modifiers
             && self.companion_receiver == other.companion_receiver
             && self.declaration_owner == other.declaration_owner
             && self.identity == other.identity
@@ -303,6 +312,8 @@ pub struct ExternalCallableRealization {
     /// Declaration-owned formal types, frozen before normalized full bounds can deepen their
     /// finite self/forward references. Empty for declarations without KLIB generic body facts.
     pub(crate) klib_body_type_parameters: Box<[Ty]>,
+    /// Known declaration implementation modifiers; absent for providers without KLIB body facts.
+    pub(crate) klib_body_declaration_modifiers: Option<super::KlibBodyDeclarationModifiers>,
 }
 
 impl ExternalCallableRealization {
@@ -323,6 +334,7 @@ impl ExternalCallableRealization {
                 type_parameters: &self.klib_body_type_parameters,
                 reified_type_parameter_ordinals: &self.callable.reified_type_parameter_ordinals,
                 compiler_intrinsic: self.callable.compiler_intrinsic,
+                declaration_modifiers: self.klib_body_declaration_modifiers,
             },
             singleton,
             self.klib_body_companion_receiver.as_ref(),

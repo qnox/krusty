@@ -7,8 +7,8 @@ use super::declaration_signatures::{SignedFunction, SignedProperty};
 use crate::fir::{ExternalCallableId, ExternalPropertyId, ResolvedParameterIdentity};
 use crate::libraries::{
     ExternalCallableKind, ExternalCallableRealization, ExternalPropertyRealization, FnKind,
-    FunctionInfo, KlibBodyCompanionReceiver, KlibDeclarationSignature, KlibDependencyCallable,
-    LibraryCallable, LibraryMember, PropertyInfo,
+    FunctionInfo, KlibBodyCompanionReceiver, KlibBodyDeclarationModifiers,
+    KlibDeclarationSignature, KlibDependencyCallable, LibraryCallable, LibraryMember, PropertyInfo,
 };
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::types::{SemanticCallableOwner, TypeName};
@@ -17,6 +17,7 @@ use crate::types::{SemanticCallableOwner, TypeName};
 struct BodyContract {
     companion_receiver: Option<KlibBodyCompanionReceiver>,
     type_parameters: Box<[crate::types::Ty]>,
+    declaration_modifiers: Option<KlibBodyDeclarationModifiers>,
 }
 
 /// One identity per exact declaration signature. The signature, not a spelling or a parameter
@@ -54,6 +55,9 @@ impl ExternalIdentities {
             signed.module.as_deref(),
             BodyContract {
                 companion_receiver,
+                declaration_modifiers: Some(KlibBodyDeclarationModifiers::function(
+                    &signed.declaration,
+                )),
                 type_parameters: crate::libraries::declared_formal_types(
                     &signed.declaration.formals,
                     enclosing,
@@ -87,6 +91,10 @@ impl ExternalIdentities {
             signed.module.as_deref(),
             BodyContract {
                 companion_receiver: companion_receiver.clone(),
+                declaration_modifiers: Some(KlibBodyDeclarationModifiers::accessor(
+                    &signed.declaration,
+                    &signed.declaration.getter_modifiers,
+                )),
                 type_parameters: crate::libraries::declared_formal_types(
                     &signed.declaration.formals,
                     enclosing,
@@ -114,6 +122,10 @@ impl ExternalIdentities {
                 signed.module.as_deref(),
                 BodyContract {
                     companion_receiver,
+                    declaration_modifiers: Some(KlibBodyDeclarationModifiers::accessor(
+                        &signed.declaration,
+                        &signed.declaration.setter_modifiers,
+                    )),
                     type_parameters: crate::libraries::declared_formal_types(
                         &signed.declaration.formals,
                         enclosing,
@@ -274,6 +286,7 @@ impl ExternalIdentities {
             direct_c_function,
             klib_body_companion_receiver: body.companion_receiver,
             klib_body_type_parameters: body.type_parameters,
+            klib_body_declaration_modifiers: body.declaration_modifiers,
         });
         self.by_signature.borrow_mut().insert(key, identity);
     }

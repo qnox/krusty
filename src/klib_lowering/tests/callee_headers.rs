@@ -96,6 +96,121 @@ fn an_unauthenticated_header_declared_callee_without_a_body_declines() {
     );
 }
 
+#[test]
+fn a_serialized_function_must_agree_with_frozen_declaration_modifiers() {
+    let demo = demo(&IDENTITY_AND_CALLER, identity_and_caller);
+    let selected = demo.facts["b"]
+        .klib_body_callable()
+        .expect("a frozen KLIB declaration");
+    let tree = function_tree(demo_signature(None, "b", &[], &[T::Int]), "b", false, 0, 1);
+    let KlibIrMember::Function(id) = tree.declaration else {
+        panic!("a function")
+    };
+    let function = tree.arena.function(id);
+    super::super::function_lowering::function_header(Some(selected), &tree.arena, function)
+        .unwrap_or_else(|reason| panic!("the original declaration agrees: {reason:?}"));
+    // Serialized FunctionFlags, not the shorter metadata accessor flag word.
+    for flag in [1 << 10, 1 << 12, 1 << 13, 1 << 5] {
+        let mut changed = function.clone();
+        changed.base.flags |= flag;
+        let Err(reason) =
+            super::super::function_lowering::function_header(Some(selected), &tree.arena, &changed)
+        else {
+            panic!("changed declaration modifier {flag} must not authenticate")
+        };
+        assert_eq!(
+            reason,
+            KlibBodyDeclineReason::SignatureMismatch(
+                "the serialized function modifiers disagree with its selected declaration"
+                    .to_owned(),
+            )
+        );
+    }
+}
+
+#[test]
+fn matching_function_modifiers_survive_the_provider_and_frozen_handoff() {
+    use crate::metadata::semantic::{KotlinModality, KotlinPackage};
+    for (inline, suspend, external, modality, flags) in [
+        (true, false, false, KotlinModality::Final, 1 << 10),
+        (false, true, false, KotlinModality::Final, 1 << 13),
+        (false, false, true, KotlinModality::Final, 1 << 12),
+        (false, false, false, KotlinModality::Open, 1 << 4),
+        (false, false, false, KotlinModality::Abstract, 1 << 5),
+    ] {
+        let mut declaration = super::demo_package::declaration(("b", &[T::Int], T::Int));
+        declaration.is_inline = inline;
+        declaration.is_suspend = suspend;
+        declaration.is_external = external;
+        declaration.modality = modality;
+        let libraries = crate::klib_libraries::KlibLibraries::from_named_packages(
+            "demo",
+            vec![(
+                vec!["demo".to_owned()],
+                KotlinPackage {
+                    functions: vec![declaration],
+                    ..Default::default()
+                },
+            )],
+        )
+        .expect("a declaration-owned modifier contract");
+        let selected = super::frozen_function(&libraries, "demo", "b", None, &[T::Int.semantic()]);
+        let contract = selected
+            .klib_body_declaration_modifiers
+            .expect("known metadata modifiers");
+        assert_eq!(contract.is_inline, inline);
+        assert_eq!(contract.is_suspend, suspend);
+        assert_eq!(contract.is_external, external);
+        assert!(!contract.property_is_external);
+        assert_eq!(contract.modality, modality);
+        let Some(KlibDeclarationSignature::Public(signature)) = &selected.declaration_signature
+        else {
+            panic!("a function signature")
+        };
+        let tree = function_tree(signature.clone(), "b", false, 0, 1);
+        let KlibIrMember::Function(id) = tree.declaration else {
+            panic!("a function")
+        };
+        let mut function = tree.arena.function(id).clone();
+        function.base.flags = flags;
+        super::super::function_lowering::function_header(
+            selected.klib_body_callable(),
+            &tree.arena,
+            &function,
+        )
+        .unwrap_or_else(|reason| panic!("matching metadata and IR modifiers: {reason:?}"));
+    }
+}
+
+#[test]
+fn missing_or_conflicting_modifier_facts_do_not_coalesce_selected_declarations() {
+    let demo = demo(&IDENTITY_AND_CALLER, identity_and_caller);
+    let original = &demo.facts["b"];
+    type Change = fn(&mut Option<crate::libraries::KlibBodyDeclarationModifiers>);
+    let changes: &[Change] = &[
+        |fact| fact.as_mut().expect("known").is_inline = true,
+        |fact| fact.as_mut().expect("known").is_suspend = true,
+        |fact| fact.as_mut().expect("known").is_external = true,
+        |fact| fact.as_mut().expect("known").property_is_external = true,
+        |fact| {
+            fact.as_mut().expect("known").modality = crate::metadata::semantic::KotlinModality::Open
+        },
+        |fact| *fact = None,
+    ];
+    for change in changes {
+        let mut changed = original.clone();
+        change(&mut changed.klib_body_declaration_modifiers);
+        let first = original.klib_body_callable().expect("selected");
+        let second = changed.klib_body_callable().expect("same exact identity");
+        assert!(!first.same_declaration_contract(second));
+        let facts = KlibCalleeFacts::new([first, second]);
+        assert!(matches!(
+            facts.get(first.identity()),
+            Some(super::super::callee_facts::KlibCalleeFact::Ambiguous)
+        ));
+    }
+}
+
 /// A provider record of `demo.b(a: Int): Int` with one fact changed.
 struct Record {
     name: &'static str,
@@ -138,6 +253,7 @@ impl Record {
                 type_parameters: &self.formals,
                 reified_type_parameter_ordinals: &self.reified,
                 compiler_intrinsic: None,
+                declaration_modifiers: None,
             },
             None,
             None,
