@@ -3,7 +3,7 @@
 //! A built-in operator lowers as checked FIR lowers the source operator the KLIB serializes as a
 //! call of it; a dependency function lowers as a call of its function in the same unit.
 
-use super::super::ir_builtins::{BuiltinOperator, BuiltinRelation};
+use super::super::ir_builtins::{BuiltinCallDisposition, BuiltinOperator, BuiltinRelation};
 use super::super::klib_types::function_invocation_arity;
 use super::super::klib_types::semantic_type;
 use super::{mismatch, unsupported, BodyLowering, LinkedAccessor, LinkedCallee, Lowered};
@@ -43,18 +43,20 @@ impl BodyLowering<'_> {
             }
             return self.function_invocation(access, arity, ty);
         }
-        let operator = self.builtins.operator(callee);
-        // A checked source call may select the same exact declaration that this support body
-        // calls. Materialize that declaration into the closed unit so the source edge has target
-        // code. Only an unselected compiler builtin is folded into its common-IR operation.
-        if operator.is_some() && self.linker.is_selected(callee)? {
-            if !access.type_arguments.is_empty() {
-                return unsupported("a call of a generic declaration");
+        // A checked source call or retained external export needs the exact declaration edge.
+        // Only a builtin without either obligation is folded into its common-IR operation.
+        let operator = match self
+            .builtins
+            .call_disposition(callee, || self.linker.requires_declaration(callee))?
+        {
+            BuiltinCallDisposition::Common(operator) => operator,
+            BuiltinCallDisposition::RetainedDeclaration => {
+                if !access.type_arguments.is_empty() {
+                    return unsupported("a call of a generic declaration");
+                }
+                return self.dependency_call(callee, access, ty);
             }
-            return self.dependency_call(callee, access, ty);
-        }
-        let Some(operator) = operator else {
-            return self.dependency_call(callee, access, ty);
+            BuiltinCallDisposition::Dependency => return self.dependency_call(callee, access, ty),
         };
         if operator == BuiltinOperator::CheckNotNull {
             return self.not_null_assertion(access, ty);

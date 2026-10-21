@@ -91,6 +91,14 @@ pub(super) struct IrBuiltinOperators {
     operators: HashMap<KlibPublicIdSignature, BuiltinOperator>,
 }
 
+/// Whether this exact call emits a declaration edge or an existing common-IR operation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum BuiltinCallDisposition {
+    Common(BuiltinOperator),
+    RetainedDeclaration,
+    Dependency,
+}
+
 impl IrBuiltinOperators {
     pub(super) fn new() -> Self {
         let package = PACKAGE.map(str::to_owned);
@@ -241,6 +249,24 @@ impl IrBuiltinOperators {
     pub(super) fn operator(&self, signature: &KlibPublicIdSignature) -> Option<BuiltinOperator> {
         self.operators.get(signature).copied()
     }
+
+    /// Source selections, retained exports and ambiguity matter even for compiler operations.
+    /// Callers resolve the producer origin before supplying this selection; operand validation
+    /// remains with actual body lowering, not dependency-graph preparation.
+    pub(super) fn call_disposition<E>(
+        &self,
+        signature: &KlibPublicIdSignature,
+        requires_declaration: impl FnOnce() -> Result<bool, E>,
+    ) -> Result<BuiltinCallDisposition, E> {
+        let Some(operator) = self.operator(signature) else {
+            return Ok(BuiltinCallDisposition::Dependency);
+        };
+        Ok(if requires_declaration()? {
+            BuiltinCallDisposition::RetainedDeclaration
+        } else {
+            BuiltinCallDisposition::Common(operator)
+        })
+    }
 }
 
 /// The nullable type of the class `internal`, as the built-in declarations state their operands.
@@ -256,6 +282,31 @@ fn nullable(internal: &str) -> KotlinType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn common_call_disposition_preserves_selected_and_ambiguous_obligations() {
+        let builtins = IrBuiltinOperators::new();
+        for (signature, operator) in &builtins.operators {
+            assert_eq!(
+                builtins.call_disposition(signature, || Ok::<_, ()>(false)),
+                Ok(BuiltinCallDisposition::Common(*operator))
+            );
+            assert_eq!(
+                builtins.call_disposition(signature, || Ok::<_, ()>(true)),
+                Ok(BuiltinCallDisposition::RetainedDeclaration)
+            );
+            assert_eq!(
+                builtins.call_disposition(signature, || Err("ambiguous")),
+                Err("ambiguous")
+            );
+            let foreign =
+                KlibPublicIdSignature::classifier(crate::types::type_name("kotlin/Boolean"));
+            assert_eq!(
+                builtins.call_disposition(&foreign, || panic!("not a common operation")),
+                Ok::<_, ()>(BuiltinCallDisposition::Dependency)
+            );
+        }
+    }
 
     /// The member ids the Kotlin/Native 2.4.20 stdlib KLIB serializes for its calls to these
     /// operators.

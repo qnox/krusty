@@ -19,7 +19,7 @@ use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
 use super::function_lowering::{
     declare_function, function_header, raw_function_header, FunctionHeader, HeaderPurpose,
 };
-use super::ir_builtins::IrBuiltinOperators;
+use super::ir_builtins::{BuiltinCallDisposition, IrBuiltinOperators};
 use super::lowering_checkpoint::LoweringCheckpoint;
 use crate::fir::ExternalCallableId;
 use crate::ir::{Callee, FunId, IrFile};
@@ -109,6 +109,28 @@ struct PendingBody<'a> {
 }
 
 impl DependencyBodyUnit {
+    /// A positive capability for graph preparation, using the same classification as lowering.
+    /// Provider header evidence is not a source selection. Ambiguity, selected roots (including
+    /// recursive calls), and non-public declarations never authorize folding a declaration edge.
+    pub(crate) fn folds_common_builtin(
+        &self,
+        identity: &KlibDependencyCallable,
+        callees: &KlibCalleeFacts<'_>,
+    ) -> bool {
+        let KlibDeclarationSignature::Public(signature) = &identity.declaration else {
+            return false;
+        };
+        matches!(
+            self.builtins.call_disposition(signature, || {
+                if matches!(callees.get(identity), Some(KlibCalleeFact::Ambiguous)) {
+                    return Err(());
+                }
+                Ok(callees.is_selected(identity))
+            }),
+            Ok(BuiltinCallDisposition::Common(_))
+        )
+    }
+
     /// Whether this selected declaration has the exact scalar boundary of an instruction wrapper:
     /// a non-member whose operands are scalars of an instruction class and whose result is such a
     /// scalar or `Boolean`. This is a semantic type/receiver contract, not a declaration-name
@@ -431,7 +453,10 @@ impl CallLinker for Linker<'_, '_> {
         ))
     }
 
-    fn is_selected(&self, callee: &KlibPublicIdSignature) -> Result<bool, KlibBodyDeclineReason> {
+    fn requires_declaration(
+        &self,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<bool, KlibBodyDeclineReason> {
         let signature = KlibDeclarationSignature::Public(callee.clone());
         let identity = match self
             .sources
@@ -453,11 +478,11 @@ impl CallLinker for Linker<'_, '_> {
         }
         let selection = self.sources.callees.get(&identity);
         match selection {
-            None => Ok(false),
-            Some(KlibCalleeFact::Selected(_)) => Ok(self.sources.callees.is_selected(&identity)),
             Some(KlibCalleeFact::Ambiguous) => Err(KlibBodyDeclineReason::AmbiguousCallee(
                 Box::new(callee.clone()),
             )),
+            _ => Ok(self.sources.callees.is_selected(&identity)
+                || self.sources.externals.contains_key(&identity)),
         }
     }
 

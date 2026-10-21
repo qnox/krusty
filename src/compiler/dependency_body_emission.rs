@@ -114,12 +114,18 @@ pub(super) fn emit_dependencies<B: Backend>(
         let Some(mut externals) = rebound_externals(platform, &support_state.emitted, diags) else {
             return Vec::new();
         };
+        let mut unit = DependencyBodyUnit::default();
+        let capabilities = DependencyLeafCapabilities {
+            unit: &unit,
+            callees: &callees,
+            target_realizes_bodyless: backend.realizes_bodyless_dependency_support(),
+        };
         if !prepare_bodyless_externals(
             platform,
             bodies,
             intrinsics,
             &roots,
-            backend.realizes_bodyless_dependency_support(),
+            &capabilities,
             &mut externals,
             diags,
         ) {
@@ -129,7 +135,12 @@ pub(super) fn emit_dependencies<B: Backend>(
             Vec::new()
         } else {
             match emitted_roots::ordinary_declarations(
-                platform, bodies, intrinsics, &roots, &externals,
+                platform,
+                bodies,
+                intrinsics,
+                &roots,
+                &externals,
+                |identity| capabilities.folds_common_builtin(identity),
             ) {
                 Ok(declarations) => declarations,
                 Err(error) => {
@@ -152,7 +163,6 @@ pub(super) fn emit_dependencies<B: Backend>(
         } else {
             &ordinary_callees
         };
-        let mut unit = DependencyBodyUnit::default();
         for callable in roots {
             if let Err(decline) = unit.lower_root_with_intrinsics_and_externals(
                 callable, bodies, callees, intrinsics, &externals,
@@ -341,17 +351,27 @@ fn rebound_externals(
     Some(rebound)
 }
 
-/// Prepare opaque provider handles for reachable declarations whose selected KLIB intentionally
-/// carries no body. Common lowering still joins them by exact producer-resolved identity and
-/// validates their serialized header; the target later realizes the frozen provider handle through
-/// its ordinary dependency registry. A missing provider realization is an inconsistency, never a
-/// reason to search another declaration or module.
+/// Common-operation and target-external capabilities of the same dependency emission unit.
+struct DependencyLeafCapabilities<'a> {
+    unit: &'a DependencyBodyUnit,
+    callees: &'a KlibCalleeFacts<'a>,
+    target_realizes_bodyless: bool,
+}
+
+impl DependencyLeafCapabilities<'_> {
+    fn folds_common_builtin(&self, identity: &KlibDependencyCallable) -> bool {
+        self.unit.folds_common_builtin(identity, self.callees)
+    }
+}
+
+/// Prepare exact provider handles only for declaration edges actual lowering will retain.
+/// A missing provider realization is an inconsistency, never permission to search or fold.
 fn prepare_bodyless_externals(
     platform: &dyn crate::libraries::SemanticPlatform,
     bodies: &crate::klib_libraries::KlibDeclarationBodies,
     intrinsics: &crate::klib_libraries::KlibIntrinsicFacts,
     roots: &[crate::libraries::KlibBodyCallable<'_>],
-    target_realizes_bodyless: bool,
+    capabilities: &DependencyLeafCapabilities<'_>,
     externals: &mut HashMap<KlibDependencyCallable, EmittedDependencyCallable>,
     diags: &mut DiagSink,
 ) -> bool {
@@ -366,6 +386,9 @@ fn prepare_bodyless_externals(
         }
         for callee in bodies.direct_callees(&identity) {
             if externals.contains_key(&callee) {
+                continue;
+            }
+            if capabilities.folds_common_builtin(&callee) {
                 continue;
             }
             if intrinsics.get(&callee).is_some() {
@@ -384,7 +407,7 @@ fn prepare_bodyless_externals(
                 pending.push_back(callee);
                 continue;
             }
-            if !target_realizes_bodyless {
+            if !capabilities.target_realizes_bodyless {
                 diags.error(
                     Span::new(0, 0),
                     "internal error: the target cannot realize a bodyless KLIB support dependency",
@@ -408,6 +431,7 @@ fn provider_external(
     diags: &mut DiagSink,
 ) -> Option<EmittedDependencyCallable> {
     let Some((external, realization)) = platform.external_callable_by_dependency(callee) else {
+        crate::trace_compiler!("lower", "missing exact bodyless KLIB provider: {callee:?}");
         diags.error(
             Span::new(0, 0),
             "internal error: a bodyless KLIB dependency has no exact provider realization",

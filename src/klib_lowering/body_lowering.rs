@@ -64,10 +64,10 @@ pub(super) struct LinkedCallee {
 
 /// Joins the calls a body makes of public dependency declarations to the functions they invoke.
 pub(super) trait CallLinker {
-    /// Whether a checked source edge selected this exact producer-resolved declaration. A body
-    /// call of such a declaration must remain a callable edge so the unit exports code for the
-    /// source call; an otherwise identical unselected compiler builtin may be folded.
-    fn is_selected(&self, callee: &KlibPublicIdSignature) -> Lowered<bool>;
+    /// Whether a checked source edge or retained external export needs this exact declaration.
+    /// Such calls must remain callable edges; only a compiler builtin without either obligation
+    /// may be folded into a common-IR operation.
+    fn requires_declaration(&self, callee: &KlibPublicIdSignature) -> Lowered<bool>;
 
     /// The function a call of the public declaration `callee` invokes.
     fn link(&mut self, ir: &mut IrFile, callee: &KlibPublicIdSignature) -> Lowered<LinkedCallee>;

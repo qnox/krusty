@@ -19,6 +19,7 @@ pub(super) fn ordinary_declarations(
     intrinsics: &KlibIntrinsicFacts,
     roots: &[KlibBodyCallable<'_>],
     externals: &HashMap<KlibDependencyCallable, super::EmittedDependencyCallable>,
+    folds_common_builtin: impl Fn(&KlibDependencyCallable) -> bool,
 ) -> Result<Vec<ExternalCallableRealization>, String> {
     let mut pending = roots
         .iter()
@@ -28,6 +29,11 @@ pub(super) fn ordinary_declarations(
     let mut declarations = Vec::new();
     while let Some(identity) = pending.pop_front() {
         if !visited.insert(identity.clone()) {
+            continue;
+        }
+        // Positive common-lowering capability, never a missing-provider fallback. Earlier emitted
+        // exports remain exact external edges and retain their declaration authentication.
+        if !externals.contains_key(&identity) && folds_common_builtin(&identity) {
             continue;
         }
         let (_, realization) = platform

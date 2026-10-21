@@ -312,6 +312,120 @@ fn provider_header_evidence_does_not_invent_a_checked_call_obligation() {
 }
 
 #[test]
+fn common_builtin_capability_distinguishes_headers_source_calls_and_conflicts() {
+    let demo = demo(&IDENTITY_AND_CALLER, identity_and_caller);
+    let mut provider = demo.facts["b"].clone();
+    let signature = operator(&["kotlin"], Some("Boolean"), "not", &[]).0;
+    provider.dependency_callable = Some(KlibDependencyCallable {
+        module: "kotlin".to_owned(),
+        declaration: KlibDeclarationSignature::Public(signature),
+    });
+    let header = provider.klib_body_callable().expect("provider header");
+    let unit = DependencyBodyUnit::default();
+    assert!(unit.folds_common_builtin(header.identity(), &KlibCalleeFacts::default()));
+    let headers = KlibCalleeFacts::with_declarations([], [header]);
+    assert!(unit.folds_common_builtin(header.identity(), &headers));
+    // Roots enter as source selections, so a recursive builtin edge is not folded either.
+    let selected = KlibCalleeFacts::new([header]);
+    assert!(!unit.folds_common_builtin(header.identity(), &selected));
+    let mut conflicting = provider.clone();
+    conflicting
+        .klib_body_declaration_modifiers
+        .as_mut()
+        .expect("known declaration")
+        .is_inline = true;
+    let headers = KlibCalleeFacts::with_declarations(
+        [],
+        [
+            header,
+            conflicting.klib_body_callable().expect("same identity"),
+        ],
+    );
+    assert!(!unit.folds_common_builtin(header.identity(), &headers));
+    assert!(!unit.folds_common_builtin(
+        demo.facts["b"]
+            .klib_body_callable()
+            .expect("ordinary")
+            .identity(),
+        &KlibCalleeFacts::default(),
+    ));
+}
+
+#[test]
+fn a_previously_retained_builtin_edge_is_not_folded_without_a_current_source_call() {
+    let signature = operator(&["kotlin"], Some("Boolean"), "not", &[]).0;
+    let mut arena = KlibIrArena::default();
+    let boolean = arena.push_type(T::Boolean.klib());
+    let declaration = arena.push_function(KlibIrFunction {
+        base: base(public_symbol(KlibIrSymbolKind::Function, signature.clone())),
+        name: "not".to_owned(),
+        constructor: false,
+        type_parameters: Vec::new(),
+        dispatch_receiver: Some(KlibIrParameter {
+            base: base(local_symbol(KlibIrSymbolKind::ReceiverParameter, 0)),
+            name: "<this>".to_owned(),
+            ty: boolean,
+            vararg_element_type: None,
+            default_value: None,
+        }),
+        context_parameters: Vec::new(),
+        extension_receiver: None,
+        regular_parameters: Vec::new(),
+        return_type: boolean,
+        overridden: Vec::new(),
+        companion_extension_class: None,
+        prepared_inline_file: None,
+        body: None,
+    });
+    let demo = demo_with(
+        &[("f", &[T::Boolean], T::Boolean)],
+        vec![KlibIrDeclarationTree {
+            arena,
+            declaration: KlibIrMember::Function(declaration),
+        }],
+        |_, body| {
+            let operand = body.param(0);
+            let call = body.call_signature(signature.clone(), vec![operand], None, T::Boolean);
+            Some(vec![body.ret(call)])
+        },
+    );
+    let external = crate::fir::ExternalCallableId::from_raw(27);
+    let identity = KlibDependencyCallable {
+        module: "demo".to_owned(),
+        declaration: KlibDeclarationSignature::Public(signature),
+    };
+    let emitted = [(
+        identity,
+        super::super::EmittedDependencyCallable::new(external, None, None),
+    )]
+    .into_iter()
+    .collect();
+    let callees = demo.callees(&["f"]);
+    let mut unit = DependencyBodyUnit::default();
+    unit.lower_function_with_intrinsics_and_externals(
+        demo.callable("f"),
+        &demo.bodies,
+        &callees,
+        crate::klib_libraries::KlibIntrinsicFacts::empty(),
+        &emitted,
+    )
+    .expect("the retained exact edge remains external");
+    validated(unit.ir());
+    assert_eq!(unit.ir().functions.len(), 1);
+    let calls = unit
+        .ir()
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            crate::ir::IrExpr::Call { callee, .. } => Some(&**callee),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(calls.len(), 1, "the retained call is not a folded negation");
+    assert!(matches!(calls[0], crate::ir::Callee::External { target, .. } if *target == external));
+}
+
+#[test]
 fn provider_header_evidence_does_not_invent_a_call_edge_variant() {
     let demo = demo(&IDENTITY_AND_CALLER, identity_and_caller);
     let mut provider = demo.facts["b"].clone();

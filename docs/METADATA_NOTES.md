@@ -683,6 +683,13 @@ declaration of a transitive primitive does not require an out-of-line export or 
 existing common-IR builtin lowering. Conflicting declaration evidence still declines even when
 no source call selected that identity.
 
+Graph preparation asks the common body's exact builtin call-disposition capability before
+requiring a provider declaration or traversing its implementation. The same decision drives
+actual call lowering; compiler-owned operations do not acquire spurious body/header obligations.
+Selected source declarations and ambiguous contracts cannot use this capability, and already
+emitted exports remain external edges. This is positive builtin recognition, never recovery from
+a failed provider lookup. Non-builtin bodyless declarations still require their exact provider.
+
 Raw call-header authentication distinguishes an external declaration from an emitted support
 body. A bodyless external member retains its dispatch operand and authenticates its classifier
 against the selected declaration owner; it does not need the singleton receiver-erasure proof

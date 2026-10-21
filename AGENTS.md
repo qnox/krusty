@@ -182,6 +182,8 @@ review explanation tied to an active migration plan.
   dependency roots from the bodies the target emits, not the whole callable or expression arena.
   Provider header facts must not invent checked source-call/export obligations or call-edge
   singleton variants; they still participate fully in declaration authentication and ambiguity.
+  Dependency prewalks and actual lowering share the same common-operation decision. Retained
+  external exports remain callable edges, even without a source selection in the current file.
 - Common FIR/IR lowering records debug-local source identity, semantic role, and inline-frame
   provenance. It must not format JVM/kotlinc synthetic local spellings such as `$iv`, `_u24`, or a
   `$lambda$N` implementation name; the JVM debug-info boundary owns those conventions.
@@ -208,7 +210,7 @@ review explanation tied to an active migration plan.
 ```text
 rg -n 'registered_local_method_is_complete|finalized_.*captures|uses_before|drop_unused_implicit_receivers' src/resolve.rs src/resolve
 rg -n 'receiver_capture_ids|receiver_role|implicit_receiver_role|refreshed_local_receiver_capture' src/resolve.rs src/resolve
-rg -n 'with_declarations|is_selected|klib_body_callables|emitted_body_roots' src/compiler/dependency_body_emission* src/klib_lowering src/backend/dependency_facts.rs
+rg -n 'with_declarations|is_selected|requires_declaration|klib_body_callables|emitted_body_roots' src/compiler/dependency_body_emission* src/klib_lowering src/backend/dependency_facts.rs
 ```
 
 ## Interned-name rule

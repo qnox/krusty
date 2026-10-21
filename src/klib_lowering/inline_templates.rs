@@ -432,7 +432,10 @@ impl CallLinker for TemplateCalls<'_> {
         .map_err(declined)
     }
 
-    fn is_selected(&self, _callee: &KlibPublicIdSignature) -> Result<bool, KlibBodyDeclineReason> {
+    fn requires_declaration(
+        &self,
+        _callee: &KlibPublicIdSignature,
+    ) -> Result<bool, KlibBodyDeclineReason> {
         // No source edge needs a template's callee as target code.
         Ok(false)
     }

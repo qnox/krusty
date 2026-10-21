@@ -17994,6 +17994,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   enum-entry-only ordinary roots are not yet covered by this structural inventory.
   Tests: `ir::emitted_body_roots`, `box_regressions/floatingSign.kt`.
 
+- **KLIB closure preparation uses common lowering's exact builtin call disposition.** A producer-
+  resolved call replaced by an existing common-IR builtin operation needs no emitted function or
+  provider handle. Both closure prewalks use the same exact-signature capability as body lowering,
+  before traversing the callee's implementation. A real selected source call (including recursive
+  root calls), an ambiguous declaration, or an already-emitted external edge retains its normal
+  declaration obligation. Missing providers alone never authorize folding; non-builtin calls and
+  operand/type-argument validation keep their existing failure paths. Tests:
+  `common_call_disposition_preserves_selected_and_ambiguous_obligations`,
+  `common_builtin_capability_distinguishes_headers_source_calls_and_conflicts`, and
+  `a_previously_retained_builtin_edge_is_not_folded_without_a_current_source_call`, plus
+  `box_regressions/floatingSign.kt`.
+
 - **A KLIB inline function expands from its prepared body through the module inliner.** When the
   backend expands same-module inline calls in IR (Native, Wasm), every `inline` declaration of a
   dependency KLIB has its prepared-inline IR body decoded and, on its first call in a file, lowered

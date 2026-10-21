@@ -5611,6 +5611,11 @@ non-inline callers, still reads the field directly. Test:
   Native property access routes the exact accessor export through the canonical call ABI. Complete
   target-specific default-wrapper/enum-root inventory and inline-accessor substitution flow remain
   unfinished; no all-arena/default scan or helper-name algorithm was added.
+- Dependency graph preparation and actual common body lowering share one exact builtin call
+  disposition. Common operations need neither an emitted callee body nor a provider handle;
+  selected source declarations, ambiguous contracts and previous external exports retain their
+  declaration obligations. Missing non-builtin provider realizations remain failures, including
+  the separately diagnosed Native array-length leaf.
 - Native dependency exports retain one emitted IR signature for both wrapper definitions and
   imports. Exact checked generic instantiation validates source operand roles independently of
   the canonical ABI; arguments/results use the existing target boxing and conversion boundary.
