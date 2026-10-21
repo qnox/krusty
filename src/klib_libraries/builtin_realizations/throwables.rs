@@ -8,7 +8,7 @@ use crate::libraries::{
 };
 use crate::types::{type_name, Ty, TypeName};
 
-pub(in crate::klib_libraries) fn realize_constructor(
+pub(in super::super) fn realize_constructor(
     owner: TypeName,
     compiler_builtin_owner: bool,
     member: &mut LibraryMember,
@@ -37,7 +37,7 @@ pub(in crate::klib_libraries) fn realize_constructor(
         MemberRealization::Intrinsic(CompilerIntrinsic::ThrowableConstructor { message });
 }
 
-pub(in crate::klib_libraries) fn realize_throwable_property(
+pub(in super::super) fn realize_throwable_property(
     owner: TypeName,
     compiler_builtin_owner: bool,
     property: &mut PropertyInfo,
