@@ -1105,6 +1105,10 @@ pub fn run(lane: &dyn Lane) {
             })
             .collect()
     });
+    // Compilation is finished. Restore ordinary panic reporting before validating outcomes:
+    // an owned fatal outcome or a broken inventory must remain visible, not fail silently under
+    // the compiler-only hook.
+    let _ = std::panic::take_hook();
 
     let mut passed = 0usize;
     let mut frontend = 0usize;
@@ -1240,7 +1244,6 @@ pub fn run(lane: &dyn Lane) {
     for (file, reason) in &known_failures {
         eprintln!("  known failure {}: {reason}", file.display());
     }
-    let _ = std::panic::take_hook();
     for (file, reason) in &failed {
         eprintln!("FAILED {}: {reason}", file.display());
     }

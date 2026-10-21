@@ -1737,7 +1737,7 @@ fn kotlin_codegen_box_conformance() {
                         .unwrap_or("File")
                         .to_string();
                     let owned_reference = owned.then(|| {
-                        box_reference_classes::checked_box(&src, &stem)
+                        box_reference_classes::checked_prepared_box(&src, &stem)
                             .unwrap_or_else(|error| panic!("required JVM oracle: {error}"))
                     });
                     if !gate_applicable(&src, no_run) {

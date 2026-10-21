@@ -31,8 +31,17 @@ use super::common::{self, byte_dump};
 /// and mixed Java). It matches the module name krusty emits those cases under.
 pub const MAIN_MODULE: &str = "main";
 
-/// Establish an owned portable fixture's actual JVM result before judging any backend.
+/// Establish a raw owned portable fixture's JVM result, preparing it for the oracle's target
+/// independently of the backend that will compile the original source afterwards.
 pub fn checked_box(src: &str, stem: &str) -> Result<ReferenceClasses, String> {
+    let prepared =
+        krusty::conformance::prepare_test_source(src, krusty::conformance::TestTarget::Jvm);
+    checked_prepared_box(&prepared, stem)
+}
+
+/// Establish the JVM result of source already prepared by the JVM corpus runner. Preparation
+/// cannot run twice: directives such as CHECK_TYPE_WITH_EXACT inject support declarations.
+pub fn checked_prepared_box(src: &str, stem: &str) -> Result<ReferenceClasses, String> {
     if !krusty::conformance::backend_targeted(src, &["JVM", "JVM_IR"])
         || krusty::conformance::backend_muted(src, &["JVM", "JVM_IR"])
     {
@@ -1005,6 +1014,33 @@ mod tests {
 
     fn kotlinc_available() -> bool {
         krusty::toolchain::kotlinc_path().is_some()
+    }
+
+    #[test]
+    fn owned_jvm_oracle_prepares_raw_portable_value_class_source() {
+        if !kotlinc_available() {
+            return;
+        }
+        let source = "OPTIONAL_JVM_INLINE_ANNOTATION\n\
+            value class OracleWord(val value: String)\n\
+            fun box(): String = OracleWord(\"OK\").value\n";
+        let classes = checked_box(source, "RawValueClassOracle")
+            .expect("the JVM oracle must prepare raw portable source for its own target");
+        assert!(!classes.is_empty());
+    }
+
+    #[test]
+    fn an_already_prepared_jvm_oracle_source_is_not_prepared_twice() {
+        if !kotlinc_available() {
+            return;
+        }
+        let prepared = krusty::conformance::prepare_test_source(
+            "// CHECK_TYPE_WITH_EXACT\nfun box(): String = \"OK\"\n",
+            krusty::conformance::TestTarget::Jvm,
+        );
+        let classes = checked_prepared_box(&prepared, "PreparedOracle")
+            .expect("the JVM corpus has already injected its support declarations");
+        assert!(!classes.is_empty());
     }
 
     /// A plain case's key inputs, which each test varies one field of.

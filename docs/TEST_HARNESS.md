@@ -221,6 +221,12 @@ compiler panics and target skips are fatal before any expectation write. The ord
 per-case applicability policy is unchanged. Full sweeps require the provisioned upstream corpus;
 the separate vendored smoke test does not replace missing setup.
 
+The owned oracle prepares raw source for JVM independently of the tested backend, including the
+portable value-class annotation placeholder. The JVM runner's already-prepared source uses a
+separate entry point, so support declarations are never injected twice. The compiler panic hook
+is restored after worker compilation and before outcome validation, keeping fatal setup and
+inventory diagnostics visible without allowing them into the failure ratchet.
+
 The existing Wasm failure inventories include the newly covered
 `regressions/multimodule/multimoduleDependencyFunctionImplementationMarkers.kt`: its former
 Native-only directive hid portable function-instance behavior that Wasm declines as a class
