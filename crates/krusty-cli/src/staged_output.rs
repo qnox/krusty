@@ -7,7 +7,6 @@
 //! for `-d dir`, a jar file for `-d foo.jar`. [`StagedOutput::commit`] moves it into place;
 //! dropping an uncommitted output removes the staging location.
 
-use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -27,9 +26,11 @@ pub struct StagedOutput {
 }
 
 enum Target {
-    /// Relative paths written under the staging directory. A path emitted twice (a source listed
-    /// twice) is staged once, the later bytes replacing the earlier, as a direct write would.
-    Directory { written: BTreeSet<String> },
+    /// Files staged under the staging directory. Commit publishes what is on disk there rather than
+    /// a ledger of written names: a path emitted twice (a source listed twice), or two names one
+    /// case-insensitive file system folds together, is one staged file holding the later bytes, as
+    /// a direct write would have left it.
+    Directory,
     /// Opened on the first artifact, so a compilation that emits nothing creates nothing.
     Jar {
         writer: Option<Box<ZipWriter<File>>>,
@@ -41,9 +42,7 @@ impl StagedOutput {
         let target = if dest.extension().is_some_and(|extension| extension == "jar") {
             Target::Jar { writer: None }
         } else {
-            Target::Directory {
-                written: BTreeSet::new(),
-            }
+            Target::Directory
         };
         Self {
             dest: dest.to_path_buf(),
@@ -59,16 +58,11 @@ impl StagedOutput {
             return;
         }
         let written = match &mut self.target {
-            Target::Directory { written } => {
+            Target::Directory => {
                 let path = self.staging.join(rel);
-                let result = path
-                    .parent()
+                path.parent()
                     .map_or(Ok(()), std::fs::create_dir_all)
-                    .and_then(|()| std::fs::write(&path, bytes));
-                if result.is_ok() {
-                    written.insert(rel.to_string());
-                }
-                result
+                    .and_then(|()| std::fs::write(&path, bytes))
             }
             Target::Jar { writer } => {
                 let writer = match writer {
@@ -91,15 +85,11 @@ impl StagedOutput {
             return Err(error);
         }
         match &mut self.target {
-            Target::Directory { written } => {
-                for rel in written.iter() {
-                    let to = self.dest.join(rel);
-                    if let Some(parent) = to.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                    move_file(&self.staging.join(rel), &to)?;
-                }
+            // Nothing staged means nothing emitted; the destination is not created.
+            Target::Directory if self.staging.is_dir() => {
+                publish_tree(&self.staging, &self.dest)?;
             }
+            Target::Directory => {}
             Target::Jar { writer } => {
                 // A jar destination exists even when nothing was emitted.
                 let writer = match writer.take() {
@@ -167,6 +157,21 @@ fn write_jar_entry(writer: &mut ZipWriter<File>, rel: &str, bytes: &[u8]) -> io:
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     writer.start_file(rel, options).map_err(io::Error::other)?;
     writer.write_all(bytes)
+}
+
+/// Move every file under `from` to the same relative path under `to`.
+fn publish_tree(from: &Path, to: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            publish_tree(&entry.path(), &target)?;
+        } else {
+            move_file(&entry.path(), &target)?;
+        }
+    }
+    Ok(())
 }
 
 /// Rename, or copy when the destination is on another file system.
@@ -242,6 +247,13 @@ mod tests {
         output.commit().unwrap();
         assert_eq!(std::fs::read(dest.join("A.class")).unwrap(), b"second");
         assert_eq!(entries(&root), vec!["classes".to_string()]);
+    }
+
+    #[test]
+    fn a_directory_with_nothing_emitted_is_not_created() {
+        let root = scratch("dir-empty");
+        StagedOutput::new(&root.join("classes")).commit().unwrap();
+        assert!(entries(&root).is_empty());
     }
 
     #[test]
