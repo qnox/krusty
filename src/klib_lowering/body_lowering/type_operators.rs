@@ -9,7 +9,7 @@
 use super::{mismatch, unsupported, BodyLowering, Lowered};
 use crate::ir::{ExprId, IrExpr, IrTypeOp};
 use crate::metadata::klib_ir::tree::{KlibIrExprId, KlibIrTypeId, KlibIrTypeOperator};
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 use super::super::decline::KlibBodyDeclineReason;
 use super::super::klib_types::semantic_type;
@@ -120,8 +120,8 @@ impl BodyLowering<'_> {
     /// Whether a smart cast of a value of `actual` to `target` narrows it: `target` is a subtype
     /// of `actual`, or names the same classifier at other type arguments.
     fn narrows(&self, actual: Ty, target: Ty) -> bool {
-        let classifier = |ty: Ty| match ty.non_null() {
-            Ty::Obj(name, _) => Some(name),
+        let classifier = |ty: Ty| match ty.non_null().kind() {
+            TyKind::Obj(name, _) => Some(name),
             _ => None,
         };
         self.linker.is_subtype(target, actual)

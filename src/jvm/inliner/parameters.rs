@@ -32,6 +32,10 @@ pub(crate) enum Binding {
     /// before it is placed (`markPlacesForInlineAndRemoveInlinable`), and each `invoke` of it
     /// becomes the lambda's own body, so it has no slot in the caller.
     Lambda(usize),
+    /// An omitted inline lambda parameter whose default lambda, read from its class, is inlined
+    /// like [`Self::Lambda`]. It still keeps a temporary that nothing writes, as kotlinc enters
+    /// one for every default parameter; the final slot compaction drops it when it stays unused.
+    DefaultLambda(usize),
     /// The body never reads this parameter once its null check is gone. The call still evaluates
     /// the argument, then pops it, and the parameter takes no slot in the caller.
     Unread,
@@ -122,7 +126,7 @@ impl Parameters {
             let words = parameter.category.words() as usize;
             if slot < declaration + words {
                 return match parameter.binding {
-                    Binding::Lambda(lambda) => Some(lambda),
+                    Binding::Lambda(lambda) | Binding::DefaultLambda(lambda) => Some(lambda),
                     _ => None,
                 };
             }
@@ -139,7 +143,10 @@ impl Parameters {
         let mut slots = vec![None; real + self.captured.len()];
         let mut next = 0u16;
         let mut assign = |index: usize, parameter: &Parameter, slots: &mut Vec<Option<u16>>| {
-            if parameter.binding == Binding::Temporary {
+            if matches!(
+                parameter.binding,
+                Binding::Temporary | Binding::DefaultLambda(_)
+            ) {
                 slots[index] = Some(next);
                 next += parameter.category.words() as u16;
             }
@@ -147,6 +154,8 @@ impl Parameters {
         let mut owned = vec![false; self.captured.len()];
         for (index, parameter) in self.parameters.iter().enumerate() {
             assign(index, parameter, &mut slots);
+            // A default lambda's captured values are stored by the inlined body, never at an
+            // argument: like kotlinc's captured parameters they follow every parameter.
             let Binding::Lambda(lambda) = parameter.binding else {
                 continue;
             };
@@ -171,7 +180,12 @@ impl Parameters {
     /// The words the temporaries take (`actualParamsSize`).
     fn temporaries_size(&self) -> u16 {
         self.all()
-            .filter(|parameter| parameter.binding == Binding::Temporary)
+            .filter(|parameter| {
+                matches!(
+                    parameter.binding,
+                    Binding::Temporary | Binding::DefaultLambda(_)
+                )
+            })
             .map(|parameter| parameter.category.words() as u16)
             .sum()
     }
@@ -188,7 +202,7 @@ impl Parameters {
             let words = parameter.category.words() as u16;
             if slot < declaration + words {
                 return match &parameter.binding {
-                    Binding::Lambda(_) => Remapped::Lambda,
+                    Binding::Lambda(_) | Binding::DefaultLambda(_) => Remapped::Lambda,
                     Binding::Unread => Remapped::Unread,
                     Binding::Field { owner, name, desc } => Remapped::Field { owner, name, desc },
                     Binding::Temporary => Remapped::Frame(
@@ -344,5 +358,24 @@ mod tests {
             capture_owners: vec![0],
         };
         assert_eq!(parameters.temporaries(), vec![None, Some(0), None]);
+    }
+
+    #[test]
+    fn a_default_lambdas_captured_temporary_follows_every_parameter() {
+        // kotlinc's `cap(a, f = { a + "?" }, b = "z")`: a, f's unwritten temporary, b, then the
+        // value the default lambda captured, which the body stores where its arm constructed it.
+        let parameters = Parameters {
+            parameters: vec![
+                parameter(Category::Reference, Binding::Temporary),
+                parameter(Category::Reference, Binding::DefaultLambda(0)),
+                parameter(Category::Reference, Binding::Temporary),
+            ],
+            captured: vec![parameter(Category::Reference, Binding::Temporary)],
+            capture_owners: vec![0],
+        };
+        assert_eq!(
+            parameters.temporaries(),
+            vec![Some(0), Some(1), Some(2), Some(3)]
+        );
     }
 }

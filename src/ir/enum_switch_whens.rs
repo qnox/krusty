@@ -7,7 +7,7 @@
 //! class owns (the JVM's `$WhenMappings`), so code holding such a `when` reads state of that class.
 
 use super::{ExprId, IrBinOp, IrExpr, IrFile};
-use crate::types::{Ty, TypeName};
+use crate::types::{TyKind, TypeName};
 
 /// A subject `when` that switches on an enum's keys.
 pub(crate) struct EnumSwitchWhen {
@@ -41,8 +41,9 @@ impl EnumSwitchWhen {
                     || matches!(ir.expr(*result), IrExpr::When { .. })
                         && self.compares_an_entry(ir, *result)
             }),
-            &IrExpr::PrimitiveBinOp {
+            &IrExpr::Equality {
                 op: IrBinOp::Eq,
+                mode: super::EqualityMode::Structural,
                 lhs,
                 rhs,
             } => self.compared_operand(ir, lhs, rhs).is_some_and(|other| {
@@ -66,8 +67,9 @@ impl EnumSwitchWhen {
                 return true;
             };
             match ir.expr(*condition) {
-                &IrExpr::PrimitiveBinOp {
+                &IrExpr::Equality {
                     op: IrBinOp::Eq,
+                    mode: super::EqualityMode::Structural,
                     lhs,
                     rhs,
                 } => self.compared_operand(ir, lhs, rhs).is_none_or(|other| {
@@ -110,9 +112,9 @@ impl IrFile {
         if !matches!(self.expr(*when), IrExpr::When { .. }) {
             return None;
         }
-        let (classifier, nullable) = match *ty {
-            Ty::Obj(classifier, _) => (classifier, false),
-            Ty::Nullable(Ty::Obj(classifier, _)) => (*classifier, true),
+        let (classifier, nullable) = match ty.kind() {
+            TyKind::Obj(classifier, _) => (classifier, false),
+            TyKind::Nullable(inner) => (inner.obj_parts()?.0, true),
             _ => return None,
         };
         let candidate = EnumSwitchWhen {

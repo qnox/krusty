@@ -408,7 +408,7 @@ pub(super) fn cross_owner_member_calls(
     contexts: &[static_accessors::EmissionContext],
     private_interface_bodies_are_members: bool,
 ) -> MemberAccessBridges {
-    let exporting = static_accessors::inline_functions_exporting_private_access(ir);
+    let exporting = static_accessors::inline_functions_exporting_private_access(ir, contexts);
     let mut private = crate::fx_hash::HashSet::default();
     let mut private_calls = crate::fx_hash::HashMap::default();
     let mut protected = crate::fx_hash::HashMap::default();
@@ -423,8 +423,11 @@ pub(super) fn cross_owner_member_calls(
                 continue;
             }
             // Local members carry a `FunId`; sibling-source members carry the exact stable module
-            // declaration selected by FIR. Neither path reconstructs identity from owner/name.
+            // declaration selected by FIR. Neither path reconstructs identity from owner/name. A
+            // call inlined from its callee's compiled body never invokes that member, so it needs
+            // no bridge; the body's own private reads export through its class's accessors.
             let local_target = match ir.expr(expression) {
+                _ if ir.compiled_inline_call(expression).is_some() => None,
                 IrExpr::MethodCall {
                     class,
                     index,

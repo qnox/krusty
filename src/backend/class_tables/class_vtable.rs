@@ -5,7 +5,7 @@ use crate::fx_hash::HashMap;
 
 use crate::fir::ResolvedFunctionOverrideTarget;
 use crate::ir::{ClassId, FunId, IrClass, IrFile, IrFunction};
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 use super::members::{
     any_slot, function_key, implements_an_interface, local_property_target, overridden_functions,
@@ -81,8 +81,8 @@ pub(super) fn class_table(
     if let Some(arity) = class
         .supertypes
         .iter()
-        .filter_map(|supertype| match supertype.non_null() {
-            Ty::Fun(signature) => Some(signature.params.len()),
+        .filter_map(|supertype| match supertype.non_null().kind() {
+            TyKind::Fun(signature) => Some(signature.params.len()),
             _ => None,
         })
         .find(|&arity| arity > 22)

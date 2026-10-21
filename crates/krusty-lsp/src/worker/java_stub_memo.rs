@@ -49,15 +49,10 @@ impl JavaStubMemo {
             .iter()
             .map(|source| (String::new(), source.clone()))
             .collect::<Vec<_>>();
-        let resolve = |candidate: &str| {
-            classpath
-                .find_name(krusty::types::type_name(candidate))
-                .is_some()
-        };
         let Some(stubs) = krusty::jvm::java_stub::stub_classes(
             &java,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &resolve,
+            classpath,
         ) else {
             self.ready = false;
             return false;

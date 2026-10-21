@@ -4,6 +4,7 @@
 //! the exact tied maximal declarations, in provider order, without repeating candidate lookup.
 
 use super::*;
+use crate::types::TyKind;
 
 pub(crate) enum CandidateSelectionWithTies<T> {
     None,
@@ -13,10 +14,20 @@ pub(crate) enum CandidateSelectionWithTies<T> {
 
 pub(crate) enum ReceiverFunctionSelection {
     None,
-    /// `FunctionInfo` alone is ~1.2 KiB and is what makes this variant large; the rest of the
-    /// tuple is a `Vec` and two `Copy` `Ty`s, so only the callable is boxed.
-    Selected((Box<FunctionInfo>, Vec<Ty>, Ty, Ty)),
+    Selected(SelectedReceiverFunction),
     Ambiguous(Vec<FunctionInfo>),
+}
+
+/// One selected receiver callable instantiated at its call site from a single binding set: the
+/// parameter vector, the result, the applied receiver, and the type-parameter bindings that
+/// produced them. The bindings are the call's solved type arguments, which the call publishes.
+pub(crate) struct SelectedReceiverFunction {
+    /// `FunctionInfo` alone is ~1.2 KiB; only the callable is boxed.
+    pub(crate) function: Box<FunctionInfo>,
+    pub(crate) params: Vec<Ty>,
+    pub(crate) ret: Ty,
+    pub(crate) applied_receiver: Ty,
+    pub(crate) bindings: GSigBinds,
 }
 
 impl<T> CandidateSelectionWithTies<T> {
@@ -1221,14 +1232,14 @@ pub(super) fn semantic_arg_assignable(src: &dyn SymbolSource, param: &Ty, arg: &
     if param == arg {
         return true;
     }
-    if let Ty::TyParam(_, bound) = param.non_null() {
+    if let TyKind::TyParam(_, bound) = param.non_null().kind() {
         if *arg == Ty::Null {
             return param.admits_null();
         }
         let expected = if param.is_nullable() {
-            Ty::nullable(*bound)
+            Ty::nullable(bound)
         } else {
-            *bound
+            bound
         };
         return crate::assignable::is_assignable(
             &crate::assignable::TyCtx::new(),
@@ -1365,7 +1376,7 @@ fn best_by_args_at_priority_with_ties<'a>(
         }
         sam || fun_arg_matches(src, p, &arg.ty(), arg.is_lambda_literal())
             || semantic_arg_assignable(src, p, &arg.ty())
-            || (arg.ty() == Ty::Null && matches!(p.non_null(), Ty::TyParam(..)))
+            || (arg.ty() == Ty::Null && p.non_null().is_ty_param())
             || function_like_fits(p, arg)
             || arg.binds_result_to(src, *p)
     };
@@ -1500,24 +1511,24 @@ fn fun_arg_matches(src: &dyn SymbolSource, param: &Ty, arg: &Ty, lambda_literal:
     let Some(arg_arity) = arg.fun_arity() else {
         return false;
     };
-    let param = match param {
-        Ty::Nullable(inner) => **inner,
+    let param = match param.kind() {
+        TyKind::Nullable(inner) => inner,
         _ => *param,
     };
     // A lambda literal declares only value parameters: `{ name -> }` fits `Scope.(String) -> Unit`,
     // whose receiver and context parameters bind implicitly. A parameter type written on the
     // lambda must still accept the value the function type passes there.
-    let declares_value_parameters = |param: Ty| match (param, *arg) {
-        (Ty::Fun(param), Ty::Fun(lambda)) if lambda_literal => {
+    let declares_value_parameters = |param: Ty| match (param.kind(), arg.kind()) {
+        (TyKind::Fun(param), TyKind::Fun(lambda)) if lambda_literal => {
             let implicit = param.context_count + usize::from(param.has_receiver);
             !lambda.has_receiver
                 && lambda.context_count == 0
                 && param.params.len().saturating_sub(implicit) == lambda.params.len()
                 && param.params.iter().skip(implicit).zip(&lambda.params).all(
                     |(passed, declared)| {
-                        matches!(declared, Ty::Error)
-                            || matches!(passed.non_null(), Ty::TyParam(..))
-                            || matches!(declared.non_null(), Ty::TyParam(..))
+                        matches!(*declared, Ty::Error)
+                            || passed.non_null().is_ty_param()
+                            || declared.non_null().is_ty_param()
                             || resolution_subtype(src, *passed, *declared)
                     },
                 )
@@ -1543,7 +1554,7 @@ pub(super) fn fun_return_compatible(
     let (Some(pr), Some(ar)) = (param.fun_ret(), arg.fun_ret()) else {
         return true;
     };
-    if matches!(pr.non_null(), Ty::TyParam(_, _))
+    if pr.non_null().is_ty_param()
         || matches!(pr, Ty::Error)
         || pr
             .non_null()
@@ -1587,7 +1598,8 @@ pub(super) fn fun_return_compatible(
 #[cfg(test)]
 mod tests {
     use super::{
-        select_fixed_or_more_specific_vararg, CandidateSelectionWithTies, ReceiverFunctionSelection,
+        select_fixed_or_more_specific_vararg, CandidateSelectionWithTies,
+        ReceiverFunctionSelection, SelectedReceiverFunction,
     };
     use crate::libraries::{CallSig, FnKind, FunctionInfo, LibraryCallable};
     use crate::types::Ty;
@@ -1615,7 +1627,12 @@ mod tests {
 
     #[test]
     fn a_receiver_selection_carries_a_pointer_to_its_callable() {
-        assert_eq!(std::mem::size_of::<ReceiverFunctionSelection>(), 96);
+        use std::mem::size_of;
+        assert!(
+            size_of::<ReceiverFunctionSelection>()
+                <= size_of::<SelectedReceiverFunction>() + size_of::<usize>()
+        );
+        assert!(size_of::<SelectedReceiverFunction>() < size_of::<FunctionInfo>() / 4);
     }
 
     #[test]

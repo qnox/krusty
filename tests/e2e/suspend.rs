@@ -80,6 +80,8 @@ mod suspend_lambda_shared_capture_e2e;
 mod suspend_lambda_sites_e2e;
 #[path = "../suspend_lambda_unit_tail_e2e.rs"]
 mod suspend_lambda_unit_tail_e2e;
+#[path = "../suspend_lambda_value_class_invoke_e2e.rs"]
+mod suspend_lambda_value_class_invoke_e2e;
 #[path = "../suspend_loop_compound_assign_e2e.rs"]
 mod suspend_loop_compound_assign_e2e;
 #[path = "../suspend_loop_continue_break_e2e.rs"]

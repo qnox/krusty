@@ -20,6 +20,7 @@ mod executable_owners;
 mod flags;
 mod nested_classifiers;
 mod property_flags;
+mod source_classifiers;
 mod type_use_annotations;
 mod visibility_suppressions;
 mod written_type_projection;
@@ -2532,7 +2533,7 @@ pub struct StreamedHeaderModule {
     /// Position in `stubs` of each inventoried declaration. Signature resolution asks for one stub
     /// by identity per type reference it resolves; scanning `stubs` for it was quadratic in module
     /// size.
-    stub_positions: crate::fx_hash::HashMap<DeclarationId, usize>,
+    stub_positions: super::DeclarationTable<u32>,
     /// How many leading entries of `stubs` the position table covers.
     indexed_stubs: usize,
     /// The `expect` KEYWORD each header declaration was introduced by.
@@ -2572,12 +2573,12 @@ pub struct StreamedHeaderModule {
 }
 
 impl StreamedHeaderModule {
-    fn index_stubs(stubs: &[DeclarationStub]) -> crate::fx_hash::HashMap<DeclarationId, usize> {
-        stubs
-            .iter()
-            .enumerate()
-            .map(|(position, stub)| (stub.id, position))
-            .collect()
+    fn index_stubs(stubs: &[DeclarationStub]) -> super::DeclarationTable<u32> {
+        let mut positions = super::DeclarationTable::default();
+        for (position, stub) in stubs.iter().enumerate() {
+            positions.insert(stub.id, next_id(position, "declaration stubs"));
+        }
+        positions
     }
 
     fn reindex_stubs(&mut self) {
@@ -2588,7 +2589,8 @@ impl StreamedHeaderModule {
     /// Append a stub and index it by identity.
     pub fn push_stub(&mut self, stub: DeclarationStub) {
         if self.indexed_stubs == self.stubs.len() {
-            self.stub_positions.insert(stub.id, self.stubs.len());
+            self.stub_positions
+                .insert(stub.id, next_id(self.stubs.len(), "declaration stubs"));
             self.indexed_stubs += 1;
         }
         self.stubs.push(stub);
@@ -2604,8 +2606,8 @@ impl StreamedHeaderModule {
     fn stub_position(&self, declaration: DeclarationId) -> Option<usize> {
         if let Some(position) = self
             .stub_positions
-            .get(&declaration)
-            .copied()
+            .get(declaration)
+            .map(|&position| position as usize)
             .filter(|position| {
                 self.stubs
                     .get(*position)
@@ -2667,38 +2669,6 @@ impl StreamedHeaderModule {
             .get(source.raw() as usize)
             .copied()
             .unwrap_or(false)
-    }
-
-    /// Qualified, JVM-neutral identities of non-local Kotlin classifiers published by this
-    /// source module. Platform source providers use this once during Pass 1 to resolve foreign
-    /// declaration headers against Kotlin declarations from the same compilation. Local and
-    /// anonymous classifiers are deliberately absent: another source file cannot name them.
-    pub fn source_classifier_names(&self) -> Vec<crate::types::TypeName> {
-        let mut names = self
-            .stubs
-            .iter()
-            .filter(|stub| stub.kind == DeclarationKind::Classifier)
-            .filter(|stub| {
-                !stub.flags.has(DeclarationFlags::LOCAL_CLASS)
-                    && !stub.flags.has(DeclarationFlags::ANONYMOUS_OBJECT)
-            })
-            .filter_map(|stub| {
-                let spelling = self.lookup_names.get(stub.lookup_name?)?;
-                let mut segments = spelling
-                    .split(['.', '$'])
-                    .filter(|segment| !segment.is_empty());
-                let first = segments.next()?;
-                let package = self.sources.get(stub.source)?.package;
-                let mut identity = crate::types::type_name_child(package, first);
-                for segment in segments {
-                    identity = crate::types::type_name_nested_child(identity, segment);
-                }
-                Some(identity)
-            })
-            .collect::<Vec<_>>();
-        let mut seen = crate::fx_hash::HashSet::default();
-        names.retain(|name| seen.insert(*name));
-        names
     }
 
     pub(crate) fn local_classifier_lexical_root(
@@ -2766,8 +2736,7 @@ impl StreamedHeaderModule {
             + self.visibility_suppressions.storage_payload_bytes()
             + self.type_use_annotations.storage_payload_bytes()
             + self.stubs.len() * std::mem::size_of::<DeclarationStub>()
-            + self.stub_positions.len()
-                * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<usize>())
+            + self.stub_positions.storage_payload_bytes()
             + self.inventory.len() * std::mem::size_of::<DeclarationId>()
             + self
                 .source_declarations

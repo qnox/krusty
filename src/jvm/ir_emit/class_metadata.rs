@@ -300,8 +300,11 @@ impl<'a> JvmClassRealization<'a> {
                 &self.local_classifiers,
             )
             .unwrap_or_default(),
-            // A data class's `equals`/`hashCode`/`toString` keep `Any`'s derivable signatures.
-            FunctionOrigin::DataMember(_) => JvmFunctionSignature::default(),
+            // A data or boxed value class's `equals`/`hashCode`/`toString` keep `Any`'s derivable
+            // signatures; an abstract value class's open ones have no method at all.
+            FunctionOrigin::DataMember(_) | FunctionOrigin::OpenValueClassAny(_) => {
+                JvmFunctionSignature::default()
+            }
             FunctionOrigin::ValueClassAny(member) => value_class_override_metadata::signature(
                 &crate::jvm::names::type_descriptor(c.fields[0].ty),
                 member,
@@ -552,6 +555,18 @@ impl<'a> JvmClassRealization<'a> {
                 arguments.iter().map(|arg| desc(arg.ty)).collect::<String>()
             ));
         }
+        // The named declared parameters take the physical types the value-class pass erased them
+        // to: a `Result` parameter requires no hidden constructor and is its `Object` carrier.
+        let declared = arguments
+            .iter()
+            .filter(|arg| arg.name.is_some() && arg.declared_ty.is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            declared.len(),
+            params.len(),
+            "the primary constructor record of {} names each declared constructor argument",
+            c.fq_name.render()
+        );
         // An `enum class`'s JVM constructor takes the two synthetic `Enum` parameters first, so its
         // recorded `JvmMethodSignature` is `(Ljava/lang/String;I…)V` — the metadata names the REAL
         // descriptor even though those parameters are not Kotlin-visible.
@@ -571,7 +586,7 @@ impl<'a> JvmClassRealization<'a> {
                 .filter(|arg| arg.name.is_none())
                 .map(|arg| desc(arg.ty))
                 .collect::<String>(),
-            params.iter().map(|(_, t)| desc(*t)).collect::<String>()
+            declared.iter().map(|arg| desc(arg.ty)).collect::<String>()
         ))
     }
 }

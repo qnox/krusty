@@ -27,7 +27,8 @@ impl BodyFirChecker<'_> {
         let call = match kind {
             FirExprKind::Call(call)
             | FirExprKind::ComparisonCall { call, .. }
-            | FirExprKind::ContainmentCall { call, .. } => call,
+            | FirExprKind::ContainmentCall { call, .. }
+            | FirExprKind::ComparableRangeContainment { lower: call, .. } => call,
             _ => return Ok(()),
         };
         super::inline_body_plan::finalize(&self.body, call).map_err(|_| {
@@ -360,6 +361,18 @@ impl BodyFirChecker<'_> {
                 semantic,
             )?
         };
+        Ok(self.stored_value_view(value, storage_ty, result_ty, origin))
+    }
+
+    /// `value`, read from storage of `storage_ty`, as the checked flow sees it: `result_ty`, a
+    /// smart cast or unboxing of the stored value, or the value itself when the two agree.
+    pub(super) fn stored_value_view(
+        &mut self,
+        value: FirExprId,
+        storage_ty: ResolvedTy,
+        result_ty: ResolvedTy,
+        origin: OriginId,
+    ) -> FirExprId {
         // A Unit local/capture/property is already stored as the language singleton. Resolution
         // may expose its classifier view (`kotlin/Unit`) for member selection, but that is not a
         // void-effect-to-value conversion. Preserve the stored read directly so lowering neither
@@ -380,12 +393,12 @@ impl BodyFirChecker<'_> {
                 })
             });
         let Some(conversion) = conversion else {
-            return Ok(value);
+            return value;
         };
-        Ok(self.body.add_expr(FirExpr {
+        self.body.add_expr(FirExpr {
             origin,
             ty: result_ty,
             kind: FirExprKind::ImplicitConversion { value, conversion },
-        }))
+        })
     }
 }

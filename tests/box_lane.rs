@@ -188,7 +188,8 @@ pub enum Libraries {
     /// class there, so the JDK has to be present for those names to resolve at all.
     JvmArtifacts,
     /// The target's own stdlib KLIB (`toolchain::kotlin_stdlib_klib`), the library kotlinc
-    /// compiles that target against. `kotlin.test` is part of it.
+    /// compiles that target against. Native includes `kotlin.test`; Wasm adds its exact target
+    /// kotlin-test KLIB as an ordinary dependency.
     StdlibKlib,
 }
 
@@ -254,6 +255,7 @@ impl Libraries {
                             .expect("checked by `Libraries::available`"),
                         klib_stdlib_semantics(target),
                     ));
+                    libraries.extend(wasm_test_library(target));
                     let (libraries, native_imports) = open_klib_inputs(target, &libraries)
                         .unwrap_or_else(|error| {
                             panic!("opening the {target:?} dependency KLIBs: {error}")
@@ -274,10 +276,11 @@ impl Libraries {
                 }
                 let stdlib = krusty::toolchain::kotlin_stdlib_klib(target)
                     .expect("checked by `Libraries::available`");
-                let inputs = [krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
+                let mut inputs = vec![krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
                     stdlib,
                     klib_stdlib_semantics(target),
                 )];
+                inputs.extend(wasm_test_library(target));
                 let (libraries, native_imports) = open_klib_inputs(target, &inputs)
                     .unwrap_or_else(|error| panic!("opening the {target:?} stdlib KLIB: {error}"));
                 let compilation = PlatformLibraries {
@@ -289,6 +292,28 @@ impl Libraries {
             }),
         }
     }
+}
+
+/// Wasm publishes kotlin-test separately from its stdlib. Retain it as an ordinary dependency:
+/// these coordinates select the exact target/version but confer no compiler intrinsic authority.
+fn wasm_test_library(
+    target: krusty::compilation_target::CompilationTarget,
+) -> Option<krusty::klib_libraries::KlibLibraryInput> {
+    use krusty::compilation_target::CompilationTarget;
+    let artifact = match target {
+        CompilationTarget::WasmJs => "kotlin-test-wasm-js",
+        CompilationTarget::WasmWasi => "kotlin-test-wasm-wasi",
+        _ => return None,
+    };
+    let version = krusty::kotlin_version::target().to_string();
+    let path = krusty::toolchain::ensure_maven_artifact(
+        "org.jetbrains.kotlin",
+        artifact,
+        &version,
+        "klib",
+    )
+    .unwrap_or_else(|| panic!("cannot provision exact {artifact}:{version}"));
+    Some(krusty::klib_libraries::KlibLibraryInput::dependency(path))
 }
 
 fn klib_stdlib_semantics(

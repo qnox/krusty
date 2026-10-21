@@ -150,4 +150,12 @@ impl LocalValues {
     pub(super) fn get(&self, symbol: &KlibIrSymbol) -> Option<LocalValue> {
         self.values.get(symbol).copied()
     }
+
+    /// Reserve internal storage without declaring a serialized value identity. A return-target
+    /// symbol owns control flow, not a readable local, even when its frame needs result storage.
+    pub(super) fn anonymous_slot(&mut self) -> u32 {
+        let index = self.next;
+        self.next += 1;
+        index
+    }
 }

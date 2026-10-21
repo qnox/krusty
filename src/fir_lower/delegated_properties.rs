@@ -287,7 +287,7 @@ pub(super) fn materialize_member_delegate(
             provide,
             initializer,
             vec![
-                (this_ref, Ty::Obj(owner_type, &[])),
+                (this_ref, Ty::obj_name(owner_type)),
                 (property_reference, property_reference_ty),
             ],
         )?
@@ -330,7 +330,7 @@ pub(super) fn materialize_member_delegate(
         &plan.get_value,
         receiver,
         vec![
-            (this_ref, Ty::Obj(owner_type, &[])),
+            (this_ref, Ty::obj_name(owner_type)),
             (property_reference, property_reference_ty),
         ],
     )?;
@@ -370,7 +370,7 @@ pub(super) fn materialize_member_delegate(
                 set_value,
                 receiver,
                 vec![
-                    (this_ref, Ty::Obj(owner_type, &[])),
+                    (this_ref, Ty::obj_name(owner_type)),
                     (property_reference, property_reference_ty),
                     (value, property.ty),
                 ],
@@ -539,7 +539,7 @@ pub(super) fn materialize_member_extension_delegate(
             provide,
             initializer,
             vec![
-                (dispatch, Ty::Obj(owner, &[])),
+                (dispatch, Ty::obj_name(owner)),
                 (property_reference, property_reference_ty),
             ],
         )?

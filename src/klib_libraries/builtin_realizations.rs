@@ -5,6 +5,8 @@
 //! the declaration modifiers, never a spelling alone, and never a target's own intrinsic
 //! annotation. A declaration the rules do not name is realized by its serialized IR body.
 
+mod library_helpers;
+
 use crate::libraries::builtin_declaration::{semantic_call_role, BuiltinMemberDeclaration};
 use crate::libraries::builtin_member_realization as member_rules;
 use crate::libraries::builtin_top_level_realization as package_rules;
@@ -86,6 +88,28 @@ pub(super) fn realize_package_function(
         compiler_builtin_owner,
         function,
     );
+    let params = function.semantic_params();
+    let generic = function.generic_sig.as_ref();
+    let helper = library_helpers::realization(
+        crate::libraries::builtin_declaration::BuiltinFunctionDeclaration {
+            package,
+            name: &name,
+            kind: function.kind,
+            receiver: function.semantic_receiver(),
+            params: params.as_ref(),
+            ret: generic.map_or(function.callable.ret, |signature| signature.ret),
+            context_count: function.context_count,
+            type_parameter_count: generic.map_or(0, |signature| signature.formals.len()),
+            vararg: function.call_sig.vararg_index,
+            is_suspend: function.flags.suspend,
+            is_operator: function.flags.operator,
+            is_infix: function.flags.infix,
+        },
+        compiler_builtin_owner,
+    );
+    if let Some(operation) = helper {
+        function.callable.compiler_intrinsic = Some(operation);
+    }
     if compiler_builtin_owner {
         if let Some(intrinsic) = crate::libraries::stdlib_klib_intrinsic(signature) {
             if intrinsic.accepts_normalized_klib(function) {

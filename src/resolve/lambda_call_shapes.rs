@@ -5,6 +5,7 @@
 //! against. Selecting the callable is left to call resolution once the lambdas are checked.
 
 use super::*;
+use crate::types::TyKind;
 
 /// A call whose lambda arguments are not typed yet, as a lambda's shape is derived from it.
 #[derive(Clone, Copy)]
@@ -214,7 +215,7 @@ impl Checker<'_> {
                         let Some(expected) = expected else {
                             return false;
                         };
-                        if let Ty::Fun(signature) = expected.non_null() {
+                        if let TyKind::Fun(signature) = expected.non_null().kind() {
                             // A receiver-less anonymous function may spell an extension
                             // function's receiver as its first ordinary parameter:
                             // `fun(it) { it.member() }` adapts to `R.() -> Unit`. A lambda arrow
@@ -234,17 +235,20 @@ impl Checker<'_> {
                         // two-parameter function/SAM shape, while a lambda with no declared
                         // parameters still fits arity 0/1 (implicit `it`). Context and receiver
                         // slots are not value parameters a lambda arrow declares.
-                        let expected_arity = match expected.non_null() {
-                            Ty::Fun(signature) => Some(
-                                signature.params.len()
-                                    - signature.context_count.min(signature.params.len())
-                                    - usize::from(signature.has_receiver),
-                            ),
-                            shape => self.semantic_sam_signature(shape).map(|sam| {
-                                sam.params.len()
-                                    - sam.context_count.min(sam.params.len())
-                                    - usize::from(sam.has_receiver)
-                            }),
+                        let expected_arity = {
+                            let shape = expected.non_null();
+                            match shape.kind() {
+                                TyKind::Fun(signature) => Some(
+                                    signature.params.len()
+                                        - signature.context_count.min(signature.params.len())
+                                        - usize::from(signature.has_receiver),
+                                ),
+                                _ => self.semantic_sam_signature(shape).map(|sam| {
+                                    sam.params.len()
+                                        - sam.context_count.min(sam.params.len())
+                                        - usize::from(sam.has_receiver)
+                                }),
+                            }
                         };
                         match expected_arity {
                             Some(arity) => {
@@ -318,7 +322,7 @@ impl Checker<'_> {
         else {
             return true;
         };
-        let Ty::Fun(expected_function) = expected.non_null() else {
+        let TyKind::Fun(expected_function) = expected.non_null().kind() else {
             return true;
         };
         if expected.mentions_ty_param() {
@@ -435,7 +439,10 @@ impl Checker<'_> {
             if actual.is_some() {
                 continue;
             }
-            let Some(Ty::Fun(function)) = argument_parameters.get(argument).map(|ty| ty.non_null())
+            let Some(TyKind::Fun(function)) = argument_parameters
+                .get(argument)
+                .map(|ty| ty.non_null())
+                .map(Ty::kind)
             else {
                 continue;
             };
@@ -550,12 +557,14 @@ impl Checker<'_> {
             .map(|&argument_parameter| {
                 Some(argument_parameter)
                     .map(|parameter| {
-                        let wrapper = match parameter {
-                            Ty::Nullable(_) => Some(Ty::nullable as fn(Ty) -> Ty),
-                            Ty::PlatformNullable(_) => Some(Ty::platform_nullable as fn(Ty) -> Ty),
+                        let wrapper = match parameter.kind() {
+                            TyKind::Nullable(_) => Some(Ty::nullable as fn(Ty) -> Ty),
+                            TyKind::PlatformNullable(_) => {
+                                Some(Ty::platform_nullable as fn(Ty) -> Ty)
+                            }
                             _ => None,
                         };
-                        let Ty::Fun(function) = parameter.non_null() else {
+                        let TyKind::Fun(function) = parameter.non_null().kind() else {
                             return crate::symbol_resolver::ty_subst_keep_unbound(
                                 parameter,
                                 &expectation_binds,
@@ -591,7 +600,7 @@ impl Checker<'_> {
                     // checked expression supplies the remaining `R` constraint. Dropping the whole
                     // expectation until every formal was bound made receiver calls type callable
                     // references without context and then fail before ordinary overload inference.
-                    .filter(|parameter| matches!(parameter.non_null(), Ty::Fun(_)))
+                    .filter(|parameter| parameter.non_null().is_fun())
             })
             .collect::<Vec<_>>();
         let fixed_expected_types = expected_types
@@ -599,12 +608,12 @@ impl Checker<'_> {
             .enumerate()
             .map(|(argument, expected)| {
                 (*expected).filter(|parameter| {
-                    let Ty::Fun(function) = parameter.non_null() else {
+                    let TyKind::Fun(function) = parameter.non_null().kind() else {
                         return false;
                     };
                     let declared_return = argument_parameters.get(argument).and_then(|parameter| {
-                        match parameter.non_null() {
-                            Ty::Fun(function) => Some(function.ret),
+                        match parameter.non_null().kind() {
+                            TyKind::Fun(function) => Some(function.ret),
                             _ => None,
                         }
                     });
@@ -646,7 +655,7 @@ impl Checker<'_> {
                         // earlier-argument constraints are applied (`MyList<T>.add(T)` on a
                         // `MyList<(Int) -> Int>`). Callable-ness belongs to that instantiated
                         // semantic parameter, not to the declaration's bare `T` node.
-                        .is_some_and(|ty| matches!(ty.non_null(), Ty::Fun(_)))
+                        .is_some_and(|ty| ty.non_null().is_fun())
             })
         {
             shape.param_types = Some(param_types);
@@ -676,8 +685,8 @@ impl Checker<'_> {
                             crate::symbol_resolver::ty_subst_keep_unbound(parameter, &binds)
                         })
                     })
-                    .and_then(|parameter| match parameter.non_null() {
-                        Ty::Fun(function) => Some(function),
+                    .and_then(|parameter| match parameter.non_null().kind() {
+                        TyKind::Fun(function) => Some(function),
                         _ => None,
                     });
                 let receiver_fun_param = overload
@@ -811,8 +820,8 @@ impl Checker<'_> {
         let lambda_expectations = signature
             .params
             .iter()
-            .map(|parameter| match parameter.non_null() {
-                Ty::Fun(function) => Some((function.params.clone(), function.ret)),
+            .map(|parameter| match parameter.non_null().kind() {
+                TyKind::Fun(function) => Some((function.params.clone(), function.ret)),
                 _ => self
                     .semantic_sam_signature(*parameter)
                     .map(|sam| (sam.params, sam.ret)),

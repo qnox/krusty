@@ -8,7 +8,7 @@ use std::cell::RefCell;
 
 use crate::ast::{ClassDecl, Decl, DeclId, File, FunBody, FunDecl, PropDecl, TypeRef};
 use crate::diag::Span;
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 use super::{ClassSig, Signature, SymbolTable};
 
@@ -29,6 +29,7 @@ mod diagnostics;
 mod file_import_scopes;
 mod generated_member_header;
 mod header_projection;
+mod header_star_bounds;
 mod header_type_resolution;
 mod implicit_context_candidates;
 mod integer_constants;
@@ -67,6 +68,7 @@ pub(super) use declaration_aliases::publish_compact_nested_aliases;
 pub(crate) use declaration_conflicts::finalize_streamed_top_level_conflicts;
 use declaration_spellings::finalized_compact_declared_spellings;
 pub(super) use header_projection::*;
+use header_star_bounds::{compact_header_star_bounds, compact_header_value_parameter_star_bounds};
 
 #[cfg(test)]
 pub(crate) use local_signatures::publish_checked_local_signatures_in_active_root;
@@ -326,7 +328,7 @@ impl ProductionSignatureSemantics<'_> {
         let Some(expected) = expected else {
             return Ok(None);
         };
-        let Ty::Fun(expected) = expected.get().non_null() else {
+        let TyKind::Fun(expected) = expected.get().non_null().kind() else {
             return Err(Self::failure());
         };
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
@@ -343,22 +345,23 @@ impl ProductionSignatureSemantics<'_> {
         // function then carries the evidence used to infer the enclosing call.
         let mut parameters = expected.params.clone();
         for (parameter, natural) in parameters.iter_mut().zip(natural_parameters) {
-            if matches!(parameter.non_null(), Ty::TyParam(..)) {
+            if parameter.non_null().is_ty_param() {
                 *parameter = *natural;
             }
         }
-        let result = if matches!(expected.ret.non_null(), Ty::TyParam(..)) {
+        let result = if expected.ret.non_null().is_ty_param() {
             result
         } else {
             expected.ret
         };
-        let Ty::Fun(contextual) = Ty::fun_with_shape(
+        let TyKind::Fun(contextual) = Ty::fun_with_shape(
             parameters.clone(),
             result,
             expected.context_count,
             expected.has_receiver,
             expected.suspend,
-        ) else {
+        )
+        .kind() else {
             unreachable!("a contextual callable-reference shape is a function type")
         };
         if !super::callable_reference_selection::is_compatible(
@@ -1712,7 +1715,7 @@ impl ProductionSignatureSemantics<'_> {
             if call_sig.vararg_index == Some(parameter) && !whole_vararg {
                 expected = expected.array_read_elem().unwrap_or(expected);
             }
-            expectations[source] = (contextual_call || matches!(expected.non_null(), Ty::Fun(_)))
+            expectations[source] = (contextual_call || expected.non_null().is_fun())
                 .then(|| crate::fir::ResolvedTy::new(expected).ok())
                 .flatten();
         }
@@ -2808,8 +2811,8 @@ fn semantic_classifier_self(signature: &ClassSig) -> Ty {
 /// eventually be the sole producer, but every signature crossing this bridge must already obey the
 /// final representation invariant.
 fn semantic_type_with_classifier_captures(table: &SymbolTable, ty: Ty) -> Ty {
-    match ty {
-        Ty::Obj(owner, arguments) => {
+    match ty.kind() {
+        TyKind::Obj(owner, arguments) => {
             let mut arguments = arguments
                 .iter()
                 .copied()
@@ -2840,7 +2843,7 @@ fn semantic_type_with_classifier_captures(table: &SymbolTable, ty: Ty) -> Ty {
             }
             Ty::obj_args_name(owner, &arguments)
         }
-        Ty::Fun(function) => Ty::fun_with_shape(
+        TyKind::Fun(function) => Ty::fun_with_shape(
             function
                 .params
                 .iter()
@@ -2852,20 +2855,22 @@ fn semantic_type_with_classifier_captures(table: &SymbolTable, ty: Ty) -> Ty {
             function.has_receiver,
             function.suspend,
         ),
-        Ty::Nullable(inner) => Ty::nullable(semantic_type_with_classifier_captures(table, *inner)),
-        Ty::PlatformNullable(inner) => {
-            Ty::platform_nullable(semantic_type_with_classifier_captures(table, *inner))
+        TyKind::Nullable(inner) => {
+            Ty::nullable(semantic_type_with_classifier_captures(table, inner))
         }
-        Ty::InProjection(inner) => {
-            Ty::in_projection(semantic_type_with_classifier_captures(table, *inner))
+        TyKind::PlatformNullable(inner) => {
+            Ty::platform_nullable(semantic_type_with_classifier_captures(table, inner))
         }
-        Ty::OutProjection(inner) => {
-            Ty::out_projection(semantic_type_with_classifier_captures(table, *inner))
+        TyKind::InProjection(inner) => {
+            Ty::in_projection(semantic_type_with_classifier_captures(table, inner))
         }
-        Ty::StarProjection(inner) => {
-            Ty::star_projection(semantic_type_with_classifier_captures(table, *inner))
+        TyKind::OutProjection(inner) => {
+            Ty::out_projection(semantic_type_with_classifier_captures(table, inner))
         }
-        other => other,
+        TyKind::StarProjection(inner) => {
+            Ty::star_projection(semantic_type_with_classifier_captures(table, inner))
+        }
+        _ => ty,
     }
 }
 
@@ -2912,104 +2917,6 @@ fn compact_classifier_cycle_edges(
         }
     }
     rejected
-}
-
-/// Reapply a compact header's star-projection syntax to a provisionally resolved legacy type.
-///
-/// The legacy collector has no classifier-shape input while resolving a `TypeRef`, so it represents
-/// every `*` as `out Any?`. The compact header still owns the exact star bit and the
-/// provider-normalized classifier (module or classpath) owns the target parameter bound. Combine
-/// those stable Pass-1 facts at publication time; an explicitly written `out Any?` has no star bit
-/// and is therefore never rewritten.
-fn compact_header_star_bounds(table: &SymbolTable, syntax: &TypeRef, resolved: Ty) -> Option<Ty> {
-    Some(match resolved {
-        Ty::Nullable(inner) => Ty::nullable(compact_header_star_bounds(table, syntax, *inner)?),
-        Ty::PlatformNullable(inner) => {
-            Ty::platform_nullable(compact_header_star_bounds(table, syntax, *inner)?)
-        }
-        Ty::InProjection(inner) if !syntax.is_star_projection() => {
-            Ty::in_projection(compact_header_star_bounds(table, syntax, *inner)?)
-        }
-        Ty::OutProjection(inner) if !syntax.is_star_projection() => {
-            Ty::out_projection(compact_header_star_bounds(table, syntax, *inner)?)
-        }
-        Ty::Obj(owner, resolved_arguments) if !syntax.targs.is_empty() => {
-            // Read the formal bounds from the provider-normalized declaration, so a classpath
-            // classifier's `*` gets its declared bound exactly as a module classifier's does.
-            let module = crate::module_symbols::ModuleSymbols::new(table);
-            let source = crate::symbol_source::CompositeSource::new(vec![
-                &module as &dyn crate::symbol_source::SymbolSource,
-                &*table.libraries as &dyn crate::symbol_source::SymbolSource,
-            ]);
-            let classifier = crate::symbol_source::SymbolSource::classifier(&source, owner)?;
-            let mut arguments = resolved_arguments.to_vec();
-            for index in 0..syntax.targs.len().min(arguments.len()) {
-                let argument_syntax = &syntax.targs[index];
-                if !argument_syntax.is_star_projection() {
-                    arguments[index] =
-                        compact_header_star_bounds(table, argument_syntax, arguments[index])?;
-                    continue;
-                }
-                let bindings = classifier
-                    .type_params()
-                    .iter()
-                    .zip(arguments.iter())
-                    .enumerate()
-                    .filter_map(|(ordinal, (formal, actual))| {
-                        (ordinal != index).then_some((formal.clone(), *actual))
-                    })
-                    .collect::<crate::symbol_resolver::GSigBinds>();
-                let upper_bound = classifier
-                    .type_param_bounds()
-                    .get(index)
-                    .and_then(|bounds| bounds.first())
-                    .copied()
-                    .map(|bound| crate::symbol_resolver::ty_subst_keep_unbound(bound, &bindings))
-                    .unwrap_or_else(|| Ty::nullable(Ty::obj_name(crate::types::wk::any())));
-                arguments[index] = Ty::star_projection(upper_bound);
-            }
-            Ty::obj_args_name(owner, &arguments)
-        }
-        Ty::Fun(function) if syntax.name == "<fun>" => {
-            let parameters = syntax
-                .fun_params
-                .iter()
-                .zip(function.params.iter())
-                .map(|(syntax, resolved)| compact_header_star_bounds(table, syntax, *resolved))
-                .collect::<Option<Vec<_>>>()?;
-            let result = syntax
-                .arg
-                .as_deref()
-                .map(|syntax| compact_header_star_bounds(table, syntax, function.ret))
-                .unwrap_or(Some(function.ret))?;
-            Ty::fun_with_shape(
-                parameters,
-                result,
-                function.context_count,
-                function.has_receiver,
-                function.suspend,
-            )
-        }
-        other => other,
-    })
-}
-
-/// Reapply star bounds to one source value-parameter type without confusing the source element
-/// annotation with the semantic array slot introduced by `vararg`.
-fn compact_header_value_parameter_star_bounds(
-    table: &SymbolTable,
-    syntax: &TypeRef,
-    resolved: Ty,
-    is_vararg: bool,
-) -> Option<Ty> {
-    if !is_vararg {
-        return compact_header_star_bounds(table, syntax, resolved);
-    }
-    let element = resolved.array_elem()?;
-    Some(crate::types::semantic_value_parameter_ty(
-        compact_header_star_bounds(table, syntax, element)?,
-        true,
-    ))
 }
 
 /// Give capture storage owned by retained Pass-1 bodies stable, non-source-visible identities.

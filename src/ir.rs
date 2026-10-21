@@ -49,7 +49,7 @@ mod catches;
 mod checked_types;
 mod companion_blocks;
 mod compiled_inline_calls;
-pub use compiled_inline_calls::SameModuleInlining;
+pub use compiled_inline_calls::{CompiledInlineOperands, SameModuleInlining};
 mod constants;
 mod constructors;
 mod default_arguments;
@@ -243,127 +243,6 @@ pub struct IrCheckedClassInitializer {
 pub enum IrPropertyDispatch {
     Ordinary,
     Super { owner: TypeName, interface: bool },
-}
-
-/// Operations whose semantic target and call shape were finalized in checked FIR. Common lowering
-/// translates body-local operands only; target realization belongs to the backend/module emitter.
-#[derive(Clone, Debug, PartialEq)]
-pub enum IrCheckedOperation {
-    Call {
-        target: crate::fir::CallableId,
-        dispatch_receiver: Option<ExprId>,
-        extension_receiver: Option<ExprId>,
-        arguments: Vec<IrCheckedArgument>,
-        substitutions: Vec<IrCheckedSubstitution>,
-    },
-    ConstructorDelegation {
-        target: IrCheckedConstructorTarget,
-        outer_parameter: Option<Ty>,
-        outer_receiver: Option<ExprId>,
-        arguments: Vec<IrCheckedArgument>,
-        substitutions: Vec<IrCheckedSubstitution>,
-    },
-    PropertyRead {
-        target: crate::fir::PropertyId,
-        dispatch_receiver: Option<ExprId>,
-        extension_receiver: Option<ExprId>,
-        context_arguments: Vec<ExprId>,
-        substitutions: Vec<IrCheckedSubstitution>,
-    },
-    PropertyWrite {
-        target: crate::fir::PropertyId,
-        dispatch_receiver: Option<ExprId>,
-        extension_receiver: Option<ExprId>,
-        context_arguments: Vec<ExprId>,
-        value: ExprId,
-        substitutions: Vec<IrCheckedSubstitution>,
-    },
-    /// Read a dependency property selected by checked FIR. `target` is an opaque provider-owned
-    /// declaration identity; common lowering deliberately does not interpret it as a method or a
-    /// field. The target backend realizes that choice after common IR has been produced.
-    ExternalPropertyRead {
-        target: crate::fir::ExternalPropertyId,
-        dispatch: IrPropertyDispatch,
-        receiver: Option<ExprId>,
-        arguments: Vec<ExprId>,
-        parameters: Vec<Ty>,
-        result: Ty,
-        source_receiver: Option<Ty>,
-    },
-    /// Write a dependency property selected by checked FIR. As with `ExternalPropertyRead`, the
-    /// physical storage/accessor choice belongs exclusively to the target backend.
-    ExternalPropertyWrite {
-        target: crate::fir::ExternalPropertyId,
-        dispatch: IrPropertyDispatch,
-        receiver: Option<ExprId>,
-        arguments: Vec<ExprId>,
-        parameters: Vec<Ty>,
-        result: Ty,
-        source_receiver: Option<Ty>,
-    },
-    LateinitFieldRead {
-        target: crate::fir::PropertyId,
-        dispatch_receiver: Option<ExprId>,
-    },
-    BackingFieldRead {
-        target: crate::fir::PropertyId,
-        dispatch_receiver: Option<ExprId>,
-    },
-    BackingFieldWrite {
-        target: crate::fir::PropertyId,
-        dispatch_receiver: Option<ExprId>,
-        value: ExprId,
-    },
-    RangeConstruction {
-        operation: crate::fir::FirRangeOperation,
-        start: ExprId,
-        start_type: Ty,
-        end: ExprId,
-        end_type: Ty,
-        result: Ty,
-    },
-    RangeContains {
-        operation: crate::fir::FirRangeOperation,
-        value: ExprId,
-        start: ExprId,
-        end: ExprId,
-        negated: bool,
-        counter: Ty,
-        /// Exact selected unsigned comparison consumed by common realization. `None` for every
-        /// signed, character or floating-point counter.
-        unsigned_compare: Option<IrRuntimeFunction>,
-    },
-    /// `step`'s failure on a step that is not positive: an `IllegalArgumentException` whose
-    /// message is `Step must be positive, was: $step.`.
-    IllegalProgressionStep { step: ExprId },
-    RangeLoop {
-        variable: u32,
-        /// Source identity of the loop variable. A representation backend attaches it to the
-        /// declaration it creates; it must not recover the name from a slot or generated spelling.
-        variable_name: Option<Box<str>>,
-        counter: Ty,
-        source: IrProgressionSource,
-        /// The selected comparison ordering an unsigned counter; `None` for any other counter.
-        unsigned_compare: Option<IrRuntimeFunction>,
-        body: ExprId,
-        label: String,
-        /// The index a destructured `withIndex()` loop over the progression counts beside it.
-        with_index: Option<IrLoopIndex>,
-    },
-    PropertyReference {
-        target: crate::fir::FirPropertyReferenceTarget,
-        /// This reference is the compiler-generated `KProperty` metadata argument of a delegated
-        /// property, not a source-written callable-reference value. Backends may realize the two
-        /// checked semantic shapes differently; common lowering still retains only the selected
-        /// property identity and never chooses a platform representation.
-        delegated: bool,
-        binding: crate::fir::FirCallableReferenceBinding,
-        dispatch_receiver: Option<ExprId>,
-        extension_receiver: Option<ExprId>,
-        mutable: bool,
-        substitutions: Vec<IrCheckedSubstitution>,
-        adaptation: Option<Box<crate::fir::FirReferenceAdaptation>>,
-    },
 }
 
 /// Checked semantic shape of an annotation constructor call. The common IR retains the annotation
@@ -995,6 +874,10 @@ pub struct IrClass {
     /// `@JvmInline value class` — a single-field class represented unboxed (as its one field's type) by
     /// the JVM `jvm::value_classes` IR pass. The IR otherwise treats it as a plain class.
     pub is_value: bool,
+    /// A boxed `value class` (`+FullValueClasses`, no `@JvmInline`): an ordinary final, abstract, or
+    /// sealed class whose Kotlin declaration is still a value class. Metadata records it as one;
+    /// nothing unboxes it.
+    pub is_full_value: bool,
     /// `data class` — carried so the metadata emitter can reproduce kotlinc's `IS_DATA` class flag and
     /// its synthesized `componentN`/`copy`/`equals`/`hashCode`/`toString` function metadata.
     pub is_data: bool,
@@ -1205,194 +1088,6 @@ pub enum FrDispatch {
 }
 
 impl IrClass {
-    /// Minimal backend-neutral shape for a compiler-generated class. The producer sets only the
-    /// semantic payload it owns (for example `prop_ref`); target passes choose representation.
-    pub fn synthetic(fq_name: TypeName) -> Self {
-        Self {
-            fq_name,
-            is_source_declared: false,
-            is_compiler_generated: false,
-            is_anonymous_object: false,
-            enclosure: None,
-            is_inner_class: false,
-            is_local_class: false,
-            is_value: false,
-            is_data: false,
-            decl_line: 0,
-            decl_start_line: 0,
-            decl_end_line: 0,
-            primary_ctor_lines: IrPrimaryCtorLines::default(),
-            type_param_bounds: Vec::new(),
-            type_params: Vec::new(),
-            captured_type_params: Vec::new(),
-            supertypes: Vec::new(),
-            properties: Vec::new(),
-            fields: Vec::new(),
-            ctor_param_count: 0,
-            constructor_prefix_count: 0,
-            ctor_args: Vec::new(),
-            ctor_param_annotations: Vec::new(),
-            init_body: None,
-            pre_super_param_fields: Vec::new(),
-            explicit_param_stores: false,
-            methods: Vec::new(),
-            is_interface: false,
-            is_fun_interface: false,
-            is_annotation: false,
-            annotation_impl_of: None,
-            is_sealed: false,
-            sealed_subclasses: Default::default(),
-            is_abstract: false,
-            is_open: false,
-            superclass: crate::types::wk::any(),
-            super_arg_prelude: Vec::new(),
-            super_args: Vec::new(),
-            super_ctor_params: Vec::new(),
-            super_ctor: IrConstructorTarget::UNRESTRICTED_PRIMARY,
-            is_enum: false,
-            enum_entries: Vec::new(),
-            is_enum_entry: false,
-            prop_ref: None,
-            func_ref: None,
-            lambda: None,
-            sam_wrapper: None,
-            bridges: Vec::new(),
-            interfaces: Default::default(),
-            is_object: false,
-            is_companion: false,
-            companion_class: None,
-            published_nested_classifiers: Vec::new(),
-            secondary_ctors: Vec::new(),
-            has_primary_ctor: true,
-            applied_annotations: DeclarationAnnotations::default(),
-            field_annotations: Vec::new(),
-            property_annotations: Vec::new(),
-            primary_ctor_annotations: DeclarationAnnotations::default(),
-            annotation_retention: None,
-        }
-    }
-
-    /// Build the declaration-only portion available from the pending-free module index. Other
-    /// declaration families enrich this class through their own stable identities; this constructor
-    /// performs no syntax lookup.
-    pub fn source_skeleton(
-        header: &crate::fir::ResolvedClassifierHeader,
-        flags: crate::fir::DeclarationFlags,
-    ) -> Self {
-        let superclass = header
-            .superclass
-            .and_then(|ty| ty.get().non_null().obj_internal())
-            .unwrap_or_else(crate::types::wk::any);
-        let interfaces = header
-            .interfaces
-            .iter()
-            .filter_map(|ty| ty.get().non_null().obj_internal())
-            .collect::<Vec<_>>()
-            .into();
-        let mut supertypes = Vec::with_capacity(1 + header.interfaces.len());
-        if let Some(superclass) = header.superclass {
-            supertypes.push(superclass.get());
-        }
-        supertypes.extend(header.interfaces.iter().map(|interface| interface.get()));
-        let context_fields = header
-            .context_parameters
-            .iter()
-            .enumerate()
-            .map(|(ordinal, parameter)| {
-                IrField::new(
-                    format!("$context_receiver_{ordinal}"),
-                    crate::types::stored_value_ty(parameter.ty.get()),
-                )
-                .with_is_final(true)
-            })
-            .collect::<Vec<_>>();
-        let context_arguments = header
-            .context_parameters
-            .iter()
-            .enumerate()
-            .map(|(field, parameter)| IrCtorArg {
-                name: parameter.name.as_deref().map(str::to_owned),
-                context_kind: parameter.kind,
-                ty: crate::types::stored_value_ty(parameter.ty.get()),
-                declared_ty: Some(parameter.ty.get()),
-                is_field: true,
-                field_index: Some(u32::try_from(field).expect("too many context fields")),
-                has_default: false,
-                is_vararg: false,
-                type_param: None,
-                check: None,
-                anonymous_super_forward: None,
-                capture: None,
-                provenance: IrCtorParameterProvenance::Value,
-                capture_identity: None,
-            })
-            .collect::<Vec<_>>();
-        let context_count =
-            u32::try_from(context_arguments.len()).expect("too many classifier context parameters");
-        Self {
-            fq_name: header.classifier,
-            is_source_declared: true,
-            is_compiler_generated: flags.has(crate::fir::DeclarationFlags::COMPILER_GENERATED),
-            is_anonymous_object: flags.has(crate::fir::DeclarationFlags::ANONYMOUS_OBJECT),
-            enclosure: None,
-            is_inner_class: flags.has(crate::fir::DeclarationFlags::INNER),
-            is_local_class: flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS),
-            is_value: flags.has(crate::fir::DeclarationFlags::VALUE),
-            is_data: flags.has(crate::fir::DeclarationFlags::DATA),
-            decl_line: 0,
-            decl_start_line: 0,
-            decl_end_line: 0,
-            primary_ctor_lines: IrPrimaryCtorLines::default(),
-            type_param_bounds: Vec::new(),
-            type_params: Vec::new(),
-            captured_type_params: Vec::new(),
-            supertypes,
-            properties: Vec::new(),
-            fields: context_fields,
-            ctor_param_count: context_count,
-            constructor_prefix_count: context_count,
-            ctor_args: context_arguments,
-            ctor_param_annotations: Vec::new(),
-            init_body: None,
-            pre_super_param_fields: Vec::new(),
-            explicit_param_stores: false,
-            methods: Vec::new(),
-            is_interface: flags.has(crate::fir::DeclarationFlags::INTERFACE),
-            is_fun_interface: flags.has(crate::fir::DeclarationFlags::FUN_INTERFACE),
-            is_annotation: flags.has(crate::fir::DeclarationFlags::ANNOTATION_CLASS),
-            annotation_impl_of: None,
-            is_sealed: flags.has(crate::fir::DeclarationFlags::SEALED),
-            sealed_subclasses: header.sealed_subclasses.to_vec().into(),
-            is_abstract: flags.has(crate::fir::DeclarationFlags::ABSTRACT),
-            is_open: flags.has(crate::fir::DeclarationFlags::OPEN),
-            superclass,
-            super_arg_prelude: Vec::new(),
-            super_args: Vec::new(),
-            super_ctor_params: Vec::new(),
-            super_ctor: IrConstructorTarget::UNRESTRICTED_PRIMARY,
-            is_enum: flags.has(crate::fir::DeclarationFlags::ENUM),
-            enum_entries: Vec::new(),
-            is_enum_entry: false,
-            prop_ref: None,
-            func_ref: None,
-            lambda: None,
-            sam_wrapper: None,
-            bridges: Vec::new(),
-            interfaces,
-            is_object: flags.has(crate::fir::DeclarationFlags::SINGLETON),
-            is_companion: flags.has(crate::fir::DeclarationFlags::COMPANION),
-            companion_class: None,
-            published_nested_classifiers: Vec::new(),
-            secondary_ctors: Vec::new(),
-            has_primary_ctor: true,
-            applied_annotations: DeclarationAnnotations::default(),
-            field_annotations: Vec::new(),
-            property_annotations: Vec::new(),
-            primary_ctor_annotations: DeclarationAnnotations::default(),
-            annotation_retention: None,
-        }
-    }
-
     pub fn fq_name_id(&self) -> TypeName {
         self.fq_name
     }
@@ -1789,8 +1484,8 @@ pub struct IrFile {
     /// captures. Keyed by `(subclass, secondary index, selected-super-parameter)`.
     pub(crate) shared_secondary_super_capture_parameters:
         crate::fx_hash::HashMap<(ClassId, u32, u32), Ty>,
-    /// Exact semantic closure identity for every local/anonymous-class capture field. Transitive
-    /// superclass forwarding consumes this coordinate instead of matching synthetic field names.
+    /// Exact closure identity of each local/anonymous-class capture by constructor-prefix identity.
+    /// Transitive superclass forwarding consumes this coordinate instead of synthetic field names.
     pub(crate) class_capture_identities:
         crate::fx_hash::HashMap<(ClassId, u32), crate::fir::ClassCaptureIdentity>,
     /// A local class's capture order by first use (`order[position]` is a field), JVM-applied.
@@ -2971,6 +2666,7 @@ impl IrFile {
 }
 
 mod class_declaration_facts;
+mod class_skeletons;
 mod data_class_members;
 mod debug_lines;
 mod debug_locals;
@@ -2987,6 +2683,8 @@ pub use generated_members::{
     IrGeneratedDeclarationDebug, IrGeneratedFunctionMetadata, IrGeneratedFunctionMetadataScope,
     IrGeneratedFunctionPublication, IrGeneratedMemberPublication,
 };
+mod checked_operation;
+pub use checked_operation::IrCheckedOperation;
 mod function_parameters;
 pub use function_parameters::*;
 mod traversal;
@@ -2996,7 +2694,8 @@ pub use clone::clone_expression_dag;
 #[cfg(test)]
 pub(crate) use clone::make_expression_children_unique;
 pub(crate) use clone::{
-    clone_class_method, clone_function_implementation, make_expression_children_unique_tracked,
+    clone_class_method, clone_function_implementation, clone_with_operands,
+    make_expression_children_unique_tracked,
 };
 mod semantic_validation;
 pub use semantic_validation::{

@@ -17,7 +17,8 @@ pub(super) fn carried_value_class(concrete: &Ty, under: &Under) -> Option<TypeNa
 
 /// Which of `bridge`'s arguments arrive as a boxed value class in an erased reference slot and must
 /// be unboxed for the target, per concrete parameter; the target's parameters are erased to their
-/// carriers. `None`, and nothing changes, when no argument needs it.
+/// carriers. A slot the supertype already declares as that class's carrier receives the carrier,
+/// not the box. `None`, and nothing changes, when no argument needs it.
 pub(super) fn unbox_arguments(
     bridge: &mut Bridge,
     under: &Under,
@@ -28,7 +29,9 @@ pub(super) fn unbox_arguments(
         .zip(&bridge.erased_params)
         .map(|(concrete, erased)| {
             carried_value_class(concrete, under)
-                .filter(|_| is_ref(erased))
+                .filter(|&classifier| {
+                    is_ref(erased) && carried_value_class(erased, under) != Some(classifier)
+                })
                 .map(|classifier| ValueClassAdapter::new(classifier, concrete.is_nullable()))
         })
         .collect::<Vec<_>>();

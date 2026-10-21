@@ -27,7 +27,7 @@ pub mod serialization;
 
 use crate::fx_hash::HashMap;
 use crate::ir::{ClassId, IrFile};
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 /// A closed expression operation selected by a frontend plugin after ordinary name and overload
 /// resolution. Core lowering copies this payload into an [`crate::ir::IrExpr::PluginPlaceholder`];
@@ -869,18 +869,18 @@ fn record_external_value_classes(
     classifiers: &dyn crate::types::ClassifierFactSource,
 ) {
     fn collect(ty: Ty, out: &mut Vec<TypeName>) {
-        match ty {
-            Ty::Obj(name, arguments) => {
+        match ty.kind() {
+            TyKind::Obj(name, arguments) => {
                 out.push(name);
                 for argument in arguments {
                     collect(*argument, out);
                 }
             }
-            Ty::Nullable(inner) | Ty::PlatformNullable(inner) => collect(*inner, out),
-            Ty::InProjection(inner) | Ty::OutProjection(inner) | Ty::StarProjection(inner) => {
-                collect(*inner, out)
-            }
-            Ty::Fun(signature) => {
+            TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => collect(inner, out),
+            TyKind::InProjection(inner)
+            | TyKind::OutProjection(inner)
+            | TyKind::StarProjection(inner) => collect(inner, out),
+            TyKind::Fun(signature) => {
                 signature
                     .params
                     .iter()
@@ -888,7 +888,7 @@ fn record_external_value_classes(
                     .for_each(|parameter| collect(parameter, out));
                 collect(signature.ret, out);
             }
-            Ty::TyParam(_, bound) => collect(*bound, out),
+            TyKind::TyParam(_, bound) => collect(bound, out),
             _ => {}
         }
     }

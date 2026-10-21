@@ -363,8 +363,8 @@ fn expected_supertype_contextualizes_nested_constructor_lambdas() {
         panic!("nested-lambda construction must become checked constructor FIR")
     };
     assert_eq!(call.substitutions.len(), 1);
-    assert!(matches!(call.substitutions[0].value.get(), Ty::TyParam(..)));
-    assert!(matches!(root.ty.get().type_args(), [Ty::TyParam(..)]));
+    assert!(call.substitutions[0].value.get().is_ty_param());
+    assert!(matches!(root.ty.get().type_args(), [argument] if argument.is_ty_param()));
 }
 
 #[test]
@@ -386,7 +386,7 @@ fn expected_supertype_completes_nested_constructor_variable_hidden_by_star_proje
     assert!(call
         .substitutions
         .iter()
-        .all(|substitution| matches!(substitution.value.get(), Ty::TyParam(..))));
+        .all(|substitution| substitution.value.get().is_ty_param()));
 }
 
 #[test]
@@ -432,7 +432,7 @@ sealed class Result<I, V> {
     assert!(call
         .substitutions
         .iter()
-        .all(|substitution| matches!(substitution.value.get(), Ty::TyParam(..))));
+        .all(|substitution| substitution.value.get().is_ty_param()));
 }
 
 #[test]
@@ -455,14 +455,14 @@ fn expected_primary_constructor_result_fixes_a_member_generic_lambda_parameter()
         .expect("member-generic constructor call");
     assert!(matches!(
         constructor.0.ty.get().type_args(),
-        [Ty::TyParam(..), Ty::TyParam(..)]
+        [first, second] if first.is_ty_param() && second.is_ty_param()
     ));
     assert_eq!(constructor.1.substitutions.len(), 2);
     assert!(constructor
         .1
         .substitutions
         .iter()
-        .all(|substitution| matches!(substitution.value.get(), Ty::TyParam(..))));
+        .all(|substitution| substitution.value.get().is_ty_param()));
 }
 
 #[test]
@@ -740,7 +740,7 @@ fn inner_constructor_parameter_uses_its_captured_outer_type_parameter() {
         Some(call.substitutions[0].parameter),
         index.type_parameter(outer, 0).map(Into::into),
     );
-    assert!(matches!(call.substitutions[0].value.get(), Ty::TyParam(..)));
+    assert!(call.substitutions[0].value.get().is_ty_param());
 }
 
 #[test]
@@ -1003,7 +1003,7 @@ fn classifier_value_invoke_honors_explicit_type_arguments_during_overload_select
     };
     assert_eq!(Some(root.ty), body.result_type());
     assert_eq!(call.substitutions.len(), 1);
-    assert!(matches!(call.substitutions[0].value.get(), Ty::TyParam(..)));
+    assert!(call.substitutions[0].value.get().is_ty_param());
 }
 
 #[test]
@@ -1074,7 +1074,7 @@ fn projected_generic_constructor_parameter_keeps_symbolic_argument_in_fir() {
 
     let root = body.expr(root_expression(&body)).expect("constructor call");
     assert!(matches!(root.kind, FirExprKind::ConstructorCall(_)));
-    assert!(matches!(root.ty.get().type_args(), [Ty::TyParam(..)]));
+    assert!(matches!(root.ty.get().type_args(), [argument] if argument.is_ty_param()));
 }
 
 #[test]
@@ -1111,7 +1111,7 @@ fun <T> makeOut(buildee: Buildee<T>) = OutBuildee(buildee)
         let root = body.expr(root_expression(&body)).expect("constructor call");
         assert!(matches!(root.kind, FirExprKind::ConstructorCall(_)));
         assert!(
-            matches!(root.ty.get().type_args(), [Ty::TyParam(..)]),
+            matches!(root.ty.get().type_args(), [argument] if argument.is_ty_param()),
             "{function} inferred {:?}",
             root.ty.get()
         );

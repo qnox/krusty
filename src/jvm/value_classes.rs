@@ -25,9 +25,11 @@ mod equality;
 mod function_invocation;
 mod function_references;
 mod hidden_constructors;
+mod impl_call_parameters;
 mod inherited_default_calls;
 mod inline_body_slots;
 mod interface_entries;
+mod lambda_slots;
 mod mangled_calls;
 mod member_names;
 mod module_members;
@@ -55,12 +57,14 @@ use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor
 use crate::jvm::operation_relocation::clone_below_representation_wrapper;
 use crate::jvm::physical_type::ir_ty_to_jvm;
 use crate::libraries::InlineKind;
-use crate::types::{existing_type_name, type_name, SemanticCallRole, Ty, TypeName};
+use crate::types::{existing_type_name, type_name, SemanticCallRole, Ty, TyKind, TypeName};
 use boxing_rewrites::{box_wrap, box_wrap_nullable, to_string_wrap};
 use call_results::CallTypes;
 pub(crate) use class_annotations::class_file_annotations;
 pub(crate) use declaration_inventory::record_referenced as record_referenced_value_classes;
 pub(crate) use inherited_default_calls::InheritedDefaultStatics;
+use lambda_slots::{boxed_lambda_own_params_from, lambda_sam_params, lambda_slot_is_boxed};
+pub(crate) use member_names::suspend_lambda_invoke_name;
 use member_names::{vc_mangle, vc_mangle_once, vc_member_entry_name, vc_member_impl_name};
 pub(crate) use module_members::*;
 use operand_nullness::{operand_nonnull, operand_null_only};
@@ -577,7 +581,7 @@ pub(crate) fn lower_value_classes(
         reference_returns::value_class_reference_supertypes(classifiers, &under);
 
     // Members of a value class: their bodies operate on the BOXED object (only signatures erase).
-    let vc_methods = value_members::value_class_members(ir);
+    let vc_methods = value_members::value_class_members(ir, &under);
     // Exprs reachable from a value-class member body reference the BOXED class (`other is X`, `this.field`
     // in the synthesized `equals`) and must NOT be erased — those methods run on the boxed object.
     let mut vc_body_exprs: HashSet<ExprId> = HashSet::default();
@@ -617,6 +621,7 @@ pub(crate) fn lower_value_classes(
     // the value-class ABI. Record it against both local declarations and exact call identities
     // before either pass rewrites expressions.
     let force_boxed_suspend_returns = record_suspend_results(ir, &under, &orig_rets, &suspend_fids);
+    let suspend_lambda_classes = lambda_slots::suspend_lambda_classes(ir, &suspend_fids);
     let slot_types: Vec<HashMap<u32, Ty>> = ir
         .functions
         .iter()
@@ -632,7 +637,11 @@ pub(crate) fn lower_value_classes(
             // boundary: like kotlinc's inlined lambda it takes the parameter unboxed, and whoever inlines
             // it unboxes the incoming box (`inline_body_slots`). Value-class-ness is decided HERE
             // (with `under`), not in the lambda-agnostic lowerer.
-            let own_from = ir.lambda_own_params_from.get(&(fid as u32)).copied();
+            let own_from = boxed_lambda_own_params_from(
+                &ir.lambda_own_params_from,
+                &suspend_lambda_classes,
+                fid as u32,
+            );
             let sam_params = own_from.and_then(|s| {
                 lambda_sam_params(&ir.lambda_sam_signature, fid as u32, s, f.params.len())
             });
@@ -683,9 +692,9 @@ pub(crate) fn lower_value_classes(
             .obj_internal()
             .is_some_and(|fq| under.contains_key(&fq))
     };
-    // kotlinc hides a constructor over any inline class, the unsigned types included, behind its
-    // `DefaultConstructorMarker` accessor.
-    let hides_constructor = |t: &Ty| is_vc_ty(t) || t.non_null().is_unsigned();
+    // kotlinc hides a constructor whose parameters require mangling (unsigned types included,
+    // `kotlin.Result` excluded) behind its `DefaultConstructorMarker` accessor.
+    let hides_constructor = |t: &Ty| member_names::requires_mangling(t, &callable_under);
     let is_callable_vc_ty = |t: &Ty| {
         t.non_null()
             .obj_internal()
@@ -694,34 +703,11 @@ pub(crate) fn lower_value_classes(
     // `(owner-internal, plain name, arity)` → mangled name for declaration-owned JVM synthetics:
     // annotation markers and override bridges that name their own target method.
     let mut mangle_map: HashMap<(TypeName, String, usize), String> = HashMap::default();
-    // Exact getters whose override pair diverges in semantic type (for example `Vid` over `Vid?`).
-    // The two declarations hash differently under JVM value-class mangling, so the accessor bridge
-    // owns their compatibility and the implementation getter keeps its ordinary spelling.
-    let mut divergent_getters = HashSet::default();
     let property_annotation_markers = ir
         .property_annotation_markers
         .values()
         .copied()
         .collect::<HashSet<_>>();
-    for (&owner, edges) in &ir.property_overrides {
-        let Some(class) = ir.classes.iter().find(|class| class.fq_name == owner) else {
-            continue;
-        };
-        for edge in edges {
-            if edge.implementation_owner != owner || edge.declared_type == edge.implementation_type
-            {
-                continue;
-            }
-            if let Some(getter) = class
-                .properties
-                .iter()
-                .find(|property| property.name == edge.name)
-                .and_then(|property| property.getter)
-            {
-                divergent_getters.insert(getter);
-            }
-        }
-    }
     // `(fid, param idx, boxed value-class Ty)` for DEFAULTED nullable-underlying value-class params —
     // the base method unboxes them (below), but its `$default` stub + call site keep them boxed.
     let mut default_boxed: Vec<(u32, usize, Ty)> = Vec::new();
@@ -743,10 +729,7 @@ pub(crate) fn lower_value_classes(
         // A USER value-class member function's body runs on the BOXED object; its value-class-typed
         // parameters/return stay boxed (a sibling member call passes `this` — a box — directly). The
         // SYNTHESIZED members (`-impl`, `equals`/`hashCode`/`toString`, `<init>`) operate on the
-        // underlying representation, so they erase like any other function. An exact
-        // type-divergent override getter also keeps its ordinary spelling; its bridge owns the
-        // representation difference.
-        let is_divergent_override_getter = divergent_getters.contains(&(fid as u32));
+        // underlying representation, so they erase like any other function.
         let synthesized = matches!(
             f.name.as_str(),
             "box-impl"
@@ -757,8 +740,7 @@ pub(crate) fn lower_value_classes(
                 | "hashCode-impl"
                 | "toString-impl"
                 | "<init>"
-        ) || is_divergent_override_getter
-            || property_annotation_markers.contains(&(fid as u32))
+        ) || property_annotation_markers.contains(&(fid as u32))
             || realized_members.any_delegators.contains(&(fid as u32));
         let vc_member = !synthesized && vc_methods.contains(&(fid as u32));
         let source_name = f.name.clone();
@@ -834,7 +816,11 @@ pub(crate) fn lower_value_classes(
                 slot_types[fid].insert(0, Ty::obj_name(owner));
             }
         }
-        let own_from = ir.lambda_own_params_from.get(&(fid as u32)).copied();
+        let own_from = boxed_lambda_own_params_from(
+            &ir.lambda_own_params_from,
+            &suspend_lambda_classes,
+            fid as u32,
+        );
         let sam_params = own_from.and_then(|s| {
             lambda_sam_params(&ir.lambda_sam_signature, fid as u32, s, f.params.len())
         });
@@ -1535,7 +1521,7 @@ pub(crate) fn lower_value_classes(
             // element boxed (don't erase to the underlying); elements are `box-impl`'d when stored. A
             // non-value-class element is erased; a primitive array (`kotlin/IntArray`) has no element arg.
             IrExpr::Vararg { array_type, .. } | IrExpr::NewArray { array_type, .. } => {
-                if let Ty::Obj(n, args) = array_type.non_null() {
+                if let TyKind::Obj(n, args) = array_type.non_null().kind() {
                     if n.matches("kotlin/Array") {
                         if let Some(elem) = args.first().copied() {
                             let keep_boxed = elem
@@ -1808,6 +1794,8 @@ pub(crate) fn lower_value_classes(
                 function: Option<u32>,
                 /// The sibling file's declaration, when the call selected one.
                 module_target: Option<crate::fir::CallableId>,
+                /// The static's own checked parameters, when they are not the call's.
+                declared_parameters: Option<Box<[Ty]>>,
             },
             /// Same-value-class non-null `==`/`!=` → `equals-impl0(U, U)Z`, negated for `!=` (kotlinc's ABI).
             VcEq {
@@ -2096,6 +2084,7 @@ pub(crate) fn lower_value_classes(
                                 extension_receiver: ir.extension_receiver_fns.contains(&fid),
                                 function: Some(fid),
                                 module_target: None,
+                                declared_parameters: None,
                             })
                     })
                 }
@@ -2118,6 +2107,7 @@ pub(crate) fn lower_value_classes(
                         extension_receiver: false,
                         function: None,
                         module_target: *module_target,
+                        declared_parameters: None,
                     }
                 }),
             },
@@ -2256,6 +2246,7 @@ pub(crate) fn lower_value_classes(
                     extension_receiver: ir.extension_receiver_fns.contains(&fid),
                     function: Some(fid),
                     module_target: None,
+                    declared_parameters: None,
                 })
             }
             // `x.getV()` getter: identity on an unboxed value, `unbox-impl()` on a boxed one.
@@ -2301,6 +2292,7 @@ pub(crate) fn lower_value_classes(
                     extension_receiver: false,
                     function: None,
                     module_target: None,
+                    declared_parameters: Some(call.realized.declared_parameters.clone()),
                 }),
         };
         let rewrite = match rw {
@@ -2385,6 +2377,7 @@ pub(crate) fn lower_value_classes(
                 extension_receiver,
                 function,
                 module_target,
+                declared_parameters,
             }) => {
                 let default_boxed_parameters = function
                     .and_then(|function| ir.default_stub_boxed_params.get(&function))
@@ -2398,18 +2391,7 @@ pub(crate) fn lower_value_classes(
                     id,
                     representation::carrier_slot(result, &under).unwrap_or(result),
                 );
-                // The physical static call gains the former dispatch receiver at parameter zero.
-                // Keep the checked declaration coordinates aligned with that new argument vector:
-                // otherwise parameter zero from the source declaration is incorrectly applied to
-                // the receiver (for example `X.foo(other: I)` boxes the `X` carrier as though it
-                // were `other`). The receiver remains semantically the value class; this backend
-                // pass alone decides that the selected `*-impl` consumes its carrier.
-                if let Some(parameters) = ir.call_declared_params.get_mut(&id) {
-                    *parameters = std::iter::once(Ty::obj_name(owner))
-                        .chain(parameters.iter().copied())
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice();
-                }
+                impl_call_parameters::align(ir, id, owner, declared_parameters);
                 let inferred_boxed = ReprInputs {
                     rets: &orig_rets,
                     fields: &orig_fields,
@@ -2457,8 +2439,8 @@ pub(crate) fn lower_value_classes(
                         }
                     }
                 }
-                if let Some(function) = function.filter(|_| !uses_default_stub) {
-                    ir.jvm_member_targets.insert(id, function);
+                if !uses_default_stub {
+                    ir.record_realized_member_target(id, function, module_target);
                 }
                 // The `-impl` of an override whose primitive result is boxed returns the wrapper.
                 let boxed_result = match (function, module_target) {
@@ -3601,8 +3583,8 @@ pub(crate) fn lower_value_classes(
             // A synthesized wrapper member such as `box-impl` keeps the boxed value-class result.
             // User declarations are absent from this branch: they were converted to static carrier
             // functions above and take the ordinary return-boundary path below.
-            if let Ty::Obj(fq, _) = &orig_rets[fid] {
-                let x = *fq;
+            if let TyKind::Obj(fq, _) = orig_rets[fid].kind() {
+                let x = fq;
                 if under.contains_key(&x) {
                     if let Some(body) = ir.functions[fid].body {
                         box_tail(ir, body, x, &under);
@@ -3635,7 +3617,7 @@ pub(crate) fn lower_value_classes(
                     true,
                 );
             }
-        } else if let Ty::Obj(x, _) = orig_rets[fid].non_null() {
+        } else if let TyKind::Obj(x, _) = orig_rets[fid].non_null().kind() {
             // A function returning the value class ITSELF (`fun test(): Z = a?.foo()!!`), or an `X?`
             // its carrier holds (a boxed `X?` took the branch above), `unbox-impl`s a BOXED tail: the
             // erased return is the underlying. A nullable tail is unboxed null-safely (`null_slot`).
@@ -3903,8 +3885,8 @@ impl ReprCtx<'_> {
     fn operand_nonnull(&self, id: ExprId) -> bool {
         operand_nonnull(self.exprs, self.rets, self.fields, self.slots, id)
             || matches!(
-                self.types.declared_result(id, self.under),
-                Some(Ty::Obj(..))
+                self.types.declared_result(id, self.under).map(Ty::kind),
+                Some(TyKind::Obj(..))
             )
     }
 
@@ -3954,7 +3936,7 @@ impl ReprCtx<'_> {
             type_operand,
         } = &self.exprs[id as usize]
         {
-            if !matches!(type_operand.non_null(), Ty::TyParam(..)) {
+            if !type_operand.non_null().is_ty_param() {
                 break;
             }
             id = *arg;
@@ -3983,8 +3965,8 @@ fn nullable_is_boxed(x: TypeName, under: &Under) -> bool {
 /// on it would wrongly reject a legal value). True when the value class's field type erases to a
 /// nullable reference (`X(val v: Int?)` → `Integer`; `X(val v: String?)` → `String?`).
 fn vc_underlying_nullable(t: &Ty, under: &Under) -> bool {
-    if let Ty::Obj(fq_name, _) = t {
-        if let Some(u) = under.get(fq_name) {
+    if let TyKind::Obj(fq_name, _) = t.kind() {
+        if let Some(u) = under.get(&fq_name) {
             return crate::value_classes::underlying_chain_accepts_null(*u, under);
         }
     }
@@ -4609,37 +4591,6 @@ fn box_nullable_vc_tail(
             }
         }
     }
-}
-
-/// Erase a value-class type to its underlying representation. Non-null `X` → underlying `U`. A nullable
-/// `X?` erases to the underlying ONLY when that underlying is a reference (which can itself hold null);
-/// over a primitive underlying, `X?` stays the boxed `X` (a primitive can't represent null). Non-value
-/// types pass through.
-/// Whether a lifted lambda realizes the value class in one of its OWN slots BOXED.
-///
-/// A plain `FunctionN.invoke` slot is generic (`Object`), and a value class travelling through one is
-/// boxed. A SAM conversion targets a DECLARED method instead, so the answer is whatever the interface
-/// spells: a slot declared as the value class itself erases to the underlying (kotlinc's
-/// `ResultHandler.onResult(Ljava/lang/Object;)` carries the *carrier*, not a `kotlin/Result` box),
-/// while a slot declared as a type parameter is generic again and does box. `declared` is the SAM
-/// method's declaration at that position; `None` means there is no SAM (or its arity doesn't line up
-/// with the lambda's own parameters), which keeps the `FunctionN` reading.
-fn lambda_slot_is_boxed(declared: Option<&Ty>, value_class: TypeName) -> bool {
-    declared.is_none_or(|t| t.non_null().obj_internal() != Some(value_class))
-}
-
-/// The SAM method's declared parameter types for a lifted lambda, aligned to the lambda's OWN
-/// parameters (`own_from` is where those begin, after the captures). `None` unless the lambda was SAM
-/// converted AND the two arities agree — an implicit receiver or context parameter in the lambda's
-/// own slots has no counterpart in the interface declaration, and misaligned slots must not be read.
-fn lambda_sam_params(
-    signatures: &HashMap<u32, (Vec<Ty>, Ty)>,
-    fid: u32,
-    own_from: u32,
-    total_params: usize,
-) -> Option<&[Ty]> {
-    let (params, _) = signatures.get(&fid)?;
-    (params.len() == total_params.saturating_sub(own_from as usize)).then_some(params.as_slice())
 }
 
 /// Whether the lambda `impl_fn` was SAM-converted to a method whose DECLARED return is the very value

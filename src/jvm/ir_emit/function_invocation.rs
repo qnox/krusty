@@ -3,6 +3,7 @@
 //! `emit_consumed_operand`) skips the narrowing to the function's declared result.
 
 use super::*;
+use crate::types::TyKind;
 
 pub(super) fn is_high_arity_function(arity: u8) -> bool {
     crate::jvm::names::uses_function_n(usize::from(arity))
@@ -33,6 +34,9 @@ impl Emitter<'_> {
         params: &[Ty],
         code: &mut CodeBuilder,
     ) {
+        // Every argument crosses `invoke` as the `Object` it is; an inlined literal's body
+        // materializes it at its own parameter.
+        let args = &self.slot_operands(args, super::operand_stack::KeptSmartCasts::None);
         if let IrExpr::GetValue(value) = self.ir.expr(func) {
             if let Some(alias) = self.inline_lambda_alias(*value) {
                 self.emit_aliased_invocation(&alias, args, params, code);
@@ -147,8 +151,8 @@ impl Emitter<'_> {
         let interface_identity = crate::types::type_name(&interface);
         let realized = ir_ty_to_jvm(&self.value_ty(func));
         let already_interface = matches!(
-            realized.non_null(),
-            Ty::Obj(name, _) if name == interface_identity
+            realized.non_null().kind(),
+            TyKind::Obj(name, _) if name == interface_identity
         );
         if !already_interface {
             code.checkcast(self.cw.class_ref(&interface));
@@ -171,9 +175,9 @@ impl Emitter<'_> {
                 semantic_scalar_adapter(ret, rt),
             );
         } else {
-            match rt {
-                Ty::Unit | Ty::Nothing => code.pop(),
-                Ty::String => {
+            match rt.kind() {
+                TyKind::Unit | TyKind::Nothing => code.pop(),
+                TyKind::STRING => {
                     let ci = self.cw.class_ref("java/lang/String");
                     code.checkcast(ci);
                 }
@@ -183,7 +187,7 @@ impl Emitter<'_> {
                 }
                 // `StackValue.coerce` between two equal types writes nothing: an erased result
                 // stays the `Object` the interface returned.
-                Ty::Obj(internal, _) if rt != Ty::obj("java/lang/Object") => {
+                TyKind::Obj(internal, _) if rt != Ty::obj("java/lang/Object") => {
                     let ci = self.cw.class_ref(&internal.render());
                     code.checkcast(ci);
                 }

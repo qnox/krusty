@@ -530,6 +530,8 @@ pub(crate) struct LocalCallableRealization {
     source_name: Box<str>,
     captures: Vec<crate::fir::FirCapture>,
     implicit_receiver_captures: Vec<crate::fir::FirImplicitReceiverCapture>,
+    /// The physical order of `captures` and `implicit_receiver_captures`.
+    capture_parameters: Vec<crate::fir::FirCaptureParameter>,
     context_parameter_count: u32,
     has_extension_receiver: bool,
     /// The type parameters the callable's closure captures (see `local_type_parameters`).
@@ -540,6 +542,33 @@ impl LocalCallableRealization {
     fn capture_count(&self) -> usize {
         self.captures.len() + self.implicit_receiver_captures.len()
     }
+
+    /// One item per capture, given as the values then the receivers, in physical order.
+    fn in_capture_order<T>(&self, items: Vec<T>) -> Vec<T> {
+        in_capture_order(&self.capture_parameters, items, self.captures.len())
+    }
+}
+
+/// `items`, a lifted callable's captures given as its `values` captured values then its captured
+/// receivers, placed in the physical `order`.
+fn in_capture_order<T>(
+    order: &[crate::fir::FirCaptureParameter],
+    items: Vec<T>,
+    values: usize,
+) -> Vec<T> {
+    let mut items = items.into_iter().map(Some).collect::<Vec<_>>();
+    order
+        .iter()
+        .map(|parameter| {
+            let at = match *parameter {
+                crate::fir::FirCaptureParameter::Value(ordinal) => ordinal as usize,
+                crate::fir::FirCaptureParameter::Receiver(ordinal) => values + ordinal as usize,
+            };
+            items[at]
+                .take()
+                .expect("a capture order names each capture once")
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -604,12 +633,7 @@ impl<'a> BodyLowering<'a> {
             .implicit_receiver_captures()
             .iter()
             .enumerate()
-            .map(|(ordinal, capture)| {
-                (
-                    capture.clone(),
-                    u32::try_from(body.captures().len() + ordinal).expect("too many FIR captures"),
-                )
-            })
+            .map(|(ordinal, capture)| (capture.clone(), body.receiver_capture_position(ordinal)))
             .collect();
         let class_constructor_capture_count = body.constructor_capture_parameter_count();
         let class_constructor_context_count = body.constructor_context_parameter_count();

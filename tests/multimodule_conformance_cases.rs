@@ -345,15 +345,49 @@ pub const DECLINED_REQUIRED_INLINE_BODY: Case = Case {
              fun box(): String = if (countOf<String>(\"a\", 2) == 2) \"OK\" else \"fail\"\n",
 };
 
-/// A call of the target stdlib's `repeat`, whose prepared body uses a form (its `for` loop's
-/// compiler-introduced block) KLIB body lowering declines. `repeat` has no legal direct call, so
-/// a target that expands dependency inline bodies in IR must reject the caller rather than call
-/// it. A single-module source: the rejection is about the stdlib, not a library module.
+/// The original required-template regression is now positive: its inherited iterator reference
+/// binds to the canonical declaration. An inert dependency anchors the shared multimodule oracle;
+/// the main module preserves the original caller program.
+pub const INLINE_STDLIB_REPEAT: Case = Case {
+    stem: "inlineStdlibRepeat",
+    source: "// MODULE: lib\n\
+             fun dependencyMarker() = Unit\n\
+             // MODULE: main(lib)\n\
+             fun box(): String {\n\
+             \x20   var count = 0\n\
+             \x20   repeat(2) { count++ }\n\
+             \x20   return if (count == 2) \"OK\" else \"fail\"\n\
+             }\n",
+};
+
+/// A required inline factory whose prepared body contains a rich function reference, which
+/// template lowering does not yet support. Keep this rejection contract distinct from the now
+/// supported repeat caller above; neither target may emit an illegal direct call to the factory.
 pub const DECLINED_STDLIB_INLINE_BODY: &str = "fun box(): String {\n\
-                                               \x20   var count = 0\n\
-                                               \x20   repeat(2) { count++ }\n\
-                                               \x20   return if (count == 2) \"OK\" else \"fail\"\n\
+                                               \x20   val order = compareBy<String> { it }\n\
+                                               \x20   return if (order.compare(\"a\", \"b\") < 0) \"OK\" else \"fail\"\n\
                                                }\n";
+
+/// Establish that the platform-specific rejection fixture is an ordinary valid Kotlin program.
+pub fn verify_declined_stdlib_source_with_kotlinc() {
+    let stdlib = super::common::stdlib_jar();
+    let reference = super::box_reference_classes::reference_compile(
+        DECLINED_STDLIB_INLINE_BODY,
+        "declinedRequiredStdlibTemplate",
+        std::slice::from_ref(&stdlib),
+        krusty::conformance::BoxJdk::Full { root: None },
+        "",
+    )
+    .expect("pinned kotlinc must compile the required-inline rejection fixture");
+    let classes = reference.flatten().into_iter().collect::<Vec<_>>();
+    let entry = super::common::find_box_class(&classes)
+        .expect("the required-inline rejection fixture declares box()");
+    assert_eq!(
+        super::common::run_box(&classes, &entry, &[stdlib]),
+        Some("OK".to_owned()),
+        "pinned kotlinc must run the required-inline rejection fixture"
+    );
+}
 
 /// The frontend rejection of a call of a required inline dependency function that has no
 /// template. The callee's identity is opaque and assigned per compilation, so it is read back
@@ -368,7 +402,157 @@ pub fn required_inline_rejection(message: &str) -> Option<u32> {
         .ok()
 }
 
+/// Portable runtime behavior reached below expanded KLIB inline templates. Each source is shared
+/// with the JVM matrix row, which establishes the answer against ordinary Kotlin declarations.
+pub const INLINE_TODO_DEFAULT: Case = Case {
+    stem: "inlineTodoDefaultMessage",
+    source: "// MODULE: lib\n\
+             fun inlineBehavior(): String = try {\n\
+             \x20   TODO()\n\
+             } catch (e: NotImplementedError) {\n\
+             \x20   if (e.message == \"An operation is not implemented.\") \"OK\" else \"fail: ${e.message}\"\n\
+             }\n\
+             // MODULE: main(lib)\nfun box(): String = inlineBehavior()\n",
+};
+
+pub const INLINE_ASSERT_FAILS: Case = Case {
+    stem: "inlineAssertFailsWithBlock",
+    source: "// WITH_STDLIB\n// MODULE: lib\n\
+             import kotlin.test.*\n\
+             fun inlineBehavior(): String {\n\
+             \x20   val thrown = assertFailsWith<IllegalStateException> { error(\"boom\") }\n\
+             \x20   if (thrown.message != \"boom\") return \"fail: ${thrown.message}\"\n\
+             \x20   val any = assertFails { throw IllegalArgumentException(\"any\") }\n\
+             \x20   return if (any.message == \"any\") \"OK\" else \"fail: ${any.message}\"\n\
+             }\n\
+             // MODULE: main(lib)\nfun box(): String = inlineBehavior()\n",
+};
+
+pub const INLINE_ASSERT_FAILS_COMPLETES: Case = Case {
+    stem: "inlineAssertFailsWithCompletedBlock",
+    source: "// WITH_STDLIB\n// MODULE: lib\n\
+             import kotlin.test.*\n\
+             fun inlineBehavior(): String = try {\n\
+             \x20   assertFailsWith<IllegalStateException> { }\n\
+             \x20   \"fail: no assertion error\"\n\
+             } catch (e: AssertionError) {\n\
+             \x20   \"OK\"\n\
+             }\n\
+             // MODULE: main(lib)\nfun box(): String = inlineBehavior()\n",
+};
+
+pub const INLINE_UNSIGNED_DIVISION: Case = Case {
+    stem: "inlineUnsignedConstructionAndData",
+    source: "// MODULE: lib\n\
+             fun inlineBehavior(): String {\n\
+             \x20   val big = (-1).toUInt()\n\
+             \x20   if (big / 2u != 2147483647u) return \"fail: div ${big / 2u}\"\n\
+             \x20   if (big % 10u != 5u) return \"fail: rem ${big % 10u}\"\n\
+             \x20   if (big.toLong() != 4294967295L) return \"fail: widen ${big.toLong()}\"\n\
+             \x20   return \"OK\"\n\
+             }\n\
+             // MODULE: main(lib)\nfun box(): String = inlineBehavior()\n",
+};
+
+pub const INLINE_NARROW_BITWISE: Case = Case {
+    stem: "inlineNarrowBitwiseOperators",
+    source: "// MODULE: lib\n\
+             import kotlin.experimental.*\n\
+             fun inlineBehavior(): String {\n\
+             \x20   val a: Byte = 0x0F\n\
+             \x20   val b: Byte = 0x3C\n\
+             \x20   if ((a and b) != 0x0C.toByte()) return \"fail: and\"\n\
+             \x20   if ((a or b) != 0x3F.toByte()) return \"fail: or\"\n\
+             \x20   if (a.inv() != (-16).toByte()) return \"fail: inv\"\n\
+             \x20   return \"OK\"\n\
+             }\n\
+             // MODULE: main(lib)\nfun box(): String = inlineBehavior()\n",
+};
+
+pub const INLINE_NARROW_RANGE_CONTAINS: Case = Case {
+    stem: "inlineNarrowElementInRange",
+    source: "// MODULE: lib\n\
+             fun inlineBehavior(): String {\n\
+             \x20   val range = 1..3\n\
+             \x20   val inside: Byte = 2\n\
+             \x20   val outside: Byte = 4\n\
+             \x20   return if (inside in range && outside !in range) \"OK\" else \"fail\"\n\
+             }\n\
+             // MODULE: main(lib)\nfun box(): String = inlineBehavior()\n",
+};
+
+pub const INLINE_BUILD_STRING: Case = Case {
+    stem: "inlineBuiltString",
+    source: "// MODULE: lib\nfun inlineBehavior(): String = buildString { append(\"O\"); append('K') }\n\
+             // MODULE: main(lib)\nfun box(): String = inlineBehavior()\n",
+};
+
+pub const INLINE_CONTEXT_UNIT_BLOCK: Case = Case {
+    stem: "inlineStdlibContextUnitBlock",
+    source: "// LANGUAGE: +ContextParameters\n// MODULE: lib\n\
+             class Prefix(val value: String)\n\
+             context(prefix: Prefix) fun read() = prefix.value\n\
+             fun inlineBehavior(): String {\n\
+             \x20   context(Prefix(\"O\")) {\n\
+             \x20       if (read() != \"O\") return \"fail\"\n\
+             \x20   }\n\
+             \x20   return \"OK\"\n\
+             }\n\
+             // MODULE: main(lib)\nfun box(): String = inlineBehavior()\n",
+};
+
+/// Prepared stdlib copies return from conditional branches to their own inline block, not from
+/// the caller. The same declaration graph checks reference/scalar results and null-failure paths.
+pub const INLINE_NULL_CHECK_RETURNS: Case = Case {
+    stem: "inlineNullCheckReturnTargets",
+    source: r#"// MODULE: lib
+fun requireText(value: String?): String = requireNotNull(value)
+fun checkNumber(value: Int?): Int = checkNotNull(value)
+// MODULE: main(lib)
+fun box(): String {
+    var calls = 0
+    fun once(): String? { calls++; return "O" }
+    val text = requireText(once())
+    if (calls != 1 || text != "O") return "evaluation order"
+    if (checkNumber(7) != 7) return "scalar result"
+    try {
+        requireText(null)
+        return "missing require failure"
+    } catch (e: Throwable) {
+        if (e.message != "Required value was null.") return "require message"
+    }
+    try {
+        checkNumber(null)
+        return "missing check failure"
+    } catch (e: Throwable) {
+        if (e.message != "Required value was null.") return "check message"
+    }
+    return text + "K"
+}
+"#,
+};
+
+/// A String inline wrapper calls the ordinary authenticated CharSequence trim declaration.
+/// Keep the caller in a separate dependency so the selected receiver fact survives publication.
+pub const INLINE_TEXT_TRIM: Case = Case {
+    stem: "inlineTextTrim",
+    source: "// MODULE: lib\n\
+             fun trimmed(value: String): String = value.trim()\n\
+             // MODULE: main(lib)\n\
+             fun box(): String {\n\
+             \x20   if (trimmed(\"  ab  \") != \"ab\") return \"both ends\"\n\
+             \x20   if (trimmed(\" \\t\\r\\n API\") != \"API\") return \"whitespace\"\n\
+             \x20   if (trimmed(\"ab\") != \"ab\") return \"unchanged\"\n\
+             \x20   if (trimmed(\" \\t\\n \") != \"\") return \"all whitespace\"\n\
+             \x20   if (trimmed(\"\") != \"\") return \"empty\"\n\
+             \x20   if (trimmed(\"\\u00A0x\\u00A0\") != \"x\") return \"Unicode whitespace\"\n\
+             \x20   return \"OK\"\n\
+             }\n",
+};
+
 pub const ALL: &[Case] = &[
+    INLINE_TEXT_TRIM,
+    INLINE_STDLIB_REPEAT,
     TOP_LEVEL_DEPENDENCY,
     DEPENDS_ON,
     EXPECT_DEFAULT_PROVIDER,
@@ -390,6 +574,15 @@ pub const ALL: &[Case] = &[
     FLOATING_BIT_REFERENCES,
     OVERLAPPING_BITS,
     RECEIVER_RETURNING_SCOPE_FUNCTIONS,
+    INLINE_TODO_DEFAULT,
+    INLINE_ASSERT_FAILS,
+    INLINE_ASSERT_FAILS_COMPLETES,
+    INLINE_UNSIGNED_DIVISION,
+    INLINE_NARROW_BITWISE,
+    INLINE_NARROW_RANGE_CONTAINS,
+    INLINE_BUILD_STRING,
+    INLINE_CONTEXT_UNIT_BLOCK,
+    INLINE_NULL_CHECK_RETURNS,
 ];
 
 #[test]

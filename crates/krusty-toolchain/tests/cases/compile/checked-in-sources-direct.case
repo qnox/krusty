@@ -1,0 +1,101 @@
+The plugin of `checked-in-sources`, its generated directory written out as the directory its
+task's action argument names, which the toolchain takes as that task's output: the same modules
+compile the same sources.
+--- task
+:mixed:compileJvm
+--- project.yaml
+modules:
+  - generated-only
+  - mixed
+  - tools/pregenerated
+plugins:
+  - ./tools/pregenerated
+--- tools/pregenerated/module.yaml
+product: jvm/amper-plugin
+repositories:
+  - mavenLocal
+--- tools/pregenerated/plugin.yaml
+tasks:
+  declare:
+    action: !org.example.build.declareSources
+      sourceDir: ${module.rootDir}/generated-src/kotlin
+generated:
+  sources:
+    - language: kotlin
+      directory: ${module.rootDir}/generated-src/kotlin
+--- tools/pregenerated/src/declareSources.kt
+package org.example.build
+
+import org.jetbrains.amper.plugins.Output
+import org.jetbrains.amper.plugins.TaskAction
+import java.nio.file.Path
+import kotlin.io.path.isDirectory
+
+@TaskAction
+fun declareSources(@Output sourceDir: Path) {
+    check(sourceDir.isDirectory()) { "Missing pre-generated sources: $sourceDir" }
+}
+--- generated-only/module.yaml
+product: jvm/lib
+layout: maven-like
+repositories:
+  - mavenLocal
+plugins:
+  pregenerated: enabled
+--- generated-only/generated-src/kotlin/org/example/Model.kt
+package org.example
+
+class Model
+--- generated-only/generated-src/kotlin/.generator-hash
+0123
+--- mixed/module.yaml
+product: jvm/lib
+layout: maven-like
+repositories:
+  - mavenLocal
+dependencies:
+  - ../generated-only
+plugins:
+  pregenerated:
+    enabled: true
+--- mixed/src/main/kotlin/Use.kt
+fun use() = org.example.Model()
+--- mixed/generated-src/kotlin/Generated.kt
+fun generated() = use()
+--- m2/org/jetbrains/amper/amper-extensibility-api/0.13.0/amper-extensibility-api-0.13.0.pom
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.jetbrains.amper</groupId>
+  <artifactId>amper-extensibility-api</artifactId>
+  <version>0.13.0</version>
+</project>
+--- m2/org/jetbrains/amper/amper-extensibility-api/0.13.0/amper-extensibility-api-0.13.0.jar
+The plugin API the distribution ships replaces this when the toolchain runs.
+--- toolchain-plugin-module
+pregenerated
+--- krusty-argv
+-Xjdk-release=25
+-jdk-home=<directory>/jdk
+-classpath=<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.20/kotlin-stdlib-2.4.20.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
+-no-stdlib
+-module-name=generated-only
+-Xkotlin-reference-version=2.4.20
+-d
+<directory>/project/build/artifacts/CompiledJvmArtifact/generated-onlyjvm/kotlin-output
+<directory>/project/generated-only/generated-src/kotlin/org/example/Model.kt
+----
+-Xjdk-release=25
+-jdk-home=<directory>/jdk
+-classpath=<directory>/project/build/artifacts/CompiledJvmArtifact/generated-onlyjvm/kotlin-output:<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.20/kotlin-stdlib-2.4.20.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
+-no-stdlib
+-module-name=mixed
+-Xmulti-platform
+-Xfragments=main
+-Xfragment-sources=main:<directory>/project/mixed/src/main/kotlin/Use.kt
+-Xfragment-sources=main:<directory>/project/mixed/generated-src/kotlin/Generated.kt
+-Xkotlin-reference-version=2.4.20
+-d
+<directory>/project/build/artifacts/CompiledJvmArtifact/mixedjvm/kotlin-output
+<directory>/project/mixed/generated-src/kotlin/Generated.kt
+<directory>/project/mixed/src/main/kotlin/Use.kt
+----

@@ -1,7 +1,7 @@
 use crate::integer_constant::IntegerConstant;
 use crate::libraries::{GenericSig, SemanticPlatform};
 use crate::symbol_source::SymbolSource;
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 use super::{infer_generic_return_bindings, semantic_arg_assignable};
 
@@ -60,7 +60,7 @@ impl CallArgKind {
     pub(crate) fn function_type(&self) -> Option<Ty> {
         match self {
             Self::CallableReference { function, .. } => Some(*function),
-            kind => matches!(kind.ty(), Ty::Fun(_)).then(|| kind.ty()),
+            kind => kind.ty().is_fun().then(|| kind.ty()),
         }
     }
 
@@ -95,12 +95,12 @@ impl CallArgKind {
         if self.adapts_integer_literal_to(concrete) {
             return concrete;
         }
-        if let Ty::TyParam(_, bound) = parameter.non_null() {
-            if self.adapts_integer_literal_to(*bound) {
-                return *bound;
+        if let TyKind::TyParam(_, bound) = parameter.non_null().kind() {
+            if self.adapts_integer_literal_to(bound) {
+                return bound;
             }
         }
-        if matches!(parameter.non_null(), Ty::Fun(_)) {
+        if parameter.non_null().is_fun() {
             self.function_type().unwrap_or_else(|| self.ty())
         } else {
             self.ty()
@@ -123,8 +123,10 @@ impl CallArgKind {
             let already = if parameter.mentions_ty_param() {
                 self.nominal_implements_classifier(source, sam.internal)
             } else {
-                !matches!(nominal.non_null(), Ty::Error | Ty::Pending | Ty::Fun(_))
-                    && !nominal.mentions_pending()
+                !matches!(
+                    nominal.non_null().kind(),
+                    TyKind::Error | TyKind::Pending | TyKind::Fun(_)
+                ) && !nominal.mentions_pending()
                     && semantic_arg_assignable(source, &parameter, &nominal)
             };
             if already {
@@ -140,7 +142,11 @@ impl CallArgKind {
     /// Whether this argument's nominal type is the fun interface `target`, or a subtype of it.
     fn nominal_implements_classifier(&self, source: &dyn SymbolSource, target: TypeName) -> bool {
         let start = self.ty().non_null();
-        if matches!(start, Ty::Error | Ty::Pending | Ty::Fun(_)) || start.mentions_pending() {
+        if matches!(
+            start.kind(),
+            TyKind::Error | TyKind::Pending | TyKind::Fun(_)
+        ) || start.mentions_pending()
+        {
             return false;
         }
         let mut pending = vec![start];
@@ -151,7 +157,7 @@ impl CallArgKind {
                 continue;
             }
             seen.push(ty);
-            if let Ty::Obj(name, _) = ty {
+            if let TyKind::Obj(name, _) = ty.kind() {
                 if name == target {
                     return true;
                 }

@@ -62,6 +62,71 @@ pub(super) fn next_id(len: usize, what: &str) -> u32 {
     u32::try_from(len).unwrap_or_else(|_| panic!("too many {what}; packed FIR ids are u32"))
 }
 
+/// One value per stable declaration, stored densely by id. Declaration ids are allocated from zero
+/// without gaps, so a table indexed by them is a fraction of a hash map keyed by them: no stored
+/// key, no hash, no spare buckets.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeclarationTable<T> {
+    slots: Vec<Option<T>>,
+    len: usize,
+}
+
+impl<T> Default for DeclarationTable<T> {
+    fn default() -> Self {
+        Self {
+            slots: Vec::new(),
+            len: 0,
+        }
+    }
+}
+
+impl<T> DeclarationTable<T> {
+    pub fn get(&self, declaration: DeclarationId) -> Option<&T> {
+        self.slots.get(declaration.raw() as usize)?.as_ref()
+    }
+
+    pub fn get_mut(&mut self, declaration: DeclarationId) -> Option<&mut T> {
+        self.slots.get_mut(declaration.raw() as usize)?.as_mut()
+    }
+
+    pub fn contains_key(&self, declaration: DeclarationId) -> bool {
+        self.get(declaration).is_some()
+    }
+
+    pub fn insert(&mut self, declaration: DeclarationId, value: T) -> Option<T> {
+        let index = declaration.raw() as usize;
+        if index >= self.slots.len() {
+            self.slots.resize_with(index + 1, || None);
+        }
+        let previous = self.slots[index].replace(value);
+        if previous.is_none() {
+            self.len += 1;
+        }
+        previous
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Present entries in declaration-id order.
+    pub fn iter(&self) -> impl Iterator<Item = (DeclarationId, &T)> {
+        self.slots.iter().enumerate().filter_map(|(index, slot)| {
+            let id = DeclarationId::from_raw(next_id(index, "declarations"));
+            slot.as_ref().map(|value| (id, value))
+        })
+    }
+
+    /// Bytes of slot storage, present or not.
+    pub fn storage_payload_bytes(&self) -> usize {
+        self.slots.len() * std::mem::size_of::<Option<T>>()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum DeclarationKind {
     Function,
@@ -250,5 +315,27 @@ mod tests {
         assert_eq!(ids.in_source(SourceFileId::from_raw(0)), &[first, second]);
         assert_eq!(ids.in_source(SourceFileId::from_raw(1)), &[other]);
         assert!(ids.in_source(SourceFileId::from_raw(2)).is_empty());
+    }
+
+    #[test]
+    fn declaration_table_keeps_sparse_entries_in_id_order() {
+        let mut table = DeclarationTable::default();
+        assert!(table.is_empty());
+        assert_eq!(table.insert(DeclarationId::from_raw(3), "d"), None);
+        assert_eq!(table.insert(DeclarationId::from_raw(1), "b"), None);
+        assert_eq!(table.insert(DeclarationId::from_raw(3), "D"), Some("d"));
+        assert_eq!(table.len(), 2);
+        assert_eq!(table.get(DeclarationId::from_raw(1)), Some(&"b"));
+        assert_eq!(table.get(DeclarationId::from_raw(2)), None);
+        assert_eq!(table.get(DeclarationId::from_raw(9)), None);
+        assert!(!table.contains_key(DeclarationId::from_raw(0)));
+        *table.get_mut(DeclarationId::from_raw(1)).unwrap() = "B";
+        assert_eq!(
+            table.iter().collect::<Vec<_>>(),
+            vec![
+                (DeclarationId::from_raw(1), &"B"),
+                (DeclarationId::from_raw(3), &"D"),
+            ]
+        );
     }
 }

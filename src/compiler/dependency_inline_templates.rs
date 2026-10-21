@@ -36,6 +36,7 @@ impl DependencyInlineTemplates for KlibInlineTemplates {
         let bodies = self.platform.klib_dependency_body_facts()?;
         let callees = TemplateCallees {
             declarations: bodies.bodies(),
+            references: bodies.references(),
             source: self.platform.as_ref(),
         };
         let Some(template) =

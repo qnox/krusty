@@ -1208,7 +1208,7 @@ where
     } else {
         crate::fx_hash::HashMap::default()
     };
-    let source_classifiers = pass1_headers.source_classifier_names();
+    let source_classifiers = pass1_headers.source_classifiers();
     let platform_sources = sources
         .iter()
         .enumerate()

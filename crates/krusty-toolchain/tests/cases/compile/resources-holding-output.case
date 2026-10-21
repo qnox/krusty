@@ -1,0 +1,29 @@
+A plugin resource directory that holds the module's resources output, as the root module's own
+directory does, is refused rather than copied into itself.
+--- task
+:project:compileJvm
+--- project.yaml
+modules:
+  - tools/whole
+plugins:
+  - ./tools/whole
+--- tools/whole/module.yaml
+product: jvm/amper-plugin
+--- tools/whole/plugin.yaml
+tasks:
+  declare:
+    action: !org.example.build.declareResources
+      resourceDir: ${module.rootDir}
+generated:
+  resources:
+    - directory: ${tasks.declare.action.resourceDir}
+--- module.yaml
+product: jvm/lib
+repositories:
+  - mavenLocal
+plugins:
+  whole: enabled
+--- src/Lib.kt
+object Lib
+--- krusty-refusal
+error	ERROR: the resource directory `<directory>/project` of module `project` holds its resources output `<directory>/project/build/artifacts/CompiledJvmArtifact/projectjvm/resources-output`, and krusty-toolchain does not copy a directory into itself

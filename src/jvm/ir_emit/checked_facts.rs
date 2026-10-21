@@ -21,9 +21,10 @@ pub(crate) struct EmitMetadata<'a> {
     /// JVM entry guards selected from exact collection override edges.
     pub(crate) collection_method_entry_barriers:
         &'a crate::jvm::collection_barriers::MethodEntryBarriers,
-    /// JVM-only inherited collection bridge plans, keyed by emitted class identity.
-    pub(in crate::jvm) inherited_collection_bridges:
-        &'a crate::jvm::inherited_collection_bridges::InheritedCollectionBridges,
+    /// JVM-only collection member plans (inherited Java bridges, read-only stubs), keyed by
+    /// emitted class identity.
+    pub(in crate::jvm) collection_members:
+        &'a crate::jvm::read_only_collection_stubs::CollectionMemberPlans,
 }
 
 /// Checked semantic declarations plus JVM-only realization facts consumed by class emission.

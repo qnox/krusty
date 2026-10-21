@@ -21,7 +21,7 @@ use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrExprId, KlibIrFunction, KlibIrParameter, KlibIrTypeId,
 };
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 /// One parameter as the body reads it.
 #[derive(Clone, Copy, Debug)]
@@ -228,7 +228,7 @@ pub(super) fn prepared_inline_header(
     let mut type_parameters = KlibTypeParameters::default();
     let mut erasures = HashMap::default();
     for (parameter, formal) in function.type_parameters.iter().zip(formals) {
-        let Ty::TyParam(name, bound) = *formal else {
+        let TyKind::TyParam(name, bound) = formal.kind() else {
             return Err(mismatch(format!(
                 "the type parameter `{}` is selected as {formal:?}",
                 parameter.name
@@ -243,8 +243,8 @@ pub(super) fn prepared_inline_header(
             )));
         }
         // A bound names only earlier formals here; a later one stays and fails the comparison.
-        let erasure = crate::types::ty_subst_keep_unbound(*bound, &erasures);
-        erasures.insert(name.to_owned(), erasure);
+        let erasure = crate::types::ty_subst_keep_unbound(bound, &erasures);
+        erasures.insert(name.as_str().to_owned(), erasure);
     }
     // The extension receiver is serialized either in its own slot or as the leading value
     // parameter; both orders follow the selected declaration's.
@@ -291,12 +291,18 @@ pub(super) fn prepared_inline_header(
     // names the selected classifier, without type arguments of its own.
     let receiver_slot = match dispatch_receiver {
         Some(receiver) => {
-            let Ty::Obj(classifier, &[]) = semantic_type(arena, &type_parameters, receiver.ty)?
+            let TyKind::Obj(classifier, arguments) =
+                semantic_type(arena, &type_parameters, receiver.ty)?.kind()
             else {
                 return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
                     "a dispatch receiver of a generic or non-class type",
                 ));
             };
+            if !arguments.is_empty() {
+                return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                    "a dispatch receiver of a generic or non-class type",
+                ));
+            }
             // Metadata is authoritative for the member's owner: the copy must be its member.
             if selected.declaration_owner()
                 != Some(crate::types::SemanticCallableOwner::Classifier(classifier))
@@ -337,7 +343,7 @@ pub(super) fn prepared_inline_header(
             )));
         }
         extension_receiver |= receiver;
-        let erased = read_type(parameter.ty, ty)?.filter(|_| !matches!(ty, Ty::Fun(_)));
+        let erased = read_type(parameter.ty, ty)?.filter(|_| !ty.is_fun());
         let stable_read = !matches!(
             identity,
             ResolvedParameterIdentity::ExtensionReceiver
@@ -783,16 +789,16 @@ fn parameter_role(role: SerializedRole, identity: &ResolvedParameterIdentity) ->
 /// The function class application `ty` is, without the annotations that mark its context
 /// parameters and receiver; any other type unchanged.
 pub(super) fn plain_function_type(ty: Ty) -> Ty {
-    match ty {
-        Ty::Fun(signature) => Ty::fun_with_shape(
+    match ty.kind() {
+        TyKind::Fun(signature) => Ty::fun_with_shape(
             signature.params.to_vec(),
             signature.ret,
             0,
             false,
             signature.suspend,
         ),
-        Ty::Nullable(inner) => Ty::nullable(plain_function_type(*inner)),
-        ty => ty,
+        TyKind::Nullable(inner) => Ty::nullable(plain_function_type(inner)),
+        _ => ty,
     }
 }
 

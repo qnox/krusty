@@ -71,7 +71,8 @@ pub(crate) fn kclass_argument(ty: Ty) -> Option<KClassArgument> {
         return None;
     }
     match ty.non_null().type_args().first().copied() {
-        None | Some(Ty::StarProjection(_)) => Some(KClassArgument::Star),
+        None => Some(KClassArgument::Star),
+        Some(argument) if argument.is_star_projection() => Some(KClassArgument::Star),
         Some(argument) => Some(KClassArgument::Projected(argument)),
     }
 }

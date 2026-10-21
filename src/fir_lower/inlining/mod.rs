@@ -13,7 +13,7 @@ use crate::ir::{
     IrDebugLocalProvenance, IrExpr, IrInlineLocalRole, IrIntrinsic, IrSamTarget,
     IrValueClassSuspendResult,
 };
-use crate::types::{stored_value_ty, ty_subst_keep_unbound, Ty};
+use crate::types::{stored_value_ty, ty_subst_keep_unbound, Ty, TyKind};
 
 use super::BodyLowering;
 
@@ -61,9 +61,9 @@ pub(super) fn specialize_inline_copy(
     let declared_temporary = match ir.expr(expression) {
         IrExpr::Variable {
             ty, named: false, ..
-        } => match ty.non_null() {
-            Ty::TyParam(name, _) if !runtime.contains_key(name) => Some(*ty),
-            Ty::DefinitelyNotNull(inner)
+        } => match ty.non_null().kind() {
+            TyKind::TyParam(name, _) if !runtime.contains_key(name.as_str()) => Some(*ty),
+            TyKind::DefinitelyNotNull(inner)
                 if inner
                     .ty_param_name()
                     .is_some_and(|name| !runtime.contains_key(name)) =>
@@ -1588,7 +1588,7 @@ pub(super) fn specialize_typed_expression(
         IrExpr::TypeOp {
             op, type_operand, ..
         } => {
-            let declaration_generic_target = matches!(type_operand.non_null(), Ty::TyParam(..));
+            let declaration_generic_target = type_operand.non_null().is_ty_param();
             specialize_ty(type_operand, runtime);
             // `as T` is checked against T's declaration bound, so an unconstrained T initially
             // admits null. Once an inline call fixes a reified T to a concrete non-null type, the
@@ -1596,7 +1596,7 @@ pub(super) fn specialize_typed_expression(
             // parameter stays a type parameter: the cast remains erased.
             if declaration_generic_target
                 && *op == crate::ir::IrTypeOp::Cast
-                && !matches!(type_operand.non_null(), Ty::TyParam(..))
+                && !type_operand.non_null().is_ty_param()
                 && !type_operand.is_nullable()
             {
                 *op = crate::ir::IrTypeOp::CastNonNull;
@@ -2053,7 +2053,8 @@ fn specialize_checked_operation(
         }
         IrCheckedOperation::RangeContains { counter, .. }
         | IrCheckedOperation::RangeLoop { counter, .. } => specialize_ty(counter, bindings),
-        IrCheckedOperation::IllegalProgressionStep { .. } => {}
+        IrCheckedOperation::IllegalProgressionStep { .. }
+        | IrCheckedOperation::ComparableRangeContains { .. } => {}
         IrCheckedOperation::PropertyReference {
             target,
             substitutions,

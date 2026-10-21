@@ -15,6 +15,7 @@
 use super::classifier_shapes::IntegralRangeElement;
 use super::*;
 use crate::fir::FirRangeOperation;
+use crate::types::TyKind;
 use crate::types::TypeName;
 
 /// The element type of a runtime range, by the name of the type declaring the member.
@@ -88,7 +89,7 @@ fn range_to_owner(owner: super::super::super::intrinsics::DeclarationOwner) -> b
 /// that declares such an implementation is declined at every member asked of a type it implements
 /// itself, before this is reached.
 fn floating_range(ty: Ty) -> Option<(&'static str, Ty)> {
-    let Ty::Obj(internal, arguments) = ty.non_null() else {
+    let TyKind::Obj(internal, arguments) = ty.non_null().kind() else {
         return None;
     };
     if !super::classifier_shapes::is_closed_floating_range(internal)
@@ -133,7 +134,7 @@ fn floating_range_symbol(
 /// implementation is declined at every member asked of a type it implements itself, before this is
 /// reached — and nothing else in this runtime wears the interface over a machine element.
 fn closed_range_element(ty: Ty) -> Option<Ty> {
-    let Ty::Obj(internal, arguments) = ty.non_null() else {
+    let TyKind::Obj(internal, arguments) = ty.non_null().kind() else {
         return None;
     };
     if !super::classifier_shapes::is_closed_range(internal) {
@@ -157,14 +158,14 @@ fn closed_range_element(ty: Ty) -> Option<Ty> {
 /// ([`FunctionLowering::range_compare_function`]), so its members need nothing from the element's
 /// descriptor and answer for any element the construction could order.
 fn comparable_range_element(ty: Ty) -> Option<Ty> {
-    let Ty::Obj(internal, arguments) = ty.non_null() else {
+    let TyKind::Obj(internal, arguments) = ty.non_null().kind() else {
         return None;
     };
     if !super::classifier_shapes::is_closed_range(internal) {
         return None;
     }
     let argument = arguments.first()?.non_null();
-    (matches!(argument, Ty::Obj(..)) && machine_carrier(argument) == Carrier::Ref)
+    (matches!(argument.kind(), TyKind::Obj(..)) && machine_carrier(argument) == Carrier::Ref)
         .then_some(argument)
 }
 
@@ -322,6 +323,32 @@ impl BodyLowering<'_, '_, '_> {
         )
     }
 
+    /// The existing provider role of an integral range extension, independent of whether common
+    /// IR carries its extension receiver separately or among the serialized parameters.
+    pub(super) fn intrinsic_range_builder(
+        &mut self,
+        intrinsic: crate::backend::BackendCompilerIntrinsic,
+        start: u32,
+        end: u32,
+        result: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let suffix = match intrinsic {
+            crate::backend::BackendCompilerIntrinsic::RangeUntil => "until",
+            crate::backend::BackendCompilerIntrinsic::RangeDownTo => "down_to",
+            _ => return Err("an operation that is not an exact range builder".into()),
+        };
+        let Some((kind, element)) = range_type(result) else {
+            return Err("an exact range builder with an unsupported result type".into());
+        };
+        self.range_of(
+            &format!("kt_{kind}_range_{suffix}"),
+            element,
+            result,
+            start,
+            end,
+        )
+    }
+
     /// `IntRange(start, endInclusive)` and its siblings constructed directly, as an expanded
     /// `rangeTo` body does: the runtime's closed range over the two bounds. `None` for any class
     /// that is not one of the runtime's integral ranges.
@@ -358,7 +385,7 @@ impl BodyLowering<'_, '_, '_> {
         })())
     }
 
-    /// A member of a range object, or `a until b` on the facade that declares it.
+    /// A member of a range object, or an ordinary progression adapter on its declaring facade.
     ///
     /// Returns `None` when this is neither, so the caller falls through to the ordinary
     /// dependency-member path. `contains` is the reason this is not simply a `runtime_member` entry:
@@ -407,46 +434,6 @@ impl BodyLowering<'_, '_, '_> {
         if comparable_range_element(self.checked_type(receiver)?).is_some() {
             let (symbol, answer) = comparable_range_symbol(signature)?;
             return Some(self.comparable_range_call(symbol, answer, receiver, args, ret));
-        }
-        // The provider marks the exact selected `until` declaration from its complete signature;
-        // the type it RETURNS says which range representation to build.
-        if intrinsic == Some(crate::backend::BackendCompilerIntrinsic::RangeUntil)
-            && matches!(signature.params, [_])
-            && signature.ret.is_reference()
-        {
-            let [end] = args else {
-                return Some(Err(
-                    "an `until` call with an unexpected argument shape".into()
-                ));
-            };
-            let (kind, element) = range_type(ret)?;
-            return Some(self.range_of(
-                &format!("kt_{kind}_range_until"),
-                element,
-                ret,
-                receiver,
-                *end,
-            ));
-        }
-        // `downTo` is the descending counterpart. Its exact provider fact selects the operation;
-        // the type it RETURNS says which range representation to build.
-        if intrinsic == Some(crate::backend::BackendCompilerIntrinsic::RangeDownTo)
-            && matches!(signature.params, [_])
-            && signature.ret.is_reference()
-        {
-            let [end] = args else {
-                return Some(Err(
-                    "a `downTo` call with an unexpected argument shape".into()
-                ));
-            };
-            let (kind, element) = range_type(ret)?;
-            return Some(self.range_of(
-                &format!("kt_{kind}_range_down_to"),
-                element,
-                ret,
-                receiver,
-                *end,
-            ));
         }
         // `range step n` and `progression.reversed()`. Both answer a PROGRESSION, which this
         // runtime represents as the range it already had with a step beside it — so the receiver
@@ -593,7 +580,7 @@ impl BodyLowering<'_, '_, '_> {
     ///   and an element that could hold both a builtin and a program object has no single function
     ///   to pass.
     fn range_compare_function(&mut self, element: Ty) -> Result<Value, Unsupported> {
-        let Ty::Obj(name, _) = element.non_null() else {
+        let TyKind::Obj(name, _) = element.non_null().kind() else {
             return Err(declined!(
                 "a range of `{}`",
                 super::type_checks::type_name_of(element)
@@ -626,7 +613,7 @@ impl BodyLowering<'_, '_, '_> {
             function.name == "compareTo"
                 && function.dispatch_receiver.is_some()
                 && function.ret == Ty::Int
-                && matches!(function.params.as_slice(), [Ty::Obj(other, _)] if *other == name)
+                && matches!(function.params.as_slice(), [other] if other.obj_parts().is_some_and(|(other, _)| other == name))
         });
         let (true, Some(function)) = (is_final, own) else {
             return Err(declined!(
@@ -860,9 +847,9 @@ impl BodyLowering<'_, '_, '_> {
         };
         // A type parameter stands for whatever its bound admits, and `indices` is declared for the
         // bound: `fun <T : Collection<*>> f(c: T) = c.indices` asks the collection's question.
-        let ty = match ty {
-            Ty::TyParam(_, bound) => bound.non_null(),
-            other => other,
+        let ty = match ty.kind() {
+            TyKind::TyParam(_, bound) => bound.non_null(),
+            _ => ty,
         };
         let size = if ty.is_array() {
             self.array_size(receiver)?

@@ -84,7 +84,7 @@ impl<'a> FileLowering<'a> {
             }
             let mut parameters: Vec<Ty> = declaration
                 .dispatch_receiver
-                .map(|owner| Ty::Obj(owner, &[]))
+                .map(Ty::obj_name)
                 .into_iter()
                 .collect();
             for (ordinal, ty) in declaration.params.iter().enumerate() {
@@ -164,7 +164,7 @@ impl<'a> FileLowering<'a> {
         let receiver = usize::from(declaration.dispatch_receiver.is_some());
         let mut parameters: Vec<Ty> = declaration
             .dispatch_receiver
-            .map(|owner| Ty::Obj(owner, &[]))
+            .map(Ty::obj_name)
             .into_iter()
             .collect();
         let mut supplied = Vec::new();
@@ -181,7 +181,7 @@ impl<'a> FileLowering<'a> {
         let target = self.functions[key.function as usize];
         let slots: Vec<Ty> = declaration
             .dispatch_receiver
-            .map(|owner| Ty::Obj(owner, &[]))
+            .map(Ty::obj_name)
             .into_iter()
             .chain(super::super::super::captures::carried_parameters(
                 self.ir,
@@ -190,7 +190,7 @@ impl<'a> FileLowering<'a> {
             .collect();
         let semantic_slots: Vec<Ty> = declaration
             .dispatch_receiver
-            .map(|owner| Ty::Obj(owner, &[]))
+            .map(Ty::obj_name)
             .into_iter()
             .chain(declaration.params.iter().copied())
             .collect();
@@ -521,7 +521,7 @@ impl BodyLowering<'_, '_, '_> {
             (true, Some(receiver)) => match declaration.dispatch_receiver {
                 // The wrapper takes a value class's receiver as the value, which is never null.
                 Some(owner) if self.file.values.is_value_class(owner) => {
-                    let Some(value) = self.coerce(receiver, Ty::Obj(owner, &[]))? else {
+                    let Some(value) = self.coerce(receiver, Ty::obj_name(owner))? else {
                         return Ok(None);
                     };
                     if self.terminated {
@@ -880,7 +880,7 @@ impl<'a> FileLowering<'a> {
         .expect("checked when the wrapper was declared");
         let mut slots = vec![any()];
         slots.extend(frame.iter().copied());
-        let mut semantic_slots = vec![Ty::Obj(declaration.fq_name, &[])];
+        let mut semantic_slots = vec![Ty::obj_name(declaration.fq_name)];
         match key.secondary {
             None => semantic_slots.extend(declaration.ctor_args.iter().map(|argument| argument.ty)),
             Some(index) => {

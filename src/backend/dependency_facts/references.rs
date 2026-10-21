@@ -245,6 +245,12 @@ impl ReferencedDependencies {
                 self.callables
                     .extend(unsigned_compare.iter().map(|compare| compare.function));
             }
+            IrCheckedOperation::RangeContains {
+                unsigned_compare, ..
+            } => {
+                self.callables
+                    .extend(unsigned_compare.iter().map(|compare| compare.function));
+            }
             IrCheckedOperation::PropertyReference { target, .. } => {
                 self.property_reference(target);
             }
@@ -255,7 +261,7 @@ impl ReferencedDependencies {
             | IrCheckedOperation::BackingFieldRead { .. }
             | IrCheckedOperation::BackingFieldWrite { .. }
             | IrCheckedOperation::RangeConstruction { .. }
-            | IrCheckedOperation::RangeContains { .. }
+            | IrCheckedOperation::ComparableRangeContains { .. }
             | IrCheckedOperation::IllegalProgressionStep { .. } => {}
         }
     }

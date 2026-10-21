@@ -8,6 +8,7 @@
 //! primary constructor for a value class.
 
 use super::*;
+use crate::types::TyKind;
 
 /// How an implementing class's compatibility forwarder reaches the inherited interface body.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -27,8 +28,11 @@ struct InheritedForwarder {
     target_interface: TypeName,
     /// The member's name before value-class mangling: its declared or accessor name.
     declared_name: String,
-    /// The member's JVM name, which the forwarder takes.
+    /// The forwarder's JVM name: the member's, or the name kotlinc gives the fake override a
+    /// value-class substitution specializes.
     name: String,
+    /// The inherited member's own JVM name, which every call to the declaration names.
+    target_name: String,
     /// The forwarder's own parameters and result: the member as the class's applied supertype
     /// substitutes it.
     param_tys: Vec<Ty>,
@@ -41,6 +45,10 @@ struct InheritedForwarder {
     /// an erased bridge also carries them.
     target_params: Vec<Ty>,
     target_ret: Ty,
+    /// The value class a substitution carries unboxed in each forwarder parameter, boxed for the
+    /// declaration's erased slot, and in its result, unboxed from the declaration's.
+    value_class_params: Vec<Option<crate::jvm::bridge_adaptations::ValueClassAdapter>>,
+    value_class_ret: Option<crate::jvm::bridge_adaptations::ValueClassAdapter>,
     /// The forwarder's generic `Signature`, when its substituted types have generic structure.
     signature: Option<String>,
     target_owner: String,
@@ -59,42 +67,75 @@ impl InheritedForwarder {
     }
 
     /// Load the forwarder's parameters from `first_slot` as the inherited declaration takes them:
-    /// a primitive the substitution introduced is boxed for the erased type-parameter slot.
+    /// a value class's carrier the substitution introduced is boxed with its `box-impl`, and a
+    /// primitive with its wrapper, for the erased type-parameter slot.
     fn load_target_arguments(&self, cw: &mut ClassWriter, code: &mut CodeBuilder, first_slot: u16) {
         let mut slot = first_slot;
-        for (parameter, target) in self.param_tys.iter().zip(&self.target_params) {
+        for (index, (parameter, target)) in
+            self.param_tys.iter().zip(&self.target_params).enumerate()
+        {
             load(*parameter, slot, code);
-            if parameter.is_jvm_scalar() && target.is_reference() {
+            if let Some(carried) = self.value_class_params.get(index).copied().flatten() {
+                emit_value_class_box_adapter(
+                    cw,
+                    code,
+                    carried.owner,
+                    *parameter,
+                    carried.null_preserving,
+                );
+            } else if parameter.is_jvm_scalar() && target.is_reference() {
                 box_prim_free(cw, code, *parameter);
             }
             slot += slot_words(*parameter);
         }
     }
 
-    /// Cast the inherited declaration's erased result back to the forwarder's substituted one.
+    /// Cast the inherited declaration's erased result back to the forwarder's substituted one, and
+    /// unbox a value class the forwarder returns as its carrier.
     fn cast_target_result(&self, cw: &mut ClassWriter, code: &mut CodeBuilder) {
-        if self.target_ret != self.ret && self.target_ret.is_reference() && self.ret.is_reference()
+        if let Some(carried) = self.value_class_ret {
+            emit_value_class_unbox_adapter(
+                cw,
+                code,
+                carried.owner,
+                self.ret,
+                carried.null_preserving,
+            );
+        } else if self.target_ret != self.ret
+            && self.target_ret.is_reference()
+            && self.ret.is_reference()
         {
             let result = cw.class_ref(&crate::jvm::names::instanceof_internal_name(self.ret));
             code.checkcast(result);
         }
     }
 
-    /// The local-variable spelling of each declaration parameter; the forwarder, its `-impl` static
-    /// and the static's parameter checks all name a parameter this way.
-    fn local_variable_names(&self) -> Vec<Option<String>> {
+    /// The name an extension receiver is labeled after (`$this$<label>`). The forwarder is a member
+    /// on the class under its own JVM name, so kotlinc labels it after that name with its
+    /// non-identifier characters escaped (`$this$bar_u2d_u2dh0D71M`); a value class's static
+    /// stands for the declaration and keeps its declared name (`$this$bar`).
+    fn receiver_label(&self, site: ForwarderSite) -> String {
+        match site {
+            ForwarderSite::Forwarder => crate::jvm::debug_local_names::escaped(&self.name),
+            ForwarderSite::ValueClassStatic => self.declared_name.clone(),
+        }
+    }
+
+    /// The local-variable spelling of each declaration parameter at `site`; the static's parameter
+    /// checks name a parameter this way too.
+    fn local_variable_names(&self, site: ForwarderSite) -> Vec<Option<String>> {
         crate::jvm::parameter_names::resolved_local_variables(
             &self.parameter_identities,
             &self.semantic_params,
-            &self.name,
+            &self.receiver_label(site),
         )
     }
 
-    fn method_parameter_names(&self) -> Vec<Option<String>> {
+    fn method_parameter_names(&self, site: ForwarderSite) -> Vec<Option<String>> {
         crate::jvm::parameter_names::resolved_method_parameters(
             &self.parameter_identities,
             &self.semantic_params,
-            &self.name,
+            &self.receiver_label(site),
         )
     }
 
@@ -111,10 +152,19 @@ impl InheritedForwarder {
     }
 }
 
+/// Where an inherited member's parameters are written.
+#[derive(Clone, Copy)]
+enum ForwarderSite {
+    /// The forwarder on the implementing class.
+    Forwarder,
+    /// The static a value class realizes the forwarder with.
+    ValueClassStatic,
+}
+
 /// `@NotNull`/`@Nullable` for one semantic type of a forwarder: reference types only, and never a
 /// bare type variable.
 fn forwarder_nullability(ty: Ty) -> Option<&'static str> {
-    if matches!(ty.non_null(), Ty::TyParam(..)) || !ir_ty_to_jvm(&ty).is_reference() {
+    if ty.non_null().is_ty_param() || !ir_ty_to_jvm(&ty).is_reference() {
         None
     } else if ty.is_nullable() {
         Some("Lorg/jetbrains/annotations/Nullable;")
@@ -222,6 +272,8 @@ fn forwarder(
     let mut semantic_params = types.semantic_params;
     let mut parameter_identities = default.parameter_identities.to_vec();
     let mut semantic_ret = types.semantic_ret;
+    let value_class_params = types.value_class_params;
+    let value_class_ret = types.value_class_ret;
     let signature = forwarder_signature(
         formatter,
         class_type_params,
@@ -272,7 +324,10 @@ fn forwarder(
         declared_name: crate::jvm::inherited_default_realization::inherited_member_declared_name(
             default,
         ),
-        name: crate::jvm::inherited_default_realization::inherited_member_jvm_name(
+        name: crate::jvm::inherited_default_realization::inherited_realization_jvm_name(
+            ir, callables, default,
+        ),
+        target_name: crate::jvm::inherited_default_realization::inherited_member_jvm_name(
             ir, callables, default,
         ),
         param_tys,
@@ -282,6 +337,8 @@ fn forwarder(
         semantic_ret,
         target_params,
         target_ret,
+        value_class_params,
+        value_class_ret,
         signature,
         target_owner,
         target_descriptor,
@@ -322,21 +379,21 @@ fn forwarder_signature(
 
 /// Whether `ty` mentions a type parameter not named in `known`.
 fn mentions_other_type_parameter(ty: Ty, known: &[String]) -> bool {
-    match ty {
-        Ty::TyParam(name, _) => !known.iter().any(|known| known == name),
-        Ty::DefinitelyNotNull(inner)
-        | Ty::Nullable(inner)
-        | Ty::PlatformNullable(inner)
-        | Ty::InProjection(inner)
-        | Ty::OutProjection(inner)
-        | Ty::StarProjection(inner) => mentions_other_type_parameter(*inner, known),
-        Ty::Intersection(parts) => parts
+    match ty.kind() {
+        TyKind::TyParam(name, _) => !known.iter().any(|known| known == name),
+        TyKind::DefinitelyNotNull(inner)
+        | TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner)
+        | TyKind::StarProjection(inner) => mentions_other_type_parameter(inner, known),
+        TyKind::Intersection(parts) => parts
             .iter()
             .any(|part| mentions_other_type_parameter(*part, known)),
-        Ty::Obj(_, arguments) => arguments
+        TyKind::Obj(_, arguments) => arguments
             .iter()
             .any(|argument| mentions_other_type_parameter(*argument, known)),
-        Ty::Fun(signature) => {
+        TyKind::Fun(signature) => {
             mentions_other_type_parameter(signature.ret, known)
                 || signature
                     .params
@@ -388,7 +445,7 @@ fn write_forwarder(
     let reflected = if java_parameters {
         crate::jvm::method_parameters::resolved_class_forwarder(
             parameter_identities,
-            &forwarder.method_parameter_names(),
+            &forwarder.method_parameter_names(ForwarderSite::Forwarder),
             param_tys,
         )
     } else {
@@ -427,14 +484,15 @@ fn write_forwarder(
     forwarder.load_target_arguments(cw, &mut code, 1);
     match dispatch {
         ForwarderDispatch::HolderStatic => {
-            let target = cw.methodref(target_owner, name, target_descriptor);
+            let target = cw.methodref(target_owner, &forwarder.target_name, target_descriptor);
             code.invokestatic(target, target_words, result_words);
         }
         // The interface publishes the body as a DEFAULT method: the forwarder is a Java-style
         // interface `super` call. The JVM requires the named interface to be a DIRECT
         // superinterface of this class — override resolution selects it.
         ForwarderDispatch::InterfaceSpecial => {
-            let target = cw.interface_methodref(target_owner, name, target_descriptor);
+            let target =
+                cw.interface_methodref(target_owner, &forwarder.target_name, target_descriptor);
             code.invokespecial(target, target_words, result_words);
         }
     }
@@ -451,7 +509,10 @@ fn write_forwarder(
     cw.set_method_parameters(name, &desc, &reflected);
     let mut locals = vec![("this".to_string(), format!("L{};", c.fq_name()), 0)];
     let mut slot = 1u16;
-    for (parameter, parameter_name) in param_tys.iter().zip(forwarder.local_variable_names()) {
+    for (parameter, parameter_name) in param_tys
+        .iter()
+        .zip(forwarder.local_variable_names(ForwarderSite::Forwarder))
+    {
         if let Some(parameter_name) = parameter_name {
             locals.push((parameter_name, local_variable_desc(*parameter), slot));
         }
@@ -507,7 +568,7 @@ fn write_value_class_static(
     let mut params = vec![carrier];
     params.extend_from_slice(&forwarder.param_tys);
     let desc = method_descriptor(&params, forwarder.ret);
-    let local_variable_names = forwarder.local_variable_names();
+    let local_variable_names = forwarder.local_variable_names(ForwarderSite::ValueClassStatic);
     assert_eq!(
         local_variable_names.len(),
         forwarder.param_tys.len(),
@@ -517,7 +578,7 @@ fn write_value_class_static(
         crate::jvm::method_parameters::value_class_inherited_static(
             &carrier_name,
             &forwarder.parameter_identities,
-            &forwarder.method_parameter_names(),
+            &forwarder.method_parameter_names(ForwarderSite::ValueClassStatic),
             &forwarder.param_tys,
         )
     } else {
@@ -576,7 +637,7 @@ fn write_value_class_static(
     forwarder.load_target_arguments(cw, &mut code, slot_words(carrier));
     let entry = cw.methodref(
         &owner,
-        &forwarder.name,
+        &forwarder.target_name,
         &forwarder.target_member_descriptor(),
     );
     let parameter_words = forwarder

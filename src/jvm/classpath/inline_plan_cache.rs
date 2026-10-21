@@ -561,7 +561,7 @@ mod tests {
         let stubs = crate::jvm::java_stub::stub_classes(
             &[("W.java".into(), "package p; public class Widget {}".into())],
             crate::jvm::java_stub::StubMode::Lenient,
-            &|candidate| candidate == "java/lang/Object",
+            &|candidate: &str| candidate == "java/lang/Object",
         )
         .expect("stub");
         cp.set_stub_overlay(stubs);

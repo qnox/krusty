@@ -808,10 +808,6 @@ mod tests {
                     "krusty does not support compilerOptions.extraWarnings",
                 ),
                 (
-                    "progressive-mode",
-                    "krusty does not support compilerOptions.progressiveMode",
-                ),
-                (
                     "reserved-free-argument",
                     "freeCompilerArg '-d=forbidden' conflicts with the plugin-owned destination; configure the structured Gradle input instead",
                 ),
@@ -915,6 +911,25 @@ mod tests {
                     assert!(!log.exists(), "{case} must fail before execing krusty");
                 }
             }
+
+            // `compilerOptions.progressiveMode` is a structured input like `javaParameters`: the
+            // plugin forwards it as kotlinc's `-progressive`, which krusty honors because it models
+            // every progressive feature of the selected release.
+            let _ = std::fs::remove_file(&log);
+            build()
+                .property("krusty.negative", "progressive-mode")
+                .tasks([":compiler:util:compileKotlin"])
+                .run()
+                .unwrap_or_else(|error| panic!("progressive-mode: {error}"));
+            let invocation = single_module_invocation(&log, "kotlin-compiler-util");
+            assert_eq!(
+                invocation
+                    .iter()
+                    .filter(|argument| argument.as_str() == "-progressive")
+                    .count(),
+                1,
+                "progressive-mode: {invocation:?}"
+            );
 
             // Free arguments reach krusty verbatim: the plugin keeps no copy of kotlinc's argument
             // table. A malformed value and an argument krusty does not implement are refused by

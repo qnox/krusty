@@ -16,7 +16,7 @@ use crate::fir::{
 };
 use crate::fx_hash::HashMap;
 use crate::libraries::ExternalCallableKind;
-use crate::types::{SemanticCallableOwner, Ty, TypeName};
+use crate::types::{SemanticCallableOwner, Ty, TyKind, TypeName};
 
 use super::call_spans::CallSpans;
 use super::offsets::Utf16Offsets;
@@ -525,12 +525,15 @@ impl BodyEncoder<'_, '_> {
         let Some(expression) = self.observed.body.expr(receiver) else {
             return Err(self.refuse(span, "a receiver missing from its body"));
         };
-        match expression.ty.get() {
-            Ty::Obj(class, _) => Ok(class),
-            other => Err(self.refuse(
-                span,
-                format!("a member call on a receiver of type {other:?}"),
-            )),
+        {
+            let other = expression.ty.get();
+            match other.kind() {
+                TyKind::Obj(class, _) => Ok(class),
+                _ => Err(self.refuse(
+                    span,
+                    format!("a member call on a receiver of type {other:?}"),
+                )),
+            }
         }
     }
 

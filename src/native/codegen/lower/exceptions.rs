@@ -17,6 +17,7 @@
 //! common IR, and not to a single test written against it.
 
 use super::*;
+use crate::types::TyKind;
 
 impl BodyLowering<'_, '_, '_> {
     /// Emit a call, then the check that turns a callee's `throw` into propagation.
@@ -353,23 +354,23 @@ impl BodyLowering<'_, '_, '_> {
     /// operation is the runtime's.
     pub(super) fn result_operation(
         &mut self,
-        operation: super::super::super::intrinsics::ResultOperation,
+        operation: crate::libraries::ResultFailureIntrinsic,
         args: &[u32],
         ret: Ty,
     ) -> Result<Option<Value>, Unsupported> {
-        use super::super::super::intrinsics::ResultOperation;
+        use crate::libraries::ResultFailureIntrinsic;
 
         let (symbol, operands) = match (operation, args) {
-            (ResultOperation::CreateFailure, [exception]) => {
+            (ResultFailureIntrinsic::Create, [exception]) => {
                 ("kt_result_failure_new", vec![self.reference(*exception)?])
             }
-            (ResultOperation::CheckIsFailureOf, [class, message, result]) => {
+            (ResultFailureIntrinsic::CheckOfClass, [class, message, result]) => {
                 let class = self.reference(*class)?;
                 let message = self.reference(*message)?;
                 let result = self.reference(*result)?;
                 ("kt_check_result_is_failure", vec![class, message, result])
             }
-            (ResultOperation::CheckIsFailure, [message, result]) => {
+            (ResultFailureIntrinsic::Check, [message, result]) => {
                 let class = self.builder.ins().iconst(types::I64, 0);
                 let message = self.reference(*message)?;
                 let result = self.reference(*result)?;
@@ -578,9 +579,12 @@ impl BodyLowering<'_, '_, '_> {
         for catch in catches {
             // A reified catch keeps its semantic type parameter in common IR. Native runtime
             // dispatch, like the JVM exception table, tests that parameter's declaration bound.
-            let runtime_type = match catch.ty.non_null() {
-                Ty::TyParam(_, bound) => *bound,
-                concrete => concrete,
+            let runtime_type = {
+                let concrete = catch.ty.non_null();
+                match concrete.kind() {
+                    TyKind::TyParam(_, bound) => bound,
+                    _ => concrete,
+                }
             };
             let Some(descriptor) = self.file.type_descriptor(runtime_type)? else {
                 return Err(declined!(

@@ -8,6 +8,7 @@
 //! only when no top-level candidate does.
 
 use super::*;
+use crate::types::TyKind;
 
 pub(super) fn is_context_parameter_receiver(
     scope: &CheckerScope<'_>,
@@ -41,7 +42,7 @@ impl Checker<'_> {
         {
             return Some(self.set(expression, resolved));
         }
-        if let Ty::Obj(_, _) = receiver.ty {
+        if let TyKind::Obj(_, _) = receiver.ty.kind() {
             if self.lookup_prop_name(receiver.ty, name).is_some() {
                 match self.select_property_read(scope, receiver.ty, name) {
                     Ok(Some(selection)) => {

@@ -194,6 +194,7 @@ impl ExistingLibrary {
                 declared_callables,
                 declared_callable_order: Vec::new(),
                 members: Vec::new(),
+                methods_as_declarations: false,
                 companion: Vec::new(),
                 constants: crate::fx_hash::HashMap::default(),
                 sam_eligible: false,
@@ -341,7 +342,7 @@ impl crate::symbol_source::SymbolSource for ExistingLibrary {
         function.call_sig = CallSig {
             lambda_param_types,
             lambda_receivers,
-            lambda_receiver_params,
+            lambda_receiver_params: lambda_receiver_params.into(),
             required: value_params.len(),
             ..CallSig::default()
         };

@@ -2,6 +2,14 @@
 
 use super::{PrimitiveBinaryIntrinsic, PrimitiveUnaryIntrinsic};
 
+/// The exact library helper used to construct or inspect a failed `Result`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResultFailureIntrinsic {
+    Create,
+    Check,
+    CheckOfClass,
+}
+
 /// A source-declared callable whose implementation is supplied by the compiler after ordinary symbol
 /// and overload selection. Providers attach this to the exact declaration identity; lowering never
 /// grants intrinsic behavior from a coincidental source name.
@@ -103,6 +111,10 @@ pub enum CompilerIntrinsic {
     Count,
     TrimIndent,
     TrimMargin,
+    /// The authenticated target stdlib's zero-argument `CharSequence.trim(): CharSequence`.
+    /// Targets must prove the receiver's representation supports their text reader before
+    /// replacing the ordinary extension call with a runtime operation.
+    TextTrim,
     /// The common stdlib `kotlin.ranges` `Double`/`Float` `rangeTo` and `rangeUntil` declarations.
     /// Membership in their closed or open-end result is an IEEE comparison. The provider copies
     /// this role from the exact common declaration onto its physical realization; a nearer
@@ -112,6 +124,10 @@ pub enum CompilerIntrinsic {
     /// kotlinc's `RangeContainsLowering` compares against the bounds of a range literal it is
     /// called on instead of calling it; a user extension of the same shape is called.
     ClosedRangeContains,
+    /// The `kotlin.ranges` `rangeTo` extension of a `Comparable` value (kotlinc's
+    /// `ComparableRangeToHandler`). Membership in the closed range it builds compares the value
+    /// with both bounds through `Comparable.compareTo` instead of building the range.
+    ComparableRangeTo,
     /// `kotlin.ranges` progression builders a counted `for` loop reads through instead of calling
     /// (kotlinc's `ForLoopsLowering` handlers). Outside a loop header they are ordinary calls.
     RangeDownTo,
@@ -128,6 +144,16 @@ pub enum CompilerIntrinsic {
     UnsignedCompare {
         carrier: crate::types::Ty,
     },
+    /// The stdlib's unsigned division helper, at its declared unsigned operand type.
+    UnsignedDivide {
+        operand: crate::types::Ty,
+    },
+    /// The corresponding unsigned remainder helper.
+    UnsignedRemainder {
+        operand: crate::types::Ty,
+    },
+    /// A fully normalized `Result` helper reached from an expanded library inline body.
+    ResultFailure(ResultFailureIntrinsic),
     /// `next()` declared by a Kotlin primitive iterator (`kotlin.collections.IntIterator.next`).
     /// A target may call the iterator's unboxed element operation instead of the boxed
     /// `Iterator<T>.next` bridge (kotlinc's `IteratorNext` intrinsic); outside that target rule the

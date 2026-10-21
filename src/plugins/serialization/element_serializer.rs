@@ -14,7 +14,7 @@ use crate::ir::{ClassId, ExprId, IrExpr, IrFile, IrTypeOp};
 use crate::plugins::PluginContext;
 
 use super::ExternalSerializer;
-use crate::types::{type_name, Ty, TypeName};
+use crate::types::{type_name, Ty, TyKind, TypeName};
 
 #[derive(Clone)]
 pub(super) enum ElementSerializerPlan {
@@ -707,9 +707,9 @@ fn declared_serializer_plan(
 /// The checked read type of one projected serializer argument. An `in` projection has no readable
 /// value type, so it cannot supply a serializer operand.
 fn readable_type_argument(argument: &Ty) -> Option<Ty> {
-    match argument {
-        Ty::OutProjection(inner) | Ty::StarProjection(inner) => Some(**inner),
-        Ty::InProjection(_) => None,
+    match argument.kind() {
+        TyKind::OutProjection(inner) | TyKind::StarProjection(inner) => Some(inner),
+        TyKind::InProjection(_) => None,
         _ => Some(*argument),
     }
 }

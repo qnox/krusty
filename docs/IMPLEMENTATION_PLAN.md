@@ -5334,15 +5334,25 @@ regress.
     ✓ Calls in inline functions (`InlineCaller`): nested callees compiled first, each node with
     its method's own source map numbered past its own file, and a body bracketed for FixStack
     written over an empty stack: 3 more box files are byte-identical (3,755 to 3,758), none
-    regresses. Not yet matched: a nested line the class map holds in a middle range (kotlinc's
-    `SourceMapper` reuses only the first or last range) and the `$iv` depth of a literal's locals
+    regresses. Not yet matched: the `$iv` depth of a literal's locals
     inlined through another inline body.
     A call whose literal reads one of the inline function's own inline parameters stays expanded
     (`InlineParameterInLiteral`): a caller expanding that function's template splices its literal
     only through expanded bodies. Retire it with the expansions that need it.
-    ☐ `$default` calls, class members, non-public callees of another file, suspend callers and callees,
+    ✓ Callee templates with nested expansions (`NestedInlineExpansion`): the compiled callee body
+    holds the nested expansion, a forwarded reified parameter reaches the nested call as the outer
+    one, operator calls publish their solved type arguments, and inlined lines join only the first
+    or last range of their file (`mapNewLineNumber`): 14 more box files are byte-identical on
+    2.4.20 (3,758 to 3,772), none regresses.
+    ✓ Class members (`ClassMember`): a member compiled on its class as an instance method or a
+    value class's `-impl` (another file's member on the class its template names), a private
+    inline member inlined into another class reading through its class's accessors, companion
+    properties read through their getter in an inline body, and unread delegated-property operands
+    passed as `null`: 19 more box files are byte-identical on 2.4.20 (3,832 to 3,851), none
+    regresses.
+    ☐ `$default` calls, non-public callees of another file, suspend callers and callees,
     `crossinline` parameters, literals with non-local jumps, calls in default arguments, and callee
-    bodies with lambdas, local classes, nested expansions or enum switches.
+    bodies with lambdas, local classes or enum switches.
 - ☐ 7. Delete `InlineBodyPlan` and its resolver/FIR threading once the coroutine state machine runs
   on inlined bytecode (the plans exist only to reach IR before `lower_suspend`).
 
@@ -5541,6 +5551,27 @@ non-inline callers, still reads the field directly. Test:
 - Not yet selectable from the CLI: a user-facing wasm target waits on that klib platform.
 - Next: exceptions on wasm EH, enums and companions on the class tables, and further target-KLIB
   library bodies/intrinsics keyed by the selected declaration.
+
+## Prepared KLIB inline return frames  🚧
+
+- Branch-local returns in prepared stdlib inline bodies use an exact serialized block target,
+  anonymous result storage and a labelled structural exit; sole-tail returns keep their direct
+  value path. Both paths reject repeated enclosing target declarations. A block target never
+  becomes a readable local, and a value frame must prove it cannot fall through.
+- Structural regression tests cover successful stores/exits and malformed targets, ghost value
+  reads and missing results. The shared `INLINE_NULL_CHECK_RETURNS` module graph covers nullable
+  reference/scalar arguments, one evaluation and both null-failure paths against pinned kotlinc.
+- Inherited-reference bindings are integrated; the original `repeat` caller is a distinct shared
+  positive, and the unsupported `compareBy` factory retains the required-template rejection
+  contract. Exact header inventories pass for every manifest release.
+- Native range-builder roles accept both checked extension-receiver operand layouts through one
+  representation path, rejecting malformed coordinates rather than retrying by spelling.
+- The selected stdlib `CharSequence.trim(): CharSequence` extension carries an authenticated
+  provider operation. Native realizes only receivers proven to use its contiguous String or
+  StringBuilder storage; an arbitrary CharSequence still declines before entering the runtime.
+  `INLINE_TEXT_TRIM` is one shared dependency graph for whitespace, Unicode and empty inputs.
+- Remaining: publish collection-role facts for inherited iterators, validate every supported
+  KLIB lane and remove the inline-template draft's new conformance regressions before landing.
 
 ## KLIB writer — krusty compiles a module to a Kotlin library  ◐
 

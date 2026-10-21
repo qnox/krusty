@@ -155,8 +155,18 @@ impl Emitter<'_> {
             inline,
             reified,
         } = request;
-        let for_inline_copy =
-            self.ir.suspend_calls.contains_key(&call_expression) && !inline.must_inline();
+        // A `$default` bridge has no `$$forInline` copy: its body is never a state machine.
+        let inline_only =
+            match self.call_is_inline_only(call_expression, owner, name, descriptor, inline) {
+                Ok(inline_only) => inline_only,
+                Err(reason) => {
+                    self.run.set_inline_bail(reason);
+                    return InlineCallOutcome::HandledWithError;
+                }
+            };
+        let for_inline_copy = self.ir.suspend_calls.contains_key(&call_expression)
+            && !inline.must_inline()
+            && !self.default_call_operands.contains(call_expression);
         if let Some(recv) = dispatch_receiver {
             let recv_desc = type_descriptor(self.value_ty(recv));
             let splice_desc = format!("({}{}", recv_desc, &descriptor[1..]);
@@ -168,13 +178,7 @@ impl Emitter<'_> {
                 name,
                 descriptor,
                 splice_desc: &splice_desc,
-                inline_only: self.call_is_inline_only(
-                    call_expression,
-                    owner,
-                    name,
-                    descriptor,
-                    inline,
-                ),
+                inline_only,
                 allow_owner_bridge: true,
                 for_inline_copy,
             };
@@ -191,13 +195,7 @@ impl Emitter<'_> {
                 name,
                 descriptor,
                 splice_desc: descriptor,
-                inline_only: self.call_is_inline_only(
-                    call_expression,
-                    owner,
-                    name,
-                    descriptor,
-                    inline,
-                ),
+                inline_only,
                 allow_owner_bridge: inline.must_inline() || has_lambda_arg,
                 for_inline_copy,
             };
@@ -637,25 +635,28 @@ impl Emitter<'_> {
             return None;
         };
         let mut lambdas = Vec::new();
+        let mut captured = Vec::new();
         let mut lambda_bindings = HashMap::default();
-        match self.load_default_lambdas(call, &default_lambdas, &physical) {
-            Ok(loaded) => {
-                for (operand, lambda) in loaded {
+        let loaded = self
+            .load_default_lambdas(call, &default_lambdas, &physical)
+            .and_then(|loaded| {
+                for (operand, mut lambda) in loaded {
+                    default_bridge::append_default_lambda_captures(&mut lambda, &mut captured)?;
                     lambda_bindings.insert(operand, lambdas.len());
                     lambdas.push(lambda);
                 }
-            }
-            Err(error) => {
-                crate::trace_compiler!("splice", "unified inliner declines: {error:?}");
-                return None;
-            }
+                Ok(())
+            });
+        if let Err(error) = loaded {
+            crate::trace_compiler!("splice", "unified inliner declines: {error:?}");
+            return None;
         }
         let parameters = self.call_parameters(
             &supplies,
             &physical,
             args,
             &lambda_bindings,
-            Vec::new(),
+            captured,
             &lambdas,
         );
         let base = self.inline_splice_base(self.frame.size());
@@ -762,15 +763,18 @@ impl Emitter<'_> {
         }
         let loaded = self
             .load_default_lambdas(call, default_lambdas, &physical)
-            .map_err(|error| {
-                crate::trace_compiler!("splice", "a default lambda is not inlined: {error:?}");
-                "a default lambda of a planned call cannot be inlined"
-            })?;
-        for (operand, mut lambda) in loaded {
-            lambda.captured = captured.len()..captured.len();
-            lambda_bindings.insert(operand, lambdas.len());
-            lambdas.push(lambda);
-        }
+            .and_then(|loaded| {
+                for (operand, mut lambda) in loaded {
+                    default_bridge::append_default_lambda_captures(&mut lambda, &mut captured)?;
+                    lambda_bindings.insert(operand, lambdas.len());
+                    lambdas.push(lambda);
+                }
+                Ok(())
+            });
+        loaded.map_err(|error| {
+            crate::trace_compiler!("splice", "a default lambda is not inlined: {error:?}");
+            "a default lambda of a planned call cannot be inlined"
+        })?;
         // The lambdas' lines are lines of the caller's map as compiling them left it.
         let lambda_lines = self
             .cw
@@ -849,6 +853,7 @@ impl Emitter<'_> {
                 .map(|(index, ((supply, &ty), &argument))| Parameter {
                     category: Category::of_descriptor(&type_descriptor(ty)),
                     binding: match (lambda_bindings.get(&index), supply) {
+                        (Some(&lambda), Supply::Omitted) => Binding::DefaultLambda(lambda),
                         (Some(&lambda), _) => Binding::Lambda(lambda),
                         (None, Supply::CallerLocal) => self.caller_local_binding(argument, ty),
                         (None, Supply::Unread) => Binding::Unread,
@@ -1222,7 +1227,7 @@ impl Emitter<'_> {
                 .get(&argument)
                 .copied()
                 .unwrap_or_else(|| self.value_ty(argument));
-            matches!(semantic.non_null(), Ty::Fun(_))
+            semantic.non_null().is_fun()
         };
         let in_place = target.inline_only
             && !args.is_empty()

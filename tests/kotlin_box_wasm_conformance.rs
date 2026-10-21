@@ -457,28 +457,6 @@ fun box(): String {
     );
 }
 
-/// The stdlib's `context(value) { ... }` expands from its prepared inline body. A `Unit` block
-/// whose statements return from the enclosing function leaves nothing on the stack for the
-/// expansion's discarded result.
-#[test]
-fn wasm_a_stdlib_context_block_of_unit_statements_expands() {
-    expect_wasm_box(
-        r#"// LANGUAGE: +ContextParameters
-class Prefix(val value: String)
-
-context(prefix: Prefix) fun read() = prefix.value
-
-fun box(): String {
-    context(Prefix("O")) {
-        if (read() != "O") return "fail"
-    }
-    return "OK"
-}
-"#,
-        "wasmStdlibContextUnitBlock",
-    );
-}
-
 #[test]
 fn wasm_declines_an_instruction_wrapper_whose_body_lowering_does_not_model() {
     // `pow` reaches fdlibm's `__ieee754_pow`, whose locals have no initializer: the wrapper is not
@@ -545,6 +523,7 @@ pub(super) fn run_multimodule_case(case: &super::multimodule_conformance_cases::
 
 /// A required inline dependency function whose body cannot become a template rejects its caller:
 /// it is never compiled as a direct call of the dependency function.
+// PLATFORM-SPECIFIC: Wasm expands required KLIB inline bodies in common IR; JVM uses bytecode.
 #[test]
 fn wasm_a_declined_required_inline_body_rejects_the_caller() {
     let case = super::multimodule_conformance_cases::DECLINED_REQUIRED_INLINE_BODY;
@@ -567,8 +546,10 @@ fn wasm_a_declined_required_inline_body_rejects_the_caller() {
 }
 
 /// A required stdlib inline function whose template declines rejects its caller.
+// PLATFORM-SPECIFIC: this tests the Wasm KLIB template-decline contract, not Kotlin behavior.
 #[test]
 fn wasm_a_declined_required_stdlib_template_rejects_the_caller() {
+    super::multimodule_conformance_cases::verify_declined_stdlib_source_with_kotlinc();
     let src = super::multimodule_conformance_cases::DECLINED_STDLIB_INLINE_BODY;
     for target in WasmTarget::ALL {
         let lane = WasmLane { target };

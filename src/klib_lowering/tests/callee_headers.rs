@@ -656,16 +656,16 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it declares a parameter default)", 27),
                 ("it declares a vararg parameter)", 10),
                 ("it declares type parameters)", 98),
-                ("it uses a block of a compiler-introduced form)", 15),
-                ("it uses a call of a member function)", 55),
+                ("it uses a block of a compiler-introduced form)", 5),
+                ("it uses a call of a member function)", 59),
+                (
+                    "it uses a call of a member no library serializes, such as a fake override)",
+                    10,
+                ),
                 ("it uses a call through a property accessor signature)", 20),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a constructor call)", 2),
                 ("it uses a loop whose body is not a block)", 2),
-                (
-                    "it uses a returnable block with a `return` before its end)",
-                    2,
-                ),
                 ("its library serializes none)", 73),
             ]
         } else {
@@ -674,16 +674,16 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it declares a parameter default)", 20),
                 ("it declares a vararg parameter)", 10),
                 ("it declares type parameters)", 86),
-                ("it uses a block of a compiler-introduced form)", 15),
-                ("it uses a call of a member function)", 55),
+                ("it uses a block of a compiler-introduced form)", 5),
+                ("it uses a call of a member function)", 59),
+                (
+                    "it uses a call of a member no library serializes, such as a fake override)",
+                    10,
+                ),
                 ("it uses a call through a property accessor signature)", 20),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a constructor call)", 2),
                 ("it uses a loop whose body is not a block)", 2),
-                (
-                    "it uses a returnable block with a `return` before its end)",
-                    2,
-                ),
                 ("its library serializes none)", 73),
             ]
         };
@@ -730,7 +730,7 @@ fn stdlib_bodies_decline_inside_header_declared_callees() {
                 &[int],
             ),
             "the KLIB body of `kotlin.collections.contains` (it reaches the KLIB body of \
-             `kotlin.collections.indexOf` (it uses a block of a compiler-introduced form))",
+             `kotlin.collections.indexOf` (it uses a call of a member no library serializes, such as a fake override))",
         ),
     ];
     let declines = cases

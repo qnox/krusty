@@ -47,7 +47,11 @@ impl Emitter<'_> {
         }
         let class = self.ir.classes.get(class_id as usize)?;
         let argument = class.ctor_args.get(index as usize - 1)?;
-        if !argument.is_field {
+        // A capture read in constructor code reads its parameter, as kotlinc does, even when
+        // later code also needs the field.
+        if !argument.is_field
+            || argument.provenance == crate::ir::IrCtorParameterProvenance::Capture
+        {
             return None;
         }
         let field_index = argument.field_index?;
@@ -176,8 +180,11 @@ impl Emitter<'_> {
         code: &mut CodeBuilder,
     ) {
         // A static-storage object field has no instance operand. Evaluate a non-trivial receiver only
-        // for its effects; the value then runs on a clean stack.
-        if !self.reads_local_value(receiver) {
+        // for its effects; the value then runs on a clean stack. A property's own initializer store
+        // has no receiver in kotlinc, so its `this` loads nothing.
+        if !self.reads_local_value(receiver)
+            && !self.ir.property_initializer_stores.contains(&statement)
+        {
             self.emit_value(receiver, code);
             code.pop();
         }

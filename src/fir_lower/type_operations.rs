@@ -2,7 +2,7 @@
 
 use crate::fir::FirExprId;
 use crate::ir::{ExprId, IrBinOp, IrConst, IrExpr, IrTypeOp};
-use crate::types::{stored_value_ty, Ty};
+use crate::types::{stored_value_ty, Ty, TyKind};
 
 use super::{BodyLowering, FirLoweringFailure};
 
@@ -167,11 +167,11 @@ impl BodyLowering<'_> {
     /// Whether `target` (or `target?`) is a reified type parameter, whose test an inline call site
     /// specializes and therefore keeps as written.
     fn is_reified_type_parameter(&self, target: Ty) -> bool {
-        let Ty::TyParam(identity, _) = target.non_null() else {
+        let TyKind::TyParam(identity, _) = target.non_null().kind() else {
             return false;
         };
         self.index
-            .type_parameter_by_semantic_name(identity)
+            .type_parameter_by_semantic_name(identity.as_str())
             .and_then(|parameter| self.index.type_parameter_header(parameter))
             .is_some_and(|header| header.flags.is_reified())
     }

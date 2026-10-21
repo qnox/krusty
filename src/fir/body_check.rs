@@ -65,6 +65,8 @@ pub use session::BodyCheckSession;
 #[cfg(test)]
 mod nothing_instantiation_tests;
 mod plugins;
+#[cfg(test)]
+mod progression_tests;
 mod progressions;
 mod properties;
 #[cfg(test)]
@@ -198,7 +200,7 @@ impl CheckedBodyParameter<'_> {
     fn inline_expansion_mode(&self) -> crate::types::InlineExpansionMode {
         crate::types::InlineExpansionMode::declared(
             false,
-            matches!(self.ty.get(), Ty::Fun(_)),
+            self.ty.get().is_fun(),
             self.inline_modifier,
         )
     }
@@ -419,6 +421,9 @@ fn check_body_unit_with_parameters_and_defaults(
         checker.body.push_root(statement);
     }
     checker.body.finalize_capture_forwarding();
+    checker
+        .body
+        .order_nested_capture_parameters(checker.origins);
     // Convert transient parser coordinates into line-only output facts before this bounded syntax
     // unit is released. Checked/default/inline FIR may carry the resulting numbers, but never a
     // file offset or AST identity.
@@ -646,6 +651,7 @@ impl BodyFirChecker<'_> {
             }
             | FirExprKind::ComparisonCall { .. }
             | FirExprKind::ContainmentCall { .. }
+            | FirExprKind::ComparableRangeContainment { .. }
             | FirExprKind::FunctionInvokeReference { .. }
             | FirExprKind::ExtensionFunctionBinding { .. }
             | FirExprKind::CallableReference { .. }
@@ -1427,18 +1433,15 @@ impl BodyFirChecker<'_> {
                             dispatch_receiver,
                         }
                     } else if let Some(field) = self.active_class_storage_read(expression) {
-                        match self.class_values.get(name).copied() {
-                            Some(binding) => {
-                                let origin = self.expression_origin(expression)?;
-                                self.class_storage_read_kind(binding, origin)?
-                            }
+                        let binding = match self.class_values.get(name).copied() {
+                            Some(binding) => binding,
                             None => {
                                 let field = *field;
-                                let origin = self.expression_origin(expression)?;
                                 let ty = self.expression_type(expression)?;
-                                self.direct_class_storage_read_kind(field, ty, origin)?
+                                self.direct_class_capture_binding(field, ty)?
                             }
-                        }
+                        };
+                        self.capture_read_kind(expression, binding)?
                     } else if let Some(ExprLowering::SingletonValue(singleton)) =
                         self.info.expr_lowers.get(&expression)
                     {
@@ -1478,8 +1481,7 @@ impl BodyFirChecker<'_> {
                             source.lateinit.then_some(name.as_str()),
                         );
                     } else if let Some(binding) = self.class_values.get(name).copied() {
-                        let origin = self.expression_origin(expression)?;
-                        let kind = self.class_storage_read_kind(binding, origin)?;
+                        let kind = self.capture_read_kind(expression, binding)?;
                         return self.checked_storage_read(expression, binding.ty, kind);
                     } else if let Some((owner, parameter, ty)) =
                         self.current_named_context_parameter(name)
@@ -1648,7 +1650,7 @@ impl BodyFirChecker<'_> {
                     {
                         self.source_member_operator_call(expression, convention, *lo, &[*hi])?
                     } else {
-                        self.range_literal(*kind, *lo, *hi)?
+                        self.range_literal(expression, *kind, *lo, *hi)?
                     }
                 }
                 Expr::IncDec {
@@ -1668,7 +1670,50 @@ impl BodyFirChecker<'_> {
                     let operator = kind.operator_name();
                     let selected_range = self.selected_operator(expression, operator);
                     let selected_contains = self.selected_operator(expression, "contains");
-                    if selected_range && selected_contains {
+                    if selected_range
+                        && selected_contains
+                        && self.selected_operator(expression, "compareTo")
+                    {
+                        let receiver = self.expression(*value)?;
+                        let mut lower = self.source_member_operator_call_on_value(
+                            expression,
+                            "compareTo",
+                            receiver,
+                            &[*start],
+                        )?;
+                        // kotlinc calls `compareTo` on the value cast to the `Comparable` it is
+                        // selected on; that view, not the value's own class, owns the dispatch.
+                        let view = match self.info.resolved_operator_call(expression, "compareTo") {
+                            Some(ResolvedCall::Member(compare_to)) => Some(compare_to.receiver),
+                            _ => None,
+                        };
+                        if let Some(view) = view {
+                            let span = self.file.expr_span(expression).ok_or_else(|| {
+                                self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
+                            })?;
+                            let conversion = FirConversion {
+                                origin: self.expression_origin(expression)?,
+                                kind: FirConversionKind::SmartCast {
+                                    to: self.resolved_type(span, view)?,
+                                },
+                            };
+                            if let Some(dispatch) = lower.dispatch_receiver.as_mut() {
+                                dispatch.conversion = Some(conversion);
+                            }
+                        }
+                        // `end` is still `rangeTo`'s argument: it keeps the boundary that call
+                        // selected for it.
+                        let span = self.file.expr_span(*end).ok_or_else(|| {
+                            self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
+                        })?;
+                        let bound =
+                            self.resolved_type(span, self.info.semantic_ty(*end).non_null())?;
+                        FirExprKind::ComparableRangeContainment {
+                            lower,
+                            upper_bound: self.direct_range_operand(*end, bound)?,
+                            negated: *negated,
+                        }
+                    } else if selected_range && selected_contains {
                         let range_kind = if self.selected_range_construction(expression, operator) {
                             FirExprKind::Range {
                                 operation: Self::range_operation(*kind),
@@ -1676,6 +1721,8 @@ impl BodyFirChecker<'_> {
                                 start_type: self.expression_type(*start)?,
                                 end: self.expression(*end)?,
                                 end_type: self.expression_type(*end)?,
+                                ends_inlined_call: self
+                                    .selected_range_inlines(expression, operator),
                             }
                         } else {
                             self.source_member_operator_call(expression, operator, *start, &[*end])?

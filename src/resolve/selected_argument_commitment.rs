@@ -5,6 +5,7 @@
 //! parameter slot, for every selected callable whatever its origin.
 
 use super::*;
+use crate::types::TyKind;
 
 const SELECTED_INDEXED_ARGUMENT_MISMATCH: &str =
     "selected indexed operator's arguments do not match its parameters";
@@ -548,8 +549,8 @@ impl Checker<'_> {
         if !whole_array_syntax {
             return element;
         }
-        match declared_array.non_null() {
-            Ty::Obj(owner, _) if owner.matches("kotlin/Array") => {
+        match declared_array.non_null().kind() {
+            TyKind::Obj(owner, _) if owner.matches("kotlin/Array") => {
                 Ty::obj_args_name(owner, &[element])
             }
             _ => declared_array,

@@ -4,10 +4,50 @@ use super::super::classifier_records::classifier_record;
 use super::super::lookup::declared_symbols;
 use super::analysis::{native_stdlib, target_stdlib};
 use crate::libraries::{
-    CompilerIntrinsic, MemberRealization, PrimitiveBinaryIntrinsic, StdlibKlibIntrinsic,
+    CompilerIntrinsic, MemberRealization, PrimitiveBinaryIntrinsic, ResultFailureIntrinsic,
+    StdlibKlibIntrinsic,
 };
 use crate::symbol_source::SymbolNamespace;
 use crate::types::{type_name, ArrayFactoryKind, SemanticCallRole, Ty};
+
+#[test]
+fn only_the_selected_native_stdlib_realizes_its_result_check_helpers() {
+    let Some(libraries) = native_stdlib() else {
+        return;
+    };
+    let package = type_name("kotlin/test");
+    let name = "checkResultIsFailure";
+    // The exact same archive bytes, including their manifest module identity, cannot grant
+    // compiler operations when compilation input assembly selects them as an ordinary dependency.
+    let path =
+        crate::toolchain::kotlin_stdlib_klib(crate::compilation_target::CompilationTarget::Native)
+            .expect("native_stdlib already required this archive");
+    let untrusted =
+        super::super::KlibLibraries::open(&[super::super::KlibLibraryInput::dependency(path)])
+            .expect("the identical ordinary dependency declarations are signable");
+    for (provider, trusted) in [(&libraries, true), (&untrusted, false)] {
+        let symbols = declared_symbols(
+            &provider.inventory,
+            &provider.identities,
+            SymbolNamespace::Package(package),
+            name,
+        );
+        assert_eq!(symbols.callables.functions().len(), 2);
+        for function in symbols.callables.functions() {
+            let expected = if function.semantic_params().len() == 3 {
+                ResultFailureIntrinsic::CheckOfClass
+            } else {
+                ResultFailureIntrinsic::Check
+            };
+            assert_eq!(
+                function.callable.compiler_intrinsic,
+                trusted.then_some(CompilerIntrinsic::ResultFailure(expected)),
+                "trusted={trusted}: {:?}",
+                function.semantic_params()
+            );
+        }
+    }
+}
 
 #[test]
 fn an_int_plus_member_is_the_primitive_addition() {

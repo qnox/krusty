@@ -176,7 +176,7 @@ mod tests {
                 "package p; public class Outer { public static class Inner {} }".into(),
             )],
             crate::jvm::java_stub::StubMode::Lenient,
-            &|candidate| candidate == "java/lang/Object",
+            &|candidate: &str| candidate == "java/lang/Object",
         )
         .expect("stub");
         let cp = Classpath::new(vec![]);

@@ -269,6 +269,13 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   `toString-impl`) and the generated list keeps only the members source left out. The visit order is the order strings enter `d2` and the
   order within each protobuf list (`function`, `property`, `enum_entry`); the lists themselves stay
   in field-number order. Test: `tests/metadata_member_order_e2e.rs`.
+- A boxed value class (`+FullValueClasses`, kotlinc 2.4.20) is still a value class in metadata:
+  `IS_VALUE` (class flag bit 13) with no inline underlying property. A final one's generated
+  `equals`/`hashCode`/`toString` follow its declarations as SYNTHESIZED records with the data-class
+  flags (`0x101d6`, `0x100d6`). An abstract or sealed one has no generated bodies, yet declares each
+  `Any` member its source does not override as an open DECLARATION (`0x10116`, `0x10016`) without a
+  `JvmMethodSignature` and without a JVM method. Test:
+  `tests/metadata_value_class_synthesized_members_e2e.rs`.
 - Captured type parameters (kotlinc 2.4.20): a local or anonymous class refers to a type parameter
   of an enclosing declaration by id alone (`Type.type_parameter`). Ids come from kotlinc's
   per-declaration interner: the class's own parameters first, then each captured one on first use,
@@ -609,6 +616,32 @@ wrong shifts every abbreviation onto the neighbouring supertype.
 Both lists lead with the superclass. The emitter then moves it to the slot that resolution recorded
 in `ResolvedClassifierHeader` and lowering published as `IrFile::class_superclass_positions`, so the
 spellings move with it. Tests: `tests/metadata_supertype_order_e2e.rs`.
+
+## Prepared KLIB inline return targets
+
+The selected Native stdlib's prepared `requireNotNull` and `checkNotNull` bodies contain
+branch-local returns to serialized returnable-block symbols. Those symbols are control-flow
+identities, not local-value declarations or returns from the containing callable. Common lowering
+keeps a lexical target stack for every block, including the sole-tail-return fast path, and uses
+anonymous result storage only for structural frames. Repeated enclosing target declarations,
+reads of a target as a value, and value frames with reachable fallthrough reject explicitly.
+The existing IR decoder and metadata wire format are unchanged. Structural tests live in
+`klib_lowering::tests::returnable_blocks`; `INLINE_NULL_CHECK_RETURNS` supplies one shared
+JVM/Native/Wasm declaration graph with reference/scalar results, exact failure messages and
+single evaluation of its argument.
+
+Prepared calls retain the callee's recorded extension-receiver parameter coordinate; it does not
+become a dispatch receiver merely because the body came from a KLIB. Native's existing range-builder
+roles consume either a separate receiver and one argument or the serialized parameter-zero receiver
+and one argument through the same representation path. Other layouts reject explicitly. This adds
+no declaration role or metadata wire format; the selected provider fact still owns the operation.
+
+The target stdlib's exact zero-argument `CharSequence.trim(): CharSequence` extension is published
+with `CompilerIntrinsic::TextTrim` only after the provider authenticates the selected stdlib and
+its complete receiver, parameter, result and modifier shape. An identical ordinary dependency
+does not acquire that operation. Native consumes the fact and the recorded receiver coordinate,
+and proves contiguous String/StringBuilder storage before invoking its existing trim runtime.
+Neither the serialized signature nor the callable is reconstructed from a backend spelling.
 
 ## Compiler-plugin declarations in a KLIB
 

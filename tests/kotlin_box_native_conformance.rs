@@ -20,9 +20,6 @@ use krusty::native::{CraneliftBackend, Entry, NativeTarget};
 use super::box_lane::{self, Lane, Libraries, Outcome};
 use super::box_ratchet::Platform;
 
-#[path = "native_library_inline_bodies.rs"]
-mod library_inline_bodies;
-
 /// Native cases are analyzed against the Kotlin/Native stdlib KLIB, as kotlinc-native compiles them.
 const LIBRARIES: Libraries = Libraries::StdlibKlib;
 
@@ -297,6 +294,7 @@ pub(super) fn run_multimodule_case(case: &super::multimodule_conformance_cases::
 
 /// A required inline dependency function whose body cannot become a template rejects its caller:
 /// it is never compiled as a direct call of the dependency function.
+// PLATFORM-SPECIFIC: Native expands required KLIB inline bodies in common IR; JVM uses bytecode.
 #[test]
 fn native_a_declined_required_inline_body_rejects_the_caller() {
     let case = super::multimodule_conformance_cases::DECLINED_REQUIRED_INLINE_BODY;
@@ -325,8 +323,10 @@ fn native_a_declined_required_inline_body_rejects_the_caller() {
 }
 
 /// A required stdlib inline function whose template declines rejects its caller.
+// PLATFORM-SPECIFIC: this tests the Native KLIB template-decline contract, not Kotlin behavior.
 #[test]
 fn native_a_declined_required_stdlib_template_rejects_the_caller() {
+    super::multimodule_conformance_cases::verify_declined_stdlib_source_with_kotlinc();
     let src = super::multimodule_conformance_cases::DECLINED_STDLIB_INLINE_BODY;
     let stem = "declinedRequiredStdlibTemplate";
     let Some(target) = host() else {

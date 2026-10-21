@@ -29,10 +29,104 @@ fn template(
 ) -> Result<KlibInlineTemplate, crate::klib_lowering::KlibBodyDecline> {
     let callees = TemplateCallees {
         declarations: libraries.declaration_bodies(),
+        references: libraries.reference_bindings(),
         source: libraries,
     };
     lower_inline_template(ir, selected, libraries.inline_declaration_bodies(), callees)
         .expect("a KLIB function")
+}
+
+#[test]
+fn default_null_checks_lower_branch_local_returns_in_prepared_inline_blocks() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    for name in ["requireNotNull", "checkNotNull"] {
+        let symbols = libraries.symbols(SymbolNamespace::Package(type_name("kotlin")), name);
+        let selected = symbols
+            .callables
+            .functions()
+            .iter()
+            .filter(|function| function.callable.params.len() == 1)
+            .collect::<Vec<_>>();
+        let [selected] = selected.as_slice() else {
+            panic!("expected one single-argument `kotlin.{name}`");
+        };
+        let selected = libraries
+            .external_callable(
+                selected
+                    .callable
+                    .external_identity
+                    .expect("provider identity"),
+            )
+            .expect("the selected declaration is realized");
+        let mut ir = IrFile::default();
+        let template = template(&mut ir, &libraries, &selected)
+            .unwrap_or_else(|decline| panic!("{name}: {decline}"));
+        assert_eq!(
+            ir.functions[template.function as usize].ret,
+            selected.callable.ret
+        );
+        validated(&ir);
+    }
+}
+
+#[test]
+fn array_sum_template_keeps_its_selected_receiver_contract() {
+    extension_template(
+        "kotlin/collections",
+        "sumOf",
+        Ty::obj("kotlin/IntArray"),
+        &[Ty::fun(vec![Ty::Int], Ty::Int)],
+    );
+}
+
+#[test]
+fn unsigned_array_iteration_template_keeps_its_selected_receiver_contract() {
+    extension_template(
+        "kotlin/collections",
+        "forEach",
+        Ty::obj("kotlin/UByteArray"),
+        &[Ty::fun(vec![Ty::UByte], Ty::Unit)],
+    );
+}
+
+#[test]
+fn text_trim_template_keeps_its_selected_receiver_contract() {
+    extension_template("kotlin/text", "trim", Ty::String, &[]);
+}
+
+fn extension_template(package: &str, name: &str, receiver: Ty, parameters: &[Ty]) {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let symbols = libraries.symbols(SymbolNamespace::Package(type_name(package)), name);
+    let selected = symbols
+        .callables
+        .functions()
+        .iter()
+        .filter(|function| {
+            function.semantic_receiver() == Some(receiver)
+                && function.semantic_params().as_ref() == parameters
+        })
+        .collect::<Vec<_>>();
+    let [selected] = selected.as_slice() else {
+        panic!("expected one `{package}.{name}` on {receiver:?}");
+    };
+    let selected = libraries
+        .external_callable(
+            selected
+                .callable
+                .external_identity
+                .expect("provider identity"),
+        )
+        .expect("the selected declaration is realized");
+    let mut ir = IrFile::default();
+    template(&mut ir, &libraries, &selected)
+        .unwrap_or_else(|decline| panic!("{name} on {receiver:?}: {decline}"));
+    validated(&ir);
 }
 
 #[test]
@@ -81,19 +175,60 @@ fn a_scope_function_body_is_a_generic_template_that_splices_its_lambda() {
 }
 
 #[test]
-fn a_declined_body_leaves_the_file_as_it_was() {
+fn repeat_uses_the_canonical_declaration_of_its_inherited_iterator() {
     let Some(root) = distribution_root() else {
         return;
     };
     let libraries = stdlib(&root);
     let selected = kotlin_function(&libraries, "repeat");
     let mut ir = IrFile::default();
+    // The original `repeat` body now lowers: its exact `IntRange.iterator` reference is bound at
+    // provider publication to the real `IntProgression.iterator`, not a fabricated range member.
+    let template = template(&mut ir, &libraries, &selected).expect("the real repeat template");
+    let function = &ir.functions[template.function as usize];
+    assert_eq!(function.params, selected.callable.params);
+    assert_eq!(function.ret, selected.callable.ret);
+    assert!(ir.inline_only_fns.contains(&template.function));
+    assert!(ir.exprs.iter().any(|expression| {
+        let IrExpr::Call {
+            callee: Callee::External { target, .. },
+            ..
+        } = expression
+        else {
+            return false;
+        };
+        let callable = libraries
+            .external_callable(*target)
+            .expect("a provider identity");
+        matches!(callable.declaration_signature,
+            Some(KlibDeclarationSignature::Public(signature))
+                if signature.matches_exact(&["kotlin", "ranges"],
+                    &["IntProgression", "iterator"], 8062689420742628886, 0))
+    }));
+    validated(&ir);
+}
+
+#[test]
+fn a_full_signature_mismatch_does_not_reuse_a_same_named_template() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let mut selected = kotlin_function(&libraries, "repeat");
+    let forged = super::demo_package::operator(&["kotlin"], None, "repeat", &[]).0;
+    let Some(KlibDeclarationSignature::Public(original)) = &selected.declaration_signature else {
+        panic!("repeat has a public identity");
+    };
+    assert_eq!(forged.package(), original.package());
+    assert_eq!(forged.declaration(), original.declaration());
+    assert_ne!(forged.member_id(), original.member_id());
+    let forged = KlibDeclarationSignature::Public(forged);
+    selected.declaration_signature = Some(forged.clone());
+    selected.dependency_callable.as_mut().unwrap().declaration = forged;
+    let mut ir = IrFile::default();
     let decline = template(&mut ir, &libraries, &selected)
-        .expect_err("`repeat` uses a form body lowering does not model");
-    assert_eq!(
-        decline.reason(),
-        &KlibBodyDeclineReason::UnsupportedOperation("a block of a compiler-introduced form")
-    );
+        .expect_err("an equal qualified spelling cannot authorize another full identity");
+    assert_eq!(decline.reason(), &KlibBodyDeclineReason::Unjoined);
     assert!(ir.exprs.is_empty());
     assert!(ir.functions.is_empty());
     assert!(ir.fn_params.is_empty());

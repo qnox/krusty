@@ -5,6 +5,7 @@
 //! adaptation plan used by checked bodies, then returns only the contextual function type.
 
 use super::*;
+use crate::types::TyKind;
 
 impl ProductionSignatureSemantics<'_> {
     /// Select, against the expected function type, the receiver-less function a callable reference
@@ -117,11 +118,11 @@ impl ProductionSignatureSemantics<'_> {
                 for (parameter, declared) in
                     parameters.iter_mut().zip(&candidate.callable.params)
                 {
-                    if matches!(parameter.non_null(), Ty::TyParam(..)) {
+                    if parameter.non_null().is_ty_param() {
                         *parameter = *declared;
                     }
                 }
-                let result = if matches!(expected.ret.non_null(), Ty::TyParam(..)) {
+                let result = if expected.ret.non_null().is_ty_param() {
                     candidate.callable.ret
                 } else {
                     expected.ret
@@ -251,7 +252,7 @@ impl ProductionSignatureSemantics<'_> {
         spelling: &str,
         expected: crate::fir::ResolvedTy,
     ) -> Option<crate::fir::ResolvedTy> {
-        let Ty::Fun(expected_function) = expected.get().non_null() else {
+        let TyKind::Fun(expected_function) = expected.get().non_null().kind() else {
             return None;
         };
         let alias = self.applied_source_alias_expansion(scope, spelling, &[]);
@@ -310,7 +311,7 @@ impl ProductionSignatureSemantics<'_> {
             crate::symbol_source::SymbolSource::classifier(&source, classifier).map(|classifier| (
                 classifier.sam_eligible,
                 classifier.type_params.clone(),
-                classifier.members.len(),
+                classifier.member_records().count(),
             )),
         );
         let (mut parameters, call_sig) = if let Some(sam) = sam {

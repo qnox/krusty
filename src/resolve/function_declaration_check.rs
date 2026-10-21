@@ -1,6 +1,7 @@
 //! Checking top-level and body-local function declarations against their owned stable headers.
 
 use super::*;
+use crate::types::TyKind;
 
 impl Checker<'_> {
     pub(super) fn check_method(
@@ -470,7 +471,7 @@ impl Checker<'_> {
                     );
                     if inferred != Ty::Error {
                         self.ret_ty = inferred;
-                        if let Some(Ty::Obj(internal, _)) = dispatch_this {
+                        if let Some(TyKind::Obj(internal, _)) = dispatch_this.map(Ty::kind) {
                             let params: Vec<Ty> = f
                                 .params
                                 .iter()

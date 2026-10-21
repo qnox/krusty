@@ -431,12 +431,18 @@ pub(super) fn complete(
     }
     let this0 = ir.add_expr(IrExpr::GetValue(0));
     let dval = ir.add_expr(IrExpr::GetValue(desc_local));
-    init_stmts.push(ir.add_expr(IrExpr::SetField {
+    let descriptor_store = ir.add_expr(IrExpr::SetField {
         receiver: this0,
         class: ser_id,
         index: 0,
         value: dval,
-    }));
+    });
+    // A singleton serializer's store is its `descriptor` property's initializer; a generic one
+    // assigns the field in its constructor body instead.
+    if !is_generic {
+        ir.property_initializer_stores.insert(descriptor_store);
+    }
+    init_stmts.push(descriptor_store);
     let init = ir.add_expr(IrExpr::Block {
         stmts: init_stmts,
         value: None,

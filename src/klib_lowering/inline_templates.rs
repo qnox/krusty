@@ -26,7 +26,10 @@ use super::klib_types::{member_owner, semantic_type, KlibTypeParameters};
 use super::lowering_checkpoint::LoweringCheckpoint;
 use crate::fir::ExternalCallableId;
 use crate::ir::{Callee, FunId, IrFile};
-use crate::klib_libraries::{KlibCalleeOrigin, KlibDeclarationBodies};
+use crate::klib_libraries::{
+    KlibDeclarationBodies, KlibReferenceBinding, KlibReferenceBindings, KlibReferenceDispatch,
+    KlibReferenceOrigin,
+};
 use crate::libraries::{
     ExternalCallableKind, ExternalCallableRealization, KlibBodyCallable, KlibDeclarationSignature,
     KlibDependencyCallable,
@@ -51,6 +54,8 @@ pub struct TemplateCallees<'a> {
     /// The ordinary serialized declarations of the loaded KLIBs, which resolve each call's
     /// producer and describe its callee.
     pub declarations: &'a KlibDeclarationBodies,
+    /// Already normalized reference identities. Template lowering performs no hierarchy lookup.
+    pub references: &'a KlibReferenceBindings,
     /// The calling compilation's symbols: the provider identity of an exact serialized
     /// declaration, its property and classifier records, and the class hierarchy that decides the
     /// subtyping a body leaves implicit.
@@ -222,11 +227,7 @@ fn expansion_modes(
         .zip(modifiers)
         .enumerate()
         .map(|(index, (ty, modifier))| {
-            InlineExpansionMode::declared(
-                receiver == Some(index),
-                matches!(ty, Ty::Fun(_)),
-                modifier,
-            )
+            InlineExpansionMode::declared(receiver == Some(index), ty.is_fun(), modifier)
         })
         .collect())
 }
@@ -268,16 +269,21 @@ impl TemplateCalls<'_> {
         signature: &KlibDeclarationSignature,
         callee: &KlibPublicIdSignature,
     ) -> Result<KlibDependencyCallable, KlibBodyDeclineReason> {
-        match self
-            .callees
-            .declarations
-            .callee_origin(self.module, signature)
-        {
-            KlibCalleeOrigin::Exact(identity) => Ok(identity),
-            KlibCalleeOrigin::Ambiguous => Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(
+        self.binding(signature, callee)
+            .map(|binding| binding.declaration)
+    }
+
+    fn binding(
+        &self,
+        signature: &KlibDeclarationSignature,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<KlibReferenceBinding, KlibBodyDeclineReason> {
+        match self.callees.references.get(self.module, signature) {
+            KlibReferenceOrigin::Exact(binding) => Ok(binding),
+            KlibReferenceOrigin::Ambiguous => Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(
                 Box::new(callee.clone()),
             )),
-            KlibCalleeOrigin::Missing => Err(KlibBodyDeclineReason::UndeclaredCallee(Box::new(
+            KlibReferenceOrigin::Missing => Err(KlibBodyDeclineReason::UndeclaredCallee(Box::new(
                 callee.clone(),
             ))),
         }
@@ -436,7 +442,8 @@ impl CallLinker for TemplateCalls<'_> {
         callee: &KlibPublicIdSignature,
     ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
         let signature = KlibDeclarationSignature::Public(callee.clone());
-        let identity = self.identity(callee)?;
+        let binding = self.binding(&signature, callee)?;
+        let identity = &binding.declaration;
         let callee_declined = |reason| {
             KlibBodyDeclineReason::CalleeDeclined(Box::new(KlibBodyDecline::new(
                 signature.clone(),
@@ -446,12 +453,12 @@ impl CallLinker for TemplateCalls<'_> {
         let (arena, declaration) = self
             .callees
             .declarations
-            .function(&identity)
+            .function(identity)
             .ok_or_else(|| callee_declined(KlibBodyDeclineReason::Unjoined))?;
         let Some((target, realization)) = self
             .callees
             .source
-            .external_callable_by_dependency(&identity)
+            .external_callable_by_dependency(identity)
         else {
             return Err(callee_declined(KlibBodyDeclineReason::SignatureMismatch(
                 "the provider realizes no declaration of the exact serialized callee".to_owned(),
@@ -463,11 +470,15 @@ impl CallLinker for TemplateCalls<'_> {
             ));
         }
         if let Some(receiver) = &declaration.dispatch_receiver {
+            let KlibDeclarationSignature::Public(canonical) = &identity.declaration else {
+                return Err(callee_declined(KlibBodyDeclineReason::Unjoined));
+            };
             let member = MemberDeclaration {
-                callee,
+                callee: canonical,
                 arena,
                 declaration,
                 receiver,
+                reference_dispatch: binding.dispatch.as_ref(),
             };
             return member_call(self.callees.source, member, target, &realization)
                 .map_err(callee_declined);
@@ -567,6 +578,7 @@ struct MemberDeclaration<'a> {
     arena: &'a crate::metadata::klib_ir::tree::KlibIrArena,
     declaration: &'a crate::metadata::klib_ir::tree::KlibIrFunction,
     receiver: &'a crate::metadata::klib_ir::tree::KlibIrParameter,
+    reference_dispatch: Option<&'a KlibReferenceDispatch>,
 }
 
 /// A template's call of the member `callee`, by the provider's identity `target`. Its signature is
@@ -585,6 +597,7 @@ fn member_call(
         arena,
         declaration,
         receiver,
+        reference_dispatch,
     } = member;
     let generic = realization
         .callable
@@ -608,7 +621,22 @@ fn member_call(
             realization.declaration_owner
         )));
     }
-    let (receiver, class_type_parameters) = class_receiver(source, owner, arena, receiver)?;
+    let (receiver, class_type_parameters) = if let Some(dispatch) = reference_dispatch {
+        // The reference binder proved the applied parent before publication. This bounded slice
+        // has no class-dependent parameter/result positions; keep the referenced receiver itself
+        // rather than redoing a hierarchy walk while lowering its call.
+        if dispatch.declaring_receiver.obj_internal() != Some(owner)
+            || realization.callable.ret.mentions_ty_param()
+            || !realization.callable.params.is_empty()
+        {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "an inherited reference disagrees with its frozen dispatch contract".to_owned(),
+            ));
+        }
+        (dispatch.receiver, Vec::new())
+    } else {
+        class_receiver(source, owner, arena, receiver)?
+    };
     let params = realization.callable.params.clone();
     let ret = realization.callable.ret;
     Ok(LinkedCallee {

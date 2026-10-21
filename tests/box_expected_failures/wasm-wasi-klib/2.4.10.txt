@@ -5852,7 +5852,6 @@ sealed/kt49752.kt
 sealed/kt54028.kt
 sealed/kt54028_cursed.kt
 sealed/multipleFiles_enabled.kt
-sealed/objects.kt
 secondaryConstructors/accessToCompanion.kt
 secondaryConstructors/basicNoPrimaryOneSink.kt
 secondaryConstructors/basicPrimary.kt
@@ -5909,7 +5908,6 @@ smartCasts/smartCastInsideIf.kt
 smartCasts/smartCastedGenericWhenSubjectInRangeCheck.kt
 smartCasts/smartcastFromGenericToString.kt
 smartCasts/smartcastToStarType.kt
-smartCasts/whenSmartCast.kt
 specialBuiltins/bridgeNotEmptyMap.kt
 specialBuiltins/bridges.kt
 specialBuiltins/emptyList.kt
@@ -6356,7 +6354,6 @@ wasmStringSwitch/mixedStringAndNonStringComparisons.kt
 wasmStringSwitch/safeCallElvisRHS.kt
 wasmStringSwitch/typeOperatorCast.kt
 wasmStringSwitch/typeOperatorSafeCast.kt
-wasmStringSwitch/whenOnVariable.kt
 when/edgeCases.kt
 when/emptyWhen.kt
 when/enumOptimization/bigEnum.kt
@@ -6405,7 +6402,6 @@ when/noElseExhaustiveUnitExpected.kt
 when/nullableWhen.kt
 when/oneUnitBranch.kt
 when/range.kt
-when/sealedWhenInitialization.kt
 when/stringOptimization/duplicatingItems.kt
 when/stringOptimization/duplicatingItemsSameHashCode.kt
 when/stringOptimization/duplicatingItemsSameHashCode2.kt
@@ -6436,7 +6432,6 @@ when/whenSubjectVariable/isCheckOnSubjectVariable.kt
 when/whenSubjectVariable/kt27161.kt
 when/whenSubjectVariable/kt27161_nested.kt
 when/whenSubjectVariable/kt27161_nested2.kt
-when/whenSubjectVariable/kt27161_string.kt
 when/whenSubjectVariable/kt33641_inlineClass.kt
 when/whenSubjectVariable/sparseIntSwitchWithSubjectVariable.kt
 when/whenSubjectVariable/subjectExpressionIsEvaluatedOnce.kt

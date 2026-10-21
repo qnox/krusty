@@ -171,7 +171,7 @@ impl BodyLowering<'_> {
     /// The checker's syntactic divergence of a source expression: a jump or `throw`, a block
     /// ending in one, an `if` with an `else` all of whose branches diverge, and a call with a
     /// diverging argument. A subjectless `when` is not read as diverging.
-    fn diverges(&self, id: KlibIrExprId) -> bool {
+    pub(super) fn diverges(&self, id: KlibIrExprId) -> bool {
         match &self.arena.expr(id).kind {
             KlibIrExprKind::Throw(_)
             | KlibIrExprKind::Return { .. }

@@ -12,6 +12,9 @@ impl ClassWriter {
     pub fn seed_plain_class_pool(
         &mut self,
         ctor_desc: &str,
+        // `MethodParameters` entries under `-java-parameters`: ASM's `visitParameter` interns each
+        // name right after the header, before every annotation.
+        method_parameters: &[(Option<String>, u16)],
         parameters: &[SeedCtorParameter],
         // Per-member generic `Signature`s (parameterized-type ctor/accessor/field members).
         sigs: &MemberSignatures,
@@ -25,6 +28,12 @@ impl ClassWriter {
         // The ctor's generic Signature (`(Ljava/util/List<Ljava/lang/String;>;)V`) — right after the desc.
         if let Some(s) = sigs.ctor {
             self.cp.utf8(s);
+        }
+        for name in method_parameters
+            .iter()
+            .filter_map(|(name, _)| name.as_deref())
+        {
+            self.cp.utf8(name);
         }
         // The constructor's OWN annotations, before the parameter ones: ASM visits `visitAnnotation`
         // ahead of `visitParameterAnnotation`, so `class C @Mark constructor(val x: Int)` interns

@@ -8,7 +8,7 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ir::{ClassId, ExprId, IrExpr, IrFile, IrTypeOp};
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 const OBJECT_REF: &str = "kotlin/jvm/internal/Ref$ObjectRef";
 
@@ -17,35 +17,37 @@ pub(super) fn holder_class(elem: &Ty) -> (&'static str, &'static str) {
     if elem.is_nullable() {
         return ("kotlin/jvm/internal/Ref$ObjectRef", "Ljava/lang/Object;");
     }
-    match elem.non_null() {
-        Ty::Int | Ty::UInt => ("kotlin/jvm/internal/Ref$IntRef", "I"),
-        Ty::Long | Ty::ULong => ("kotlin/jvm/internal/Ref$LongRef", "J"),
-        Ty::Float => ("kotlin/jvm/internal/Ref$FloatRef", "F"),
-        Ty::Double => ("kotlin/jvm/internal/Ref$DoubleRef", "D"),
-        Ty::Boolean => ("kotlin/jvm/internal/Ref$BooleanRef", "Z"),
-        Ty::Char => ("kotlin/jvm/internal/Ref$CharRef", "C"),
-        Ty::Byte | Ty::UByte => ("kotlin/jvm/internal/Ref$ByteRef", "B"),
-        Ty::Short | Ty::UShort => ("kotlin/jvm/internal/Ref$ShortRef", "S"),
-        Ty::Obj(name, _) if name.matches("kotlin/Int") || name.matches("kotlin/UInt") => {
+    match elem.non_null().kind() {
+        TyKind::INT | TyKind::UINT => ("kotlin/jvm/internal/Ref$IntRef", "I"),
+        TyKind::LONG | TyKind::ULONG => ("kotlin/jvm/internal/Ref$LongRef", "J"),
+        TyKind::FLOAT => ("kotlin/jvm/internal/Ref$FloatRef", "F"),
+        TyKind::DOUBLE => ("kotlin/jvm/internal/Ref$DoubleRef", "D"),
+        TyKind::BOOLEAN => ("kotlin/jvm/internal/Ref$BooleanRef", "Z"),
+        TyKind::CHAR => ("kotlin/jvm/internal/Ref$CharRef", "C"),
+        TyKind::BYTE | TyKind::UBYTE => ("kotlin/jvm/internal/Ref$ByteRef", "B"),
+        TyKind::SHORT | TyKind::USHORT => ("kotlin/jvm/internal/Ref$ShortRef", "S"),
+        TyKind::Obj(name, _) if name.matches("kotlin/Int") || name.matches("kotlin/UInt") => {
             ("kotlin/jvm/internal/Ref$IntRef", "I")
         }
-        Ty::Obj(name, _) if name.matches("kotlin/Long") || name.matches("kotlin/ULong") => {
+        TyKind::Obj(name, _) if name.matches("kotlin/Long") || name.matches("kotlin/ULong") => {
             ("kotlin/jvm/internal/Ref$LongRef", "J")
         }
-        Ty::Obj(name, _) if name.matches("kotlin/Float") => {
+        TyKind::Obj(name, _) if name.matches("kotlin/Float") => {
             ("kotlin/jvm/internal/Ref$FloatRef", "F")
         }
-        Ty::Obj(name, _) if name.matches("kotlin/Double") => {
+        TyKind::Obj(name, _) if name.matches("kotlin/Double") => {
             ("kotlin/jvm/internal/Ref$DoubleRef", "D")
         }
-        Ty::Obj(name, _) if name.matches("kotlin/Boolean") => {
+        TyKind::Obj(name, _) if name.matches("kotlin/Boolean") => {
             ("kotlin/jvm/internal/Ref$BooleanRef", "Z")
         }
-        Ty::Obj(name, _) if name.matches("kotlin/Char") => ("kotlin/jvm/internal/Ref$CharRef", "C"),
-        Ty::Obj(name, _) if name.matches("kotlin/Byte") || name.matches("kotlin/UByte") => {
+        TyKind::Obj(name, _) if name.matches("kotlin/Char") => {
+            ("kotlin/jvm/internal/Ref$CharRef", "C")
+        }
+        TyKind::Obj(name, _) if name.matches("kotlin/Byte") || name.matches("kotlin/UByte") => {
             ("kotlin/jvm/internal/Ref$ByteRef", "B")
         }
-        Ty::Obj(name, _) if name.matches("kotlin/Short") || name.matches("kotlin/UShort") => {
+        TyKind::Obj(name, _) if name.matches("kotlin/Short") || name.matches("kotlin/UShort") => {
             ("kotlin/jvm/internal/Ref$ShortRef", "S")
         }
         _ => ("kotlin/jvm/internal/Ref$ObjectRef", "Ljava/lang/Object;"),
@@ -65,28 +67,36 @@ pub(super) fn holder_ty(elem: &Ty) -> Ty {
 /// Replace only backend declaration slots. The marker map remains logical so metadata, diagnostics,
 /// and non-JVM backends never observe `Ref$*Ref` as the captured source value's type.
 pub(super) fn lower_class_capture_slots(ir: &mut IrFile) {
-    let mut physical = HashMap::<ClassId, Vec<(usize, Ty)>>::default();
-    for (&(class, field), _) in &ir.shared_class_capture_fields {
+    // Each cell is a field and the constructor-prefix parameter that fills it. A local class can
+    // keep a capture in its parameter alone, so the two positions can differ.
+    let mut physical = HashMap::<ClassId, Vec<(usize, usize, Ty)>>::default();
+    for &(class, field) in ir.shared_class_capture_fields.keys() {
+        let declaration = &ir.classes[class as usize];
+        let parameter = declaration
+            .ctor_args
+            .iter()
+            .position(|argument| argument.field_index == Some(field))
+            .expect("a shared capture field is filled by a constructor-prefix parameter");
         let field = field as usize;
-        let element = ir.classes[class as usize].fields[field].ty;
+        let element = declaration.fields[field].ty;
         physical
             .entry(class)
             .or_default()
-            .push((field, holder_ty(&element)));
+            .push((field, parameter, holder_ty(&element)));
     }
     for slots in physical.values_mut() {
-        slots.sort_unstable_by_key(|(field, _)| *field);
+        slots.sort_unstable_by_key(|(field, _, _)| *field);
     }
 
     for (&class, slots) in &physical {
         let declaration = &mut ir.classes[class as usize];
-        for &(field, holder) in slots {
+        for &(field, parameter, holder) in slots {
             declaration.fields[field].ty = holder;
-            let argument = &mut declaration.ctor_args[field];
+            let argument = &mut declaration.ctor_args[parameter];
             argument.ty = holder;
             argument.check = None;
             for constructor in &mut declaration.secondary_ctors {
-                constructor.prefix_params[field] = holder;
+                constructor.prefix_params[parameter] = holder;
             }
         }
     }
@@ -122,8 +132,8 @@ pub(super) fn lower_class_capture_slots(ir: &mut IrFile) {
         let Some(slots) = class_names.get(internal) else {
             continue;
         };
-        for &(field, holder) in slots {
-            parameters[field] = holder;
+        for &(_, parameter, holder) in slots {
+            parameters[parameter] = holder;
         }
     }
 }
@@ -440,7 +450,7 @@ fn lambda_class_constructor(ir: &IrFile, internal: TypeName) -> Option<Vec<Ty>> 
 
 /// The element a constructor parameter of the erased `Ref$ObjectRef<T>` holder carries.
 fn erased_cell_element(parameter: Ty) -> Option<Ty> {
-    let Ty::Obj(holder, arguments) = parameter.non_null() else {
+    let TyKind::Obj(holder, arguments) = parameter.non_null().kind() else {
         return None;
     };
     if !holder.matches(OBJECT_REF) {
@@ -571,62 +581,56 @@ mod tests {
 
     #[test]
     fn realizes_only_marked_class_capture_slots() {
+        // A local class's constructor prefix: an unstored capture kept in its parameter alone,
+        // then the shared and the plain stored captures, so field and parameter positions differ.
+        let capture = |field_index: Option<u32>| IrCtorArg {
+            name: None,
+            context_kind: crate::types::ContextParameterKind::None,
+            ty: Ty::String,
+            declared_ty: None,
+            is_field: field_index.is_some(),
+            field_index,
+            has_default: false,
+            is_vararg: false,
+            type_param: None,
+            check: None,
+            anonymous_super_forward: None,
+            capture: None,
+            provenance: crate::ir::IrCtorParameterProvenance::Capture,
+            capture_identity: None,
+        };
         let mut ir = IrFile::default();
         let mut class = IrClass::synthetic(crate::types::type_name("Captured"));
         class.fields = vec![
             IrField::new("shared".to_string(), Ty::String),
             IrField::new("plain".to_string(), Ty::String),
         ];
-        class.ctor_args = vec![
-            IrCtorArg {
-                name: Some("shared".to_string()),
-                context_kind: crate::types::ContextParameterKind::None,
-                ty: Ty::String,
-                declared_ty: None,
-                is_field: true,
-                field_index: None,
-                has_default: false,
-                is_vararg: false,
-                type_param: None,
-                check: Some("shared".to_string()),
-                anonymous_super_forward: None,
-                capture: None,
-                provenance: crate::ir::IrCtorParameterProvenance::Value,
-                capture_identity: None,
-            },
-            IrCtorArg {
-                name: Some("plain".to_string()),
-                context_kind: crate::types::ContextParameterKind::None,
-                ty: Ty::String,
-                declared_ty: None,
-                is_field: true,
-                field_index: None,
-                has_default: false,
-                is_vararg: false,
-                type_param: None,
-                check: Some("plain".to_string()),
-                anonymous_super_forward: None,
-                capture: None,
-                provenance: crate::ir::IrCtorParameterProvenance::Value,
-                capture_identity: None,
-            },
-        ];
+        class.ctor_args = vec![capture(None), capture(Some(0)), capture(Some(1))];
+        class.constructor_prefix_count = 3;
         let class = ir.add_class(class);
         ir.shared_class_capture_fields
             .insert((class, 0), Ty::String);
 
         lower_class_capture_slots(&mut ir);
 
+        let holder = Ty::obj_args(OBJECT_REF, &[Ty::String]);
+        let lowered = &ir.classes[class as usize];
         assert_eq!(
-            ir.classes[class as usize].fields[0].ty,
-            Ty::obj_args(OBJECT_REF, &[Ty::String])
+            lowered
+                .fields
+                .iter()
+                .map(|field| field.ty)
+                .collect::<Vec<_>>(),
+            [holder, Ty::String]
         );
-        assert_eq!(ir.classes[class as usize].fields[1].ty, Ty::String);
         assert_eq!(
-            ir.classes[class as usize].ctor_args[0].ty,
-            Ty::obj_args(OBJECT_REF, &[Ty::String])
+            lowered
+                .ctor_args
+                .iter()
+                .map(|argument| argument.ty)
+                .collect::<Vec<_>>(),
+            [Ty::String, holder, Ty::String]
         );
-        assert_eq!(ir.classes[class as usize].ctor_args[1].ty, Ty::String);
         assert_eq!(
             ir.shared_class_capture_fields.get(&(class, 0)),
             Some(&Ty::String)
@@ -734,9 +738,9 @@ mod tests {
         assert!(matches!(
             ir.expr(operand),
             IrExpr::Variable {
-                ty: Ty::TyParam(name, _),
+                ty,
                 ..
-            } if *name == "R"
+            } if ty.ty_param_name() == Some("R")
         ));
 
         let IrExpr::RefNew {
@@ -746,7 +750,7 @@ mod tests {
         else {
             panic!("cell");
         };
-        assert!(matches!(elem, Ty::TyParam(name, _) if *name == "R"));
+        assert!(matches!(elem.kind(), TyKind::TyParam(name, _) if &*name == "R"));
         assert!(matches!(
             ir.expr(*init),
             IrExpr::TypeOp {
@@ -766,12 +770,12 @@ mod tests {
         assert_eq!(*type_operand, Ty::Int);
         assert!(matches!(
             ir.expr(*moved),
-            IrExpr::RefGet { elem, .. } if matches!(elem, Ty::TyParam(name, _) if *name == "R")
+            IrExpr::RefGet { elem, .. } if matches!(elem.kind(), TyKind::TyParam(name, _) if &*name == "R")
         ));
         let IrExpr::RefSet { elem, value, .. } = ir.expr(write) else {
             panic!("write");
         };
-        assert!(matches!(elem, Ty::TyParam(name, _) if *name == "R"));
+        assert!(matches!(elem.kind(), TyKind::TyParam(name, _) if &*name == "R"));
         assert!(matches!(
             ir.expr(*value),
             IrExpr::TypeOp {
@@ -875,9 +879,9 @@ mod tests {
         assert!(matches!(
             ir.expr(cell),
             IrExpr::RefNew {
-                elem: Ty::TyParam(name, _),
+                elem,
                 ..
-            } if *name == "R"
+            } if elem.ty_param_name() == Some("R")
         ));
     }
 
@@ -978,17 +982,17 @@ mod tests {
         assert!(matches!(
             ir.expr(cell),
             IrExpr::RefNew {
-                elem: Ty::TyParam(name, _),
+                elem,
                 ..
-            } if *name == "R"
+            } if elem.ty_param_name() == Some("R")
         ));
         assert!(matches!(
             ir.functions[specialized as usize].params.as_slice(),
-            [Ty::TyParam(name, _)] if *name == "R"
+            [parameter] if parameter.ty_param_name() == Some("R")
         ));
         assert!(matches!(
-            ir.shared_capture_parameters.get(&(specialized, 0)),
-            Some(Ty::TyParam(name, _)) if *name == "R"
+            ir.shared_capture_parameters.get(&(specialized, 0)).map(|ty| ty.kind()),
+            Some(TyKind::TyParam(name, _)) if &*name == "R"
         ));
         let IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
@@ -1001,9 +1005,9 @@ mod tests {
         assert!(matches!(
             ir.expr(*moved),
             IrExpr::RefGet {
-                elem: Ty::TyParam(name, _),
+                elem,
                 ..
-            } if *name == "R"
+            } if elem.ty_param_name() == Some("R")
         ));
     }
 

@@ -316,7 +316,15 @@ pub(super) fn finalize_local_superclass_captures(
             .enumerate()
             .filter_map(|(parameter, supply)| {
                 let (owner, field) = match *supply {
-                    SuperCaptureSupply::PrefixParameter(slot) => (class as u32, slot),
+                    // A capture handed on to a local superclass is stored: the field its
+                    // parameter fills is the one that can hold a shared cell.
+                    SuperCaptureSupply::PrefixParameter(slot) => (
+                        class as u32,
+                        ir.classes[class]
+                            .ctor_args
+                            .get(slot as usize)?
+                            .field_index?,
+                    ),
                     SuperCaptureSupply::EnclosingField(read) => (read.class, read.field),
                 };
                 ir.shared_class_capture_fields
@@ -1294,10 +1302,12 @@ pub(super) fn accept_constructor_body(
         let defaults = constructor.defaults.clone();
         if anchor.sibling == 0 {
             let class = &ir.classes[class as usize];
+            // Every capture is a prefix parameter, stored or not, so the field count is not the
+            // prefix: a capture only constructor code reads has no field.
             let synthetic_prefix_count = if class.is_inner_class {
                 class.ctor_args.len().saturating_sub(defaults.len())
             } else {
-                class.ctor_param_count as usize
+                class.constructor_prefix_count as usize
             };
             let mut physical_defaults = vec![None; synthetic_prefix_count];
             physical_defaults.extend(defaults);

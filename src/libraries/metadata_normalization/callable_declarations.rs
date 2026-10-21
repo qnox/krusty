@@ -305,7 +305,7 @@ pub(crate) fn declared_property(
         context_param_names: property.context_param_names.clone(),
         context_parameter_identities: parameters.contexts.clone(),
         getter,
-        setter,
+        setter: setter.map(Box::new),
         setter_visibility: property.setter_visibility,
         setter_parameter_name: property.setter_parameter_name.clone(),
         is_const: property.is_const,

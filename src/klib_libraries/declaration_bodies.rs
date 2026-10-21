@@ -246,6 +246,22 @@ impl KlibDeclarationBodies {
         reachable
     }
 
+    /// Exact references consumed by prepared template linking. No inherited alias enters the
+    /// declaration index or the narrower intrinsic-support call graph.
+    pub(super) fn callable_references(&self) -> Vec<(String, KlibDeclarationSignature)> {
+        let mut references = HashSet::default();
+        for (module, &library) in &self.modules {
+            for (arena, function) in self.libraries[library].all_functions() {
+                for symbol in arena.callable_symbols(function) {
+                    if let Some(signature) = declaration_signature(&symbol.signature) {
+                        references.insert((module.clone(), signature));
+                    }
+                }
+            }
+        }
+        references.into_iter().collect()
+    }
+
     /// Resolve a call symbol in the graph of the KLIB body which serialized it.
     ///
     /// A definition in the body module wins. Otherwise exactly one reachable producer module

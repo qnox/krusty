@@ -57,14 +57,19 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::Count
         | CompilerIntrinsic::TrimIndent
         | CompilerIntrinsic::TrimMargin
+        | CompilerIntrinsic::TextTrim
         | CompilerIntrinsic::FloatingRangeMembership
         | CompilerIntrinsic::ClosedRangeContains
+        | CompilerIntrinsic::ComparableRangeTo
         | CompilerIntrinsic::RangeDownTo
         | CompilerIntrinsic::RangeUntil
         | CompilerIntrinsic::ProgressionStep
         | CompilerIntrinsic::ProgressionReversed
         | CompilerIntrinsic::WithIndex
         | CompilerIntrinsic::UnsignedCompare { .. }
+        | CompilerIntrinsic::UnsignedDivide { .. }
+        | CompilerIntrinsic::UnsignedRemainder { .. }
+        | CompilerIntrinsic::ResultFailure(_)
         | CompilerIntrinsic::PrimitiveIteratorNext => return None,
     })
 }

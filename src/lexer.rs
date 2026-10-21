@@ -1230,9 +1230,26 @@ impl<'a> Lexer<'a> {
         }
         self.b
             .get(after)
-            .is_some_and(|next| *next == b'{' || *next == b'`' || is_ident_start_at(self.b, after))
+            .is_some_and(|next| {
+                *next == b'{'
+                    || is_ident_start_at(self.b, after)
+                    || escaped_identifier_at(self.b, after)
+            })
             .then_some((after - required, after))
     }
+}
+
+/// Kotlin's `ESCAPED_IDENTIFIER`: a backtick, at least one character that is neither a backtick nor
+/// a line break, and the closing backtick. A `$` before any other backtick is literal text.
+fn escaped_identifier_at(bytes: &[u8], index: usize) -> bool {
+    if bytes.get(index) != Some(&b'`') {
+        return false;
+    }
+    let content = &bytes[index + 1..];
+    content
+        .iter()
+        .position(|byte| matches!(byte, b'`' | b'\n' | b'\r'))
+        .is_some_and(|end| end > 0 && content[end] == b'`')
 }
 
 fn is_ascii_ident_start(c: u8) -> bool {

@@ -7,7 +7,7 @@ use krusty::ast::{
     TypeRef,
 };
 use krusty::diag::Span;
-use krusty::types::{type_name, Ty, TypeName};
+use krusty::types::{type_name, Ty, TyKind, TypeName};
 
 use super::{
     rendering::{render_ty, render_type},
@@ -1011,10 +1011,10 @@ fn bind_declared_type_ref(
     matcher: &krusty::frontend::SourceConstructorMatcher<'_>,
 ) {
     let actual = if declared.nullable() {
-        match actual {
-            Ty::Nullable(inner) => *inner,
-            Ty::Null => return,
-            actual => actual,
+        match actual.kind() {
+            TyKind::Nullable(inner) => inner,
+            TyKind::Null => return,
+            _ => actual,
         }
     } else {
         actual
@@ -1033,7 +1033,9 @@ fn bind_declared_type_ref(
         return;
     }
     if declared.name == "<fun>" {
-        let (Ty::Fun(semantic), Ty::Fun(actual)) = (semantic.non_null(), actual) else {
+        let (TyKind::Fun(semantic), TyKind::Fun(actual)) =
+            (semantic.non_null().kind(), actual.kind())
+        else {
             return;
         };
         if declared.fun_params.len() != actual.params.len()
@@ -1068,8 +1070,10 @@ fn bind_declared_type_ref(
         }
         return;
     }
-    let (Ty::Obj(semantic_name, semantic_arguments), Ty::Obj(actual_name, actual_arguments)) =
-        (semantic.non_null(), actual)
+    let (
+        TyKind::Obj(semantic_name, semantic_arguments),
+        TyKind::Obj(actual_name, actual_arguments),
+    ) = (semantic.non_null().kind(), actual.kind())
     else {
         return;
     };

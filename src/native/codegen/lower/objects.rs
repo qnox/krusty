@@ -1090,7 +1090,7 @@ impl<'a> FileLowering<'a> {
         let mut slots = vec![self.object_type(class)];
         slots.extend(secondary.prefix_params.iter().copied());
         slots.extend(secondary.params.iter().copied());
-        let mut semantic_slots = vec![Ty::Obj(declaration.fq_name, &[])];
+        let mut semantic_slots = vec![Ty::obj_name(declaration.fq_name)];
         semantic_slots.extend(secondary.prefix_params.iter().copied());
         semantic_slots.extend(secondary.params.iter().copied());
         let signature = self.signature_of(&slots, Ty::Unit)?;
@@ -1672,7 +1672,7 @@ impl<'a> FileLowering<'a> {
             .expect("a primary constructor is defined only where one was declared");
         let mut slots = vec![self.object_type(class)];
         slots.extend(constructor_parameters(self.ir, class));
-        let mut semantic_slots = vec![Ty::Obj(declaration.fq_name, &[])];
+        let mut semantic_slots = vec![Ty::obj_name(declaration.fq_name)];
         semantic_slots.extend(declaration.ctor_args.iter().map(|argument| argument.ty));
         let signature = self.signature_of(&slots, Ty::Unit)?;
         let parent = match layout.superclass {
@@ -2053,7 +2053,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if self.unboxed_value_receiver(receiver, classifier)
             && model::value_field(self.file.ir, class)? == index
         {
-            let Some(value) = self.coerce(receiver, Ty::Obj(classifier, &[]))? else {
+            let Some(value) = self.coerce(receiver, Ty::obj_name(classifier))? else {
                 return Ok(None);
             };
             // The value is held at the declared underlying type; the node reads the field at the
@@ -2526,7 +2526,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         // property dispatch starts from an object receiver.
         let classifier = self.file.ir.classes[class as usize].fq_name;
         if self.unboxed_value_receiver(receiver, classifier) {
-            let Some(value) = self.coerce(receiver, Ty::Obj(classifier, &[]))? else {
+            let Some(value) = self.coerce(receiver, Ty::obj_name(classifier))? else {
                 return Ok(None);
             };
             return self.value_property_read_of(class, index, value);

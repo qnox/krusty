@@ -134,18 +134,29 @@ impl Emitter<'_> {
     }
 
     /// Each extracted default lambda read from its class, by the call operand of its parameter.
-    /// The lambdas take no captured values.
+    /// Their captured values are not yet among the call's captured parameters
+    /// ([`append_default_lambda_captures`]).
     pub(super) fn load_default_lambdas(
         &self,
         call: &ClasspathInlineCall<'_, '_>,
         extracted: &[inliner::ExtractedDefaultLambda],
         physical: &[Ty],
     ) -> Result<Vec<(usize, inliner::Lambda)>, inliner::InlineError> {
-        let function = call
-            .target
-            .name
-            .strip_suffix("$default")
-            .unwrap_or(call.target.name);
+        if extracted.is_empty() {
+            return Ok(Vec::new());
+        }
+        let function = match self
+            .default_call_operands
+            .defaulted_declaration(call.call_expression)
+        {
+            Ok(Some(declaration)) => declaration.name.as_str(),
+            Ok(None) => {
+                return Err(inliner::InlineError::DefaultLambda(
+                    "a default lambda of a call that is not a default call",
+                ));
+            }
+            Err(reason) => return Err(inliner::InlineError::DefaultLambda(reason)),
+        };
         extracted
             .iter()
             .map(|lambda| {
@@ -183,17 +194,22 @@ impl Emitter<'_> {
         name: &str,
         descriptor: &str,
         inline: crate::libraries::InlineKind,
-    ) -> bool {
-        match self.default_call_operands.declaration(call_expression) {
-            Some(declaration) => declaration_is_inline_only(
-                self.bodies,
-                &declaration.owner.render(),
-                &declaration.name,
-                &declaration.descriptor,
-                inline,
-            ),
-            None => declaration_is_inline_only(self.bodies, owner, name, descriptor, inline),
-        }
+    ) -> Result<bool, &'static str> {
+        Ok(
+            match self
+                .default_call_operands
+                .defaulted_declaration(call_expression)?
+            {
+                Some(declaration) => declaration_is_inline_only(
+                    self.bodies,
+                    &declaration.owner.render(),
+                    &declaration.name,
+                    &declaration.descriptor,
+                    inline,
+                ),
+                None => declaration_is_inline_only(self.bodies, owner, name, descriptor, inline),
+            },
+        )
     }
 
     /// How a default bridge call supplies the parameter at `index`: a mask word or the method
@@ -218,4 +234,26 @@ impl Emitter<'_> {
             None
         }
     }
+}
+
+/// Append a loaded default lambda's captured values to the call's captured parameters. The
+/// inlined body stores them where its default arm constructed the lambda, so they are temporaries
+/// no argument evaluates, and they follow every parameter as kotlinc's captured parameters of a
+/// default lambda do.
+pub(super) fn append_default_lambda_captures(
+    lambda: &mut inliner::Lambda,
+    captured: &mut Vec<Parameter>,
+) -> Result<(), inliner::InlineError> {
+    let types = lambda
+        .captured_types()
+        .ok_or(inliner::InlineError::DefaultLambda(
+            "a default lambda's descriptor cannot be parsed",
+        ))?;
+    let start = captured.len();
+    captured.extend(types.iter().map(|ty| Parameter {
+        category: Category::of_descriptor(ty),
+        binding: Binding::Temporary,
+    }));
+    lambda.captured = start..captured.len();
+    Ok(())
 }

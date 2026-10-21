@@ -13,6 +13,7 @@ mod archives;
 mod builtin_realizations;
 mod classifier_records;
 mod classifier_signatures;
+mod collection_roles;
 mod declaration_bodies;
 mod declaration_signatures;
 mod direct_c_calls;
@@ -21,6 +22,7 @@ mod inventory;
 mod lookup;
 pub(crate) mod parameter_defaults;
 mod platform;
+mod serialized_references;
 mod target_intrinsics;
 #[cfg(test)]
 mod tests;
@@ -34,6 +36,9 @@ pub use archives::{KlibLibrariesOpenError, KlibLibraryInput, KlibStdlibSemantics
 pub(crate) use declaration_bodies::KlibCalleeOrigin;
 pub use declaration_bodies::{KlibBodyLibrary, KlibDeclarationBodies, KlibDeclarationBodiesError};
 pub use declaration_signatures::KlibLibraryError;
+pub use serialized_references::{
+    KlibReferenceBinding, KlibReferenceBindings, KlibReferenceDispatch, KlibReferenceOrigin,
+};
 pub use target_intrinsics::{KlibIntrinsicCallable, KlibIntrinsicFacts};
 
 /// Declarations of a set of KLIB libraries, published as one symbol source.
@@ -46,6 +51,7 @@ pub struct KlibLibraries {
     bodies: std::rc::Rc<KlibDeclarationBodies>,
     /// The prepared-inline copies, the exclusive source of an inline function's cross-module body.
     inline_bodies: std::rc::Rc<KlibDeclarationBodies>,
+    references: std::rc::Rc<KlibReferenceBindings>,
     body_snapshot: Option<crate::libraries::DependencyBodySnapshot>,
     identities: external_identities::ExternalIdentities,
     lookups: lookup::SymbolLookups,
@@ -90,12 +96,15 @@ impl KlibLibraries {
 
     /// The same declarations, for another compilation with no selected identities yet.
     pub fn for_compilation(&self) -> Self {
-        Self::over_with_bodies_and_snapshot(
-            std::rc::Rc::clone(&self.inventory),
-            std::rc::Rc::clone(&self.bodies),
-            std::rc::Rc::clone(&self.inline_bodies),
-            self.body_snapshot.clone(),
-        )
+        Self {
+            inventory: std::rc::Rc::clone(&self.inventory),
+            bodies: std::rc::Rc::clone(&self.bodies),
+            inline_bodies: std::rc::Rc::clone(&self.inline_bodies),
+            references: std::rc::Rc::clone(&self.references),
+            body_snapshot: self.body_snapshot.clone(),
+            identities: external_identities::ExternalIdentities::default(),
+            lookups: lookup::SymbolLookups::default(),
+        }
     }
 
     fn over(inventory: std::rc::Rc<inventory::PackageInventory>) -> Self {
@@ -123,14 +132,17 @@ impl KlibLibraries {
         inline_bodies: std::rc::Rc<KlibDeclarationBodies>,
         body_snapshot: Option<crate::libraries::DependencyBodySnapshot>,
     ) -> Self {
-        Self {
+        let mut libraries = Self {
             inventory,
             bodies,
             inline_bodies,
+            references: std::rc::Rc::default(),
             body_snapshot,
             identities: external_identities::ExternalIdentities::default(),
             lookups: lookup::SymbolLookups::default(),
-        }
+        };
+        libraries.references = std::rc::Rc::new(KlibReferenceBindings::freeze(&libraries));
+        libraries
     }
 
     /// Intrinsic declarations authenticated from the compilation-selected target stdlib.
@@ -146,6 +158,11 @@ impl KlibLibraries {
     /// The prepared-inline copies of the inline functions the same inputs declare.
     pub fn inline_declaration_bodies(&self) -> &KlibDeclarationBodies {
         &self.inline_bodies
+    }
+
+    /// Frozen serialized-reference bindings from the same archive generation as the bodies.
+    pub fn reference_bindings(&self) -> &KlibReferenceBindings {
+        &self.references
     }
 
     pub(crate) fn dependency_body_snapshot(

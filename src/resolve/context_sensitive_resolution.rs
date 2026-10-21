@@ -6,7 +6,7 @@
 use crate::symbol_resolver::InheritedNestedClassifier;
 use crate::symbol_resolver::{direct_supertypes, inherited_nested_classifier_name};
 use crate::symbol_source::SymbolSource;
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 pub(super) fn expected_nested_classifier(
     source: &dyn SymbolSource,
@@ -31,8 +31,10 @@ pub(super) fn expected_nested_classifier(
 
 /// Attach the represented classifier to the reflection-class base selected by normal resolution.
 pub(super) fn parameterized_class_literal_type(base: Ty, represented: Ty) -> Ty {
-    match base {
-        Ty::Obj(internal, []) => Ty::obj_args_name(internal, &[represented]),
+    match base.kind() {
+        TyKind::Obj(internal, args) if args.is_empty() => {
+            Ty::obj_args_name(internal, &[represented])
+        }
         _ => base,
     }
 }

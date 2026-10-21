@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::resolve::{AdaptedRefArgument, CallableReferenceBinding, CallableReferenceTarget};
+use crate::types::TyKind;
 
 impl BodyFirChecker<'_> {
     fn reference_function_type(&self, expression: ExprId) -> Result<ResolvedTy, BodyCheckFailure> {
@@ -9,7 +10,7 @@ impl BodyFirChecker<'_> {
         let function = self
             .info
             .callable_reference_type(expression)
-            .filter(|ty| matches!(ty.non_null(), Ty::Fun(_)))
+            .filter(|ty| ty.non_null().is_fun())
             .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?;
         ResolvedTy::new(function)
             .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))
@@ -17,8 +18,8 @@ impl BodyFirChecker<'_> {
 
     fn reference_is_reflective(&self, expression: ExprId) -> bool {
         let semantic = self.info.semantic_ty(expression);
-        let reflective = self.info.callable_reference_is_reflective(expression)
-            || !matches!(semantic.non_null(), Ty::Fun(_));
+        let reflective =
+            self.info.callable_reference_is_reflective(expression) || !semantic.non_null().is_fun();
         crate::trace_compiler!(
             "callable_ref",
             "FIR reference expression={expression:?} semantic={semantic:?} reflective={reflective}"
@@ -56,7 +57,8 @@ impl BodyFirChecker<'_> {
         if let Some(ExprLowering::FunctionInvokeReference { target, signature }) =
             self.info.expr_lowers.get(&expression).cloned()
         {
-            let (Ty::Fun(target), Ty::Fun(reference)) = (target.non_null(), signature.non_null())
+            let (TyKind::Fun(target), TyKind::Fun(reference)) =
+                (target.non_null().kind(), signature.non_null().kind())
             else {
                 return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
             };
@@ -124,7 +126,7 @@ impl BodyFirChecker<'_> {
             self.info.expr_lowers.get(&expression).cloned()
         {
             let internal = sam.internal;
-            let Ty::Fun(function) = signature.non_null() else {
+            let TyKind::Fun(function) = signature.non_null().kind() else {
                 return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
             };
             let source_suspend = sam.suspend;
@@ -208,14 +210,14 @@ impl BodyFirChecker<'_> {
             signature,
         }) = self.info.expr_lowers.get(&expression).cloned()
         {
-            let Ty::Fun(function) = signature.non_null() else {
+            let TyKind::Fun(function) = signature.non_null().kind() else {
                 return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
             };
             // A reference whose EXPRESSION type is reflective (`KFunction1<…>`) needs a real
             // callable-reference object, not a lambda: `kotlin.reflect.KFunction` is not a function
             // interface and the adapter would fail its cast at run time. Only a reference used as a
             // plain function value is materialized here.
-            if !matches!(self.info.semantic_ty(expression).non_null(), Ty::Fun(_)) {
+            if !self.info.semantic_ty(expression).non_null().is_fun() {
                 return Err(self.failure(
                     span,
                     BodyCheckFailureKind::UnsupportedExpression(ExpressionForm::CallableRef),
@@ -246,7 +248,7 @@ impl BodyFirChecker<'_> {
         }) = self.info.expr_lowers.get(&expression).cloned()
         {
             let origin = self.expression_origin(expression)?;
-            let Ty::Fun(function) = signature.non_null() else {
+            let TyKind::Fun(function) = signature.non_null().kind() else {
                 return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
             };
             let target = self
@@ -315,7 +317,7 @@ impl BodyFirChecker<'_> {
             ..
         }) = self.info.expr_lowers.get(&expression).cloned()
         {
-            let Ty::Fun(function) = signature.non_null() else {
+            let TyKind::Fun(function) = signature.non_null().kind() else {
                 return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
             };
             let reference_parameters = function
@@ -854,7 +856,7 @@ impl BodyFirChecker<'_> {
                         None,
                         false,
                         &property.getter,
-                        property.setter.as_ref(),
+                        property.setter.as_deref(),
                         property.ty,
                         adaptation,
                     )

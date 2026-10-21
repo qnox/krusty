@@ -16,7 +16,7 @@ use crate::metadata::klib_ir::tree::{
     KlibIrArguments, KlibIrExprId, KlibIrExprKind, KlibIrMemberAccess,
 };
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbolKind};
-use crate::types::{EqualityMode, Ty};
+use crate::types::{EqualityMode, Ty, TyKind};
 
 use super::super::decline::KlibBodyDeclineReason;
 
@@ -284,12 +284,12 @@ impl BodyLowering<'_> {
             ));
         }
         let func = self.expression(*function)?;
-        let Ty::Fun(signature) = self.lowered_type(func).non_null() else {
+        let TyKind::Fun(signature) = self.lowered_type(func).non_null().kind() else {
             return Err(mismatch(
                 "a function invocation's value has no function type",
             ));
         };
-        if self.lowered_type(func) != Ty::Fun(signature) {
+        if self.lowered_type(func).kind() != TyKind::Fun(signature) {
             return unsupported("an invocation of a nullable function value");
         }
         // A context or extension function type's parameters lead with its context parameters and

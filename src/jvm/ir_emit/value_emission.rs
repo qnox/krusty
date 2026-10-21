@@ -31,7 +31,12 @@ impl super::Emitter<'_> {
             self.static_owner,
             super::companion_field::companion_field_read(self.ir, self.classifiers, node),
         ) {
-            match super::companion_field::companion_field_accessor(self.ir, context, &read) {
+            match super::companion_field::companion_field_accessor(
+                self.ir,
+                context,
+                self.export_private_calls,
+                &read,
+            ) {
                 Err(error) => {
                     *self.run.emit_error.borrow_mut() = Some(error);
                     return;
@@ -219,6 +224,8 @@ impl super::Emitter<'_> {
                 if self.emit_nullable_sam_wrapper_new(e, *internal, &args, code) {
                     return;
                 }
+                // Each argument is materialized at the constructor parameter it fills.
+                let args = self.slot_operands(&args, super::operand_stack::KeptSmartCasts::None);
                 let owner = internal.render();
                 // The constructor descriptor + its argument-word count come from ONE source, identified by
                 // the owner NAME (no same-file/other-file/classpath control-flow split):
@@ -442,6 +449,11 @@ impl super::Emitter<'_> {
                     code.invokespecial(m, aw, 0);
                 }
             }
+            IrExpr::Call { .. } | IrExpr::MethodCall { .. }
+                if self.ir.compiled_inline_call(e).is_some() =>
+            {
+                self.inline_compiled_module_call(e, code);
+            }
             IrExpr::MethodCall {
                 class,
                 index,
@@ -470,7 +482,8 @@ impl super::Emitter<'_> {
                     // the placeholder is `valueOf` of the primitive zero, and a supplied primitive is
                     // boxed the same way.
                     let args = args.clone();
-                    self.emit_value(*receiver, code);
+                    // The stub takes its receiver as an ordinary parameter of the owner's type.
+                    self.emit_operand_at_slot(*receiver, Ty::obj_name(c.fq_name), code);
                     let mut stub_params = vec![Ty::obj_name(c.fq_name)];
                     stub_params
                         .extend(self.emit_default_call_arguments(e, fid, &args, &param_tys, code));
@@ -651,9 +664,6 @@ impl super::Emitter<'_> {
                         code.checkcast(class);
                     }
                 }
-            }
-            IrExpr::Call { args, .. } if self.ir.compiled_inline_call(e).is_some() => {
-                self.inline_compiled_module_call(e, args, code);
             }
             IrExpr::Call {
                 callee,
@@ -965,10 +975,9 @@ impl super::Emitter<'_> {
                     );
                     // `@InlineOnly`/non-public inline functions must splice. Public inline functions have
                     // callable bytecode, so a failed optional splice can fall back to a real call. An
-                    // ordinary `$default` synthetic is an ABI dispatcher whose mask prologue must run
-                    // as emitted. Only a metadata-normalized splice-only declaration may bypass it.
-                    if inline.can_inline() && (!name.ends_with("$default") || inline.must_inline())
-                    {
+                    // inline function's `$default` bridge is inlined like the function, its masks
+                    // resolving the bridge's header, as kotlinc's `IrInlineCodegen` does.
+                    if inline.can_inline() {
                         let call_frame = self.frame.mark();
                         let spliced = self.try_splice_static_inline(
                             bytecode_inline_call::StaticSpliceRequest {
@@ -1614,6 +1623,18 @@ impl super::Emitter<'_> {
                     // realized in IR. This emitter-owned class path is only the SAM shim.
                     self.run
                         .set_emit_error(lambda_class::unrealized(self.ir, *impl_fn));
+                    return code.aconst_null();
+                }
+                if lambda_mode == LambdaMode::Indy
+                    && crate::jvm::suspend::suspend_lambda::takes_value_class_carrier(
+                        self.ir, *impl_fn,
+                    )
+                {
+                    self.run.set_emit_error(format!(
+                        "internal error: suspend lambda {} takes a value-class carrier, which needs \
+                         its SuspendLambda class",
+                        self.ir.functions[*impl_fn as usize].name
+                    ));
                     return code.aconst_null();
                 }
                 if lambda_mode == LambdaMode::Indy {

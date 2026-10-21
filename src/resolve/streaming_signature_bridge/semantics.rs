@@ -812,15 +812,12 @@ impl ProductionSignatureSemantics<'_> {
         {
             return Ok(vec![None; arguments.len()].into_boxed_slice());
         }
-        let callable = match callee.get().non_null() {
-            Ty::Fun(_) => Some(callee.get().non_null()),
-            nominal => crate::symbol_resolver::classifier_callable_signature(
-                &*self.table.libraries,
-                nominal,
-            ),
-        };
-        let signature = match callable {
-            Some(Ty::Fun(signature)) => signature,
+        let callable = crate::symbol_resolver::classifier_callable_signature(
+            &*self.table.libraries,
+            callee.get().non_null(),
+        );
+        let signature = match callable.map(|ty| ty.kind()) {
+            Some(TyKind::Fun(signature)) => signature,
             _ => {
                 let (parameters, slots) = self.with_resolver(scope, |resolver| {
                     let (mut functions, properties) = resolver
@@ -876,13 +873,10 @@ impl ProductionSignatureSemantics<'_> {
             .iter()
             .copied()
             .map(|parameter| {
-                let expectation = match parameter.non_null() {
-                    Ty::Fun(_) => Some(parameter.non_null()),
-                    nominal => crate::symbol_resolver::classifier_callable_signature(
-                        &*self.table.libraries,
-                        nominal,
-                    ),
-                };
+                let expectation = crate::symbol_resolver::classifier_callable_signature(
+                    &*self.table.libraries,
+                    parameter.non_null(),
+                );
                 expectation
                     .map(crate::fir::ResolvedTy::new)
                     .transpose()
@@ -2622,19 +2616,16 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             }
         }
         if let Some(expected_ty) = expected {
-            let expected_function = match expected_ty.get().non_null() {
-                Ty::Fun(_) => Some(expected_ty.get().non_null()),
-                nominal => crate::symbol_resolver::classifier_callable_signature(
-                    &*self.table.libraries,
-                    nominal,
-                ),
-            };
+            let expected_function = crate::symbol_resolver::classifier_callable_signature(
+                &*self.table.libraries,
+                expected_ty.get().non_null(),
+            );
             if let Some(selected) =
                 self.classifier_constructor_reference(scope, spelling, expected_ty)
             {
                 return Ok(selected);
             }
-            let Some(Ty::Fun(expected)) = expected_function else {
+            let Some(TyKind::Fun(expected)) = expected_function.map(|ty| ty.kind()) else {
                 // A non-functional expectation cannot shape a reference; infer its natural type.
                 return self.select_callable_reference(scope, spelling, origin, None, demand);
             };
@@ -2890,8 +2881,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 let declaration = crate::symbol_source::SymbolSource::classifier(&source, nested)
                     .ok_or_else(Self::failure)?;
                 let expected_function =
-                    expected.and_then(|expected| match expected.get().non_null() {
-                        Ty::Fun(function) => Some(function),
+                    expected.and_then(|expected| match expected.get().non_null().kind() {
+                        TyKind::Fun(function) => Some(function),
                         _ => None,
                     });
                 let constructor_arguments = expected_function.map_or_else(
@@ -3161,7 +3152,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     &arguments,
                 )
                 .ok_or_else(Self::failure)?;
-            if expected.is_some_and(|expected| matches!(expected.get().non_null(), Ty::Fun(_))) {
+            if expected.is_some_and(|expected| expected.get().non_null().is_fun()) {
                 if let Some(contextual) = self.contextual_callable_reference_type(
                     scope,
                     &natural_parameters,
@@ -3201,7 +3192,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             ));
         }
         if let Some(expected) = expected {
-            let Ty::Fun(expected_function) = expected.get().non_null() else {
+            let TyKind::Fun(expected_function) = expected.get().non_null().kind() else {
                 return Err(Self::failure());
             };
             // Member candidates occupy the earlier scope-tower rung. Select them with the same
@@ -3472,12 +3463,12 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         classifier: Option<(crate::fir::SignatureScope, &str)>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let receiver = receiver.get();
-        let receiver = match (receiver, classifier) {
-            (Ty::Obj(internal, []), Some(_)) if receiver.is_reference_array() => Ty::obj_args_name(
+        let receiver = match (receiver.obj_parts(), classifier) {
+            (Some((internal, [])), Some(_)) if receiver.is_reference_array() => Ty::obj_args_name(
                 internal,
                 &[Ty::out_projection(Ty::nullable(Ty::obj("kotlin/Any")))],
             ),
-            (Ty::Obj(internal, []), Some((scope, _))) if unbound => {
+            (Some((internal, [])), Some((scope, _))) if unbound => {
                 let classifier =
                     self.with_resolver(scope, |resolver| resolver.classifier(internal))?;
                 super::super::class_literal_receiver::star_projected_class_literal_receiver(
@@ -3485,7 +3476,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     &classifier,
                 )
             }
-            (receiver, _) => receiver,
+            _ => receiver,
         };
         if !unbound && !receiver.is_reference() && receiver.jvm_boxed_ref().is_none() {
             return Err(Self::failure());
@@ -4346,14 +4337,11 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 .map(|argument| argument.ty.get())
                 .collect::<Vec<_>>(),
         );
-        let callable = match callee.get().non_null() {
-            Ty::Fun(_) => Some(callee.get().non_null()),
-            nominal => crate::symbol_resolver::classifier_callable_signature(
-                &*self.table.libraries,
-                nominal,
-            ),
-        };
-        if let Some(Ty::Fun(signature)) = callable {
+        let callable = crate::symbol_resolver::classifier_callable_signature(
+            &*self.table.libraries,
+            callee.get().non_null(),
+        );
+        if let Some(TyKind::Fun(signature)) = callable.map(|ty| ty.kind()) {
             let implicit_prefix = signature
                 .context_count
                 .saturating_add(usize::from(signature.has_receiver))

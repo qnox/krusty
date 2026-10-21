@@ -82,6 +82,41 @@ pub(super) fn range_operator(kind: crate::ast::RangeKind) -> RangeConvention {
     RangeConvention { key, name }
 }
 
+/// One selected operator convention: its result, its resolved target, and what its selection
+/// solved for the declaration's own type parameters.
+struct SelectedOperator {
+    ret: Ty,
+    call: ResolvedCall,
+    type_arguments: OperatorTypeArguments,
+}
+
+/// The declaration's generic signature, the selected call shape, and one solved argument per
+/// declared formal (`None` when the selection left that formal unbound).
+struct SolvedOperatorTypeArguments {
+    signature: crate::libraries::GenericSig,
+    call_sig: CallSig,
+    arguments: Vec<Option<Ty>>,
+}
+
+/// The type arguments an operator selection solved, published only by the caller whose expression
+/// IS that one call (`a + b`, `a..b`, `a < b`). A convention selected for another expression's
+/// key (a loop range, a compound assignment receiver, an `in` range that also selects `contains`)
+/// does not own that key's single generic-call record.
+enum OperatorTypeArguments {
+    Solved(Box<SolvedOperatorTypeArguments>),
+    NotGeneric,
+    /// The selection path committed its own generic facts (member extensions) or has none to
+    /// commit here (local extensions and indexed `set`, which their own paths record).
+    CommittedBySelection,
+}
+
+/// The single right-hand operand of a binary operator expression (`b` in `a + b`, `a..b`,
+/// `a < b`): its checked type and its source expression.
+pub(super) struct OperatorOperand {
+    pub(super) ty: Ty,
+    pub(super) expression: ExprId,
+}
+
 impl<'a> Checker<'a> {
     pub(super) fn operator_call_ret(
         &mut self,
@@ -94,7 +129,7 @@ impl<'a> Checker<'a> {
         span: Span,
         expected_result: Option<Ty>,
     ) -> Option<(Ty, ResolvedCall)> {
-        self.operator_call_ret_with_argument_kinds(
+        self.select_operator(
             scope,
             site,
             receiver,
@@ -105,12 +140,105 @@ impl<'a> Checker<'a> {
             expected_result,
             None,
         )
+        .map(|selected| (selected.ret, selected.call))
+    }
+
+    /// Select the convention `name` that the binary expression `expression` denotes (`a + b`,
+    /// `a..b`) and record its target under the expression's synthetic operator call. Returns the
+    /// convention's result.
+    pub(super) fn select_binary_operator_expression(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+        receiver: Ty,
+        name: &str,
+        operand: OperatorOperand,
+        expected_result: Option<Ty>,
+    ) -> Option<Ty> {
+        let key = SyntheticOperatorCall::from_name(name)
+            .expect("a binary operator expression names a synthetic operator");
+        let (ret, call) = self.operator_expression_call_ret(
+            scope,
+            expression,
+            receiver,
+            name,
+            operand,
+            expected_result,
+        )?;
+        self.resolved_operator_calls.insert((expression, key), call);
+        Some(ret)
+    }
+
+    /// Select the `compareTo` convention a comparison expression (`a < b`) denotes. Only a
+    /// convention returning `Int` is a comparison; its target is then recorded under the
+    /// expression's synthetic `compareTo` call.
+    pub(super) fn select_comparison_expression(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+        receiver: Ty,
+        operand: OperatorOperand,
+    ) -> bool {
+        match self.operator_expression_call_ret(
+            scope,
+            expression,
+            receiver,
+            "compareTo",
+            operand,
+            None,
+        ) {
+            Some((Ty::Int, call)) => {
+                self.resolved_operator_calls
+                    .insert((expression, SyntheticOperatorCall::CompareTo), call);
+                true
+            }
+            Some(_) | None => false,
+        }
+    }
+
+    /// Select the operator convention that `expression` itself denotes and publish the type
+    /// arguments it solved under that expression, as every other generic call publishes them:
+    /// `a + b` through `inline operator fun <reified T> T.plus(other: T)` passes the same reified
+    /// `T` as the explicit `a.plus(b)`.
+    fn operator_expression_call_ret(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+        receiver: Ty,
+        name: &str,
+        operand: OperatorOperand,
+        expected_result: Option<Ty>,
+    ) -> Option<(Ty, ResolvedCall)> {
+        let selected = self.select_operator(
+            scope,
+            expression,
+            receiver,
+            name,
+            &[operand.ty],
+            &[operand.expression],
+            self.span(expression),
+            expected_result,
+            None,
+        )?;
+        match selected.type_arguments {
+            OperatorTypeArguments::Solved(solved) => {
+                let SolvedOperatorTypeArguments {
+                    signature,
+                    call_sig,
+                    arguments,
+                } = *solved;
+                self.replace_selected_generic_call(expression, &signature, &call_sig, arguments)
+            }
+            OperatorTypeArguments::NotGeneric => self.clear_selected_generic_call(expression),
+            OperatorTypeArguments::CommittedBySelection => {}
+        }
+        Some((selected.ret, selected.call))
     }
 
     /// Shared operator selection with an optional checked semantic view of the arguments. Range
     /// membership uses this only to authorize a direct comparison through a type parameter's
     /// declared primitive bound; the ordinary call path always derives kinds from source values.
-    fn operator_call_ret_with_argument_kinds(
+    fn select_operator(
         &mut self,
         scope: &CheckerScope<'_>,
         site: ExprId,
@@ -121,7 +249,7 @@ impl<'a> Checker<'a> {
         span: Span,
         expected_result: Option<Ty>,
         checked_argument_kinds: Option<Vec<crate::symbol_resolver::CallArgKind>>,
-    ) -> Option<(Ty, ResolvedCall)> {
+    ) -> Option<SelectedOperator> {
         // `downTo` and the legacy `until` range spellings are represented by RangeKind in the AST,
         // but their Kotlin declarations are `infix`, not `operator`. They still go through the same
         // semantic callable selection and checked-FIR handoff as the operator range conventions.
@@ -174,7 +302,11 @@ impl<'a> Checker<'a> {
                         name,
                         span,
                     ) {
-                        Ok(selected) => selected,
+                        Ok(selected) => selected.map(|(ret, call)| SelectedOperator {
+                            ret,
+                            call,
+                            type_arguments: OperatorTypeArguments::CommittedBySelection,
+                        }),
                         Err(()) => {
                             self.indexed_operator_ambiguous = true;
                             self.diags.error(
@@ -259,7 +391,11 @@ impl<'a> Checker<'a> {
                         .to_vec(),
                 })
             };
-            return Some((ret, target));
+            return Some(SelectedOperator {
+                ret,
+                call: target,
+                type_arguments: OperatorTypeArguments::CommittedBySelection,
+            });
         }
         let arg_kinds =
             checked_argument_kinds.unwrap_or_else(|| self.call_arg_kinds(scope, arg_exprs));
@@ -337,16 +473,17 @@ impl<'a> Checker<'a> {
                         arg_tys,
                     );
                     let ret = selected.signature.ret;
-                    return Some((
+                    return Some(SelectedOperator {
                         ret,
-                        ResolvedCall::LocalFunction(Box::new(ResolvedLocalFunctionCall {
+                        call: ResolvedCall::LocalFunction(Box::new(ResolvedLocalFunctionCall {
                             stmt_id: selected.statement,
                             sig: selected.signature,
                             provided_arg_count: arg_exprs.len(),
                             context_args: selected.context_args,
                             receiver: None,
                         })),
-                    ));
+                        type_arguments: OperatorTypeArguments::CommittedBySelection,
+                    });
                 }
                 LocalExtensionSelection::Selected(_)
                 | LocalExtensionSelection::Ambiguous
@@ -363,7 +500,13 @@ impl<'a> Checker<'a> {
                 name,
                 span,
             ) {
-                Ok(Some(selected)) => return Some(selected),
+                Ok(Some((ret, call))) => {
+                    return Some(SelectedOperator {
+                        ret,
+                        call,
+                        type_arguments: OperatorTypeArguments::CommittedBySelection,
+                    })
+                }
                 Ok(None) => {}
                 Err(()) => {
                     self.diags.error(
@@ -378,7 +521,13 @@ impl<'a> Checker<'a> {
         // The expected result joins the receiver and the arguments as an input to the ONE
         // instantiation that yields the parameter vector, the result type and the recorded target,
         // so they cannot disagree about a formal the result and the operands share.
-        let (selected, params, ret) = match resolver.select_receiver_function_with_params_tracking(
+        let crate::symbol_resolver::SelectedReceiverFunction {
+            function: selected,
+            params,
+            ret,
+            bindings,
+            ..
+        } = match resolver.select_receiver_function_with_applied_receiver_tracking(
             receiver,
             name,
             &arg_kinds,
@@ -386,9 +535,9 @@ impl<'a> Checker<'a> {
             &callables,
             expected_result,
         ) {
-            crate::symbol_resolver::CandidateSelection::Selected(selected) => selected,
-            crate::symbol_resolver::CandidateSelection::None
-            | crate::symbol_resolver::CandidateSelection::Ambiguous => return None,
+            crate::symbol_resolver::ReceiverFunctionSelection::Selected(selected) => selected,
+            crate::symbol_resolver::ReceiverFunctionSelection::None
+            | crate::symbol_resolver::ReceiverFunctionSelection::Ambiguous(_) => return None,
         };
         let semantic = selected.semantic_signature();
         let context_count = selected.context_count.min(semantic.params.len());
@@ -423,18 +572,7 @@ impl<'a> Checker<'a> {
         }
         self.expect_call_args(scope, &params, false, arg_exprs, arg_tys);
         let target = if selected.kind == crate::libraries::FnKind::Member {
-            let mut member = selected.member_with_return(ret);
-            member.params = params;
-            ResolvedCall::Member(crate::symbol_resolver::ResolvedMember {
-                receiver,
-                physical_params: selected.callable.physical_params.clone(),
-                context_args: Vec::new(),
-                ret,
-                member,
-                projected_return_hazard: selected.projected_return_hazard,
-                suspend: selected.flags.suspend,
-                origin: selected.callable.origin.clone(),
-            })
+            selected_member_call(receiver, &selected, params, ret)
         } else {
             let vararg = selected
                 .call_sig
@@ -459,7 +597,25 @@ impl<'a> Checker<'a> {
                     .to_vec(),
             })
         };
-        Some((ret, target))
+        let type_arguments = match selected.generic_sig.as_ref() {
+            Some(signature) => {
+                OperatorTypeArguments::Solved(Box::new(SolvedOperatorTypeArguments {
+                    arguments: signature
+                        .formals
+                        .iter()
+                        .map(|formal| bindings.get(formal).copied())
+                        .collect(),
+                    signature: signature.clone(),
+                    call_sig: selected.call_sig.clone(),
+                }))
+            }
+            None => OperatorTypeArguments::NotGeneric,
+        };
+        Some(SelectedOperator {
+            ret,
+            call: target,
+            type_arguments,
+        })
     }
 
     /// Parameter types of the one applicable operator overload, before any postponed argument body is
@@ -539,7 +695,11 @@ impl<'a> Checker<'a> {
     ) -> Ty {
         self.resolved_in_range_comparisons.remove(&e);
         let convention = range_operator(kind);
-        for operator in [convention.key, SyntheticOperatorCall::Contains] {
+        for operator in [
+            convention.key,
+            SyntheticOperatorCall::Contains,
+            SyntheticOperatorCall::CompareTo,
+        ] {
             self.resolved_operator_calls.remove(&(e, operator));
             self.resolved_builtin_operator_accesses
                 .remove(&(e, operator));
@@ -705,10 +865,69 @@ impl<'a> Checker<'a> {
                 // live in stdlib metadata. Scalar storage is irrelevant to source applicability.
                 let contains = ordinary_contains
                     .unwrap_or_else(|| self.range_contains_call(scope, e, range_ty, vt, value));
-                self.finish_range_contains(&operands, range_ty, range_call, contains)
+                let comparable_range = range_call.range_provider_realization()
+                    == Some(crate::libraries::MemberRealization::Intrinsic(
+                        crate::libraries::CompilerIntrinsic::ComparableRangeTo,
+                    ))
+                    && matches!(contains, Some((Ty::Boolean, ResolvedCall::Member(_))));
+                let ty = self.finish_range_contains(&operands, range_ty, range_call, contains);
+                if comparable_range
+                    && ty == Ty::Boolean
+                    && !self.select_comparable_range_ordering(e, range_ty)
+                {
+                    self.diags.error(
+                        self.span(e),
+                        "internal error: the Comparable range has no single `compareTo` to order \
+                         its bounds"
+                            .to_string(),
+                    );
+                    return self.set(e, Ty::Error);
+                }
+                ty
             }
         };
         self.set(e, t)
+    }
+
+    /// kotlinc's `RangeContainsLowering` over a `ComparableRangeToHandler` range: the range's own
+    /// `contains` is replaced by `Comparable.compareTo` of the value with each bound. Select that
+    /// member on `Comparable<T>` for the range's element `T`, through the ordinary member
+    /// candidate selection, and record it beside the range and `contains` calls it stands in for.
+    /// The bounds keep the boundaries `rangeTo` gave them, so the selection sees only the element
+    /// type. Returns whether exactly one `compareTo` was selected: the provider role promises it,
+    /// so the caller fails closed without one.
+    fn select_comparable_range_ordering(&mut self, expression: ExprId, range_ty: Ty) -> bool {
+        let [element] = *range_ty.type_args() else {
+            return false;
+        };
+        let comparable = Ty::obj_args_name(crate::types::wk::comparable(), &[element]);
+        let (mut functions, _) = self
+            .stable_receiver_callables(comparable, "compareTo")
+            .into_parts();
+        functions.overloads.retain(|candidate| {
+            candidate.flags.operator
+                && candidate.kind == crate::libraries::FnKind::Member
+                && candidate.context_count == 0
+        });
+        let callables = crate::libraries::Callables::Functions(functions);
+        let crate::symbol_resolver::CandidateSelection::Selected((selected, params, Ty::Int)) =
+            self.resolver()
+                .select_receiver_function_with_params_tracking(
+                    comparable,
+                    "compareTo",
+                    &[crate::symbol_resolver::CallArgKind::Typed(element)],
+                    &[],
+                    &callables,
+                    None,
+                )
+        else {
+            return false;
+        };
+        self.resolved_operator_calls.insert(
+            (expression, SyntheticOperatorCall::CompareTo),
+            selected_member_call(comparable, &selected, params, Ty::Int),
+        );
+        true
     }
 
     /// The `contains` operator call testing membership of `value` in a range of `range_ty`.
@@ -744,7 +963,7 @@ impl<'a> Checker<'a> {
         bound: Ty,
         value: ExprId,
     ) -> Option<(Ty, ResolvedCall)> {
-        self.operator_call_ret_with_argument_kinds(
+        self.select_operator(
             scope,
             expression,
             range_ty,
@@ -755,6 +974,7 @@ impl<'a> Checker<'a> {
             None,
             Some(vec![crate::symbol_resolver::CallArgKind::Typed(bound)]),
         )
+        .map(|selected| (selected.ret, selected.call))
     }
 
     fn finish_range_contains(
@@ -785,6 +1005,27 @@ impl<'a> Checker<'a> {
         );
         Ty::Boolean
     }
+}
+
+/// The call target of a selected member operator over `receiver`.
+fn selected_member_call(
+    receiver: Ty,
+    selected: &crate::libraries::FunctionInfo,
+    params: Vec<Ty>,
+    ret: Ty,
+) -> ResolvedCall {
+    let mut member = selected.member_with_return(ret);
+    member.params = params;
+    ResolvedCall::Member(crate::symbol_resolver::ResolvedMember {
+        receiver,
+        physical_params: selected.callable.physical_params.clone(),
+        context_args: Vec::new(),
+        ret,
+        member,
+        projected_return_hazard: selected.projected_return_hazard,
+        suspend: selected.flags.suspend,
+        origin: selected.callable.origin.clone(),
+    })
 }
 
 /// `computeComparisonClass`: the widest numeric type of a range literal's bounds and the value.

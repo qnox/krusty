@@ -3,10 +3,51 @@
 //! The lexer represents a physical line break and an explicit `;` both as `Newline`. Kotlin's
 //! grammar allows `NL*` in specific positions and treats a break before `||`, `&&`, or `?:` as a
 //! continuation; these operations keep every caller on the same rules.
+//!
+//! Inside `(…)` and `[…]` a line break is not a terminator at all: kotlinc's parser disables
+//! newlines there and re-enables them in every `{…}` body nested inside (lambda, block, `when`
+//! body, object literal). [`Parser::with_newlines_insignificant`] and
+//! [`Parser::with_newlines_significant`] keep that mode, and `bump` honours it, so `(a\n+ b)` and
+//! `f(x\nor y)` continue the expression exactly as kotlinc does.
 
 use super::*;
 
 impl Parser<'_> {
+    /// Parse a parenthesized or bracketed construct, in which physical line breaks are whitespace.
+    pub(super) fn with_newlines_insignificant<T>(
+        &mut self,
+        parse: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        self.with_newline_mode(true, parse)
+    }
+
+    /// Parse a `{…}` body, which restores statement-terminating line breaks inside any enclosing
+    /// parentheses.
+    pub(super) fn with_newlines_significant<T>(&mut self, parse: impl FnOnce(&mut Self) -> T) -> T {
+        self.with_newline_mode(false, parse)
+    }
+
+    fn with_newline_mode<T>(
+        &mut self,
+        insignificant: bool,
+        parse: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let outer = std::mem::replace(&mut self.newlines_insignificant, insignificant);
+        self.skip_insignificant_newlines();
+        let result = parse(self);
+        self.newlines_insignificant = outer;
+        self.skip_insignificant_newlines();
+        result
+    }
+
+    /// While line breaks are insignificant, the cursor never rests on one. An explicit `;` is kept:
+    /// it is a token, not whitespace.
+    pub(super) fn skip_insignificant_newlines(&mut self) {
+        if self.newlines_insignificant {
+            self.skip_plain_newlines();
+        }
+    }
+
     pub(super) fn skip_newlines(&mut self) {
         while self.at(TokenKind::Newline) {
             self.bump();

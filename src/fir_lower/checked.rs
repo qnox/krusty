@@ -276,7 +276,7 @@ impl BodyLowering<'_> {
             ty: reference_ty,
             reflection_owner,
         } = reference;
-        let crate::types::Ty::Fun(reference) = reference_ty.non_null() else {
+        let crate::types::TyKind::Fun(reference) = reference_ty.non_null().kind() else {
             return Ok(None);
         };
         let signature = self

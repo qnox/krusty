@@ -216,7 +216,7 @@ impl FileLowering<'_> {
         if self.values.is_value_class(declaration.fq_name) {
             any()
         } else {
-            Ty::Obj(declaration.fq_name_id(), &[])
+            Ty::obj_name(declaration.fq_name_id())
         }
     }
 

@@ -11,7 +11,7 @@ use crate::libraries::builtin_declaration::{
 use crate::libraries::{
     kotlin_array_factory_kind, CompilerIntrinsic, FnKind, FunctionInfo, PropKind, PropertyInfo,
 };
-use crate::types::{ArrayFactoryKind, Ty, TypeName};
+use crate::types::{ArrayFactoryKind, Ty, TyKind, TypeName};
 
 /// Attach every compiler-owned realization fact for one normalized top-level declaration.
 /// Providers call this only after constructing the complete semantic signature; consumers never
@@ -85,7 +85,7 @@ fn property_reference_receiver(receiver: Ty, mutable: bool) -> Option<(u8, &'sta
 fn property_reference_metadata_parameter(ty: Ty) -> bool {
     let ty = ty.non_null();
     ty.obj_internal() == Some(crate::types::type_name("kotlin/reflect/KProperty"))
-        && matches!(ty.type_args(), [Ty::StarProjection(_)])
+        && matches!(ty.type_args(), [argument] if argument.is_star_projection())
 }
 
 pub(crate) fn function_semantic_role(
@@ -165,7 +165,7 @@ fn plain(facts: &BuiltinFunctionDeclaration<'_>, kind: FnKind) -> bool {
 }
 
 fn function_shape(ty: Ty, arity: usize, suspend: bool) -> bool {
-    matches!(ty.non_null(), Ty::Fun(signature)
+    matches!(ty.non_null().kind(), TyKind::Fun(signature)
         if signature.params.len() == arity
             && signature.context_count == 0
             && !signature.has_receiver
@@ -224,14 +224,14 @@ fn array_factory(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntri
             let [elements] = facts.params else {
                 return None;
             };
-            let Some(Ty::OutProjection(element)) = elements.array_elem() else {
+            let Some(TyKind::OutProjection(element)) = elements.array_elem().map(Ty::kind) else {
                 return None;
             };
             facts.type_parameter_count == 1
                 && facts.vararg == Some(0)
                 && elements.is_reference_array()
                 && facts.ret.is_reference_array()
-                && facts.ret.array_elem() == Some(*element)
+                && facts.ret.array_elem() == Some(element)
         }
         ArrayFactoryKind::ReferenceSize => {
             let [Ty::Int, initializer] = facts.params else {
@@ -322,7 +322,7 @@ fn kotlin_function(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerInt
                 && facts
                     .ret
                     .array_elem()
-                    .is_some_and(|element| matches!(element, Ty::TyParam(_, _))) =>
+                    .is_some_and(|element| element.is_ty_param()) =>
         {
             Some(CompilerIntrinsic::EnumValues)
         }
@@ -330,7 +330,7 @@ fn kotlin_function(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerInt
             if facts.type_parameter_count == 1
                 && facts.vararg.is_none()
                 && !facts.is_operator
-                && matches!(facts.ret, Ty::TyParam(_, _)) =>
+                && facts.ret.is_ty_param() =>
         {
             Some(CompilerIntrinsic::EnumValueOf)
         }
@@ -445,10 +445,13 @@ fn with_index(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsi
     let class = receiver.obj_internal();
     let (element, container) = if facts.package == wk::kotlin_collections_package() {
         if receiver.is_reference_array() {
-            let [Ty::OutProjection(element)] = receiver.type_args() else {
+            let [argument] = receiver.type_args() else {
                 return None;
             };
-            (generic_element(**element)?, wk::iterable())
+            let TyKind::OutProjection(element) = argument.kind() else {
+                return None;
+            };
+            (generic_element(element)?, wk::iterable())
         } else if receiver.is_array() {
             if facts.type_parameter_count != 0 {
                 return None;
@@ -490,7 +493,7 @@ fn kotlin_test(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrins
         || facts.type_parameter_count != 1
         || facts.vararg.is_some()
         || facts.is_operator
-        || !matches!(facts.ret, Ty::TyParam(_, _))
+        || !facts.ret.is_ty_param()
     {
         return None;
     }
@@ -580,6 +583,39 @@ fn progression_builder(facts: &BuiltinFunctionDeclaration<'_>) -> Option<Compile
     }
 }
 
+/// `ComparableRangeToHandler`: the stdlib's
+/// `operator fun <T : Comparable<T>> T.rangeTo(that: T): ClosedRange<T>`, declared by the
+/// authenticated compiler builtins owner. A dependency declaring the same shape keeps its body.
+fn comparable_range_to(
+    facts: &BuiltinFunctionDeclaration<'_>,
+    compiler_builtin_owner: bool,
+) -> Option<CompilerIntrinsic> {
+    use crate::types::wk;
+    if !compiler_builtin_owner
+        || facts.name != "rangeTo"
+        || !plain(facts, FnKind::Extension)
+        || !facts.is_operator
+        || facts.type_parameter_count != 1
+        || facts.vararg.is_some()
+    {
+        return None;
+    }
+    let element = facts.receiver?;
+    let bound = element.ty_param_bound()?;
+    let is_element = |ty: &Ty| match (ty.kind(), element.kind()) {
+        (TyKind::TyParam(name, _), TyKind::TyParam(declared, _)) => name == declared,
+        _ => false,
+    };
+    let applied_to_element = |ty: Ty, class| {
+        matches!(ty.kind(), TyKind::Obj(name, arguments)
+            if name == class && matches!(arguments.as_slice(), [argument] if is_element(argument)))
+    };
+    (applied_to_element(bound, wk::comparable())
+        && facts.params == [element]
+        && applied_to_element(facts.ret, wk::closed_range()))
+    .then_some(CompilerIntrinsic::ComparableRangeTo)
+}
+
 /// `matchStdlibExtensionContainsCall`: an operator `contains` extension of a closed range with one
 /// parameter.
 fn closed_range_contains(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
@@ -587,6 +623,9 @@ fn closed_range_contains(facts: &BuiltinFunctionDeclaration<'_>) -> Option<Compi
     if facts.kind != FnKind::Extension
         || facts.name != "contains"
         || !facts.is_operator
+        || facts.is_suspend
+        || facts.is_infix
+        || facts.ret != Ty::Boolean
         || facts.params.len() != 1
         || facts.context_count != 0
         || facts.vararg.is_some()
@@ -614,7 +653,7 @@ fn coroutine(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic
             ("startCoroutine", FnKind::Extension, Some(receiver), parameters)
                 if facts.type_parameter_count >= 1
                     && !facts.is_suspend
-                    && matches!(receiver.non_null(), Ty::Fun(signature)
+                    && matches!(receiver.non_null().kind(), TyKind::Fun(signature)
                         if signature.context_count == 0
                             && signature.suspend
                             && parameters.len() == signature.params.len() + 1
@@ -692,11 +731,13 @@ fn function_realization_with_stdlib_owner(
     } else if facts.package.matches("kotlin/reflect") {
         reflection(&facts)
     } else if facts.package == crate::types::wk::kotlin_ranges_package() {
-        progression_builder(&facts).or_else(|| {
-            compiler_builtin_owner
-                .then(|| closed_range_contains(&facts))
-                .flatten()
-        })
+        progression_builder(&facts)
+            .or_else(|| comparable_range_to(&facts, compiler_builtin_owner))
+            .or_else(|| {
+                compiler_builtin_owner
+                    .then(|| closed_range_contains(&facts))
+                    .flatten()
+            })
     } else {
         None
     }
@@ -857,6 +898,39 @@ mod tests {
         let mut non_operator = string_plus(&non_operator_params, Ty::String);
         non_operator.is_operator = false;
         assert_eq!(function_realization(non_operator), None);
+    }
+
+    #[test]
+    fn range_membership_requires_a_boolean_stdlib_operator() {
+        let declaration = |ret| BuiltinFunctionDeclaration {
+            package: crate::types::wk::kotlin_ranges_package(),
+            name: "contains",
+            kind: FnKind::Extension,
+            receiver: Some(Ty::obj("kotlin/ranges/IntRange")),
+            params: &[Ty::Byte],
+            ret,
+            context_count: 0,
+            type_parameter_count: 0,
+            vararg: None,
+            is_suspend: false,
+            is_operator: true,
+            is_infix: false,
+        };
+        assert_eq!(
+            function_realization_with_stdlib_owner(declaration(Ty::Boolean), true),
+            Some(CompilerIntrinsic::ClosedRangeContains)
+        );
+        assert_eq!(
+            function_realization_with_stdlib_owner(declaration(Ty::Boolean), false),
+            None
+        );
+        assert_eq!(
+            function_realization_with_stdlib_owner(declaration(Ty::Int), true),
+            None
+        );
+        let mut suspend = declaration(Ty::Boolean);
+        suspend.is_suspend = true;
+        assert_eq!(function_realization(suspend), None);
     }
 
     #[test]
@@ -1192,6 +1266,160 @@ mod tests {
             normalized_function_realization(package, "rangeTo", &same_shape),
             None
         );
+    }
+
+    #[test]
+    fn comparable_range_to_requires_the_complete_generic_declaration_and_its_owner() {
+        let comparable_of = |name: &str| {
+            Ty::obj_args(
+                "kotlin/Comparable",
+                &[Ty::ty_param(name, Ty::nullable(Ty::obj("kotlin/Any")))],
+            )
+        };
+        let element = Ty::ty_param("T", comparable_of("T"));
+        let other = Ty::ty_param("U", comparable_of("U"));
+        let closed_range = |argument| Ty::obj_args("kotlin/ranges/ClosedRange", &[argument]);
+        let params = [element];
+        let declaration = BuiltinFunctionDeclaration {
+            package: crate::types::wk::kotlin_ranges_package(),
+            name: "rangeTo",
+            kind: FnKind::Extension,
+            receiver: Some(element),
+            params: &params,
+            ret: closed_range(element),
+            context_count: 0,
+            type_parameter_count: 1,
+            vararg: None,
+            is_suspend: false,
+            is_operator: true,
+            is_infix: false,
+        };
+        assert_eq!(
+            function_realization_with_stdlib_owner(declaration, true),
+            Some(CompilerIntrinsic::ComparableRangeTo)
+        );
+        assert_eq!(
+            function_realization_with_stdlib_owner(declaration, false),
+            None,
+            "an unauthenticated provider's identical declaration"
+        );
+
+        let other_params = [other];
+        let concrete_params = [comparable_of("T")];
+        let foreign_bound = Ty::ty_param("T", comparable_of("U"));
+        let indirect_bound = Ty::ty_param("T", Ty::ty_param("U", comparable_of("T")));
+        for (near, why) in [
+            (
+                BuiltinFunctionDeclaration {
+                    params: &other_params,
+                    ..declaration
+                },
+                "a parameter of another type parameter",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    params: &concrete_params,
+                    ..declaration
+                },
+                "a Comparable parameter that is not the receiver's type parameter",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    receiver: Some(foreign_bound),
+                    params: &[foreign_bound],
+                    ret: closed_range(foreign_bound),
+                    ..declaration
+                },
+                "a bound comparing with another type parameter",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    receiver: Some(comparable_of("T")),
+                    params: &concrete_params,
+                    ret: closed_range(comparable_of("T")),
+                    ..declaration
+                },
+                "a Comparable receiver that is not a type parameter",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    ret: closed_range(other),
+                    ..declaration
+                },
+                "a range of another element",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    ret: Ty::nullable(closed_range(element)),
+                    ..declaration
+                },
+                "a nullable range",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    ret: Ty::ty_param("U", closed_range(element)),
+                    ..declaration
+                },
+                "another type parameter bounded by the range",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    ret: Ty::platform_nullable(closed_range(element)),
+                    ..declaration
+                },
+                "a platform range",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    receiver: Some(indirect_bound),
+                    params: &[indirect_bound],
+                    ret: closed_range(indirect_bound),
+                    ..declaration
+                },
+                "an indirect bound through another type parameter",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    type_parameter_count: 2,
+                    ..declaration
+                },
+                "a second type parameter",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    is_infix: true,
+                    ..declaration
+                },
+                "an infix declaration",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    is_suspend: true,
+                    ..declaration
+                },
+                "a suspend declaration",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    is_operator: false,
+                    ..declaration
+                },
+                "a declaration that is not an operator",
+            ),
+            (
+                BuiltinFunctionDeclaration {
+                    package: type_name("fixture"),
+                    ..declaration
+                },
+                "another package",
+            ),
+        ] {
+            assert_eq!(
+                function_realization_with_stdlib_owner(near, true),
+                None,
+                "{why}"
+            );
+        }
     }
 
     #[test]

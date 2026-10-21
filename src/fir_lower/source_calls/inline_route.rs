@@ -12,7 +12,7 @@ use crate::fir::{
 };
 use crate::fx_hash::HashSet;
 use crate::ir::{ExprId, FunId, IrExpr, SameModuleInlining};
-use crate::types::{InlineParameterModifier, Ty, Visibility};
+use crate::types::{InlineParameterModifier, Ty, TyKind, Visibility};
 
 #[cfg(test)]
 mod tests;
@@ -53,8 +53,6 @@ pub(in super::super) enum ExpansionReason {
     /// A parameter of the callee is `crossinline`: its lambda is placed in an object or lambda the
     /// callee's body creates.
     CrossinlineParameter,
-    /// The callee is a member of a class, object or interface, or of a class's companion block.
-    ClassMember,
     /// The callee is not public and declared in another file, so its body may reach declarations
     /// only its own file's class can.
     NonPublicCallee,
@@ -64,8 +62,6 @@ pub(in super::super) enum ExpansionReason {
     LambdaInBody,
     /// The callee's body creates an object of a local or anonymous class.
     LocalClassInBody,
-    /// The callee's body expands another same-module inline call.
-    NestedInlineExpansion,
     /// The callee's body holds a subject `when` that switches on an enum's keys. The keys are
     /// read from a table of the callee's own class (the JVM's `$WhenMappings`), numbered as that
     /// class's emission claims them, which a body compiled for the call site cannot reproduce.
@@ -133,7 +129,7 @@ impl BodyLowering<'_> {
             return Some(ExpansionReason::SuspendCallee);
         }
         let suspend_function =
-            |ty: Ty| matches!(ty.non_null(), Ty::Fun(signature) if signature.suspend);
+            |ty: Ty| matches!(ty.non_null().kind(), TyKind::Fun(signature) if signature.suspend);
         let Some(signature) = self.index.signature(declaration) else {
             return Some(ExpansionReason::NoTemplate);
         };
@@ -147,12 +143,6 @@ impl BodyLowering<'_> {
                 .is_some_and(|receiver| suspend_function(receiver.get()))
         {
             return Some(ExpansionReason::SuspendFunctionParameter);
-        }
-        // A companion-block member is a static of its class, compiled there.
-        if self.index.enclosing_classifier(declaration).is_some()
-            || header.flags.has(DeclarationFlags::COMPANION)
-        {
-            return Some(ExpansionReason::ClassMember);
         }
         let Some(function) = function else {
             return Some(ExpansionReason::NoTemplate);
@@ -203,9 +193,6 @@ impl BodyLowering<'_> {
         while let Some(expression) = pending.pop() {
             if !seen.insert(expression) {
                 continue;
-            }
-            if self.ir.inline_regions.contains(&expression) {
-                return Some(ExpansionReason::NestedInlineExpansion);
             }
             if self.ir.enum_switch_when(expression).is_some() {
                 return Some(ExpansionReason::EnumSwitchInBody);

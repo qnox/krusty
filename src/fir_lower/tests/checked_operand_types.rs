@@ -46,6 +46,14 @@ fn generated_data_class_equality_records_declared_field_types() {
             (Some(Ty::Boolean), Some(Ty::Boolean)),
         ]
     );
+    assert_eq!(
+        ir.exprs
+            .iter()
+            .filter(|expression| matches!(expression, IrExpr::Equality { .. }))
+            .count(),
+        0,
+        "generated comparisons must keep their primitive contract instead of acquiring source equality modes"
+    );
 }
 
 /// Membership is realized after FIR lowering, as kotlinc's `RangeContainsLowering` runs after

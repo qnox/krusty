@@ -123,14 +123,48 @@ pub(crate) fn realize(ir: &mut IrFile, policy: CountedLoopPolicy) {
         record_generated_lines(ir, expression as ExprId, first_generated);
         ir.exprs[expression] = replacement;
     }
-    realize_memberships(ir, style, &mut next_slot);
+    realize_memberships(ir, style, inlining, &mut next_slot);
 }
 
-/// Realize every checked membership test in a signed, character or floating-point range literal
-/// as kotlinc's `RangeContainsLowering` does. An unsigned one uses the normalized ordering role
-/// authorized by the exact provider-selected comparison carried by checked IR.
-fn realize_memberships(ir: &mut IrFile, style: CounterLoopStyle, next_slot: &mut Option<u32>) {
+/// Realize every checked membership test in a range literal as kotlinc's `RangeContainsLowering`
+/// does. An unsigned one orders its operands with the inline `compareTo`, whose body is the
+/// provider-selected comparison carried by checked IR.
+fn realize_memberships(
+    ir: &mut IrFile,
+    style: CounterLoopStyle,
+    inlining: HeaderInlining,
+    next_slot: &mut Option<u32>,
+) {
     for expression in 0..ir.exprs.len() {
+        if let IrExpr::Checked(IrCheckedOperation::ComparableRangeContains {
+            lower,
+            end,
+            negated,
+        }) = ir.exprs[expression]
+        {
+            let first_generated = ir.exprs.len();
+            let mut realizer = Realizer {
+                next_slot: next_slot.unwrap_or_else(|| ir.next_value_slot()),
+                ir: &mut *ir,
+                style,
+                inlining: HeaderInlining::None,
+                until_steps: UntilSteps::Built,
+                unsigned_compare: None,
+                inlined_calls: Vec::new(),
+                represented: Vec::new(),
+            };
+            let contains = realizer.comparable_range_contains(lower, end);
+            *next_slot = Some(realizer.next_slot);
+            finish_membership(
+                ir,
+                expression as ExprId,
+                contains,
+                negated,
+                first_generated,
+                &[],
+            );
+            continue;
+        }
         let IrExpr::Checked(IrCheckedOperation::RangeContains {
             operation,
             value,
@@ -148,7 +182,7 @@ fn realize_memberships(ir: &mut IrFile, style: CounterLoopStyle, next_slot: &mut
             next_slot: next_slot.unwrap_or_else(|| ir.next_value_slot()),
             ir: &mut *ir,
             style,
-            inlining: HeaderInlining::None,
+            inlining,
             until_steps: UntilSteps::Built,
             unsigned_compare,
             inlined_calls: Vec::new(),
@@ -162,14 +196,38 @@ fn realize_memberships(ir: &mut IrFile, style: CounterLoopStyle, next_slot: &mut
             comparison: counter,
         });
         *next_slot = Some(realizer.next_slot);
-        if negated {
-            let contains = ir.add_expr(contains);
-            ir.logical_types.insert(contains, Ty::Boolean);
-            ir.replace_with_negation(expression as ExprId, contains);
-        } else {
-            ir.exprs[expression] = contains;
-        }
-        record_generated_origins(ir, expression as ExprId, first_generated, &[]);
+        let inlined_calls = std::mem::take(&mut realizer.inlined_calls);
+        finish_membership(
+            ir,
+            expression as ExprId,
+            contains,
+            negated,
+            first_generated,
+            &inlined_calls,
+        );
+    }
+}
+
+/// Put a realized membership test in place of its checked node, negated for `!in`, and give the
+/// generated nodes the membership's origin and line.
+fn finish_membership(
+    ir: &mut IrFile,
+    expression: ExprId,
+    contains: IrExpr,
+    negated: bool,
+    first_generated: usize,
+    inlined_calls: &[ExprId],
+) {
+    if negated {
+        let contains = ir.add_expr(contains);
+        ir.logical_types.insert(contains, Ty::Boolean);
+        ir.replace_with_negation(expression, contains);
+    } else {
+        ir.exprs[expression as usize] = contains;
+    }
+    record_generated_origins(ir, expression, first_generated, inlined_calls);
+    if let Some(line) = ir.expr_source_lines.get(&expression).copied() {
+        record_generated_line(ir, line, first_generated);
     }
 }
 
@@ -509,6 +567,13 @@ fn record_generated_lines(ir: &mut IrFile, source: ExprId, first_generated: usiz
     let Some(line) = ir.expr_lines.get(&source).copied() else {
         return;
     };
+    record_generated_line(ir, line, first_generated);
+}
+
+/// Give every node generated from `first_generated` on the source `line` it was built at.
+/// kotlinc's `RangeContainsLowering` builds a membership's comparisons at the `in` expression's
+/// offsets, so the comparison after an inlined `compareTo` marks that line at its jump.
+fn record_generated_line(ir: &mut IrFile, line: u32, first_generated: usize) {
     for raw in first_generated..ir.exprs.len() {
         ir.expr_source_lines.insert(raw as ExprId, line);
     }

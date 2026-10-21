@@ -29,8 +29,10 @@
 mod bytecode_machine;
 mod continuation_class;
 mod coroutine_context;
+mod resume_coercion;
 use continuation_class::{build_continuation_class, physical_parameters, suspend_parameter_ty};
 use coroutine_context::realize_coroutine_context;
+use resume_coercion::unbox;
 mod call_operand_realization;
 mod cps_bridges;
 pub(crate) use cps_bridges::finalize_suspend_bridges;
@@ -60,7 +62,7 @@ use spill_layout::{
 };
 mod specialized_lambda_classes;
 pub(crate) use specialized_lambda_classes::SpecializedLambdaClasses;
-mod suspend_lambda;
+pub(crate) mod suspend_lambda;
 mod tail_forward;
 mod value_class_results;
 pub(crate) use value_class_results::{box_may_be_null, completion_box};
@@ -3623,46 +3625,6 @@ fn wrap_dispatch_for_handlers(
         finally: None,
         result: Ty::Unit,
     })
-}
-
-/// Coerce an `Object` value to `target` (unbox a primitive, or checkcast a reference).
-fn unbox(ir: &mut IrFile, value: ExprId, target: &Ty) -> ExprId {
-    // The CPS resume value is `Object`; a reference target (`Config`, `String`, `List<…>`) needs a real
-    // `checkcast` to that type, while a primitive target unboxes. `ImplicitCoercion` unboxes but does not
-    // narrow a reference, so a concrete reference result would otherwise stay `Object` (VerifyError at its
-    // first typed use). `Cast` (a plain `checkcast`, null-passing) applies for a reference; `kotlin/Any`
-    // needs neither (already `Object`).
-    let op = if reference_needs_checkcast(target) {
-        IrTypeOp::Cast
-    } else {
-        IrTypeOp::ImplicitCoercion
-    };
-    ir.add_expr(IrExpr::TypeOp {
-        op,
-        arg: value,
-        type_operand: target.clone(),
-    })
-}
-
-/// Whether narrowing an erased `Object` resume value to `t` needs an explicit `checkcast` — a concrete
-/// reference class (`Config`), `String`, or an array. `kotlin/Any` (already `Object`) and primitives do
-/// NOT; crucially a BOXED-primitive object type (`Obj("kotlin/Int")`, a spilled `Int`) also does not —
-/// there `ImplicitCoercion` UNBOXES to the primitive, whereas a `checkcast` would leave it boxed and a
-/// later primitive use (`istore`/`iadd`) would fail verification.
-fn reference_needs_checkcast(t: &Ty) -> bool {
-    match *t {
-        // A NULLABLE PRIMITIVE (`Int?`) is a boxed reference (`Integer`): the resume value must be
-        // checkcast to the wrapper — `ImplicitCoercion` would no-op (it can't unbox to a nullable),
-        // leaving the slot `Object` while the spill restore's frame type is the wrapper (VerifyError
-        // at the state merge). A nullable REFERENCE keeps the inner type's own answer.
-        Ty::Nullable(inner) => t.nullable_primitive().is_some() || reference_needs_checkcast(inner),
-        Ty::TyParam(_, inner) => reference_needs_checkcast(inner),
-        Ty::String => true,
-        Ty::Obj(i, _) => {
-            i != crate::types::wk::any() && !super::jvm_class_map::is_boxed_primitive_classifier(i)
-        }
-        _ => false,
-    }
 }
 
 /// A spilled-local shape the state machine's uniform restore doesn't model yet: kotlinc's per-kind

@@ -9,7 +9,7 @@ use crate::language_version::LanguageVersion;
 use crate::libraries::{CallSig, GenericSig};
 use crate::types::{ContextParameterKind, ReturnValueStatus, Ty, TypeName, Visibility};
 
-use super::{MetaValueParam, MfnFlags};
+use super::MetaValueParam;
 
 /// A function decoded from a `Class`/`Package` `@Metadata` message — the *metadata-truth* signature
 /// kotlinc resolves against (`JvmProtoBufUtil.getJvmMethodSignature`): the Kotlin name, the JVM method
@@ -56,6 +56,96 @@ pub struct MetaFn {
     /// metadata layer hard-coding any one annotation's semantics.
     pub annotations: Vec<TypeName>,
     extras: Option<Box<FunctionExtras>>,
+}
+
+/// Bit-packed boolean flags for a [`MetaFn`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MfnFlags(u16);
+
+impl MfnFlags {
+    const IS_INLINE: u16 = 1 << 0;
+    const IS_SUSPEND: u16 = 1 << 1;
+    const IS_EXTENSION: u16 = 1 << 2;
+    const RET_NULLABLE: u16 = 1 << 3;
+    const IS_OPERATOR: u16 = 1 << 4;
+    const IS_INFIX: u16 = 1 << 5;
+    const HAS_REIFIED_TYPE_PARAMS: u16 = 1 << 6;
+    const DEPRECATED_HIDDEN: u16 = 1 << 7;
+    const IS_ABSTRACT: u16 = 1 << 8;
+    const IS_FINAL: u16 = 1 << 9;
+    const IS_COMPANION_BLOCK_MEMBER: u16 = 1 << 10;
+    const IS_SYNTHESIZED: u16 = 1 << 11;
+    const ANNOTATIONS_ON_REALIZATION: u16 = 1 << 12;
+
+    #[inline]
+    const fn with(mut self, mask: u16, on: bool) -> Self {
+        if on {
+            self.0 |= mask;
+        } else {
+            self.0 &= !mask;
+        }
+        self
+    }
+    #[inline]
+    const fn has(self, mask: u16) -> bool {
+        self.0 & mask != 0
+    }
+
+    #[inline]
+    pub const fn with_is_inline(self, on: bool) -> Self {
+        self.with(Self::IS_INLINE, on)
+    }
+    #[inline]
+    pub const fn with_is_suspend(self, on: bool) -> Self {
+        self.with(Self::IS_SUSPEND, on)
+    }
+    #[inline]
+    pub const fn with_is_extension(self, on: bool) -> Self {
+        self.with(Self::IS_EXTENSION, on)
+    }
+    #[inline]
+    pub const fn with_ret_nullable(self, on: bool) -> Self {
+        self.with(Self::RET_NULLABLE, on)
+    }
+    #[inline]
+    pub const fn with_is_operator(self, on: bool) -> Self {
+        self.with(Self::IS_OPERATOR, on)
+    }
+    #[inline]
+    pub const fn with_is_infix(self, on: bool) -> Self {
+        self.with(Self::IS_INFIX, on)
+    }
+    #[inline]
+    pub const fn with_has_reified_type_params(self, on: bool) -> Self {
+        self.with(Self::HAS_REIFIED_TYPE_PARAMS, on)
+    }
+    #[inline]
+    pub const fn with_deprecated_hidden(self, on: bool) -> Self {
+        self.with(Self::DEPRECATED_HIDDEN, on)
+    }
+    #[inline]
+    pub const fn with_is_abstract(self, on: bool) -> Self {
+        self.with(Self::IS_ABSTRACT, on)
+    }
+    #[inline]
+    pub const fn with_is_final(self, on: bool) -> Self {
+        self.with(Self::IS_FINAL, on)
+    }
+    #[inline]
+    pub const fn with_is_companion_block_member(self, on: bool) -> Self {
+        self.with(Self::IS_COMPANION_BLOCK_MEMBER, on)
+    }
+    #[inline]
+    pub const fn with_is_synthesized(self, on: bool) -> Self {
+        self.with(Self::IS_SYNTHESIZED, on)
+    }
+    /// `HAS_ANNOTATIONS` is set while metadata records no `Function.annotation`: the external
+    /// payload shape of a library compiled without `AnnotationsInMetadata`, whose annotations live
+    /// only on the realization method.
+    #[inline]
+    pub const fn with_annotations_on_realization(self, on: bool) -> Self {
+        self.with(Self::ANNOTATIONS_ON_REALIZATION, on)
+    }
 }
 
 /// Facts present on a small minority of metadata functions.
@@ -212,6 +302,12 @@ impl MetaFn {
     #[inline]
     pub fn is_synthesized(&self) -> bool {
         self.flags.has(MfnFlags::IS_SYNTHESIZED)
+    }
+    /// Whether this function's annotations live only on its realization method (see
+    /// [`MfnFlags::with_annotations_on_realization`]).
+    #[inline]
+    pub(super) fn annotations_on_realization(&self) -> bool {
+        self.flags.has(MfnFlags::ANNOTATIONS_ON_REALIZATION)
     }
     #[inline]
     pub fn ret_nullable(&self) -> bool {
@@ -373,10 +469,10 @@ impl MetaFn {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
-    fn blank() -> DecodedFunction {
+    pub(in crate::jvm::metadata) fn blank() -> DecodedFunction {
         DecodedFunction {
             kotlin_name: String::new(),
             jvm_name: String::new(),
@@ -410,7 +506,7 @@ mod tests {
         assert_eq!(function.deprecation(), None);
         // Four empty vectors and an `Option<Ty>` used to sit on every function. The side
         // record is one pointer. Pin the size so those fields cannot move back onto `MetaFn`.
-        assert_eq!(size_of::<MetaFn>(), 296);
+        assert_eq!(size_of::<MetaFn>(), 240);
     }
 
     #[test]

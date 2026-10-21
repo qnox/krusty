@@ -108,6 +108,39 @@ impl KlibIrArena {
         calls.into_iter()
     }
 
+    /// Calls and constructions in a prepared body's executable graph, including defaults.
+    /// This broader inventory is only for reference binding, not intrinsic-root authority.
+    pub(crate) fn callable_symbols<'a>(
+        &'a self,
+        function: &'a KlibIrFunction,
+    ) -> impl Iterator<Item = &'a KlibIrSymbol> {
+        let mut pending = Vec::new();
+        if let Some(KlibIrBody::Block(statements)) = &function.body {
+            push_statement_expressions(self, statements, &mut pending);
+        }
+        pending.extend(
+            function
+                .context_parameters
+                .iter()
+                .chain(&function.extension_receiver)
+                .chain(&function.regular_parameters)
+                .filter_map(|parameter| parameter.default_value),
+        );
+        let mut calls = Vec::new();
+        while let Some(id) = pending.pop() {
+            let expression = self.expr(id);
+            push_child_expressions(self, &expression.kind, &mut pending);
+            match &expression.kind {
+                KlibIrExprKind::Call { access, .. }
+                | KlibIrExprKind::ConstructorCall { access, .. }
+                | KlibIrExprKind::DelegatingConstructorCall(access)
+                | KlibIrExprKind::EnumConstructorCall(access) => calls.push(&access.symbol),
+                _ => {}
+            }
+        }
+        calls.into_iter()
+    }
+
     /// The number of `return`s naming `target` among `statements` and the expressions nested in
     /// them.
     pub(crate) fn returns_to(

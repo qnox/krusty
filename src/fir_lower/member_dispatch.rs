@@ -3,7 +3,8 @@
 use super::BodyLowering;
 use crate::fir::{FirConversionKind, FirReceiver};
 use crate::ir::ExprId;
-use crate::types::{Ty, TypeName};
+use crate::types::TyKind;
+use crate::types::TypeName;
 
 impl BodyLowering<'_> {
     /// The class type `receiver` statically has, after any smart cast: the class the checker
@@ -14,8 +15,8 @@ impl BodyLowering<'_> {
             Some(FirConversionKind::SmartCast { to }) => to.get(),
             _ => self.body.expr(receiver.value)?.ty.get(),
         };
-        match ty.non_null() {
-            Ty::Obj(class, _) => Some(class),
+        match ty.non_null().kind() {
+            TyKind::Obj(class, _) => Some(class),
             _ => None,
         }
     }

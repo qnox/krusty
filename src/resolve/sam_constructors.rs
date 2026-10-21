@@ -11,7 +11,7 @@ use crate::symbol_resolver::{
     SamSignature,
 };
 use crate::symbol_source::SymbolSource;
-use crate::types::{Ty, TypeVariance};
+use crate::types::{Ty, TyKind, TypeVariance};
 
 pub(super) struct SelectedSamConstructor {
     pub result: Ty,
@@ -28,11 +28,10 @@ pub(super) fn select_fixed_sam_constructor(
     result: Ty,
     actual: Ty,
 ) -> Option<SelectedSamConstructor> {
-    let callable = match actual.non_null() {
-        function @ Ty::Fun(_) => function,
-        nominal => crate::symbol_resolver::classifier_callable_signature(source, nominal)?,
-    };
-    let Ty::Fun(actual_function) = callable else {
+    // A function type is its own callable signature.
+    let callable =
+        crate::symbol_resolver::classifier_callable_signature(source, actual.non_null())?;
+    let TyKind::Fun(actual_function) = callable.kind() else {
         return None;
     };
     let expected = Ty::fun_with_shape(
@@ -42,7 +41,7 @@ pub(super) fn select_fixed_sam_constructor(
         signature.has_receiver,
         signature.suspend,
     );
-    let Ty::Fun(expected) = expected else {
+    let TyKind::Fun(expected) = expected.kind() else {
         unreachable!("a SAM method always has a function shape")
     };
     let oracle = crate::symbol_resolver::SourceOracle(source);
@@ -81,11 +80,10 @@ pub(super) fn select_sam_constructor(
     mut signature: SamSignature,
     actual: Ty,
 ) -> Option<SelectedSamConstructor> {
-    let callable = match actual.non_null() {
-        function @ Ty::Fun(_) => function,
-        nominal => crate::symbol_resolver::classifier_callable_signature(source, nominal)?,
-    };
-    let Ty::Fun(actual_function) = callable else {
+    // A function type is its own callable signature.
+    let callable =
+        crate::symbol_resolver::classifier_callable_signature(source, actual.non_null())?;
+    let TyKind::Fun(actual_function) = callable.kind() else {
         return None;
     };
     if actual_function.params.len() != signature.params.len()
@@ -107,7 +105,7 @@ pub(super) fn select_sam_constructor(
             signature.has_receiver,
             signature.suspend,
         );
-        let Ty::Fun(expected) = expected else {
+        let TyKind::Fun(expected) = expected.kind() else {
             unreachable!("a SAM method always has a function shape")
         };
         let oracle = crate::symbol_resolver::SourceOracle(source);

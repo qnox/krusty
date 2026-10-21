@@ -11,7 +11,7 @@ use crate::libraries::{
     CallSig, Callables, ClassifierInheritance, FnKind, FunctionInfo, FunctionSet, LibraryCallable,
     LibraryMember, LibraryType, TypeKind,
 };
-use crate::types::{type_name, type_name_child, wk, Ty, TypeName, TypeVariance};
+use crate::types::{type_name, type_name_child, wk, Ty, TyKind, TypeName, TypeVariance};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FunctionClassKind {
@@ -111,7 +111,7 @@ pub(crate) fn classifier_name_in(package: TypeName, name: &str) -> Option<TypeNa
 /// (`kotlin/coroutines/SuspendFunction1<A, R>`), which declares the `invoke` a class declaring
 /// that supertype overrides.
 pub(crate) fn supertype_classifier(supertype: Ty) -> Ty {
-    let Ty::Fun(signature) = supertype else {
+    let TyKind::Fun(signature) = supertype.kind() else {
         return supertype;
     };
     let classifier = function_classifier_identity(signature.params.len(), signature.suspend);
@@ -164,7 +164,7 @@ pub(crate) fn property_reference_type(arity: usize, mutable: bool, args: &[Ty]) 
 /// Select the reflective classifier from an already-resolved function signature. Direction matters:
 /// consumers never parse a reflective classifier spelling to reconstruct callable semantics.
 pub(crate) fn function_reference_type(function: Ty) -> Option<Ty> {
-    let Ty::Fun(signature) = function else {
+    let TyKind::Fun(signature) = function.kind() else {
         return None;
     };
     if signature.context_count != 0 {
@@ -395,7 +395,8 @@ mod tests {
     fn synthetic_function_has_complete_common_shape() {
         let function = classifier(type_name("kotlin/Function30")).expect("Function30 identity");
         let shape = synthetic(function);
-        let Ty::Fun(signature) = shape.callable_signature.expect("callable shape") else {
+        let TyKind::Fun(signature) = shape.callable_signature.expect("callable shape").kind()
+        else {
             panic!("Function30 callable signature is not a function")
         };
         assert_eq!(shape.type_params().len(), 31);

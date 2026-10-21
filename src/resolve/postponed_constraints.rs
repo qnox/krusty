@@ -2,6 +2,7 @@
 //! analyzed before the call is solved (kotlinc's PCLA).
 
 use super::*;
+use crate::types::TyKind;
 
 pub(super) type PostponedLambdaTypes = (Vec<Ty>, Option<Ty>, Option<Ty>, Option<Ty>, bool);
 
@@ -84,7 +85,7 @@ impl PostponedCallConstraints {
     ) -> (Ty, bool) {
         let constraints = Self::for_call(compilation, file, call, formals);
         let ty = constraints.instantiate_type(ty);
-        let entered = matches!(ty.non_null(), Ty::Fun(_)) && constraints.mentions_formal(ty);
+        let entered = ty.non_null().is_fun() && constraints.mentions_formal(ty);
         if entered {
             frames.push(constraints);
         }
@@ -110,10 +111,18 @@ impl PostponedCallConstraints {
         formals: &[String],
         function: &'static crate::types::FnSig,
     ) -> (&'static crate::types::FnSig, bool) {
-        match Self::enter_for_type(frames, compilation, file, call, formals, Ty::Fun(function)) {
-            (Ty::Fun(function), entered) => (function, entered),
-            _ => unreachable!("a function type remains a function type"),
-        }
+        let (entered_type, entered) = Self::enter_for_type(
+            frames,
+            compilation,
+            file,
+            call,
+            formals,
+            Ty::from(TyKind::Fun(function)),
+        );
+        let TyKind::Fun(function) = entered_type.kind() else {
+            unreachable!("a function type remains a function type")
+        };
+        (function, entered)
     }
 
     pub(super) fn enter_lambda(
@@ -152,11 +161,11 @@ impl PostponedCallConstraints {
     /// relates `() -> V?` to the same type once its callee's result variable has been replaced by
     /// `V?`; that must not turn `V`'s concrete `Int` evidence into `V & Any`.
     fn is_trivial_self_bound(&self, formal: &str, bound: Ty, lower: bool) -> bool {
-        let variable = match (bound, lower) {
-            (Ty::DefinitelyNotNull(inner), true) | (Ty::Nullable(inner), false) => *inner,
-            (bound, _) => bound,
+        let variable = match (bound.kind(), lower) {
+            (TyKind::DefinitelyNotNull(inner), true) | (TyKind::Nullable(inner), false) => inner,
+            (_, _) => bound,
         };
-        matches!(variable, Ty::TyParam(name, _) if name == formal)
+        matches!(variable.kind(), TyKind::TyParam(name, _) if name == formal)
     }
 
     pub(super) fn mentions_formal(&self, ty: Ty) -> bool {
@@ -275,7 +284,8 @@ impl PostponedCallConstraints {
         declared: Ty,
         checked: Ty,
     ) {
-        let (Ty::Fun(declared), Ty::Fun(checked)) = (declared.non_null(), checked.non_null())
+        let (TyKind::Fun(declared), TyKind::Fun(checked)) =
+            (declared.non_null().kind(), checked.non_null().kind())
         else {
             return;
         };
@@ -361,7 +371,7 @@ impl PostponedCallConstraints {
         declared: Ty,
         bindings: &crate::symbol_resolver::GSigBinds,
     ) -> Ty {
-        let Ty::Fun(function) = declared.non_null() else {
+        let TyKind::Fun(function) = declared.non_null().kind() else {
             return crate::symbol_resolver::ty_subst_keep_unbound(declared, bindings);
         };
         let fixed_result_bindings = bindings
@@ -494,7 +504,7 @@ impl Checker<'_> {
                         }))
                     && (depends_on_open_result
                         || generic.params.iter().any(|parameter| {
-                            matches!(parameter.non_null(), Ty::Fun(function)
+                            matches!(parameter.non_null().kind(), TyKind::Fun(function)
                                 if !function.has_receiver
                                     && function.params.iter().any(|input| {
                                         ty_mentions_param(
@@ -567,7 +577,7 @@ impl Checker<'_> {
             .rev()
             .find(|frame| frame.mentions_formal(expected))
             .map_or(expected, |frame| frame.declared_type(expected));
-        let Ty::TyParam(formal, _) = expected.non_null() else {
+        let TyKind::TyParam(formal, _) = expected.non_null().kind() else {
             return true;
         };
         // A generic referenced declaration can specialize its input to the still-open formal. Its
@@ -577,7 +587,7 @@ impl Checker<'_> {
             return true;
         }
         constraints
-            .and_then(|constraints| constraints.get(formal))
+            .and_then(|constraints| constraints.get(formal.as_str()))
             .is_none_or(|arguments| {
                 arguments.iter().all(|argument| {
                     self.receiver_is_assignable(argument.ty(), target)
@@ -682,7 +692,7 @@ impl Checker<'_> {
                 // weaken the stable result it just published. Callable references remain
                 // sensitive to their complete function type because the result selects overloads.
                 let changed_input = if is_lambda {
-                    matches!(declared.non_null(), Ty::Fun(function) if changed.iter().any(|formal| {
+                    matches!(declared.non_null().kind(), TyKind::Fun(function) if changed.iter().any(|formal| {
                         function.params.iter().any(|parameter| {
                             ty_mentions_param(*parameter, std::slice::from_ref(formal))
                         })
@@ -702,7 +712,7 @@ impl Checker<'_> {
                     // its complete expected signature selects the referenced overload.
                     crate::symbol_resolver::ty_subst_keep_unbound(declared, known_bindings)
                 };
-                if !matches!(expected.non_null(), Ty::Fun(_)) {
+                if !expected.non_null().is_fun() {
                     continue;
                 }
                 let checked = if is_lambda {
@@ -737,7 +747,7 @@ impl Checker<'_> {
                     checked
                 };
                 if is_lambda
-                    && matches!(expected.non_null(), Ty::Fun(function)
+                    && matches!(expected.non_null().kind(), TyKind::Fun(function)
                         if function.params.iter().all(|input| !constraints.mentions_formal(*input)))
                 {
                     // The concrete-input check is now authoritative. Any unresolved member still
@@ -955,7 +965,7 @@ mod tests {
         assert!(constraints.is_trivial_self_bound(&name, value, true));
         assert!(constraints.is_trivial_self_bound(
             &name,
-            Ty::DefinitelyNotNull(crate::types::intern_ty(value)),
+            Ty::from(TyKind::DefinitelyNotNull(value)),
             true
         ));
         assert!(constraints.is_trivial_self_bound(&name, value, false));

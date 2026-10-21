@@ -98,7 +98,8 @@ impl ExternalIdentities {
         let identity = self.intern_property(signed, property);
         // Each accessor's realization names its property, as the published accessor does.
         let mut realizations = self.realizations.borrow_mut();
-        for accessor in std::iter::once(&mut property.getter).chain(property.setter.as_mut()) {
+        for accessor in std::iter::once(&mut property.getter).chain(property.setter.as_deref_mut())
+        {
             accessor.external_property_identity = Some(identity);
             if let Some(realization) = accessor
                 .external_identity

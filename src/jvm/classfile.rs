@@ -1331,6 +1331,7 @@ impl ClassWriter {
             Rvpa,
             Ripa,
             Sig,
+            Mp,
         }
         /// A method's `RuntimeInvisibleParameterAnnotations` entries: the USER (BINARY-retained)
         /// annotations first, then the synthesized `@NotNull`/`@Nullable` — kotlinc's order within a
@@ -1430,9 +1431,14 @@ impl ClassWriter {
             if !invisible_param_anns(m).is_empty() && !seq.contains(&An::Ripa) {
                 seq.push(An::Ripa);
             }
+            if !m.method_parameters.is_empty() && !seq.contains(&An::Mp) {
+                seq.push(An::Mp);
+            }
         }
         let (mut lnt_attr_name, mut lvt_attr_name, mut stackmap_attr_name, mut ripa_attr_name) =
             (None, None, None, None);
+        // `MethodParameters` (only under `-java-parameters`) interns last in its method's sequence.
+        let mut method_parameters_attr_name = None;
         // Unused when no method has a body: an unused attribute name would diverge from kotlinc.
         let mut code_attr_name = 0;
         // A method-level `RuntimeVisibleAnnotations` shares its attribute-name entry with the class
@@ -1463,6 +1469,7 @@ impl ClassWriter {
                 An::Sig => {
                     self.cp.utf8("Signature");
                 }
+                An::Mp => method_parameters_attr_name = Some(self.cp.utf8("MethodParameters")),
             }
         }
         let method_invis_ann_name = invis_ann_name;
@@ -1477,13 +1484,6 @@ impl ClassWriter {
                 .any(|m| m.signature.is_some())
                 .then(|| self.cp.utf8("Signature"))
         });
-        // `MethodParameters` (written only under `-java-parameters`) interns once, when some method
-        // carries one.
-        let method_parameters_attr_name = self
-            .methods
-            .iter()
-            .any(|method| !method.method_parameters.is_empty())
-            .then(|| self.cp.utf8("MethodParameters"));
         let mut annotation_default_attrs = HashMap::default();
         for default in self
             .methods

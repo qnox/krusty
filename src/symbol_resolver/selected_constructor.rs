@@ -5,8 +5,8 @@
 use super::generic_inference::constrain_constructor_result;
 use super::{GSigBinds, SelectedConstructorCall};
 use crate::libraries::{LibraryMember, LibraryType};
-use crate::types::Ty;
 use crate::types::TypeName;
+use crate::types::{Ty, TyKind};
 
 /// The semantic declaration and classifier-owned generic facts selected as one resolver decision.
 #[derive(Clone, Debug)]
@@ -115,10 +115,10 @@ fn bind_direct_supertype(
         .copied()
         .zip(expected_args.iter().copied())
     {
-        if matches!(actual, Ty::StarProjection(_)) {
+        if actual.is_star_projection() {
             continue;
         }
-        let Ty::TyParam(name, _) = formal.non_null() else {
+        let TyKind::TyParam(name, _) = formal.non_null().kind() else {
             continue;
         };
         bindings

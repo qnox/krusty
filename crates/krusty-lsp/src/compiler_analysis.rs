@@ -17,7 +17,7 @@ use krusty::frontend;
 #[cfg(test)]
 use krusty::libraries::SemanticPlatform;
 use krusty::source::SourceInput;
-use krusty::types::Ty;
+use krusty::types::{Ty, TyKind};
 use std::collections::HashMap;
 
 pub(crate) use completion::{CompletionDetails, CompletionKind, CompletionSymbols};
@@ -363,28 +363,28 @@ fn add_unused_extension_property_inspection(
 
 /// Type-parameter identities mentioned anywhere in `ty`.
 fn type_parameters_mentioned(ty: Ty, names: &mut std::collections::HashSet<&'static str>) {
-    match ty {
-        Ty::TyParam(name, _) => {
-            names.insert(name);
+    match ty.kind() {
+        TyKind::TyParam(name, _) => {
+            names.insert(krusty::types::TyParamName::as_str(name));
         }
-        Ty::Nullable(inner) | Ty::PlatformNullable(inner) | Ty::DefinitelyNotNull(inner) => {
-            type_parameters_mentioned(*inner, names)
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::DefinitelyNotNull(inner) => type_parameters_mentioned(inner, names),
+        TyKind::InProjection(inner) | TyKind::OutProjection(inner) => {
+            type_parameters_mentioned(inner, names)
         }
-        Ty::InProjection(inner) | Ty::OutProjection(inner) => {
-            type_parameters_mentioned(*inner, names)
-        }
-        Ty::Obj(_, args) => {
+        TyKind::Obj(_, args) => {
             for &arg in args {
                 type_parameters_mentioned(arg, names);
             }
         }
-        Ty::Fun(signature) => {
+        TyKind::Fun(signature) => {
             for &parameter in &signature.params {
                 type_parameters_mentioned(parameter, names);
             }
             type_parameters_mentioned(signature.ret, names);
         }
-        Ty::Intersection(parts) => {
+        TyKind::Intersection(parts) => {
             for &part in parts {
                 type_parameters_mentioned(part, names);
             }
@@ -1070,7 +1070,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()
@@ -1119,7 +1119,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()
@@ -1176,7 +1176,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()
@@ -1219,7 +1219,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()
@@ -1333,7 +1333,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()
@@ -1409,7 +1409,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()
@@ -1466,7 +1466,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()
@@ -1517,7 +1517,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()
@@ -1586,7 +1586,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()
@@ -1641,7 +1641,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()
@@ -1717,7 +1717,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()
@@ -1778,7 +1778,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()
@@ -1831,7 +1831,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()
@@ -1882,7 +1882,7 @@ mod tests {
         let stubs = krusty::jvm::java_stub::stub_classes(
             &java_sources,
             krusty::jvm::java_stub::StubMode::Lenient,
-            &|candidate| {
+            &|candidate: &str| {
                 classpath
                     .find_name(krusty::types::type_name(candidate))
                     .is_some()
@@ -1923,8 +1923,7 @@ mod tests {
             "T",
             krusty::types::Ty::nullable(krusty::types::Ty::obj("kotlin/Any")),
         );
-        let intersection =
-            krusty::types::Ty::DefinitelyNotNull(krusty::types::intern_ty(parameter));
+        let intersection = Ty::from(TyKind::DefinitelyNotNull(parameter));
         let mut names = std::collections::HashSet::new();
         type_parameters_mentioned(intersection, &mut names);
         assert!(names.contains("T"));

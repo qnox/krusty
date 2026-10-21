@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::integer_constant::IntegerConstant;
+use crate::types::TyKind;
 
 mod declaration_publication;
 mod postponed_arguments;
@@ -361,7 +362,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                     wrapped_contextual_call: false,
                 });
             };
-            let Ty::Fun(expected) = expectation.get().non_null() else {
+            let TyKind::Fun(expected) = expectation.get().non_null().kind() else {
                 return Err(semantics.missing_signature_diagnostic(contextual_declaration));
             };
             let value_start = expected.context_count.min(expected.params.len())

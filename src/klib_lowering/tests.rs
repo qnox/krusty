@@ -8,6 +8,7 @@ mod callee_headers;
 mod control_forms;
 mod demo_package;
 mod inline_templates;
+mod returnable_blocks;
 
 use super::*;
 use crate::backend::{BackendCallableFact, CheckedBackendCallables};
@@ -34,7 +35,7 @@ use crate::metadata::klib_ir::{
 use crate::metadata::semantic::{KotlinFunction, KotlinPackage};
 use crate::metadata::semantic::{KotlinFunctionTypeShape, KotlinType};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
-use crate::types::{type_name, Ty, TypeName, Visibility};
+use crate::types::{type_name, Ty, TyKind, TypeName, Visibility};
 
 /// The fact the backend handoff freezes for the one function of `package` named `name` with this
 /// receiver and these value parameters.
@@ -248,21 +249,21 @@ pub(super) fn validated(ir: &IrFile) {
 }
 
 pub(super) fn type_name_of(ty: Ty) -> String {
-    match ty {
-        Ty::Int => "Int".to_owned(),
-        Ty::Long => "Long".to_owned(),
-        Ty::Float => "Float".to_owned(),
-        Ty::Double => "Double".to_owned(),
-        Ty::Boolean => "Boolean".to_owned(),
-        Ty::String => "String".to_owned(),
-        Ty::Nothing => "Nothing".to_owned(),
-        Ty::Unit => "Unit".to_owned(),
+    match ty.kind() {
+        TyKind::INT => "Int".to_owned(),
+        TyKind::LONG => "Long".to_owned(),
+        TyKind::FLOAT => "Float".to_owned(),
+        TyKind::DOUBLE => "Double".to_owned(),
+        TyKind::BOOLEAN => "Boolean".to_owned(),
+        TyKind::STRING => "String".to_owned(),
+        TyKind::Nothing => "Nothing".to_owned(),
+        TyKind::Unit => "Unit".to_owned(),
         // Any other class without type arguments, by its qualified name (a test rendering).
-        Ty::Obj(name, []) => name.render(),
-        Ty::Nullable(inner) => format!("{}?", type_name_of(*inner)),
+        TyKind::Obj(name, arguments) if arguments.is_empty() => name.render(),
+        TyKind::Nullable(inner) => format!("{}?", type_name_of(inner)),
         // A type parameter by its interned name, which a test maps to its declared spelling.
-        Ty::TyParam(name, _) => format!("<{name:?}>"),
-        Ty::Fun(signature) => format!(
+        TyKind::TyParam(name, _) => format!("<{name:?}>"),
+        TyKind::Fun(signature) => format!(
             "({}) -> {}",
             signature
                 .params
@@ -272,7 +273,10 @@ pub(super) fn type_name_of(ty: Ty) -> String {
                 .join(", "),
             type_name_of(signature.ret)
         ),
-        other => format!("{other:?}"),
+        _ => {
+            let other = ty;
+            format!("{other:?}")
+        }
     }
 }
 
@@ -1917,8 +1921,10 @@ fn wasm_numbers_bodies_link_their_internal_wasm_op_by_exact_intrinsic_identity()
         assert_eq!(unit.ir().functions.len(), 1);
         assert_eq!(unit.ir().functions[function as usize].ret, result);
         if name == "fromBits" {
-            let Ty::Obj(receiver, arguments) =
-                fact.source_receiver.expect("fromBits is an extension")
+            let TyKind::Obj(receiver, arguments) = fact
+                .source_receiver
+                .expect("fromBits is an extension")
+                .kind()
             else {
                 panic!("fromBits has a singleton classifier receiver")
             };

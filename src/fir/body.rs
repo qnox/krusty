@@ -15,6 +15,8 @@ pub(crate) mod debug_lines;
 pub use crate::libraries::InlineKind;
 pub use debug_lines::{FirExpressionDebugLines, FirStatementDebugLines};
 mod capture_order;
+mod capture_parameters;
+pub use capture_parameters::FirCaptureParameter;
 mod class_captures;
 pub(crate) use class_captures::{
     ClassBodyContext, ClassCaptureBinding, ClassCaptureIdentity, ClassReceiverCaptureSource,
@@ -1166,6 +1168,15 @@ pub enum FirExprKind {
         call: FirCall,
         negated: bool,
     },
+    /// `value in start..end` over the closed range `Comparable.rangeTo` builds (kotlinc's
+    /// `RangeContainsLowering` with a `ComparableRangeToHandler` header): `lower` is the selected
+    /// `Comparable.compareTo` of the value with `start`; the value is compared with `upper_bound`
+    /// through the same member. Neither the range nor its `contains` is called.
+    ComparableRangeContainment {
+        lower: FirCall,
+        upper_bound: FirExprId,
+        negated: bool,
+    },
     CallableReference {
         target: FirCallableReferenceTarget,
         /// Exact callable shape selected by the checker. This remains a function type even when
@@ -1273,12 +1284,15 @@ pub enum FirExprKind {
         rhs_primitive: ResolvedTy,
         comparison: ResolvedTy,
     },
+    /// `ends_inlined_call`: the selected range declaration is an inline function (`UInt.rangeTo`)
+    /// that this construction realizes in place of the body kotlinc inlines.
     Range {
         operation: FirRangeOperation,
         start: FirExprId,
         start_type: ResolvedTy,
         end: FirExprId,
         end_type: ResolvedTy,
+        ends_inlined_call: bool,
     },
     InRange {
         operation: FirRangeOperation,
@@ -1540,7 +1554,10 @@ impl FirExprKind {
                 target_parameters, ..
             } => target_parameters.len() * std::mem::size_of::<ResolvedTy>(),
             FirExprKind::ComparisonCall { call, .. }
-            | FirExprKind::ContainmentCall { call, .. } => call.storage_payload_bytes(),
+            | FirExprKind::ContainmentCall { call, .. }
+            | FirExprKind::ComparableRangeContainment { lower: call, .. } => {
+                call.storage_payload_bytes()
+            }
             FirExprKind::Lambda {
                 type_parameters,
                 body,
@@ -1811,6 +1828,9 @@ pub struct FirBody {
     captures: Vec<FirCapture>,
     capture_declaration_ordinals: Box<[u32]>,
     implicit_receiver_captures: Vec<FirImplicitReceiverCapture>,
+    /// The lifted capture parameters' physical order, when it is not the values then the receivers
+    /// (see [`capture_parameters`]).
+    capture_parameters: Box<[FirCaptureParameter]>,
     sam_conversions: Vec<FirSamConversion>,
     platform_narrowings: Vec<FirPlatformNarrowing>,
     control_targets: Vec<FirControlTarget>,
@@ -1875,6 +1895,7 @@ impl FirBody {
             captures: Vec::new(),
             capture_declaration_ordinals: Box::default(),
             implicit_receiver_captures: Vec::new(),
+            capture_parameters: Box::default(),
             sam_conversions: Vec::new(),
             platform_narrowings: Vec::new(),
             control_targets: Vec::new(),
@@ -2691,7 +2712,8 @@ impl FirBody {
             match &expression.kind {
                 FirExprKind::Call(call)
                 | FirExprKind::ComparisonCall { call, .. }
-                | FirExprKind::ContainmentCall { call, .. } => {
+                | FirExprKind::ContainmentCall { call, .. }
+                | FirExprKind::ComparableRangeContainment { lower: call, .. } => {
                     if let Some(callable) = call.target.module() {
                         callables.insert(callable);
                     }
@@ -2839,6 +2861,7 @@ impl FirBody {
             + self.type_parameter_payload_bytes()
             + self.captures.len() * std::mem::size_of::<FirCapture>()
             + self.capture_declaration_ordinals.len() * std::mem::size_of::<u32>()
+            + self.capture_parameters.len() * std::mem::size_of::<FirCaptureParameter>()
             + self.implicit_receiver_captures.len()
                 * std::mem::size_of::<FirImplicitReceiverCapture>()
             + self

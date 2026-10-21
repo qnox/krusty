@@ -5,7 +5,7 @@ use crate::fir::{
     FirReferenceAdaptation, ResolvedTy,
 };
 use crate::ir::{ExprId, IrExpr, IrFunction};
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 use super::source_calls::{ExternalConstructorRequest, ModuleConstructorRequest};
 use super::{BodyLowering, FirLoweringFailure};
@@ -51,7 +51,7 @@ impl BodyLowering<'_> {
         reflective: bool,
     ) -> Result<ExprId, FirLoweringFailure> {
         let failed = || unsupported_constructor_reference(target);
-        let Ty::Fun(reference) = reference_ty.non_null() else {
+        let TyKind::Fun(reference) = reference_ty.non_null().kind() else {
             return Err(failed());
         };
         let arity = u8::try_from(reference.params.len()).map_err(|_| failed())?;
@@ -417,7 +417,7 @@ impl BodyLowering<'_> {
         if binding != FirCallableReferenceBinding::Static {
             return Err(failed());
         }
-        let Ty::Fun(reference) = reference_ty.non_null() else {
+        let TyKind::Fun(reference) = reference_ty.non_null().kind() else {
             return Err(failed());
         };
         let arity = u8::try_from(reference.params.len()).map_err(|_| failed())?;

@@ -41,6 +41,15 @@ impl Emitter<'_> {
         }
     }
 
+    /// Whether the mixed comparison stores an operand: a boxed left operand's comparison stores
+    /// a right operand it cannot reload in place (see `emit_unsigned_unbox_equality`).
+    pub(super) fn unsigned_mixed_equality_stores(&self, lhs: ExprId, rhs: ExprId) -> bool {
+        matches!(
+            self.unsigned_mixed(lhs, rhs),
+            Some(UnsignedMixed::UnboxLeft { .. })
+        ) && !Self::reloads_in_place(self.ir.expr(rhs))
+    }
+
     /// Put the mixed unsigned comparison's Boolean on the stack. Returns whether it was one.
     pub(super) fn emit_unsigned_mixed_equality_value(
         &mut self,

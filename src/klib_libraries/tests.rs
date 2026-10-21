@@ -9,7 +9,7 @@ use crate::metadata::semantic::{
     KotlinTypeParameter, KotlinTypeParameterId,
 };
 use crate::types::{
-    type_name, ContextParameterKind, SemanticCallableOwner, Ty, TypeVariance, Visibility,
+    type_name, ContextParameterKind, SemanticCallableOwner, Ty, TyKind, TypeVariance, Visibility,
 };
 
 fn class(internal: &str, nullable: bool) -> KotlinType {
@@ -1323,13 +1323,16 @@ fn same_spelled_function_and_property_type_parameters_keep_distinct_identities()
         panic!("expected the generic conditional return effect");
     };
     let crate::contracts::Condition::IsType {
-        ty: crate::contracts::ConditionType::Metadata(Ty::TyParam(contract_formal, _)),
+        ty: crate::contracts::ConditionType::Metadata(conclusion_ty),
         ..
     } = conclusion
     else {
         panic!("expected the generic is-type conclusion");
     };
-    assert_eq!(*contract_formal, function_formal);
+    let TyKind::TyParam(contract_formal, _) = conclusion_ty.kind() else {
+        panic!("expected the generic is-type conclusion");
+    };
+    assert_eq!(contract_formal, function_formal);
 }
 
 #[test]
@@ -1435,3 +1438,4 @@ mod classes;
 mod implementation_coverage;
 mod implementation_inventory;
 mod properties;
+mod serialized_references;

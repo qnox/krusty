@@ -869,6 +869,14 @@ pub(super) fn realize(
                 unreachable!("a target KLIB scalar instruction cannot reach JVM call realization")
             }
             Some(
+                crate::libraries::CompilerIntrinsic::UnsignedDivide { .. }
+                | crate::libraries::CompilerIntrinsic::UnsignedRemainder { .. }
+                | crate::libraries::CompilerIntrinsic::ResultFailure(_)
+                | crate::libraries::CompilerIntrinsic::TextTrim,
+            ) => {
+                unreachable!("a target KLIB library helper cannot reach JVM call realization")
+            }
+            Some(
                 crate::libraries::CompilerIntrinsic::ArraySize
                 | crate::libraries::CompilerIntrinsic::FloatingIsNaN { .. }
                 | crate::libraries::CompilerIntrinsic::FloatingIsInfinite { .. }
@@ -894,6 +902,7 @@ pub(super) fn realize(
                 | crate::libraries::CompilerIntrinsic::TrimMargin
                 | crate::libraries::CompilerIntrinsic::FloatingRangeMembership
                 | crate::libraries::CompilerIntrinsic::ClosedRangeContains
+                | crate::libraries::CompilerIntrinsic::ComparableRangeTo
                 | crate::libraries::CompilerIntrinsic::RangeDownTo
                 | crate::libraries::CompilerIntrinsic::RangeUntil
                 | crate::libraries::CompilerIntrinsic::ProgressionStep

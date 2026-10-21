@@ -720,7 +720,6 @@ impl PackageInventory {
     }
 
     /// Every published class with its identity, in no particular order.
-    #[cfg(test)]
     pub(super) fn all_classifiers(&self) -> impl Iterator<Item = (TypeName, &SignedClassifier)> {
         self.classifiers
             .iter()

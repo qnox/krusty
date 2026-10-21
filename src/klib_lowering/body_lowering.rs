@@ -133,6 +133,10 @@ pub(super) struct BodyLowering<'a> {
     /// Compiler temporaries that name another immutable value, by the initializer each read of
     /// them lowers as.
     compiler_aliases: HashMap<KlibIrSymbol, KlibIrExprId>,
+    /// All enclosing return-target declarations, including tail-only blocks without a frame.
+    returnable_targets: Vec<KlibIrSymbol>,
+    /// Enclosing serialized returnable blocks, whose exact symbols own their local exits.
+    returnable_frames: Vec<compiler_blocks::ReturnableFrame>,
     /// The loops enclosing the expression being lowered, innermost last: each serialized loop
     /// identity with the label its `break`s and `continue`s name.
     loops: Vec<(u32, String)>,
@@ -161,6 +165,8 @@ impl<'a> BodyLowering<'a> {
             linker,
             locals: LocalValues::after(header.parameter_count()),
             compiler_aliases: HashMap::default(),
+            returnable_targets: Vec::new(),
+            returnable_frames: Vec::new(),
             loops: Vec::new(),
             breakable_loops: HashSet::default(),
             erasure_coercions: HashSet::default(),
@@ -624,6 +630,9 @@ impl<'a> BodyLowering<'a> {
     }
 
     fn return_value(&mut self, target: &KlibIrSymbol, value: KlibIrExprId) -> Lowered<ExprId> {
+        if let Some(returned) = self.returnable_frame_exit(target, value)? {
+            return Ok(returned);
+        }
         if target != self.function.symbol {
             return Err(KlibBodyDeclineReason::ForeignReturnTarget);
         }

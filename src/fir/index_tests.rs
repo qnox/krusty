@@ -159,9 +159,13 @@ fn a_specializing_supertype_publishes_the_applied_member_shape() {
     .expect("one classifier");
     let [default] = specialized.try_into().expect("one inherited default");
     let declared = default.parameters.to_vec();
-    let [crate::types::Ty::TyParam(..)] = declared[..] else {
+    let [parameter] = declared[..] else {
         panic!("the declared parameter stays the interface's `T`: {declared:?}");
     };
+    assert!(
+        parameter.is_ty_param(),
+        "the declared parameter stays the interface's `T`: {declared:?}"
+    );
     assert_eq!(default.result, declared[0]);
     let string = crate::types::Ty::obj("kotlin/String");
     assert_eq!(*default.applied_parameters, [string]);
@@ -581,9 +585,9 @@ fn superclass_function_override_edge_precedes_backend_erasure() {
         edge.declared_parameters.as_ref(),
         [parameter]
             if matches!(
-                parameter.get(),
-                crate::types::Ty::TyParam(_, bound)
-                    if *bound == crate::types::Ty::nullable(crate::types::Ty::obj("kotlin/Any"))
+                parameter.get().kind(),
+                crate::types::TyKind::TyParam(_, bound)
+                    if bound == crate::types::Ty::nullable(crate::types::Ty::obj("kotlin/Any"))
             )
     ));
     assert_eq!(

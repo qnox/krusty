@@ -10,7 +10,7 @@ use crate::libraries::{
     InlineIterationTraversal, LibraryCallable, LibraryMember, PropertyInfo,
 };
 use crate::symbol_source::SymbolSource;
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 #[derive(Clone, Copy)]
 pub(crate) enum TypePosition {
@@ -62,7 +62,7 @@ pub(super) fn bind_member_return_from_call_args_tracking(
     provider_ret: Ty,
 ) -> (Ty, GSigBinds) {
     let mut binds = seeded_gsig_binds(gsig, type_args);
-    if let Ty::Obj(owner, arguments) = receiver.non_null() {
+    if let TyKind::Obj(owner, arguments) = receiver.non_null().kind() {
         if let Some(classifier) = source.classifier(owner) {
             for (formal, argument) in classifier.type_params.iter().zip(arguments) {
                 if !gsig.formals.iter().any(|method| method == formal) {
@@ -142,18 +142,22 @@ pub(super) fn preserve_receiver_identity_bindings(
     actual: Ty,
     bindings: &mut GSigBinds,
 ) {
-    match (declared.non_null(), actual.non_null()) {
-        (Ty::TyParam(declared, _), actual @ Ty::TyParam(found, _)) if declared == found => {
-            bindings.entry(declared.to_string()).or_insert(actual);
+    match (declared.non_null().kind(), actual.non_null().kind()) {
+        (TyKind::TyParam(declared, _), TyKind::TyParam(found, _)) if declared == found => {
+            bindings
+                .entry(declared.to_string())
+                .or_insert(actual.non_null());
         }
-        (Ty::Obj(declared, declared_args), Ty::Obj(found, actual_args)) if declared == found => {
+        (TyKind::Obj(declared, declared_args), TyKind::Obj(found, actual_args))
+            if declared == found =>
+        {
             for (&declared, &actual) in declared_args.iter().zip(actual_args) {
                 preserve_receiver_identity_bindings(declared, actual, bindings);
             }
         }
-        (Ty::InProjection(declared), Ty::InProjection(actual))
-        | (Ty::OutProjection(declared), Ty::OutProjection(actual)) => {
-            preserve_receiver_identity_bindings(*declared, *actual, bindings);
+        (TyKind::InProjection(declared), TyKind::InProjection(actual))
+        | (TyKind::OutProjection(declared), TyKind::OutProjection(actual)) => {
+            preserve_receiver_identity_bindings(declared, actual, bindings);
         }
         _ => {}
     }
@@ -183,9 +187,9 @@ fn specialize_member_type_with_unbound(
     position: TypePosition,
     unbound: UnboundSpecialization,
 ) -> Ty {
-    match ty {
-        Ty::TyParam(name, bound) => {
-            let Some(binding) = bindings.get(name).copied() else {
+    match ty.kind() {
+        TyKind::TyParam(name, bound) => {
+            let Some(binding) = bindings.get(name.as_str()).copied() else {
                 return match unbound {
                     UnboundSpecialization::Preserve => ty,
                     UnboundSpecialization::UseUpperBound => bound.non_null(),
@@ -198,23 +202,27 @@ fn specialize_member_type_with_unbound(
                     binding.non_null()
                 }
             };
-            match (position, binding) {
+            match (position, binding.kind()) {
                 // The projection already carries the capture's readable bound. Applying the
                 // declaration bound again would silently narrow the actual capture before a
                 // selected-call or recovery consumer observes its value type.
-                (TypePosition::Out, Ty::OutProjection(inner) | Ty::StarProjection(inner)) => *inner,
-                (TypePosition::In, Ty::OutProjection(_) | Ty::StarProjection(_)) => Ty::Nothing,
-                (TypePosition::Out, Ty::InProjection(_)) => *bound,
-                (TypePosition::In, Ty::InProjection(inner)) => adjusted(*inner),
+                (
+                    TypePosition::Out,
+                    TyKind::OutProjection(inner) | TyKind::StarProjection(inner),
+                ) => inner,
+                (TypePosition::In, TyKind::OutProjection(_) | TyKind::StarProjection(_)) => {
+                    Ty::Nothing
+                }
+                (TypePosition::Out, TyKind::InProjection(_)) => bound,
+                (TypePosition::In, TyKind::InProjection(inner)) => adjusted(inner),
                 (
                     TypePosition::Invariant,
-                    projected
-                    @ (Ty::InProjection(_) | Ty::OutProjection(_) | Ty::StarProjection(_)),
-                ) => projected,
-                (_, binding) => adjusted(binding),
+                    TyKind::InProjection(_) | TyKind::OutProjection(_) | TyKind::StarProjection(_),
+                ) => binding,
+                _ => adjusted(binding),
             }
         }
-        Ty::Fun(signature) => Ty::fun_with_shape(
+        TyKind::Fun(signature) => Ty::fun_with_shape(
             signature
                 .params
                 .iter()
@@ -233,45 +241,45 @@ fn specialize_member_type_with_unbound(
             signature.has_receiver,
             signature.suspend,
         ),
-        Ty::Nullable(inner) => Ty::nullable(specialize_member_type_with_unbound(
-            source, *inner, bindings, position, unbound,
+        TyKind::Nullable(inner) => Ty::nullable(specialize_member_type_with_unbound(
+            source, inner, bindings, position, unbound,
         )),
-        Ty::PlatformNullable(inner) => {
-            let declared = *inner;
+        TyKind::PlatformNullable(inner) => {
+            let declared = inner;
             let specialized =
                 specialize_member_type_with_unbound(source, declared, bindings, position, unbound);
             // A flexible variable is the interval `T..T?`. A nullable binding makes both faces
             // identical and therefore produces that rigid nullable type; every other binding
             // retains the flexible wrapper. This belongs to selected-slot instantiation, not the
             // general type-substitution walk used by aliases, hierarchy projection, and bounds.
-            if matches!(declared, Ty::TyParam(..)) && specialized.is_nullable() {
+            if declared.is_ty_param() && specialized.is_nullable() {
                 specialized
             } else {
                 Ty::platform_nullable(specialized)
             }
         }
-        Ty::InProjection(inner) => Ty::in_projection(specialize_member_type_with_unbound(
+        TyKind::InProjection(inner) => Ty::in_projection(specialize_member_type_with_unbound(
             source,
-            *inner,
+            inner,
             bindings,
             compose_position(position, crate::types::TypeVariance::In),
             unbound,
         )),
-        Ty::OutProjection(inner) => Ty::out_projection(specialize_member_type_with_unbound(
+        TyKind::OutProjection(inner) => Ty::out_projection(specialize_member_type_with_unbound(
             source,
-            *inner,
+            inner,
             bindings,
             compose_position(position, crate::types::TypeVariance::Out),
             unbound,
         )),
-        Ty::StarProjection(inner) => Ty::star_projection(specialize_member_type_with_unbound(
+        TyKind::StarProjection(inner) => Ty::star_projection(specialize_member_type_with_unbound(
             source,
-            *inner,
+            inner,
             bindings,
             compose_position(position, crate::types::TypeVariance::Out),
             unbound,
         )),
-        Ty::Obj(internal, arguments) if !arguments.is_empty() => {
+        TyKind::Obj(internal, arguments) if !arguments.is_empty() => {
             let variances = source
                 .classifier(internal)
                 .map(|classifier| classifier.type_param_variances.clone())
@@ -436,18 +444,18 @@ pub(crate) fn instantiate_vararg_element(
 }
 
 fn contains_flexible_variable(ty: Ty) -> bool {
-    match ty {
-        Ty::PlatformNullable(inner) if matches!(*inner, Ty::TyParam(..)) => true,
-        Ty::DefinitelyNotNull(inner)
-        | Ty::Nullable(inner)
-        | Ty::PlatformNullable(inner)
-        | Ty::InProjection(inner)
-        | Ty::OutProjection(inner)
-        | Ty::StarProjection(inner) => contains_flexible_variable(*inner),
-        Ty::Obj(_, arguments) | Ty::Intersection(arguments) => {
+    match ty.kind() {
+        TyKind::PlatformNullable(inner) if inner.is_ty_param() => true,
+        TyKind::DefinitelyNotNull(inner)
+        | TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner)
+        | TyKind::StarProjection(inner) => contains_flexible_variable(inner),
+        TyKind::Obj(_, arguments) | TyKind::Intersection(arguments) => {
             arguments.iter().copied().any(contains_flexible_variable)
         }
-        Ty::Fun(signature) => {
+        TyKind::Fun(signature) => {
             signature
                 .params
                 .iter()
@@ -706,8 +714,8 @@ pub(super) fn specialize_callable(
         .map(|ty| specialize_member_type(source, ty, bindings, TypePosition::Invariant));
     // A declared bare type parameter stays one: bound to a value class it is still a box read out
     // of an erased slot, and only the unsubstituted declaration says so.
-    callable.declared_ret = callable.declared_ret.map(|ty| match ty {
-        Ty::TyParam(..) => ty,
+    callable.declared_ret = callable.declared_ret.map(|ty| match ty.kind() {
+        TyKind::TyParam(..) => ty,
         _ => specialize_member_type(source, ty, bindings, TypePosition::Out),
     });
 }

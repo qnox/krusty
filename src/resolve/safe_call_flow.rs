@@ -8,7 +8,7 @@ use crate::fx_hash::HashSet;
 
 use crate::ast::{Expr, ExprId};
 use crate::diag::Span;
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 use super::lexical_bindings::BindingIdentity;
 use super::scope::{NarrowPath, Ns, PathRoot};
@@ -99,8 +99,10 @@ impl Checker<'_> {
         site: Span,
     ) {
         for origin in self.safe_call_origin_paths(scope, path) {
-            if let Some(Ty::Nullable(inner)) = self.stable_path_ty(scope, &origin, site) {
-                self.apply_narrowing_unchecked(scope, &origin, *inner);
+            if let Some(TyKind::Nullable(inner)) =
+                self.stable_path_ty(scope, &origin, site).map(Ty::kind)
+            {
+                self.apply_narrowing_unchecked(scope, &origin, inner);
             }
         }
     }
@@ -115,13 +117,14 @@ impl Checker<'_> {
     ) {
         let origins = self.safe_call_origin_paths(scope, path);
         for path in std::iter::once(path.clone()).chain(origins) {
-            match self.stable_path_ty(scope, &path, site) {
-                Some(Ty::Nullable(inner)) => out.push((path, *inner)),
+            match self.stable_path_ty(scope, &path, site).map(Ty::kind) {
+                Some(TyKind::Nullable(inner)) => out.push((path, inner)),
                 _ => {
-                    if let Some((name, Ty::Nullable(inner))) =
-                        self.closure_mutated_decline(scope, &path, site)
+                    if let Some((name, mutated)) = self.closure_mutated_decline(scope, &path, site)
                     {
-                        declined.push((name, *inner));
+                        if let TyKind::Nullable(inner) = mutated.kind() {
+                            declined.push((name, inner));
+                        }
                     }
                 }
             }

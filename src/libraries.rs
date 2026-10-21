@@ -22,8 +22,11 @@ mod enhanced_nullability;
 pub(crate) mod function_classifiers;
 mod generic_signature;
 mod inline_body;
+mod inline_kind;
 mod member_flags;
+mod member_records;
 mod metadata_normalization;
+mod param_flags;
 pub(crate) mod physical_parameter_plan;
 mod platform_contract;
 mod property_producer;
@@ -57,6 +60,8 @@ pub(crate) use dependency_body_contract::{
     DependencyBodyProviderRole, DependencyBodyProviderSnapshot, DependencyBodySnapshot,
 };
 pub use enhanced_nullability::{enhance_from_overridden, EnhancedResult, TypeEnhancement};
+pub use inline_kind::InlineKind;
+pub use param_flags::ParamFlags;
 pub use physical_parameter_plan::PhysicalParameterSlot;
 pub use platform_contract::{
     PlatformInitializationError, PlatformSourceHeaderInput, SourceHeaderError,
@@ -70,9 +75,9 @@ pub(crate) use stdlib_klib_intrinsics::{stdlib_klib_intrinsic, StdlibKlibIntrins
 use crate::fx_hash::{HashMap, HashSet};
 use crate::types::InlineParameterModifier;
 pub use crate::types::Visibility;
-use crate::types::{SemanticCallRole, SemanticCallableOwner, Ty, TypeName, TypeNameList};
+use crate::types::{SemanticCallRole, SemanticCallableOwner, Ty, TyKind, TypeName, TypeNameList};
 pub(crate) use array_factories::kotlin_array_factory_kind;
-pub use compiler_intrinsic::CompilerIntrinsic;
+pub use compiler_intrinsic::{CompilerIntrinsic, ResultFailureIntrinsic};
 pub(crate) use core_builtins::add_core_builtin_declarations;
 pub use generic_signature::{GenericReturnPolicy, GenericSig};
 pub use inline_body::{
@@ -400,8 +405,10 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
 
     /// Install declaration headers contributed by platform source languages before Kotlin
     /// signature resolution starts. `source_classifiers` is the stable, qualified Kotlin
-    /// classifier inventory already extracted in Pass 1; it lets a Java provider resolve a header
-    /// such as `class J extends K` even though `K.class` has not been emitted yet.
+    /// classifier inventory already extracted in Pass 1, with each classifier's declared
+    /// visibility; it lets a Java provider resolve a header such as `class J extends K` even though
+    /// `K.class` has not been emitted yet, and decide which of `K`'s nested classifiers `J`
+    /// inherits.
     ///
     /// Implementations may retain normalized declaration records for the lifetime of this
     /// compilation, but must not retain source text, source ranges as lookup keys, or executable
@@ -409,7 +416,7 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     fn install_source_module_headers(
         &self,
         sources: &[PlatformSourceHeaderInput<'_>],
-        _source_classifiers: &[TypeName],
+        _source_classifiers: &[(TypeName, crate::types::Visibility)],
     ) -> Result<(), SourceHeaderError> {
         match sources.first() {
             Some(source) => Err(SourceHeaderError {
@@ -1084,17 +1091,17 @@ pub struct CallSig {
     /// empty metadata name, or another spelling convention.
     pub parameter_identities: Vec<crate::fir::ResolvedParameterIdentity>,
     /// Per logical param: whether it has a default value (so it may be omitted). Parallel to the params.
-    pub param_defaults: Vec<bool>,
+    pub param_defaults: ParamFlags,
     /// Per logical parameter: the declared type is annotated with Kotlin's internal `@Exact`, so
     /// applicability requires equality after generic substitution rather than ordinary subtyping.
-    pub exact_params: Vec<bool>,
+    pub exact_params: ParamFlags,
     /// Per logical parameter: the declared type carries Kotlin's internal `@NoInfer`, so the
     /// argument is checked for applicability after inference but contributes no type-variable
     /// constraint itself.
-    pub no_infer_params: Vec<bool>,
+    pub no_infer_params: ParamFlags,
     /// Per logical parameter, the resolved declaration carries
     /// `kotlin.internal.ImplicitIntegerCoercion`.
-    pub implicit_integer_coercion: Vec<bool>,
+    pub implicit_integer_coercion: ParamFlags,
     /// Per logical param: if it is a function type `(A, B) -> R`, its inner param types `[A, B]` (to type
     /// a lambda argument's `it`/params); otherwise empty. Parallel to the params.
     pub lambda_param_types: Vec<Vec<Ty>>,
@@ -1104,14 +1111,14 @@ pub struct CallSig {
     pub lambda_receivers: Vec<Option<Ty>>,
     /// Per logical param: whether it is a receiver function type, even when metadata cannot name a
     /// concrete receiver class because the receiver is a type parameter (`T.() -> R`).
-    pub lambda_receiver_params: Vec<bool>,
+    pub lambda_receiver_params: ParamFlags,
     /// Leading context receiver count for each function-typed parameter.
     pub lambda_context_counts: Vec<usize>,
     /// Per logical param: its `crossinline`/`noinline` modifier ([`InlineParameterModifier`]).
     /// Parallel to the params; empty when the source publishes none.
     pub inline_modifiers: Vec<InlineParameterModifier>,
     /// Per logical Java parameter, whether nullable arguments are accepted.
-    pub platform_nullable_params: Vec<bool>,
+    pub platform_nullable_params: ParamFlags,
     /// Java signature enhancement of the declared result's nullability.
     pub result_enhancement: ResultEnhancement,
     /// Minimum arguments a caller must supply (params beyond this have defaults). 0 by default.
@@ -1125,7 +1132,7 @@ pub struct CallSig {
 pub struct ParamList {
     pub visibility: Visibility,
     pub names: Vec<String>,
-    pub defaults: Vec<bool>,
+    pub defaults: ParamFlags,
     /// Declared Kotlin parameter types, parallel to [`Self::names`]. Empty only when the provider cannot
     /// recover the semantic signature. Constructor selection must never replace these with storage types.
     pub types: Vec<Ty>,
@@ -1133,7 +1140,7 @@ pub struct ParamList {
     /// descriptor and `Signature` both erase that to a plain `FunctionN`, so only the source-level
     /// metadata carries it — and without it a lambda argument gets no implicit receiver, leaving a bare
     /// member call inside unresolved. Empty when the origin records no per-parameter types.
-    pub recv_fun: Vec<bool>,
+    pub recv_fun: ParamFlags,
     pub vararg: Option<usize>,
     /// Present only when this is a provider-normalized annotation application shape rather than a
     /// constructor parameter list. The checker consumes the policy without asking whether the
@@ -1343,13 +1350,14 @@ impl CallSig {
 
     pub fn source(
         param_names: Vec<String>,
-        param_defaults: Vec<bool>,
+        param_defaults: impl Into<ParamFlags>,
         lambda_param_types: Vec<Vec<Ty>>,
-        lambda_recv: Vec<bool>,
+        lambda_recv: impl Into<ParamFlags>,
         lambda_context_counts: Vec<usize>,
         required: usize,
         vararg_index: Option<usize>,
     ) -> Self {
+        let lambda_recv: ParamFlags = lambda_recv.into();
         let lambda_receivers = lambda_recv
             .iter()
             .enumerate()
@@ -1382,7 +1390,7 @@ impl CallSig {
                 })
                 .collect(),
             param_names,
-            param_defaults,
+            param_defaults: param_defaults.into(),
             lambda_param_types,
             lambda_receivers,
             lambda_receiver_params: lambda_recv,
@@ -1437,7 +1445,7 @@ impl CallSig {
         lambda_receiver_params: Vec<bool>,
     ) {
         self.lambda_receivers = vec_for_arity(lambda_receivers, param_count);
-        self.lambda_receiver_params = vec_for_arity(lambda_receiver_params, param_count);
+        self.lambda_receiver_params = vec_for_arity(lambda_receiver_params, param_count).into();
     }
 
     fn metadata_base(
@@ -1471,7 +1479,7 @@ impl CallSig {
                 )
                 .collect(),
             param_names: names,
-            param_defaults: defaults,
+            param_defaults: defaults.into(),
             vararg: vararg_index.is_some(),
             vararg_index,
             ..Default::default()
@@ -1699,13 +1707,13 @@ impl FunctionInfo {
         }
 
         fn merge_method_arguments(declared: Ty, selected: Ty, formals: &[String]) -> Ty {
-            match (declared, selected) {
-                (Ty::TyParam(formal, _), selected)
+            match (declared.kind(), selected.kind()) {
+                (TyKind::TyParam(formal, _), _)
                     if formals.iter().any(|candidate| candidate == formal) =>
                 {
                     selected
                 }
-                (Ty::Obj(name, arguments), Ty::Obj(selected_name, selected_arguments))
+                (TyKind::Obj(name, arguments), TyKind::Obj(selected_name, selected_arguments))
                     if name == selected_name && arguments.len() == selected_arguments.len() =>
                 {
                     let merged = arguments
@@ -1720,7 +1728,7 @@ impl FunctionInfo {
                         .then(|| Ty::obj_args_name(name, &merged))
                         .unwrap_or(declared)
                 }
-                (Ty::Fun(function), Ty::Fun(selected_function))
+                (TyKind::Fun(function), TyKind::Fun(selected_function))
                     if function.params.len() == selected_function.params.len()
                         && function.context_count == selected_function.context_count
                         && function.has_receiver == selected_function.has_receiver
@@ -1748,20 +1756,20 @@ impl FunctionInfo {
                         })
                         .unwrap_or(declared)
                 }
-                (Ty::Nullable(inner), Ty::Nullable(selected_inner)) => {
-                    Ty::nullable(merge_method_arguments(*inner, *selected_inner, formals))
+                (TyKind::Nullable(inner), TyKind::Nullable(selected_inner)) => {
+                    Ty::nullable(merge_method_arguments(inner, selected_inner, formals))
                 }
-                (Ty::PlatformNullable(inner), Ty::PlatformNullable(selected_inner)) => {
-                    Ty::platform_nullable(merge_method_arguments(*inner, *selected_inner, formals))
+                (TyKind::PlatformNullable(inner), TyKind::PlatformNullable(selected_inner)) => {
+                    Ty::platform_nullable(merge_method_arguments(inner, selected_inner, formals))
                 }
-                (Ty::InProjection(inner), Ty::InProjection(selected_inner)) => {
-                    Ty::in_projection(merge_method_arguments(*inner, *selected_inner, formals))
+                (TyKind::InProjection(inner), TyKind::InProjection(selected_inner)) => {
+                    Ty::in_projection(merge_method_arguments(inner, selected_inner, formals))
                 }
-                (Ty::OutProjection(inner), Ty::OutProjection(selected_inner)) => {
-                    Ty::out_projection(merge_method_arguments(*inner, *selected_inner, formals))
+                (TyKind::OutProjection(inner), TyKind::OutProjection(selected_inner)) => {
+                    Ty::out_projection(merge_method_arguments(inner, selected_inner, formals))
                 }
-                (Ty::StarProjection(inner), Ty::StarProjection(selected_inner)) => {
-                    Ty::star_projection(merge_method_arguments(*inner, *selected_inner, formals))
+                (TyKind::StarProjection(inner), TyKind::StarProjection(selected_inner)) => {
+                    Ty::star_projection(merge_method_arguments(inner, selected_inner, formals))
                 }
                 _ => declared,
             }
@@ -1910,50 +1918,6 @@ impl FunctionInfo {
         member.stable_declaration = self.stable_declaration;
         member.source_member = self.source_member;
         member
-    }
-}
-
-/// How a callable relates to bytecode inlining — the single state that replaces the old
-/// `inline` + `inline_only`/`must_inline` boolean pairs (one per layer: [`FnFlags`],
-/// [`LibraryCallable`], and `ir::Callee::Static`). Ordered weakest→strongest; the splice obligation
-/// strengthens as you go down.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum InlineKind {
-    /// Not an `inline` function — emit an ordinary call (`invokestatic`/`invokevirtual`).
-    #[default]
-    None,
-    /// A Kotlin `inline` function (per its `@Metadata`): the JVM backend MAY splice its compiled body
-    /// at the call site, but a real call is a legal fallback (the callee is a public method).
-    CanInline,
-    /// No legal direct-call fallback. This includes a NON-PUBLIC `@InlineOnly` function
-    /// (`require`/`check`/`error`/`let`/…) whose method is inaccessible and a reified source body
-    /// whose erased method may exist only to publish inline code. The backend MUST splice the body;
-    /// a failed splice skips the whole file rather than emitting an inaccessible or unspecialized
-    /// `invokestatic`.
-    MustInline,
-}
-
-impl InlineKind {
-    /// Build from the legacy `(inline, must_inline)` boolean pair. `must_inline` is the stronger
-    /// signal (no callable fallback), so it wins regardless of the `inline` bit — which the `@Metadata`
-    /// `inline` flag can read back as `false` for a `@JvmName`-mangled private callee even though it
-    /// must still be spliced.
-    pub fn from_flags(inline: bool, must_inline: bool) -> InlineKind {
-        if must_inline {
-            InlineKind::MustInline
-        } else if inline {
-            InlineKind::CanInline
-        } else {
-            InlineKind::None
-        }
-    }
-    /// True when the backend may attempt to splice the body (`inline` OR `@InlineOnly`).
-    pub fn can_inline(self) -> bool {
-        self != InlineKind::None
-    }
-    /// True when splicing is mandatory — the callee has no legal call site to fall back to.
-    pub fn must_inline(self) -> bool {
-        self == InlineKind::MustInline
     }
 }
 
@@ -2139,7 +2103,7 @@ pub struct PropertyInfo {
     /// The real getter — an opaque platform emit handle (the erased descriptor lives here).
     pub getter: LibraryCallable,
     /// The setter, present iff the property is a `var`.
-    pub setter: Option<LibraryCallable>,
+    pub setter: Option<Box<LibraryCallable>>,
     /// The setter's own visibility. Accessors can differ, so property visibility cannot stand in for
     /// this fact.
     pub setter_visibility: Visibility,
@@ -2368,8 +2332,15 @@ pub struct LibraryType {
     /// Source order for [`Self::declared_callables`], used where interface delegation or metadata
     /// emission materializes the full declaration surface.
     pub declared_callable_order: Vec<String>,
-    /// Instance members (member functions and property accessors).
+    /// Stored flat instance-member records (member functions and property accessors). Read the
+    /// complete flat view through [`Self::member_records`]: with
+    /// [`Self::methods_as_declarations`], ordinary methods are not stored here.
     pub members: Vec<LibraryMember>,
+    /// This record publishes each ordinary member function once, as its
+    /// [`Self::declared_callables`] declaration, and [`Self::members`] holds only the records that
+    /// have no such declaration (member extensions). The flat record of a method is projected from
+    /// its declaration on demand instead of being kept as a second copy.
+    pub methods_as_declarations: bool,
     /// Companion-object members — accessed as `Type.member(…)` (the JVM realizes these as statics).
     pub companion: Vec<LibraryMember>,
     /// Compile-time constants declared by this classifier. For `Int.Companion.MAX_VALUE`, this map is
@@ -2534,6 +2505,7 @@ impl LibraryType {
             declared_callables: HashMap::default(),
             declared_callable_order: Vec::new(),
             members: Vec::new(),
+            methods_as_declarations: false,
             companion: Vec::new(),
             constants: HashMap::default(),
             sam_eligible: false,
@@ -2827,6 +2799,7 @@ mod tests {
             declared_callables: crate::fx_hash::HashMap::default(),
             declared_callable_order: Vec::new(),
             members: vec![],
+            methods_as_declarations: false,
             companion: vec![],
             constants: crate::fx_hash::HashMap::default(),
             sam_eligible: false,
@@ -2868,9 +2841,9 @@ mod tests {
         let expected = ParamList {
             visibility: Visibility::Public,
             names: vec!["host".into(), "port".into()],
-            defaults: vec![false, true],
+            defaults: vec![false, true].into(),
             types: Vec::new(),
-            recv_fun: vec![false, false],
+            recv_fun: vec![false, false].into(),
             vararg: None,
             annotation: None,
         };
@@ -2884,9 +2857,9 @@ mod tests {
             t.named_parameter_lists = vec![ParamList {
                 visibility: Visibility::Public,
                 names: vec!["".into()],
-                defaults: vec![false],
+                defaults: vec![false].into(),
                 types: Vec::new(),
-                recv_fun: vec![false],
+                recv_fun: vec![false].into(),
                 vararg: None,
                 annotation: None,
             }];
@@ -2903,9 +2876,9 @@ mod tests {
         let parameters = ParamList {
             visibility: Visibility::Public,
             names: vec!["text".into()],
-            defaults: vec![false],
+            defaults: vec![false].into(),
             types: vec![Ty::String],
-            recv_fun: vec![false],
+            recv_fun: vec![false].into(),
             vararg: None,
             annotation: Some(policy),
         };

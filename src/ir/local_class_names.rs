@@ -4,7 +4,7 @@ mod reachable;
 
 use crate::fx_hash::{HashMap, HashSet};
 
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 /// A lambda implementation split from a shared source implementation while remapping one
 /// reachable inline expansion. The lowering that owns that expansion attaches its call-site
@@ -84,15 +84,15 @@ fn captured_receiver(
 }
 
 fn ty(value: Ty, names: &HashMap<TypeName, TypeName>) -> Ty {
-    match value {
-        Ty::Obj(classifier, arguments) => Ty::obj_args_name(
+    match value.kind() {
+        TyKind::Obj(classifier, arguments) => Ty::obj_args_name(
             remapped_name(classifier, names),
             &arguments
                 .iter()
                 .map(|argument| ty(*argument, names))
                 .collect::<Vec<_>>(),
         ),
-        Ty::Fun(signature) => Ty::fun_with_shape(
+        TyKind::Fun(signature) => Ty::fun_with_shape(
             signature
                 .params
                 .iter()
@@ -103,22 +103,20 @@ fn ty(value: Ty, names: &HashMap<TypeName, TypeName>) -> Ty {
             signature.has_receiver,
             signature.suspend,
         ),
-        Ty::Nullable(inner) => Ty::nullable(ty(*inner, names)),
-        Ty::PlatformNullable(inner) => Ty::platform_nullable(ty(*inner, names)),
-        Ty::InProjection(inner) => Ty::in_projection(ty(*inner, names)),
-        Ty::OutProjection(inner) => Ty::out_projection(ty(*inner, names)),
-        Ty::StarProjection(inner) => Ty::star_projection(ty(*inner, names)),
-        Ty::TyParam(parameter, bound) => Ty::ty_param(parameter, ty(*bound, names)),
-        Ty::DefinitelyNotNull(inner) => {
-            Ty::DefinitelyNotNull(crate::types::intern_ty(ty(*inner, names)))
-        }
-        Ty::Intersection(parts) => Ty::intersection(
+        TyKind::Nullable(inner) => Ty::nullable(ty(inner, names)),
+        TyKind::PlatformNullable(inner) => Ty::platform_nullable(ty(inner, names)),
+        TyKind::InProjection(inner) => Ty::in_projection(ty(inner, names)),
+        TyKind::OutProjection(inner) => Ty::out_projection(ty(inner, names)),
+        TyKind::StarProjection(inner) => Ty::star_projection(ty(inner, names)),
+        TyKind::TyParam(parameter, bound) => Ty::ty_param(parameter.as_str(), ty(bound, names)),
+        TyKind::DefinitelyNotNull(inner) => Ty::from(TyKind::DefinitelyNotNull(ty(inner, names))),
+        TyKind::Intersection(parts) => Ty::intersection(
             &parts
                 .iter()
                 .map(|part| ty(*part, names))
                 .collect::<Vec<_>>(),
         ),
-        Ty::Unit | Ty::Null | Ty::Nothing | Ty::Error | Ty::Pending => value,
+        TyKind::Unit | TyKind::Null | TyKind::Nothing | TyKind::Error | TyKind::Pending => value,
     }
 }
 
@@ -369,7 +367,8 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &HashMap<TypeNam
             }
             return;
         }
-        IrCheckedOperation::IllegalProgressionStep { .. } => return,
+        IrCheckedOperation::IllegalProgressionStep { .. }
+        | IrCheckedOperation::ComparableRangeContains { .. } => return,
         IrCheckedOperation::PropertyReference {
             target,
             substitutions,

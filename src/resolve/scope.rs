@@ -1618,13 +1618,13 @@ mod tests {
 
     fn class(name: &str, carries_outer: bool) -> ScopeKind {
         ScopeKind::Class {
-            ty: Ty::Obj(type_name(name), &[]),
+            ty: Ty::obj_name(type_name(name)),
             carries_outer,
         }
     }
 
     fn obj(name: &str) -> Ty {
-        Ty::Obj(type_name(name), &[])
+        Ty::obj_name(type_name(name))
     }
 
     #[test]

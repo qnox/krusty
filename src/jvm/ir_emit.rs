@@ -22,7 +22,7 @@ use crate::jvm::names::{
 use crate::jvm::property_references::local_delegated_properties::LocalDelegatedProperties;
 use crate::jvm::value_classes::instance_representation;
 use crate::kt_string::KtStringBuf;
-use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
+use crate::types::{stored_value_ty, Ty, TyKind, TypeName, TypeVariance};
 use companion_field::{add_companion_field, companion_field_access, emit_companion_init};
 use field_visibility::{declared_field_access, default_accessor_access, is_jvm_field};
 use inherited_default_forwarders::emit_default_impls_forwarders;
@@ -162,9 +162,9 @@ mod value_class_override_metadata;
 mod value_class_signatures;
 use crate::jvm::private_static_access::StaticOwner;
 use class_pool_seed::{
-    seed_accessor_locals, seed_ctor_before_members, seed_enum_constructor_locals,
-    seed_plain_constructor_locals, seed_plain_constructor_tail, seed_value_class_method_locals,
-    seed_value_ctor_after_members, PlainClassPoolSeed,
+    primary_constructor_method_parameters, seed_accessor_locals, seed_ctor_before_members,
+    seed_enum_constructor_locals, seed_plain_constructor_locals, seed_plain_constructor_tail,
+    seed_value_class_method_locals, seed_value_ctor_after_members, PlainClassPoolSeed,
 };
 pub(super) use enclosure::{class_enclosure, property_accessor_function};
 use primary_constructor_parameters::{
@@ -276,38 +276,6 @@ fn companion_of_interface(ir: &IrFile, c: &IrClass) -> bool {
 /// [`object_static_storage`] plus the interface-companion case — the storage rule emission keys on.
 fn static_storage(ir: &IrFile, c: &IrClass) -> bool {
     object_static_storage(c) || companion_of_interface(ir, c)
-}
-
-/// Whether a static-storage object's `init_body` reads `this` (`GetValue(0)`) anywhere OTHER than
-/// as the receiver of a store to its own (now static) field — those receivers are dropped by the
-/// `putstatic` lowering, so only remaining reads force materializing INSTANCE into a local.
-fn init_body_reads_this(ir: &IrFile, body: crate::ir::ExprId) -> bool {
-    fn walk(ir: &IrFile, e: crate::ir::ExprId, skip_self: bool) -> bool {
-        use crate::ir::IrExpr;
-        match ir.expr(e) {
-            IrExpr::GetValue(v) => *v == 0 && !skip_self,
-            IrExpr::SetField {
-                receiver, value, ..
-            } => {
-                let receiver_is_this = matches!(ir.expr(*receiver), IrExpr::GetValue(0));
-                (!receiver_is_this && walk(ir, *receiver, false)) || walk(ir, *value, false)
-            }
-            IrExpr::Block { stmts, value } => {
-                stmts.iter().any(|&s| walk(ir, s, false))
-                    || value.is_some_and(|v| walk(ir, v, false))
-            }
-            _ => {
-                let mut found = false;
-                crate::ir::for_each_child(&ir.exprs, e, &mut |child| {
-                    if walk(ir, child, false) {
-                        found = true;
-                    }
-                });
-                found
-            }
-        }
-    }
-    walk(ir, body, false)
 }
 
 fn has_ctor_marker_accessor(ir: &IrFile, class: &IrClass) -> bool {
@@ -490,8 +458,7 @@ pub(super) struct EmitEnv<'a> {
     function_argument_arrays: &'a crate::jvm::function_argument_arrays::FunctionArgumentArrays,
     override_results: &'a crate::jvm::override_results::OverrideResults,
     collection_method_entry_barriers: &'a crate::jvm::collection_barriers::MethodEntryBarriers,
-    inherited_collection_bridges:
-        &'a crate::jvm::inherited_collection_bridges::InheritedCollectionBridges,
+    collection_members: &'a crate::jvm::read_only_collection_stubs::CollectionMemberPlans,
     /// Semantic classifier declarations used only while translating Kotlin generic types into JVM
     /// `Signature` attributes. Declaration-site variance is a Kotlin fact; spelling it as JVM
     /// use-site wildcards is owned entirely by this emitter.
@@ -679,7 +646,7 @@ fn primary_ctor_parameter_descs(ir: &IrFile, c: &IrClass) -> String {
 
 fn ctor_field_descs(ir: &IrFile, c: &IrClass) -> String {
     let fields = c.fields.iter().take(c.ctor_param_count as usize).collect();
-    capture_order::physical(ir, c, fields)
+    capture_order::physical_fields(ir, c, fields)
         .into_iter()
         .map(|f| crate::jvm::names::type_descriptor(f.ty))
         .collect()
@@ -1288,7 +1255,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
         function_argument_arrays: facts.metadata.function_argument_arrays,
         override_results: facts.metadata.override_results,
         collection_method_entry_barriers: facts.metadata.collection_method_entry_barriers,
-        inherited_collection_bridges: facts.metadata.inherited_collection_bridges,
+        collection_members: facts.metadata.collection_members,
         signature_symbols: facts.signature_symbols,
         dependency_callables: facts.dependency_callables,
         dispatch_classifiers: std::rc::Rc::new(
@@ -1894,10 +1861,10 @@ fn apply_enum_entry_annotations(cw: &mut ClassWriter, c: &crate::ir::IrClass, fi
 /// The internal class name to `checkcast` a value to when narrowing an erased `Object` to `ty` — or
 /// `None` when no narrowing is needed (`Object`/`Any`, a primitive, `Unit`/`Nothing`).
 fn checkcast_internal(ty: Ty) -> Option<String> {
-    match ty {
-        Ty::String => Some("java/lang/String".to_string()),
+    match ty.kind() {
+        TyKind::STRING => Some("java/lang/String".to_string()),
         _ if ty.is_array() => Some(type_descriptor(ty)),
-        Ty::Obj(n, _) if !crate::jvm::jvm_class_map::is_jvm_erased_top(n) => {
+        TyKind::Obj(n, _) if !crate::jvm::jvm_class_map::is_jvm_erased_top(n) => {
             Some(crate::jvm::names::classfile_internal_name_of(n).to_string())
         }
         _ => None,
@@ -2348,6 +2315,7 @@ fn emit_class(
         class: c,
         fq_name: &fq_name,
         ctor_signature: ctor_signature.as_deref(),
+        java_parameters: env.java_parameters,
     };
     seed_ctor_before_members(byte_parity, pool_seed(), &mut cw);
     // Access: an extended or abstract class must not be `final`; a class with an emitted abstract
@@ -2411,10 +2379,10 @@ fn emit_class(
     let mut field_order: Vec<(usize, &crate::ir::IrField)> = if static_storage(ir, c) {
         Vec::new()
     } else {
-        capture_order::physical(ir, c, c.fields.iter().enumerate().collect())
+        capture_order::physical_fields(ir, c, c.fields.iter().enumerate().collect())
     };
     // kotlinc appends captures and the outer instance (the constructor prefix) after declared fields.
-    let prefix = (c.constructor_prefix_count as usize).min(field_order.len());
+    let prefix = captured_storage::constructor_prefix_fields(c).min(field_order.len());
     field_order.rotate_left(prefix);
     if is_continuation {
         field_order.sort_by_key(|(_, field)| match field.name.as_str() {
@@ -2577,15 +2545,7 @@ fn emit_class(
     // secondary constructor (below). Otherwise emit the primary `<init>` here.
     if c.has_primary_ctor {
         let ctor_desc = primary_ctor_descriptor(ir, c);
-        let ctor_parameters = if env.java_parameters {
-            if is_continuation {
-                super::method_parameters::continuation_constructor(c)
-            } else {
-                super::method_parameters::primary_constructor(ir, c, &param_tys)
-            }
-        } else {
-            Vec::new()
-        };
+        let ctor_parameters = primary_constructor_method_parameters(ir, c, env.java_parameters);
         // A `MethodParameters` name is interned with the method HEADER, before the body's constants
         // and before the `@NotNull`/`@Nullable` parameter descriptors — ASM's `visitParameter` order.
         cw.reserve_method_pool_with_annotations(
@@ -2837,28 +2797,6 @@ fn emit_class(
         }
         .emit(secondary_ordinal as usize, sc);
     }
-    // The child-serializer cache's factories and its `…$cp` accessor follow that constructor, which
-    // is kotlinc's order for them. They are generated, so they carry no source order to sort by and
-    // the declared-member schedule leaves them out.
-    for &fid in c
-        .methods
-        .iter()
-        .filter(|fid| ir.serialization_cache_methods.contains(fid))
-    {
-        let f = &ir.functions[fid as usize];
-        if f.body.is_some() {
-            emit_method(
-                ir,
-                fid,
-                StaticOwner::Class(c.fq_name),
-                &fq_name,
-                facade,
-                &mut cw,
-                !f.is_static,
-                env,
-            );
-        }
-    }
     // EVERY parameter defaulted → kotlinc also emits the no-arg convenience `<init>()`
     // (`AuditFilters()` in Java/reflection), delegating to the `$default` overload with a full
     // mask — AFTER the declared methods (kotlinc's member order), at the primary's declared
@@ -2940,6 +2878,27 @@ fn emit_class(
                     }
                 }
             }
+        }
+    }
+    // The child-serializer cache follows both constructors (kotlinc's order), outside the schedule.
+    let deferred = accessor_emission_order::deferred_cache_accessor(ir, c);
+    for &fid in c
+        .methods
+        .iter()
+        .filter(|fid| ir.serialization_cache_methods.contains(fid) && Some(**fid) != deferred)
+    {
+        let f = &ir.functions[fid as usize];
+        if f.body.is_some() {
+            emit_method(
+                ir,
+                fid,
+                StaticOwner::Class(c.fq_name),
+                &fq_name,
+                facade,
+                &mut cw,
+                !f.is_static,
+                env,
+            );
         }
     }
     jvm_static_members::emit_companion_bridges(ir, c, &mut cw, env);
@@ -3080,17 +3039,17 @@ fn function_reference_target(ir: &IrFile, reference: &crate::ir::FuncRef) -> Opt
 }
 
 fn verif_for_jvm_free(cw: &mut ClassWriter, t: Ty) -> VerifType {
-    match t {
-        t if is_jvm_int_category(t) => VerifType::Integer,
-        Ty::Long => VerifType::Long,
-        Ty::Double => VerifType::Double,
-        Ty::Float => VerifType::Float,
-        Ty::String => VerifType::Object(cw.class_ref("java/lang/String")),
-        t if t.is_array() => VerifType::Object(cw.class_ref(&type_descriptor(t))),
-        Ty::Obj(n, _) => {
+    match t.kind() {
+        _ if is_jvm_int_category(t) => VerifType::Integer,
+        TyKind::LONG => VerifType::Long,
+        TyKind::DOUBLE => VerifType::Double,
+        TyKind::FLOAT => VerifType::Float,
+        TyKind::STRING => VerifType::Object(cw.class_ref("java/lang/String")),
+        _ if t.is_array() => VerifType::Object(cw.class_ref(&type_descriptor(t))),
+        TyKind::Obj(n, _) => {
             VerifType::Object(cw.class_ref(crate::jvm::names::classfile_internal_name_of(n)))
         }
-        Ty::Null => VerifType::Null,
+        TyKind::Null => VerifType::Null,
         _ => VerifType::Top,
     }
 }
@@ -4564,17 +4523,16 @@ fn emit_placed_method(
     // istore_<n>` into a synthetic `$i$f$<name>` int local covering the body — its inliner tracks
     // splice depth through these. Emitted after the parameter guards; the body's LineNumberTable
     // then naturally starts at the post-store pc.
-    let inline_marker: Option<(u16, u16)> = (ir.top_level_inline_functions.contains(&fid)
-        || (receiver_value && ir.inline_fns.contains(&fid)))
-    .then(|| {
-        let slot = e
-            .frame
-            .enter_temp(TempRole::InlineDepthMarker, Ty::Int)
-            .slot();
-        code.push_int(0, e.cw);
-        store(Ty::Int, slot, &mut code);
-        (slot, code.bytes.len() as u16)
-    });
+    let inline_marker: Option<(u16, u16)> =
+        function_debug::opens_with_inline_depth_marker(ir, fid, receiver_value).then(|| {
+            let slot = e
+                .frame
+                .enter_temp(TempRole::InlineDepthMarker, Ty::Int)
+                .slot();
+            code.push_int(0, e.cw);
+            store(Ty::Int, slot, &mut code);
+            (slot, code.bytes.len() as u16)
+        });
     // The marker and the parameter guards carry no line. The method's first entry is the first
     // statement, or the expression body — kotlinc does not also record the signature line there.
     // Building the machine: everything the discovery pass learned is in hand, so the entry,
@@ -4876,18 +4834,18 @@ fn parameterized_sig_at(
     ty: &Ty,
     wildcards: Wildcards,
 ) -> Option<String> {
-    let inner = match ty {
-        Ty::Nullable(t) | Ty::PlatformNullable(t) => t,
-        t => t,
+    let inner = match ty.kind() {
+        TyKind::Nullable(t) | TyKind::PlatformNullable(t) => t,
+        _ => *ty,
     };
-    match inner {
-        Ty::Obj(_, args) if !args.is_empty() => {
-            let sig = formatter.ty_at(inner, wildcards)?;
-            (sig != ir_type_desc(inner)).then_some(sig)
+    match inner.kind() {
+        TyKind::Obj(_, args) if !args.is_empty() => {
+            let sig = formatter.ty_at(&inner, wildcards)?;
+            (sig != ir_type_desc(&inner)).then_some(sig)
         }
-        Ty::Fun(_) => {
-            let sig = formatter.ty_at(inner, wildcards)?;
-            (sig != ir_type_desc(inner)).then_some(sig)
+        TyKind::Fun(_) => {
+            let sig = formatter.ty_at(&inner, wildcards)?;
+            (sig != ir_type_desc(&inner)).then_some(sig)
         }
         _ => None,
     }
@@ -5039,12 +4997,12 @@ fn method_parameterized_sig(
 ) -> Option<String> {
     // Runs for every emitted method — bail before building any string when no position can carry one.
     let is_parameterized = |t: &Ty| {
-        let inner = match t {
-            Ty::Nullable(t) | Ty::PlatformNullable(t) => t,
-            t => t,
+        let inner = match t.kind() {
+            TyKind::Nullable(t) | TyKind::PlatformNullable(t) => t,
+            _ => *t,
         };
-        matches!(inner, Ty::Fun(_) | Ty::Intersection(_))
-            || matches!(inner, Ty::Obj(_, arguments) if !arguments.is_empty())
+        matches!(inner.kind(), TyKind::Fun(_) | TyKind::Intersection(_))
+            || matches!(inner.kind(), TyKind::Obj(_, arguments) if !arguments.is_empty())
     };
     if !params
         .iter()
@@ -6478,21 +6436,21 @@ impl<'a> Emitter<'a> {
     fn verif_single(&mut self, ty: Ty) -> VerifType {
         // Keep object types by name here. The final StackMapTable encoder interns only classes that
         // survive frame compression, avoiding constant-pool entries for omitted locals.
-        match ty {
-            t if is_jvm_int_category(t) => VerifType::Integer,
-            Ty::Long => VerifType::Long,
-            Ty::Double => VerifType::Double,
-            Ty::Float => VerifType::Float,
-            Ty::String => VerifType::ObjectName("java/lang/String".to_string()),
+        match ty.kind() {
+            _ if is_jvm_int_category(ty) => VerifType::Integer,
+            TyKind::LONG => VerifType::Long,
+            TyKind::DOUBLE => VerifType::Double,
+            TyKind::FLOAT => VerifType::Float,
+            TyKind::STRING => VerifType::ObjectName("java/lang/String".to_string()),
             // An array's verification type is an `Object` whose class name is its descriptor (`[I`).
-            t if t.is_array() => VerifType::ObjectName(type_descriptor(ty)),
-            Ty::Obj(n, _) => {
+            _ if ty.is_array() => VerifType::ObjectName(type_descriptor(ty)),
+            TyKind::Obj(n, _) => {
                 VerifType::ObjectName(crate::jvm::names::classfile_internal_name_of(n).to_string())
             }
-            Ty::Nullable(_) | Ty::PlatformNullable(_) => {
+            TyKind::Nullable(_) | TyKind::PlatformNullable(_) => {
                 VerifType::ObjectName(crate::jvm::names::instanceof_internal_name(ty))
             }
-            Ty::Null => VerifType::Null,
+            TyKind::Null => VerifType::Null,
             _ => VerifType::Top,
         }
     }
@@ -6833,9 +6791,9 @@ fn call_ret_ty(ret: &Ty) -> Ty {
 }
 
 fn norm_nothing(t: Ty) -> Ty {
-    match &t {
-        Ty::Obj(n, _)
-            if crate::jvm::jvm_class_map::type_name_maps_to_jvm_internal(*n, "java/lang/Void") =>
+    match t.kind() {
+        TyKind::Obj(n, _)
+            if crate::jvm::jvm_class_map::type_name_maps_to_jvm_internal(n, "java/lang/Void") =>
         {
             Ty::Nothing
         }
@@ -7107,8 +7065,8 @@ mod invariant_tests {
         let override_results = crate::jvm::override_results::OverrideResults::default();
         let collection_method_entry_barriers =
             crate::jvm::collection_barriers::MethodEntryBarriers::default();
-        let inherited_collection_bridges =
-            crate::jvm::inherited_collection_bridges::InheritedCollectionBridges::default();
+        let collection_members =
+            crate::jvm::read_only_collection_stubs::CollectionMemberPlans::default();
         let local_delegate_access = crate::jvm::local_delegate_accessors::HelperAccess::default();
         let dependency_callables = crate::backend::CheckedBackendCallables::default();
         emit_all_with_checked_classifiers(
@@ -7123,7 +7081,7 @@ mod invariant_tests {
                     function_argument_arrays: &function_argument_arrays,
                     override_results: &override_results,
                     collection_method_entry_barriers: &collection_method_entry_barriers,
-                    inherited_collection_bridges: &inherited_collection_bridges,
+                    collection_members: &collection_members,
                     emit_time_machines,
                     suspended_result_returns: &suspended_result_returns,
                     intrinsic_probe_continuations,

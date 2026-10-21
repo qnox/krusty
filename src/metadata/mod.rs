@@ -1,5 +1,6 @@
 //! Kotlin @Metadata emission (protobuf payload + encoding). WIP — Phase 4b.
 
+use crate::types::TyKind;
 use protobuf::Pb;
 
 pub mod annotations;
@@ -52,6 +53,8 @@ pub(crate) mod function_flags {
     pub const IS_STATIC: u64 = 1 << 18;
     /// Bits 6-7 are `MemberKind`. DELEGATION (2) is a function realized by `interface by`.
     pub const MEMBER_KIND_DELEGATION: u64 = 2 << 6;
+    /// Both `MemberKind` bits; clearing them makes a function a DECLARATION (0).
+    pub const MEMBER_KIND_MASK: u64 = 3 << 6;
 }
 
 pub(crate) mod property_flags {
@@ -91,11 +94,16 @@ pub(crate) mod property_flags {
 /// unprojected — it travels separately as `ValueParameter.vararg_element_type`.
 pub(crate) fn vararg_recorded_type(ty: crate::types::Ty) -> crate::types::Ty {
     use crate::types::Ty;
-    let Ty::Obj(name, args) = ty else { return ty };
+    let TyKind::Obj(name, args) = ty.kind() else {
+        return ty;
+    };
     match args.first().copied() {
         Some(element)
             if ty.is_reference_array()
-                && !matches!(element, Ty::OutProjection(_) | Ty::StarProjection(_)) =>
+                && !matches!(
+                    element.kind(),
+                    TyKind::OutProjection(_) | TyKind::StarProjection(_)
+                ) =>
         {
             Ty::obj_args_name(name, &[Ty::out_projection(element)])
         }

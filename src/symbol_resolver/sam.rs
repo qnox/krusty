@@ -6,7 +6,7 @@
 
 use crate::libraries::LibraryMember;
 use crate::symbol_source::SymbolSource;
-use crate::types::{Ty, TypeName, Visibility};
+use crate::types::{Ty, TyKind, TypeName, Visibility};
 
 use super::{
     classifier_bindings, classifier_type_parameter_bounds, receiver_hierarchy,
@@ -132,7 +132,8 @@ pub(crate) fn semantic_sam_signature(
                 .annotations
                 .iter()
                 .any(|annotation| receiver_annotations.contains(&annotation.annotation));
-        for member in &classifier.members {
+        for member in classifier.member_records() {
+            let member = member.as_ref();
             collect_member(
                 member,
                 if function_type {
@@ -154,7 +155,11 @@ pub(crate) fn semantic_sam_signature(
         // Their inherited abstract `invoke` must nevertheless participate in the same SAM member
         // set. Materialize one short-lived normalized candidate here; no spelling or backend owner
         // is reconstructed.
-        if let Some(Ty::Fun(callable)) = classifier.callable_signature.map(Ty::non_null) {
+        if let Some(TyKind::Fun(callable)) = classifier
+            .callable_signature
+            .map(Ty::non_null)
+            .map(Ty::kind)
+        {
             let mut invoke = LibraryMember::new(
                 "invoke".to_string(),
                 callable.params.clone(),
@@ -394,15 +399,15 @@ fn sam_substitute(
     occurrence_bounds: &crate::fx_hash::HashMap<String, Ty>,
     bindings: &GSigBinds,
 ) -> Ty {
-    let platform_inner = match declared {
-        Ty::PlatformNullable(inner) => Some(*inner),
+    let platform_inner = match declared.kind() {
+        TyKind::PlatformNullable(inner) => Some(inner),
         _ => None,
     };
-    let explicit_nullable = platform_inner.and_then(|inner| match inner {
-        Ty::TyParam(name, _) => bindings
-            .get(name)
+    let explicit_nullable = platform_inner.and_then(|inner| match inner.kind() {
+        TyKind::TyParam(name, _) => bindings
+            .get(name.as_str())
             .copied()
-            .filter(|binding| matches!(binding, Ty::Nullable(_))),
+            .filter(|binding| matches!(binding.kind(), TyKind::Nullable(_))),
         _ => None,
     });
     if let Some(binding) = explicit_nullable {

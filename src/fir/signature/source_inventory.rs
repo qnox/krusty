@@ -14,7 +14,7 @@ impl ResolvedModuleIndex {
     }
 
     pub fn source_order(&self, declaration: DeclarationId) -> Option<u32> {
-        let order = self.source_orders.get(&declaration).copied();
+        let order = self.source_orders.get(declaration).copied();
         if order.is_none() {
             crate::trace_compiler!(
                 "fir",
@@ -80,7 +80,7 @@ impl ResolvedModuleIndex {
                 let declaration = DeclarationId::from_raw(
                     u32::try_from(raw).expect("too many stable declarations for a packed id"),
                 );
-                if self.source_orders.contains_key(&declaration)
+                if self.source_orders.contains_key(declaration)
                     || !self.declaration_header(declaration).is_some_and(|header| {
                         header.flags.has(DeclarationFlags::COMPILER_GENERATED)
                     })
@@ -97,7 +97,7 @@ impl ResolvedModuleIndex {
                     .is_classifier_plugin_callable(declaration, owner, declarations)
                     .then(|| subtree_ends.get(&owner).map(|end| end + 1))
                     .flatten();
-                let Some(order) = after_members.or_else(|| self.source_orders.get(&owner).copied())
+                let Some(order) = after_members.or_else(|| self.source_orders.get(owner).copied())
                 else {
                     continue;
                 };
@@ -132,11 +132,11 @@ impl ResolvedModuleIndex {
 
 /// The last source order inside each owner's declaration subtree.
 fn subtree_ends(
-    source_orders: &HashMap<DeclarationId, u32>,
+    source_orders: &super::super::DeclarationTable<u32>,
     declarations: &DeclarationIds,
 ) -> HashMap<DeclarationId, u32> {
     let mut ends = HashMap::<DeclarationId, u32>::default();
-    for (&declaration, &order) in source_orders {
+    for (declaration, &order) in source_orders.iter() {
         let mut owner = declarations
             .anchor(declaration)
             .and_then(|anchor| anchor.owner);

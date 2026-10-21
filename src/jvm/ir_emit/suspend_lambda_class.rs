@@ -10,6 +10,7 @@
 use super::*;
 use crate::jvm::suspend::cps::SuspendLambdaMember;
 use crate::jvm::suspend::SuspendLambdaClass;
+use crate::types::TyKind;
 
 const SUSPEND_LAMBDA: &str = "kotlin/coroutines/jvm/internal/SuspendLambda";
 const CONTINUATION: &str = "kotlin/coroutines/Continuation";
@@ -31,6 +32,92 @@ struct Parameter {
     semantic: Ty,
     physical: Ty,
     field: Option<Field>,
+    /// How the erased `FunctionN.invoke` and `create` receive the parameter.
+    erased: Erased,
+}
+
+/// The form a parameter takes in an erased `Object` slot, relative to its physical type.
+#[derive(Clone, Copy)]
+enum Erased {
+    /// The box of a value class the parameter physically carries unboxed (`IC` over `String`).
+    CarriedValueClass(TypeName),
+    /// A value class's box, which is the parameter's physical type too (`BI?` over `int`).
+    ValueClassBox(TypeName),
+    /// Any other type: the physical type itself, or its primitive's wrapper.
+    Physical,
+}
+
+impl Erased {
+    fn of(ir: &IrFile, semantic: Ty, physical: Ty) -> Erased {
+        let Some(class) = semantic.non_null().obj_internal() else {
+            return Erased::Physical;
+        };
+        let value_class = ir.is_value_class_name(class) || semantic.non_null().is_unsigned();
+        if !value_class
+            || physical.is_jvm_scalar()
+                && !crate::jvm::value_classes::is_boxed_value_class(ir, class)
+        {
+            return Erased::Physical;
+        }
+        if physical.non_null().kotlin_class_internal() == Some(class) {
+            Erased::ValueClassBox(class)
+        } else {
+            Erased::CarriedValueClass(class)
+        }
+    }
+}
+
+impl Parameter {
+    /// Convert the erased `Object` on the stack to the parameter's physical type.
+    fn convert_from_erased(&self, cw: &mut ClassWriter, code: &mut CodeBuilder) {
+        if let Erased::CarriedValueClass(value_class) = self.erased {
+            emit_value_class_unbox_adapter(
+                cw,
+                code,
+                value_class,
+                self.physical,
+                self.semantic.is_nullable(),
+            );
+        } else if let Erased::ValueClassBox(value_class) = self.erased {
+            let class = cw.class_ref(&value_class.render());
+            code.checkcast(class);
+        } else if self.physical.is_jvm_scalar() {
+            unbox_prim_from(
+                cw,
+                code,
+                Ty::obj("java/lang/Object"),
+                semantic_scalar_adapter(self.semantic, self.physical),
+            );
+        } else if let Some(internal) = checkcast_internal(self.physical) {
+            let class = cw.class_ref(&internal);
+            code.checkcast(class);
+        }
+    }
+
+    /// Box the physical value on the stack for `create`'s erased `Object` parameter.
+    /// Whether `create` converts the `Object` it receives before storing it: kotlinc stores any
+    /// other reference unchecked.
+    fn converted_by_create(&self) -> bool {
+        !matches!(self.erased, Erased::Physical) || self.physical.is_jvm_scalar()
+    }
+
+    fn convert_to_erased(&self, cw: &mut ClassWriter, code: &mut CodeBuilder) {
+        if let Erased::CarriedValueClass(value_class) = self.erased {
+            emit_value_class_box_adapter(
+                cw,
+                code,
+                value_class,
+                self.physical,
+                self.semantic.is_nullable(),
+            );
+        } else if self.physical.is_jvm_scalar() {
+            box_prim_free(
+                cw,
+                code,
+                semantic_scalar_adapter(self.semantic, self.physical),
+            );
+        }
+    }
 }
 
 /// A captured value's field.
@@ -50,10 +137,12 @@ struct Shape {
     result: Ty,
     /// The `FunctionN` arity: the parameters and the continuation.
     arity: u8,
+    /// The typed `invoke`'s JVM name: mangled when a parameter is a value class.
+    invoke_name: String,
 }
 
 impl Shape {
-    fn new(c: &crate::ir::IrClass, lambda: &SuspendLambdaClass) -> Shape {
+    fn new(ir: &IrFile, c: &crate::ir::IrClass, lambda: &SuspendLambdaClass) -> Shape {
         let field = |index: u32| {
             let field = &c.fields[index as usize];
             Field {
@@ -63,7 +152,7 @@ impl Shape {
                 private: field.is_private(),
             }
         };
-        let Ty::Fun(signature) = lambda.function_type.non_null() else {
+        let TyKind::Fun(signature) = lambda.function_type.non_null().kind() else {
             unreachable!("a suspend lambda has a function type")
         };
         let parameters = lambda
@@ -76,6 +165,7 @@ impl Shape {
                     unreachable!("one type maps to one JVM type")
                 };
                 let semantic = signature.params.get(index).copied().unwrap_or(ty);
+                let erased = Erased::of(ir, semantic, physical);
                 Parameter {
                     semantic: if semantic == Ty::Unit {
                         physical
@@ -84,9 +174,16 @@ impl Shape {
                     },
                     physical,
                     field: stored.map(field),
+                    erased,
                 }
             })
             .collect::<Vec<_>>();
+        let semantic_parameters = parameters
+            .iter()
+            .map(|parameter| parameter.semantic)
+            .collect::<Vec<_>>();
+        let invoke_name =
+            crate::jvm::value_classes::suspend_lambda_invoke_name(ir, &semantic_parameters);
         Shape {
             class: c.fq_name(),
             captures: lambda
@@ -101,6 +198,7 @@ impl Shape {
                 .expect("a suspend lambda's arity fits its FunctionN"),
             parameters,
             result: signature.ret,
+            invoke_name,
         }
     }
 
@@ -232,7 +330,7 @@ pub(super) fn emit_suspend_lambda_class(
     env: &EmitEnv,
     opts: &EmitOptions,
 ) -> Vec<u8> {
-    let shape = Shape::new(c, lambda);
+    let shape = Shape::new(ir, c, lambda);
     let formatter = JvmSignatureFormatter::new(ir, env);
     let continuation = match JvmSignatureFormatter::nothing_continuation(shape.result) {
         Some(continuation) => continuation.to_string(),
@@ -389,7 +487,7 @@ fn lambda_metadata(
         lambda.function_type,
         &lambda.type_parameters,
     );
-    let Ty::Fun(signature) = function_type.non_null() else {
+    let TyKind::Fun(signature) = function_type.non_null().kind() else {
         unreachable!("a suspend lambda has a function type")
     };
     let own = &signature.params[signature.context_count..];
@@ -475,9 +573,12 @@ fn emit_constructor(
         );
     }
     signature.push_str(&format!("L{CONTINUATION}<-{}>;)V", shape.self_desc()));
-    cw.seed_utf8("<init>");
-    cw.seed_utf8(&descriptor);
-    cw.seed_utf8(&signature);
+    let reflected = if java_parameters {
+        shape.method_parameters(ir, lambda, SuspendLambdaMember::Constructor)
+    } else {
+        Vec::new()
+    };
+    seed_header(cw, "<init>", &descriptor, Some(&signature), &reflected);
     let completion = 1 + shape.capture_words();
     let mut code = CodeBuilder::new(completion + 1);
     let mut slot = 1u16;
@@ -520,9 +621,25 @@ fn emit_constructor(
         );
     }
     cw.set_method_debug("<init>", &descriptor, None, &locals);
-    if java_parameters {
-        let reflected = shape.method_parameters(ir, lambda, SuspendLambdaMember::Constructor);
-        cw.set_method_parameters("<init>", &descriptor, &reflected);
+    cw.set_method_parameters("<init>", &descriptor, &reflected);
+}
+
+/// Intern a member's header in ASM's visit order: name, descriptor, `Signature`, then the
+/// `MethodParameters` names `visitParameter` interns before the body.
+fn seed_header(
+    cw: &mut ClassWriter,
+    name: &str,
+    descriptor: &str,
+    signature: Option<&str>,
+    reflected: &[crate::jvm::method_parameters::MethodParameter],
+) {
+    cw.seed_utf8(name);
+    cw.seed_utf8(descriptor);
+    for text in signature
+        .into_iter()
+        .chain(reflected.iter().filter_map(|(name, _)| name.as_deref()))
+    {
+        cw.seed_utf8(text);
     }
 }
 
@@ -573,9 +690,12 @@ fn emit_create(
         "({}L{CONTINUATION}<*>;)L{CONTINUATION}<Lkotlin/Unit;>;",
         if parameter.is_some() { OBJECT_DESC } else { "" }
     );
-    cw.seed_utf8("create");
-    cw.seed_utf8(&descriptor);
-    cw.seed_utf8(&signature);
+    let reflected = if java_parameters {
+        shape.method_parameters(ir, lambda, SuspendLambdaMember::Create)
+    } else {
+        Vec::new()
+    };
+    seed_header(cw, "create", &descriptor, Some(&signature), &reflected);
     let completion = 1 + u16::from(parameter.is_some());
     let copy = completion + 1;
     let mut code = CodeBuilder::new(copy);
@@ -585,13 +705,8 @@ fn emit_create(
         code.astore(copy);
         store_parameter(cw, &mut code, shape, copy, field, |cw, code| {
             code.aload(1);
-            if parameter.physical.is_jvm_scalar() {
-                unbox_prim_from(
-                    cw,
-                    code,
-                    Ty::obj("java/lang/Object"),
-                    semantic_scalar_adapter(parameter.semantic, parameter.physical),
-                );
+            if parameter.converted_by_create() {
+                parameter.convert_from_erased(cw, code);
             }
         });
         code.aload(copy);
@@ -615,10 +730,7 @@ fn emit_create(
         Some(&signature),
     );
     cw.set_method_debug("create", &descriptor, None, &locals);
-    if java_parameters {
-        let reflected = shape.method_parameters(ir, lambda, SuspendLambdaMember::Create);
-        cw.set_method_parameters("create", &descriptor, &reflected);
-    }
+    cw.set_method_parameters("create", &descriptor, &reflected);
 }
 
 /// The typed `invoke(parameters…, Continuation)`: start a fresh copy of the lambda with `Unit`.
@@ -645,11 +757,18 @@ fn emit_invoke(
     // A raw continuation (a `Nothing?` result) over raw parameters spells the descriptor back, and
     // such a `Signature` is omitted.
     let signature = (signature != descriptor).then_some(signature);
-    cw.seed_utf8("invoke");
-    cw.seed_utf8(&descriptor);
-    if let Some(signature) = &signature {
-        cw.seed_utf8(signature);
-    }
+    let reflected = if java_parameters {
+        shape.method_parameters(ir, lambda, SuspendLambdaMember::Invoke)
+    } else {
+        Vec::new()
+    };
+    seed_header(
+        cw,
+        &shape.invoke_name,
+        &descriptor,
+        signature.as_deref(),
+        &reflected,
+    );
     let mut slots = Vec::with_capacity(shape.parameters.len());
     let mut completion = 1u16;
     for parameter in &shape.parameters {
@@ -662,13 +781,7 @@ fn emit_invoke(
         code.aload(0);
         if let (Some(parameter), Some(&slot)) = (shape.parameters.first(), slots.first()) {
             load(parameter.physical, slot, &mut code);
-            if parameter.physical.is_jvm_scalar() {
-                box_prim_free(
-                    cw,
-                    &mut code,
-                    semantic_scalar_adapter(parameter.semantic, parameter.physical),
-                );
-            }
+            parameter.convert_to_erased(cw, &mut code);
         }
         code.aload(completion);
         let create = cw.methodref(&shape.class, "create", &shape.create_desc());
@@ -698,17 +811,14 @@ fn emit_invoke(
     cw.reserve_method_lvt(&locals);
     finish_code_sig::<0x0011>(
         cw,
-        "invoke",
+        &shape.invoke_name,
         &descriptor,
         &mut code,
         max_locals,
         signature.as_deref(),
     );
-    cw.set_method_debug("invoke", &descriptor, None, &locals);
-    if java_parameters {
-        let reflected = shape.method_parameters(ir, lambda, SuspendLambdaMember::Invoke);
-        cw.set_method_parameters("invoke", &descriptor, &reflected);
-    }
+    cw.set_method_debug(&shape.invoke_name, &descriptor, None, &locals);
+    cw.set_method_parameters(&shape.invoke_name, &descriptor, &reflected);
 }
 
 /// The erased `FunctionN.invoke(Object…)` bridge to the typed `invoke`. Its parameters are the
@@ -740,17 +850,7 @@ fn emit_bridge(ir: &IrFile, cw: &mut ClassWriter, shape: &Shape, lambda: &Suspen
         } else {
             code.aload(1 + index as u16);
         }
-        if parameter.physical.is_jvm_scalar() {
-            unbox_prim_from(
-                cw,
-                &mut code,
-                Ty::obj("java/lang/Object"),
-                semantic_scalar_adapter(parameter.semantic, parameter.physical),
-            );
-        } else if let Some(internal) = checkcast_internal(parameter.physical) {
-            let class = cw.class_ref(&internal);
-            code.checkcast(class);
-        }
+        parameter.convert_from_erased(cw, &mut code);
     }
     if high_arity {
         super::function_reference_invoke::load_erased_function_argument(
@@ -770,7 +870,7 @@ fn emit_bridge(ir: &IrFile, cw: &mut ClassWriter, shape: &Shape, lambda: &Suspen
         .map(|parameter| slot_words(parameter.physical))
         .sum::<u16>()
         + 1;
-    let invoke = cw.methodref(&shape.class, "invoke", &shape.invoke_desc());
+    let invoke = cw.methodref(&shape.class, &shape.invoke_name, &shape.invoke_desc());
     code.invokevirtual(invoke, argument_words as i32, 1);
     code.areturn();
     if high_arity {

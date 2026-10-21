@@ -62,13 +62,18 @@ impl BodyLowering<'_> {
         // kotlinc folds an intrinsic-const operation over constants before any other lowering, so
         // the whole operation becomes its value.
         let folded = self.constants.fold(self.body, expression_id);
-        // A conversion that realizes an inline call in place ends that inlined call.
+        // A conversion or range construction that realizes an inline call in place ends that
+        // inlined call.
         let ends_inlined_call = folded.is_none()
-            && matches!(
-                expression.kind,
-                FirExprKind::ImplicitConversion { conversion, .. }
-                    if self.body.is_inlined_call_conversion(conversion.origin)
-            );
+            && match &expression.kind {
+                FirExprKind::ImplicitConversion { conversion, .. } => {
+                    self.body.is_inlined_call_conversion(conversion.origin)
+                }
+                FirExprKind::Range {
+                    ends_inlined_call, ..
+                } => *ends_inlined_call,
+                _ => false,
+            };
         // kotlinc then flattens nested concatenations into one, merging each run of constant
         // arguments into one `String` constant.
         let concatenation = folded
@@ -386,6 +391,35 @@ impl BodyLowering<'_> {
                 } else {
                     call
                 }
+            }
+            FirExprKind::ComparableRangeContainment {
+                lower,
+                upper_bound,
+                negated,
+            } => {
+                let lower = self.checked_call(
+                    lower,
+                    self.body.expression_debug_lines(expression_id).source,
+                )?;
+                if !matches!(
+                    self.ir.expr(lower),
+                    IrExpr::Call {
+                        dispatch_receiver: Some(_),
+                        args,
+                        ..
+                    } if args.len() == 1
+                ) {
+                    return Err(FirLoweringFailure::InvalidComparableRangeOrdering { origin });
+                }
+                self.ir.logical_types.insert(lower, Ty::Int);
+                let end = self.expression(*upper_bound)?;
+                self.ir.add_expr(IrExpr::Checked(
+                    crate::ir::IrCheckedOperation::ComparableRangeContains {
+                        lower,
+                        end,
+                        negated: *negated,
+                    },
+                ))
             }
             FirExprKind::ClassLiteral { classifier, value } => {
                 self.checked_class_literal(*classifier, *value)?
@@ -856,6 +890,7 @@ impl BodyLowering<'_> {
                 start_type,
                 end,
                 end_type,
+                ..
             } => self.range_expression(
                 *operation,
                 *start,
@@ -1377,8 +1412,8 @@ impl BodyLowering<'_> {
                 body,
             } => {
                 let suspend = matches!(
-                    expression.ty.get().non_null(),
-                    crate::types::Ty::Fun(signature) if signature.suspend
+                    expression.ty.get().non_null().kind(),
+                    crate::types::TyKind::Fun(signature) if signature.suspend
                 );
                 let unit_method = self.unit_method_lambda.take() == Some(expression_id);
                 let lambda = self.checked_lambda(*callable, body, suspend, unit_method)?;
@@ -2082,11 +2117,35 @@ impl BodyLowering<'_> {
             .dispatch_receiver_slot()
             .map(|slot| self.ir.add_expr(IrExpr::GetValue(slot)))
             .ok_or(FirLoweringFailure::MissingLocalClass(owner))?;
+        let index = self.capture_field_index(class, field)?;
         Ok(self.ir.add_expr(IrExpr::GetField {
             receiver,
             class,
-            index: field,
+            index,
         }))
+    }
+
+    /// The field-table position of capture `field` (its identity) of `class`. A local class stores
+    /// only the captures code that runs after construction reads, so its capture fields can be
+    /// fewer than its constructor prefix. Reading the storage of a capture that has none is an
+    /// internal error: the checker selected the constructor parameter for every read of it.
+    fn capture_field_index(
+        &self,
+        class: crate::ir::ClassId,
+        field: u32,
+    ) -> Result<u32, FirLoweringFailure> {
+        let declaration = &self.ir.classes[class as usize];
+        match declaration.ctor_args.get(field as usize) {
+            Some(argument)
+                if field < declaration.constructor_prefix_count
+                    && argument.provenance == crate::ir::IrCtorParameterProvenance::Capture =>
+            {
+                argument
+                    .field_index
+                    .ok_or(FirLoweringFailure::UnstoredCaptureRead { class, field })
+            }
+            _ => Ok(field),
+        }
     }
 
     pub(super) fn constructor_capture_parameter(
@@ -2108,7 +2167,14 @@ impl BodyLowering<'_> {
                 let valid_owner = self
                     .index
                     .declaration_anchor(declaration)
-                    .filter(|anchor| anchor.kind == crate::fir::DeclarationKind::Constructor)
+                    .filter(|anchor| {
+                        matches!(
+                            anchor.kind,
+                            crate::fir::DeclarationKind::Constructor
+                                | crate::fir::DeclarationKind::Initializer
+                                | crate::fir::DeclarationKind::Property
+                        )
+                    })
                     .and_then(|anchor| anchor.owner)
                     == Some(owner);
                 if !valid_owner || field >= self.class_constructor_capture_count {
@@ -2188,10 +2254,11 @@ impl BodyLowering<'_> {
                 ),
             });
         }
+        let index = self.capture_field_index(class, field)?;
         Ok(self.ir.add_expr(IrExpr::GetField {
             receiver,
             class,
-            index: field,
+            index,
         }))
     }
 
@@ -2237,10 +2304,11 @@ impl BodyLowering<'_> {
             return Err(FirLoweringFailure::MissingLocalClass(owner));
         }
         let class = self.storage_class(owner)?;
+        let index = self.capture_field_index(class, field)?;
         Ok(self.ir.add_expr(IrExpr::GetField {
             receiver,
             class,
-            index: field,
+            index,
         }))
     }
 

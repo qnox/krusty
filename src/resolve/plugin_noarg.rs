@@ -214,7 +214,7 @@ fn constructors(
             .map(|(ordinal, (signature, annotations))| Constructor {
                 target: declaration(ordinal + 1).map(NoArgSuperConstructor::Declared),
                 primary: false,
-                parameter_defaults: signature.param_defaults.clone(),
+                parameter_defaults: signature.param_defaults.to_vec(),
                 jvm_overloads: annotations.contains(&jvm_overloads),
             });
         return primary.into_iter().chain(secondaries).collect();
@@ -298,7 +298,7 @@ mod tests {
             Ty::Unit,
             "(I)V".to_owned(),
         );
-        constructor.call_sig.param_defaults = vec![true];
+        constructor.call_sig.param_defaults = vec![true].into();
         assert!(constructor.default_values.is_empty());
         let unknown = LibraryMember::new(
             "<init>".to_owned(),

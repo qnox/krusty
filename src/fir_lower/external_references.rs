@@ -5,7 +5,7 @@ use crate::fir::{
     FirReceiver, FirReferenceAdaptation,
 };
 use crate::ir::{ExprId, IrCheckedArgument, IrExpr, IrFunction};
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 use super::{BodyLowering, FirLoweringFailure};
 
@@ -49,7 +49,7 @@ impl BodyLowering<'_> {
             ty: reference_ty,
             reflection_owner,
         } = reference;
-        let Ty::Fun(reference) = reference_ty.non_null() else {
+        let TyKind::Fun(reference) = reference_ty.non_null().kind() else {
             return Err(FirLoweringFailure::UnsupportedExternalCallableReference(
                 declaration,
             ));

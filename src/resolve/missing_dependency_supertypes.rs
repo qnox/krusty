@@ -13,6 +13,7 @@
 //! missing dependency; only an edge leading out of a classpath classifier is one.
 
 use super::*;
+use crate::types::TyKind;
 
 /// The supertypes of a classifier, transitively, that a classpath classifier names and no source
 /// provides, in kotlinc's depth-first `collectSuperTypes` order. `parents` are the classifier's
@@ -211,8 +212,8 @@ impl Checker<'_> {
             return;
         };
         let mut upper = checked;
-        while let Ty::TyParam(_, bound) = upper.non_null() {
-            upper = *bound;
+        while let TyKind::TyParam(_, bound) = upper.non_null().kind() {
+            upper = bound;
         }
         if let Some(classifier) = upper.non_null().kotlin_class_internal() {
             let label = access_control::owner_display(classifier);

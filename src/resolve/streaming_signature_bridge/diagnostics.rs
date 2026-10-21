@@ -1,6 +1,7 @@
 //! Diagnostic selection while pass-one signature expressions use the ordinary resolver.
 
 use super::*;
+use crate::types::TyKind;
 
 /// Publish one retained pass-one diagnostic through the ordinary source diagnostic sink.
 pub(super) fn emit_production_signature_diagnostic(
@@ -85,7 +86,7 @@ impl ProductionSignatureSemantics<'_> {
         receiver: Ty,
         spelling: &str,
     ) -> crate::fir::DiagnosticId {
-        let non_null_member = if matches!(receiver, Ty::Nullable(_)) {
+        let non_null_member = if matches!(receiver.kind(), TyKind::Nullable(_)) {
             match self.with_resolver(scope, |resolver| {
                 Some(
                     resolver

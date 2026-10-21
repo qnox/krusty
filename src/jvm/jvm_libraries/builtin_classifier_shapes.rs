@@ -34,6 +34,7 @@ pub(super) fn mapped_builtin_signature(internal: TypeName) -> Option<LibraryType
         declared_callables: crate::fx_hash::HashMap::default(),
         declared_callable_order: Vec::new(),
         members,
+        methods_as_declarations: false,
         companion: Vec::new(),
         constants: Default::default(),
         sam_eligible: false,
@@ -163,7 +164,7 @@ pub(super) fn builtin_library_type(
         .supertype_templates
         .iter()
         .copied()
-        .filter(|supertype| matches!(supertype, Ty::Fun(_)))
+        .filter(|supertype| supertype.is_fun())
         .collect::<Vec<_>>();
     let callable_signature = callable_signatures.first().copied();
     LibraryType {
@@ -184,6 +185,7 @@ pub(super) fn builtin_library_type(
         declared_callables: crate::fx_hash::HashMap::default(),
         declared_callable_order: Vec::new(),
         members,
+        methods_as_declarations: false,
         companion: Vec::new(),
         constants: Default::default(),
         sam_eligible: false,

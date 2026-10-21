@@ -135,6 +135,59 @@ impl BodyLowering<'_, '_, '_> {
             (self.checked_type(value).map(Ty::non_null) == Some(operand)).then_some(value)
         };
         match intrinsic {
+            Some(crate::backend::BackendCompilerIntrinsic::TextTrim) => {
+                let Some(value) =
+                    exact_extension_operand(receiver, args, extension_receiver_parameter)
+                else {
+                    return Some(Err("an exact text trim with malformed operands".into()));
+                };
+                return Some(self.text_trim(value, ret));
+            }
+            Some(crate::backend::BackendCompilerIntrinsic::ClosedRangeContains) => {
+                let operands = match (receiver, args) {
+                    (Some(range), [value]) => (range, *value),
+                    (None, [range, value]) if extension_receiver_parameter == Some(0) => {
+                        (*range, *value)
+                    }
+                    _ => return Some(Err("a range membership with malformed operands".into())),
+                };
+                return Some(self.facade_range_contains(operands.0, operands.1));
+            }
+            Some(
+                operation @ (crate::backend::BackendCompilerIntrinsic::RangeUntil
+                | crate::backend::BackendCompilerIntrinsic::RangeDownTo),
+            ) => {
+                let Some((start, end)) =
+                    exact_range_extension_operands(receiver, args, extension_receiver_parameter)
+                else {
+                    return Some(Err("an exact range builder with malformed operands".into()));
+                };
+                return Some(self.intrinsic_range_builder(operation, start, end, ret));
+            }
+            Some(
+                operation @ (crate::backend::BackendCompilerIntrinsic::UnsignedDivide { operand }
+                | crate::backend::BackendCompilerIntrinsic::UnsignedRemainder {
+                    operand,
+                }),
+            ) => {
+                let (None, [left, right]) = (receiver, args) else {
+                    return Some(Err("an unsigned division with malformed operands".into()));
+                };
+                if ret != operand {
+                    return Some(Err("an unsigned division with a mismatched result".into()));
+                }
+                let remainder = matches!(
+                    operation,
+                    crate::backend::BackendCompilerIntrinsic::UnsignedRemainder { .. }
+                );
+                return Some(self.unsigned_division(operand, remainder, *left, *right));
+            }
+            Some(crate::backend::BackendCompilerIntrinsic::ResultFailure(operation)) => {
+                if receiver.is_some() {
+                    return Some(Err("a Result helper with a dispatch receiver".into()));
+                }
+                return Some(self.result_operation(operation, args, ret));
+            }
             Some(crate::backend::BackendCompilerIntrinsic::FloatingIsNaN { operand }) => {
                 let Some(value) = floating_extension_operand(operand) else {
                     return Some(Err(
@@ -258,6 +311,20 @@ fn exact_extension_operand(
     }
 }
 
+/// A range builder has one extension receiver and one value argument. The serialized form's
+/// receiver remains at its authenticated parameter coordinate rather than becoming dispatch.
+fn exact_range_extension_operands(
+    receiver: Option<u32>,
+    args: &[u32],
+    extension_receiver_parameter: Option<u32>,
+) -> Option<(u32, u32)> {
+    match (receiver, args, extension_receiver_parameter) {
+        (Some(start), [end], None) => Some((start, *end)),
+        (None, [start, end], Some(0)) => Some((*start, *end)),
+        _ => None,
+    }
+}
+
 pub(super) fn console_intrinsic(
     intrinsic: Option<crate::backend::BackendCompilerIntrinsic>,
 ) -> Option<super::super::super::intrinsics::ConsoleIntrinsic> {
@@ -273,7 +340,34 @@ pub(super) fn console_intrinsic(
 
 #[cfg(test)]
 mod tests {
-    use super::exact_extension_operand;
+    use super::{exact_extension_operand, exact_range_extension_operands};
+
+    #[test]
+    fn a_range_extension_preserves_its_two_authenticated_operand_layouts() {
+        assert_eq!(
+            exact_range_extension_operands(Some(3), &[5], None),
+            Some((3, 5))
+        );
+        assert_eq!(
+            exact_range_extension_operands(None, &[7, 11], Some(0)),
+            Some((7, 11))
+        );
+        for (receiver, args, coordinate) in [
+            (None, &[7, 11][..], None),
+            (None, &[7, 11][..], Some(1)),
+            (None, &[7][..], Some(0)),
+            (None, &[7, 11, 13][..], Some(0)),
+            (Some(3), &[][..], None),
+            (Some(3), &[5, 7][..], None),
+            (Some(3), &[5][..], Some(0)),
+        ] {
+            assert_eq!(
+                exact_range_extension_operands(receiver, args, coordinate),
+                None,
+                "receiver={receiver:?}, args={args:?}, coordinate={coordinate:?}"
+            );
+        }
+    }
 
     #[test]
     fn a_floating_extension_accepts_only_its_two_authenticated_receiver_coordinates() {

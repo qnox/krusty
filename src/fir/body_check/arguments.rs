@@ -1,6 +1,7 @@
 //! Final source-argument mapping for already selected calls.
 
 use super::*;
+use crate::types::TyKind;
 
 #[cfg(test)]
 #[path = "vararg_default_tests.rs"]
@@ -1256,7 +1257,7 @@ impl BodyFirChecker<'_> {
             return Ok(value);
         }
         let span = self.file.expr_span(producer);
-        if matches!(target.get().non_null(), Ty::Fun(_)) {
+        if target.get().non_null().is_fun() {
             return Err(self.failure(span, BodyCheckFailureKind::UnpublishedRecordedSamConversion));
         }
         let origin = self.expression_origin(producer)?;
@@ -1311,8 +1312,8 @@ impl BodyFirChecker<'_> {
         } else if target_ty.accepts_numeric(actual_ty) {
             FirConversionKind::NumericWidening { to: target }
         } else if matches!(
-            actual_ty.non_null(),
-            Ty::Intersection(parts) if parts
+            actual_ty.non_null().kind(),
+            TyKind::Intersection(parts) if parts
                 .iter()
                 .any(|part| part.non_null() == target_ty.non_null())
         ) {

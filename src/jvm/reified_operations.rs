@@ -10,7 +10,7 @@ use crate::fx_hash::{HashMap, HashSet};
 
 use super::reified_arguments::ReifiedArgument;
 use crate::ir::{ClassId, ExprId, FunId, IrEnclosure, IrExpr, IrFile, IrTypeOp, IrTypeParameter};
-use crate::types::{stored_value_ty, Ty, TypeName};
+use crate::types::{stored_value_ty, Ty, TyKind, TypeName};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ReifiedParameter {
@@ -48,10 +48,10 @@ fn reified_parameters(
 }
 
 fn parameter(ty: Ty, parameters: &HashMap<String, ReifiedParameter>) -> Option<&ReifiedParameter> {
-    let Ty::TyParam(identity, _) = ty.non_null() else {
+    let TyKind::TyParam(identity, _) = ty.non_null().kind() else {
         return None;
     };
-    parameters.get(identity)
+    parameters.get(identity.as_str())
 }
 
 /// kotlinc's `extractReificationArgument` for the element type of an array a reified body creates:
@@ -63,10 +63,10 @@ fn new_array_reification(
     array_type: Ty,
     parameters: &HashMap<String, ReifiedParameter>,
 ) -> Option<(String, String)> {
-    let projected = |ty: Ty| match ty {
-        Ty::OutProjection(inner) | Ty::InProjection(inner) => Some(*inner),
-        Ty::StarProjection(_) => None,
-        element => Some(element),
+    let projected = |ty: Ty| match ty.kind() {
+        TyKind::OutProjection(inner) | TyKind::InProjection(inner) => Some(inner),
+        TyKind::StarProjection(_) => None,
+        _ => Some(ty),
     };
     let element = projected(array_type.non_null().array_elem()?)?;
     // kotlinc reads the mark from the created array's element before descending its levels, so
@@ -78,13 +78,13 @@ fn new_array_reification(
         depth += 1;
         current = projected(current.non_null().array_elem()?)?;
     }
-    let Ty::TyParam(identity, _) = current.non_null() else {
+    let TyKind::TyParam(identity, _) = current.non_null().kind() else {
         return None;
     };
-    let parameter = parameters.get(identity)?;
+    let parameter = parameters.get(identity.as_str())?;
     let suffix = if nullable { "?" } else { "" };
     Some((
-        identity.to_owned(),
+        identity.to_owned().to_string(),
         format!("{}{}{suffix}", "[".repeat(depth), parameter.source_name),
     ))
 }
@@ -107,7 +107,7 @@ pub(super) fn splice_type_map(
         return HashMap::default();
     };
     let forwarded = |ty: Ty| {
-        let Ty::TyParam(identity, _) = ty.non_null() else {
+        let TyKind::TyParam(identity, _) = ty.non_null().kind() else {
             return None;
         };
         ir.signatures
@@ -172,7 +172,7 @@ fn reified_classifier(ty: Ty) -> Option<crate::types::TypeName> {
 /// so `suspend () -> Unit` and `SuspendFunction0` are both `Function1`.
 fn jvm_function_erasure(ty: Ty) -> Option<String> {
     let value = ty.non_null();
-    let (arity, suspend) = if let Ty::Fun(signature) = value {
+    let (arity, suspend) = if let TyKind::Fun(signature) = value.kind() {
         (signature.params.len(), signature.suspend)
     } else {
         let function = super::function_classifiers::classifier(value.obj_internal()?)?;
@@ -457,32 +457,37 @@ fn collect_type_reified_parameters(
     parameters: &HashMap<String, ReifiedParameter>,
     found: &mut HashSet<String>,
 ) {
-    match ty {
-        Ty::TyParam(identity, _) => {
-            if parameters.contains_key(identity) {
-                found.insert(identity.to_owned());
+    match ty.kind() {
+        TyKind::TyParam(identity, _) => {
+            if parameters.contains_key(identity.as_str()) {
+                found.insert(identity.to_owned().to_string());
             }
         }
-        Ty::Obj(_, arguments) | Ty::Intersection(arguments) => arguments
+        TyKind::Obj(_, arguments) | TyKind::Intersection(arguments) => arguments
             .iter()
             .copied()
             .for_each(|argument| collect_type_reified_parameters(argument, parameters, found)),
-        Ty::Fun(signature) => {
+        TyKind::Fun(signature) => {
             signature.params.iter().copied().for_each(|parameter| {
                 collect_type_reified_parameters(parameter, parameters, found)
             });
             collect_type_reified_parameters(signature.ret, parameters, found);
         }
-        Ty::Nullable(inner)
-        | Ty::PlatformNullable(inner)
-        | Ty::InProjection(inner)
-        | Ty::OutProjection(inner)
-        | Ty::DefinitelyNotNull(inner) => {
-            collect_type_reified_parameters(*inner, parameters, found);
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner)
+        | TyKind::DefinitelyNotNull(inner) => {
+            collect_type_reified_parameters(inner, parameters, found);
         }
         // A star's readable bound is semantic information, but `typeOf<C<*>>()` emits
         // `KTypeProjection.star` and no operation for that bound.
-        Ty::StarProjection(_) | Ty::Unit | Ty::Null | Ty::Nothing | Ty::Error | Ty::Pending => {}
+        TyKind::StarProjection(_)
+        | TyKind::Unit
+        | TyKind::Null
+        | TyKind::Nothing
+        | TyKind::Error
+        | TyKind::Pending => {}
     }
 }
 

@@ -33,6 +33,30 @@ fn unsigned_range(element: Ty) -> Option<(&'static str, Ty)> {
 }
 
 impl BodyLowering<'_, '_, '_> {
+    /// A provider-authenticated stdlib helper, at its declared unsigned operand width.
+    pub(super) fn unsigned_division(
+        &mut self,
+        operand: Ty,
+        remainder: bool,
+        left: u32,
+        right: u32,
+    ) -> Result<Option<Value>, Unsupported> {
+        if !matches!(operand, Ty::UInt | Ty::ULong) {
+            return Err("an unsigned division with a non-unsigned operand type".into());
+        }
+        let left = self.coerce(left, operand)?;
+        let right = self.coerce(right, operand)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let (Some(left), Some(right)) = (left, right) else {
+            return Err("an unsigned division of Unit".into());
+        };
+        let operation = if remainder { "rem" } else { "div" };
+        let symbol = format!("kt_{operation}_{}", unsigned_suffix(operand)?);
+        self.runtime_call(&symbol, &[operand, operand], operand, &[left, right])
+    }
+
     /// Whether `target` is an array's `size`, by its getter's provider realization.
     pub(super) fn is_array_size(&self, target: crate::fir::ExternalPropertyId) -> bool {
         self.file

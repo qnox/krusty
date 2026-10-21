@@ -5,7 +5,7 @@ use crate::fir::{
     FirStatementKind, LocalCallableId,
 };
 use crate::ir::{Callee, ExprId, IrExpr, IrFunction};
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 use super::tailrec::{finish_tailrec_body, Frame as TailrecFrame};
 
@@ -52,6 +52,7 @@ impl BodyLowering<'_> {
                 source_name: body.debug_name().unwrap_or("<anonymous>").into(),
                 captures: body.captures().to_vec(),
                 implicit_receiver_captures: body.implicit_receiver_captures().to_vec(),
+                capture_parameters: body.capture_parameters(),
                 context_parameter_count: body.context_receiver_types().len() as u32,
                 has_extension_receiver: body.receiver_type().is_some(),
                 captured_type_parameters,
@@ -199,7 +200,8 @@ impl BodyLowering<'_> {
                 .iter()
                 .copied()
                 .map(|argument| self.expression(argument))
-                .collect::<Result<Vec<_>, _>>()?
+                .collect::<Result<Vec<_>, _>>()
+                .map(|arguments| realization.in_capture_order(arguments))?
         } else {
             self.bound_all_captures(target.body_depth, &realization)?
         };
@@ -426,6 +428,7 @@ impl BodyLowering<'_> {
             source_name: body.debug_name().unwrap_or("<anonymous>").into(),
             captures: body.captures().to_vec(),
             implicit_receiver_captures: body.implicit_receiver_captures().to_vec(),
+            capture_parameters: body.capture_parameters(),
             context_parameter_count: body.context_receiver_types().len() as u32,
             has_extension_receiver: body.receiver_type().is_some(),
             captured_type_parameters,
@@ -545,7 +548,8 @@ impl BodyLowering<'_> {
                 .iter()
                 .copied()
                 .map(|argument| self.expression(argument))
-                .collect::<Result<Vec<_>, _>>()?
+                .collect::<Result<Vec<_>, _>>()
+                .map(|arguments| realization.in_capture_order(arguments))?
         } else {
             self.bound_all_captures(target.body_depth, &realization)?
         };
@@ -576,7 +580,7 @@ impl BodyLowering<'_> {
         adaptation: Option<&crate::fir::FirReferenceAdaptation>,
         reference_ty: Ty,
     ) -> Result<Option<ExprId>, FirLoweringFailure> {
-        let Ty::Fun(reference) = reference_ty.non_null() else {
+        let TyKind::Fun(reference) = reference_ty.non_null().kind() else {
             return Ok(None);
         };
         let reference_suspend = realization.suspend
@@ -738,17 +742,19 @@ impl BodyLowering<'_> {
         )?;
         let selected_result = self.ir.functions[realization.function as usize].ret;
         let body = self.callable_reference_adapter_body(call, selected_result, reference.ret);
-        let mut parameters = realization
-            .captures
-            .iter()
-            .map(|capture| capture.ty.get())
-            .chain(
-                realization
-                    .implicit_receiver_captures
-                    .iter()
-                    .map(|capture| capture.ty.get()),
-            )
-            .collect::<Vec<_>>();
+        let mut parameters = realization.in_capture_order(
+            realization
+                .captures
+                .iter()
+                .map(|capture| capture.ty.get())
+                .chain(
+                    realization
+                        .implicit_receiver_captures
+                        .iter()
+                        .map(|capture| capture.ty.get()),
+                )
+                .collect(),
+        );
         if bound_extension_receiver.is_some() {
             parameters.push(
                 self.ir.functions[realization.function as usize].params
@@ -770,12 +776,17 @@ impl BodyLowering<'_> {
             is_static: true,
             dispatch_receiver: None,
         });
+        let positions = realization.in_capture_order((0..realization.capture_count()).collect());
         for (capture, captured) in realization.captures.iter().enumerate() {
             if captured.shared_cell {
+                let position = positions
+                    .iter()
+                    .position(|&identity| identity == capture)
+                    .expect("every capture has a position");
                 self.ir.shared_capture_parameters.insert(
                     (
                         wrapper,
-                        u32::try_from(capture).expect("too many local reference captures"),
+                        u32::try_from(position).expect("too many local reference captures"),
                     ),
                     captured.ty.get(),
                 );
@@ -924,7 +935,7 @@ impl BodyLowering<'_> {
             callable_depth,
             &realization.implicit_receiver_captures,
         )?);
-        Ok(captures)
+        Ok(realization.in_capture_order(captures))
     }
 
     /// Whether `body` belongs to an inline function another file declares, lowered here only as
@@ -1033,13 +1044,10 @@ impl BodyLowering<'_> {
         } else {
             None
         };
-        for (parameter, capture) in body.captures().iter().enumerate() {
+        for (ordinal, capture) in body.captures().iter().enumerate() {
             if capture.shared_cell {
                 self.ir.shared_capture_parameters.insert(
-                    (
-                        function,
-                        u32::try_from(parameter).expect("too many lifted capture parameters"),
-                    ),
+                    (function, body.value_capture_position(ordinal)),
                     capture.ty.get(),
                 );
             }
@@ -1179,7 +1187,7 @@ impl BodyLowering<'_> {
             .enumerate()
             .map(|(slot, capture)| {
                 let declared = match identities
-                    .get(slot)
+                    .get(body.value_capture_position(slot) as usize)
                     .map(|identity| (identity, identity.role))
                 {
                     Some((identity, crate::ir::IrParameterRole::CapturedValue { capture, .. })) => {
@@ -1195,7 +1203,7 @@ impl BodyLowering<'_> {
                 (
                     (capture.enclosing_depth, capture.source),
                     CaptureSlot {
-                        slot: u32::try_from(slot).expect("too many FIR captures"),
+                        slot: body.value_capture_position(slot),
                         ty: capture.ty,
                         shared_cell: capture.shared_cell,
                         stable: self.capture_source_is_stable(capture),
@@ -1476,7 +1484,8 @@ fn declaration_parameter_slot_offset(
 }
 
 fn local_function_parameters(body: &FirBody) -> Vec<Ty> {
-    body.captures()
+    let captures = body
+        .captures()
         .iter()
         .map(|capture| capture.ty.get())
         .chain(
@@ -1484,6 +1493,9 @@ fn local_function_parameters(body: &FirBody) -> Vec<Ty> {
                 .iter()
                 .map(|capture| capture.ty.get()),
         )
+        .collect();
+    super::in_capture_order(&body.capture_parameters(), captures, body.captures().len())
+        .into_iter()
         .chain(
             body.context_receiver_types()
                 .iter()
@@ -1573,6 +1585,11 @@ fn local_function_parameter_identities(
                     u32::try_from(ordinal).expect("too many captured receiver parameters"),
                 )
             }),
+    );
+    let mut identities = super::in_capture_order(
+        &body.capture_parameters(),
+        identities,
+        body.captures().len(),
     );
     let context_value_count = body.context_value_count() as usize;
     for ordinal in 0..body.context_receiver_types().len() {

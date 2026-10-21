@@ -50,6 +50,11 @@ pub(super) fn attach(file: &mut File, src: &str) {
                     })
             };
             let anchor = match expr {
+                // kotlinc anchors a binary-operator form `a foo b` at its left operand, like `a + b`,
+                // even when the name starts the next line inside parentheses.
+                Expr::Call { .. } if file.infix_calls.contains(&(index as u32)) => {
+                    file.expr_spans[index]
+                }
                 Expr::Call { callee, .. } => match &file.expr_arena[callee.0 as usize] {
                     Expr::Member { name, .. } | Expr::SafeCall { name, .. } => {
                         member_name_span(callee.0 as usize, name)
@@ -144,6 +149,15 @@ pub(super) fn attach(file: &mut File, src: &str) {
             end,
         }
     };
+    // A bodiless (abstract) function still ends somewhere: its declaration's last line, where a
+    // generated forwarder of it (a `$DefaultImpls` stub) returns.
+    let function_lines = |body: &FunBody, span: Span| {
+        let mut lines = body_lines(body);
+        if lines.end == 0 && span.hi != 0 {
+            lines.end = line_at(span.hi.saturating_sub(1));
+        }
+        lines
+    };
     for decl in &mut file.decl_arena {
         match decl {
             Decl::Class(c) => {
@@ -182,7 +196,7 @@ pub(super) fn attach(file: &mut File, src: &str) {
                 for m in &mut c.methods {
                     m.sig_line = line_at(m.span.lo);
                     m.decl_line = body_line(&m.body, m.sig_line);
-                    m.body_lines = body_lines(&m.body);
+                    m.body_lines = function_lines(&m.body, m.span);
                 }
                 for p in &mut c.props {
                     if p.span.lo != 0 || p.span.hi != 0 {
@@ -212,7 +226,7 @@ pub(super) fn attach(file: &mut File, src: &str) {
                     for m in &mut e.methods {
                         m.sig_line = line_at(m.span.lo);
                         m.decl_line = body_line(&m.body, m.sig_line);
-                        m.body_lines = body_lines(&m.body);
+                        m.body_lines = function_lines(&m.body, m.span);
                     }
                     for p in &mut e.props {
                         p.decl_line = line_at(p.span.lo);
@@ -249,7 +263,7 @@ pub(super) fn attach(file: &mut File, src: &str) {
             Decl::Fun(f) => {
                 f.sig_line = line_at(f.span.lo);
                 f.decl_line = body_line(&f.body, f.sig_line);
-                f.body_lines = body_lines(&f.body);
+                f.body_lines = function_lines(&f.body, f.span);
             }
             // A top-level property's accessors and `<clinit>` store map to its declaration line.
             Decl::Property(p) => {

@@ -428,8 +428,8 @@ pub(super) fn publish_extension_iteration(
     let action = parameters
         .get(lambda_parameter as usize)
         .map(|parameter| parameter.get())
-        .and_then(|parameter| match parameter {
-            crate::types::Ty::Fun(signature) => Some(signature),
+        .and_then(|parameter| match parameter.kind() {
+            crate::types::TyKind::Fun(signature) => Some(signature),
             _ => None,
         })
         .filter(|signature| signature.params.len() == 1 + usize::from(index.is_some()))
@@ -475,8 +475,8 @@ pub(super) fn publish_extension_collection_transform(
     let action = parameters
         .get(lambda_parameter as usize)
         .map(|parameter| parameter.get())
-        .and_then(|parameter| match parameter {
-            crate::types::Ty::Fun(signature) => Some(signature),
+        .and_then(|parameter| match parameter.kind() {
+            crate::types::TyKind::Fun(signature) => Some(signature),
             _ => None,
         })
         .filter(|signature| signature.params.len() == 1)

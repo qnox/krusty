@@ -33,6 +33,11 @@ pub enum FirLoweringFailure {
         origin: OriginId,
         ty: crate::types::Ty,
     },
+    /// A comparable range's selected `compareTo` did not lower to one member call of the value
+    /// with the bound.
+    InvalidComparableRangeOrdering {
+        origin: OriginId,
+    },
     /// A member a counted or indexed loop reads that is not a dependency property; the checker
     /// only selects `kotlin.ranges` and `kotlin.CharSequence` members, which are.
     UnsupportedLoopMember,
@@ -59,6 +64,11 @@ pub enum FirLoweringFailure {
     InvalidConstructorCaptureArgument(FirExprId),
     /// A local class's capture order is not a permutation of its capture fields.
     InvalidCaptureOrder(crate::fir::DeclarationId),
+    /// A read of the field of a capture that only constructor code reads, which has none.
+    UnstoredCaptureRead {
+        class: crate::ir::ClassId,
+        field: u32,
+    },
     MissingEnumClassifier(crate::types::TypeName),
     UnsupportedPropertyReferenceTarget,
     MissingParameter {

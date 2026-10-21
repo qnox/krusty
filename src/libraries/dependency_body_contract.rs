@@ -84,6 +84,7 @@ impl DependencyBodySnapshot {
 pub struct DependencyBodyFacts<'a> {
     bodies: &'a crate::klib_libraries::KlibDeclarationBodies,
     inline_bodies: &'a crate::klib_libraries::KlibDeclarationBodies,
+    references: &'a crate::klib_libraries::KlibReferenceBindings,
     intrinsics: &'a crate::klib_libraries::KlibIntrinsicFacts,
     snapshot: Option<&'a DependencyBodySnapshot>,
 }
@@ -92,12 +93,14 @@ impl<'a> DependencyBodyFacts<'a> {
     pub(crate) fn new(
         bodies: &'a crate::klib_libraries::KlibDeclarationBodies,
         inline_bodies: &'a crate::klib_libraries::KlibDeclarationBodies,
+        references: &'a crate::klib_libraries::KlibReferenceBindings,
         intrinsics: &'a crate::klib_libraries::KlibIntrinsicFacts,
         snapshot: Option<&'a DependencyBodySnapshot>,
     ) -> Self {
         Self {
             bodies,
             inline_bodies,
+            references,
             intrinsics,
             snapshot,
         }
@@ -110,6 +113,10 @@ impl<'a> DependencyBodyFacts<'a> {
     /// The prepared-inline copies, the only bodies a call of an inline function expands from.
     pub(crate) fn inline_bodies(self) -> &'a crate::klib_libraries::KlibDeclarationBodies {
         self.inline_bodies
+    }
+
+    pub(crate) fn references(self) -> &'a crate::klib_libraries::KlibReferenceBindings {
+        self.references
     }
 
     pub(crate) fn intrinsics(self) -> &'a crate::klib_libraries::KlibIntrinsicFacts {

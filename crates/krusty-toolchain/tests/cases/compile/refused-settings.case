@@ -1,12 +1,13 @@
-What the toolchain compiles with KSP processors, toolchain plugins, compiler settings or compiler
-plugins krusty-toolchain does not pass is refused where it is set, for every module the task
-needs, before anything is compiled.
+What the toolchain compiles with KSP processors that are not Maven artifacts, toolchain plugins,
+compiler settings or compiler plugins krusty-toolchain does not pass is refused where it is set,
+for every module the task needs, before anything is compiled.
 --- task
 :app:compileJvm
 --- project.yaml
 modules:
   - app
   - lib
+  - processor
 --- app/module.yaml
 product: jvm/app
 repositories:
@@ -38,14 +39,18 @@ settings:
       - kotlin.ExperimentalStdlibApi
     ksp:
       processors:
-        - org.example:processor:1.0
+        - ../processor
 --- lib/src/Lib.kt
 class Lib
+--- processor/module.yaml
+product: jvm/lib
+--- processor/src/Processor.kt
+class Processor
 --- krusty-refusal
-error	lib/module.yaml:11:9: ERROR: module `lib` runs KSP processors (`settings.kotlin.ksp.processors`), and krusty-toolchain does not run KSP
 error	lib/module.yaml:8:7: ERROR: module `lib` sets `settings.kotlin.optIns`, and krusty-toolchain does not implement compiling with it
 error	lib/module.yaml:6:26: ERROR: module `lib` sets `settings.kotlin.allWarningsAsErrors`, and krusty-toolchain does not implement compiling with it
-error	app/module.yaml:7:3: ERROR: module `app` enables toolchain plugins (`plugins`), and krusty-toolchain does not run toolchain plugins
+error	lib/module.yaml:11:11: ERROR: module `lib` runs a KSP processor that is not a Maven artifact, and krusty-toolchain runs only processors published to a Maven repository
+error	app/module.yaml:7:3: ERROR: module `app` enables toolchain plugin `my-plugin`, which the project does not list in its `plugins`
 error	app/module.yaml:10:22: ERROR: module `app` sets `settings.kotlin.languageVersion`, and krusty-toolchain does not implement compiling with it
 error	app/module.yaml:12:7: ERROR: module `app` sets `settings.kotlin.freeCompilerArgs`, and krusty-toolchain does not implement compiling with it
 error	app/module.yaml:13:18: ERROR: module `app` sets `settings.kotlin.explicitApi`, and krusty-toolchain does not implement compiling with it

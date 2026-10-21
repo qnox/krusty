@@ -1,6 +1,6 @@
 //! What a module's configuration asks of its compilation that krusty-toolchain does not implement:
-//! toolchain plugins, KSP, and every compiler setting the toolchain turns into compiler arguments
-//! or compiler plugins other than the ones krusty-toolchain passes. Each is refused where it is
+//! every compiler setting the toolchain turns into compiler arguments or compiler plugins other
+//! than the ones krusty-toolchain passes. Each is refused where it is
 //! set, naming the module, rather than compiled without it.
 
 use crate::configuration::Configuration;
@@ -77,9 +77,8 @@ const COMPILER_SETTINGS: [(&[&str], Effect); 19] = [
 /// Settings the toolchain implements with compiler plugins of its own.
 const PLUGIN_SETTINGS: [&[&str]; 1] = [&["springBoot", "enabled"]];
 
-/// The refusals of `module`'s configuration, in the order its settings are listed above: its
-/// toolchain plugins, KSP processors, then its compiler settings. A value from the schema's
-/// defaults is never refused.
+/// The refusals of `module`'s configuration, in the order its settings are listed above. A value
+/// from the schema's defaults is never refused.
 pub(super) fn refusals(
     module: &str,
     configuration: &Configuration,
@@ -87,37 +86,9 @@ pub(super) fn refusals(
 ) -> Vec<Diagnostic> {
     let mut refused = Vec::new();
     let written = |node: &&Node| !node.trace.is_default();
-    if let Some(plugins) = configuration
-        .module
-        .as_ref()
-        .and_then(|whole| whole.get("plugins"))
-        .filter(written)
-        .filter(|plugins| Effect::Set.applies(&plugins.value))
-    {
-        refused.push(at_setting(
-            configuration,
-            plugins,
-            format!(
-                "module `{module}` enables toolchain plugins (`plugins`), and krusty-toolchain does not run toolchain plugins"
-            ),
-        ));
-    }
     let Some(settings) = main.get("settings") else {
         return refused;
     };
-    if let Some(processors) = settings
-        .at(&["kotlin", "ksp", "processors"])
-        .filter(written)
-        .filter(|processors| Effect::Items.applies(&processors.value))
-    {
-        refused.push(at_setting(
-            configuration,
-            processors,
-            format!(
-                "module `{module}` runs KSP processors (`settings.kotlin.ksp.processors`), and krusty-toolchain does not run KSP"
-            ),
-        ));
-    }
     for (path, effect) in COMPILER_SETTINGS {
         if let Some(node) = settings
             .at(path)

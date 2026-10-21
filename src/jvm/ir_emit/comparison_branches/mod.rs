@@ -47,6 +47,28 @@ impl Emitter<'_> {
         }
     }
 
+    /// Whether realizing this source `==`/`!=` stores an operand to a temporary: a primitive on
+    /// the right of `PrimitiveToObjectComparison`, or the right operand of a boxed-left unsigned
+    /// comparison that is not reloaded in place. Every other realization keeps its operands on
+    /// the stack and branches only within itself.
+    pub(super) fn equality_stores_operand(&self, expression: ExprId) -> bool {
+        let IrExpr::Equality { op, mode, lhs, rhs } = *self.ir.expr(expression) else {
+            return false;
+        };
+        if !matches!(op, IrBinOp::Eq | IrBinOp::Ne) || mode == crate::ir::EqualityMode::Ieee754 {
+            return false;
+        }
+        if self.unsigned_mixed_equality_stores(lhs, rhs) {
+            return true;
+        }
+        let null_operand = [lhs, rhs]
+            .iter()
+            .any(|&operand| matches!(self.ir.expr(operand), IrExpr::Const(IrConst::Null)));
+        mode == crate::ir::EqualityMode::Structural
+            && !null_operand
+            && self.primitive_to_object_stores(lhs, rhs)
+    }
+
     /// Mark the comparison's line at the instruction that decides it, after its operands.
     ///
     /// kotlinc marks the comparison expression's line right before the deciding instruction on every

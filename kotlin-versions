@@ -13,11 +13,13 @@
 #   - Resets to 1 per reference version, increases by 1 per commit, fully ordered.
 #   - Reproducible from a local clone (`just version`) — no CI state involved.
 #   - Set <baseline-git-ref> to the commit at which support for that version began. "-" => root.
+#   - A baseline must be an ancestor of HEAD. History rewrites must map it to the same tree in
+#     the rewritten history; an available but unrelated old release tag is not a valid baseline.
 #
 # Add a line only once that reference version actually passes the harness (it is a correctness claim).
 #
 # reference   baseline
-2.4.0         a29a891
-2.4.10        ff38bf77
-2.4.20        6cc3a4c8
-2.4.21        d83de161
+2.4.0         6dc9f6b4d5337fee0bbc2ba5bd913cf30204c37b
+2.4.10        1643c221f09d6f01be78e028590e64fac3237c67
+2.4.20        00671c17db8b23111eaab0f7a23f35595629ae2e
+2.4.21        6782ee02a03022d258ec7945539f5e224034038a

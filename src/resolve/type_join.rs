@@ -2,12 +2,12 @@ use crate::fx_hash::HashSet;
 
 use crate::assignable::TypeOracle;
 use crate::symbol_source::SymbolSource;
-use crate::types::{Ty, TypeVariance};
+use crate::types::{Ty, TyKind, TypeVariance};
 
 use super::semantic_common_supertype_inner;
 
 fn joined_star_projection(star_upper_bound: Ty, left: Ty, right: Ty) -> Option<Ty> {
-    (matches!(left, Ty::StarProjection(_)) || matches!(right, Ty::StarProjection(_)))
+    (left.is_star_projection() || right.is_star_projection())
         .then(|| Ty::star_projection(star_upper_bound))
 }
 
@@ -34,9 +34,9 @@ fn builtin_scalar(ty: Ty) -> bool {
 /// classifier's own argument join; treating it as an outer flexible pair makes the result depend
 /// on branch order and can discard a nested null-assertion obligation.
 pub(super) fn exact_platform_flexible_pair(left: Ty, right: Ty) -> Option<Ty> {
-    match (left, right) {
-        (Ty::PlatformNullable(inner), plain) if *inner == plain => Some(left),
-        (plain, Ty::PlatformNullable(inner)) if plain == *inner => Some(right),
+    match (left.kind(), right.kind()) {
+        (TyKind::PlatformNullable(inner), _) if inner == right => Some(left),
+        (_, TyKind::PlatformNullable(inner)) if left == inner => Some(right),
         _ => None,
     }
 }
@@ -67,10 +67,10 @@ pub(super) fn join_type_projection(
     if let Some(star) = joined_star_projection(star_upper_bound, left, right) {
         return Some(star);
     }
-    let projection = |argument| match argument {
-        Ty::InProjection(inner) => (true, false, *inner),
-        Ty::OutProjection(inner) | Ty::StarProjection(inner) => (false, true, *inner),
-        other => (true, true, other),
+    let projection = |argument: Ty| match argument.kind() {
+        TyKind::InProjection(inner) => (true, false, inner),
+        TyKind::OutProjection(inner) | TyKind::StarProjection(inner) => (false, true, inner),
+        _ => (true, true, argument),
     };
     let (left_in, left_out, left) = projection(left);
     let (right_in, right_out, right) = projection(right);

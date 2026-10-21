@@ -18,7 +18,7 @@ use crate::jvm::mapped_builtin_declarations::{
 use crate::jvm::method_descriptors::{jvm_declared_ty, jvm_tys};
 use crate::jvm::names::{method_descriptor, owned_classfile_internal_name};
 use crate::names::property_getter_name;
-use crate::types::{ty_subst, ty_subst_all, Ty, TypeName};
+use crate::types::{ty_subst, ty_subst_all, Ty, TyKind, TypeName};
 
 #[derive(Default)]
 pub(super) struct InheritedCollectionBridges {
@@ -793,33 +793,39 @@ fn signature_type(ty: Ty, keep_parameters: bool) -> String {
     if ty.nullable_primitive().is_some() {
         return descriptor_of(ty);
     }
-    match ty.non_null() {
-        Ty::TyParam(name, bound) => {
-            if keep_parameters {
-                format!("T{};", crate::types::type_parameter_source_name(name))
-            } else {
-                signature_type(*bound, false)
+    {
+        let other = ty.non_null();
+        match other.kind() {
+            TyKind::TyParam(name, bound) => {
+                if keep_parameters {
+                    format!(
+                        "T{};",
+                        crate::types::type_parameter_source_name(name.as_str())
+                    )
+                } else {
+                    signature_type(bound, false)
+                }
             }
+            TyKind::DefinitelyNotNull(inner) => signature_type(inner, keep_parameters),
+            TyKind::StarProjection(_) | TyKind::OutProjection(_) | TyKind::InProjection(_) => {
+                "Ljava/lang/Object;".to_string()
+            }
+            TyKind::Obj(name, arguments) if !arguments.is_empty() => {
+                let arguments = arguments
+                    .iter()
+                    .map(|argument| signature_argument(*argument, keep_parameters))
+                    .collect::<String>();
+                format!("L{}<{}>;", owned_classfile_internal_name(name), arguments)
+            }
+            _ => descriptor_of(other),
         }
-        Ty::DefinitelyNotNull(inner) => signature_type(*inner, keep_parameters),
-        Ty::StarProjection(_) | Ty::OutProjection(_) | Ty::InProjection(_) => {
-            "Ljava/lang/Object;".to_string()
-        }
-        Ty::Obj(name, arguments) if !arguments.is_empty() => {
-            let arguments = arguments
-                .iter()
-                .map(|argument| signature_argument(*argument, keep_parameters))
-                .collect::<String>();
-            format!("L{}<{}>;", owned_classfile_internal_name(name), arguments)
-        }
-        other => descriptor_of(other),
     }
 }
 
 fn signature_argument(ty: Ty, keep_parameters: bool) -> String {
-    match ty.non_null() {
-        Ty::TyParam(..) if keep_parameters => signature_type(ty, true),
-        Ty::StarProjection(_) | Ty::OutProjection(_) | Ty::InProjection(_) => {
+    match ty.non_null().kind() {
+        TyKind::TyParam(..) if keep_parameters => signature_type(ty, true),
+        TyKind::StarProjection(_) | TyKind::OutProjection(_) | TyKind::InProjection(_) => {
             signature_type(ty, keep_parameters)
         }
         _ if ty.nullable_primitive().is_some() || ty.non_null().is_jvm_scalar() => {
@@ -834,14 +840,14 @@ fn reference_of(ty: Ty) -> Ty {
     if let Some(boxed) = ty.boxed_ref() {
         return boxed;
     }
-    match ty {
-        Ty::String => Ty::obj("java/lang/String"),
-        Ty::TyParam(_, bound) => reference_of(*bound),
-        Ty::DefinitelyNotNull(inner) => reference_of(*inner),
-        Ty::StarProjection(_) | Ty::OutProjection(_) | Ty::InProjection(_) => {
+    match ty.kind() {
+        TyKind::STRING => Ty::obj("java/lang/String"),
+        TyKind::TyParam(_, bound) => reference_of(bound),
+        TyKind::DefinitelyNotNull(inner) => reference_of(inner),
+        TyKind::StarProjection(_) | TyKind::OutProjection(_) | TyKind::InProjection(_) => {
             Ty::obj("java/lang/Object")
         }
-        Ty::Obj(name, arguments) => Ty::obj_args_name(name, arguments),
+        TyKind::Obj(name, arguments) => Ty::obj_args_name(name, arguments.as_slice()),
         _ => Ty::obj("java/lang/Object"),
     }
 }

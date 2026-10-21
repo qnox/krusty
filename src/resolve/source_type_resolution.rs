@@ -6,7 +6,7 @@
 
 use crate::ast::{File, TypeRef};
 use crate::diag::{DiagSink, Span};
-use crate::types::{type_name, Ty, TypeName};
+use crate::types::{type_name, Ty, TyKind, TypeName};
 
 use super::{ClassNames, ClassifierBindingError, SymbolTable, TParams};
 
@@ -400,9 +400,9 @@ pub(super) fn ty_of_ref_with(
         Ty::Error
     };
     let base = if reference.definitely_non_null() {
-        match base {
-            Ty::TyParam(name, bound) => Ty::ty_param(name, bound.non_null()),
-            other => other,
+        match base.kind() {
+            TyKind::TyParam(name, bound) => Ty::ty_param(name.as_str(), bound.non_null()),
+            _ => base,
         }
     } else {
         base

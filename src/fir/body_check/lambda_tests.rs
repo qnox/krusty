@@ -4,6 +4,7 @@ use super::test_support::{
 };
 use super::*;
 use crate::fir::{CallableId, FirSamConversionId, FirSamMethod, ResolvedFunctionOverrideTarget};
+use crate::types::TyKind;
 
 #[test]
 fn valueless_nullable_unit_lambda_return_retains_its_unit_value() {
@@ -583,8 +584,8 @@ fn selected_generic_receiver_lambda_uses_the_selected_context_shape() {
         panic!("with block must remain checked lambda FIR")
     };
     assert!(matches!(
-        lambda_body.receiver_type().map(ResolvedTy::get),
-        Some(Ty::Fun(signature)) if signature.params.is_empty() && signature.ret == Ty::String
+        lambda_body.receiver_type().map(ResolvedTy::get).map(Ty::kind),
+        Some(TyKind::Fun(signature)) if signature.params.is_empty() && signature.ret == Ty::String
     ));
 
     let call = (0..lambda_body.expression_count())

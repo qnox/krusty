@@ -21,7 +21,7 @@ use crate::metadata::klib_ir::tree::{
     KlibIrVariance,
 };
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
-use crate::types::{builtin_semantic, type_name_child, wk, Ty, TypeName};
+use crate::types::{builtin_semantic, type_name_child, wk, Ty, TyKind, TypeName};
 
 /// The type parameters a body may name, each bound to the semantic type parameter its
 /// declaration's provider record uses for it.
@@ -88,8 +88,8 @@ pub(super) fn semantic_type(
         KlibIrNullability::MarkedNullable => Ty::nullable(semantic),
         // A class type the serializer marks definitely non-null is its ordinary non-null type; on
         // a type parameter the mark is the intersection `T & Any`.
-        KlibIrNullability::DefinitelyNotNull if matches!(semantic, Ty::TyParam(..)) => {
-            Ty::DefinitelyNotNull(crate::types::intern_ty(semantic))
+        KlibIrNullability::DefinitelyNotNull if semantic.is_ty_param() => {
+            Ty::from(TyKind::DefinitelyNotNull(semantic))
         }
         KlibIrNullability::NotSpecified | KlibIrNullability::DefinitelyNotNull => semantic,
     })

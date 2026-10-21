@@ -32,6 +32,7 @@ impl SemanticPlatform for KlibLibraries {
         Some(crate::libraries::DependencyBodyFacts::new(
             self.declaration_bodies(),
             self.inline_declaration_bodies(),
+            self.reference_bindings(),
             self.intrinsic_facts(),
             self.dependency_body_snapshot(),
         ))

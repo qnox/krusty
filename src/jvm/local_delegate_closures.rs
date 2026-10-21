@@ -63,7 +63,7 @@ fn source_function(ir: &IrFile, mut function: FunId) -> FunId {
 /// its generic `Signature` and body, not that slot into a concrete return plus an invented bridge.
 pub(super) fn invoke_result(ir: &IrFile, function: FunId) -> Option<Ty> {
     let declared = ir.functions[source_function(ir, function) as usize].ret;
-    matches!(declared.non_null(), Ty::TyParam(..)).then_some(declared)
+    declared.non_null().is_ty_param().then_some(declared)
 }
 
 /// A closure's plans are backend copies of one checked declaration, not declaration-owned exports.

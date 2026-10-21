@@ -51,7 +51,7 @@ impl RepresentationPolicy for NativeRepresentation {
             return false;
         }
         let terminal = project_underlying(underlying, declarations, self);
-        !matches!(terminal, Ty::TyParam(..)) && terminal.scalar_value_repr().is_none()
+        !terminal.is_ty_param() && terminal.scalar_value_repr().is_none()
     }
 }
 

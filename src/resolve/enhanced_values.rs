@@ -18,7 +18,7 @@ use super::{Checker, Local, ReceiverFnValueOrigin, ResolvedCall, ResolvedConstru
 use crate::ast::ExprId;
 use crate::fx_hash::HashMap;
 use crate::libraries::{GenericSig, TypeEnhancement};
-use crate::types::{Ty, TypeName};
+use crate::types::{Ty, TyKind, TypeName};
 
 /// The checker's record of marked values that a later check reads back through a local.
 #[derive(Default)]
@@ -438,9 +438,12 @@ fn constrain(
         constraints,
         super::selected_result_publication::StarProjectionPolicy::Stop,
         &mut |actual, marks, owner| {
-            let actual = match actual.non_null() {
-                Ty::InProjection(inner) | Ty::OutProjection(inner) => *inner,
-                other => other,
+            let actual = {
+                let other = actual.non_null();
+                match other.kind() {
+                    TyKind::InProjection(inner) | TyKind::OutProjection(inner) => inner,
+                    _ => other,
+                }
             };
             let (view, view_marks) = checker.supertype_view(actual, marks, owner)?;
             let facts = (0..view.type_args().len())
@@ -455,7 +458,7 @@ fn constrain(
 /// parameters have no result-derived marks; the layout follows the same parameter-then-result
 /// order used by Kotlin metadata.
 fn function_result_enhancement(function: Ty, result: &TypeEnhancement) -> TypeEnhancement {
-    let Ty::Fun(signature) = function.non_null() else {
+    let TyKind::Fun(signature) = function.non_null().kind() else {
         return TypeEnhancement::NONE;
     };
     let mut arguments = vec![TypeEnhancement::NONE; signature.params.len()];
@@ -471,10 +474,10 @@ fn function_enhancement_positions(
     actual: Ty,
     marks: &TypeEnhancement,
 ) -> Option<Vec<(Ty, Ty, TypeEnhancement)>> {
-    let Ty::Fun(declared) = declared.non_null() else {
+    let TyKind::Fun(declared) = declared.non_null().kind() else {
         return None;
     };
-    let Ty::Fun(actual) = actual.non_null() else {
+    let TyKind::Fun(actual) = actual.non_null().kind() else {
         return Some(Vec::new());
     };
     if declared.suspend != actual.suspend

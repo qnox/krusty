@@ -30,6 +30,10 @@ pub(super) struct SignedConstructor {
 
 /// A class joined with its identity, its validated shape, and its signed members.
 pub(super) struct SignedClassifier {
+    /// Authenticated serialization container facts, retained for inherited reference signing.
+    pub(super) signature: KlibPublicIdSignature,
+    pub(super) expect: bool,
+    pub(super) native_interop_library: bool,
     /// The class's shape without its callables.
     pub(super) shape: LibraryType,
     /// Exact declaring KLIB module identity, when this classifier came from an archive.
@@ -152,8 +156,11 @@ pub(super) fn sign_package_classes(
             .last()
             .filter(|_| class.is_inner)
             .map(|owner| type_name(owner));
-        let shape = classifier_shape(identity, &name, class, &type_parameters, outer_instance)
+        let mut shape = classifier_shape(identity, &name, class, &type_parameters, outer_instance)
             .map_err(|error| unsignable(package, &local, error))?;
+        shape.mapped_collection =
+            super::collection_roles::normalize(identity, compiler_builtin_owner, &shape)
+                .map_err(|error| unsignable(package, &local, error))?;
         let enum_members = (class.kind == TypeKind::Enum)
             .then(|| enum_class_member_signatures(inside, class.has_enum_entries))
             .transpose()
@@ -248,6 +255,9 @@ pub(super) fn sign_package_classes(
         published.push((
             identity,
             SignedClassifier {
+                signature: metadata_class_signature(around, *own),
+                expect: class.is_expect,
+                native_interop_library,
                 shape,
                 module: module.map(str::to_owned),
                 modality: class.modality,

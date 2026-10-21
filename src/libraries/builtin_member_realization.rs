@@ -473,7 +473,7 @@ fn array_access(facts: &BuiltinMemberDeclaration<'_>) -> Option<CompilerIntrinsi
     }
     let element = |ty: Ty| {
         if array.is_reference_array() {
-            matches!(ty, Ty::TyParam(..))
+            ty.is_ty_param()
         } else {
             array.array_elem() == Some(ty)
         }

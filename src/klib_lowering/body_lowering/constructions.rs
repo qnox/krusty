@@ -10,7 +10,7 @@ use super::{mismatch, unsupported, BodyLowering, Lowered};
 use crate::ir::{ExprId, IrExpr};
 use crate::metadata::klib_ir::tree::KlibIrMemberAccess;
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 impl BodyLowering<'_> {
     /// The value of the dependency object `symbol`, typed `ty`: the object's own class type.
@@ -46,7 +46,7 @@ impl BodyLowering<'_> {
             return unsupported("a call of a generic constructor");
         }
         let linked = self.linker.link_constructor(callee)?;
-        if !matches!(ty, Ty::Obj(classifier, _) if classifier == linked.classifier) {
+        if !matches!(ty.kind(), TyKind::Obj(classifier, _) if classifier == linked.classifier) {
             return Err(mismatch(
                 "a constructor call is typed apart from its constructor's class",
             ));
