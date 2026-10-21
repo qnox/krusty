@@ -27,9 +27,9 @@ mod shared_cells;
 
 pub(super) use scalar_instructions::is_scalar_operation;
 
-pub(super) fn is_direct_operation(operation: crate::libraries::CompilerIntrinsic) -> bool {
+pub(super) fn is_direct_operation(operation: crate::backend::BackendCompilerIntrinsic) -> bool {
     is_scalar_operation(operation)
-        || operation == crate::libraries::CompilerIntrinsic::ThrowableMessage
+        || operation == crate::backend::BackendCompilerIntrinsic::ThrowableMessage
 }
 
 use crate::backend::{BackendCallableFact, CheckedBackendCallables, DependencyExportSignatures};

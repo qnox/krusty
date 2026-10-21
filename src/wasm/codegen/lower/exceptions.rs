@@ -1,8 +1,8 @@
 //! Base Throwable realization and structured catch-only Kotlin exception transport.
 
+use crate::backend::BackendCompilerIntrinsic as CompilerIntrinsic;
 use crate::fir::ExternalCallableId;
 use crate::ir::IrCatch;
-use crate::libraries::CompilerIntrinsic;
 use crate::types::{type_name, TypeName};
 
 use super::*;
