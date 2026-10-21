@@ -1662,6 +1662,34 @@ fun main() {
             "{output}"
         );
 
+        // AGP passes `-Xuse-inline-scopes-numbers` to an application's debug compiles. krusty does
+        // not implement it yet, so the build reports it and kotlinc compiles that variant.
+        let _ = std::fs::remove_file(log);
+        let _ = std::fs::remove_file(&fixture.probes);
+        let output = fixture
+            .build()
+            .tasks([":app:compileDebugKotlin"])
+            .run_output()
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_left_to_kotlinc(
+            &output,
+            ":app:compileDebugKotlin",
+            &[
+                "krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'"
+                    .to_string(),
+            ],
+        );
+        let text = std::fs::read_to_string(log).unwrap_or_default();
+        assert!(
+            invocations(&text)
+                .iter()
+                .all(|run| !has_pair(run, "-module-name", "app")),
+            "{text}"
+        );
+        assert!(root
+            .join("app/build/intermediates/built_in_kotlinc/debug/compileDebugKotlin/classes/sample/app/MainActivity.class")
+            .is_file());
+
         let _ = std::fs::remove_dir_all(root);
     }
 
