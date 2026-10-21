@@ -14151,8 +14151,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   assertion under a coercion). A node that names its type in itself needs no record: a constant, a
   type operation's target, an intrinsic call's declared result, and a comparison or equality.
   `IrFile::checked_type` is that one contract; it never derives a parent's type from its children.
-  The Wasm backend declines a value without a checked type by name rather than inferring one.
-  Tests: the `wasm-js`/`wasm-wasi` box lanes.
+  A generic declaration-result boundary deliberately leaves its inner call without a logical
+  type: `call_declared_ret` records its declared result, while the outer coercion has the selected
+  checked type. Wasm consumes that exact declaration-result record only for such an untyped call;
+  an existing checked type still wins. A value missing both facts declines rather than inferring
+  a type from a callee or its operands. Tests: `an_untyped_call_uses_only_its_published_declared_result`,
+  `a_checked_call_keeps_its_checked_type_over_declared_provenance`, and the box lanes.
 - **An arithmetic operator's result is the selected operator's declared result, recorded once.**
   Kotlin's mixed numeric promotion (`Int.plus(Long): Long`, `Char.plus(Int): Char`,
   `Char.minus(Char): Int`, `Byte`/`Short` operands answering `Int`) is a fact of the operator the

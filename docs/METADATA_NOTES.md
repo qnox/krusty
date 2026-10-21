@@ -662,6 +662,10 @@ Provider generic signatures and checked external-formal substitutions validate s
 roles separately; specializing a call never changes the published symbol's physical signature.
 No serialized metadata format or formal identity is rewritten to achieve ABI coercion.
 
+Common IR separately records an inner generic call's declared result and the checked result of
+its enclosing conversion. Wasm now consumes that existing declaration-result provenance when
+the inner call deliberately has no logical type; this changes no KLIB metadata or type identity.
+
 Serialized type-parameter flags use the active Kotlin `TypeParameterFlags` encoding, which
 delegates to `IrFlags`: annotations at bit 0, variance at bits 1 and 2, and reification at bit 3.
 Invariant non-reified formals have flags 4; invariant reified formals have flags 12. Ordinary
