@@ -186,7 +186,7 @@ impl ChildSerializerCachePlan {
 /// The name is carried as the interned `TypeName` identity rather than a rendered `String`: a
 /// round trip through text would re-intern it, and the only place a class name legitimately
 /// becomes characters is the classfile writer.
-pub(super) type PendingChildSerializerCache = (ClassId, TypeName, Vec<(String, Ty)>);
+pub(super) type PendingChildSerializerCache = (ClassId, TypeName, Vec<super::WireElement>);
 
 /// The `$childSerializers` cache for one `@Serializable` class, built once every OTHER class's
 /// `$serializer` exists.
@@ -201,7 +201,7 @@ pub(super) fn add_child_serializer_cache(
     ctx: &PluginContext,
     class_id: ClassId,
     serialized: TypeName,
-    foo_fields: &[(String, Ty)],
+    elements: &[super::WireElement],
 ) -> Option<ChildSerializerCachePlan> {
     // `$childSerializers` cache — a `private static final Lazy[]` + the public synthetic
     // `access$get$childSerializers$cp()` accessor kotlinc emits when a prop's serializer is
@@ -222,16 +222,17 @@ pub(super) fn add_child_serializer_cache(
     // right, not merely recoverable — and computing it up front is also what lets the build loop
     // below take `ir` mutably.
     let cached_plans: Result<Vec<Option<ElementSerializerPlan>>, UnderivableChildCacheElement> =
-        foo_fields
+        elements
             .iter()
-            .map(|(name, ty)| {
-                if declared_serializer_of(ctx, ir, class_id, name).is_some() {
+            .map(|element| {
+                let (declaring, name, ty) = (element.class, &element.name, &element.ty);
+                if declared_serializer_of(ctx, ir, declaring, name).is_some() {
                     return Ok(None);
                 }
                 let annotated = super::type_argument_serializers::declared_type_spelling(
-                    ctx, ir, class_id, name,
+                    ctx, ir, declaring, name,
                 );
-                if property_is_contextual(ctx, ir, class_id, name) {
+                if property_is_contextual(ctx, ir, declaring, name) {
                     return contextual_property_plan(ir, ctx, ty, &annotated);
                 }
                 child_cache_element_plan(ir, ctx, ty, &annotated)
@@ -278,13 +279,13 @@ pub(super) fn add_child_serializer_cache(
         // A slot is `null` ONLY where the selected serializer plan needs no cache. The same plan
         // that made this decision is consumed below, so classification and emission cannot drift
         // into a legacy second derivation.
-        let mut elems: Vec<ExprId> = Vec::with_capacity(foo_fields.len());
+        let mut elems: Vec<ExprId> = Vec::with_capacity(elements.len());
         let mut factories = 0usize;
         // kotlinc records ONE `LineNumberTable` entry on every member it generates for the cache,
         // and it is the serialized class's annotation-inclusive declaration line — the line its
         // `@Serializable` sits on.
         let owner_decl_line = ir.classes[class_id as usize].decl_start_line;
-        for (index, _) in foo_fields.iter().enumerate() {
+        for index in 0..elements.len() {
             let Some(plan) = cached_plans[index].clone() else {
                 elems.push(ir.add_expr(IrExpr::Const(IrConst::Null)));
                 continue;
@@ -433,11 +434,8 @@ pub(super) fn add_child_serializer_cache(
 pub(super) struct ChildSerializersBody<'a> {
     pub(super) function: u32,
     pub(super) serialized_class: ClassId,
-    /// The class the PROPERTIES are declared on, for the per-property annotation questions.
-    pub(super) declaring_class: ClassId,
-    pub(super) fields: &'a [(String, Ty)],
-    /// Element types as the SERIALIZER sees them, which is not always the field's own type.
-    pub(super) serializer_field_types: &'a [Ty],
+    /// Every element of the wire shape, each with the class its property is declared on.
+    pub(super) elements: &'a [super::WireElement],
     /// The serializers of the class's type parameters, on the generic `$serializer`.
     pub(super) type_parameter_serializers:
         super::type_parameter_serializers::TypeParameterSerializers<'a>,
@@ -450,9 +448,7 @@ impl ChildSerializersBody<'_> {
         let Self {
             function,
             serialized_class,
-            declaring_class,
-            fields,
-            serializer_field_types,
+            elements: wire,
             type_parameter_serializers,
             plan,
         } = self;
@@ -474,61 +470,61 @@ impl ChildSerializersBody<'_> {
                 .expect("too many childSerializers parameters")
                 + 1
         });
-        let elements: Vec<ExprId> = serializer_field_types
+        let elements: Vec<ExprId> = wire
             .iter()
             .enumerate()
-            .map(|(i, _ty)| {
+            .map(|(i, element)| {
                 if let Some(cached) = cached_element(
                     ir,
                     plan.as_ref(),
                     cache_local,
                     i,
-                    serializer_field_types.len(),
-                    &serializer_field_types[i],
+                    wire.len(),
+                    &element.serializer_ty,
                 ) {
                     cached
-                } else if property_is_contextual(ctx, ir, declaring_class, &fields[i].0) {
+                } else if property_is_contextual(ctx, ir, element.class, &element.name) {
                     // An uncached contextual property mentions a class type parameter, so build
                     // it where the generated `$serializer` can read that parameter's serializer.
                     let annotated = super::type_argument_serializers::declared_type_spelling(
                         ctx,
                         ir,
-                        declaring_class,
-                        &fields[i].0,
+                        element.class,
+                        &element.name,
                     );
                     super::element_serializer::contextual_property_serializer(
                         ir,
                         ctx,
-                        &serializer_field_types[i],
+                        &element.serializer_ty,
                         type_parameter_serializers,
                         &annotated,
                     )
                     .unwrap_or_else(|| {
                         super::element_serializer::unsupported_element_serializer(
                             ir,
-                            serializer_field_types[i],
+                            element.serializer_ty,
                         )
                     })
                 } else if let Some(internal) =
-                    declared_serializer_of(ctx, ir, declaring_class, &fields[i].0)
+                    declared_serializer_of(ctx, ir, element.class, &element.name)
                 {
                     // Explicit per-property serializer: the selected constructor (or
                     // `X.INSTANCE`), wrapped `.nullable` for a nullable property.
                     let annotated = super::type_argument_serializers::declared_type_spelling(
                         ctx,
                         ir,
-                        declaring_class,
-                        &fields[i].0,
+                        element.class,
+                        &element.name,
                     );
                     let base = super::build_field_serializer_instance(
                         ir,
                         ctx,
                         internal,
-                        serializer_field_types[i],
+                        element.serializer_ty,
                         type_parameter_serializers,
                         &annotated,
                     );
-                    if super::is_nullable(&serializer_field_types[i]) {
+                    if super::is_nullable(&element.serializer_ty) {
                         super::wrap_nullable_serializer(ir, base)
                     } else {
                         base
@@ -536,13 +532,13 @@ impl ChildSerializersBody<'_> {
                 } else if let Some(e) = super::element_serializer::element_serializer_expr_in(
                     ir,
                     ctx,
-                    &serializer_field_types[i],
+                    &element.serializer_ty,
                     type_parameter_serializers,
                     &super::type_argument_serializers::declared_type_spelling(
                         ctx,
                         ir,
-                        declaring_class,
-                        &fields[i].0,
+                        element.class,
+                        &element.name,
                     ),
                 )
                 .map(|base| {
@@ -550,7 +546,7 @@ impl ChildSerializersBody<'_> {
                     // `.nullable`, narrowed to the `KSerializer` that wrapper takes. Only the
                     // explicit-serializer arm above did this, so every nullable property whose
                     // serializer is DERIVED from its type published the non-null serializer.
-                    if super::is_nullable(&serializer_field_types[i]) {
+                    if super::is_nullable(&element.serializer_ty) {
                         let narrowed =
                             super::deserialize_body::narrowed(ir, base, super::KSERIALIZER_FQ);
                         super::wrap_nullable_serializer(ir, narrowed)
@@ -564,7 +560,7 @@ impl ChildSerializersBody<'_> {
                 } else {
                     super::element_serializer::unsupported_element_serializer(
                         ir,
-                        serializer_field_types[i],
+                        element.serializer_ty,
                     )
                 }
             })
@@ -594,13 +590,20 @@ mod tests {
 
     use super::class_ty;
 
-    fn holder(element: Ty) -> (IrFile, crate::ir::ClassId, Vec<(String, Ty)>) {
+    fn holder(element: Ty) -> (IrFile, crate::ir::ClassId, Vec<super::super::WireElement>) {
         let mut ir = IrFile::default();
         let mut holder = synthetic_class("demo/Holder");
         holder.fields = vec![crate::ir::IrField::new("tags".to_string(), element)];
         holder.ctor_param_count = 1;
         let class_id = ir.add_class(holder);
-        (ir, class_id, vec![("tags".to_string(), element)])
+        let wire = vec![super::super::WireElement {
+            class: class_id,
+            field: 0,
+            name: "tags".to_string(),
+            ty: element,
+            serializer_ty: element,
+        }];
+        (ir, class_id, wire)
     }
 
     /// A cached slot whose serializer cannot be constructed REFUSES the file.

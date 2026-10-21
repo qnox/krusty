@@ -66,7 +66,7 @@ use generated_members::{
 };
 pub use plugin_release::PluginRelease;
 pub use runtime_abi::SerializationAbi;
-use serial_elements::{SerialElements, SerializedProperties};
+use serial_elements::{SerialElements, SerializedProperties, WireElement};
 use serialize_body::SerializeBody;
 use std::sync::Mutex;
 pub(super) use type_argument_serializers::named_serializers;
@@ -1487,6 +1487,7 @@ impl IrPlugin for SerializationPlugin {
             }
             serializer_class::declare(
                 ir,
+                ctx,
                 class_id,
                 ctx.generated_serializer_statuses()
                     .expect("Pass 1 must publish the exact generated-serializer override statuses"),
@@ -1562,7 +1563,8 @@ impl IrPlugin for SerializationPlugin {
                 continue;
             }
             let properties = SerializedProperties::of(ir, class_id);
-            let elements = SerialElements::of(ir, class_id);
+            let elements = SerialElements::of(ctx, ir, class_id);
+            let wire = elements.wire(ir, class_id);
             let fields = &properties.fields;
             crate::trace_compiler!(
                 "lower",
@@ -1649,6 +1651,18 @@ impl IrPlugin for SerializationPlugin {
                             serialized_class: foo_id,
                             fields,
                             elements: elements.fields(),
+                            inherited: elements.parent().map(|parent| {
+                                serialize_body::InheritedElements {
+                                    count: elements.inherited_count(),
+                                    write_self: ir
+                                        .generated_function(
+                                            ir.classes[parent as usize].fq_name_id(),
+                                            crate::ir::IrGeneratedFunctionRole::SerializationWriteSelf,
+                                        )
+                                        .expect("a serializable superclass declares its write$Self"),
+                                    owner: ir.classes[parent as usize].fq_name_id(),
+                                }
+                            }),
                             field_defaults: &properties.constant_defaults,
                             nested_serializers: &properties.nested_serializers,
                             type_parameter_serializers,
@@ -1669,7 +1683,7 @@ impl IrPlugin for SerializationPlugin {
                             function: fid,
                             serializer_class: ser_idx,
                             serialized_class: foo_id,
-                            fields: &elements.select(fields),
+                            fields: &wire,
                             type_parameter_serializers,
                             bounded_type_parameters: self.serializer_type_parameters_are_bounded(),
                             cache: self
@@ -1681,9 +1695,7 @@ impl IrPlugin for SerializationPlugin {
                         ChildSerializersBody {
                             function: fid,
                             serialized_class: foo_id,
-                            declaring_class: class_id,
-                            fields: &elements.select(fields),
-                            serializer_field_types: &elements.select(&properties.serializer_types),
+                            elements: &wire,
                             type_parameter_serializers,
                             plan: self
                                 .child_serializer_cache(ir.classes[foo_id as usize].fq_name_id()),

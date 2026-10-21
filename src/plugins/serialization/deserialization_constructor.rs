@@ -1,6 +1,6 @@
 //! Construction of the synthetic constructor used by serialization deserialization.
 
-use super::serial_elements::SerialElements;
+use super::serial_elements::{SerialElements, WireElement};
 use super::{class_ty, value_class_underlying};
 use crate::ir::{
     Callee, ClassId, CtorDelegateTarget, DeclarationAnnotations, IrConst, IrExpr, IrFile,
@@ -220,23 +220,26 @@ fn mask_count(elements: usize) -> usize {
 /// Declare the deserialization constructor for a plain serializable data class. It is synthetic in
 /// the class file but published as an internal Kotlin secondary constructor.
 ///
-/// It takes one argument per serial element after the seen-element masks, and a trailing
-/// `SerializationConstructorMarker`. Its body is realized by
+/// It takes one argument per serial element after the seen-element masks, inherited elements
+/// first, and a trailing `SerializationConstructorMarker`. Its body is realized by
 /// [`complete_deserialization_constructor`].
 pub(super) fn declare_deserialization_constructor(
     ir: &mut IrFile,
     class_id: ClassId,
-    named_fields: &[(String, Ty)],
-    elements: &SerialElements,
+    wire: &[WireElement],
 ) {
     // A value-class element is taken as its NULLABLE type, as kotlinc declares every reference
     // parameter of this constructor nullable. Its representation is that of `V?`: the underlying
     // reference itself, or the box when the underlying is a primitive. The body converts it when
     // storing the field.
-    let element_fields = elements
-        .select(named_fields)
-        .into_iter()
-        .map(|(name, ty)| (name, deserialization_parameter_ty(ty)))
+    let element_fields = wire
+        .iter()
+        .map(|element| {
+            (
+                element.name.clone(),
+                deserialization_parameter_ty(element.ty),
+            )
+        })
         .collect::<Vec<_>>();
     let mask_count = mask_count(element_fields.len());
     let mut params = vec![Ty::Int; mask_count];
@@ -245,7 +248,9 @@ pub(super) fn declare_deserialization_constructor(
         "kotlinx/serialization/internal/SerializationConstructorMarker",
     ));
     let super_owner = ir.classes[class_id as usize].superclass;
-    // kotlinc delegates to the superclass's no-argument constructor. A class whose own `super()`
+    // Without a serializable superclass, kotlinc delegates to the superclass's no-argument
+    // constructor; [`complete_deserialization_constructor`] replaces the delegation of a class
+    // that has one, whose own constructor may be declared after this one. A class whose own `super()`
     // passes no arguments selected exactly that one, so the call reuses its target and reaches a
     // sealed or private constructor through the accessor. One that passes arguments selected a
     // different constructor; the plugin does not select the no-argument one for it yet.
@@ -320,6 +325,7 @@ pub(super) fn complete_deserialization_constructor(
     serializer_id: ClassId,
     named_fields: &[(String, Ty)],
     elements: &SerialElements,
+    wire: &[WireElement],
     cached_descriptor: Option<u32>,
 ) {
     let ordinal = ir
@@ -328,18 +334,20 @@ pub(super) fn complete_deserialization_constructor(
             IrSecondaryConstructorRole::SerializationDeserialization,
         )
         .expect("a plain serializable class has its declared deserialization constructor");
-    let element_fields = elements.select(named_fields);
-    let mask_count = mask_count(element_fields.len());
-    let has_value_field = element_fields
+    let mask_count = mask_count(wire.len());
+    let has_value_field = wire
         .iter()
-        .any(|(_, ty)| value_class_underlying(ir, ty).is_some());
+        .any(|element| value_class_underlying(ir, &element.ty).is_some());
     // An element is optional when its property declares a default: a constructor parameter's
     // default or a body property's initializer.
-    let optional = elements
-        .fields()
+    let optional = wire
         .iter()
-        .map(|&field| super::property_default::checked_default(ir, class_id, field).is_some())
+        .map(|element| {
+            super::property_default::checked_default(ir, element.class, element.field).is_some()
+        })
         .collect::<Vec<_>>();
+    // The class's own element `i` is wire element `offset + i`, after the inherited ones.
+    let offset = elements.inherited_count();
     let required_masks = required_masks(&optional);
     debug_assert_eq!(required_masks.len(), mask_count);
     let owner = ir.classes[class_id as usize].fq_name_id();
@@ -391,10 +399,47 @@ pub(super) fn complete_deserialization_constructor(
         ));
     }
 
+    // A serializable superclass's own deserialization constructor stores the inherited elements:
+    // it takes the same seen masks, those elements' arguments and the marker.
+    let parent_delegation = elements.parent().map(|parent| {
+        let parent_ordinal = ir
+            .generated_secondary_constructor(
+                parent,
+                IrSecondaryConstructorRole::SerializationDeserialization,
+            )
+            .expect("a serializable superclass declares its deserialization constructor");
+        let target_params = ir.classes[parent as usize].secondary_ctors[parent_ordinal as usize]
+            .params
+            .clone();
+        let parent_masks = self::mask_count(offset);
+        // `this` is slot 0; masks occupy 1..=mask_count; element arguments follow them, then the
+        // marker.
+        let first_element = 1 + mask_count;
+        let marker = first_element + wire.len();
+        let args = (1..=parent_masks)
+            .chain(first_element..first_element + offset)
+            .chain(std::iter::once(marker))
+            .map(|slot| ir.add_expr(IrExpr::GetValue(slot as u32)))
+            .collect::<Vec<_>>();
+        let delegate = CtorDelegateTarget::Super {
+            owner: ir.classes[parent as usize].fq_name_id(),
+            target_params,
+            target: crate::ir::IrConstructorTarget {
+                ordinal: parent_ordinal + 1,
+                access: crate::ir::IrConstructorAccess::Unrestricted,
+            },
+            default_masks: vec![],
+        };
+        (delegate, args)
+    });
     let this = ir.add_expr(IrExpr::GetValue(0));
     let mut body_stmts = Vec::with_capacity(named_fields.len());
     for (field, (field_name, field_ty)) in named_fields.iter().enumerate() {
-        let element = elements.fields().iter().position(|&serial| serial == field);
+        let element = elements
+            .fields()
+            .iter()
+            .position(|&serial| serial == field)
+            .map(|own| offset + own);
         // `this` is slot 0; masks occupy 1..=mask_count; element arguments follow them.
         let store_argument = element.map(|element| {
             let argument = ir.add_expr(IrExpr::GetValue(element as u32 + 1 + mask_count as u32));
@@ -446,7 +491,7 @@ pub(super) fn complete_deserialization_constructor(
                 class_id,
                 field,
                 super::property_default::DefaultFrame {
-                    first_free_local: u32::try_from(mask_count + element_fields.len() + 2)
+                    first_free_local: u32::try_from(mask_count + wire.len() + 2)
                         .expect("a constructor's parameters fit u32"),
                     read_field: &mut read_argument,
                     receiver: Some(0),
@@ -516,6 +561,10 @@ pub(super) fn complete_deserialization_constructor(
         "a declared deserialization constructor receives one body"
     );
     constructor.delegate_prelude = delegate_prelude;
+    if let Some((delegate, delegate_args)) = parent_delegation {
+        constructor.delegate = delegate;
+        constructor.delegate_args = delegate_args;
+    }
     // The JVM value-class pass makes this constructor private and emits the ordinary public
     // `DefaultConstructorMarker` accessor. The serialization constructor itself retains
     // only `SerializationConstructorMarker`, matching kotlinc's nestmate call target.
