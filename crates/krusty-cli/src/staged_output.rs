@@ -7,7 +7,7 @@
 //! for `-d dir`, a jar file for `-d foo.jar`. [`StagedOutput::commit`] moves it into place;
 //! dropping an uncommitted output removes the staging location.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -17,8 +17,11 @@ use zip::ZipWriter;
 
 pub struct StagedOutput {
     dest: PathBuf,
-    staging: PathBuf,
     target: Target,
+    /// The staging entry this output created, reserved by the first artifact. Only an entry this
+    /// instance created is ever published or removed; one left by another process is never
+    /// adopted, even when its name would match.
+    staging: Option<PathBuf>,
     /// The first write failure. Emission continues so the compilation still reports its own
     /// diagnostics; the failure is returned by `commit`.
     error: Option<io::Error>,
@@ -31,7 +34,7 @@ enum Target {
     /// case-insensitive file system folds together, is one staged file holding the later bytes, as
     /// a direct write would have left it.
     Directory,
-    /// Opened on the first artifact, so a compilation that emits nothing creates nothing.
+    /// Started together with the staging file.
     Jar {
         writer: Option<Box<ZipWriter<File>>>,
     },
@@ -46,8 +49,8 @@ impl StagedOutput {
         };
         Self {
             dest: dest.to_path_buf(),
-            staging: staging_path(dest),
             target,
+            staging: None,
             error: None,
             committed: false,
         }
@@ -57,26 +60,36 @@ impl StagedOutput {
         if self.error.is_some() {
             return;
         }
-        let written = match &mut self.target {
+        if let Err(error) = self.reserve().and_then(|staging| match &mut self.target {
             Target::Directory => {
-                let path = self.staging.join(rel);
+                let path = staging.join(rel);
                 path.parent()
                     .map_or(Ok(()), std::fs::create_dir_all)
                     .and_then(|()| std::fs::write(&path, bytes))
             }
-            Target::Jar { writer } => {
-                let writer = match writer {
-                    Some(writer) => Ok(writer),
-                    None => {
-                        start_jar(&self.staging).map(|started| writer.insert(Box::new(started)))
-                    }
-                };
-                writer.and_then(|writer| write_jar_entry(writer, rel, bytes))
-            }
-        };
-        if let Err(error) = written {
+            Target::Jar { writer } => write_jar_entry(
+                writer.as_mut().expect("a reserved jar stage has a writer"),
+                rel,
+                bytes,
+            ),
+        }) {
             self.error = Some(error);
         }
+    }
+
+    /// The staging entry, created exclusively on first use.
+    fn reserve(&mut self) -> io::Result<PathBuf> {
+        if let Some(staging) = &self.staging {
+            return Ok(staging.clone());
+        }
+        let jar = matches!(self.target, Target::Jar { .. });
+        let (staging, file) = reserve_staging(&self.dest, jar)?;
+        // Owned from here on, so a failure below still removes it.
+        self.staging = Some(staging.clone());
+        if let (Target::Jar { writer }, Some(file)) = (&mut self.target, file) {
+            *writer = Some(Box::new(start_jar(file)?));
+        }
+        Ok(staging)
     }
 
     /// Publish everything written so far at the destination.
@@ -84,23 +97,22 @@ impl StagedOutput {
         if let Some(error) = self.error.take() {
             return Err(error);
         }
-        match &mut self.target {
-            // Nothing staged means nothing emitted; the destination is not created.
-            Target::Directory if self.staging.is_dir() => {
-                publish_tree(&self.staging, &self.dest)?;
-            }
-            Target::Directory => {}
-            Target::Jar { writer } => {
-                // A jar destination exists even when nothing was emitted.
-                let writer = match writer.take() {
-                    Some(writer) => *writer,
-                    None => start_jar(&self.staging)?,
-                };
-                writer.finish().map_err(io::Error::other)?;
-                if let Some(parent) = self.dest.parent() {
-                    std::fs::create_dir_all(parent)?;
+        match &self.target {
+            Target::Directory => {
+                // Nothing staged means nothing emitted; the destination is not created.
+                if let Some(staging) = &self.staging {
+                    publish_tree(staging, &self.dest)?;
                 }
-                move_file(&self.staging, &self.dest)?;
+            }
+            Target::Jar { .. } => {
+                // A jar destination exists even when nothing was emitted.
+                let staging = self.reserve()?;
+                let Target::Jar { writer } = &mut self.target else {
+                    unreachable!("the target was matched as a jar")
+                };
+                let writer = writer.take().expect("a reserved jar stage has a writer");
+                writer.finish().map_err(io::Error::other)?;
+                move_file(&staging, &self.dest)?;
             }
         }
         self.committed = true;
@@ -109,11 +121,14 @@ impl StagedOutput {
     }
 
     fn remove_staging(&self) {
+        let Some(staging) = &self.staging else {
+            return;
+        };
         // Best effort: a leftover staging entry never affects the destination.
-        let _ = if self.staging.is_dir() {
-            std::fs::remove_dir_all(&self.staging)
+        let _ = if staging.is_dir() {
+            std::fs::remove_dir_all(staging)
         } else {
-            std::fs::remove_file(&self.staging)
+            std::fs::remove_file(staging)
         };
     }
 }
@@ -126,25 +141,50 @@ impl Drop for StagedOutput {
     }
 }
 
-/// A hidden sibling of the destination, so publishing it is a rename on the same file system.
-fn staging_path(dest: &Path) -> PathBuf {
-    static SEQUENCE: AtomicU32 = AtomicU32::new(0);
+/// Create a fresh hidden sibling of the destination, so publishing it is a rename on the same file
+/// system. The entry is created with exclusive semantics: a name another process left behind (its
+/// pid since reused) is skipped, never reused.
+static SEQUENCE: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(test)]
+fn reserve_sequence_peek() -> u32 {
+    SEQUENCE.load(Ordering::Relaxed)
+}
+
+fn reserve_staging(dest: &Path, jar: bool) -> io::Result<(PathBuf, Option<File>)> {
     let name = dest
         .file_name()
         .map_or_else(|| "out".into(), |name| name.to_string_lossy());
-    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let staging = format!(".{name}.krusty-{}-{sequence}.tmp", std::process::id());
-    match dest.parent() {
-        Some(parent) => parent.join(staging),
-        None => PathBuf::from(staging),
+    let parent = dest
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    loop {
+        let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let staging = parent.join(format!(
+            ".{name}.krusty-{}-{sequence}.tmp",
+            std::process::id()
+        ));
+        let created = if jar {
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&staging)
+                .map(Some)
+        } else {
+            std::fs::create_dir(&staging).map(|()| None)
+        };
+        match created {
+            Ok(file) => return Ok((staging, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
     }
 }
 
-fn start_jar(path: &Path) -> io::Result<ZipWriter<File>> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut writer = ZipWriter::new(File::create(path)?);
+fn start_jar(file: File) -> io::Result<ZipWriter<File>> {
+    let mut writer = ZipWriter::new(file);
     write_jar_entry(
         &mut writer,
         "META-INF/MANIFEST.MF",
@@ -254,6 +294,69 @@ mod tests {
         let root = scratch("dir-empty");
         StagedOutput::new(&root.join("classes")).commit().unwrap();
         assert!(entries(&root).is_empty());
+    }
+
+    /// Leave entries under every staging name this process can pick next, as an interrupted
+    /// compilation whose pid was later reused would have.
+    fn plant_stale_stages(dest: &Path, jar: bool) -> Vec<PathBuf> {
+        let name = dest.file_name().unwrap().to_string_lossy().into_owned();
+        let first = reserve_sequence_peek();
+        (first..first + 64)
+            .map(|sequence| {
+                let stale = dest.parent().unwrap().join(format!(
+                    ".{name}.krusty-{}-{sequence}.tmp",
+                    std::process::id()
+                ));
+                if jar {
+                    std::fs::write(&stale, b"stale jar").unwrap();
+                } else {
+                    std::fs::create_dir_all(&stale).unwrap();
+                    std::fs::write(stale.join("Stale.class"), b"stale").unwrap();
+                }
+                stale
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_stale_directory_stage_is_neither_published_nor_removed() {
+        let root = scratch("dir-stale");
+        let dest = root.join("classes");
+        let stale = plant_stale_stages(&dest, false);
+        let mut output = StagedOutput::new(&dest);
+        output.write("Fresh.class", b"fresh");
+        output.commit().unwrap();
+        assert_eq!(entries(&dest), vec!["Fresh.class".to_string()]);
+        let failed = StagedOutput::new(&dest);
+        drop(failed);
+        let mut dropped = StagedOutput::new(&dest);
+        dropped.write("Other.class", b"other");
+        drop(dropped);
+        for stage in &stale {
+            assert_eq!(entries(stage), vec!["Stale.class".to_string()]);
+        }
+        assert_eq!(entries(&root).len(), stale.len() + 1);
+    }
+
+    #[test]
+    fn a_stale_jar_stage_is_neither_published_nor_removed() {
+        let root = scratch("jar-stale");
+        let dest = root.join("lib.jar");
+        let stale = plant_stale_stages(&dest, true);
+        let mut output = StagedOutput::new(&dest);
+        output.write("Fresh.class", b"fresh");
+        output.commit().unwrap();
+        assert_eq!(
+            jar_names(&dest),
+            vec!["META-INF/MANIFEST.MF", "Fresh.class"]
+        );
+        let mut dropped = StagedOutput::new(&dest);
+        dropped.write("Other.class", b"other");
+        drop(dropped);
+        for stage in &stale {
+            assert_eq!(std::fs::read(stage).unwrap(), b"stale jar");
+        }
+        assert_eq!(entries(&root).len(), stale.len() + 1);
     }
 
     #[test]
