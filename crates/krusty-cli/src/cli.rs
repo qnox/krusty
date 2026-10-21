@@ -73,6 +73,9 @@ pub struct Options {
     /// Batch-compilable Kotlin and Java source inputs (directories already expanded). Java files
     /// contribute source headers to Kotlin analysis; their executable bodies remain javac's work.
     pub sources: Vec<String>,
+    /// The `sources` a multiplatform fragment other than the platform leaf lists: common sources
+    /// folded into the leaf's compilation (`-Xfragment-refines`).
+    pub common_sources: Vec<String>,
     /// Module name → `<module>.kotlin_module` (kotlinc `-module-name`, default `main`).
     pub module_name: String,
     /// Standard per-compilation language/API versions and their finalized feature baseline.
@@ -170,6 +173,7 @@ impl Default for Options {
             classpath: Vec::new(),
             friend_paths: Vec::new(),
             sources: Vec::new(),
+            common_sources: Vec::new(),
             module_name: "main".to_string(),
             // Parsing replaces this once it knows the selected release. Building it must not fix the
             // process-wide reference version, which `-Xkotlin-reference-version` may still choose.
@@ -348,10 +352,15 @@ fn read(argv: impl IntoIterator<Item = String>, reading: Reading) -> Options {
         finish_language_settings(&mut opts, parsed, catalog, &tokenized.explicit, Vec::new());
         return opts;
     }
-    for source in &tokenized.free {
-        collect_sources(source, &mut opts.sources, &mut opts.ignored);
-    }
     let fragments = fragments::check(&parsed.fragments, &tokenized.free);
+    for source in &tokenized.free {
+        let first = opts.sources.len();
+        collect_sources(source, &mut opts.sources, &mut opts.ignored);
+        if fragments.common.contains(source) {
+            let collected = opts.sources[first..].to_vec();
+            opts.common_sources.extend(collected);
+        }
+    }
     opts.errors.extend(fragments.unsupported);
     opts.configuration_errors
         .extend(fragments.configuration_errors);
@@ -1165,7 +1174,7 @@ mod tests {
     }
 
     /// A fragment name declared twice, in one `-Xfragments` list or in repeated arguments, is
-    /// one fragment, as in kotlinc; a second distinct name is refused.
+    /// one fragment, as in kotlinc; a second distinct name the leaf does not refine is refused.
     #[test]
     fn a_repeated_fragment_name_is_one_fragment() {
         for fragments in [
@@ -1191,7 +1200,7 @@ mod tests {
         ]);
         assert_eq!(
             parsed.errors,
-            vec!["krusty compiles a single fragment, but -Xfragments declares 2: main,other"]
+            vec!["krusty compiles fragments the leaf refines, but `other` does not refine `main`"]
         );
         assert_eq!(parsed.configuration_errors, Vec::<String>::new());
     }

@@ -316,12 +316,17 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
         .zip(&sources)
         .zip(&stems)
         .map(|((path, source), stem)| {
-            krusty::source::SourceInput::new(
+            let input = krusty::source::SourceInput::new(
                 krusty::source::kind(Path::new(path))
                     .expect("CLI source collection must classify every source"),
                 source,
             )
-            .with_file_stem(stem)
+            .with_file_stem(stem);
+            if opts.common_sources.contains(path) {
+                input.common()
+            } else {
+                input
+            }
         })
         .collect::<Vec<_>>();
     // The module name reaches diagnostics that spell it (an `expect` with no `actual` names the

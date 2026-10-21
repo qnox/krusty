@@ -14991,11 +14991,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A name declared twice (`-Xfragments=main,main`, or `-Xfragments=main` repeated) is one
   fragment, and the empty name is a fragment. Each distinct `-Xfragment-sources` value and free
   spelling is checked once, in first-seen order (`bad,bad` is one diagnostic, `,` one empty
-  value). These errors are reported for any number of fragments; only a well-formed structure
-  with more than one distinct fragment (a common/platform hierarchy, with `-Xfragment-refines`)
-  is refused. (`tests/fragment_arguments_e2e.rs` compares exit code, complete stderr and the
-  output tree with kotlinc; `crates/krusty-cli/src/cli/fragments.rs` unit tests; five
-  `compiler/testData/cli/jvm/hmpp` cases in the CLI corpus.)
+  value). These errors are reported for any number of fragments.
+- **A refined fragment hierarchy compiles as its platform leaf.** A Kotlin Multiplatform JVM
+  compilation passes several fragments with `-Xfragment-refines=<from>:<on>` edges. kotlinc
+  compiles each fragment in its own session in a depth-first post-order over the edges (starting
+  from each fragment in declaration order); the last one is the platform leaf, every other one is
+  common, and the classes are the leaf compilation's. krusty folds the fragments the leaf refines,
+  directly or transitively, into one compilation as common sources (`SourceInput::common`), the
+  same folding as the multiplatform box lane. A fragment the leaf does not refine (two fragments
+  with no edge) would be visible only in the fold, so krusty refuses it: `krusty compiles
+  fragments the leaf refines, but `<leaf>` does not refine `<fragment>``. After the source checks
+  (a source in two fragments or in none stops kotlinc before the graph), kotlinc 2.4.20 reports
+  `-Xfragment-refines` without `-Xfragments`, with a single distinct fragment (`… there is only one
+  module declared`), each edge that is not two names, each undeclared name of an edge
+  (`` `-Xfragment-refines=<edge>` Fragment `<name>` not found in -Xfragments arguments ``), then
+  each fragment of the order whose refined fragment does not precede it (`there is a cycle in
+  dependencies of module `<name>``), a repeated message once. For an edge that is not two names
+  kotlinc prints its argument array's identity hash (`[Ljava.lang.String;@…`), which varies by
+  run; krusty prints the edge. Folding makes a declaration of the leaf visible to common sources,
+  so an invalid common source kotlinc rejects can compile. (`tests/fragment_arguments_e2e.rs`
+  compares exit code, complete stderr and the output tree with kotlinc, including an `expect`
+  actualized by the leaf; `crates/krusty-cli/src/cli/fragments.rs` unit tests; the
+  `compiler/testData/cli/jvm/hmpp` cases and `kt77220` in the CLI corpus.)
 - **A supertype missing from the classpath is `MISSING_DEPENDENCY_SUPERCLASS`.** As kotlinc's
   `FirMissingDependencySupertype*` checkers, a classpath classifier naming a supertype that no
   source or classpath entry provides makes every use that depends on that hierarchy an error:
