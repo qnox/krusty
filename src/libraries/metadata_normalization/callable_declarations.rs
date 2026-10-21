@@ -231,42 +231,63 @@ pub(crate) fn declared_property(
     let receiver = generic_sig.receiver;
     let ty = generic_sig.ret;
     let declaration_owner = placement.declaration_owner();
-    let is_abstract = property.modality == KotlinModality::Abstract;
+    let reified = reified_type_parameter_ordinals(&property.formals);
     let getter_params: Vec<Ty> = generic_sig
         .params
         .iter()
         .chain(&receiver)
         .copied()
         .collect();
-    let accessor = |name: &str, params: Vec<Ty>, ret: Ty| {
-        let mut callable = LibraryCallable::library(
-            declaration_owner.name(),
-            name,
-            params,
-            ret,
-            ret,
-            String::new(),
-        );
-        callable.declaration_owner = Some(declaration_owner);
-        callable.owner_is_interface = placement.owner_is_interface();
-        callable.is_abstract = is_abstract;
-        callable.source_receiver = receiver;
-        callable.context_count = property.context_count;
-        callable
-    };
+    let accessor =
+        |name: &str,
+         params: Vec<Ty>,
+         ret: Ty,
+         modifiers: &crate::metadata::semantic::KotlinAccessorModifiers| {
+            let mut callable = LibraryCallable::library(
+                declaration_owner.name(),
+                name,
+                params,
+                ret,
+                ret,
+                String::new(),
+            );
+            callable.declaration_owner = Some(declaration_owner);
+            callable.owner_is_interface = placement.owner_is_interface();
+            callable.is_abstract = modifiers.modality == KotlinModality::Abstract;
+            callable.visibility = modifiers.visibility;
+            callable.inline = InlineKind::from_flags(
+                modifiers.is_inline,
+                modifiers.is_inline
+                    && (!reified.is_empty()
+                        || modifiers
+                            .annotations
+                            .contains(&crate::types::type_name("kotlin/internal/InlineOnly"))),
+            );
+            callable.annotations = modifiers.annotations.clone();
+            callable.reified_type_parameter_ordinals = reified.clone().into_boxed_slice();
+            callable.source_receiver = receiver;
+            callable.context_count = property.context_count;
+            callable
+        };
 
-    let mut getter = accessor(accessors.getter, getter_params.clone(), ty);
-    getter.visibility = property.visibility;
-    getter.annotations = property.annotations.clone();
+    let mut getter = accessor(
+        accessors.getter,
+        getter_params.clone(),
+        ty,
+        &property.getter_modifiers,
+    );
+    for annotation in &property.annotations {
+        if !getter.annotations.contains(annotation) {
+            getter.annotations.push(*annotation);
+        }
+    }
     let mut setter = accessors.setter.map(|name| {
         let params = getter_params
             .iter()
             .copied()
             .chain([stored_value_ty(ty)])
             .collect();
-        let mut setter = accessor(name, params, Ty::Unit);
-        setter.visibility = property.setter_visibility;
-        setter
+        accessor(name, params, Ty::Unit, &property.setter_modifiers)
     });
     if !generic_sig.formals.is_empty() {
         if let Some(setter) = &mut setter {
@@ -306,7 +327,7 @@ pub(crate) fn declared_property(
         context_parameter_identities: parameters.contexts.clone(),
         getter,
         setter: setter.map(Box::new),
-        setter_visibility: property.setter_visibility,
+        setter_visibility: property.setter_modifiers.visibility,
         setter_parameter_name: property.setter_parameter_name.clone(),
         is_const: property.is_const,
         implicit_integer_coercion: property

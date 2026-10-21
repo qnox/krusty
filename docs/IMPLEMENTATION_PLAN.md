@@ -5598,6 +5598,11 @@ non-inline callers, still reads the field directly. Test:
 - Ordinary generic headers authenticate the exact provider-frozen formal types and every full
   bound, including recursive/forward bounds, without prepared-inline erasure. Reification and
   parameter roles must agree independently of the flattened operand types.
+- Accessor metadata preserves independent getter/setter modifiers and annotation identities,
+  including exact absent-word defaults and explicit zero. Accessor inline obligations now survive
+  provider normalization. Remaining ordinary-body admission must authenticate those declaration
+  modifiers against the serialized function before selecting an emitted-use root; it is not yet
+  enabled by this metadata producer change.
 - Native dependency exports retain one emitted IR signature for both wrapper definitions and
   imports. Exact checked generic instantiation validates source operand roles independently of
   the canonical ABI; arguments/results use the existing target boxing and conversion boundary.

@@ -649,6 +649,17 @@ Neither the serialized signature nor the callable is reconstructed from a backen
 
 ## Ordinary KLIB generic declaration headers
 
+Property getter and setter words are decoded independently, including visibility, modality,
+non-default, external and inline status. An absent word takes only the shared property prefix
+(bits 0-5); an explicit zero remains zero. Property external (bit 14) is separate from accessor
+external (bit 7). Accessor inline is bit 8 and non-default is bit 6. Inline or external on a
+default accessor is rejected as inconsistent metadata. The semantic declaration keeps each
+accessor's own annotations (modern fields 15/16, BuiltIns fields 152/153, KLIB fields 177/178);
+`InlineOnly` obligation comes from the selected accessor, not the property's annotation list.
+Each accessor also carries the property's declaration-owned reified formal ordinals. These are
+existing schema facts, not new intrinsic markers or a metadata format change. This producer fix alone does not
+enable ordinary dependency-body emission.
+
 The KLIB provider retains each formal's exact normalized semantic type alongside the full generic
 signature. Both use the same metadata identities, enclosing bounds and bound-normalization helper;
 the frozen backend handoff copies the formal types unchanged. Full bounds can contain deeper

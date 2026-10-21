@@ -100,7 +100,15 @@ mod tests {
             formals: Vec::new(),
             visibility: Visibility::Public,
             modality: KotlinModality::Open,
-            setter_visibility: Visibility::Public,
+            getter_modifiers: crate::metadata::semantic::KotlinAccessorModifiers::default_for(
+                Visibility::Public,
+                KotlinModality::Open,
+            ),
+            setter_modifiers: crate::metadata::semantic::KotlinAccessorModifiers::default_for(
+                Visibility::Public,
+                KotlinModality::Open,
+            ),
+            is_external: false,
             setter_parameter_name: None,
             is_var: false,
             is_const: false,

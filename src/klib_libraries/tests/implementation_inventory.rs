@@ -553,7 +553,15 @@ pub(super) fn fixture_property(name: &str, mutable: bool) -> KotlinProperty {
         formals: Vec::new(),
         visibility: Visibility::Public,
         modality: KotlinModality::Final,
-        setter_visibility: Visibility::Public,
+        getter_modifiers: crate::metadata::semantic::KotlinAccessorModifiers::default_for(
+            Visibility::Public,
+            KotlinModality::Final,
+        ),
+        setter_modifiers: crate::metadata::semantic::KotlinAccessorModifiers::default_for(
+            Visibility::Public,
+            KotlinModality::Final,
+        ),
+        is_external: false,
         setter_parameter_name: None,
         is_var: mutable,
         is_const: false,
