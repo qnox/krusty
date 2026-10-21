@@ -4332,6 +4332,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `klib_libraries::tests::analysis::an_omitted_constant_default_is_the_klib_parameter_default` and
   `…_constructor_default_is_the_klib_parameter_default`, plus
   `klib_libraries::parameter_defaults::tests`.
+- **KLIB collection roles come from authenticated platform declarations.** The selected platform
+  stdlib's sixteen canonical collection interfaces publish their existing collection kind and
+  read-only/mutable face. Publication validates an interface with the exact own and total type
+  parameter arity (two for map/entry faces, one otherwise), without an enclosing instance. A
+  malformed authenticated header rejects the provider with its full classifier identity; an
+  ordinary dependency with an identical name never receives a builtin role. Native iteration and
+  type-check consumers read these normalized facts without reconstructing roles from names.
+  This changes no metadata wire format. Tests:
+  `klib_libraries::tests::classes::collection_roles`; existing Native box-corpus iteration also
+  consumes the published roles, including `unsignedTypes/iterateOverListOfBoxedUnsignedValues.kt`.
 - **A KLIB member extension publishes both of its receivers.** Its classifier owns the implicit
   dispatch receiver, while the classifier member record retains the extension receiver after any
   context parameters and before its value parameters. The callable's source-argument signature
@@ -11262,6 +11272,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   bare `return` with no line. (A sealed class's `write$Self` and an abstract class's
   `PolymorphicSerializer` companion are not generated yet.)
   Test: `tests/open_serializable_write_self_e2e.rs`.
+- **`write$Self` reads an overridable property through its getter.** It reads a final property's
+  backing field, as kotlinc's JVM lowering does for a default getter, but an open or overriding
+  property's getter can be overridden, so kotlinc calls it: `override val name` is read with
+  `invokevirtual getName`, a plain `val tag` with `getfield`. The getter is chosen from the
+  property's modality alone; a target that cannot describe its result is a compiler error, never a
+  field read. A source-declared getter is called as that property's checked getter, like a source
+  read, so a value-class result keeps its mangled JVM name (`getU-pVg5ArA`).
+  Test: `tests/serialized_override_getter_e2e.rs`.
 - **A concrete generic element is cached; a generic class's descriptor and accessor follow
   kotlinc.** `val g: G<Int>` over a same-file generic `@Serializable class G<T>` is serialized by
   `new G.$serializer(IntSerializer.INSTANCE)`, a constructed serializer, so the holder caches it in

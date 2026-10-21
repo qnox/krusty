@@ -13,6 +13,7 @@ mod archives;
 mod builtin_realizations;
 mod classifier_records;
 mod classifier_signatures;
+mod collection_roles;
 mod declaration_bodies;
 mod declaration_signatures;
 mod direct_c_calls;

@@ -1,5 +1,7 @@
 //! Classes published by the KLIB provider, with their constructors and members.
 
+mod collection_roles;
+
 use crate::fx_hash::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
