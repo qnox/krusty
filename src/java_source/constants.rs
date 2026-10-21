@@ -61,76 +61,81 @@ impl JavaConstant {
 /// The literal spelled by `literal` (a lexed number, with its suffix) under `negative` sign, or
 /// `None` for a malformed or out-of-range literal or a hexadecimal floating-point one.
 pub(super) fn number_literal(literal: &str, negative: bool) -> Option<JavaConstant> {
-    let text = literal.replace('_', "");
-    let lower = text.to_ascii_lowercase();
+    let lower = literal.replace('_', "").to_ascii_lowercase();
     let (radix, digits) = if let Some(rest) = lower.strip_prefix("0x") {
+        if rest.contains('p') {
+            return None;
+        }
         (16, rest)
     } else if let Some(rest) = lower.strip_prefix("0b") {
         (2, rest)
-    } else if lower.len() > 1
-        && lower.starts_with('0')
-        && lower
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || byte == b'l')
-    {
-        (8, &lower[1..])
+    } else if lower.contains(['.', 'e']) || lower.ends_with(['f', 'd']) {
+        return floating_literal(&lower, negative);
     } else {
-        (10, lower.as_str())
-    };
-    let floating = radix == 10 && (digits.contains(['.', 'e']) || digits.ends_with(['f', 'd']));
-    if floating {
-        let sign = if negative { "-" } else { "" };
-        return if let Some(value) = digits.strip_suffix('f') {
-            format!("{sign}{value}")
-                .parse::<f32>()
-                .ok()
-                .map(JavaConstant::Float)
+        let body = lower.strip_suffix('l').unwrap_or(&lower);
+        if body.len() > 1 && body.starts_with('0') {
+            (8, &lower[1..])
         } else {
-            let value = digits.strip_suffix('d').unwrap_or(digits);
-            format!("{sign}{value}")
-                .parse::<f64>()
-                .ok()
-                .map(JavaConstant::Double)
-        };
-    }
-    if radix == 16 && digits.contains('p') {
-        return None;
-    }
+            (10, lower.as_str())
+        }
+    };
     let (digits, long) = match digits.strip_suffix('l') {
         Some(digits) => (digits, true),
         None => (digits, false),
     };
     let magnitude = u64::from_str_radix(digits, radix).ok()?;
-    // A decimal literal states a magnitude, which only `-` may take to the type's minimum; the
-    // other radixes state the two's-complement bits of the value (JLS §3.10.1).
-    let bits = if long { 64 } else { 32 };
-    let value = if radix == 10 {
-        let limit = (1u64 << (bits - 1)) - u64::from(!negative);
+    if radix == 10 {
+        // A decimal literal states a magnitude, which only `-` may take to the type's minimum
+        // (JLS §3.10.1).
+        let limit = if long { 1u64 << 63 } else { 1u64 << 31 } - u64::from(!negative);
         if magnitude > limit {
             return None;
         }
-        let signed = magnitude as i128;
-        (if negative { -signed } else { signed }) as i64
-    } else {
-        if bits == 32 && magnitude > u64::from(u32::MAX) {
-            return None;
-        }
-        let wrapped = if bits == 32 {
-            i64::from(magnitude as u32 as i32)
+        let value = if negative {
+            -i128::from(magnitude)
         } else {
-            magnitude as i64
+            i128::from(magnitude)
         };
-        if negative {
-            wrapped.wrapping_neg()
+        return Some(if long {
+            JavaConstant::Long(i64::try_from(value).ok()?)
         } else {
-            wrapped
-        }
-    };
+            JavaConstant::Int(i32::try_from(value).ok()?)
+        });
+    }
+    // The other radixes state the two's-complement bits of a value of the literal's own width, and
+    // a unary `-` negates at that width: `-0x80000000` is still `Integer.MIN_VALUE`.
     Some(if long {
-        JavaConstant::Long(value)
+        let value = magnitude as i64;
+        JavaConstant::Long(if negative {
+            value.wrapping_neg()
+        } else {
+            value
+        })
     } else {
-        JavaConstant::Int(i32::try_from(value).ok()?)
+        let value = u32::try_from(magnitude).ok()? as i32;
+        JavaConstant::Int(if negative {
+            value.wrapping_neg()
+        } else {
+            value
+        })
     })
+}
+
+/// A decimal floating-point literal, rounded once to its own type (`f` for `float`, else `double`).
+fn floating_literal(lower: &str, negative: bool) -> Option<JavaConstant> {
+    let sign = if negative { "-" } else { "" };
+    if let Some(value) = lower.strip_suffix('f') {
+        format!("{sign}{value}")
+            .parse::<f32>()
+            .ok()
+            .map(JavaConstant::Float)
+    } else {
+        let value = lower.strip_suffix('d').unwrap_or(lower);
+        format!("{sign}{value}")
+            .parse::<f64>()
+            .ok()
+            .map(JavaConstant::Double)
+    }
 }
 
 #[cfg(test)]
@@ -163,6 +168,42 @@ mod tests {
         assert_eq!(number_literal("10L", true), Some(JavaConstant::Long(-10)));
         assert_eq!(
             number_literal("9223372036854775808L", true),
+            Some(JavaConstant::Long(i64::MIN))
+        );
+        assert_eq!(number_literal("9223372036854775808L", false), None);
+        assert_eq!(number_literal("0x1_0000_0000", false), None);
+        assert_eq!(number_literal("08", false), None);
+        assert_eq!(number_literal("0x", false), None);
+    }
+
+    #[test]
+    fn zero_long_literals_are_decimal() {
+        assert_eq!(number_literal("0L", false), Some(JavaConstant::Long(0)));
+        assert_eq!(number_literal("0l", true), Some(JavaConstant::Long(0)));
+        assert_eq!(number_literal("00L", false), Some(JavaConstant::Long(0)));
+        assert_eq!(number_literal("017L", false), Some(JavaConstant::Long(15)));
+    }
+
+    #[test]
+    fn non_decimal_negation_wraps_at_the_literal_width() {
+        assert_eq!(
+            number_literal("0x80000000", true),
+            Some(JavaConstant::Int(i32::MIN))
+        );
+        assert_eq!(
+            number_literal("020000000000", true),
+            Some(JavaConstant::Int(i32::MIN))
+        );
+        assert_eq!(
+            number_literal("0b1000_0000_0000_0000_0000_0000_0000_0000", true),
+            Some(JavaConstant::Int(i32::MIN))
+        );
+        assert_eq!(
+            number_literal("0xFFFFFFFF", true),
+            Some(JavaConstant::Int(1))
+        );
+        assert_eq!(
+            number_literal("0x8000000000000000L", true),
             Some(JavaConstant::Long(i64::MIN))
         );
     }

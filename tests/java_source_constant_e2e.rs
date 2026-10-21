@@ -25,7 +25,14 @@ fn a_java_source_literal_constant_is_inlined_like_kotlinc() {
              fun small(): Short = Config.SMALL\n\
              fun tiny(): Byte = Config.TINY\n\
              fun name(): String = Config.NAME\n\
-             fun mutable(): Boolean = Config.mutable\n",
+             fun mutable(): Boolean = Config.mutable\n\
+             fun zero(): Long = Config.ZERO\n\
+             fun plusZero(): Long = Config.PLUS_ZERO\n\
+             fun minusZero(): Long = Config.MINUS_ZERO\n\
+             fun hexMin(): Int = Config.HEX_MIN\n\
+             fun octalMin(): Int = Config.OCTAL_MIN\n\
+             fun binaryMin(): Int = Config.BINARY_MIN\n\
+             fun hexLongMin(): Long = Config.HEX_LONG_MIN\n",
         ),
         (
             "p/Config.java",
@@ -46,6 +53,13 @@ fn a_java_source_literal_constant_is_inlined_like_kotlinc() {
              \x20   public static final byte TINY = -128;\n\
              \x20   public static final String NAME = \"release\";\n\
              \x20   public static boolean mutable = false;\n\
+             \x20   public static final long ZERO = 0L;\n\
+             \x20   public static final long PLUS_ZERO = +0L;\n\
+             \x20   public static final long MINUS_ZERO = -0L;\n\
+             \x20   public static final int HEX_MIN = -0x80000000;\n\
+             \x20   public static final int OCTAL_MIN = -020000000000;\n\
+             \x20   public static final int BINARY_MIN = -0b10000000000000000000000000000000;\n\
+             \x20   public static final long HEX_LONG_MIN = -0x8000000000000000L;\n\
              }\n",
         ),
     ]);
