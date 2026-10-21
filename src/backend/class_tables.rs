@@ -39,6 +39,8 @@ pub(crate) mod fixtures;
 mod hierarchy;
 mod interface_slots;
 mod members;
+pub(crate) mod module_slots;
+mod planned_vtable;
 #[cfg(test)]
 mod tests;
 
@@ -250,10 +252,12 @@ fn any_vtable() -> (Vec<Slot>, HashMap<SlotKey, u32>) {
     (vtable, slots)
 }
 
-/// Build the table of every class in `ir`, superclasses first.
+/// Build the table of every class in `ir`, superclasses first. A class `plan` numbers takes its
+/// numbers from it, so a file that dispatches through the class reads the same ones.
 pub(crate) fn build(
     representation: &dyn Representation,
     ir: &IrFile,
+    plan: &module_slots::ModuleSlotPlan,
 ) -> Result<ClassTables, Unsupported> {
     let order = hierarchy::hierarchy_order(representation, ir)?;
     // Before the tables because the program-wide interface region uses the complete transitive
@@ -268,7 +272,17 @@ pub(crate) fn build(
                     .as_ref()
                     .expect("superclasses are tabled first")
             });
-            class_vtable::class_table(representation, ir, id, superclass, parent)?
+            match plan.table(ir.classes[id as usize].fq_name) {
+                Some(Ok(planned)) => planned_vtable::planned_class_table(
+                    representation,
+                    ir,
+                    id,
+                    superclass,
+                    parent,
+                    planned,
+                )?,
+                _ => class_vtable::class_table(representation, ir, id, superclass, parent)?,
+            }
         };
         tables[id as usize] = Some(table);
     }

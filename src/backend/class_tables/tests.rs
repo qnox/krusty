@@ -21,7 +21,11 @@ impl Representation for IntsAndReferences {
 }
 
 fn tables(ir: &IrFile) -> Result<ClassTables, Unsupported> {
-    build(&IntsAndReferences, ir)
+    build(
+        &IntsAndReferences,
+        ir,
+        &super::module_slots::ModuleSlotPlan::empty(),
+    )
 }
 
 #[test]
@@ -132,7 +136,12 @@ fn a_superclass_no_file_declares_is_declined_unless_the_target_owns_it() {
                 .to_string()
         )
     );
-    let owned = build(&OwnsEverything, &ir).expect("tables");
+    let owned = build(
+        &OwnsEverything,
+        &ir,
+        &super::module_slots::ModuleSlotPlan::empty(),
+    )
+    .expect("tables");
     assert_eq!(owned.table(error).superclass, None);
 }
 

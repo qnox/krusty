@@ -9,6 +9,7 @@ mod dependency_facts;
 mod dependency_metadata;
 mod entry;
 pub(crate) mod local_properties;
+pub(crate) mod module_classes;
 mod module_facts;
 
 #[cfg(test)]
@@ -103,6 +104,13 @@ pub trait Backend {
     /// Whether this backend emits compiler-owned executable bodies selected from dependencies.
     /// Metadata writers leave this disabled: their output describes the source module only.
     fn emits_dependency_support(&self) -> bool {
+        false
+    }
+
+    /// Whether this backend numbers the dispatch slots of the module's classes itself, so a file
+    /// needs the module's class shapes ([`BackendModuleFacts::with_classes`]) to dispatch through
+    /// a class another file declares.
+    fn numbers_slots(&self) -> bool {
         false
     }
 
