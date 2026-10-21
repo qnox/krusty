@@ -2295,11 +2295,32 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   property view of a function (`ClosedRange.isEmpty`, whose getter IS the function) is not a second
   slot. Recorded gaps: a forwarder over the member's OWN type parameter (`fun <T> echo`) omits
   kotlinc's `<T:...>` `Signature` (the record does not carry the member's type-parameter
-  declarations), and a value-class substitute (`I<Z>`) keeps the erased shape where kotlinc writes
-  a mangled typed forwarder
+  declarations), and a suspend member keeps its declared CPS shape where kotlinc also specializes
+  it
   (`tests/jvm_default_mode_e2e.rs::a_specializing_supertype_types_the_inherited_default_like_kotlinc`,
   `a_kotlinc_consumer_links_against_a_specialized_inherited_default`,
   `specialized_inherited_defaults_run_in_every_shape`).
+  A substitute that is a VALUE CLASS (`I<Z>`, including a value class substituting itself,
+  `L : IFoo<L>`) gives the fake override a value-class signature of its own, which kotlinc names
+  like any member mentioning a value class: the declared name mangled over the SUBSTITUTED
+  parameters and result (`foo-IQRRRT4(I)` for `foo(x: T)`, `next-GKOAj6k()I` for `next(): T`,
+  `getP-m98lmvQ()LZ;` for `val p: T?`; a non-value position contributes the same `_` it does in
+  the declaration's hash). The typed forwarder takes the carriers, boxes each with `box-impl` for
+  the declaration's erased slot and unboxes a carried result with `checkcast`/`unbox-impl`; a
+  substituted value-class result is never re-boxed to a wrapper, while another substituted
+  primitive result alongside it still is (`Integer f-IQRRRT4(int)` for `U<Z, Int>`). The erased
+  bridge keeps the declaration's own name and descriptor and unboxes into the typed forwarder.
+  An `Any` carrier leaves the descriptor unchanged but still changes the mangled name: method
+  identity includes BOTH, so the erased bridge remains necessary and an overriding `super` call
+  selects the mangled forwarder
+  (`tests/jvm_default_mode_e2e.rs::an_any_carrier_default_keeps_distinct_physical_method_identities`,
+  `an_any_carrier_default_runs_through_its_bridge_and_overriding_super_call`).
+  A value class's static takes the same mangled name (`foo--h0D71M(JJ)`, never `foo-impl`), boxes
+  its carrier and arguments and calls the erased entry; a call on the value class selects it with
+  carrier arguments. The forwarder labels an extension receiver after its own escaped name
+  (`$this$bar_u2d_u2dh0D71M`), the static after the declared name (`$this$bar`). A `super` call
+  through a class holding such a forwarder names it (`invokespecial D.g-e_ggP3o(II)`)
+  (`tests/value_class_interface_defaults_e2e.rs`).
   A sub-interface REPUBLISHES the surface for every inherited default it
   does not redeclare, even when it declares nothing itself; a member inherited from a
   `disable`-compiled dependency gets a holder forward straight to that dependency's holder (behind
@@ -12627,6 +12648,32 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   of `addAll` is the method the caller hits. Tests: `tests/collection_bridge_barrier_e2e.rs`.
   Corpus: `inlineClasses/inlineClassCollection/*` (collection, list and map, with their `Generic`
   forms, and `inlineMutableCollectionBulkAdd`).
+- **A read-only iterator realizes its mutable members as throwing stubs.** Kotlin's `Iterator` and
+  `ListIterator` map onto `java.util.Iterator`/`ListIterator`, whose `remove`, `set` and `add` a
+  Java caller can reach. Like kotlinc's `CollectionStubMethodLowering`, a class (abstract,
+  anonymous and enum classes included, interfaces not) that strictly extends a read-only face
+  without its mutable counterpart gets a `public` method for each member the mutable declaration
+  itself declares in `.kotlin_builtins`, substituted with the face's type arguments, unless the
+  class declares a member of that name and parameter shape (abstract or not) or inherits a
+  non-abstract one from a superclass or an interface default. Each throws
+  `UnsupportedOperationException("Operation is not supported for read-only collection")`, has a
+  `this`-and-parameters `LocalVariableTable` named after the mutable declaration, no line numbers,
+  and a generic `Signature` when one differs from its descriptor (`set(TT;)V`). Only the most
+  specific related face counts (`ListIterator` over `Iterator`). Because `MutableListIterator`
+  redeclares `next` and `hasNext`, an abstract `ListIterator` that implements neither gets stubs
+  for them too (KT-36724). The stubs follow the declared members in the mutable declaration's
+  order. A stub whose descriptor differs from the mutable declaration's erasure (`set(I)V` of a
+  `ListIterator<Int>`) also gets an `ACC_PUBLIC|ACC_BRIDGE|ACC_SYNTHETIC` throwing bridge
+  (`set(Ljava/lang/Object;)V`), placed after the ordinary bridges. A subclass does not repeat a
+  stub a superclass already realizes, but it does when an abstract superclass declares the member
+  abstract. Abstract superclass declarations are compared after applying the superclass's type
+  arguments in the child context: `Base<T>.set(T)` suppresses the parent's stub but not an applied
+  child's `set(String)` stub and erased bridge. A concrete generic intermediate's existing stub is
+  still inherited rather than repeated. The stubs never enter Kotlin metadata. The collection faces
+  (`Iterable`, `Collection`, `List`, `Set`, `Map`, `Map.Entry`), with `removeAt`, the lifted
+  `iterator` result types, the JDK members and `toArray`, follow in later slices. Tests:
+  `tests/read_only_iterator_stubs_e2e.rs`. Corpus: `objects/useAnonymousObjectAsIterator.kt`,
+  `builtinStubMethods/customReadOnlyIterator.kt`.
 - **A nested value class over a reference carrier is read as its carrier.** In `ZN(val z: Z1?)`
   with `Z1(val x: En)`, `Z1?` is carried as `En?`, so `zn.z` and `zn.z!!` already are `Z1`'s
   carrier and `.x` of them is that carrier itself, with no cast. krusty took the unboxed property

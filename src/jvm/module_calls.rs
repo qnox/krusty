@@ -645,7 +645,7 @@ pub(super) fn realize_super_calls(
             // call with its typed forwarder; its erased entry is a bridge back to that forwarder.
             let specialized = match (declaration, interface, &realization) {
                 (Some(declaration), false, crate::libraries::MemberRealization::Dispatch) => {
-                    crate::jvm::inherited_default_realization::specialized_super_descriptor(
+                    crate::jvm::inherited_default_realization::specialized_super_entry(
                         ir,
                         callables,
                         owner,
@@ -655,10 +655,26 @@ pub(super) fn realize_super_calls(
                 }
                 _ => None,
             };
-            let descriptor = match specialized {
-                Some(specialized) => specialized,
-                None if descriptor.is_empty() => crate::jvm::names::method_descriptor(&params, ret),
-                None => descriptor,
+            let (name, descriptor, source) = match specialized {
+                // A value-class-specialized forwarder is not the selected declaration's own
+                // realization: it no longer names that declaration as its source, and its
+                // arguments and result are represented for the substituted signature.
+                Some(crate::jvm::inherited_default_realization::SpecializedSuperEntry {
+                    name,
+                    descriptor,
+                    value_class_signature: Some((parameters, result)),
+                }) => {
+                    ir.call_declared_params.insert(raw as ExprId, parameters);
+                    ir.call_declared_ret.insert(raw as ExprId, result);
+                    (name, descriptor, None)
+                }
+                Some(specialized) => (specialized.name, specialized.descriptor, source),
+                None if descriptor.is_empty() => (
+                    name,
+                    crate::jvm::names::method_descriptor(&params, ret),
+                    source,
+                ),
+                None => (name, descriptor, source),
             };
             if enclosing_dispatch {
                 let class = ir
