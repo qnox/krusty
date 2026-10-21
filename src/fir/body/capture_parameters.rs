@@ -1,14 +1,19 @@
 //! Where a lifted local callable takes each captured value and captured receiver.
 //!
 //! The checked body lists its captured values, then its captured receivers; that is their identity
-//! (`FirCaptureParameter` ordinals). kotlinc's closure annotator instead takes the dispatch receiver
-//! where the body first uses it, among the values it reads directly: `prefix + count` in a member
-//! captures `this` first, `count + prefix` captures `count` first. A capture the body reaches only
-//! through a nested closure keeps its relative place after the ones it reads directly.
+//! (`FirCaptureParameter` ordinals). kotlinc's closure annotator instead takes first the captures
+//! the body reads itself, where it first reads them: `prefix + count` in a member captures `this`
+//! first, `count + prefix` captures `count` first, and `if (length > 0) "" + count + prefix` in a
+//! member extension takes the extension receiver, then `count`, then `this`. After those come the
+//! captures of each nested lambda and called local function, in the order the body meets them and
+//! each in that callee's own order: `plainIt { prefix } + count` captures `count`, then `this`.
 
 use crate::fx_hash::HashMap;
 
-use super::{FirBody, FirCaptureSource, FirExprKind, FirStatementKind, OriginStore};
+use super::{
+    DeclarationId, FirBody, FirCaptureSource, FirExprKind, FirStatementKind, LocalCallableId,
+    OriginStore,
+};
 
 /// One lifted capture parameter, by its ordinal among the body's values or receivers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,93 +57,271 @@ impl FirBody {
     /// Order the capture parameters of every local function and lambda nested in this body, once
     /// their capture sets are final.
     pub(crate) fn order_nested_capture_parameters(&mut self, origins: &OriginStore) {
-        for statement in &mut self.statements {
-            if let FirStatementKind::LocalFunction { body, .. } = &mut statement.kind {
-                body.order_capture_parameters(origins);
-            }
+        let mut closures = Vec::new();
+        collect_closures(self, None, 0, origins, &mut Vec::new(), &mut closures);
+        let mut orders = vec![None; closures.len()];
+        for closure in 0..closures.len() {
+            build_order(&closures, closure, &mut orders);
         }
-        for expression in &mut self.expressions {
-            if let FirExprKind::Lambda { body, .. } = &mut expression.kind {
-                body.order_capture_parameters(origins);
+        apply_orders(self, 0, &orders, &mut 0);
+    }
+}
+
+/// A capture named by the body that supplies it, so the same capture compares equal from every
+/// nested callable that forwards it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CaptureKey {
+    Value {
+        level: u32,
+        source: FirCaptureSource,
+    },
+    Receiver {
+        level: u32,
+        current: bool,
+        depth: u32,
+        path: Box<[DeclarationId]>,
+    },
+}
+
+/// What one lifted callable's order is built from: the captures its body reads itself, by first
+/// read, and the nested closures it meets, in source order.
+#[derive(Default)]
+struct Closure {
+    reads: Vec<CaptureKey>,
+    includes: Vec<usize>,
+}
+
+/// The local functions, then the lambdas, declared directly in `body`.
+fn nested_bodies(body: &FirBody) -> impl Iterator<Item = (LocalCallableId, &FirBody)> {
+    let functions = body
+        .statements
+        .iter()
+        .filter_map(|statement| match &statement.kind {
+            FirStatementKind::LocalFunction { callable, body, .. } => Some((*callable, &**body)),
+            _ => None,
+        });
+    let lambdas = body
+        .expressions
+        .iter()
+        .filter_map(|expression| match &expression.kind {
+            FirExprKind::Lambda { callable, body, .. } => Some((*callable, &**body)),
+            _ => None,
+        });
+    functions.chain(lambdas)
+}
+
+/// Give `body`'s nested callables consecutive closure indices, then record `body`'s own closure
+/// (when it is itself lifted, as `index`) and recurse, depth first. `apply_orders` walks the same
+/// way.
+fn collect_closures(
+    body: &FirBody,
+    index: Option<usize>,
+    level: u32,
+    origins: &OriginStore,
+    scopes: &mut Vec<HashMap<LocalCallableId, usize>>,
+    closures: &mut Vec<Closure>,
+) {
+    let first = closures.len();
+    let mut scope = HashMap::default();
+    for (offset, (callable, _)) in nested_bodies(body).enumerate() {
+        scope.insert(callable, first + offset);
+        closures.push(Closure::default());
+    }
+    scopes.push(scope);
+    if let Some(index) = index {
+        let mut closure = closure_of(body, level, origins, scopes);
+        closure.includes.retain(|&include| include != index);
+        closures[index] = closure;
+    }
+    let nested_level = level
+        .checked_add(1)
+        .expect("too many nested capture bodies");
+    for (offset, (_, nested)) in nested_bodies(body).enumerate() {
+        collect_closures(
+            nested,
+            Some(first + offset),
+            nested_level,
+            origins,
+            scopes,
+            closures,
+        );
+    }
+    scopes.pop();
+}
+
+/// The direct reads and met closures of the lifted `body` at `level`; `scopes` ends with the scope
+/// of `body`'s own nested callables.
+fn closure_of(
+    body: &FirBody,
+    level: u32,
+    origins: &OriginStore,
+    scopes: &[HashMap<LocalCallableId, usize>],
+) -> Closure {
+    let supplier = |enclosing_depth: u32| {
+        level
+            .checked_sub(1)
+            .and_then(|parent| parent.checked_sub(enclosing_depth))
+    };
+    let resolve = |depth: u32, callable: &LocalCallableId| {
+        scopes
+            .len()
+            .checked_sub(depth as usize + 1)
+            .and_then(|scope| scopes[scope].get(callable))
+            .copied()
+    };
+    let mut reads = Vec::new();
+    let mut includes = Vec::new();
+    for expression in &body.expressions {
+        let Some(position) = origins
+            .source_span(expression.origin)
+            .map(|(_, span)| span.lo)
+        else {
+            continue;
+        };
+        match &expression.kind {
+            FirExprKind::CapturedValueRead {
+                enclosing_depth,
+                source,
             }
+            | FirExprKind::CapturedValueWrite {
+                enclosing_depth,
+                source,
+                ..
+            } => {
+                if let Some(level) = supplier(*enclosing_depth) {
+                    let source = FirCaptureSource::Value(*source);
+                    reads.push((position, CaptureKey::Value { level, source }));
+                }
+            }
+            FirExprKind::CapturedImplicitReceiver {
+                enclosing_depth,
+                current,
+                depth,
+                path,
+            } => {
+                if let Some(level) = supplier(*enclosing_depth) {
+                    let key = CaptureKey::Receiver {
+                        level,
+                        current: *current,
+                        depth: *depth,
+                        path: path.clone(),
+                    };
+                    reads.push((position, key));
+                }
+            }
+            FirExprKind::LocalCall { target, .. }
+            | FirExprKind::LocalCallableReference { target, .. } => {
+                includes.extend(
+                    resolve(target.body_depth, &target.callable).map(|closure| (position, closure)),
+                );
+            }
+            FirExprKind::Lambda { callable, .. } => {
+                includes.extend(resolve(0, callable).map(|closure| (position, closure)));
+            }
+            _ => {}
         }
     }
+    reads.sort_by_key(|(position, _)| *position);
+    includes.sort_by_key(|(position, _)| *position);
+    Closure {
+        reads: reads.into_iter().map(|(_, key)| key).collect(),
+        includes: includes.into_iter().map(|(_, closure)| closure).collect(),
+    }
+}
 
-    fn order_capture_parameters(&mut self, origins: &OriginStore) {
-        self.order_nested_capture_parameters(origins);
+/// The capture order of closure `index`: its direct reads, then each met closure's order. A closure
+/// met again while its own order is being built contributes what it has so far.
+fn build_order(closures: &[Closure], index: usize, orders: &mut [Option<Vec<CaptureKey>>]) {
+    if orders[index].is_some() {
+        return;
+    }
+    let mut order = Vec::new();
+    for key in &closures[index].reads {
+        if !order.contains(key) {
+            order.push(key.clone());
+        }
+    }
+    orders[index] = Some(order.clone());
+    for &include in &closures[index].includes {
+        build_order(closures, include, orders);
+        for key in orders[include].iter().flatten() {
+            if !order.contains(key) {
+                order.push(key.clone());
+            }
+        }
+        orders[index] = Some(order.clone());
+    }
+}
+
+fn apply_orders(
+    body: &mut FirBody,
+    level: u32,
+    orders: &[Option<Vec<CaptureKey>>],
+    next: &mut usize,
+) {
+    let first = *next;
+    *next += nested_bodies(body).count();
+    let nested_level = level
+        .checked_add(1)
+        .expect("too many nested capture bodies");
+    let mut offset = 0;
+    let mut apply = |nested: &mut FirBody| {
+        let order = orders[first + offset].as_deref().unwrap_or_default();
+        nested.order_capture_parameters(nested_level, order);
+        apply_orders(nested, nested_level, orders, next);
+        offset += 1;
+    };
+    for statement in &mut body.statements {
+        if let FirStatementKind::LocalFunction { body, .. } = &mut statement.kind {
+            apply(body);
+        }
+    }
+    for expression in &mut body.expressions {
+        if let FirExprKind::Lambda { body, .. } = &mut expression.kind {
+            apply(body);
+        }
+    }
+}
+
+impl FirBody {
+    /// Store the physical order of this lifted body's captures, at `level`, ranked by `order`; a
+    /// capture `order` does not name keeps its relative place after the ones it does.
+    fn order_capture_parameters(&mut self, level: u32, order: &[CaptureKey]) {
         self.capture_parameters = Box::default();
-        let mut values = HashMap::default();
-        let mut receiver_reads = vec![u32::MAX; self.implicit_receiver_captures.len()];
-        for expression in &self.expressions {
-            let Some(position) = origins
-                .source_span(expression.origin)
-                .map(|(_, span)| span.lo)
-            else {
-                continue;
-            };
-            match &expression.kind {
-                FirExprKind::CapturedValueRead {
-                    enclosing_depth,
-                    source,
-                }
-                | FirExprKind::CapturedValueWrite {
-                    enclosing_depth,
-                    source,
-                    ..
-                } => {
-                    let first = values
-                        .entry((*enclosing_depth, FirCaptureSource::Value(*source)))
-                        .or_insert(position);
-                    *first = (*first).min(position);
-                }
-                FirExprKind::CapturedImplicitReceiver {
-                    enclosing_depth,
-                    current,
-                    depth,
-                    path,
-                } => {
-                    let ordinal = self.implicit_receiver_captures.iter().position(|capture| {
-                        capture.enclosing_depth == *enclosing_depth
-                            && capture.current == *current
-                            && capture.depth == *depth
-                            && capture.path == *path
-                    });
-                    if let Some(first) = ordinal.map(|ordinal| &mut receiver_reads[ordinal]) {
-                        *first = (*first).min(position);
-                    }
-                }
-                _ => {}
+        let rank = |key: Option<CaptureKey>| {
+            key.and_then(|key| order.iter().position(|candidate| *candidate == key))
+                .unwrap_or(usize::MAX)
+        };
+        let supplier = |enclosing_depth: u32| {
+            level
+                .checked_sub(1)
+                .and_then(|parent| parent.checked_sub(enclosing_depth))
+        };
+        let mut parameters = self.capture_parameters();
+        parameters.sort_by_cached_key(|parameter| match *parameter {
+            FirCaptureParameter::Value(ordinal) => {
+                let capture = &self.captures[ordinal as usize];
+                rank(
+                    supplier(capture.enclosing_depth).map(|level| CaptureKey::Value {
+                        level,
+                        source: capture.source,
+                    }),
+                )
             }
-        }
-        let value_reads = self
-            .captures
-            .iter()
-            .map(|capture| {
-                values
-                    .get(&(capture.enclosing_depth, capture.source))
-                    .copied()
-                    .unwrap_or(u32::MAX)
-            })
-            .collect::<Vec<_>>();
-        // Merge the two lists, each in its own order: a receiver goes ahead of the next value when
-        // the body reads it first.
-        let (mut value, mut receiver) = (0, 0);
-        let mut order = Vec::with_capacity(value_reads.len() + receiver_reads.len());
-        while value < value_reads.len() || receiver < receiver_reads.len() {
-            let receiver_first = receiver < receiver_reads.len()
-                && value_reads
-                    .get(value)
-                    .is_none_or(|&first| receiver_reads[receiver] < first);
-            if receiver_first {
-                order.push(FirCaptureParameter::Receiver(index(receiver)));
-                receiver += 1;
-            } else {
-                order.push(FirCaptureParameter::Value(index(value)));
-                value += 1;
+            FirCaptureParameter::Receiver(ordinal) => {
+                let capture = &self.implicit_receiver_captures[ordinal as usize];
+                rank(
+                    supplier(capture.enclosing_depth).map(|level| CaptureKey::Receiver {
+                        level,
+                        current: capture.current,
+                        depth: capture.depth,
+                        path: capture.path.clone(),
+                    }),
+                )
             }
-        }
-        if order != self.capture_parameters() {
-            self.capture_parameters = order.into();
+        });
+        if parameters != self.capture_parameters() {
+            self.capture_parameters = parameters.into();
         }
     }
 }

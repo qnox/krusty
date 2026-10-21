@@ -1,6 +1,6 @@
 //! A lifted lambda or local function takes its captures in the order its body first uses them,
-//! the dispatch receiver among the captured values: `prefix + count` in a member captures `this`
-//! first, `count + prefix` captures `count` first.
+//! receivers among the captured values: `prefix + count` in a member captures `this` first,
+//! `count + prefix` captures `count` first.
 
 use super::common;
 
@@ -51,4 +51,93 @@ fn suspend_lambda_classes_take_the_receiver_where_the_body_first_uses_it() {
     ] {
         byte_identical("capture_first_use_order", SOURCE, class);
     }
+}
+
+const TWO_RECEIVERS: &str = r#"
+fun <T> plainIt(block: () -> T): T = block()
+class Receivers(private val prefix: String) {
+    fun String.condition(count: Int): String {
+        fun loc() = if (length > 0) "" + count + prefix else ""
+        return loc()
+    }
+    fun String.member(count: Int): String {
+        fun loc() = if (prefix.length > 0) "" + count + length else ""
+        return loc()
+    }
+    fun String.lambda(count: Int): String {
+        val f = { if (length > 0) "" + count + prefix else "" }
+        return f()
+    }
+}
+"#;
+
+/// Two captured receivers are ordered between themselves by first use too: a condition the body
+/// reads before its branch puts the extension receiver ahead of `count` and `this`.
+#[test]
+fn lifted_callables_order_two_receivers_by_first_use() {
+    byte_identical(
+        "capture_first_use_two_receivers",
+        TWO_RECEIVERS,
+        "Receivers",
+    );
+}
+
+const NESTED_ONLY: &str = r#"
+fun <T> plainIt(block: () -> T): T = block()
+class Nested(private val prefix: String) {
+    fun receiverFirst(count: Int): String {
+        fun loc() = plainIt { prefix + count }
+        return loc()
+    }
+    fun valueFirst(count: Int): String {
+        fun loc() = plainIt { count.toString() + prefix }
+        return loc()
+    }
+    fun partly(count: Int): String {
+        fun loc() = plainIt { prefix } + count
+        return loc()
+    }
+}
+"#;
+
+/// A local function that reaches its captures only through a nested lambda takes them in the
+/// lambda's order.
+#[test]
+fn local_functions_order_captures_read_through_a_nested_lambda() {
+    byte_identical("capture_first_use_nested_only", NESTED_ONLY, "Nested");
+}
+
+const MET_CLOSURES: &str = r#"
+fun <T> plainIt(block: () -> T): T = block()
+class Met(private val prefix: String) {
+    fun sibling(count: Int): String {
+        fun a() = prefix + count
+        fun b() = a()
+        return b()
+    }
+    fun twoNested(count: Int, other: Long): String {
+        fun loc() = plainIt { "" + other + prefix } + plainIt { "" + count + other }
+        return loc()
+    }
+    fun ownAfter(count: Int, other: Long): String {
+        fun loc() = plainIt { prefix + count } + other
+        return loc()
+    }
+    fun callFirst(count: Int, other: Long): String {
+        fun a() = prefix + count
+        fun loc() = a() + other
+        return loc()
+    }
+    fun lambdaOuter(count: Int, other: Long): String {
+        val f = { plainIt { "" + count + prefix } + other }
+        return f()
+    }
+}
+"#;
+
+/// After its own reads, a callable takes each nested lambda's and called local function's captures
+/// in that callee's order, in the order it meets them.
+#[test]
+fn lifted_callables_take_met_closures_captures_after_their_own() {
+    byte_identical("capture_first_use_met_closures", MET_CLOSURES, "Met");
 }

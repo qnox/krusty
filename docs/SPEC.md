@@ -2646,15 +2646,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Not yet like kotlinc: kotlinc inlines an immediately invoked lambda literal (`{ … }()`), whose
   reads are then the function's own; krusty still lifts it. An anonymous object's own fields are
   still ordered by name.
-- **Lifted captured receiver order.** A lifted lambda or local function takes a captured receiver
-  where its body first reads it among the values it reads directly. A member's `{ prefix + count }`
-  takes `(this, count)` and `{ "" + count + prefix }` takes `(count, this)`, for an indy lambda's
-  static, a local function's static and a suspend lambda's class constructor and fields alike. A
-  capture the body reaches only through a nested closure keeps its relative place after those.
-  Checked FIR keeps the values then the receivers as their identity, and records the physical order
-  beside them once the capture sets are final (`FirCaptureParameter`). Lowering places the lifted
-  parameters, their slots and every construction's arguments by that order, including a streamed
-  caller's explicit capture operands (`tests/capture_first_use_order_e2e.rs`).
+- **Lifted capture order.** A lifted lambda or local function takes first the captures its body
+  reads itself, values and receivers alike, where it first reads them. A member's
+  `{ prefix + count }` takes `(this, count)` and `{ "" + count + prefix }` takes `(count, this)`;
+  a member extension's `if (length > 0) "" + count + prefix` takes the extension receiver, then
+  `count`, then `this`. This holds for an indy lambda's static, a local function's static and a
+  suspend lambda's class constructor and fields alike. After those come the captures of each nested
+  lambda and called local function, in the order the body meets them and each in that callee's own
+  order, skipping ones already taken: `plainIt { prefix } + count` takes `(count, this)`, and a
+  local `b() = a()` takes `a`'s order. Checked FIR keeps the values then the receivers as their
+  identity, and records the physical order beside them once the capture sets are final
+  (`FirCaptureParameter`), naming each capture by the body that supplies it so a forwarded capture
+  matches across nested callables. Lowering places the lifted parameters, their slots and every
+  construction's arguments by that order, including a streamed caller's explicit capture operands
+  (`tests/capture_first_use_order_e2e.rs`).
 - **Inherited member call owner.** A call to an inherited member, or a read or write through an
   inherited property accessor, names the receiver's own class as the owner, as kotlinc does:
   `Leaf.m`, `Leaf.getBase`, `Leaf.hashCode`. An interface default reached through a class receiver
