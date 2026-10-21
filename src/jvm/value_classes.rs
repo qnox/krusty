@@ -25,6 +25,7 @@ mod equality;
 mod function_invocation;
 mod function_references;
 mod hidden_constructors;
+mod impl_call_parameters;
 mod inherited_default_calls;
 mod inline_body_slots;
 mod interface_entries;
@@ -1793,6 +1794,8 @@ pub(crate) fn lower_value_classes(
                 function: Option<u32>,
                 /// The sibling file's declaration, when the call selected one.
                 module_target: Option<crate::fir::CallableId>,
+                /// The static's own checked parameters, when they are not the call's.
+                declared_parameters: Option<Box<[Ty]>>,
             },
             /// Same-value-class non-null `==`/`!=` → `equals-impl0(U, U)Z`, negated for `!=` (kotlinc's ABI).
             VcEq {
@@ -2081,6 +2084,7 @@ pub(crate) fn lower_value_classes(
                                 extension_receiver: ir.extension_receiver_fns.contains(&fid),
                                 function: Some(fid),
                                 module_target: None,
+                                declared_parameters: None,
                             })
                     })
                 }
@@ -2103,6 +2107,7 @@ pub(crate) fn lower_value_classes(
                         extension_receiver: false,
                         function: None,
                         module_target: *module_target,
+                        declared_parameters: None,
                     }
                 }),
             },
@@ -2241,6 +2246,7 @@ pub(crate) fn lower_value_classes(
                     extension_receiver: ir.extension_receiver_fns.contains(&fid),
                     function: Some(fid),
                     module_target: None,
+                    declared_parameters: None,
                 })
             }
             // `x.getV()` getter: identity on an unboxed value, `unbox-impl()` on a boxed one.
@@ -2286,6 +2292,7 @@ pub(crate) fn lower_value_classes(
                     extension_receiver: false,
                     function: None,
                     module_target: None,
+                    declared_parameters: Some(call.realized.declared_parameters.clone()),
                 }),
         };
         let rewrite = match rw {
@@ -2370,6 +2377,7 @@ pub(crate) fn lower_value_classes(
                 extension_receiver,
                 function,
                 module_target,
+                declared_parameters,
             }) => {
                 let default_boxed_parameters = function
                     .and_then(|function| ir.default_stub_boxed_params.get(&function))
@@ -2383,18 +2391,7 @@ pub(crate) fn lower_value_classes(
                     id,
                     representation::carrier_slot(result, &under).unwrap_or(result),
                 );
-                // The physical static call gains the former dispatch receiver at parameter zero.
-                // Keep the checked declaration coordinates aligned with that new argument vector:
-                // otherwise parameter zero from the source declaration is incorrectly applied to
-                // the receiver (for example `X.foo(other: I)` boxes the `X` carrier as though it
-                // were `other`). The receiver remains semantically the value class; this backend
-                // pass alone decides that the selected `*-impl` consumes its carrier.
-                if let Some(parameters) = ir.call_declared_params.get_mut(&id) {
-                    *parameters = std::iter::once(Ty::obj_name(owner))
-                        .chain(parameters.iter().copied())
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice();
-                }
+                impl_call_parameters::align(ir, id, owner, declared_parameters);
                 let inferred_boxed = ReprInputs {
                     rets: &orig_rets,
                     fields: &orig_fields,

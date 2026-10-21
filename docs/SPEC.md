@@ -2295,11 +2295,32 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   property view of a function (`ClosedRange.isEmpty`, whose getter IS the function) is not a second
   slot. Recorded gaps: a forwarder over the member's OWN type parameter (`fun <T> echo`) omits
   kotlinc's `<T:...>` `Signature` (the record does not carry the member's type-parameter
-  declarations), and a value-class substitute (`I<Z>`) keeps the erased shape where kotlinc writes
-  a mangled typed forwarder
+  declarations), and a suspend member keeps its declared CPS shape where kotlinc also specializes
+  it
   (`tests/jvm_default_mode_e2e.rs::a_specializing_supertype_types_the_inherited_default_like_kotlinc`,
   `a_kotlinc_consumer_links_against_a_specialized_inherited_default`,
   `specialized_inherited_defaults_run_in_every_shape`).
+  A substitute that is a VALUE CLASS (`I<Z>`, including a value class substituting itself,
+  `L : IFoo<L>`) gives the fake override a value-class signature of its own, which kotlinc names
+  like any member mentioning a value class: the declared name mangled over the SUBSTITUTED
+  parameters and result (`foo-IQRRRT4(I)` for `foo(x: T)`, `next-GKOAj6k()I` for `next(): T`,
+  `getP-m98lmvQ()LZ;` for `val p: T?`; a non-value position contributes the same `_` it does in
+  the declaration's hash). The typed forwarder takes the carriers, boxes each with `box-impl` for
+  the declaration's erased slot and unboxes a carried result with `checkcast`/`unbox-impl`; a
+  substituted value-class result is never re-boxed to a wrapper, while another substituted
+  primitive result alongside it still is (`Integer f-IQRRRT4(int)` for `U<Z, Int>`). The erased
+  bridge keeps the declaration's own name and descriptor and unboxes into the typed forwarder.
+  An `Any` carrier leaves the descriptor unchanged but still changes the mangled name: method
+  identity includes BOTH, so the erased bridge remains necessary and an overriding `super` call
+  selects the mangled forwarder
+  (`tests/jvm_default_mode_e2e.rs::an_any_carrier_default_keeps_distinct_physical_method_identities`,
+  `an_any_carrier_default_runs_through_its_bridge_and_overriding_super_call`).
+  A value class's static takes the same mangled name (`foo--h0D71M(JJ)`, never `foo-impl`), boxes
+  its carrier and arguments and calls the erased entry; a call on the value class selects it with
+  carrier arguments. The forwarder labels an extension receiver after its own escaped name
+  (`$this$bar_u2d_u2dh0D71M`), the static after the declared name (`$this$bar`). A `super` call
+  through a class holding such a forwarder names it (`invokespecial D.g-e_ggP3o(II)`)
+  (`tests/value_class_interface_defaults_e2e.rs`).
   A sub-interface REPUBLISHES the surface for every inherited default it
   does not redeclare, even when it declares nothing itself; a member inherited from a
   `disable`-compiled dependency gets a holder forward straight to that dependency's holder (behind
