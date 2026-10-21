@@ -767,9 +767,11 @@ impl BodyLowering<'_, '_, '_> {
         let Some(internal) = receiver_ty.obj_internal() else {
             return Err(declined!("`contains` on a `{receiver_ty:?}`"));
         };
-        // An integral range held under `ClosedRange<T>` is the runtime's too, as long as this
-        // file puts no class of its own behind the interface; see [`closed_range_element`].
-        let held_under_interface = closed_range_element(receiver_ty).is_some()
+        // A range held under its stdlib interface is the runtime's too, as long as this file
+        // puts no class of its own behind that interface; see [`closed_range_element`].
+        let floating_element = floating_range(receiver_ty).map(|(_, element)| element);
+        let held_under_interface = (closed_range_element(receiver_ty).is_some()
+            || floating_element.is_some())
             && !self.file.implements_dependency(internal);
         if range_element(internal).is_none() && !held_under_interface {
             return Err(declined!("`contains` on a `{receiver_ty:?}`"));
@@ -789,6 +791,16 @@ impl BodyLowering<'_, '_, '_> {
         // through the guard.
         if !argument_ty.is_jvm_scalar() {
             return Err(declined!("`contains` of a `{argument_ty:?}`"));
+        }
+        if let Some(element) = floating_element {
+            return self.floating_range_call(
+                "kt_floating_range_contains",
+                Ty::Boolean,
+                element,
+                receiver,
+                &[argument],
+                Ty::Boolean,
+            );
         }
         let object = self.reference(receiver)?;
         let Some(value) = self.coerce(argument, argument_ty)? else {

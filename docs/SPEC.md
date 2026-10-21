@@ -17561,6 +17561,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/custom_floating_range_membership_e2e.rs`, box
   `ranges/contains/inComparableRange.kt`.
 
+- **Mixed-width floating range membership keeps its IEEE representation.** An authenticated
+  `ClosedRange.contains` extension reached from an expanded KLIB body may operate on a
+  `ClosedFloatingPointRange<Float>` or `ClosedFloatingPointRange<Double>`. Native uses its
+  floating-range ABI, not the integral-range ABI, evaluates each operand once, and retains the
+  representation guard against program-defined interface implementations. The ordinary shared
+  fixture `tests/box_regressions/floatingRangeContainsMixedWidths.kt` covers both widths, an empty
+  range, NaN and operand effects.
+
 - **A KLIB body's built-in relation is the source comparison.** Kotlin serializes `a < b` (and `<=`,
   `>`, `>=`) on two operands of one primitive type as a call of a compiler built-in,
   `kotlin.internal.ir.less` (`lessOrEqual`, `greater`, `greaterOrEqual`), which no library declares.
