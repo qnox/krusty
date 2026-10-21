@@ -75,6 +75,15 @@ impl SourceFragment {
     }
 }
 
+/// A top-level `actual` that stands for an `expect` declared in another source.
+pub(crate) struct ExpectStandIn {
+    pub(crate) actual: crate::fir::DeclarationId,
+    /// The identity of an `actual typealias`, which is found by identity, not declaration.
+    pub(crate) alias: Option<crate::types::TypeName>,
+    /// The source declaring the `expect`.
+    pub(crate) expect_source: u32,
+}
+
 /// Each source file's [`SourceFragment`], by source index, and the `expect` each top-level
 /// `actual` stands for: a source that sees the `expect` sees the `actual` that replaces it.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -94,12 +103,24 @@ impl SourceFragments {
     }
 
     /// Record the source of the `expect` each `actual` declaration actualizes.
+    /// An `actual typealias` also carries its identity, which replaces the alias's own source.
     pub(crate) fn publish_expect_sources(
         &mut self,
-        expect_sources: impl IntoIterator<Item = (crate::fir::DeclarationId, u32)>,
+        expect_sources: impl IntoIterator<Item = ExpectStandIn>,
     ) {
-        if self.fragments.iter().any(Option::is_some) {
-            self.expect_sources.extend(expect_sources);
+        if !self.fragments.iter().any(Option::is_some) {
+            return;
+        }
+        for ExpectStandIn {
+            actual,
+            alias,
+            expect_source,
+        } in expect_sources
+        {
+            self.expect_sources.insert(actual, expect_source);
+            if let Some(alias) = alias {
+                self.alias_sources.insert(alias, expect_source);
+            }
         }
     }
 

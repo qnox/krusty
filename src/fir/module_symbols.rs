@@ -126,7 +126,10 @@ impl<'a> StreamedModuleSymbols<'a> {
                     .index
                     .declaration_anchor(header.declaration)
                     .map(|anchor| anchor.source.raw());
-                if !self.index.source_sees(self.source_file, declared_in, None) {
+                if !self
+                    .index
+                    .source_sees(self.source_file, declared_in, Some(header.declaration))
+                {
                     return None;
                 }
                 header

@@ -1629,7 +1629,7 @@ impl SymbolSource for ModuleSymbols<'_> {
         }
         // A refined common fragment sees only its own declarations and those of the fragments it
         // refines: the platform declarations that refine it are no candidates there.
-        let sees = |declared_in: Option<u32>, declaration: Option<crate::fir::DeclarationId>| {
+        let sees = |declared_in: Option<u32>, declaration| {
             self.syms
                 .source_fragments
                 .sees(self.source_file, declared_in, declaration)

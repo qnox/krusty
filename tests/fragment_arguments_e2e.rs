@@ -387,3 +387,29 @@ fn an_inferred_common_signature_binds_the_platform_actual_as_kotlinc_does() {
     assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
     assert_eq!(compiled.krusty, compiled.kotlinc);
 }
+
+#[test]
+fn a_common_supertype_actualized_by_a_platform_alias_compiles_as_kotlinc_does() {
+    let compiled = compile_sources(
+        "package p\nexpect open class Lock()\nclass Guarded : Lock() {\n    fun value() = 1\n}\nfun read(guarded: Guarded) = guarded.value()\n",
+        "package p\nactual typealias Lock = java.util.concurrent.locks.ReentrantLock\n",
+        common_and_jvm,
+    );
+    assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
+    // kotlinc also warns that expect/actual classes are Beta, which krusty does not report yet.
+    let beta_warnings = compiled
+        .kotlinc
+        .1
+        .lines()
+        .filter(|line| line.contains(": warning: 'expect'/'actual' classes"))
+        .count();
+    assert_eq!(beta_warnings, 2, "kotlinc: {}", compiled.kotlinc.1);
+    assert_eq!(
+        (
+            compiled.krusty.0,
+            compiled.krusty.1.as_str(),
+            &compiled.krusty.2
+        ),
+        (compiled.kotlinc.0, "", &compiled.kotlinc.2)
+    );
+}

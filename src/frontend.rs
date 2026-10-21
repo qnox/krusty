@@ -291,7 +291,7 @@ struct ActualizedHeaders {
     /// The `actual` declarations that actualized something.
     targets: crate::fx_hash::HashSet<crate::fir::DeclarationId>,
     /// Each top-level `actual` and the source of the `expect` it stands for.
-    expect_sources: Vec<(crate::fir::DeclarationId, u32)>,
+    expect_sources: Vec<crate::source::ExpectStandIn>,
     /// Expect-owned defaults, as stable provider→target work.
     defaults: Vec<crate::fir::DefaultArgumentProvider>,
     /// Implementations that did not write `actual`.
@@ -337,7 +337,11 @@ fn actualize_headers_and_collect_inherited_defaults(
             anchor
                 .owner
                 .is_none()
-                .then_some((pair.actual, anchor.source.raw()))
+                .then(|| crate::source::ExpectStandIn {
+                    actual: pair.actual,
+                    alias: headers.type_alias_identity(pair.actual),
+                    expect_source: anchor.source.raw(),
+                })
         })
         .collect();
     let mut work = Vec::new();
