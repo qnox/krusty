@@ -1930,6 +1930,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `CharSurrogateWhen`, and `CharSurrogateAnnotationArg` in `tests/feature_box_e2e.rs`, plus
   `cross_file_super_ctor_char_defaults_keep_utf16_code_units` in
   `tests/cross_file_ctor_default_e2e.rs` for the sibling-file handoff.
+- **Block comments nest, and an unclosed one is a syntax error at the end of the file.** Each
+  `/*` inside a block comment or KDoc opens another level that its own `*/` closes, so
+  ``/** wraps `/* */` */`` is one comment and `/* a /* b */ c */ val k` declares `k`. A comment still
+  open at the end of the file swallows the rest of the source; the compiler lexer reports kotlinc's
+  `syntax error: Unclosed comment.` at the end of the file (after any trailing newlines), once,
+  and nothing else for the swallowed text. The formatter's lexer keeps the comment text as written
+  and reports nothing. Tests: `tests/nested_block_comment_e2e.rs` (a box run against kotlinc, and
+  two exact kotlinc diagnostic comparisons: an unclosed nested comment and an unclosed comment
+  before trailing newlines); `ordinary_lexer_keeps_shebang_and_nests_block_comments` in
+  `src/lexer.rs`.
 - **A `Char` literal that is not exactly one UTF-16 code unit is REJECTED in the lexer.** The `i2c`
   truncation above is correct only because a *well-formed* literal is in the BMP, so the ill-formed ones
   have to be diagnosed rather than truncated: `const val E = '😀'` used to compile silently to

@@ -647,6 +647,15 @@ impl<'a> Lexer<'a> {
                             self.i += 1;
                         }
                     }
+                    // An unclosed comment runs to the end of the file, where kotlinc reports it.
+                    // The formatter keeps the comment text as written.
+                    if depth > 0 && self.formatting.is_none() {
+                        let end = self.b.len() as u32;
+                        self.diags.error(
+                            Span::new(end, end),
+                            "syntax error: Unclosed comment.".to_string(),
+                        );
+                    }
                     self.retain(RetainedKind::BlockComment, start, self.i);
                 }
                 // Diagnostic-test markers `<!DIAGNOSTIC_NAME!>` (open) and `<!>` (close) that wrap an
