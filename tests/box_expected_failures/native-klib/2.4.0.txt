@@ -79,7 +79,6 @@ boxingOptimization/maxMinByOrNull.kt
 boxingOptimization/progressions.kt
 boxingOptimization/safeCallWithElvisMultipleFiles.kt
 boxingOptimization/taintedValues.kt
-boxingOptimization/unsignedArrayForEach.kt
 branching/when_with_try1.kt
 bridges/complexTraitImpl.kt
 bridges/delegationComplexWithList.kt
@@ -301,7 +300,6 @@ contracts/isNullString.kt
 contracts/kt39374.kt
 contracts/listAppend.kt
 contracts/nestedLambdaInNonInlineCallExactlyOnce.kt
-contracts/nonNullSmartCast.kt
 contracts/referenceToGenericInDeserializedContract.kt
 controlStructures/breakContinueInExpressions/breakInLoopConditions.kt
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/initializerBlock.kt
@@ -1190,7 +1188,6 @@ inlineClasses/unboxValueFromPlatformTypeGeneric.kt
 inlineClasses/unboxValueOfAnyBeforeMethodInvocation.kt
 inlineClasses/unboxValueOfAnyBeforeMethodInvocationGeneric.kt
 inlineClasses/unboxValueOfAnyBeforeMethodInvocationGeneric2.kt
-inlineClasses/unboxValueOfNullableInlineClassUsingInlineFunction.kt
 inlineClasses/valueClassInstanceOfNumberAndComparableInInlineFunction.kt
 inlineEvaluationOrder/arrayAccessLhsDecomposed.kt
 inlineEvaluationOrder/arrayLiteral.kt
@@ -1247,7 +1244,6 @@ lambda/lambda9.kt
 lambda/lambda_kt49360_trivial.kt
 lambda/lambda_kt49360_withFlow.kt
 lambda/lambda_kt49360_wrapBlock.kt
-lower/forLoopsLowering/arrays.kt
 lower/forLoopsLowering/lists.kt
 lower/forLoopsLowering/listsCME.kt
 lower/forLoopsLowering/nested.kt
@@ -2177,7 +2173,6 @@ specialBuiltins/throwableImpl.kt
 strings/MultiDollarInterpolation.kt
 strings/charSequenceGet.kt
 strings/charSequenceSubSequence.kt
-strings/kt13213.kt
 strings/kt13213a.kt
 strings/kt2592.kt
 strings/kt3571.kt
