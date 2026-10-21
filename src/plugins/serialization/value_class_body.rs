@@ -147,6 +147,7 @@ impl ValueClassBody<'_> {
             name,
             getter_descriptor,
             (self.serialized_class, 0),
+            None,
         );
         // kotlinc calls the encoder `encodeInline` returns through a safe call.
         let temporary = 3;

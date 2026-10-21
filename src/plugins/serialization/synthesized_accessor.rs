@@ -4,11 +4,16 @@
 //! Only a field that is a property has a synthesized accessor. The value-class pass renames
 //! that call only through this binding, and retires the binding when it replaces the call.
 
-use crate::ir::{Callee, ClassId, ExprId, IrExpr, IrFile, SynthesizedAccessorCall};
+use crate::ir::{
+    Callee, ClassId, ExprId, FunId, IrExpr, IrFile, IrLocalPropertyLayout, IrVirtualTarget,
+    SynthesizedAccessorCall,
+};
 use crate::names::property_getter_name;
-use crate::types::TypeName;
+use crate::types::{Ty, TypeName};
 
-/// Emit a virtual property getter and bind it to the property that owns `field` when one exists.
+/// Emit a virtual property getter call. A source-declared getter is called as the checked property's
+/// getter, like a source read of it, so the JVM representation passes name it from that identity; a
+/// default getter is bound to the property that owns `field` instead.
 pub(super) fn getter(
     ir: &mut IrFile,
     receiver: ExprId,
@@ -16,22 +21,60 @@ pub(super) fn getter(
     property_name: &str,
     descriptor: String,
     property: (ClassId, u32),
+    declared_getter: Option<FunId>,
 ) -> ExprId {
-    let call = ir.add_expr(IrExpr::Call {
-        callee: Callee::Virtual {
+    let name = property_getter_name(property_name);
+    let callee = match declared_getter {
+        Some(getter) => {
+            let (property_id, ty) = declared_getter_property(ir, getter);
+            Callee::Virtual {
+                owner,
+                name,
+                descriptor: String::new(),
+                params: Some((Vec::new(), ty)),
+                interface: false,
+                module_target: None,
+                target: Some(IrVirtualTarget::PropertyGetter(
+                    crate::fir::ResolvedPropertyOverrideTarget::Module(property_id),
+                )),
+            }
+        }
+        None => Callee::Virtual {
             owner,
-            name: property_getter_name(property_name),
+            name,
             descriptor: format!("(){descriptor}"),
             params: None,
             interface: false,
             module_target: None,
             target: None,
         },
+    };
+    let call = ir.add_expr(IrExpr::Call {
+        callee,
         dispatch_receiver: Some(receiver),
         args: vec![],
     });
-    bind_field_getter(ir, call, property.0, property.1);
+    if declared_getter.is_none() {
+        bind_field_getter(ir, call, property.0, property.1);
+    }
     call
+}
+
+/// The checked property whose source-declared getter is `getter`, and its type.
+fn declared_getter_property(ir: &IrFile, getter: FunId) -> (crate::fir::PropertyId, Ty) {
+    ir.local_property_layouts
+        .iter()
+        .find_map(|(&property, layout)| match layout {
+            IrLocalPropertyLayout::Member {
+                getter: Some(function),
+                ty,
+                ..
+            } if *function == getter => Some((property, *ty)),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!("declared getter {getter} is no checked member property's getter")
+        })
 }
 
 /// Record that `call` is the synthesized getter of the property whose backing field is `field`.
