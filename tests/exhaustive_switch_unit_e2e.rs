@@ -85,6 +85,81 @@ fn a_small_method_drops_the_switch_arms_unit() {
     }
 }
 
+/// A `Unit` switch whose `when` is `Unit` only because it ends in an open `else -> if`: its other
+/// arms keep their `String` type, so each discards its value and the join gets a `Unit`, with a
+/// `box()` that takes such an arm. `slots` sizes the method as [`large_function`] does.
+fn mixed_arm_function(slots: usize) -> String {
+    let declarations: String = (0..slots)
+        .map(|i| format!("    var p{i}: List<String>? = null\n"))
+        .collect();
+    let arms: String = (0..slots)
+        .map(|i| format!("            {i} -> p{i} = d.next(p{i})\n"))
+        .collect();
+    let sum = (0..slots)
+        .map(|i| format!("p{i}.hashCode()"))
+        .collect::<Vec<_>>()
+        .join(" + ");
+    format!(
+        "interface D {{ fun idx(): Int; fun next(o: List<String>?): List<String>?; fun n(): Int }}\n\
+         fun text(): String = \"ignored\"\n\
+         fun big(d: D): Int {{\n\
+         {declarations}\
+         \x20   var go = true\n\
+         \x20   when (d.n()) {{\n\
+         \x20       1 -> text()\n\
+         \x20       2 -> text()\n\
+         \x20       else -> if (d.n() == 5) text()\n\
+         \x20   }}\n\
+         \x20   mark()\n\
+         \x20   while (go) {{\n\
+         \x20       val i = d.idx()\n\
+         \x20       when (i) {{\n\
+         \x20           -1 -> go = false\n\
+         {arms}\
+         \x20           else -> throw IllegalStateException(i.toString())\n\
+         \x20       }}\n\
+         \x20       mark()\n\
+         \x20   }}\n\
+         \x20   return {sum}\n\
+         }}\n\
+         fun mark() {{}}\n\
+         fun box(): String {{\n\
+         \x20   val d = object : D {{\n\
+         \x20       override fun idx() = -1\n\
+         \x20       override fun next(o: List<String>?) = o\n\
+         \x20       override fun n() = 1\n\
+         \x20   }}\n\
+         \x20   big(d)\n\
+         \x20   return \"OK\"\n\
+         }}\n"
+    )
+}
+
+fn assert_mixed_arm_switch_matches_kotlinc(slots: usize, stem: &str) {
+    let source = mixed_arm_function(slots);
+    common::expect_box_ok_with_stdlib(&source, stem);
+    let comparison = common::byte_diff_against_kotlinc_cp(
+        stem,
+        &source,
+        &format!("{stem}Kt"),
+        &[common::stdlib_jar()],
+    )
+    .expect("reference class comparison must be available");
+    if let Err(e) = comparison {
+        panic!("{e}");
+    }
+}
+
+#[test]
+fn a_large_method_discards_a_non_unit_arm_before_its_unit() {
+    assert_mixed_arm_switch_matches_kotlinc(90, "ExhaustiveSwitchMixedArms");
+}
+
+#[test]
+fn a_small_method_discards_a_non_unit_arm() {
+    assert_mixed_arm_switch_matches_kotlinc(3, "ExhaustiveSwitchMixedArmsSmall");
+}
+
 /// A large `$$serializer.deserialize`: its element `when` is the last statement of the decode
 /// loop's body, so the joined `Unit` is popped after that body's locals end.
 #[test]

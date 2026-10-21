@@ -4365,7 +4365,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   locals end before that `pop`. A non-exhaustive switch and an `if`/`else` chain discard each
   branch in the branch. `PopBackwardPropagation` removes the pushes and the `pop` wherever the
   method fits its source-interpreter gate, so only a large method (such as a wide class's
-  `$$serializer.deserialize`) keeps them. Test: `tests/exhaustive_switch_unit_e2e.rs`.
+  `$$serializer.deserialize`) keeps them. A `when` that is `Unit` only because it ends in an open
+  `else -> if` keeps its other arms' own types: such an arm's value is discarded and the `Unit` is
+  materialized after it, never cast to `Unit`. Test: `tests/exhaustive_switch_unit_e2e.rs`.
 - **A subjectless `when` threads false-branch narrowings into later arms**: a later condition or body
   runs only after every earlier arm fell through. Null, compound, and type-test conditions use the
   same narrowing rules as `if` branches.
