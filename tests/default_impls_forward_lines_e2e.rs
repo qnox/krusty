@@ -97,3 +97,34 @@ fn suspend_default_impls_forward_keeps_the_declaration_end_line() {
     );
     assert_eq!(krusty, reference, "suspend DefaultImpls forward differs");
 }
+
+#[test]
+fn default_impls_forward_copies_the_member_and_parameter_annotations() {
+    // kotlinc's forward carries the member's RUNTIME annotations before its own
+    // `@java.lang.Deprecated`, the BINARY ones before `@NotNull`, and each parameter's annotations.
+    const ANNOTATED: &str = "\
+package store\n\
+\n\
+annotation class Marker\n\
+@Retention(AnnotationRetention.BINARY) annotation class Bin\n\
+@Target(AnnotationTarget.VALUE_PARAMETER) annotation class P\n\
+\n\
+interface Annotated {\n\
+    @Marker @Bin\n\
+    fun close(@P x: String?): String {\n\
+        return \"\"\n\
+    }\n\
+\n\
+    @Deprecated(\"old\")\n\
+    fun old() {}\n\
+}\n\
+";
+    common::byte_diff_against_kotlinc_cp(
+        "DefaultImplsForwardAnnotations",
+        ANNOTATED,
+        "store/Annotated$DefaultImpls",
+        &[common::stdlib_jar()],
+    )
+    .expect("reference kotlinc is provisioned")
+    .unwrap_or_else(|diff| panic!("store/Annotated$DefaultImpls differs from kotlinc: {diff}"));
+}

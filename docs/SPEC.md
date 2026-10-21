@@ -2262,6 +2262,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A republished inherited member has no source here and keeps no line.
   Test: `tests/default_impls_forward_lines_e2e.rs`.
 
+  A `$DefaultImpls` forward of the interface's OWN member also copies that member's declared
+  annotations and its parameters' annotations, as kotlinc does. The constant pool is reserved in
+  kotlinc's order: the member's `RUNTIME` annotations, then `Ljava/lang/Deprecated;` (on a forward
+  to an `access$…$jd` bridge), then the member's `BINARY` (class-file, invisible) annotations, then
+  the nullability and parameter annotation types (an empty slot for the `$this` receiver, then each
+  user parameter's annotations). Each user parameter's annotations land on that parameter's
+  slot after `$this`. A forward of an INHERITED member that the interface republishes copies no
+  annotations. Test: `default_impls_forward_copies_the_member_and_parameter_annotations` in
+  `tests/default_impls_forward_lines_e2e.rs` compares the holder's bytes with kotlinc.
+
   `enable` (krusty's default) emits the full measured compatibility surface: a `public static
   synthetic access$<name>$jd` bridge on the interface per non-private body (an `invokespecial` on
   the interface's own default method; `LineNumberTable` = one entry at the invoke pc on the
