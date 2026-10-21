@@ -17608,8 +17608,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   classifier FQNs. Function/default-wrapper, property accessor, file initializer, constructor, and
   value-class box/unbox entry points therefore include the exact source module before their stable
   declaration component. File-local class/runtime symbols remain local linkage. Tests:
-  `multimodule_conformance_cases::{DEFAULT_CALLABLE_IDS, PROPERTY_IDS, NATIVE_ABI_SYMBOLS}` through
-  `multimodule_conformance_cases::multimodule_cases_run_through_the_matrix_selected_backend`.
+  `multimodule_conformance_cases::{DEFAULT_CALLABLE_IDS, PROPERTY_IDS}` through
+  `multimodule_conformance_cases::multimodule_cases_run_through_the_matrix_selected_backend`, and
+  the Native-specific `native_module_abi_symbols_keep_same_named_internal_classifiers_distinct`.
 
 - **A KLIB body's call of a dependency function lowers that function too.** A call of a public
   declaration is joined, by its exact module-qualified signature, to the callee's serialized

@@ -854,16 +854,17 @@ fn compile_module_test(
     })
 }
 
-/// Run one case selected by the shared backend-neutral multimodule conformance inventory.
-pub(super) fn run_multimodule_case(case: &super::multimodule_conformance_cases::Case) {
-    if !krusty::conformance::backend_targeted(case.source, &["JVM", "JVM_IR"])
-        || krusty::conformance::backend_muted(case.source, &["JVM", "JVM_IR"])
-    {
-        return;
-    }
+/// Check the common JVM oracle before any backend judges a portable module graph.
+pub(super) fn check_multimodule_reference(case: &super::multimodule_conformance_cases::Case) {
+    assert!(
+        krusty::conformance::backend_targeted(case.source, &["JVM", "JVM_IR"])
+            && !krusty::conformance::backend_muted(case.source, &["JVM", "JVM_IR"]),
+        "{}: portable multimodule cases may not skip JVM",
+        case.stem
+    );
     let jdk = common::jdk_modules();
     let classpath = common::classpath_jars_for(case.source);
-    let reference = box_reference_classes::reference_compile(
+    let reference = super::box_reference_classes::reference_compile(
         case.source,
         case.stem,
         &classpath,
@@ -872,19 +873,25 @@ pub(super) fn run_multimodule_case(case: &super::multimodule_conformance_cases::
         },
         COROUTINE_HELPERS,
     )
-    .unwrap_or_else(|error| panic!("{}: kotlinc module graph failed: {error}", case.stem));
-    let reference_classes = reference
+    .unwrap_or_else(|error| panic!("{}: pinned kotlinc module oracle: {error}", case.stem));
+    let reference: Vec<_> = reference
         .qualified()
         .map(|((_, name), bytes)| (name.to_owned(), bytes.to_vec()))
-        .collect::<Vec<_>>();
-    let reference_box = find_box_class(&reference_classes)
-        .unwrap_or_else(|| panic!("{}: kotlinc module graph must emit box()", case.stem));
+        .collect();
+    let reference_box = find_box_class(&reference)
+        .unwrap_or_else(|| panic!("{}: pinned kotlinc module graph must emit box()", case.stem));
     assert_eq!(
-        common::run_box(&reference_classes, &reference_box, &classpath),
+        common::run_box(&reference, &reference_box, &classpath),
         Some("OK".to_string()),
-        "{}: kotlinc must run the exact module graph",
+        "{}: pinned kotlinc must run the exact module graph as OK",
         case.stem
     );
+}
+
+/// Run one case selected by the shared backend-neutral multimodule conformance inventory.
+pub(super) fn run_multimodule_case(case: &super::multimodule_conformance_cases::Case) {
+    let jdk = common::jdk_modules();
+    let classpath = common::classpath_jars_for(case.source);
     let classes = compile_module_test(case.source, &classpath, Some(jdk.as_path()), &|_| {})
         .unwrap_or_else(|| panic!("{}: JVM must compile the exact module graph", case.stem));
     let box_class = find_box_class(&classes.flat)

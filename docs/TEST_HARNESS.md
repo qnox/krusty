@@ -207,6 +207,31 @@ Blessing requires the exact value `1` and is refused under CI and on a partial r
 is replaced atomically. Review and commit the platform/version diff. The failure lists only shrink;
 the long-term goal is zero expected failures on every platform.
 
+### Portable multimodule outcomes
+
+The matrix-selected `multimodule_cases_run_through_the_matrix_selected_backend` test runs the same
+complete portable case table on JVM, Native, Wasm-JS and Wasm-WASI. Every selected runner first
+requires the pinned JVM/kotlinc oracle to return `OK` for every portable case. JVM also requires
+krusty to return `OK`; it has no failure allowance. Native and both Wasm lanes use
+`tests/multimodule_expected_failures/<platform>/<recorded-release>.txt`, with the same canonical
+release inheritance as the box ratchet. Native's initial inventory is empty. Each Wasm lane records
+only `multimoduleDependencyFunctionImplementationMarkers`: its former Native-only directive hid a
+portable function-instance case that Wasm declines as a class implementing a function type. Full
+runs on every manifest release measured that sole newly covered gap; all 19 previously exercised
+Wasm cases remain strict positives. Failure-to-pass changes also fail until their entry is removed.
+
+Every physical lane must report each case exactly once. Missing/duplicate/unknown observations,
+unavailable setup, compiler panics, harness errors, applicability exclusions and missing/malformed/
+stale inventories fail hard, not as recordable failures. A genuinely platform-specific Native ABI
+fixture instead runs in the named `native_module_abi_symbols_keep_same_named_internal_classifiers_distinct`
+test, retaining its exact source and mandatory Native oracle.
+
+`KRUSTY_BLESS_MULTIMODULE_EXPECTATIONS=1` records a full selected KLIB runner's measured failures
+locally; other values, CI and the strict JVM runner are rejected. For example, set it alongside
+`KRUSTY_MULTIMODULE_CONFORMANCE_RUNNER=native` when invoking the shared test through `run-tests.sh`.
+For `wasm`, both full physical inventories are validated before either is written. Each file is
+replaced atomically, and unchanged release records inherit instead of duplicating an earlier file.
+
 A pull request is judged against its own base, so two that each match the lists can still disagree
 with them once both land: one fixes a file the other's list still names, or their changes interact.
 The `ci` workflow also runs on `merge_group`, so with master's merge queue (or "require branches to
@@ -396,9 +421,10 @@ conformance matrix, `build-gradle-plugin`, and the whole `gradle` compatibility 
 supported Kotlin version has distinct JVM, Native and Wasm conformance
 rows; the maximum-version Native row also runs the focused KLIB decoder, value-class and
 kotlinc-native oracle coverage formerly owned by a standalone job, while `just klib-semantics`
-remains the focused local recipe. One backend-neutral multimodule case table runs through the
-runner provisioned by every JVM, Native and Wasm row; a genuinely platform-specific source stays
-there only behind its explicit `TARGET_BACKEND` directive. The JVM row owns JVM regressions; Native
+remains the focused local recipe. One backend-neutral portable multimodule case table runs in full
+through the runner provisioned by every JVM, Native and Wasm row; directives may not silently skip
+its cases. Genuinely platform-specific sources live in named target-owned tests with a
+`PLATFORM-SPECIFIC` marker. The JVM row owns JVM regressions; Native
 and Wasm own their focused non-corpus regressions. The job is scheduled with `if: always()`,
 because a required check that is skipped counts as passing, and it fails unless every dependency
 result is `success`. A failed, skipped, cancelled, or absent dependency therefore fails it,

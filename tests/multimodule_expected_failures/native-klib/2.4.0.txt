@@ -1,0 +1,2 @@
+# Portable multimodule cases expected to fail on native-klib.
+# Empty: every portable case must pass. Releases without their own file inherit this record.

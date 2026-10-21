@@ -680,8 +680,15 @@ pub fn run_program(command: &mut Command) -> Outcome {
         // than a stream. The answer is compared whole, so one that spans lines (`"FAIL\nOK"`) is
         // the wrong answer it is, not a last line that happens to read OK.
         Ok(output) => framed_outcome(output),
-        Err(error) => Outcome::Failed(error),
+        Err(ProgramRunError::Harness(error)) => Outcome::Harness(error),
+        Err(ProgramRunError::Program(error)) => Outcome::Failed(error),
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ProgramRunError {
+    Harness(String),
+    Program(String),
 }
 
 /// Run the program with a deadline; its stdout, or what went wrong.
@@ -689,14 +696,17 @@ pub fn run_program(command: &mut Command) -> Outcome {
 /// Both pipes are drained concurrently into bounded trailing buffers. Waiting before draining can
 /// deadlock once either pipe fills; retaining output without a bound lets a broken program fill the
 /// host until the deadline. Keeping the tail preserves the final result frame.
-fn run_with_timeout(command: &mut Command, timeout: Duration) -> Result<ProgramOutput, String> {
+fn run_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<ProgramOutput, ProgramRunError> {
     let mut child = super::common::spawn_freshly_written(
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped()),
     )
-    .map_err(|error| format!("could not start the program: {error}"))?;
+    .map_err(|error| ProgramRunError::Harness(format!("could not start the program: {error}")))?;
     let stdout = child.stdout.take().expect("piped child stdout");
     let stderr = child.stderr.take().expect("piped child stderr");
     let stdout = std::thread::spawn(move || output_tail(stdout));
@@ -710,10 +720,10 @@ fn run_with_timeout(command: &mut Command, timeout: Duration) -> Result<ProgramO
                 let _ = child.wait();
                 let _ = stdout.join();
                 let _ = stderr.join();
-                return Err(format!(
+                return Err(ProgramRunError::Program(format!(
                     "the program did not finish within {}s",
                     timeout.as_secs()
-                ));
+                )));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(2)),
             Err(error) => {
@@ -721,15 +731,17 @@ fn run_with_timeout(command: &mut Command, timeout: Duration) -> Result<ProgramO
                 let _ = child.wait();
                 let _ = stdout.join();
                 let _ = stderr.join();
-                return Err(format!("waiting for the program: {error}"));
+                return Err(ProgramRunError::Harness(format!(
+                    "waiting for the program: {error}"
+                )));
             }
         }
     };
-    let stdout = captured_output(stdout, "stdout")?;
-    let stderr = captured_output(stderr, "stderr")?;
+    let stdout = captured_output(stdout, "stdout").map_err(ProgramRunError::Harness)?;
+    let stderr = captured_output(stderr, "stderr").map_err(ProgramRunError::Harness)?;
     let stdout_text = String::from_utf8_lossy(&stdout.bytes).into_owned();
     if !status.success() {
-        return Err(format!(
+        return Err(ProgramRunError::Program(format!(
             "exit {}; stdout{} {stdout_text:?}; stderr{} {:?}",
             status,
             if stdout.truncated {
@@ -743,7 +755,7 @@ fn run_with_timeout(command: &mut Command, timeout: Duration) -> Result<ProgramO
                 ""
             },
             String::from_utf8_lossy(&stderr.bytes).trim()
-        ));
+        )));
     }
     Ok(ProgramOutput {
         stdout: stdout_text,
@@ -1324,6 +1336,17 @@ fn runner_does_not_block_on_large_stdout_or_stderr() {
 }
 
 #[test]
+fn a_missing_program_is_a_harness_error_not_a_recordable_failure() {
+    let scratch = Scratch::new("missing-program");
+    let missing = scratch.0.join("not-an-executable");
+    let error = Command::new(&missing).output().unwrap_err();
+    assert_eq!(
+        run_program(&mut Command::new(&missing)),
+        Outcome::Harness(format!("could not start the program: {error}"))
+    );
+}
+
+#[test]
 fn runner_bounds_output_while_retaining_the_verdict_tail() {
     let mut output = vec![b'x'; 80];
     output.extend_from_slice(BOX_RESULT_FRAME.as_bytes());
@@ -1369,7 +1392,9 @@ fn runner_kills_a_program_at_its_deadline() {
 
     assert_eq!(
         run_with_timeout(&mut Command::new(&executable), Duration::from_millis(20)),
-        Err("the program did not finish within 0s".to_string())
+        Err(ProgramRunError::Program(
+            "the program did not finish within 0s".to_string()
+        ))
     );
 }
 

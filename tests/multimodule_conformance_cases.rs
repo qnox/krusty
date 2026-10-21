@@ -219,8 +219,7 @@ pub const REIFIED_CALLABLE_ORIGINS: Case = Case {
 
 pub const DEPENDENCY_FUNCTION_IMPLEMENTATION_MARKERS: Case = Case {
     stem: "multimoduleDependencyFunctionImplementationMarkers",
-    source: "// TARGET_BACKEND: NATIVE\n\
-             // MODULE: lib\n\
+    source: "// MODULE: lib\n\
              interface ExternalFn : (Int) -> Int\n\
              // MODULE: main(lib)\n\
              interface LocalFn : ExternalFn\n\
@@ -235,14 +234,6 @@ pub const DEPENDENCY_FUNCTION_IMPLEMENTATION_MARKERS: Case = Case {
              \x20   if (throughLocal !is Function1<*, *>) return \"local arity\"\n\
              \x20   return \"OK\"\n\
              }\n",
-};
-
-pub const NATIVE_ABI_SYMBOLS: Case = Case {
-    stem: "multimoduleNativeAbiSymbols",
-    source: "// TARGET_BACKEND: NATIVE\n\
-             // MODULE: left\npackage shared\ninternal class Token(val value: String)\ninternal value class Packed(val value: String)\n\
-             // MODULE: right\npackage shared\ninternal class Token(val value: String)\ninternal value class Packed(val value: String)\n\
-             // MODULE: main(left, right)\nfun box() = \"OK\"\n",
 };
 
 pub const FLOATING_BITS: Case = Case {
@@ -569,7 +560,6 @@ pub const ALL: &[Case] = &[
     LOCAL_MEMBER_EXTENSION_EXPECT_RECEIVER,
     REIFIED_CALLABLE_ORIGINS,
     DEPENDENCY_FUNCTION_IMPLEMENTATION_MARKERS,
-    NATIVE_ABI_SYMBOLS,
     FLOATING_BITS,
     FLOATING_BIT_REFERENCES,
     OVERLAPPING_BITS,
@@ -589,12 +579,64 @@ pub const ALL: &[Case] = &[
 fn multimodule_cases_run_through_the_matrix_selected_backend() {
     let runner = std::env::var("KRUSTY_MULTIMODULE_CONFORMANCE_RUNNER")
         .expect("multimodule conformance requires an explicit matrix-selected runner");
+    assert!(
+        matches!(runner.as_str(), "jvm" | "native" | "wasm"),
+        "unknown multimodule conformance runner {runner}"
+    );
+    let bless = super::multimodule_ratchet::recording_requested();
+    assert!(
+        runner != "jvm" || !bless,
+        "JVM multimodule cases have no recordable failure allowance"
+    );
     for case in ALL {
-        match runner.as_str() {
-            "jvm" => super::kotlin_box_ir_jvm_conformance::run_multimodule_case(case),
-            "native" => super::kotlin_box_native_conformance::run_multimodule_case(case),
-            "wasm" => super::kotlin_box_wasm_conformance::run_multimodule_case(case),
-            other => panic!("unknown multimodule conformance runner {other}"),
+        super::kotlin_box_ir_jvm_conformance::check_multimodule_reference(case);
+    }
+    match runner.as_str() {
+        "jvm" => {
+            for case in ALL {
+                super::kotlin_box_ir_jvm_conformance::run_multimodule_case(case);
+            }
         }
+        "native" => super::multimodule_ratchet::check(
+            ALL,
+            vec![(
+                super::box_ratchet::Platform::Native,
+                ALL.iter()
+                    .map(|case| {
+                        (
+                            case.stem.to_string(),
+                            super::kotlin_box_native_conformance::run_multimodule_case(case),
+                        )
+                    })
+                    .collect(),
+            )],
+            bless,
+        ),
+        "wasm" => super::multimodule_ratchet::check(
+            ALL,
+            krusty::wasm::WasmTarget::ALL
+                .into_iter()
+                .map(|target| {
+                    let platform = match target {
+                        krusty::wasm::WasmTarget::Js => super::box_ratchet::Platform::WasmJs,
+                        krusty::wasm::WasmTarget::Wasi => super::box_ratchet::Platform::WasmWasi,
+                    };
+                    let actual = ALL
+                        .iter()
+                        .map(|case| {
+                            (
+                                case.stem.to_string(),
+                                super::kotlin_box_wasm_conformance::run_multimodule_case(
+                                    case, target,
+                                ),
+                            )
+                        })
+                        .collect();
+                    (platform, actual)
+                })
+                .collect(),
+            bless,
+        ),
+        other => panic!("unknown multimodule conformance runner {other}"),
     }
 }

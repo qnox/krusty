@@ -59,11 +59,11 @@ impl WasmLane {
             rayon::current_thread_index().unwrap_or(0)
         ));
         if let Err(error) = std::fs::create_dir_all(&directory) {
-            return Outcome::Failed(format!("creating the case directory: {error}"));
+            return Outcome::Harness(format!("creating the case directory: {error}"));
         }
         for (name, bytes) in &artifacts {
             if let Err(error) = std::fs::write(directory.join(name), bytes) {
-                return Outcome::Failed(format!("writing {name}: {error}"));
+                return Outcome::Harness(format!("writing {name}: {error}"));
             }
         }
         let outcome = box_lane::run_program(
@@ -500,25 +500,28 @@ fn focused_wasm_lane_available(lane: &WasmLane, stem: &str) -> bool {
 }
 
 /// Run one case selected by the shared backend-neutral multimodule conformance inventory.
-pub(super) fn run_multimodule_case(case: &super::multimodule_conformance_cases::Case) {
+pub(super) fn run_multimodule_case(
+    case: &super::multimodule_conformance_cases::Case,
+    target: WasmTarget,
+) -> Outcome {
     let modules = krusty::conformance::split_modules(case.source).expect("valid module test shape");
     let units = krusty::conformance::module_units(&modules);
-    for target in WasmTarget::ALL {
-        let lane = WasmLane { target };
-        if lane.not_applicable(case.source).is_some() {
-            continue;
-        }
-        let stem = format!("{}-{}", target.name(), case.stem);
-        if !focused_wasm_lane_available(&lane, &stem) {
-            return;
-        }
-        assert_eq!(
-            lane.compile_modules_and_run(&std::env::temp_dir(), &stem, &units, case.source,),
-            Outcome::Pass,
-            "{stem}: {} must run the exact separately analyzed module graph",
-            target.name()
-        );
+    let lane = WasmLane { target };
+    if let Some(reason) = lane.not_applicable(case.source) {
+        return Outcome::NotApplicable(reason);
     }
+    if let Some(reason) = lane.unavailable() {
+        return Outcome::Harness(format!(
+            "required {} setup is unavailable: {reason}",
+            lane.label()
+        ));
+    }
+    lane.compile_modules_and_run(
+        &std::env::temp_dir(),
+        &format!("{}-{}", target.name(), case.stem),
+        &units,
+        case.source,
+    )
 }
 
 /// A required inline dependency function whose body cannot become a template rejects its caller:
