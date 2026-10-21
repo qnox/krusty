@@ -17844,11 +17844,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `DEFINED`) lowers to a named variable in the next value slot after the parameters, reads of a
   `val` publish a stable binding and reads of a `var` a mutable one, and an assignment is a `Unit`
   `SetValue`, as checked FIR lowering publishes them. The serialized local-variable flags are, from
-  bit 0: has annotations, `var`, `const`, `lateinit`. Compiler temporaries, `lateinit` and `const`
-  locals, a declaration without an initializer and an assignment to a `val` decline by form. Tests:
+  bit 0: has annotations, `var`, `const`, `lateinit`. Outside the explicitly modelled compiler
+  expression blocks, compiler temporaries decline by form, as do `lateinit` and `const` locals,
+  a declaration without an initializer and an assignment to a `val`. Tests:
   `local_variables_lower_as_the_source_declarations_do`,
   `unmodelled_local_variables_decline_by_form`,
   `stdlib_local_variable_flags_have_the_decoded_layout`.
+
+- **KLIB increment blocks preserve their serialized effects and value.** `PREFIX_INCR`,
+  `PREFIX_DECR`, `POSTFIX_INCR` and `POSTFIX_DECR` blocks contain the selected operation and
+  assignment already; common lowering preserves their statement order and final expression.
+  A compiler temporary reading a mutable local snapshots it before the write, rather than
+  aliasing a later read, so postfix returns the old value and prefix the updated one. Unknown
+  block origins still decline. Tests:
+  `control_forms::increment_blocks_keep_their_ordered_effects_and_selected_value`,
+  `control_forms::an_unmodelled_expression_block_origin_still_declines`.
 
 - **A KLIB body's implicit cast to the value's own type is no conversion.** An `IMPLICIT_CAST`
   whose target is the operand's semantic type adds no node, as the source has none. One from `T?` to

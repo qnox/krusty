@@ -34,15 +34,16 @@ pub(super) struct ReturnableFrame {
 }
 
 impl BodyLowering<'_> {
-    /// An `INLINE_ARGS_CONTAINER` block typed `ty`: its statements, the last its value unless the
-    /// block is typed `Unit`.
-    pub(super) fn argument_container(
+    /// An inline-argument or increment/decrement block typed `ty`: its ordered statements and
+    /// final value. Compiler temporaries snapshot mutable reads before any later write, so a
+    /// postfix expression returns the old value rather than re-reading the updated variable.
+    pub(super) fn temporary_expression_block(
         &mut self,
         statements: &[KlibIrStatement],
         ty: Ty,
     ) -> Lowered<ExprId> {
         let Some((last, leading)) = statements.split_last() else {
-            return Err(mismatch("an inline argument container is empty"));
+            return Err(mismatch("a compiler expression block is empty"));
         };
         let mut stmts = self.compiler_statements(leading)?;
         let value = match last {
@@ -50,7 +51,7 @@ impl BodyLowering<'_> {
                 Some(self.compiler_value(*last, ty)?)
             }
             _ => {
-                return unsupported("an inline argument container without its inlined call");
+                return unsupported("a compiler expression block without its value");
             }
         };
         stmts.extend(value.filter(|_| ty == Ty::Unit));

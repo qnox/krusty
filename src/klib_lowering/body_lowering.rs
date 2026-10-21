@@ -282,9 +282,17 @@ impl<'a> BodyLowering<'a> {
             KlibIrExprKind::Block {
                 statements,
                 origin: Some(origin),
-            } if origin == "INLINE_ARGS_CONTAINER" => {
-                let ty = self.ty(expression, "inline argument container")?;
-                return self.argument_container(statements, ty);
+            } if matches!(
+                origin.as_str(),
+                "INLINE_ARGS_CONTAINER"
+                    | "POSTFIX_INCR"
+                    | "POSTFIX_DECR"
+                    | "PREFIX_INCR"
+                    | "PREFIX_DECR"
+            ) =>
+            {
+                let ty = self.ty(expression, "compiler expression block")?;
+                return self.temporary_expression_block(statements, ty);
             }
             KlibIrExprKind::Block {
                 statements,

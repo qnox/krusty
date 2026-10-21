@@ -296,6 +296,97 @@ fn a_block_branch_lowers_as_the_source_block_does() {
 }
 
 #[test]
+fn increment_blocks_keep_their_ordered_effects_and_selected_value() {
+    for (origin, prefix) in [
+        ("POSTFIX_INCR", false),
+        ("POSTFIX_DECR", false),
+        ("PREFIX_INCR", true),
+        ("PREFIX_DECR", true),
+    ] {
+        let demo = demo(
+            &[("f", &[T::Boolean, T::Int, T::Int], T::Int)],
+            |_, body| {
+                let initial = body.param(1);
+                let (variable, x) = body.var(T::Int, initial);
+                let mut statements = Vec::new();
+                let saved = if prefix {
+                    None
+                } else {
+                    let old = body.get(&x, T::Int);
+                    let (temporary, saved) =
+                        body.variable_with(T::Int, Some(old), 0, "IR_TEMPORARY_VARIABLE");
+                    statements.push(temporary);
+                    Some(saved)
+                };
+                let updated = body.param(2);
+                statements.push(body.set(&x, updated));
+                let value = body.get(saved.as_ref().unwrap_or(&x), T::Int);
+                statements.push(KlibIrStatement::Expression(value));
+                let block = body.expr(
+                    T::Int,
+                    KlibIrExprKind::Block {
+                        statements,
+                        origin: Some(origin.to_owned()),
+                    },
+                );
+                let condition = body.param(0);
+                let otherwise = body.otherwise();
+                let zero = body.int(0);
+                let conditional =
+                    body.branches("IF", vec![(condition, block), (otherwise, zero)], T::Int);
+                Some(vec![variable, body.ret(conditional)])
+            },
+        );
+        let branch = if prefix {
+            "x = c; x"
+        } else {
+            "val old = x; x = c; old"
+        };
+        let source = format!(
+            "fun f(a: Boolean, b: Int, c: Int): Int {{\n var x = b\n return if (a) {{ {branch} }} else 0\n}}\n"
+        );
+        // Source names its saved value; a compiler block deliberately publishes an unnamed
+        // temporary. Pin both complete forms instead of erasing that provenance distinction.
+        let (expected, source_expected) = if prefix {
+            let expected = "scope {scope {val v3: Int = v1!: Int; return@Some(0) \
+                when[v0!: Boolean -> {v3 = v2!: Int: Unit => v3~: Int}: Int, \
+                else -> Int(0): Int]: Int: Nothing}: Nothing}";
+            (expected, expected)
+        } else {
+            (
+                "scope {scope {val v3: Int = v1!: Int; return@Some(0) when[v0!: Boolean -> \
+                 {temp v4: Int = v3~: Int; v3 = v2!: Int: Unit => v4!: Int}: Int, \
+                 else -> Int(0): Int]: Int: Nothing}: Nothing}",
+                "scope {scope {val v3: Int = v1!: Int; return@Some(0) when[v0!: Boolean -> \
+                 {val v4: Int = v3~: Int; v3 = v2!: Int: Unit => v4!: Int}: Int, \
+                 else -> Int(0): Int]: Int: Nothing}: Nothing}",
+            )
+        };
+        assert_eq!(lowered_f(&demo), expected, "{origin}");
+        assert_eq!(source_body(&source, "f", 3), source_expected, "{origin}");
+    }
+}
+
+#[test]
+fn an_unmodelled_expression_block_origin_still_declines() {
+    let demo = demo(&[("f", &[], T::Int)], |_, body| {
+        let one = body.int(1);
+        let block = body.expr(
+            T::Int,
+            KlibIrExprKind::Block {
+                statements: vec![KlibIrStatement::Expression(one)],
+                origin: Some("UNMODELLED_EXPRESSION_BLOCK".to_owned()),
+            },
+        );
+        Some(vec![body.ret(block)])
+    });
+    assert_eq!(
+        demo.declined("f", &[]),
+        "the KLIB body of `demo.f` (it uses a block of a compiler-introduced form)"
+    );
+}
+
+#[test]
 fn a_returning_block_is_typed_by_its_jump() {
     // A KLIB types the braced branch of a `Unit` `if` `Unit`; the source block ends in a jump.
     let demo = demo(&[("f", &[T::Int], T::Int)], |_, body| {
