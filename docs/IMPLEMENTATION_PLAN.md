@@ -5553,6 +5553,9 @@ non-inline callers, still reads the field directly. Test:
   181/181/182; Native's counts are unchanged by the shared tables.
 - Known gap: `x as? C` on a value smart-cast earlier in the body lowers to a `When` with no
   checked type, which Wasm declines rather than infer one.
+- Wasm consumes the published declaration-result provenance of a generic call beneath its
+  checked result coercion. This preserves separate declared and selected types without inventing
+  missing facts; it does not yet supply generic scalar boxing or a canonical dependency-call ABI.
 - Not yet selectable from the CLI: a user-facing wasm target waits on that klib platform.
 - Catch-only EH: a module-owned tag carries the same Throwable reference across calls/modules.
   The selected stdlib's exact `Throwable()` / `Throwable(String?)` and nullable `message` getter
