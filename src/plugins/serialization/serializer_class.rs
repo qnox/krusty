@@ -534,16 +534,6 @@ pub(super) fn complete(
             &serializer_type_parameters,
             write_self_line,
         );
-        // An open or abstract class's metadata lists its own elements in program order for a
-        // subclass's serializer; a sealed class's subclasses all live in its own module.
-        let class = &ir.classes[class_id as usize];
-        if write_self_is_public(class) && !class.is_sealed {
-            let properties = element_fields
-                .iter()
-                .map(|(name, _)| name.clone())
-                .collect();
-            ir.publish_serializable_property_order(class.fq_name_id(), properties);
-        }
     }
 
     // `<getter>$annotations()` markers for properties kotlinc preserves the serialization

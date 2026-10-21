@@ -27,6 +27,7 @@ pub(crate) use external_serializer::{custom_class_serializer, generated_external
 mod generated_classifier;
 mod generated_members;
 mod plugin_release;
+mod program_order_metadata;
 mod property_default;
 mod runtime_abi;
 mod serial_elements;
@@ -1275,6 +1276,19 @@ impl SerializationPlugin {
 impl IrPlugin for SerializationPlugin {
     fn name(&self) -> &str {
         "kotlinx.serialization"
+    }
+
+    fn class_metadata_fields(&self) -> &'static [u32] {
+        &[program_order_metadata::PROPERTIES_NAMES_IN_PROGRAM_ORDER]
+    }
+
+    fn write_class_metadata(
+        &self,
+        ir: &IrFile,
+        class: &crate::ir::IrClass,
+        out: &mut crate::plugins::class_metadata::ClassMetadataExtensions<'_>,
+    ) {
+        program_order_metadata::write(ir, class, out);
     }
 
     fn generate_frontend_declarations(

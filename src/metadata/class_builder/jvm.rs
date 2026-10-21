@@ -33,9 +33,8 @@ pub struct JvmClassSignatures<'a> {
     pub properties: Vec<JvmPropertySignature>,
     /// The functions' realizations, parallel to the declaration's.
     pub functions: Vec<JvmFunctionSignature>,
-    /// The serialization plugin's `propertiesNamesInProgramOrder` (f18000) on an inheritable
-    /// serializable class: its own serialized property names, each already in the string table.
-    pub serializable_property_order: &'a [String],
+    /// The compiler plugins asked for their extension fields as the record is written.
+    pub plugin_metadata: Option<crate::plugins::class_metadata::PluginClassMetadata<'a>>,
 }
 
 /// A constructor's `JvmMethodSignature`: `<init>` or a value class's static `constructor-impl`.
@@ -198,11 +197,26 @@ impl ClassCarrier for JvmCarrier<'_, '_> {
 
     fn class_trailer(&self, st: &mut StringTable<'_>) -> Pb {
         let mut trailer = Pb::new();
-        for name in self.signatures.serializable_property_order {
-            // SerializationPluginMetadataExtensions.propertiesNamesInProgramOrder = 18000
-            trailer.repeated_varint(18000, u64::from(st.local(name)));
+        if let Some(plugins) = &self.signatures.plugin_metadata {
+            plugins.write(&mut PluginExtensionRecord {
+                record: &mut trailer,
+                strings: st,
+            });
         }
         trailer
+    }
+}
+
+/// The class record's trailer as compiler plugins append their extension fields to it.
+struct PluginExtensionRecord<'w, 's> {
+    record: &'w mut Pb,
+    strings: &'w mut StringTable<'s>,
+}
+
+impl crate::plugins::class_metadata::ClassMetadataSink for PluginExtensionRecord<'_, '_> {
+    fn repeated_string(&mut self, field: u32, value: &str) {
+        self.record
+            .repeated_varint(field, u64::from(self.strings.local(value)));
     }
 }
 
