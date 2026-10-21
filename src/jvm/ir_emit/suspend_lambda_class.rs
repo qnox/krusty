@@ -573,9 +573,11 @@ fn emit_constructor(
         );
     }
     signature.push_str(&format!("L{CONTINUATION}<-{}>;)V", shape.self_desc()));
-    let reflected = java_parameters
-        .then(|| shape.method_parameters(ir, lambda, SuspendLambdaMember::Constructor))
-        .unwrap_or_default();
+    let reflected = if java_parameters {
+        shape.method_parameters(ir, lambda, SuspendLambdaMember::Constructor)
+    } else {
+        Vec::new()
+    };
     seed_header(cw, "<init>", &descriptor, Some(&signature), &reflected);
     let completion = 1 + shape.capture_words();
     let mut code = CodeBuilder::new(completion + 1);
@@ -688,9 +690,11 @@ fn emit_create(
         "({}L{CONTINUATION}<*>;)L{CONTINUATION}<Lkotlin/Unit;>;",
         if parameter.is_some() { OBJECT_DESC } else { "" }
     );
-    let reflected = java_parameters
-        .then(|| shape.method_parameters(ir, lambda, SuspendLambdaMember::Create))
-        .unwrap_or_default();
+    let reflected = if java_parameters {
+        shape.method_parameters(ir, lambda, SuspendLambdaMember::Create)
+    } else {
+        Vec::new()
+    };
     seed_header(cw, "create", &descriptor, Some(&signature), &reflected);
     let completion = 1 + u16::from(parameter.is_some());
     let copy = completion + 1;
@@ -753,9 +757,11 @@ fn emit_invoke(
     // A raw continuation (a `Nothing?` result) over raw parameters spells the descriptor back, and
     // such a `Signature` is omitted.
     let signature = (signature != descriptor).then_some(signature);
-    let reflected = java_parameters
-        .then(|| shape.method_parameters(ir, lambda, SuspendLambdaMember::Invoke))
-        .unwrap_or_default();
+    let reflected = if java_parameters {
+        shape.method_parameters(ir, lambda, SuspendLambdaMember::Invoke)
+    } else {
+        Vec::new()
+    };
     seed_header(
         cw,
         &shape.invoke_name,
