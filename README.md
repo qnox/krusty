@@ -147,7 +147,7 @@ changing its plugin configuration.
 | all-open (`plugin.allopen`, `plugin.spring`, `plugin.jpa`) | Supported, with the `spring` and `jpa` presets. |
 | no-arg (`plugin.noarg`, `plugin.jpa`) | Supported, with the `jpa` preset; `invokeInitializers=true` is not implemented. |
 | sam-with-receiver | Supported. |
-| KSP (KSP2) | Supported through a build system: under Gradle, KSP's own `kspKotlin` task runs the processors and krusty compiles what they generate (KSP's Gradle plugin needs Gradle 8 or newer); under the Kotlin Toolchain, processors from Maven artifacts run before the module compiles. The plain command line has no codegen host and rejects the KSP plugin. |
+| KSP (KSP2) | Supported through a build system: under Gradle, KSP's own `kspKotlin` task runs the processors and krusty compiles what they generate (KSP's Gradle plugin needs Gradle 8 or newer); under the Kotlin Toolchain, processors from Maven artifacts run before the module compiles, but only their generated classes and resources are picked up; a processor that generates Kotlin or Java sources fails the module for now. The plain command line has no codegen host and rejects the KSP plugin. |
 | Compose, Parcelize, assignment, kapt and every other FIR/IR plugin | Not supported; the build fails with an error. |
 | Kotlin scripts (`.kts`) | Not supported. |
 
