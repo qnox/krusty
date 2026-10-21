@@ -84,8 +84,14 @@ from the real `kotlin` command, and refuses by name whatever it does not impleme
 
 Gradle projects are compiled by running that project's `./gradlew`, not by reimplementing the
 Kotlin plugin. `tools/krusty-gradle` is a Gradle plugin (`id("krusty")`, sources under
-`src/main/kotlin`). A build applies both its selected `org.jetbrains.kotlin.jvm` 2.4.x plugin and
-`krusty`; source sets, `kotlin {}`, compiler options, and `KotlinJvmCompile` stay. Source checkouts
+`src/main/kotlin`). A build applies both its selected `org.jetbrains.kotlin.jvm` (or
+`org.jetbrains.kotlin.multiplatform`) 2.4.x plugin and `krusty`; source sets, `kotlin {}`, compiler
+options, and `KotlinJvmCompile` stay. A multiplatform JVM compilation's source sets (its default
+source set and every source set it depends on) are passed as kotlinc's `-Xfragments`, each listing
+its own `.kt` files in `-Xfragment-sources` and refining the source sets it directly depends on in
+`-Xfragment-refines`, read from the public `KotlinCompilation`/`KotlinSourceSet` model. A
+multiplatform `KotlinJvmCompile` that compiles no Kotlin/JVM target (an Android target) stays with
+its compiler. Source checkouts
 can use `--include-build`; releases include a portable local Maven repository with the implementation
 and plugin-marker publications. The Kotlin JVM plugin still owns source sets, `project()` edges,
 compiler options, classpaths, friend paths,

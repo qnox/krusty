@@ -91,7 +91,10 @@ plugins {
 }
 ```
 
-Kotlin/JVM must be applied before krusty. `kotlin("plugin.serialization")` works in any order:
+Kotlin/JVM, or Kotlin Multiplatform, must be applied before krusty. In a multiplatform project
+krusty compiles the JVM targets' compilations; each source set of a compilation reaches the
+compiler as a fragment refining the source sets it depends on, as kotlinc receives them. Other
+targets (Android included) keep their own compilers. `kotlin("plugin.serialization")` works in any order:
 krusty receives the Kotlin Gradle plugin's compiler-plugin classpath and options exactly as kotlinc
 would. The compiler identifies plugin jars and directories from their registrar service entries;
 any unsupported Kotlin compiler plugin (assignment, Compose, ...) fails the build regardless
