@@ -1565,7 +1565,6 @@ reified/reifiedIntersectionTypeArgument.kt
 reified/reifiedIntersectionTypeArgumentCrossModule.kt
 reified/reifiedTypeArgumentWithIntersectionTypeAsTypeArgument.kt
 reified/spreads.kt
-reified/vararg.kt
 reified/varargs.kt
 sam/constructors/sameWrapperClass2.kt
 sam/constructors/suspendSamConstructorAdaptation.kt
