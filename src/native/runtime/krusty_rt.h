@@ -117,6 +117,9 @@ typedef struct KType {
     const char *simple_name;
     uint32_t simple_name_length;
     uint32_t class_names;
+    /* Exact Collection.size getter of a program class, through a typed virtual thunk. This is
+       independent of the Iterable walk: a plain Iterable must never be sized by iteration. */
+    kt_int (*collection_size)(struct KObject *self);
 } KType;
 
 /* What a descriptor publishes about its class's names, in `KType.class_names`.
@@ -393,6 +396,7 @@ kt_int kt_list_size(KRef list);
 kt_boolean kt_list_is_empty(KRef list);
 /* `Collection.size`: a list's, a set's or a map view's, decided by the descriptor. */
 kt_int kt_collection_size(KRef collection);
+kt_int kt_collection_size_or_default(KRef iterable, kt_int fallback);
 kt_boolean kt_collection_is_empty(KRef collection);
 kt_boolean kt_collection_contains_all(KRef self, KRef elements);
 /* `MutableCollection`'s members over a growable list or a set (or a map view, which removes and

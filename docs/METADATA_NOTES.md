@@ -649,6 +649,13 @@ Neither the serialized signature nor the callable is reconstructed from a backen
 
 ## Authenticated KLIB collection classifier roles
 
+The ordinary stdlib `Iterable<T>.collectionSizeOrDefault(Int): Int` helper receives a normalized
+implementation fact only after authenticating the selected stdlib, its single declaration-owned
+formal with the nullable Any bound, the complete extension signature and modifiers. This does not
+invent a TypedIntrinsic annotation or make other ordinary bodies eligible as support roots. Native
+consumes exact property override identities to expose program Collection.size through a typed
+descriptor thunk; classifier roles distinguish Collections from plain Iterables.
+
 The selected stdlib's size-only `Array<T>` constructor also publishes a semantic allocation role,
 after checking its class formal and full constructor signature. The role survives ordinary
 constructor realization and lets prepared inline bodies lower allocation to the same `NewArray`

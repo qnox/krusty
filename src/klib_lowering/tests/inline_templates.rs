@@ -83,6 +83,107 @@ fn array_sum_template_keeps_its_selected_receiver_contract() {
 }
 
 #[test]
+fn map_keeps_the_authenticated_collection_sizing_call_and_receiver_coordinate() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let package = SymbolNamespace::Package(type_name("kotlin/collections"));
+    let helper_symbols = libraries.symbols(package, "collectionSizeOrDefault");
+    let [helper] = helper_symbols.callables.functions() else {
+        panic!("expected one collectionSizeOrDefault declaration");
+    };
+    let target = helper.callable.external_identity.expect("helper identity");
+    let helper = libraries
+        .external_callable(target)
+        .expect("helper realization");
+    assert_eq!(
+        helper.callable.compiler_intrinsic,
+        Some(crate::libraries::CompilerIntrinsic::CollectionSizeOrDefault)
+    );
+    let map_symbols = libraries.symbols(package, "map");
+    let selected = map_symbols
+        .callables
+        .functions()
+        .iter()
+        .filter(|function| {
+            function.semantic_receiver().and_then(Ty::obj_internal)
+                == Some(type_name("kotlin/collections/Iterable"))
+        })
+        .collect::<Vec<_>>();
+    let [selected] = selected.as_slice() else {
+        panic!("expected one Iterable.map");
+    };
+    let selected = libraries
+        .external_callable(selected.callable.external_identity.expect("map identity"))
+        .expect("map realization");
+    let mut ir = IrFile::default();
+    let lowered = template(&mut ir, &libraries, &selected)
+        .unwrap_or_else(|decline| panic!("Iterable.map: {decline}"));
+    assert_eq!(
+        ir.functions[lowered.function as usize].params,
+        selected.callable.params
+    );
+    let calls = ir
+        .exprs
+        .iter()
+        .filter_map(|expression| {
+            let IrExpr::Call {
+                callee,
+                dispatch_receiver,
+                args,
+            } = expression
+            else {
+                return None;
+            };
+            let Callee::External {
+                target: called,
+                params,
+                ret,
+                extension_receiver_parameter,
+                substitutions,
+                ..
+            } = callee.as_ref()
+            else {
+                return None;
+            };
+            (*called == target).then_some((
+                dispatch_receiver.is_some(),
+                params.clone(),
+                *ret,
+                *extension_receiver_parameter,
+                args.len(),
+                substitutions.clone(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    // The prepared stdlib body explicitly serializes TYPE_ARG Any? on this call, rather than
+    // map's reconstructed declaration formal. Preserve that instantiation as well as its target.
+    let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
+    assert_eq!(
+        calls,
+        vec![(
+            false,
+            vec![Ty::obj_args("kotlin/collections/Iterable", &[any]), Ty::Int],
+            Ty::Int,
+            Some(0),
+            2,
+            vec![crate::ir::IrCheckedSubstitution {
+                parameter: crate::fir::FirTypeParameterRef::External {
+                    callable: target,
+                    ordinal: 0
+                },
+                reified: false,
+                value: any,
+                reified_runtime: any,
+                additional_bounds: Vec::new(),
+            }]
+        )]
+    );
+    validated(&ir);
+}
+
+#[test]
 fn collection_to_typed_array_uses_the_selected_array_allocation() {
     let Some(root) = distribution_root() else {
         return;

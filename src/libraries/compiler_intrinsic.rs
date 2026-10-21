@@ -122,6 +122,9 @@ pub enum CompilerIntrinsic {
     /// Targets must prove the receiver's representation supports their text reader before
     /// replacing the ordinary extension call with a runtime operation.
     TextTrim,
+    /// Authenticated stdlib Iterable<T>.collectionSizeOrDefault(Int): Int. Native tests the
+    /// Collection marker and invokes its selected size getter, never counting an Iterable.
+    CollectionSizeOrDefault,
     /// The common stdlib `kotlin.ranges` `Double`/`Float` `rangeTo` and `rangeUntil` declarations.
     /// Membership in their closed or open-end result is an IEEE comparison. The provider copies
     /// this role from the exact common declaration onto its physical realization; a nearer

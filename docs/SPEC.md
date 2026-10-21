@@ -4351,6 +4351,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `collection_to_typed_array_uses_the_selected_array_allocation`, and the shared
   `collectionSizeInInlineBody.kt` fixture.
 
+- **Native collection sizing does not walk a plain Iterable.** The authenticated stdlib
+  `Iterable<T>.collectionSizeOrDefault(Int): Int` declaration retains its exact generic receiver
+  and argument coordinate. Both arguments evaluate eagerly, receiver first. A runtime Collection
+  answers through its selected virtual `size` getter, exactly once; an ordinary Iterable returns
+  the supplied default without asking for an iterator. Program descriptors publish a typed getter
+  thunk from the checked property override identity, inherited independently of iterator overrides.
+  Size-getter exceptions propagate normally. Shared cross-module regression:
+  `collectionSizeOrDefault.kt` (JVM oracle, custom and inherited size, plain and throwing cases).
+
 - **KLIB collection roles come from authenticated platform declarations.** The selected platform
   stdlib's sixteen canonical collection interfaces publish their existing collection kind and
   read-only/mutable face. Publication validates an interface with the exact own and total type

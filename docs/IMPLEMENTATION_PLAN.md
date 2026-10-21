@@ -5583,6 +5583,9 @@ non-inline callers, still reads the field directly. Test:
   the containing declaration, matching checked FIR and preventing slot aliasing.
 - Initializer lambdas carry an explicit nameless-caller context into source and dependency inline
   expansion. Named local functions reset that fact; missing named-function provenance still fails.
+- The exact stdlib collection sizing helper preserves its generic declaration and eager operands.
+  Native descriptors expose the selected virtual Collection.size getter independently of iterator
+  inheritance; plain Iterable inputs return the default without iteration.
 - The selected stdlib `CharSequence.trim(): CharSequence` extension carries an authenticated
   provider operation. Native realizes only receivers proven to use its contiguous String or
   StringBuilder storage; an arbitrary CharSequence still declines before entering the runtime.

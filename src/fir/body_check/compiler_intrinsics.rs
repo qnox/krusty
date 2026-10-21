@@ -60,6 +60,7 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::TrimIndent
         | CompilerIntrinsic::TrimMargin
         | CompilerIntrinsic::TextTrim
+        | CompilerIntrinsic::CollectionSizeOrDefault
         | CompilerIntrinsic::FloatingRangeMembership
         | CompilerIntrinsic::ClosedRangeContains
         | CompilerIntrinsic::ComparableRangeTo

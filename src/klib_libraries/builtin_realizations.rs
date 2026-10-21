@@ -6,6 +6,7 @@
 //! annotation. A declaration the rules do not name is realized by its serialized IR body.
 
 mod arrays;
+mod collection_size;
 mod library_helpers;
 
 use crate::libraries::builtin_declaration::{semantic_call_role, BuiltinMemberDeclaration};
@@ -114,6 +115,10 @@ pub(super) fn realize_package_function(
         compiler_builtin_owner,
     );
     if let Some(operation) = helper {
+        function.callable.compiler_intrinsic = Some(operation);
+    }
+    if let Some(operation) = collection_size::realization(package, compiler_builtin_owner, function)
+    {
         function.callable.compiler_intrinsic = Some(operation);
     }
     if compiler_builtin_owner {

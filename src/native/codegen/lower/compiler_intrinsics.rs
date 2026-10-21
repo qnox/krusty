@@ -135,6 +135,21 @@ impl BodyLowering<'_, '_, '_> {
             (self.checked_type(value).map(Ty::non_null) == Some(operand)).then_some(value)
         };
         match intrinsic {
+            Some(crate::backend::BackendCompilerIntrinsic::CollectionSizeOrDefault) => {
+                let Some((iterable, fallback)) =
+                    exact_extension_pair(receiver, args, extension_receiver_parameter)
+                else {
+                    return Some(Err(
+                        "an exact collection sizing helper with malformed operands".into(),
+                    ));
+                };
+                if ret != Ty::Int || self.checked_type(fallback) != Some(Ty::Int) {
+                    return Some(Err(
+                        "an exact collection sizing helper with a mismatched signature".into(),
+                    ));
+                }
+                return Some(self.collection_size_or_default(iterable, fallback));
+            }
             Some(crate::backend::BackendCompilerIntrinsic::TextTrim) => {
                 let Some(value) =
                     exact_extension_operand(receiver, args, extension_receiver_parameter)
@@ -158,7 +173,7 @@ impl BodyLowering<'_, '_, '_> {
                 | crate::backend::BackendCompilerIntrinsic::RangeDownTo),
             ) => {
                 let Some((start, end)) =
-                    exact_range_extension_operands(receiver, args, extension_receiver_parameter)
+                    exact_extension_pair(receiver, args, extension_receiver_parameter)
                 else {
                     return Some(Err("an exact range builder with malformed operands".into()));
                 };
@@ -269,6 +284,30 @@ impl BodyLowering<'_, '_, '_> {
             _ => None,
         }
     }
+
+    /// Both arguments are eager, including the fallback when Collection.size will be used.
+    fn collection_size_or_default(
+        &mut self,
+        iterable: u32,
+        fallback: u32,
+    ) -> Result<Option<Value>, Unsupported> {
+        let value = self.reference(iterable)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let Some(fallback) = self.coerce(fallback, Ty::Int)? else {
+            return Err("a Unit fallback in collection sizing".into());
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        self.runtime_call(
+            "kt_collection_size_or_default",
+            &[any(), Ty::Int],
+            Ty::Int,
+            &[value, fallback],
+        )
+    }
 }
 
 /// The common-IR operation of a provider's primitive binary operator.
@@ -311,16 +350,16 @@ fn exact_extension_operand(
     }
 }
 
-/// A range builder has one extension receiver and one value argument. The serialized form's
+/// An exact extension has one receiver and one value argument. The serialized form's
 /// receiver remains at its authenticated parameter coordinate rather than becoming dispatch.
-fn exact_range_extension_operands(
+fn exact_extension_pair(
     receiver: Option<u32>,
     args: &[u32],
     extension_receiver_parameter: Option<u32>,
 ) -> Option<(u32, u32)> {
     match (receiver, args, extension_receiver_parameter) {
-        (Some(start), [end], None) => Some((start, *end)),
-        (None, [start, end], Some(0)) => Some((*start, *end)),
+        (Some(receiver), [argument], None) => Some((receiver, *argument)),
+        (None, [receiver, argument], Some(0)) => Some((*receiver, *argument)),
         _ => None,
     }
 }
@@ -340,18 +379,12 @@ pub(super) fn console_intrinsic(
 
 #[cfg(test)]
 mod tests {
-    use super::{exact_extension_operand, exact_range_extension_operands};
+    use super::{exact_extension_operand, exact_extension_pair};
 
     #[test]
-    fn a_range_extension_preserves_its_two_authenticated_operand_layouts() {
-        assert_eq!(
-            exact_range_extension_operands(Some(3), &[5], None),
-            Some((3, 5))
-        );
-        assert_eq!(
-            exact_range_extension_operands(None, &[7, 11], Some(0)),
-            Some((7, 11))
-        );
+    fn an_extension_pair_preserves_its_two_authenticated_operand_layouts() {
+        assert_eq!(exact_extension_pair(Some(3), &[5], None), Some((3, 5)));
+        assert_eq!(exact_extension_pair(None, &[7, 11], Some(0)), Some((7, 11)));
         for (receiver, args, coordinate) in [
             (None, &[7, 11][..], None),
             (None, &[7, 11][..], Some(1)),
@@ -362,7 +395,7 @@ mod tests {
             (Some(3), &[5][..], Some(0)),
         ] {
             assert_eq!(
-                exact_range_extension_operands(receiver, args, coordinate),
+                exact_extension_pair(receiver, args, coordinate),
                 None,
                 "receiver={receiver:?}, args={args:?}, coordinate={coordinate:?}"
             );

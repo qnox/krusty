@@ -883,7 +883,8 @@ pub(super) fn realize(
                 crate::libraries::CompilerIntrinsic::UnsignedDivide { .. }
                 | crate::libraries::CompilerIntrinsic::UnsignedRemainder { .. }
                 | crate::libraries::CompilerIntrinsic::ResultFailure(_)
-                | crate::libraries::CompilerIntrinsic::TextTrim,
+                | crate::libraries::CompilerIntrinsic::TextTrim
+                | crate::libraries::CompilerIntrinsic::CollectionSizeOrDefault,
             ) => {
                 unreachable!("a target KLIB library helper cannot reach JVM call realization")
             }
