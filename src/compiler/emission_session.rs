@@ -88,7 +88,8 @@ impl<'a, B: Backend> EmissionSession<'a, B> {
             .state
             .as_mut()
             .expect("an unfinished emission session retains its backend state");
-        let outputs = emit_analyzed_into(
+        let mut outputs = Vec::new();
+        emit_analyzed_into(
             analysis,
             stems,
             self.backend,
@@ -102,6 +103,7 @@ impl<'a, B: Backend> EmissionSession<'a, B> {
                         metadata.record_ir_file(file, &mut metadata_state, diags);
                 },
                 checked_bodies: &mut super::NoObserver,
+                artifacts: &mut |artifact| outputs.push(artifact),
             },
         );
         if diags.has_errors() {
