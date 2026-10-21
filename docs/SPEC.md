@@ -2652,8 +2652,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a member extension's `if (length > 0) "" + count + prefix` takes the extension receiver, then
   `count`, then `this`. This holds for an indy lambda's static, a local function's static and a
   suspend lambda's class constructor and fields alike. After those come the captures of each nested
-  lambda and called local function, in the order the body meets them and each in that callee's own
-  order, skipping ones already taken: `plainIt { prefix } + count` takes `(count, this)`, and a
+  lambda, called local function and created anonymous object, in the order the body meets them and
+  each in that callee's own order, skipping ones already taken: `plainIt { prefix } + count` takes `(count, this)`, and a
   local `b() = a()` takes `a`'s order. Checked FIR keeps the values then the receivers as their
   identity, and records the physical order beside them once the capture sets are final
   (`FirCaptureParameter`), naming each capture by the body that supplies it so a forwarded capture

@@ -5,8 +5,9 @@
 //! the body reads itself, where it first reads them: `prefix + count` in a member captures `this`
 //! first, `count + prefix` captures `count` first, and `if (length > 0) "" + count + prefix` in a
 //! member extension takes the extension receiver, then `count`, then `this`. After those come the
-//! captures of each nested lambda and called local function, in the order the body meets them and
-//! each in that callee's own order: `plainIt { prefix } + count` captures `count`, then `this`.
+//! captures of each nested lambda, called local function and created anonymous object, in the
+//! order the body meets them and each in that callee's own order: `plainIt { prefix } + count`
+//! captures `count`, then `this`.
 
 use crate::fx_hash::HashMap;
 
@@ -14,6 +15,7 @@ use super::{
     DeclarationId, FirBody, FirCaptureSource, FirExprKind, FirStatementKind, LocalCallableId,
     OriginStore,
 };
+use crate::fir::FirLocalClassCaptureSource;
 
 /// One lifted capture parameter, by its ordinal among the body's values or receivers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,25 +60,34 @@ impl FirBody {
     /// their capture sets are final.
     pub(crate) fn order_nested_capture_parameters(&mut self, origins: &OriginStore) {
         let mut closures = Vec::new();
-        collect_closures(self, None, 0, origins, &mut Vec::new(), &mut closures);
+        collect_closures(
+            self,
+            None,
+            origins,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut closures,
+        );
         let mut orders = vec![None; closures.len()];
         for closure in 0..closures.len() {
             build_order(&closures, closure, &mut orders);
         }
-        apply_orders(self, 0, &orders, &mut 0);
+        apply_orders(self, None, &orders, &mut Vec::new(), &mut 0);
     }
 }
 
 /// A capture named by the body that supplies it, so the same capture compares equal from every
-/// nested callable that forwards it.
+/// nested callable that forwards it. `supplier` is that body's id: zero for the checked body, one
+/// past its closure index for a nested callable. Sibling bodies number their locals afresh, so
+/// their nesting level alone would not tell their locals apart.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CaptureKey {
     Value {
-        level: u32,
+        supplier: usize,
         source: FirCaptureSource,
     },
     Receiver {
-        level: u32,
+        supplier: usize,
         current: bool,
         depth: u32,
         path: Box<[DeclarationId]>,
@@ -88,7 +99,14 @@ enum CaptureKey {
 #[derive(Default)]
 struct Closure {
     reads: Vec<CaptureKey>,
-    includes: Vec<usize>,
+    includes: Vec<Include>,
+}
+
+/// A closure a body meets: a nested or called lifted callable, or an anonymous object, whose
+/// captures are already final in its own order.
+enum Include {
+    Callable(usize),
+    Object(Vec<CaptureKey>),
 }
 
 /// The local functions, then the lambdas, declared directly in `body`.
@@ -116,11 +134,12 @@ fn nested_bodies(body: &FirBody) -> impl Iterator<Item = (LocalCallableId, &FirB
 fn collect_closures(
     body: &FirBody,
     index: Option<usize>,
-    level: u32,
     origins: &OriginStore,
+    ancestors: &mut Vec<usize>,
     scopes: &mut Vec<HashMap<LocalCallableId, usize>>,
     closures: &mut Vec<Closure>,
 ) {
+    ancestors.push(body_id(index));
     let first = closures.len();
     let mut scope = HashMap::default();
     for (offset, (callable, _)) in nested_bodies(body).enumerate() {
@@ -129,39 +148,48 @@ fn collect_closures(
     }
     scopes.push(scope);
     if let Some(index) = index {
-        let mut closure = closure_of(body, level, origins, scopes);
-        closure.includes.retain(|&include| include != index);
+        let mut closure = closure_of(body, origins, ancestors, scopes);
+        closure
+            .includes
+            .retain(|include| !matches!(include, Include::Callable(callee) if *callee == index));
         closures[index] = closure;
     }
-    let nested_level = level
-        .checked_add(1)
-        .expect("too many nested capture bodies");
     for (offset, (_, nested)) in nested_bodies(body).enumerate() {
         collect_closures(
             nested,
             Some(first + offset),
-            nested_level,
             origins,
+            ancestors,
             scopes,
             closures,
         );
     }
     scopes.pop();
+    ancestors.pop();
 }
 
-/// The direct reads and met closures of the lifted `body` at `level`; `scopes` ends with the scope
-/// of `body`'s own nested callables.
+/// The id `CaptureKey` names a body by.
+fn body_id(index: Option<usize>) -> usize {
+    index.map_or(0, |index| index + 1)
+}
+
+/// The id of the body that supplies a capture `enclosing_depth` above the parent of the innermost
+/// of `ancestors`.
+fn supplier(ancestors: &[usize], enclosing_depth: u32) -> Option<usize> {
+    let parent = ancestors.len().checked_sub(2)?;
+    let supplier = parent.checked_sub(enclosing_depth as usize)?;
+    Some(ancestors[supplier])
+}
+
+/// The direct reads and met closures of the lifted `body`, the last of `ancestors`; `scopes` ends
+/// with the scope of `body`'s own nested callables.
 fn closure_of(
     body: &FirBody,
-    level: u32,
     origins: &OriginStore,
+    ancestors: &[usize],
     scopes: &[HashMap<LocalCallableId, usize>],
 ) -> Closure {
-    let supplier = |enclosing_depth: u32| {
-        level
-            .checked_sub(1)
-            .and_then(|parent| parent.checked_sub(enclosing_depth))
-    };
+    let supplier = |enclosing_depth: u32| supplier(ancestors, enclosing_depth);
     let resolve = |depth: u32, callable: &LocalCallableId| {
         scopes
             .len()
@@ -188,9 +216,9 @@ fn closure_of(
                 source,
                 ..
             } => {
-                if let Some(level) = supplier(*enclosing_depth) {
+                if let Some(supplier) = supplier(*enclosing_depth) {
                     let source = FirCaptureSource::Value(*source);
-                    reads.push((position, CaptureKey::Value { level, source }));
+                    reads.push((position, CaptureKey::Value { supplier, source }));
                 }
             }
             FirExprKind::CapturedImplicitReceiver {
@@ -199,9 +227,9 @@ fn closure_of(
                 depth,
                 path,
             } => {
-                if let Some(level) = supplier(*enclosing_depth) {
+                if let Some(supplier) = supplier(*enclosing_depth) {
                     let key = CaptureKey::Receiver {
-                        level,
+                        supplier,
                         current: *current,
                         depth: *depth,
                         path: path.clone(),
@@ -212,11 +240,42 @@ fn closure_of(
             FirExprKind::LocalCall { target, .. }
             | FirExprKind::LocalCallableReference { target, .. } => {
                 includes.extend(
-                    resolve(target.body_depth, &target.callable).map(|closure| (position, closure)),
+                    resolve(target.body_depth, &target.callable)
+                        .map(|closure| (position, Include::Callable(closure))),
                 );
             }
             FirExprKind::Lambda { callable, .. } => {
-                includes.extend(resolve(0, callable).map(|closure| (position, closure)));
+                includes.extend(
+                    resolve(0, callable).map(|closure| (position, Include::Callable(closure))),
+                );
+            }
+            FirExprKind::AnonymousObject(object) => {
+                let keys = object
+                    .captures
+                    .iter()
+                    .filter_map(|capture| match &capture.source {
+                        FirLocalClassCaptureSource::Captured {
+                            enclosing_depth,
+                            source,
+                        } => Some(CaptureKey::Value {
+                            supplier: supplier(*enclosing_depth)?,
+                            source: FirCaptureSource::Value(*source),
+                        }),
+                        FirLocalClassCaptureSource::CapturedImplicitReceiver {
+                            enclosing_depth,
+                            current,
+                            depth,
+                            path,
+                        } => Some(CaptureKey::Receiver {
+                            supplier: supplier(*enclosing_depth)?,
+                            current: *current,
+                            depth: *depth,
+                            path: path.clone(),
+                        }),
+                        _ => None,
+                    })
+                    .collect();
+                includes.push((position, Include::Object(keys)));
             }
             _ => {}
         }
@@ -242,9 +301,15 @@ fn build_order(closures: &[Closure], index: usize, orders: &mut [Option<Vec<Capt
         }
     }
     orders[index] = Some(order.clone());
-    for &include in &closures[index].includes {
-        build_order(closures, include, orders);
-        for key in orders[include].iter().flatten() {
+    for include in &closures[index].includes {
+        let keys = match include {
+            Include::Callable(callee) => {
+                build_order(closures, *callee, orders);
+                orders[*callee].clone().unwrap_or_default()
+            }
+            Include::Object(keys) => keys.clone(),
+        };
+        for key in &keys {
             if !order.contains(key) {
                 order.push(key.clone());
             }
@@ -255,20 +320,22 @@ fn build_order(closures: &[Closure], index: usize, orders: &mut [Option<Vec<Capt
 
 fn apply_orders(
     body: &mut FirBody,
-    level: u32,
+    index: Option<usize>,
     orders: &[Option<Vec<CaptureKey>>],
+    ancestors: &mut Vec<usize>,
     next: &mut usize,
 ) {
+    ancestors.push(body_id(index));
     let first = *next;
     *next += nested_bodies(body).count();
-    let nested_level = level
-        .checked_add(1)
-        .expect("too many nested capture bodies");
     let mut offset = 0;
     let mut apply = |nested: &mut FirBody| {
-        let order = orders[first + offset].as_deref().unwrap_or_default();
-        nested.order_capture_parameters(nested_level, order);
-        apply_orders(nested, nested_level, orders, next);
+        let index = first + offset;
+        ancestors.push(body_id(Some(index)));
+        let order = orders[index].as_deref().unwrap_or_default();
+        nested.order_capture_parameters(ancestors, order);
+        ancestors.pop();
+        apply_orders(nested, Some(index), orders, ancestors, next);
         offset += 1;
     };
     for statement in &mut body.statements {
@@ -281,29 +348,26 @@ fn apply_orders(
             apply(body);
         }
     }
+    ancestors.pop();
 }
 
 impl FirBody {
-    /// Store the physical order of this lifted body's captures, at `level`, ranked by `order`; a
-    /// capture `order` does not name keeps its relative place after the ones it does.
-    fn order_capture_parameters(&mut self, level: u32, order: &[CaptureKey]) {
+    /// Store the physical order of this lifted body's captures, the last of `ancestors`, ranked by
+    /// `order`; a capture `order` does not name keeps its relative place after the ones it does.
+    fn order_capture_parameters(&mut self, ancestors: &[usize], order: &[CaptureKey]) {
         self.capture_parameters = Box::default();
         let rank = |key: Option<CaptureKey>| {
             key.and_then(|key| order.iter().position(|candidate| *candidate == key))
                 .unwrap_or(usize::MAX)
         };
-        let supplier = |enclosing_depth: u32| {
-            level
-                .checked_sub(1)
-                .and_then(|parent| parent.checked_sub(enclosing_depth))
-        };
+        let supplier = |enclosing_depth: u32| supplier(ancestors, enclosing_depth);
         let mut parameters = self.capture_parameters();
         parameters.sort_by_cached_key(|parameter| match *parameter {
             FirCaptureParameter::Value(ordinal) => {
                 let capture = &self.captures[ordinal as usize];
                 rank(
-                    supplier(capture.enclosing_depth).map(|level| CaptureKey::Value {
-                        level,
+                    supplier(capture.enclosing_depth).map(|supplier| CaptureKey::Value {
+                        supplier,
                         source: capture.source,
                     }),
                 )
@@ -311,8 +375,8 @@ impl FirBody {
             FirCaptureParameter::Receiver(ordinal) => {
                 let capture = &self.implicit_receiver_captures[ordinal as usize];
                 rank(
-                    supplier(capture.enclosing_depth).map(|level| CaptureKey::Receiver {
-                        level,
+                    supplier(capture.enclosing_depth).map(|supplier| CaptureKey::Receiver {
+                        supplier,
                         current: capture.current,
                         depth: capture.depth,
                         path: capture.path.clone(),
