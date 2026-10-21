@@ -307,6 +307,7 @@ fn full_local_conformance_uses_target_owned_focused_passes() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let runner = fs::read_to_string(root.join("run-tests.sh")).expect("read run-tests.sh");
     for required in [
+        "--exact kotlin_box_ir_jvm_conformance::kotlin_codegen_box_conformance --test-threads=1",
         "run-tests.sh: conformance native-focused",
         "KRUSTY_REQUIRE_NATIVE_CONFORMANCE=1",
         "kotlin_box_native_conformance:: --skip kotlin_box_native_conformance::kotlin_codegen_box_native_conformance",
