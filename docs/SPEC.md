@@ -110,6 +110,10 @@ A literal is an input occurrence of a nullable `@OnlyInputTypes` solution as wel
 (`tests/only_input_integer_literal_e2e.rs`).
 Public static fields are valid class-qualified property reads, including in inferred property
 initializers.
+A Java static field's `ConstantValue` makes it a compile-time constant only when the field is
+`final` (JLS §4.12.4): such a read inlines the value, while a non-final static that carries one, as
+every resource id in the Android Gradle plugin's compile `R.jar` does, stays a `getstatic`, as in
+kotlinc (`tests/java_nonfinal_constant_e2e.rs`).
 
 Public Java instance fields are valid value-qualified property reads. Selection uses the same
 classifier/property hierarchy for Java source stubs, compiled dependencies, and source/module
