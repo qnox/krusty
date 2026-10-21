@@ -871,32 +871,13 @@ fn build_generic_sig(
         })
     };
     let decode_parameter = |vp: &ParsedValueParam| {
-        if let Some((elem, table_nullable)) = vararg_element_type(vp, type_table) {
-            decode_metadata_type(
-                elem,
-                type_table,
-                records,
-                d2,
-                &context.names,
-                &context.erasure_bounds,
-                table_nullable,
-                0,
-            )
-            .map(Ty::array)
-        } else {
-            value_parameter_type(vp, type_table).and_then(|(body, table_nullable)| {
-                decode_metadata_type(
-                    body,
-                    type_table,
-                    records,
-                    d2,
-                    &context.names,
-                    &context.erasure_bounds,
-                    table_nullable,
-                    0,
-                )
-            })
-        }
+        decode_metadata_type_ref(
+            value_parameter_type(vp, type_table),
+            type_table,
+            records,
+            d2,
+            Some(&context),
+        )
     };
     let context_params = if !pf.context_params.is_empty() {
         pf.context_params
@@ -2807,6 +2788,9 @@ fn parse_package_parts(body: &[u8], jvm_pkgs: &[String]) -> Option<(String, Vec<
 
 #[cfg(test)]
 mod builtin_class_access_tests;
+
+#[cfg(test)]
+mod vararg_signature_tests;
 
 #[cfg(test)]
 mod module_reader_tests {
