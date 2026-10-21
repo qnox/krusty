@@ -6,8 +6,9 @@
 use super::common;
 
 fn byte_identical(name: &str, src: &str, class: &str) {
-    let comparison = common::byte_diff_against_kotlinc_cp(name, src, class, &[common::stdlib_jar()])
-        .expect("reference class comparison must be available");
+    let comparison =
+        common::byte_diff_against_kotlinc_cp(name, src, class, &[common::stdlib_jar()])
+            .expect("reference class comparison must be available");
     if let Err(e) = comparison {
         panic!("{e}");
     }
