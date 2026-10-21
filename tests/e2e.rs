@@ -1960,6 +1960,8 @@ mod native_value_classes_e2e;
 mod native_vararg_constructor_e2e;
 #[path = "native_virtual_call_result_e2e.rs"]
 mod native_virtual_call_result_e2e;
+#[path = "native_virtual_selection_e2e.rs"]
+mod native_virtual_selection_e2e;
 #[path = "native_walkable_collection_e2e.rs"]
 mod native_walkable_collection_e2e;
 #[path = "native_walkable_text_e2e.rs"]
@@ -2505,6 +2507,8 @@ mod serialization_transient_e2e;
 mod serialization_tuple_elements_e2e;
 #[path = "serialization_type_parameter_elements_e2e.rs"]
 mod serialization_type_parameter_elements_e2e;
+#[path = "serialized_override_getter_e2e.rs"]
+mod serialized_override_getter_e2e;
 #[path = "serializer_operand_cast_e2e.rs"]
 mod serializer_operand_cast_e2e;
 #[path = "session_subsystems_e2e.rs"]

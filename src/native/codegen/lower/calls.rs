@@ -420,7 +420,7 @@ impl BodyLowering<'_, '_, '_> {
                 let Some(receiver) = dispatch_receiver else {
                     return Err(declined!("a `super` call without a receiver (`{name}`)"));
                 };
-                let target = objects::SuperTarget {
+                let target = dispatch::SuperTarget {
                     owner: *owner,
                     name,
                     kind: *kind,
@@ -433,6 +433,7 @@ impl BodyLowering<'_, '_, '_> {
                 name,
                 params,
                 module_target,
+                target,
                 ..
             } => {
                 let Some(receiver) = dispatch_receiver else {
@@ -443,7 +444,7 @@ impl BodyLowering<'_, '_, '_> {
                 {
                     return self.module_member_call(*owner, target, receiver, args);
                 }
-                self.virtual_call(*owner, name, params.as_ref(), receiver, args)
+                self.virtual_call(*owner, name, params.as_ref(), *target, receiver, args)
             }
             Callee::Special {
                 owner,
@@ -456,7 +457,7 @@ impl BodyLowering<'_, '_, '_> {
                 };
                 // A diamond `super.f()` to a superinterface's DEFAULT METHOD. `Callee::Special`
                 // carries no accessor kind because it never names one.
-                let target = objects::SuperTarget {
+                let target = dispatch::SuperTarget {
                     owner: *owner,
                     name,
                     kind: crate::ir::IrSuperCallKind::Function,

@@ -154,8 +154,11 @@ pub(super) fn sign_package_classes(
             .last()
             .filter(|_| class.is_inner)
             .map(|owner| type_name(owner));
-        let shape = classifier_shape(identity, &name, class, &type_parameters, outer_instance)
+        let mut shape = classifier_shape(identity, &name, class, &type_parameters, outer_instance)
             .map_err(|error| unsignable(package, &local, error))?;
+        shape.mapped_collection =
+            super::collection_roles::normalize(identity, compiler_builtin_owner, &shape)
+                .map_err(|error| unsignable(package, &local, error))?;
         let enum_members = (class.kind == TypeKind::Enum)
             .then(|| enum_class_member_signatures(inside, class.has_enum_entries))
             .transpose()
