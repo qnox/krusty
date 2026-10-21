@@ -155,6 +155,12 @@ impl ClassWriter {
                 self.add_leading_field(position, 0, &field.name, &field.descriptor);
             }
             self.lead_with_debug_metadata(&machine.debug_metadata);
+            // The method node replays `visitParameter` after the transformer: its names follow.
+            for &(name, _) in &self.methods[index].method_parameters {
+                if name != 0 {
+                    self.cp.noting(name);
+                }
+            }
             let leading = self.cp.take_noted();
             let outcome = CoroutineOutcome::StateMachine {
                 fields: machine.layout.fields,

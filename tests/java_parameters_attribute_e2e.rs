@@ -636,3 +636,85 @@ fn method_parameters_remain_opt_in() {
         BTreeMap::new()
     );
 }
+
+/// Byte-compare `expected_classes` compiled by both compilers under `-java-parameters`.
+fn assert_byte_parity(source_name: &str, source: &str, expected_classes: &[&str]) {
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let reference_dir = kotlinc_classes(source_name, source);
+    let classes = compile_java_parameters(
+        source_name,
+        source,
+        &[stdlib, jdk.clone()],
+        Some(jdk.as_path()),
+    )
+    .expect("compile with -java-parameters");
+    let mismatches: Vec<&str> = expected_classes
+        .iter()
+        .copied()
+        .filter(|name| {
+            let reference = std::fs::read(reference_dir.join(format!("{name}.class")))
+                .unwrap_or_else(|error| panic!("read kotlinc {name}: {error}"));
+            let ours = classes
+                .iter()
+                .find_map(|(class, bytes)| (class == name).then_some(bytes))
+                .unwrap_or_else(|| panic!("krusty did not emit expected class {name}"));
+            *ours != reference
+        })
+        .collect();
+    assert_eq!(
+        mismatches,
+        Vec::<&str>::new(),
+        "classes must be byte-identical to kotlinc's"
+    );
+    let root = reference_dir
+        .parent()
+        .expect("reference output has a scratch root");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// ASM interns each `MethodParameters` name in `visitParameter`, right after a method's header and
+/// before its annotations and code, and the attribute's own name when it writes that method. A
+/// primary constructor's names therefore precede its parameters' `@NotNull`, and a class whose
+/// constructor comes first names `MethodParameters` before a later method's `StackMapTable`.
+#[test]
+fn java_parameters_interns_constructor_names_in_kotlinc_order() {
+    assert_byte_parity(
+        "JavaParametersPoolOrder",
+        "package demo\n\
+        data class Invite(val email: String, val role: String = \"viewer\")\n\
+        class Plain(val email: String, val role: String)\n\
+        class Defaulted(val count: Int, private val label: String = \"x\") {\n\
+        \x20 fun render(prefix: Int, suffix: String?) = prefix.toString() + suffix + label\n\
+        }\n",
+        &["demo/Invite", "demo/Plain", "demo/Defaulted"],
+    );
+}
+
+/// A suspend lambda's constructor, `create` and typed `invoke` intern their names with their
+/// headers. Its `invokeSuspend` is the coroutine transformer's: kotlinc replays the method node
+/// after the transformer queued `@DebugMetadata`, so `$result` follows that annotation's entries.
+#[test]
+fn java_parameters_interns_suspend_lambda_names_in_kotlinc_order() {
+    assert_byte_parity(
+        "JavaParametersSuspendLambda",
+        "package demo\n\
+        class Repo {\n\
+        \x20 suspend fun load(id: String): String = id\n\
+        \x20 suspend fun upsert(id: String, value: Int): String {\n\
+        \x20\x20 val loaded = load(id)\n\
+        \x20\x20 return loaded + value\n\
+        \x20 }\n\
+        }\n\
+        fun <T> runIt(block: suspend () -> T): Any = block\n\
+        class Caller {\n\
+        \x20 fun test(repo: Repo) = runIt { repo.upsert(\"a\", 1) }\n\
+        }\n",
+        &[
+            "demo/Repo",
+            "demo/Repo$upsert$1",
+            "demo/Caller",
+            "demo/Caller$test$1",
+        ],
+    );
+}

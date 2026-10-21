@@ -9,6 +9,26 @@ pub(super) struct PlainClassPoolSeed<'a> {
     pub(super) class: &'a crate::ir::IrClass,
     pub(super) fq_name: &'a str,
     pub(super) ctor_signature: Option<&'a str>,
+    pub(super) java_parameters: bool,
+}
+
+/// The primary constructor's `MethodParameters` entries under `-java-parameters`, else none.
+pub(super) fn primary_constructor_method_parameters(
+    ir: &IrFile,
+    class: &crate::ir::IrClass,
+    java_parameters: bool,
+) -> Vec<crate::jvm::method_parameters::MethodParameter> {
+    if !java_parameters {
+        Vec::new()
+    } else if super::metadata_policy::is_continuation_class(class) {
+        crate::jvm::method_parameters::continuation_constructor(class)
+    } else {
+        crate::jvm::method_parameters::primary_constructor(
+            ir,
+            class,
+            &class_ctor_jvm_tys(ir, class),
+        )
+    }
 }
 
 /// Reserve an ordinary class's constructor before its members, at kotlinc's schedule position.
@@ -40,6 +60,7 @@ fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_>, cw: &mut ClassWriter) {
         ir,
         class: c,
         ctor_signature,
+        java_parameters,
         ..
     } = seed;
     let ctor_desc = primary_ctor_descriptor(ir, c);
@@ -66,6 +87,7 @@ fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_>, cw: &mut ClassWriter) {
             .collect();
     cw.seed_plain_class_pool(
         &ctor_desc,
+        &primary_constructor_method_parameters(ir, c, java_parameters),
         &parameters,
         &crate::jvm::classfile::MemberSignatures {
             ctor: ctor_signature,
