@@ -97,7 +97,9 @@ pub(crate) struct ReparseSource {
     kind: SourceKind,
     is_common: bool,
     text: Box<str>,
-    features: LangFeatures,
+    /// Shared with every other source the module's own features cover; only a source whose
+    /// directives change them holds its own set.
+    features: std::sync::Arc<LangFeatures>,
     #[cfg(test)]
     parse_count: std::cell::Cell<usize>,
     #[cfg(test)]
@@ -1060,6 +1062,7 @@ where
             features.apply_source_directives(source.text);
             features.has("MultiPlatformProjects")
         });
+    let shared_features = std::sync::Arc::new(project_features.clone());
     for (index, source) in sources.iter().enumerate() {
         diags.set_file(index as u32);
         let mut features = project_features.clone();
@@ -1068,7 +1071,11 @@ where
             kind: source.kind,
             is_common: source.is_common,
             text: source.text.into(),
-            features: features.clone(),
+            features: if features == *shared_features {
+                shared_features.clone()
+            } else {
+                std::sync::Arc::new(features.clone())
+            },
             #[cfg(test)]
             parse_count: std::cell::Cell::new(0),
             #[cfg(test)]

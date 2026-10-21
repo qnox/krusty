@@ -75,3 +75,28 @@ fn explicit_ordinary_body_growth_does_not_enter_the_signature_graph() {
         "only inferred non-local signatures may contribute ordinary expression dependencies"
     );
 }
+
+#[test]
+fn sources_without_directives_share_the_module_feature_set() {
+    let inputs = [
+        SourceInput::kotlin("fun first(): Int = 1\n").with_file_stem("First"),
+        SourceInput::kotlin("fun second(): Int = 2\n").with_file_stem("Second"),
+        SourceInput::kotlin("// OPT_IN: example.Marker\nfun third(): Int = 3\n")
+            .with_file_stem("Third"),
+    ];
+    let mut diagnostics = DiagSink::new();
+    let analysis = analyze_source_set_with_features_and_prepare(
+        &inputs,
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
+        &LangFeatures::new(),
+        |_, _| {},
+        &mut diagnostics,
+    );
+    assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
+    let [first, second, third] = analysis.reparse_sources.as_slice() else {
+        panic!("three retained sources");
+    };
+    assert!(std::sync::Arc::ptr_eq(&first.features, &second.features));
+    assert!(!std::sync::Arc::ptr_eq(&first.features, &third.features));
+    assert_ne!(*first.features, *third.features);
+}
