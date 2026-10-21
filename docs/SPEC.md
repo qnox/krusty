@@ -17891,6 +17891,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   it. A `null` of another type is an inconsistency. Test:
   `control_forms::a_nullability_smart_cast_lowers_as_the_source_smart_cast_does`.
 
+- **KLIB accessor declaration modifiers are independent.** Getter and setter flag words are
+  independent. An absent word inherits only the property's annotation/visibility/modality prefix;
+  explicit zero does not inherit. Inline, external and non-default status belong to each accessor,
+  while property-level external status remains separate. An accessor's own `InlineOnly` annotation
+  strengthens its inline obligation; a property annotation or the other accessor's annotation
+  cannot do so. A default accessor claiming an inline or external implementation is inconsistent
+  metadata. Tests: `klib_libraries::tests::accessor_modifiers`.
+
 - **A KLIB `also`/`apply` call expands as an invocation that answers the receiver.** The direct
   lambda invocation plan of an exact `@InlineOnly` prepared-inline body accepts, besides one
   `return` of the invocation (`let`, `run`, `with`), the two statements `block(...)` and

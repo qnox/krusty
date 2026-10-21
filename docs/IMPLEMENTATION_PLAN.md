@@ -5562,6 +5562,13 @@ non-inline callers, still reads the field directly. Test:
   finally, enums and companions on the class tables, and further target-KLIB
   library bodies/intrinsics keyed by the selected declaration.
 
+## KLIB accessor metadata
+
+- Accessor metadata preserves independent getter/setter modifiers and annotation identities,
+  including exact absent-word defaults and explicit zero. Accessor inline obligations now survive
+  provider normalization. This producer change does not enable ordinary-body or inline-accessor
+  emission; those consumers remain separate work.
+
 ## KLIB writer — krusty compiles a module to a Kotlin library  ◐
 
 A non-JVM dependency is distributed as a KLIB, and a dependent compilation reads its declarations
