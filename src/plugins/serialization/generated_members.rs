@@ -17,10 +17,11 @@ const DESERIALIZE_PARAMETER_NAMES: [&str; 1] = ["decoder"];
 const WRITE_SELF_KOTLIN_NAME: &str = "write$Self";
 const WRITE_SELF_PARAMETER_NAMES: [&str; 3] = ["self", "output", "serialDesc"];
 
-/// kotlinc publishes an inheritable class's `write$Self` because a subclass, possibly in another
-/// module, calls it; a final class's stays internal.
+/// kotlinc publishes an open or abstract class's `write$Self` because a subclass, possibly in
+/// another module, calls it; a final class's stays internal. (A sealed class gets no `write$Self`
+/// yet.)
 pub(super) fn write_self_is_public(class: &IrClass) -> bool {
-    class.is_open || class.is_abstract || class.is_sealed
+    class.is_open || class.is_abstract
 }
 
 pub(super) fn write_self_visibility(class: &IrClass) -> Visibility {
