@@ -11319,6 +11319,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   factories and their `…$cp` accessor. krusty declared the cache members before the no-arg
   constructor. Test: `tests/serializable_noarg_constructor_order_e2e.rs` (ordered member lists and
   class bytes compared with kotlinc's).
+- **A value-class parameter keeps the no-arg convenience constructor.** A primary constructor
+  taking a value class is private behind its public `DefaultConstructorMarker` accessor, yet when
+  every parameter has a default kotlinc still adds `<init>()` at the primary's declared visibility
+  (public, or protected for a protected primary). Test:
+  `tests/value_class_parameter_no_arg_constructor_e2e.rs` (class bytes compared with kotlinc's).
 - **A hidden serializable primary's `…$cp` accessor follows its marker accessor.** When a
   `@Serializable` class's primary constructor takes a value class, kotlinc's accessor lowering
   declares the primary's `DefaultConstructorMarker` accessor, then
