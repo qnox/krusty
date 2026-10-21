@@ -50,7 +50,7 @@ pub fn checked_box(src: &str, stem: &str) -> Result<ReferenceClasses, String> {
         BoxJdk::Full { root: Some(&jdk) },
         krusty::conformance::COROUTINE_HELPERS,
     )?;
-    // Do not flatten: two distinct modules may emit the same JVM internal name.
+    // Keep the qualified inventory for comparisons; execution uses the runner's classpath names.
     let classes = reference
         .qualified()
         .map(|((_, name), bytes)| (name.to_owned(), bytes.to_vec()))

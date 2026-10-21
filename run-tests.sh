@@ -360,7 +360,7 @@ if [ -n "$gate" ]; then
   echo "run-tests.sh: conformance jvm-box" >&2
   KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS" \
     run_one \
-      "$logdir" "$gate::--exact kotlin_codegen_box_conformance::kotlin_codegen_box_conformance --test-threads=1" \
+      "$logdir" "$gate::--exact kotlin_box_ir_jvm_conformance::kotlin_codegen_box_conformance --test-threads=1" \
       "jvm-box"
   # The native box lane compiles, links and runs every accepted case in one process under its own
   # suite-wide deadline. It reads the same committed platform/version expectations locally and in
