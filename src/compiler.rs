@@ -230,7 +230,7 @@ fn emit_analyzed_into<B: Backend>(
             .map(|package| package.render().replace('/', "."));
         let mut ir = crate::ir::IrFile::with_package(package);
         ir.set_same_module_inlining(backend.same_module_inlining());
-        ir.recursive_type_of = source.recursive_type_of();
+        ir.recursive_type_of = source.recursive_type_of(reparse_sources.features());
         ir.source_debug =
             crate::ir::SourceDebug::from_map(&source_map, source_id, &source_line_counts);
         let mut sink = match crate::fir_lower::CommonIrBodySink::new(&index, source_id, &mut ir) {
@@ -271,7 +271,7 @@ fn emit_analyzed_into<B: Backend>(
         let mut source_failed = false;
         let mut source_rejected = false;
         let source_diagnostics = diags.diags.len();
-        source.visit_declaration_units(diags, |active_file, diags| {
+        source.visit_declaration_units(reparse_sources.features(), diags, |active_file, diags| {
             if source_failed {
                 return;
             }
@@ -1208,33 +1208,37 @@ pub fn check_frontend_only(
             diags.set_file(raw_source as u32);
             let diagnostics_start = diags.diags.len();
             let streamed_cache = crate::fir::StreamedModuleProjectionCache::default();
-            source.visit_diagnostic_units(diags, |active_file, diags| {
-                let mut cursor = crate::fir::ActiveSourceCursor::new(source_id, &index);
-                let active = match cursor.bind_next(&active_file, source_id, &index) {
-                    Ok(active) if cursor.is_finished() => active,
-                    Ok(_) | Err(_) => {
-                        diags.error(
+            source.visit_diagnostic_units(
+                reparse_sources.features(),
+                diags,
+                |active_file, diags| {
+                    let mut cursor = crate::fir::ActiveSourceCursor::new(source_id, &index);
+                    let active = match cursor.bind_next(&active_file, source_id, &index) {
+                        Ok(active) if cursor.is_finished() => active,
+                        Ok(_) | Err(_) => {
+                            diags.error(
                             Span::new(0, 0),
                             "internal error: script declarations did not bind to the stable module",
                         );
-                        return;
-                    }
-                };
-                let selected_spans = crate::fx_hash::HashSet::default();
-                let selected_bodies = crate::fx_hash::HashSet::default();
-                drop(crate::resolve::check_selected_declarations_in_pass_two(
-                    &active_file,
-                    raw_source as u32,
-                    &selected_spans,
-                    &selected_spans,
-                    &active,
-                    &selected_bodies,
-                    &mut symbols,
-                    &index,
-                    &streamed_cache,
-                    diags,
-                ));
-            });
+                            return;
+                        }
+                    };
+                    let selected_spans = crate::fx_hash::HashSet::default();
+                    let selected_bodies = crate::fx_hash::HashSet::default();
+                    drop(crate::resolve::check_selected_declarations_in_pass_two(
+                        &active_file,
+                        raw_source as u32,
+                        &selected_spans,
+                        &selected_spans,
+                        &active,
+                        &selected_bodies,
+                        &mut symbols,
+                        &index,
+                        &streamed_cache,
+                        diags,
+                    ));
+                },
+            );
             let reported = diags.diags[diagnostics_start..]
                 .iter()
                 .find(|diagnostic| diagnostic.severity == crate::diag::Severity::Error);
@@ -1269,7 +1273,7 @@ pub fn check_frontend_only(
         let source_diagnostic_start = diags.diags.len();
         let mut source_failed = false;
         let mut source_rejected = false;
-        source.visit_declaration_units(diags, |active_file, diags| {
+        source.visit_declaration_units(reparse_sources.features(), diags, |active_file, diags| {
             if source_failed {
                 return;
             }

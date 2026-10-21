@@ -75,3 +75,25 @@ fn explicit_ordinary_body_growth_does_not_enter_the_signature_graph() {
         "only inferred non-local signatures may contribute ordinary expression dependencies"
     );
 }
+
+#[test]
+fn retained_sources_keep_the_module_features_once() {
+    let inputs = [
+        SourceInput::kotlin("fun first(): Int = 1\n").with_file_stem("First"),
+        SourceInput::kotlin("// OPT_IN: example.Marker\nfun second(): Int = 2\n")
+            .with_file_stem("Second"),
+    ];
+    let mut module_features = LangFeatures::new();
+    module_features.enable("NameBasedDestructuring");
+    let mut diagnostics = DiagSink::new();
+    let analysis = analyze_source_set_with_features_and_prepare(
+        &inputs,
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
+        &module_features,
+        |_, _| {},
+        &mut diagnostics,
+    );
+    assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
+    assert_eq!(*analysis.reparse_sources.features(), module_features);
+    assert_eq!(analysis.reparse_sources.len(), 2);
+}
