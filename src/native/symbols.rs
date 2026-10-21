@@ -102,6 +102,18 @@ pub(super) fn module_value_box_symbols(
     )
 }
 
+/// Symbol of the runtime type descriptor of a named source class, which the declaring file
+/// defines and every other file of the module names in a type check, a cast or a `catch`. Named
+/// from the exact source module and the class's qualified name, which every file holds.
+pub(super) fn module_descriptor_symbol(
+    module_name: &str,
+    classifier: crate::types::TypeName,
+) -> String {
+    let mut symbol = format!("kt_modtype_{}_", module_namespace(module_name));
+    mangle_name(&mut symbol, &classifier.render());
+    symbol
+}
+
 /// Symbol of the getter of an `object` declaration's instance, which the declaring file defines
 /// and every other file of the module calls to reach the object. Named from the exact source
 /// module and the object's qualified name, which every file holds.

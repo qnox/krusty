@@ -70,7 +70,30 @@ impl<'a> FileLowering<'a> {
         Ok(id)
     }
 
-    /// The runtime descriptor for a represented type: an in-file class or a built-in.
+    /// The descriptor of class `class`. A named source class's is the module symbol every other
+    /// file of the module names it by; a local, anonymous or dependency-support class's is this
+    /// object's own.
+    pub(super) fn declare_descriptor(
+        &mut self,
+        class: ClassId,
+        base: &str,
+    ) -> Result<DataId, Unsupported> {
+        let named = self.unit_kind == crate::backend::CheckedIrUnitKind::Source
+            && !self.ir.local_class_name_provenance.contains_key(&class);
+        if !named {
+            return self.declare_local_data(&format!("kt_type_{base}"), false);
+        }
+        let symbol = super::super::super::symbols::module_descriptor_symbol(
+            self.module_name,
+            self.ir.classes[class as usize].fq_name_id(),
+        );
+        self.module
+            .declare_data(&symbol, Linkage::Hidden, false, false)
+            .map_err(|error| declined!("declaring `{symbol}` ({error})"))
+    }
+
+    /// The runtime descriptor for a represented type: a class of this file or of another file of
+    /// the module, or a built-in.
     pub(super) fn type_descriptor(&mut self, ty: Ty) -> Result<Option<DataId>, Unsupported> {
         let target = ty.non_null();
         if let Some(class) = target
@@ -78,6 +101,19 @@ impl<'a> FileLowering<'a> {
             .and_then(|name| self.ir.class_id_by_name(name))
         {
             return Ok(Some(self.classes[class as usize].descriptor));
+        }
+        // A named class another file of the module declares: that file defines its descriptor
+        // under the module symbol.
+        if let Some(name) = target.obj_internal() {
+            if self
+                .classifiers
+                .classifier(name)
+                .is_some_and(|fact| fact.source)
+            {
+                let symbol =
+                    super::super::super::symbols::module_descriptor_symbol(self.module_name, name);
+                return self.import_data(&symbol).map(Some);
+            }
         }
         let symbol = match target {
             Ty::String => "kt_type_string",

@@ -14573,6 +14573,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_value_class_member_function_takes_the_value`,
   `an_object_declared_in_another_file_is_constructed_once_and_called`,
   `a_companion_member_is_called_from_another_file`).
+- **Native: a class declared in another file is named by its module descriptor.** The runtime
+  type descriptor of a named source class is defined by its declaring file under one symbol per
+  class, named from the source module and the class's qualified name, so `is`, `!is`, `as`, `as?`
+  and a `catch` clause in another file of the module ask about the same descriptor the declaring
+  file stamps on the class's instances. A `when` over a sealed hierarchy declared elsewhere is
+  those checks. A local or anonymous class keeps a descriptor of its own file, since no other file
+  can name it.
+  Tests: `tests/native_cross_file_e2e.rs`
+  (`an_is_check_names_a_class_declared_in_another_file`,
+  `a_when_over_a_sealed_hierarchy_from_another_file_selects_its_branch`,
+  `an_exception_declared_in_another_file_is_caught_by_its_class`).
 - **Native: the public C ABI is primitives, String, and a Unit result.** A public top-level
   function whose parameters are primitives or `String` and whose result is one of those types or
   `Unit` is declared in the module's C header and exported under that declaration. The export runs

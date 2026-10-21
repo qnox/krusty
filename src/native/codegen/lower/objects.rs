@@ -211,7 +211,7 @@ impl<'a> FileLowering<'a> {
     pub(super) fn declare_classes(&mut self) -> Result<(), Unsupported> {
         for class in 0..self.ir.classes.len() as ClassId {
             let base = self.class_base(class).to_string();
-            let descriptor = self.declare_local_data(&format!("kt_type_{base}"), false)?;
+            let descriptor = self.declare_descriptor(class, &base)?;
             let params: Vec<Ty> = std::iter::once(any())
                 .chain(constructor_parameters(self.ir, class))
                 .collect();
