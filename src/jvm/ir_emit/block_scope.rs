@@ -1200,6 +1200,7 @@ impl Emitter<'_> {
         }
         let optimized_postfix = self.emit_postfix_iinc(block, true, code);
         let mut bound_operands = 0;
+        let mut unit_switch_value = false;
         for (index, statement) in stmts.iter().copied().enumerate() {
             if optimized_postfix {
                 break;
@@ -1236,6 +1237,22 @@ impl Emitter<'_> {
                 code.set_stack(base.max(0) as u16);
                 continue;
             }
+            // A statement block's last `when` is its value: kotlinc pops a switch's joined `Unit`
+            // after the block's locals end.
+            if close_statement_lambda
+                && value.is_none()
+                && Some(index) == last_statement
+                && !self.ir.callable_scopes.contains(&block)
+                && self.is_unit_switch(statement)
+            {
+                self.emit_unit_switch_value(statement, code);
+                if code.is_dead() {
+                    dead = true;
+                } else {
+                    unit_switch_value = true;
+                }
+                break;
+            }
             self.emit(statement, code);
             if self.discarding_diverges(statement) {
                 dead = true;
@@ -1247,7 +1264,7 @@ impl Emitter<'_> {
         let mut retains_postfix_temporary = false;
         let mut close_lambda_before_locals = false;
         let mut emit_after_frame_close = None;
-        let mut discard_after_frame = None;
+        let mut discard_after_frame = unit_switch_value.then_some(1);
         let mut close_discarded_provider_frame = None;
         if !dead && !optimized_postfix {
             if let Some(value) = value {
