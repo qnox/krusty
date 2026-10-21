@@ -28,10 +28,13 @@ fn generic_call_result_boundary_keeps_declared_and_selected_types() {
                 return None;
             };
             let IrExpr::Call {
-                callee: Callee::Local(function),
+                callee: call_callee,
                 ..
             } = ir.expr(*arg)
             else {
+                return None;
+            };
+            let Callee::Local(function) = &**call_callee else {
                 return None;
             };
             (ir.functions[*function as usize].name == "produce").then_some((

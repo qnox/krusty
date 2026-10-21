@@ -129,11 +129,11 @@ impl ValueClassBody<'_> {
         let descriptor = self.descriptor(ir);
         let encoder = ir.add_expr(IrExpr::GetValue(1));
         let inline_encoder = ir.add_expr(IrExpr::Call {
-            callee: virtual_iface(
+            callee: Box::new(virtual_iface(
                 "kotlinx/serialization/encoding/Encoder",
                 "encodeInline",
                 "(Lkotlinx/serialization/descriptors/SerialDescriptor;)Lkotlinx/serialization/encoding/Encoder;",
-            ),
+            )),
             dispatch_receiver: Some(encoder),
             args: vec![descriptor],
         });
@@ -191,11 +191,11 @@ impl ValueClassBody<'_> {
             }
         };
         let encode = ir.add_expr(IrExpr::Call {
-            callee: virtual_iface(
+            callee: Box::new(virtual_iface(
                 "kotlinx/serialization/encoding/Encoder",
                 method,
                 method_descriptor,
-            ),
+            )),
             dispatch_receiver: Some(receiver),
             args,
         });
@@ -229,11 +229,11 @@ impl ValueClassBody<'_> {
         let descriptor = self.descriptor(ir);
         let decoder = ir.add_expr(IrExpr::GetValue(1));
         let inline_decoder = ir.add_expr(IrExpr::Call {
-            callee: virtual_iface(
+            callee: Box::new(virtual_iface(
                 "kotlinx/serialization/encoding/Decoder",
                 "decodeInline",
                 "(Lkotlinx/serialization/descriptors/SerialDescriptor;)Lkotlinx/serialization/encoding/Decoder;",
-            ),
+            )),
             dispatch_receiver: Some(decoder),
             args: vec![descriptor],
         });
@@ -242,11 +242,11 @@ impl ValueClassBody<'_> {
                 decode: (method, method_descriptor),
                 ..
             } => ir.add_expr(IrExpr::Call {
-                callee: virtual_iface(
+                callee: Box::new(virtual_iface(
                     "kotlinx/serialization/encoding/Decoder",
                     method,
                     method_descriptor,
-                ),
+                )),
                 dispatch_receiver: Some(inline_decoder),
                 args: vec![],
             }),
@@ -265,11 +265,11 @@ impl ValueClassBody<'_> {
                     "decodeSerializableValue"
                 };
                 let decoded = ir.add_expr(IrExpr::Call {
-                    callee: virtual_iface(
+                    callee: Box::new(virtual_iface(
                         "kotlinx/serialization/encoding/Decoder",
                         method,
                         "(Lkotlinx/serialization/DeserializationStrategy;)Ljava/lang/Object;",
-                    ),
+                    )),
                     dispatch_receiver: Some(inline_decoder),
                     args: vec![serializer],
                 });

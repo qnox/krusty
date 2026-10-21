@@ -24,14 +24,22 @@ use super::value_when::value_when;
 pub(crate) fn suspend_call_fid(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> Option<u32> {
     match &ir.exprs[e as usize] {
         IrExpr::Call {
-            callee: Callee::Local(fid) | Callee::LocalDefault(fid),
+            callee: call_callee,
             ..
-        } if suspend_set.contains(fid) => Some(*fid),
+        } if let Callee::Local(fid) | Callee::LocalDefault(fid) = &**call_callee
+            && suspend_set.contains(fid) =>
+        {
+            Some(*fid)
+        }
         IrExpr::Call {
-            callee:
-                Callee::ClassStatic { function, .. } | Callee::ClassStaticDefault { function, .. },
+            callee: call_callee,
             ..
-        } if suspend_set.contains(function) => Some(*function),
+        } if let Callee::ClassStatic { function, .. }
+        | Callee::ClassStaticDefault { function, .. } = &**call_callee
+            && suspend_set.contains(function) =>
+        {
+            Some(*function)
+        }
         IrExpr::MethodCall { class, index, .. } => {
             let fid = *ir.classes[*class as usize].methods.get(*index as usize)?;
             suspend_set.contains(&fid).then_some(fid)

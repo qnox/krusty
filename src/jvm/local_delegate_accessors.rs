@@ -224,7 +224,7 @@ pub(crate) fn realize(
         args.push(access.delegate);
         args.extend(access.value);
         ir.exprs[raw] = IrExpr::Call {
-            callee,
+            callee: Box::new(callee),
             dispatch_receiver: None,
             args,
         };

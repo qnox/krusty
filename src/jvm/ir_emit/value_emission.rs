@@ -669,7 +669,7 @@ impl super::Emitter<'_> {
                 callee,
                 dispatch_receiver,
                 args,
-            } => match callee {
+            } => match &**callee {
                 // `jvm::module_calls::realize` rewrites every `super` call into
                 // `Callee::Special` before emission.
                 Callee::Super { .. } => {
@@ -1590,7 +1590,7 @@ impl super::Emitter<'_> {
                 // pass keeps it; separately record only the indy realization for target-version checks.
                 self.run.used_lambdas.borrow_mut().insert(*impl_fn);
                 let function_adapter = sam.as_ref().is_some_and(|target| target.function_adapter);
-                let mut lambda_mode = self.lambda_modes.for_lambda(sam.as_ref(), *arity);
+                let mut lambda_mode = self.lambda_modes.for_lambda(sam.as_deref(), *arity);
                 // This implementation executes a runtime reified operation. The common IR records
                 // that semantic requirement; the JVM realizes it as a class independently of the
                 // file's ordinary lambda strategy.

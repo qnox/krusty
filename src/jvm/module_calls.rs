@@ -410,14 +410,14 @@ pub(super) fn realize_default_calls(
     for raw in 0..ir.exprs.len() {
         let replacement = match ir.exprs[raw].clone() {
             IrExpr::Call {
-                callee: Callee::LocalWithDefaults { function, defaults },
+                callee: ref call_callee,
                 dispatch_receiver,
                 args,
-            } => {
-                let (args, plan) = realize_local_default_arguments(ir, function, &defaults, args)?;
+            } if let Callee::LocalWithDefaults { function, defaults } = &**call_callee => {
+                let (args, plan) = realize_local_default_arguments(ir, *function, defaults, args)?;
                 Some((
                     IrExpr::Call {
-                        callee: Callee::LocalDefault(function),
+                        callee: Box::new(Callee::LocalDefault(*function)),
                         dispatch_receiver,
                         args,
                     },
@@ -425,19 +425,22 @@ pub(super) fn realize_default_calls(
                 ))
             }
             IrExpr::Call {
-                callee:
-                    Callee::ClassStaticWithDefaults {
-                        owner,
-                        function,
-                        defaults,
-                    },
+                callee: ref call_callee,
                 dispatch_receiver,
                 args,
-            } => {
-                let (args, plan) = realize_local_default_arguments(ir, function, &defaults, args)?;
+            } if let Callee::ClassStaticWithDefaults {
+                owner,
+                function,
+                defaults,
+            } = &**call_callee =>
+            {
+                let (args, plan) = realize_local_default_arguments(ir, *function, defaults, args)?;
                 Some((
                     IrExpr::Call {
-                        callee: Callee::ClassStaticDefault { owner, function },
+                        callee: Box::new(Callee::ClassStaticDefault {
+                            owner: *owner,
+                            function: *function,
+                        }),
                         dispatch_receiver,
                         args,
                     },
@@ -445,24 +448,24 @@ pub(super) fn realize_default_calls(
                 ))
             }
             IrExpr::Call {
-                callee:
-                    Callee::ModuleWithDefaults {
-                        target,
-                        default_provider,
-                        name,
-                        params,
-                        ret,
-                        defaults,
-                        dispatch_receiver_ty,
-                        extension_receiver_parameter,
-                    },
+                callee: ref call_callee,
                 dispatch_receiver,
                 args,
-            } => {
-                let failure = ModuleRealizationTarget::Callable(target);
+            } if let Callee::ModuleWithDefaults {
+                target,
+                default_provider,
+                name,
+                params,
+                ret,
+                defaults,
+                dispatch_receiver_ty,
+                extension_receiver_parameter,
+            } = &**call_callee =>
+            {
+                let failure = ModuleRealizationTarget::Callable(*target);
                 let callable = ir
                     .referenced_module_callables
-                    .get(&target)
+                    .get(target)
                     .cloned()
                     .ok_or(failure)?;
                 let crate::fir::ResolvedFunctionOverrideTarget::Module(default_provider) =
@@ -472,15 +475,15 @@ pub(super) fn realize_default_calls(
                 };
                 let provider = ir
                     .referenced_module_callables
-                    .get(&default_provider)
+                    .get(default_provider)
                     .cloned()
-                    .ok_or(ModuleRealizationTarget::Callable(default_provider))?;
+                    .ok_or(ModuleRealizationTarget::Callable(*default_provider))?;
                 if callable.flags.has(crate::fir::DeclarationFlags::INLINE) {
                     ir.module_inline_calls.insert(raw as ExprId);
                 }
                 let physical_name = header_jvm_name(&provider.annotations)
                     .map_err(|()| failure)?
-                    .unwrap_or(&name)
+                    .unwrap_or(name)
                     .to_owned();
                 let owner = match provider.owner {
                     Some(owner) => owner,
@@ -490,7 +493,7 @@ pub(super) fn realize_default_calls(
                 };
                 let mut stub_boxed =
                     super::default_parameter_representation::defaulted_primitive_bounds(
-                        &params,
+                        params,
                         &provider.default_parameters,
                     );
                 stub_boxed.extend(provider.default_parameters.iter().filter_map(|&parameter| {
@@ -500,10 +503,10 @@ pub(super) fn realize_default_calls(
                 }));
                 let (mut params, mut args, mut plan) = realize_default_arguments(
                     ir,
-                    params,
+                    params.to_vec(),
                     args,
-                    &defaults,
-                    extension_receiver_parameter,
+                    defaults,
+                    *extension_receiver_parameter,
                     &stub_boxed,
                 )
                 .ok_or(failure)?;
@@ -511,7 +514,7 @@ pub(super) fn realize_default_calls(
                 let static_member =
                     super::ir_emit::jvm_static_members::module_singleton_static_owner(
                         ir,
-                        default_provider,
+                        *default_provider,
                     )
                     .is_some();
                 // The static stub takes no receiver and initializes the object itself. A receiver
@@ -533,14 +536,14 @@ pub(super) fn realize_default_calls(
                 }
                 Some((
                     IrExpr::Call {
-                        callee: Callee::CrossFile {
+                        callee: Box::new(Callee::CrossFile {
                             facade: owner,
                             name: format!("{physical_name}$default"),
                             params,
-                            ret,
-                            module_target: Some(default_provider),
+                            ret: *ret,
+                            module_target: Some(*default_provider),
                             module_default_call: true,
-                        },
+                        }),
                         dispatch_receiver: discarded_receiver,
                         args,
                     },
@@ -571,244 +574,248 @@ pub(super) fn realize_super_calls(
         // `super` dispatch: the checker fixed the supertype declaration, so only the PHYSICAL
         // descriptor is left to choose, and that is a JVM ABI decision derived from the semantic
         // parameter and physical result types.
-        if let IrExpr::Call {
-            callee:
-                Callee::Super {
-                    owner,
-                    dispatch_owner,
-                    enclosing_dispatch,
-                    kind,
-                    name,
-                    params,
-                    ret,
-                    interface,
-                    realization,
-                    descriptor,
-                    declaration,
-                    defaults,
-                    source_member,
-                },
+        let IrExpr::Call {
+            callee,
             dispatch_receiver,
             args,
         } = ir.exprs[raw].clone()
-        {
-            // The current-module declaration a realized call keeps as its source. A dependency
-            // declaration whose ordinary descriptor is not a legal nonvirtual entry (a legacy
-            // interface body) names its holder: realize the selected declaration there, as a
-            // receiver-first static. Resolution keeps the declaration it selected.
-            let (source, external) = match declaration {
-                Some(crate::fir::ResolvedFunctionOverrideTarget::Module(callable)) => {
-                    (Some(callable), None)
-                }
-                Some(crate::fir::ResolvedFunctionOverrideTarget::External(external)) => {
-                    (None, Some(external))
-                }
-                None => (None, None),
-            };
-            let holder = match external {
-                Some(target) => callables
-                    .callable(target)
-                    .ok_or(ModuleRealizationTarget::DependencyCallable(target))?
-                    .nonvirtual_realization
-                    .clone(),
-                None => None,
-            };
-            // A holder static is public, so `super@Outer` from an inner class calls it directly
-            // with the outer receiver; only a real nonvirtual dispatch needs the outer accessor.
-            let enclosing_dispatch = enclosing_dispatch && holder.is_none();
-            let (owner, descriptor, realization) = match holder {
-                Some(holder) => (
-                    holder.owner,
-                    holder.descriptor,
-                    crate::libraries::MemberRealization::Direct {
-                        pass_receiver: true,
-                    },
-                ),
-                None => (owner, descriptor, realization),
-            };
-            if !defaults.is_empty() {
-                return Err(source.map_or(
-                    ModuleRealizationTarget::Classifier(owner),
-                    ModuleRealizationTarget::Callable,
-                ));
+        else {
+            continue;
+        };
+        let Callee::Super {
+            owner,
+            dispatch_owner,
+            enclosing_dispatch,
+            kind,
+            name,
+            params,
+            ret,
+            interface,
+            realization,
+            descriptor,
+            declaration,
+            defaults,
+            source_member,
+        } = *callee
+        else {
+            continue;
+        };
+        // The current-module declaration a realized call keeps as its source. A dependency
+        // declaration whose ordinary descriptor is not a legal nonvirtual entry (a legacy
+        // interface body) names its holder: realize the selected declaration there, as a
+        // receiver-first static. Resolution keeps the declaration it selected.
+        let (source, external) = match declaration {
+            Some(crate::fir::ResolvedFunctionOverrideTarget::Module(callable)) => {
+                (Some(callable), None)
             }
-            // The accessor's own name, as selection resolved it. Property accessors are published
-            // accessor-shaped now — `getValue`/`setValue`, the same shape a dependency provider
-            // publishes — so rebuilding `get`/`set` from it here named `getGetValue`, which no
-            // class declares: `super<Base>@Outer.value` died at its first read with a
-            // `NoSuchMethodError`. `kind` remains the semantic fact for targets that need it;
-            // nothing about the JVM spelling is derived from it.
-            if let crate::ir::IrSuperCallKind::PropertyGetter(property) = kind {
-                property_realizations.record_super_getter(raw as ExprId, property);
+            Some(crate::fir::ResolvedFunctionOverrideTarget::External(external)) => {
+                (None, Some(external))
             }
-            // A class that inherits the selected declaration as a specialized default answers the
-            // call with its typed forwarder; its erased entry is a bridge back to that forwarder.
-            let specialized = match (declaration, interface, &realization) {
-                (Some(declaration), false, crate::libraries::MemberRealization::Dispatch) => {
-                    crate::jvm::inherited_default_realization::specialized_super_entry(
-                        ir,
-                        callables,
+            None => (None, None),
+        };
+        let holder = match external {
+            Some(target) => callables
+                .callable(target)
+                .ok_or(ModuleRealizationTarget::DependencyCallable(target))?
+                .nonvirtual_realization
+                .clone(),
+            None => None,
+        };
+        // A holder static is public, so `super@Outer` from an inner class calls it directly
+        // with the outer receiver; only a real nonvirtual dispatch needs the outer accessor.
+        let enclosing_dispatch = enclosing_dispatch && holder.is_none();
+        let (owner, descriptor, realization) = match holder {
+            Some(holder) => (
+                holder.owner,
+                holder.descriptor,
+                crate::libraries::MemberRealization::Direct {
+                    pass_receiver: true,
+                },
+            ),
+            None => (owner, descriptor, realization),
+        };
+        if !defaults.is_empty() {
+            return Err(source.map_or(
+                ModuleRealizationTarget::Classifier(owner),
+                ModuleRealizationTarget::Callable,
+            ));
+        }
+        // The accessor's own name, as selection resolved it. Property accessors are published
+        // accessor-shaped now — `getValue`/`setValue`, the same shape a dependency provider
+        // publishes — so rebuilding `get`/`set` from it here named `getGetValue`, which no
+        // class declares: `super<Base>@Outer.value` died at its first read with a
+        // `NoSuchMethodError`. `kind` remains the semantic fact for targets that need it;
+        // nothing about the JVM spelling is derived from it.
+        if let crate::ir::IrSuperCallKind::PropertyGetter(property) = kind {
+            property_realizations.record_super_getter(raw as ExprId, property);
+        }
+        // A class that inherits the selected declaration as a specialized default answers the
+        // call with its typed forwarder; its erased entry is a bridge back to that forwarder.
+        let specialized = match (declaration, interface, &realization) {
+            (Some(declaration), false, crate::libraries::MemberRealization::Dispatch) => {
+                crate::jvm::inherited_default_realization::specialized_super_entry(
+                    ir,
+                    callables,
+                    owner,
+                    declaration,
+                    jvm_default,
+                )
+            }
+            _ => None,
+        };
+        let (name, descriptor, source) = match specialized {
+            // A value-class-specialized forwarder is not the selected declaration's own
+            // realization: it no longer names that declaration as its source, and its
+            // arguments and result are represented for the substituted signature.
+            Some(crate::jvm::inherited_default_realization::SpecializedSuperEntry {
+                name,
+                descriptor,
+                value_class_signature: Some((parameters, result)),
+            }) => {
+                ir.call_declared_params.insert(raw as ExprId, parameters);
+                ir.call_declared_ret.insert(raw as ExprId, result);
+                (name, descriptor, None)
+            }
+            Some(specialized) => (specialized.name, specialized.descriptor, source),
+            None if descriptor.is_empty() => (
+                name,
+                crate::jvm::names::method_descriptor(&params, ret),
+                source,
+            ),
+            None => (name, descriptor, source),
+        };
+        if enclosing_dispatch {
+            let class = ir
+                .classes
+                .iter()
+                .position(|class| class.fq_name_id() == dispatch_owner)
+                .ok_or(ModuleRealizationTarget::Classifier(dispatch_owner))?;
+            let receiver = ir.add_expr(IrExpr::GetValue(0));
+            let bridge_arguments = (0..params.len())
+                .map(|parameter| {
+                    ir.add_expr(IrExpr::GetValue(
+                        u32::try_from(parameter + 1).expect("too many super parameters"),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            let invocation = match realization {
+                crate::libraries::MemberRealization::Dispatch => ir.add_expr(IrExpr::Call {
+                    callee: Box::new(Callee::Special {
                         owner,
-                        declaration,
-                        jvm_default,
-                    )
-                }
-                _ => None,
-            };
-            let (name, descriptor, source) = match specialized {
-                // A value-class-specialized forwarder is not the selected declaration's own
-                // realization: it no longer names that declaration as its source, and its
-                // arguments and result are represented for the substituted signature.
-                Some(crate::jvm::inherited_default_realization::SpecializedSuperEntry {
-                    name,
-                    descriptor,
-                    value_class_signature: Some((parameters, result)),
-                }) => {
-                    ir.call_declared_params.insert(raw as ExprId, parameters);
-                    ir.call_declared_ret.insert(raw as ExprId, result);
-                    (name, descriptor, None)
-                }
-                Some(specialized) => (specialized.name, specialized.descriptor, source),
-                None if descriptor.is_empty() => (
-                    name,
-                    crate::jvm::names::method_descriptor(&params, ret),
-                    source,
-                ),
-                None => (name, descriptor, source),
-            };
-            if enclosing_dispatch {
-                let class = ir
-                    .classes
-                    .iter()
-                    .position(|class| class.fq_name_id() == dispatch_owner)
-                    .ok_or(ModuleRealizationTarget::Classifier(dispatch_owner))?;
-                let receiver = ir.add_expr(IrExpr::GetValue(0));
-                let bridge_arguments = (0..params.len())
-                    .map(|parameter| {
-                        ir.add_expr(IrExpr::GetValue(
-                            u32::try_from(parameter + 1).expect("too many super parameters"),
-                        ))
-                    })
-                    .collect::<Vec<_>>();
-                let invocation = match realization {
-                    crate::libraries::MemberRealization::Dispatch => ir.add_expr(IrExpr::Call {
-                        callee: Callee::Special {
-                            owner,
-                            name,
-                            descriptor,
-                            interface,
-                            source_member,
-                            source,
-                        },
-                        dispatch_receiver: Some(receiver),
-                        args: bridge_arguments,
+                        name,
+                        descriptor,
+                        interface,
+                        source_member,
+                        source,
                     }),
-                    // As for a direct `super` call below, the receiver stays the dispatch receiver,
-                    // so a receiver-first holder static loads it at its own class.
-                    crate::libraries::MemberRealization::Direct { pass_receiver } => {
-                        ir.add_expr(IrExpr::Call {
-                            callee: Callee::Static {
-                                owner,
-                                name,
-                                descriptor,
-                                inline: crate::libraries::InlineKind::None,
-                            },
-                            dispatch_receiver: pass_receiver.then_some(receiver),
-                            args: bridge_arguments,
-                        })
-                    }
-                    crate::libraries::MemberRealization::Intrinsic(_)
-                    | crate::libraries::MemberRealization::RangeConstruction { .. } => {
-                        return Err(source.map_or(
-                            ModuleRealizationTarget::Classifier(owner),
-                            ModuleRealizationTarget::Callable,
-                        ));
-                    }
-                };
-                let body = if ret == crate::types::Ty::Unit {
-                    let returned = ir.add_expr(IrExpr::Return(None));
-                    ir.add_expr(IrExpr::Block {
-                        stmts: vec![invocation, returned],
-                        value: None,
-                    })
-                } else {
-                    let returned = ir.add_expr(IrExpr::Return(Some(invocation)));
-                    ir.add_expr(IrExpr::Block {
-                        stmts: vec![returned],
-                        value: None,
-                    })
-                };
-                let mut bridge_params = Vec::with_capacity(params.len() + 1);
-                bridge_params.push(crate::types::Ty::obj_name(dispatch_owner));
-                bridge_params.extend(params);
-                let function = ir.add_fun(IrFunction {
-                    name: format!("$fir$access$super${raw}"),
-                    params: bridge_params,
-                    ret,
-                    body: Some(body),
-                    is_static: true,
-                    dispatch_receiver: None,
-                    param_checks: Vec::new(),
-                });
-                ir.classes[class].methods.push(function);
-                ir.synthetic_methods.insert(function);
-                let mut bridge_call_arguments = Vec::with_capacity(args.len() + 1);
-                bridge_call_arguments.push(
-                    dispatch_receiver.ok_or(ModuleRealizationTarget::Classifier(dispatch_owner))?,
-                );
-                bridge_call_arguments.extend(args);
-                ir.exprs[raw] = IrExpr::Call {
-                    callee: Callee::ClassStatic {
-                        owner: dispatch_owner,
-                        function,
-                    },
-                    dispatch_receiver: None,
-                    args: bridge_call_arguments,
-                };
-            } else {
-                ir.exprs[raw] = match realization {
-                    crate::libraries::MemberRealization::Dispatch => IrExpr::Call {
-                        callee: Callee::Special {
-                            owner,
-                            name,
-                            descriptor,
-                            interface,
-                            source_member,
-                            source,
-                        },
-                        dispatch_receiver,
-                        args,
-                    },
-                    // The receiver stays the call's dispatch receiver: a receiver-first holder
-                    // static loads it at its own class, as the original dispatch did.
-                    crate::libraries::MemberRealization::Direct { pass_receiver } => IrExpr::Call {
-                        callee: Callee::Static {
+                    dispatch_receiver: Some(receiver),
+                    args: bridge_arguments,
+                }),
+                // As for a direct `super` call below, the receiver stays the dispatch receiver,
+                // so a receiver-first holder static loads it at its own class.
+                crate::libraries::MemberRealization::Direct { pass_receiver } => {
+                    ir.add_expr(IrExpr::Call {
+                        callee: Box::new(Callee::Static {
                             owner,
                             name,
                             descriptor,
                             inline: crate::libraries::InlineKind::None,
-                        },
-                        dispatch_receiver: if pass_receiver {
-                            Some(
-                                dispatch_receiver
-                                    .ok_or(ModuleRealizationTarget::Classifier(dispatch_owner))?,
-                            )
-                        } else {
-                            None
-                        },
-                        args,
+                        }),
+                        dispatch_receiver: pass_receiver.then_some(receiver),
+                        args: bridge_arguments,
+                    })
+                }
+                crate::libraries::MemberRealization::Intrinsic(_)
+                | crate::libraries::MemberRealization::RangeConstruction { .. } => {
+                    return Err(source.map_or(
+                        ModuleRealizationTarget::Classifier(owner),
+                        ModuleRealizationTarget::Callable,
+                    ));
+                }
+            };
+            let body = if ret == crate::types::Ty::Unit {
+                let returned = ir.add_expr(IrExpr::Return(None));
+                ir.add_expr(IrExpr::Block {
+                    stmts: vec![invocation, returned],
+                    value: None,
+                })
+            } else {
+                let returned = ir.add_expr(IrExpr::Return(Some(invocation)));
+                ir.add_expr(IrExpr::Block {
+                    stmts: vec![returned],
+                    value: None,
+                })
+            };
+            let mut bridge_params = Vec::with_capacity(params.len() + 1);
+            bridge_params.push(crate::types::Ty::obj_name(dispatch_owner));
+            bridge_params.extend(params);
+            let function = ir.add_fun(IrFunction {
+                name: format!("$fir$access$super${raw}"),
+                params: bridge_params,
+                ret,
+                body: Some(body),
+                is_static: true,
+                dispatch_receiver: None,
+                param_checks: Vec::new(),
+            });
+            ir.classes[class].methods.push(function);
+            ir.synthetic_methods.insert(function);
+            let mut bridge_call_arguments = Vec::with_capacity(args.len() + 1);
+            bridge_call_arguments.push(
+                dispatch_receiver.ok_or(ModuleRealizationTarget::Classifier(dispatch_owner))?,
+            );
+            bridge_call_arguments.extend(args);
+            ir.exprs[raw] = IrExpr::Call {
+                callee: Box::new(Callee::ClassStatic {
+                    owner: dispatch_owner,
+                    function,
+                }),
+                dispatch_receiver: None,
+                args: bridge_call_arguments,
+            };
+        } else {
+            ir.exprs[raw] = match realization {
+                crate::libraries::MemberRealization::Dispatch => IrExpr::Call {
+                    callee: Box::new(Callee::Special {
+                        owner,
+                        name,
+                        descriptor,
+                        interface,
+                        source_member,
+                        source,
+                    }),
+                    dispatch_receiver,
+                    args,
+                },
+                // The receiver stays the call's dispatch receiver: a receiver-first holder
+                // static loads it at its own class, as the original dispatch did.
+                crate::libraries::MemberRealization::Direct { pass_receiver } => IrExpr::Call {
+                    callee: Box::new(Callee::Static {
+                        owner,
+                        name,
+                        descriptor,
+                        inline: crate::libraries::InlineKind::None,
+                    }),
+                    dispatch_receiver: if pass_receiver {
+                        Some(
+                            dispatch_receiver
+                                .ok_or(ModuleRealizationTarget::Classifier(dispatch_owner))?,
+                        )
+                    } else {
+                        None
                     },
-                    crate::libraries::MemberRealization::Intrinsic(_)
-                    | crate::libraries::MemberRealization::RangeConstruction { .. } => {
-                        return Err(source.map_or(
-                            ModuleRealizationTarget::Classifier(owner),
-                            ModuleRealizationTarget::Callable,
-                        ));
-                    }
-                };
-            }
-            continue;
+                    args,
+                },
+                crate::libraries::MemberRealization::Intrinsic(_)
+                | crate::libraries::MemberRealization::RangeConstruction { .. } => {
+                    return Err(source.map_or(
+                        ModuleRealizationTarget::Classifier(owner),
+                        ModuleRealizationTarget::Callable,
+                    ));
+                }
+            };
         }
+        continue;
     }
     Ok(())
 }
@@ -836,20 +843,20 @@ pub(super) fn realize(
         let mut declared_getter_result = None::<crate::types::Ty>;
         let replacement = match ir.exprs[raw].clone() {
             IrExpr::Call {
-                callee:
-                    Callee::Module {
-                        target,
-                        name,
-                        params,
-                        ret,
-                    },
+                callee: ref call_callee,
                 dispatch_receiver,
                 args,
-            } => {
-                let failure = ModuleRealizationTarget::Callable(target);
+            } if let Callee::Module {
+                target,
+                name,
+                params,
+                ret,
+            } = &**call_callee =>
+            {
+                let failure = ModuleRealizationTarget::Callable(*target);
                 let callable = ir
                     .referenced_module_callables
-                    .get(&target)
+                    .get(target)
                     .cloned()
                     .ok_or(failure)?;
                 if callable.flags.has(crate::fir::DeclarationFlags::INLINE) {
@@ -857,7 +864,7 @@ pub(super) fn realize(
                 }
                 let physical_name = header_jvm_name(&callable.annotations)
                     .map_err(|()| failure)?
-                    .unwrap_or(&name)
+                    .unwrap_or(name)
                     .to_owned();
                 if callable.owner.is_some() {
                     return Err(failure);
@@ -865,30 +872,32 @@ pub(super) fn realize(
                 let owner =
                     static_owner(callable.placement, callable.source, facades).ok_or(failure)?;
                 Some(IrExpr::Call {
-                    callee: Callee::CrossFile {
+                    callee: Box::new(Callee::CrossFile {
                         facade: owner,
                         name: physical_name,
-                        params,
-                        ret,
-                        module_target: Some(target),
+                        params: params.to_vec(),
+                        ret: *ret,
+                        module_target: Some(*target),
                         module_default_call: false,
-                    },
+                    }),
                     dispatch_receiver,
                     args,
                 })
             }
-            IrExpr::Checked(IrCheckedOperation::PropertyRead {
-                target,
-                dispatch_receiver,
-                extension_receiver,
-                context_arguments,
-                substitutions: _,
-            }) => {
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::PropertyRead {
+                    target,
+                    dispatch_receiver,
+                    extension_receiver,
+                    context_arguments,
+                    substitutions: _,
+                } = &**checked_op =>
+            {
                 let property = ir
                     .referenced_module_properties
-                    .get(&target)
+                    .get(target)
                     .cloned()
-                    .ok_or(ModuleRealizationTarget::Property(target))?;
+                    .ok_or(ModuleRealizationTarget::Property(*target))?;
                 let mut selected_parameters = property.context_parameters.clone();
                 if let Some(receiver) = property.extension_receiver {
                     selected_parameters.push(receiver);
@@ -896,7 +905,7 @@ pub(super) fn realize(
                 ir.module_member_accesses.insert(
                     raw as ExprId,
                     crate::ir::IrModuleMemberAccess::Property {
-                        target,
+                        target: *target,
                         write: false,
                         selected_parameters: selected_parameters.into_boxed_slice(),
                     },
@@ -904,7 +913,7 @@ pub(super) fn realize(
                 if let Some(access) = jvm_field_access(&property, facades) {
                     property_realizations.record_physical(raw as ExprId, access);
                     Some(IrExpr::PropertyRead {
-                        receiver: dispatch_receiver,
+                        receiver: *dispatch_receiver,
                         owner: property.owner.unwrap_or(TypeName::ROOT),
                         name: property.name.clone(),
                         ty: property.ty,
@@ -915,33 +924,35 @@ pub(super) fn realize(
                     let (call, parameters, semantic) = realize_property(
                         &property,
                         facades,
-                        target,
-                        dispatch_receiver,
-                        extension_receiver,
-                        context_arguments,
+                        *target,
+                        *dispatch_receiver,
+                        *extension_receiver,
+                        context_arguments.clone(),
                         None,
                     )?;
                     accessor_parameters = Some(parameters);
-                    annotation_member_semantic = semantic.map(|ty| (target, ty));
+                    annotation_member_semantic = semantic.map(|ty| (*target, ty));
                     // The getter returns the property's declared type: a property declared as a
                     // value class hands back its carrier, never a box.
                     declared_getter_result = semantic.is_none().then_some(property.ty);
                     Some(call)
                 }
             }
-            IrExpr::Checked(IrCheckedOperation::PropertyWrite {
-                target,
-                dispatch_receiver,
-                extension_receiver,
-                context_arguments,
-                value,
-                substitutions: _,
-            }) => {
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::PropertyWrite {
+                    target,
+                    dispatch_receiver,
+                    extension_receiver,
+                    context_arguments,
+                    value,
+                    substitutions: _,
+                } = &**checked_op =>
+            {
                 let property = ir
                     .referenced_module_properties
-                    .get(&target)
+                    .get(target)
                     .cloned()
-                    .ok_or(ModuleRealizationTarget::Property(target))?;
+                    .ok_or(ModuleRealizationTarget::Property(*target))?;
                 let mut selected_parameters = property.context_parameters.clone();
                 if let Some(receiver) = property.extension_receiver {
                     selected_parameters.push(receiver);
@@ -950,21 +961,21 @@ pub(super) fn realize(
                 ir.module_member_accesses.insert(
                     raw as ExprId,
                     crate::ir::IrModuleMemberAccess::Property {
-                        target,
+                        target: *target,
                         write: true,
                         selected_parameters: selected_parameters.into_boxed_slice(),
                     },
                 );
                 if let Some(access) = jvm_field_access(&property, facades) {
                     if !property.mutable {
-                        return Err(ModuleRealizationTarget::Property(target));
+                        return Err(ModuleRealizationTarget::Property(*target));
                     }
                     property_realizations.record_physical(raw as ExprId, access);
                     Some(IrExpr::PropertyWrite {
-                        receiver: dispatch_receiver,
+                        receiver: *dispatch_receiver,
                         owner: property.owner.unwrap_or(TypeName::ROOT),
                         name: property.name.clone(),
-                        value,
+                        value: *value,
                         ty: property.ty,
                         interface: owner_is_jvm_interface(&property),
                         operation: Some(raw as ExprId),
@@ -973,45 +984,45 @@ pub(super) fn realize(
                     let (call, parameters, _) = realize_property(
                         &property,
                         facades,
-                        target,
-                        dispatch_receiver,
-                        extension_receiver,
-                        context_arguments,
-                        Some(value),
+                        *target,
+                        *dispatch_receiver,
+                        *extension_receiver,
+                        context_arguments.clone(),
+                        Some(*value),
                     )?;
                     accessor_parameters = Some(parameters);
                     Some(call)
                 }
             }
             IrExpr::Call {
-                callee:
-                    Callee::Virtual {
-                        owner,
-                        name,
-                        descriptor,
-                        params,
-                        interface,
-                        module_target: Some(target),
-                        target: virtual_target,
-                    },
+                callee: ref call_callee,
                 dispatch_receiver,
                 args,
-            } => {
-                let failure = ModuleRealizationTarget::Callable(target);
-                let callable = ir.referenced_module_callables.get(&target).ok_or(failure)?;
+            } if let Callee::Virtual {
+                owner,
+                name,
+                descriptor,
+                params,
+                interface,
+                module_target: Some(target),
+                target: virtual_target,
+            } = &**call_callee =>
+            {
+                let failure = ModuleRealizationTarget::Callable(*target);
+                let callable = ir.referenced_module_callables.get(target).ok_or(failure)?;
                 header_jvm_name(&callable.annotations)
                     .map_err(|()| failure)?
                     .filter(|physical| *physical != name)
                     .map(|physical| IrExpr::Call {
-                        callee: Callee::Virtual {
-                            owner,
+                        callee: Box::new(Callee::Virtual {
+                            owner: *owner,
                             name: physical.to_owned(),
-                            descriptor,
-                            params,
-                            interface,
-                            module_target: Some(target),
-                            target: virtual_target,
-                        },
+                            descriptor: descriptor.to_string(),
+                            params: params.clone(),
+                            interface: *interface,
+                            module_target: Some(*target),
+                            target: *virtual_target,
+                        }),
                         dispatch_receiver,
                         args,
                     })
@@ -1040,13 +1051,16 @@ pub(super) fn realize(
         }
         if let Some((target, semantic)) = annotation_member_semantic {
             let IrExpr::Call {
-                callee:
-                    Callee::Virtual {
-                        params: Some((_, physical)),
-                        ..
-                    },
+                callee: call_callee,
                 ..
             } = &ir.exprs[raw]
+            else {
+                return Err(ModuleRealizationTarget::Property(target));
+            };
+            let Callee::Virtual {
+                params: Some((_, physical)),
+                ..
+            } = &**call_callee
             else {
                 return Err(ModuleRealizationTarget::Property(target));
             };
@@ -1071,20 +1085,23 @@ fn prepare_inherited_default_calls(ir: &mut IrFile) -> Result<(), ModuleRealizat
     for raw in 0..expression_count {
         let expression = raw as ExprId;
         let IrExpr::Call {
-            callee:
-                Callee::ModuleWithDefaults {
-                    target,
-                    default_provider,
-                    name,
-                    params,
-                    ret,
-                    defaults,
-                    dispatch_receiver_ty,
-                    extension_receiver_parameter,
-                },
+            callee: call_callee,
             dispatch_receiver,
             args,
         } = ir.exprs[raw].clone()
+        else {
+            continue;
+        };
+        let Callee::ModuleWithDefaults {
+            target,
+            default_provider,
+            name,
+            params,
+            ret,
+            defaults,
+            dispatch_receiver_ty,
+            extension_receiver_parameter,
+        } = *call_callee
         else {
             continue;
         };
@@ -1101,7 +1118,7 @@ fn prepare_inherited_default_calls(ir: &mut IrFile) -> Result<(), ModuleRealizat
                 let provider_params = provider_header.parameters.into_vec();
                 let provider_ret = provider_header.result;
                 ir.exprs[raw] = IrExpr::Call {
-                    callee: Callee::ModuleWithDefaults {
+                    callee: Box::new(Callee::ModuleWithDefaults {
                         target,
                         default_provider,
                         name,
@@ -1110,7 +1127,7 @@ fn prepare_inherited_default_calls(ir: &mut IrFile) -> Result<(), ModuleRealizat
                         defaults,
                         dispatch_receiver_ty: provider_header.owner.map(crate::types::Ty::obj_name),
                         extension_receiver_parameter,
-                    },
+                    }),
                     dispatch_receiver,
                     args,
                 };
@@ -1122,7 +1139,7 @@ fn prepare_inherited_default_calls(ir: &mut IrFile) -> Result<(), ModuleRealizat
             }
             crate::fir::ResolvedFunctionOverrideTarget::External(provider) => {
                 ir.exprs[raw] = IrExpr::Call {
-                    callee: Callee::External {
+                    callee: Box::new(Callee::External {
                         target: provider,
                         default_provider: Some(provider),
                         params,
@@ -1130,7 +1147,7 @@ fn prepare_inherited_default_calls(ir: &mut IrFile) -> Result<(), ModuleRealizat
                         substitutions: Vec::new(),
                         defaults: defaults.into_vec(),
                         extension_receiver_parameter,
-                    },
+                    }),
                     dispatch_receiver,
                     args,
                 };
@@ -1196,7 +1213,7 @@ fn realize_property(
         }
         Ok((
             IrExpr::Call {
-                callee: Callee::Virtual {
+                callee: Box::new(Callee::Virtual {
                     owner: classifier,
                     name: accessor,
                     descriptor: String::new(),
@@ -1212,7 +1229,7 @@ fn realize_property(
                             crate::fir::ResolvedPropertyOverrideTarget::Module(target),
                         )
                     }),
-                },
+                }),
                 dispatch_receiver: Some(dispatch_receiver.ok_or(failure)?),
                 args: arguments,
             },
@@ -1226,14 +1243,14 @@ fn realize_property(
         let facade = static_owner(property.placement, property.source, facades).ok_or(failure)?;
         Ok((
             IrExpr::Call {
-                callee: Callee::CrossFile {
+                callee: Box::new(Callee::CrossFile {
                     facade,
                     name: accessor,
                     params: parameters.clone(),
                     ret,
                     module_target: None,
                     module_default_call: false,
-                },
+                }),
                 dispatch_receiver: None,
                 args: arguments,
             },

@@ -289,11 +289,11 @@ pub enum IrExpr {
     },
     /// A frontend-selected semantic operation. Backend realization consumes the stable declaration
     /// identity; it must not repeat lookup, overload selection, or argument mapping.
-    Checked(IrCheckedOperation),
+    Checked(Box<IrCheckedOperation>),
     /// Checked Kotlin callable-reference identity plus a fully lowered common invocation adapter.
     /// Unlike [`IrExpr::Lambda`], this preserves declaration-based equality and reflection without
     /// selecting a platform carrier in common lowering.
-    CallableReference(IrCallableReference),
+    CallableReference(Box<IrCallableReference>),
     /// A class-literal constant — `ldc class <internal>` (a `java.lang.Class`). Used e.g. for the
     /// `PropertyReference0Impl(Class, …)` argument in delegated-property setup. `internal = None`
     /// is the current-facade sentinel for places lowered before the facade name is known.
@@ -332,7 +332,7 @@ pub enum IrExpr {
     /// backend maps to its platform (`kotlin.plus`, `kotlin.io.println`, …). This single node
     /// expresses every call — there is no dedicated node per stdlib operation.
     Call {
-        callee: Callee,
+        callee: Box<Callee>,
         dispatch_receiver: Option<ExprId>,
         args: Vec<ExprId>,
     },
@@ -642,7 +642,7 @@ pub enum IrExpr {
         impl_fn: u32,
         arity: u8,
         captures: Vec<ExprId>,
-        sam: Option<IrSamTarget>,
+        sam: Option<Box<IrSamTarget>>,
         inline_body: Option<ExprId>,
     },
     /// The `kotlin.Unit` singleton value (`IrGetObjectValue` of `Unit`). On the JVM, `getstatic

@@ -2880,12 +2880,12 @@ fn emit_class(
             }
         }
     }
-    // The child-serializer cache's factories and `…$cp` accessor follow both constructors above
-    // (kotlinc's order). They are generated, so the declared-member schedule leaves them out.
+    // The child-serializer cache follows both constructors (kotlinc's order), outside the schedule.
+    let deferred = accessor_emission_order::deferred_cache_accessor(ir, c);
     for &fid in c
         .methods
         .iter()
-        .filter(|fid| ir.serialization_cache_methods.contains(fid))
+        .filter(|fid| ir.serialization_cache_methods.contains(fid) && Some(**fid) != deferred)
     {
         let f = &ir.functions[fid as usize];
         if f.body.is_some() {
@@ -6141,7 +6141,7 @@ impl<'a> Emitter<'a> {
                 args,
             } => {
                 matches!(
-                    callee,
+                    &**callee,
                     Callee::Intrinsic {
                         operation: crate::ir::IrIntrinsic::Assert { .. },
                         ..
@@ -6522,7 +6522,7 @@ impl<'a> Emitter<'a> {
                 if let Some(function) = callee.source_function() {
                     call_ret_ty(&self.ir.functions[function as usize].ret)
                 } else {
-                    match callee {
+                    match &**callee {
                         Callee::CrossFile { ret, .. }
                         | Callee::Module { ret, .. }
                         | Callee::Super { ret, .. }

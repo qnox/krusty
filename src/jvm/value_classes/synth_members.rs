@@ -429,22 +429,22 @@ pub(super) fn synth_value_members(
         let b = ir.add_expr(IrExpr::GetValue(1));
         let cmp = if custom_equals {
             let boxed = ir.add_expr(IrExpr::Call {
-                callee: Callee::Static {
+                callee: Box::new(Callee::Static {
                     owner: internal_name,
                     name: "box-impl".to_string(),
                     descriptor: format!("({udesc})L{};", internal_name.render()),
                     inline: InlineKind::None,
-                },
+                }),
                 dispatch_receiver: None,
                 args: vec![b],
             });
             ir.add_expr(IrExpr::Call {
-                callee: Callee::Static {
+                callee: Box::new(Callee::Static {
                     owner: internal_name,
                     name: "equals-impl".to_string(),
                     descriptor: format!("({udesc}Ljava/lang/Object;)Z"),
                     inline: InlineKind::None,
-                },
+                }),
                 dispatch_receiver: None,
                 args: vec![a, boxed],
             })
@@ -511,12 +511,12 @@ pub(super) fn synth_value_members(
         }
         let fv = this_field(ir);
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
+            callee: Box::new(Callee::Static {
                 owner: internal_name,
                 name: "toString-impl".to_string(),
                 descriptor: format!("({udesc})Ljava/lang/String;"),
                 inline: InlineKind::None,
-            },
+            }),
             dispatch_receiver: None,
             args: vec![fv],
         });
@@ -549,12 +549,12 @@ pub(super) fn synth_value_members(
         }
         let fv = this_field(ir);
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
+            callee: Box::new(Callee::Static {
                 owner: internal_name,
                 name: "hashCode-impl".to_string(),
                 descriptor: format!("({udesc})I"),
                 inline: InlineKind::None,
-            },
+            }),
             dispatch_receiver: None,
             args: vec![fv],
         });
@@ -615,10 +615,10 @@ pub(super) fn synth_value_members(
                 // The declared type's own equality, as a data class compares a property: a nested
                 // value class's `equals-impl0`, otherwise `Intrinsics.areEqual`.
                 let eq = ir.add_expr(IrExpr::Call {
-                    callee: Callee::Intrinsic {
+                    callee: Box::new(Callee::Intrinsic {
                         operation: crate::ir::IrIntrinsic::GeneratedPropertyEquals { ty: u_ir },
                         ret: bool_ir,
-                    },
+                    }),
                     dispatch_receiver: None,
                     args: vec![v, tmp],
                 });
@@ -653,12 +653,12 @@ pub(super) fn synth_value_members(
         let fv = this_field(ir);
         let other_i = ir.add_expr(IrExpr::GetValue(1));
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
+            callee: Box::new(Callee::Static {
                 owner: internal_name,
                 name: "equals-impl".to_string(),
                 descriptor: format!("({udesc}Ljava/lang/Object;)Z"),
                 inline: InlineKind::None,
-            },
+            }),
             dispatch_receiver: None,
             args: vec![fv, other_i],
         });
@@ -751,12 +751,12 @@ pub(super) fn synth_value_members(
 
             let mut stmts = sc.delegate_prelude.clone();
             let call = ir.add_expr(IrExpr::Call {
-                callee: Callee::Static {
+                callee: Box::new(Callee::Static {
                     owner: internal_name,
                     name: "constructor-impl".to_string(),
                     descriptor: target_descriptor,
                     inline: InlineKind::None,
-                },
+                }),
                 dispatch_receiver: None,
                 args: sc.delegate_args.clone(),
             });
@@ -916,12 +916,12 @@ fn vc_underlying_eq(
 ) -> ExprId {
     if is_ref_under {
         return ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
+            callee: Box::new(Callee::Static {
                 owner: type_name("kotlin/jvm/internal/Intrinsics"),
                 name: "areEqual".into(),
                 descriptor: "(Ljava/lang/Object;Ljava/lang/Object;)Z".into(),
                 inline: InlineKind::None,
-            },
+            }),
             dispatch_receiver: None,
             args: vec![a, b],
         });
@@ -933,12 +933,12 @@ fn vc_underlying_eq(
             ("java/lang/Double", "(DD)I")
         };
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
+            callee: Box::new(Callee::Static {
                 owner: type_name(owner),
                 name: "compare".into(),
                 descriptor: desc.into(),
                 inline: InlineKind::None,
-            },
+            }),
             dispatch_receiver: None,
             args: vec![a, b],
         });
@@ -977,12 +977,12 @@ fn nested_value_equals(
     };
     let carrier = super::desc(&carrier);
     Some(ir.add_expr(IrExpr::Call {
-        callee: Callee::Static {
+        callee: Box::new(Callee::Static {
             owner,
             name: "equals-impl0".into(),
             descriptor: format!("({carrier}{carrier})Z"),
             inline: InlineKind::None,
-        },
+        }),
         dispatch_receiver: None,
         args: vec![a, b],
     }))
@@ -999,12 +999,12 @@ fn vc_underlying_ne(ir: &mut IrFile, a: ExprId, b: ExprId, underlying: Ty) -> Ex
             ("java/lang/Double", "(DD)I")
         };
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Static {
+            callee: Box::new(Callee::Static {
                 owner: type_name(owner),
                 name: "compare".into(),
                 descriptor: desc.into(),
                 inline: InlineKind::None,
-            },
+            }),
             dispatch_receiver: None,
             args: vec![a, b],
         });
@@ -1053,10 +1053,10 @@ fn nested_value_text(
         // kotlinc renders an unsigned carrier through its own `toString-impl`, appended as an
         // object like a nested value class.
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Intrinsic {
+            callee: Box::new(Callee::Intrinsic {
                 operation: crate::ir::IrIntrinsic::UnsignedToString { source: underlying },
                 ret: Ty::String,
-            },
+            }),
             dispatch_receiver: Some(value),
             args: vec![],
         });
@@ -1071,12 +1071,12 @@ fn nested_value_text(
     }
     let carrier = erase(&underlying, under);
     let call = ir.add_expr(IrExpr::Call {
-        callee: Callee::Static {
+        callee: Box::new(Callee::Static {
             owner: nested,
             name: "toString-impl".to_string(),
             descriptor: format!("({})Ljava/lang/String;", super::desc(&carrier)),
             inline: InlineKind::None,
-        },
+        }),
         dispatch_receiver: None,
         args: vec![value],
     });
@@ -1093,10 +1093,10 @@ fn property_hash(ir: &mut IrFile, underlying: Ty) -> ExprId {
     let hash = |ir: &mut IrFile| {
         let value = ir.add_expr(IrExpr::GetValue(0));
         ir.add_expr(IrExpr::Call {
-            callee: Callee::Intrinsic {
+            callee: Box::new(Callee::Intrinsic {
                 operation: crate::ir::IrIntrinsic::GeneratedPropertyHash { ty: underlying },
                 ret: Ty::Int,
-            },
+            }),
             dispatch_receiver: None,
             args: vec![value],
         })

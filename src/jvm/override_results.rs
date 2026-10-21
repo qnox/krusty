@@ -188,36 +188,44 @@ impl OverrideResults {
                     .then(|| ir.functions[function as usize].ret)
             }
             IrExpr::Call {
-                callee:
-                    Callee::Special {
-                        source: Some(callable),
-                        ..
-                    }
-                    | Callee::Virtual {
-                        module_target: Some(callable),
-                        ..
-                    },
+                callee: call_callee,
                 ..
-            } => self.boxed_callable_result(ir, *callable),
+            } if let Callee::Special {
+                source: Some(callable),
+                ..
+            }
+            | Callee::Virtual {
+                module_target: Some(callable),
+                ..
+            } = &**call_callee =>
+            {
+                self.boxed_callable_result(ir, *callable)
+            }
             IrExpr::Call {
-                callee:
-                    Callee::Virtual {
-                        target:
-                            Some(crate::ir::IrVirtualTarget::PropertyGetter(
-                                crate::fir::ResolvedPropertyOverrideTarget::Module(property),
-                            )),
-                        ..
-                    },
+                callee: call_callee,
                 ..
-            } => self.boxed_property_result(ir, *property),
+            } if let Callee::Virtual {
+                target:
+                    Some(crate::ir::IrVirtualTarget::PropertyGetter(
+                        crate::fir::ResolvedPropertyOverrideTarget::Module(property),
+                    )),
+                ..
+            } = &**call_callee =>
+            {
+                self.boxed_property_result(ir, *property)
+            }
             IrExpr::Call {
-                callee: Callee::Static { .. },
+                callee: call_callee,
                 ..
-            } => self.static_member_calls.get(&expression).copied(),
+            } if let Callee::Static { .. } = &**call_callee => {
+                self.static_member_calls.get(&expression).copied()
+            }
             IrExpr::Call {
-                callee: Callee::Special { source: None, .. },
+                callee: call_callee,
                 ..
-            } => self.super_getter_calls.get(&expression).copied(),
+            } if let Callee::Special { source: None, .. } = &**call_callee => {
+                self.super_getter_calls.get(&expression).copied()
+            }
             _ => None,
         }
     }

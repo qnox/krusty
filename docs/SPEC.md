@@ -11319,6 +11319,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   factories and their `…$cp` accessor. krusty declared the cache members before the no-arg
   constructor. Test: `tests/serializable_noarg_constructor_order_e2e.rs` (ordered member lists and
   class bytes compared with kotlinc's).
+- **A hidden serializable primary's `…$cp` accessor follows its marker accessor.** When a
+  `@Serializable` class's primary constructor takes a value class, kotlinc's accessor lowering
+  declares the primary's `DefaultConstructorMarker` accessor, then
+  `access$get$childSerializers$cp`, then the deserialization constructor's marker accessor; the
+  cache's factory stays with the generated constructors. Test:
+  `tests/serializable_value_class_cache_accessor_order_e2e.rs` (ordered member lists and class
+  bytes compared with kotlinc's).
 - **A `Unit` tailrec's `f(x); return` is a tail call in any block.** Nothing of the function runs
   after a `return`, so the statement right before one is in tail position whether the block ends
   the body or sits inside an `if`, a `when` arm or a loop. Only the body's own last block was

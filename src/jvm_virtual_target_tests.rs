@@ -18,15 +18,17 @@ fn virtual_calls(ir: &IrFile) -> Vec<(TypeName, String, Option<IrVirtualTarget>)
         .iter()
         .filter_map(|expression| match expression {
             IrExpr::Call {
-                callee:
-                    Callee::Virtual {
-                        owner,
-                        name,
-                        target,
-                        ..
-                    },
+                callee: call_callee,
                 ..
-            } => Some((*owner, name.clone(), *target)),
+            } if let Callee::Virtual {
+                owner,
+                name,
+                target,
+                ..
+            } = &**call_callee =>
+            {
+                Some((*owner, name.clone(), *target))
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -130,9 +132,9 @@ fn a_dependency_member_dispatch_keeps_the_selected_declaration() {
         .iter()
         .filter_map(|expression| match expression {
             IrExpr::Call {
-                callee: Callee::External { target, .. },
+                callee: call_callee,
                 ..
-            } => Some(*target),
+            } if let Callee::External { target, .. } = &**call_callee => Some(*target),
             _ => None,
         })
         .collect::<Vec<_>>();

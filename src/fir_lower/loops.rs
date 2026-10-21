@@ -183,9 +183,8 @@ impl BodyLowering<'_> {
             }
         };
         let body = self.expression(lp.body)?;
-        Ok(self
-            .ir
-            .add_expr(IrExpr::Checked(crate::ir::IrCheckedOperation::RangeLoop {
+        Ok(self.ir.add_expr(IrExpr::Checked(Box::new(
+            crate::ir::IrCheckedOperation::RangeLoop {
                 variable: self.value_slot(variable),
                 variable_name: self.body.debug_value_name(variable).map(Into::into),
                 counter: lp.counter.ty(),
@@ -194,7 +193,8 @@ impl BodyLowering<'_> {
                 body,
                 label: self.control_label(0, lp.target)?,
                 with_index,
-            })))
+            },
+        ))))
     }
 
     /// Lowers the operands of a matched progression. A progression value gets the static class
@@ -407,10 +407,10 @@ impl BodyLowering<'_> {
                 };
                 let receiver = self.ir.add_expr(self.ir.expr(receiver_leaf).clone());
                 let size = self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Intrinsic {
+                    callee: Box::new(Callee::Intrinsic {
                         operation: size_operation,
                         ret: Ty::Int,
-                    },
+                    }),
                     dispatch_receiver: Some(receiver),
                     args: Vec::new(),
                 });
@@ -431,10 +431,10 @@ impl BodyLowering<'_> {
                 let receiver = self.ir.add_expr(self.ir.expr(receiver_leaf).clone());
                 let index_read = self.ir.add_expr(IrExpr::GetValue(index_slot));
                 let element = self.ir.add_expr(IrExpr::Call {
-                    callee: Callee::Intrinsic {
+                    callee: Box::new(Callee::Intrinsic {
                         operation: get_operation,
                         ret: variable_ty.get(),
-                    },
+                    }),
                     dispatch_receiver: Some(receiver),
                     args: vec![index_read],
                 });

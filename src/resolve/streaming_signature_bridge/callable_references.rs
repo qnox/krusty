@@ -311,7 +311,7 @@ impl ProductionSignatureSemantics<'_> {
             crate::symbol_source::SymbolSource::classifier(&source, classifier).map(|classifier| (
                 classifier.sam_eligible,
                 classifier.type_params.clone(),
-                classifier.members.len(),
+                classifier.member_records().count(),
             )),
         );
         let (mut parameters, call_sig) = if let Some(sam) = sam {

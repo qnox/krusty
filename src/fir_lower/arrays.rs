@@ -186,10 +186,10 @@ impl BodyLowering<'_> {
         let array = self.ir.add_expr(IrExpr::GetValue(array_slot));
         let element = self.ir.add_expr(IrExpr::GetValue(element_index_slot));
         let set = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Intrinsic {
+            callee: Box::new(Callee::Intrinsic {
                 operation: IrIntrinsic::ArraySet,
                 ret: Ty::Unit,
-            },
+            }),
             dispatch_receiver: Some(array),
             args: vec![element, value],
         });

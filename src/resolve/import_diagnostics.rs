@@ -112,10 +112,7 @@ fn bind_import_path(
                     return Err(unresolved(segment, *span));
                 };
                 let instance_member = !matches!(inherited, Callables::None)
-                    || owner_type
-                        .members
-                        .iter()
-                        .any(|member| member.name == *segment);
+                    || owner_type.member_records_named(segment).next().is_some();
                 if instance_member {
                     return Err((
                         *span,

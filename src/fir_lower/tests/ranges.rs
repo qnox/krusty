@@ -18,30 +18,34 @@ fn literal_until_loop_stays_checked_until_backend_realization() {
         .exprs
         .iter()
         .filter_map(|expression| match expression {
-            IrExpr::Checked(IrCheckedOperation::RangeLoop {
-                variable,
-                variable_name,
-                counter,
-                source:
-                    crate::ir::IrProgressionSource::Literal {
-                        operation,
-                        start,
-                        end,
-                    },
-                unsigned_compare: None,
-                body,
-                label,
-                with_index: None,
-            }) => Some((
-                *variable,
-                variable_name.as_deref(),
-                *counter,
-                *operation,
-                *start,
-                *end,
-                *body,
-                label.as_str(),
-            )),
+            IrExpr::Checked(checked_op)
+                if let IrCheckedOperation::RangeLoop {
+                    variable,
+                    variable_name,
+                    counter,
+                    source:
+                        crate::ir::IrProgressionSource::Literal {
+                            operation,
+                            start,
+                            end,
+                        },
+                    unsigned_compare: None,
+                    body,
+                    label,
+                    with_index: None,
+                } = &**checked_op =>
+            {
+                Some((
+                    *variable,
+                    variable_name.as_deref(),
+                    *counter,
+                    *operation,
+                    *start,
+                    *end,
+                    *body,
+                    label.as_str(),
+                ))
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -84,10 +88,14 @@ fn range_loop_records_an_exact_type_stable_bound_read() {
         .exprs
         .iter()
         .filter_map(|expression| match expression {
-            IrExpr::Checked(IrCheckedOperation::RangeLoop {
-                source: crate::ir::IrProgressionSource::Literal { end, .. },
-                ..
-            }) => Some(*end),
+            IrExpr::Checked(checked_op)
+                if let IrCheckedOperation::RangeLoop {
+                    source: crate::ir::IrProgressionSource::Literal { end, .. },
+                    ..
+                } = &**checked_op =>
+            {
+                Some(*end)
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -146,7 +154,7 @@ fn unsigned_range_containment_stays_semantic_until_backend_realization() {
     let lowered = lower_body(body, &ResolvedModuleIndex::default(), &mut ir).unwrap();
     assert!(matches!(
         ir.expr(lowered.roots[0]),
-        IrExpr::Checked(IrCheckedOperation::RangeContains {
+        IrExpr::Checked(checked_op) if matches!(&**checked_op, IrCheckedOperation::RangeContains {
             operation: FirRangeOperation::Through,
             counter: Ty::UInt,
             negated: false,

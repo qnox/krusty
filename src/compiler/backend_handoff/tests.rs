@@ -167,7 +167,7 @@ fn dependency_identity_carriers(ir: &crate::ir::IrFile) -> Vec<(&'static str, Ex
     }
     for expression in &ir.exprs {
         if let crate::ir::IrExpr::Call { callee, .. } = expression {
-            match callee {
+            match &**callee {
                 crate::ir::Callee::ModuleWithDefaults {
                     default_provider: ResolvedFunctionOverrideTarget::External(provider),
                     ..
@@ -209,7 +209,7 @@ fn property_carriers(ir: &crate::ir::IrFile) -> Vec<(&'static str, ExternalPrope
         let IrExpr::Checked(operation) = expression else {
             continue;
         };
-        match operation {
+        match &**operation {
             IrCheckedOperation::ExternalPropertyRead { target, .. } => {
                 carriers.push(("property read", *target))
             }
@@ -705,7 +705,7 @@ fn an_identity_its_provider_cannot_answer_is_an_internal_error() {
     let mut ir = crate::ir::IrFile::default();
     let target = ExternalCallableId::from_raw(3);
     ir.add_expr(crate::ir::IrExpr::Call {
-        callee: crate::ir::Callee::External {
+        callee: Box::new(crate::ir::Callee::External {
             target,
             default_provider: None,
             params: Vec::new(),
@@ -713,7 +713,7 @@ fn an_identity_its_provider_cannot_answer_is_an_internal_error() {
             substitutions: Vec::new(),
             defaults: Vec::new(),
             extension_receiver_parameter: None,
-        },
+        }),
         dispatch_receiver: None,
         args: Vec::new(),
     });
@@ -733,7 +733,7 @@ fn selected_singletons_are_frozen_per_call_edge_not_on_the_provider_base_record(
         classifier: singleton,
     });
     let call = ir.add_expr(crate::ir::IrExpr::Call {
-        callee: crate::ir::Callee::External {
+        callee: Box::new(crate::ir::Callee::External {
             target,
             default_provider: None,
             params: vec![Ty::Int],
@@ -741,7 +741,7 @@ fn selected_singletons_are_frozen_per_call_edge_not_on_the_provider_base_record(
             substitutions: Vec::new(),
             defaults: Vec::new(),
             extension_receiver_parameter: None,
-        },
+        }),
         dispatch_receiver: Some(receiver),
         args: Vec::new(),
     });
@@ -750,7 +750,7 @@ fn selected_singletons_are_frozen_per_call_edge_not_on_the_provider_base_record(
         classifier: inherited_singleton,
     });
     let inherited_call = ir.add_expr(crate::ir::IrExpr::Call {
-        callee: crate::ir::Callee::External {
+        callee: Box::new(crate::ir::Callee::External {
             target,
             default_provider: None,
             params: vec![Ty::Int],
@@ -758,7 +758,7 @@ fn selected_singletons_are_frozen_per_call_edge_not_on_the_provider_base_record(
             substitutions: Vec::new(),
             defaults: Vec::new(),
             extension_receiver_parameter: None,
-        },
+        }),
         dispatch_receiver: Some(inherited_receiver),
         args: Vec::new(),
     });
@@ -867,7 +867,7 @@ fn a_klib_declaration_signature_is_frozen_with_its_callable() {
         .expect("a KLIB function carries its provider identity");
     let mut ir = crate::ir::IrFile::default();
     ir.add_expr(crate::ir::IrExpr::Call {
-        callee: crate::ir::Callee::External {
+        callee: Box::new(crate::ir::Callee::External {
             target,
             default_provider: None,
             params: vec![Ty::nullable(Ty::obj("kotlin/Any"))],
@@ -875,7 +875,7 @@ fn a_klib_declaration_signature_is_frozen_with_its_callable() {
             substitutions: Vec::new(),
             defaults: Vec::new(),
             extension_receiver_parameter: None,
-        },
+        }),
         dispatch_receiver: None,
         args: Vec::new(),
     });
@@ -916,7 +916,7 @@ fn a_plugin_added_dependency_super_call_is_frozen_once() {
         descriptor: "(Lfixture/Legacy;)I".to_string(),
     };
     ir.add_expr(crate::ir::IrExpr::Call {
-        callee: crate::ir::Callee::Super {
+        callee: Box::new(crate::ir::Callee::Super {
             owner,
             dispatch_owner: type_name("fixture/Child"),
             enclosing_dispatch: false,
@@ -930,7 +930,7 @@ fn a_plugin_added_dependency_super_call_is_frozen_once() {
             declaration: Some(crate::fir::ResolvedFunctionOverrideTarget::External(target)),
             defaults: Vec::new(),
             source_member: None,
-        },
+        }),
         dispatch_receiver: None,
         args: Vec::new(),
     });
@@ -984,7 +984,7 @@ fn a_plugin_added_dependency_super_call_is_frozen_once() {
 fn a_property_its_provider_cannot_answer_is_an_internal_error() {
     let mut ir = crate::ir::IrFile::default();
     let property = ExternalPropertyId::from_raw(5);
-    ir.exprs.push(crate::ir::IrExpr::Checked(
+    ir.exprs.push(crate::ir::IrExpr::Checked(Box::new(
         crate::ir::IrCheckedOperation::ExternalPropertyRead {
             target: property,
             dispatch: crate::ir::IrPropertyDispatch::Ordinary,
@@ -994,7 +994,7 @@ fn a_property_its_provider_cannot_answer_is_an_internal_error() {
             result: crate::types::Ty::Int,
             source_receiver: None,
         },
-    ));
+    )));
     assert_eq!(
         CheckedBackendCallables::freeze(&ir, &crate::libraries::EmptySymbolSource).map(|_| ()),
         Err(DependencyFactError::UnknownProperty(property))

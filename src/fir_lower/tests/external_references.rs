@@ -73,10 +73,9 @@ fn external_unbound_reference_trusts_the_checked_receiver_widening() {
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,
         IrExpr::Call {
-            callee: crate::ir::Callee::External { target, .. },
+            callee: call_callee,
             ..
-        } if *target == declaration
-    )));
+        } if matches!(&**call_callee, crate::ir::Callee::External { target, .. } if *target == declaration))));
 }
 
 #[test]

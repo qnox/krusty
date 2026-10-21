@@ -2441,6 +2441,7 @@ impl JvmLibraries {
                 declared_callables: crate::fx_hash::HashMap::default(),
                 declared_callable_order: Vec::new(),
                 members,
+                methods_as_declarations: false,
                 companion,
                 constants: self.constants_for_class(internal_name, &ci),
                 // A Kotlin `actual typealias` to a Java SAM preserves constructor syntax. This is

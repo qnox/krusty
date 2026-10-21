@@ -184,7 +184,7 @@ impl CallableRegistry {
             else {
                 continue;
             };
-            match callee {
+            match &**callee {
                 Callee::Module { target, .. } if dispatch_receiver.is_none() => {
                     targets
                         .module
@@ -705,12 +705,12 @@ mod tests {
         let dead_target = CallableId::from_raw(2);
         let mut ir = IrFile::default();
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Module {
+            callee: Box::new(Callee::Module {
                 target: dead_target,
                 name: "dead".to_string(),
                 params: Vec::new(),
                 ret: Ty::Unit,
-            },
+            }),
             dispatch_receiver: None,
             args: Vec::new(),
         });
@@ -741,12 +741,12 @@ mod tests {
         let target = CallableId::from_raw(0);
         let mut ir = IrFile::default();
         let call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Module {
+            callee: Box::new(Callee::Module {
                 target,
                 name: "initialize".to_string(),
                 params: Vec::new(),
                 ret: Ty::Unit,
-            },
+            }),
             dispatch_receiver: None,
             args: Vec::new(),
         });
@@ -814,7 +814,7 @@ mod tests {
 
         let mut caller = IrFile::default();
         let call = caller.add_expr(IrExpr::Call {
-            callee: Callee::ModuleWithDefaults {
+            callee: Box::new(Callee::ModuleWithDefaults {
                 target,
                 default_provider: crate::fir::ResolvedFunctionOverrideTarget::Module(provider),
                 name: "answer".to_string(),
@@ -823,7 +823,7 @@ mod tests {
                 defaults: vec![0].into_boxed_slice(),
                 dispatch_receiver_ty: None,
                 extension_receiver_parameter: None,
-            },
+            }),
             dispatch_receiver: None,
             args: Vec::new(),
         });

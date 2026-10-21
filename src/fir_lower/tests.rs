@@ -137,14 +137,16 @@ fn immutable_local_array_loop_reads_the_source_value_slot() {
         .iter()
         .find_map(|expression| match expression {
             IrExpr::Call {
-                callee:
-                    Callee::Intrinsic {
-                        operation: IrIntrinsic::ArraySize,
-                        ..
-                    },
+                callee: call_callee,
                 dispatch_receiver: Some(receiver),
                 ..
-            } => Some(*receiver),
+            } if let Callee::Intrinsic {
+                operation: IrIntrinsic::ArraySize,
+                ..
+            } = &**call_callee =>
+            {
+                Some(*receiver)
+            }
             _ => None,
         })
         .expect("array-size operation");
@@ -222,9 +224,12 @@ fn sibling_member_properties_keep_checked_identities_until_backend_realization()
         .filter(|expression| {
             matches!(
                 expression,
-                IrExpr::Checked(IrCheckedOperation::PropertyRead { target, .. })
-                    if property(target).owner.is_some_and(|owner| owner.matches("Counter"))
-                        && property(target).name == "value"
+                IrExpr::Checked(operation) if matches!(
+                    &**operation,
+                    IrCheckedOperation::PropertyRead { target, .. }
+                        if property(target).owner.is_some_and(|owner| owner.matches("Counter"))
+                            && property(target).name == "value"
+                )
             )
         })
         .count();
@@ -234,9 +239,12 @@ fn sibling_member_properties_keep_checked_identities_until_backend_realization()
         .filter(|expression| {
             matches!(
                 expression,
-                IrExpr::Checked(IrCheckedOperation::PropertyWrite { target, .. })
-                    if property(target).owner.is_some_and(|owner| owner.matches("Counter"))
-                        && property(target).name == "value"
+                IrExpr::Checked(operation) if matches!(
+                    &**operation,
+                    IrCheckedOperation::PropertyWrite { target, .. }
+                        if property(target).owner.is_some_and(|owner| owner.matches("Counter"))
+                            && property(target).name == "value"
+                )
             )
         })
         .count();
@@ -247,10 +255,9 @@ fn sibling_member_properties_keep_checked_identities_until_backend_realization()
         assert!(ir.exprs.iter().any(|expression| {
             matches!(
                 expression,
-                IrExpr::Checked(IrCheckedOperation::PropertyRead { target, .. })
-                    if property(target).owner.is_some_and(|candidate| candidate.matches(owner))
-                        && property(target).name == name
-            )
+                IrExpr::Checked(checked_op)
+                    if matches!(&**checked_op, IrCheckedOperation::PropertyRead { target, .. } if property(target).owner.is_some_and(|candidate| candidate.matches(owner))
+                        && property(target).name == name))
         }));
     }
     let generic_operation = ir
@@ -258,14 +265,16 @@ fn sibling_member_properties_keep_checked_identities_until_backend_realization()
         .iter()
         .enumerate()
         .find_map(|(operation, expression)| match expression {
-            IrExpr::Checked(IrCheckedOperation::PropertyRead {
-                target,
-                substitutions,
-                ..
-            }) if property(target)
-                .owner
-                .is_some_and(|owner| owner.matches("GenericBox"))
-                && property(target).name == "item" =>
+            IrExpr::Checked(checked_op)
+                if let IrCheckedOperation::PropertyRead {
+                    target,
+                    substitutions,
+                    ..
+                } = &**checked_op
+                    && property(target)
+                        .owner
+                        .is_some_and(|owner| owner.matches("GenericBox"))
+                    && property(target).name == "item" =>
             {
                 Some((operation as u32, target, substitutions))
             }
@@ -342,16 +351,15 @@ fn disabled_assertion_drops_its_unlowered_operand_graph() {
     assert!(matches!(
         ir.expr(lowered.roots[0]),
         IrExpr::Call {
-            callee: Callee::Intrinsic {
+            callee: call_callee,
+            dispatch_receiver: None,
+            args,
+        } if matches!(&**call_callee, Callee::Intrinsic {
                 operation: IrIntrinsic::Assert {
                     mode: crate::types::AssertionMode::AlwaysDisabled,
                 },
                 ret: Ty::Unit,
-            },
-            dispatch_receiver: None,
-            args,
-        } if args.is_empty()
-    ));
+            } if args.is_empty())));
 }
 
 #[test]
@@ -534,9 +542,12 @@ fn checked_call_keeps_stable_target_and_final_argument_mapping() {
 
     let mut ir = IrFile::default();
     let lowered = lower_body(body, &index, &mut ir).unwrap();
-    let IrExpr::Checked(IrCheckedOperation::Call {
+    let IrExpr::Checked(checked_op) = ir.expr(lowered.roots[0]) else {
+        panic!("checked source call must remain a stable semantic operation")
+    };
+    let IrCheckedOperation::Call {
         target, arguments, ..
-    }) = ir.expr(lowered.roots[0])
+    } = &**checked_op
     else {
         panic!("checked source call must remain a stable semantic operation")
     };
@@ -617,15 +628,14 @@ fn external_default_call_keeps_only_supplied_common_operands() {
     assert!(matches!(
         ir.expr(lowered.roots[0]),
         IrExpr::Call {
-            callee: Callee::External {
+            callee: call_callee,
+            args,
+            ..
+        } if matches!(&**call_callee, Callee::External {
                 target,
                 defaults,
                 ..
-            },
-            args,
-            ..
-        } if *target == declaration && defaults == &[0] && args.len() == 1
-    ));
+            } if *target == declaration && defaults == &[0] && args.len() == 1)));
 }
 
 #[test]
@@ -710,9 +720,8 @@ fn external_property_function_reference_is_materialized_without_lookup() {
     ));
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,
-        IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead { target, .. })
-            if *target == property
-    )));
+        IrExpr::Checked(checked_op)
+            if matches!(&**checked_op, IrCheckedOperation::ExternalPropertyRead { target, .. } if *target == property))));
 }
 
 #[test]
@@ -771,13 +780,18 @@ fn external_member_extension_property_uses_published_receiver_coordinate() {
         .exprs
         .iter()
         .filter_map(|expression| match expression {
-            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
-                target,
-                parameters,
-                receiver,
-                arguments,
-                ..
-            }) if *target == property => Some((parameters, receiver, arguments)),
+            IrExpr::Checked(checked_op)
+                if let IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    parameters,
+                    receiver,
+                    arguments,
+                    ..
+                } = &**checked_op
+                    && *target == property =>
+            {
+                Some((parameters, receiver, arguments))
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -837,7 +851,7 @@ fn external_super_property_dispatch_survives_common_lowering() {
 
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,
-        IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+        IrExpr::Checked(checked_op) if matches!(&**checked_op, IrCheckedOperation::ExternalPropertyRead {
             target,
             dispatch: crate::ir::IrPropertyDispatch::Super {
                 owner: selected_owner,
@@ -845,8 +859,7 @@ fn external_super_property_dispatch_survives_common_lowering() {
             },
             receiver: Some(_),
             ..
-        }) if *target == property && *selected_owner == owner
-    )));
+        } if *target == property && *selected_owner == owner))));
 }
 
 #[test]
@@ -859,15 +872,14 @@ fn consuming_sink_realizes_positional_same_file_calls_without_checked_wrappers()
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,
         IrExpr::Call {
-            callee: crate::ir::Callee::Local(_),
+            callee: call_callee,
             args,
             ..
-        } if args.len() == 1
-    )));
+        } if matches!(&**call_callee, crate::ir::Callee::Local(_) if args.len() == 1))));
     assert!(!ir
         .exprs
         .iter()
-        .any(|expression| matches!(expression, IrExpr::Checked(IrCheckedOperation::Call { .. }))));
+        .any(|expression| matches!(expression, IrExpr::Checked(checked_op) if matches!(&**checked_op, IrCheckedOperation::Call { .. }))));
 }
 
 #[test]
@@ -884,7 +896,7 @@ fn consuming_sink_realizes_positional_same_file_member_calls() {
     assert!(!ir
         .exprs
         .iter()
-        .any(|expression| matches!(expression, IrExpr::Checked(IrCheckedOperation::Call { .. }))));
+        .any(|expression| matches!(expression, IrExpr::Checked(checked_op) if matches!(&**checked_op, IrCheckedOperation::Call { .. }))));
 }
 
 #[test]
@@ -895,7 +907,7 @@ fn positional_member_call_keeps_its_receiver_direct() {
     );
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,
-        IrExpr::Checked(IrCheckedOperation::PropertyRead { .. })
+        IrExpr::Checked(checked_op) if matches!(&**checked_op, IrCheckedOperation::PropertyRead { .. })
     )));
     assert!(
         !ir.exprs
@@ -925,10 +937,9 @@ fn suspending_call_operand_stays_a_direct_constructor_argument() {
             matches!(
                 expression,
                 IrExpr::Call {
-                    callee: crate::ir::Callee::Local(function),
+                    callee: call_callee,
                     ..
-                } if *function == next
-            )
+                } if matches!(&**call_callee, crate::ir::Callee::Local(function) if *function == next))
         })
         .expect("checked suspend call") as u32;
     // kotlinc keeps `1` on the stack across the suspension (its FixStack saves and restores it),
@@ -996,10 +1007,9 @@ fn same_file_named_call_spills_in_source_order_before_parameter_reordering() {
             matches!(
                 ir.expr(*call),
                 IrExpr::Call {
-                    callee: crate::ir::Callee::Local(target),
+                    callee: call_callee,
                     ..
-                } if *target == selected
-            )
+                } if matches!(&**call_callee, crate::ir::Callee::Local(target) if *target == selected))
             .then_some((wrapper as u32, (*call, stmts.clone())))
         })
         .expect("named call normalization block");
@@ -1013,9 +1023,11 @@ fn same_file_named_call_spills_in_source_order_before_parameter_reordering() {
                 ..
             } => match ir.expr(*initializer) {
                 IrExpr::Call {
-                    callee: crate::ir::Callee::Local(target),
+                    callee: call_callee,
                     ..
-                } => ir.functions[*target as usize].name.as_str(),
+                } if let crate::ir::Callee::Local(target) = &**call_callee => {
+                    ir.functions[*target as usize].name.as_str()
+                }
                 other => panic!("unexpected named argument initializer: {other:?}"),
             },
             other => panic!("unexpected named argument spill: {other:?}"),
@@ -1051,15 +1063,14 @@ fn same_file_defaults_and_varargs_are_semantic_before_backend_emission() {
     assert!(defaults.exprs.iter().any(|expression| matches!(
         expression,
         IrExpr::Call {
-            callee: crate::ir::Callee::LocalWithDefaults { defaults, .. },
+            callee: call_callee,
             args,
             ..
-        } if defaults.as_ref() == [0] && args.len() == 1
-    )));
+        } if matches!(&**call_callee, crate::ir::Callee::LocalWithDefaults { defaults, .. } if defaults.as_ref() == [0] && args.len() == 1))));
     assert!(!defaults
         .exprs
         .iter()
-        .any(|expression| matches!(expression, IrExpr::Checked(IrCheckedOperation::Call { .. }))));
+        .any(|expression| matches!(expression, IrExpr::Checked(checked_op) if matches!(&**checked_op, IrCheckedOperation::Call { .. }))));
 
     let varargs = lower_single_source(
         "fun selected(vararg values: Int): Int = values[0]\n\
@@ -1074,7 +1085,7 @@ fn same_file_defaults_and_varargs_are_semantic_before_backend_emission() {
     assert!(!varargs
         .exprs
         .iter()
-        .any(|expression| matches!(expression, IrExpr::Checked(IrCheckedOperation::Call { .. }))));
+        .any(|expression| matches!(expression, IrExpr::Checked(checked_op) if matches!(&**checked_op, IrCheckedOperation::Call { .. }))));
 }
 
 #[test]
@@ -1087,15 +1098,14 @@ fn same_file_generic_and_extension_calls_consume_semantic_substitutions_and_rece
     assert!(generic.exprs.iter().any(|expression| matches!(
         expression,
         IrExpr::Call {
-            callee: crate::ir::Callee::Local(_),
+            callee: call_callee,
             args,
             ..
-        } if args.len() == 1
-    )));
+        } if matches!(&**call_callee, crate::ir::Callee::Local(_) if args.len() == 1))));
     assert!(!generic
         .exprs
         .iter()
-        .any(|expression| matches!(expression, IrExpr::Checked(IrCheckedOperation::Call { .. }))));
+        .any(|expression| matches!(expression, IrExpr::Checked(checked_op) if matches!(&**checked_op, IrCheckedOperation::Call { .. }))));
 
     let extension = lower_single_source(
         "fun Int.selected(value: Int): Int = this + value\n\
@@ -1113,15 +1123,14 @@ fn same_file_generic_and_extension_calls_consume_semantic_substitutions_and_rece
     assert!(extension.exprs.iter().any(|expression| matches!(
         expression,
         IrExpr::Call {
-            callee: crate::ir::Callee::Local(target),
+            callee: call_callee,
             args,
             ..
-        } if *target == extension_function && args.len() == 2
-    )));
+        } if matches!(&**call_callee, crate::ir::Callee::Local(target) if *target == extension_function && args.len() == 2))));
     assert!(!extension
         .exprs
         .iter()
-        .any(|expression| matches!(expression, IrExpr::Checked(IrCheckedOperation::Call { .. }))));
+        .any(|expression| matches!(expression, IrExpr::Checked(checked_op) if matches!(&**checked_op, IrCheckedOperation::Call { .. }))));
 }
 
 #[test]
@@ -1156,16 +1165,18 @@ fn abstract_member_extension_property_keeps_bodyless_accessors_and_override_disp
         .exprs
         .iter()
         .find_map(|expression| match expression {
-            IrExpr::Checked(IrCheckedOperation::PropertyRead {
-                target,
-                dispatch_receiver,
-                extension_receiver,
-                context_arguments,
-                substitutions,
-            }) if dispatch_receiver.is_some()
-                && extension_receiver.is_some()
-                && context_arguments.is_empty()
-                && substitutions.is_empty() =>
+            IrExpr::Checked(checked_op)
+                if let IrCheckedOperation::PropertyRead {
+                    target,
+                    dispatch_receiver,
+                    extension_receiver,
+                    context_arguments,
+                    substitutions,
+                } = &**checked_op
+                    && dispatch_receiver.is_some()
+                    && extension_receiver.is_some()
+                    && context_arguments.is_empty()
+                    && substitutions.is_empty() =>
             {
                 Some((*target, *dispatch_receiver, *extension_receiver))
             }
@@ -1340,11 +1351,14 @@ fn local_function_is_lifted_once_and_receives_its_checked_capture() {
     assert_eq!(ir.functions[0].params, vec![Ty::Int]);
     assert!(ir.functions[0].body.is_some());
     let IrExpr::Call {
-        callee: crate::ir::Callee::Local(function),
+        callee: call_callee,
         args,
         ..
     } = ir.expr(lowered.roots[2])
     else {
+        panic!("local call must retain its lifted function and bound environment")
+    };
+    let crate::ir::Callee::Local(function) = &**call_callee else {
         panic!("local call must retain its lifted function and bound environment")
     };
     assert_eq!(*function, 0);
@@ -1468,16 +1482,15 @@ fn local_default_call_keeps_semantic_omission_without_abi_placeholders() {
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,
         IrExpr::Call {
-            callee: crate::ir::Callee::LocalWithDefaults {
-                function,
-                defaults,
-            },
+            callee: call_callee,
             args,
             ..
-        } if *function == selected
+        } if matches!(&**call_callee, crate::ir::Callee::LocalWithDefaults {
+                function,
+                defaults,
+            } if *function == selected
             && defaults.as_ref() == [1]
-            && args.len() == 2
-    )));
+            && args.len() == 2))));
     assert!(ir
         .exprs
         .iter()
@@ -1504,13 +1517,12 @@ fn local_vararg_call_materializes_array_at_checked_parameter_slot() {
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,
         IrExpr::Call {
-            callee: crate::ir::Callee::Local(function),
+            callee: call_callee,
             args,
             ..
-        } if *function == sum
+        } if matches!(&**call_callee, crate::ir::Callee::Local(function) if *function == sum
             && matches!(args.as_slice(), [array]
-                if matches!(ir.expr(*array), IrExpr::Vararg { elements, .. } if elements.len() == 2))
-    )));
+                if matches!(ir.expr(*array), IrExpr::Vararg { elements, .. } if elements.len() == 2))))));
 }
 
 #[test]
@@ -1534,11 +1546,10 @@ fn local_extension_call_materializes_selected_receiver_slot() {
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,
         IrExpr::Call {
-            callee: crate::ir::Callee::Local(function),
+            callee: call_callee,
             args,
             ..
-        } if *function == tag && args.len() == 2
-    )));
+        } if matches!(&**call_callee, crate::ir::Callee::Local(function) if *function == tag && args.len() == 2))));
 }
 
 #[test]
@@ -1738,7 +1749,7 @@ fn consuming_lowering_receives_folded_object_const_accesses() {
 
     assert!(ir.exprs.iter().all(|expression| !matches!(
         expression,
-        IrExpr::Checked(IrCheckedOperation::PropertyRead { .. })
+        IrExpr::Checked(checked_op) if matches!(&**checked_op, IrCheckedOperation::PropertyRead { .. })
     )));
     assert!(ir
         .exprs
@@ -1911,10 +1922,9 @@ fn cross_source_inline_call_consumes_retained_fir_as_a_non_emitted_template() {
     assert!(ir.exprs.iter().all(|expression| !matches!(
         expression,
         IrExpr::Call {
-            callee: crate::ir::Callee::Module { name, .. },
+            callee: call_callee,
             ..
-        } if name == "checkedCast"
-    )));
+        } if matches!(&**call_callee, crate::ir::Callee::Module { name, .. } if name == "checkedCast"))));
 }
 
 #[test]
@@ -1962,14 +1972,13 @@ fn retained_inline_local_delegate_materializes_its_inline_convention_dependency(
     assert!(ir.exprs.iter().all(|expression| !matches!(
         expression,
         IrExpr::Call {
-            callee: Callee::Module { target, .. }
+            callee: call_callee,
+            ..
+        } if matches!(&**call_callee, Callee::Module { target, .. }
                 | Callee::CrossFile {
                     module_target: Some(target),
                     ..
-                },
-            ..
-        } if template_targets.contains(target)
-    )));
+                } if template_targets.contains(target)))));
 }
 
 #[test]
@@ -2214,10 +2223,9 @@ fn named_call_passes_constants_and_vals_in_place_when_reordered() {
             matches!(
                 ir.expr(*call),
                 IrExpr::Call {
-                    callee: crate::ir::Callee::Local(target),
+                    callee: call_callee,
                     ..
-                } if *target == selected
-            )
+                } if matches!(&**call_callee, crate::ir::Callee::Local(target) if *target == selected))
             .then_some((stmts.clone(), *call))
         })
         .expect("named call normalization block");
@@ -2660,12 +2668,11 @@ fn constructor_delegation_remains_distinct_from_object_construction() {
     let lowered = lower_body(body, &index, &mut ir).unwrap();
     assert!(matches!(
         ir.expr(lowered.roots[0]),
-        IrExpr::Checked(IrCheckedOperation::ConstructorDelegation {
+        IrExpr::Checked(checked_op) if matches!(&**checked_op, IrCheckedOperation::ConstructorDelegation {
             target: crate::ir::IrCheckedConstructorTarget::Module(target),
             arguments,
             ..
-        }) if *target == constructor && matches!(arguments.as_slice(), [IrCheckedArgument::Expression { parameter: 0, value: 0 }])
-    ));
+        } if *target == constructor && matches!(arguments.as_slice(), [IrCheckedArgument::Expression { parameter: 0, value: 0 }]))));
 }
 
 #[test]

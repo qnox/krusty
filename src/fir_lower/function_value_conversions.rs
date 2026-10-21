@@ -83,7 +83,7 @@ impl BodyLowering<'_> {
         self.attach_generated_static_to_lexical_class(adapter);
         Some(
             self.ir
-                .add_expr(IrExpr::CallableReference(IrCallableReference {
+                .add_expr(IrExpr::CallableReference(Box::new(IrCallableReference {
                     target: IrCallableReferenceTarget::FunctionValueConversion { ordinal },
                     adapter,
                     captures: Vec::new(),
@@ -94,7 +94,7 @@ impl BodyLowering<'_> {
                     declaration_suspend: target.suspend,
                     adaptation: None,
                     reflection_owner: None,
-                })),
+                }))),
         )
     }
 }

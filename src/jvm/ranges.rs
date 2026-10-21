@@ -32,14 +32,17 @@ pub(super) fn realize(
     let runtime = JvmLibraries::new(classpath).map_err(RangeRealizationFailure::Initialization)?;
     let expression_count = ir.exprs.len();
     for expression in 0..expression_count {
-        let IrExpr::Checked(IrCheckedOperation::RangeConstruction {
+        let IrExpr::Checked(checked_op) = ir.exprs[expression].clone() else {
+            continue;
+        };
+        let IrCheckedOperation::RangeConstruction {
             operation,
             start,
             start_type,
             end,
             end_type,
             result,
-        }) = ir.exprs[expression].clone()
+        } = *checked_op
         else {
             continue;
         };
@@ -106,10 +109,10 @@ pub(super) fn realize(
     }
     for expression in 0..expression_count {
         match ir.exprs[expression].clone() {
-            IrExpr::Checked(IrCheckedOperation::IllegalProgressionStep { step }) => {
-                ir.exprs[expression] = illegal_step(ir, expression as ExprId, step);
-            }
-            IrExpr::Checked(
+            IrExpr::Checked(checked_op) => match *checked_op {
+                IrCheckedOperation::IllegalProgressionStep { step } => {
+                    ir.exprs[expression] = illegal_step(ir, expression as ExprId, step);
+                }
                 IrCheckedOperation::Call { .. }
                 | IrCheckedOperation::ConstructorDelegation { .. }
                 | IrCheckedOperation::BackingFieldRead { .. }
@@ -119,16 +122,14 @@ pub(super) fn realize(
                 | IrCheckedOperation::PropertyWrite { .. }
                 | IrCheckedOperation::ExternalPropertyRead { .. }
                 | IrCheckedOperation::ExternalPropertyWrite { .. }
-                | IrCheckedOperation::PropertyReference { .. },
-            )
-            // The backend pass above realized every counted loop and range-membership test.
-            | IrExpr::Checked(
-                IrCheckedOperation::RangeConstruction { .. }
+                | IrCheckedOperation::PropertyReference { .. }
+                // The backend pass above realized every counted loop and range-membership test.
+                | IrCheckedOperation::RangeConstruction { .. }
                 | IrCheckedOperation::RangeLoop { .. }
                 | IrCheckedOperation::RangeContains { .. }
-                | IrCheckedOperation::ComparableRangeContains { .. },
-            )
-            | IrExpr::CallableReference(_)
+                | IrCheckedOperation::ComparableRangeContains { .. } => {}
+            },
+            IrExpr::CallableReference(_)
             | IrExpr::Const(_)
             | IrExpr::BottomValue { .. }
             | IrExpr::ClassConst { .. }
@@ -222,12 +223,12 @@ fn illegal_step(ir: &mut IrFile, cause: ExprId, step: ExprId) -> IrExpr {
 fn static_call(callable: crate::libraries::LibraryCallable, start: ExprId, end: ExprId) -> IrExpr {
     let physical_name = callable.physical_name().to_string();
     IrExpr::Call {
-        callee: Callee::Static {
+        callee: Box::new(Callee::Static {
             owner: callable.owner,
             name: physical_name,
             descriptor: callable.descriptor,
             inline: callable.inline,
-        },
+        }),
         dispatch_receiver: None,
         args: vec![start, end],
     }

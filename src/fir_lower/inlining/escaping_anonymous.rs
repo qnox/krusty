@@ -184,14 +184,16 @@ fn note_caller_property_uses(ir: &mut crate::ir::IrFile, root: ExprId, owned: &H
             }
         });
         let receiver = match ir.expr(expression) {
-            IrExpr::Checked(
-                crate::ir::IrCheckedOperation::PropertyRead {
+            IrExpr::Checked(checked_op)
+                if let crate::ir::IrCheckedOperation::PropertyRead {
                     dispatch_receiver, ..
                 }
                 | crate::ir::IrCheckedOperation::PropertyWrite {
                     dispatch_receiver, ..
-                },
-            ) => *dispatch_receiver,
+                } = &**checked_op =>
+            {
+                *dispatch_receiver
+            }
             _ => None,
         };
         let Some(receiver) = receiver else {
@@ -238,7 +240,7 @@ fn retarget_caller_property_use(
     let IrExpr::Checked(operation) = ir.expr(expression).clone() else {
         return Ok(());
     };
-    let (target, receiver, extension_receiver, context_arguments, value) = match operation {
+    let (target, receiver, extension_receiver, context_arguments, value) = match *operation {
         crate::ir::IrCheckedOperation::PropertyRead {
             target,
             dispatch_receiver,
@@ -921,9 +923,13 @@ fn retarget_copied_property_calls(
                 Some(*impl_fn)
             }
             IrExpr::Call {
-                callee: crate::ir::Callee::Local(function),
+                callee: call_callee,
                 ..
-            } if ir.specialized_functions.contains_key(function) => Some(*function),
+            } if let crate::ir::Callee::Local(function) = &**call_callee
+                && ir.specialized_functions.contains_key(function) =>
+            {
+                Some(*function)
+            }
             _ => None,
         };
         if let Some(implementation) = implementation {
@@ -934,9 +940,9 @@ fn retarget_copied_property_calls(
         if matches!(
             ir.expr(expression),
             IrExpr::Checked(
-                crate::ir::IrCheckedOperation::PropertyRead { .. }
-                    | crate::ir::IrCheckedOperation::PropertyWrite { .. }
-            )
+                checked_op
+            ) if matches!(&**checked_op, crate::ir::IrCheckedOperation::PropertyRead { .. }
+                    | crate::ir::IrCheckedOperation::PropertyWrite { .. })
         ) {
             operations.push(expression);
         }
@@ -967,7 +973,7 @@ fn retarget_property_operation(
     let IrExpr::Checked(operation) = ir.expr(expression).clone() else {
         return Ok(());
     };
-    let (target, dispatch_receiver, extension_receiver, context_arguments, value) = match operation
+    let (target, dispatch_receiver, extension_receiver, context_arguments, value) = match *operation
     {
         crate::ir::IrCheckedOperation::PropertyRead {
             target,
@@ -1960,13 +1966,15 @@ fn node_uses_binding(expression: &IrExpr, bindings: &HashMap<String, Ty>) -> boo
         IrExpr::TypeOp { type_operand, .. } => uses(*type_operand),
         IrExpr::KClassLiteral { classifier, .. } => classifier.is_some_and(uses),
         IrExpr::Call {
-            callee:
-                crate::ir::Callee::Intrinsic {
-                    operation: crate::ir::IrIntrinsic::TypeOf { ty },
-                    ..
-                },
+            callee: call_callee,
             ..
-        } => uses(*ty),
+        } if let crate::ir::Callee::Intrinsic {
+            operation: crate::ir::IrIntrinsic::TypeOf { ty },
+            ..
+        } = &**call_callee =>
+        {
+            uses(*ty)
+        }
         _ => false,
     }
 }

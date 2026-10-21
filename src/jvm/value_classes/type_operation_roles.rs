@@ -75,13 +75,16 @@ pub(super) fn record_primitive_array_allocation_carriers(ir: &mut IrFile, under:
         .enumerate()
         .filter_map(|(id, expr)| {
             let IrExpr::Call {
-                callee:
-                    Callee::Intrinsic {
-                        operation: crate::ir::IrIntrinsic::PrimitiveArrayNew { element },
-                        ..
-                    },
+                callee: call_callee,
                 ..
             } = expr
+            else {
+                return None;
+            };
+            let Callee::Intrinsic {
+                operation: crate::ir::IrIntrinsic::PrimitiveArrayNew { element },
+                ..
+            } = &**call_callee
             else {
                 return None;
             };
@@ -151,7 +154,7 @@ mod tests {
             type_operand: Ty::obj_name(array),
         });
         ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual {
+            callee: Box::new(Callee::Virtual {
                 owner: crate::types::type_name("sample/Ordinary"),
                 name: "unbox-impl".to_string(),
                 descriptor: "()[I".to_string(),
@@ -159,7 +162,7 @@ mod tests {
                 interface: false,
                 module_target: None,
                 target: None,
-            },
+            }),
             dispatch_receiver: Some(same_spelling_cast),
             args: vec![],
         });

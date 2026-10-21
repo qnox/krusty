@@ -326,10 +326,15 @@ fn forwarded_type_arguments(ir: &crate::ir::IrFile, function: u32) -> Vec<Ty> {
         }
         match ir.expr(expression) {
             IrExpr::Call {
-                callee: crate::ir::Callee::External { substitutions, .. },
+                callee: call_callee,
                 ..
-            } => arguments.extend(substitutions.iter().map(|substitution| substitution.value)),
-            IrExpr::Checked(crate::ir::IrCheckedOperation::Call { substitutions, .. }) => {
+            } if let crate::ir::Callee::External { substitutions, .. } = &**call_callee => {
+                arguments.extend(substitutions.iter().map(|substitution| substitution.value))
+            }
+            IrExpr::Checked(checked_op)
+                if let crate::ir::IrCheckedOperation::Call { substitutions, .. } =
+                    &**checked_op =>
+            {
                 arguments.extend(substitutions.iter().map(|substitution| substitution.value))
             }
             _ => {}
@@ -413,15 +418,17 @@ fn type_of_arguments(ir: &crate::ir::IrFile, function: u32) -> Vec<Ty> {
             continue;
         }
         if let IrExpr::Call {
-            callee:
-                crate::ir::Callee::Intrinsic {
-                    operation: crate::ir::IrIntrinsic::TypeOf { ty },
-                    ..
-                },
+            callee: call_callee,
             ..
         } = ir.expr(expression)
         {
-            arguments.push(*ty);
+            if let crate::ir::Callee::Intrinsic {
+                operation: crate::ir::IrIntrinsic::TypeOf { ty },
+                ..
+            } = &**call_callee
+            {
+                arguments.push(*ty);
+            }
         }
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
     }

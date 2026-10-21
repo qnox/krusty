@@ -53,7 +53,7 @@ impl<'a> FileLowering<'a> {
             || declaration.init.is_none_or(|init| {
                 matches!(
                     self.ir.expr(init),
-                    IrExpr::Checked(IrCheckedOperation::PropertyReference { .. })
+                    IrExpr::Checked(checked_op) if matches!(&**checked_op, IrCheckedOperation::PropertyReference { .. })
                 )
             })
     }
