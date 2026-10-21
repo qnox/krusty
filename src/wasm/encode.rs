@@ -224,6 +224,8 @@ pub(super) struct Module {
     memory_pages: Option<u32>,
     exports: Vec<(String, u32)>,
     globals: Vec<Global>,
+    /// Exception tags, each naming a function type with payload parameters and no results.
+    tags: Vec<u32>,
     /// Functions the code names by `ref.func`, which the format requires a module to declare.
     referenced: Vec<u32>,
     /// One passive data segment: the bytes `array.new_data` copies constants out of.
@@ -258,6 +260,13 @@ impl Module {
 
     pub(super) fn func_type(&mut self, params: Vec<ValType>, results: Vec<ValType>) -> u32 {
         self.ty(CompositeType::Func { params, results })
+    }
+
+    pub(super) fn exception_tag(&mut self, payload: Vec<ValType>) -> u32 {
+        let ty = self.func_type(payload, Vec::new());
+        let index = self.tags.len() as u32;
+        self.tags.push(ty);
+        index
     }
 
     /// Declare an imported function. Imports precede every defined function in the index space,
@@ -368,6 +377,16 @@ impl Module {
                 uleb(body, 1);
                 body.push(0x00);
                 uleb(body, u64::from(pages));
+            });
+        }
+        // The exception-handling proposal places section 13 before globals, not in numeric order.
+        if !self.tags.is_empty() {
+            section(&mut out, 13, |body| {
+                uleb(body, self.tags.len() as u64);
+                for ty in &self.tags {
+                    body.push(0x00);
+                    uleb(body, u64::from(*ty));
+                }
             });
         }
         if !self.globals.is_empty() {
@@ -520,6 +539,21 @@ impl Code {
 
     pub(super) fn if_(&mut self, ty: BlockType) -> &mut Self {
         self.op(0x04).block_type(ty)
+    }
+
+    /// A `try_table` with one tag-specific handler. The handler label is relative to the
+    /// enclosing context, before the try itself opens its body label.
+    pub(super) fn try_table(&mut self, ty: BlockType, tag: u32, handler: u32) -> &mut Self {
+        self.op(0x1f)
+            .block_type(ty)
+            .index(1)
+            .op(0x00)
+            .index(tag)
+            .index(handler)
+    }
+
+    pub(super) fn throw(&mut self, tag: u32) -> &mut Self {
+        self.op(0x08).index(tag)
     }
 
     pub(super) fn else_(&mut self) -> &mut Self {
@@ -699,6 +733,34 @@ impl Code {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exception_instructions_keep_the_tag_and_enclosing_handler_label() {
+        let mut code = Code::default();
+        code.try_table(BlockType::Empty, 128, 2).throw(128).end();
+        assert_eq!(
+            code.bytes,
+            [0x1f, 0x40, 1, 0, 0x80, 1, 2, 0x08, 0x80, 1, 0x0b]
+        );
+    }
+
+    #[test]
+    fn the_exception_tag_section_precedes_globals() {
+        let mut module = Module::default();
+        assert_eq!(module.exception_tag(vec![ValType::I32]), 0);
+        module.global(ValType::I32);
+        assert_eq!(
+            module.encode(),
+            [
+                0, 0x61, 0x73, 0x6d, 1, 0, 0, 0, // header
+                1, 9, 1, 0x4e, 1, 0x4f, 0, 0x60, 1, 0x7f, 0, // type
+                2, 1, 0, 3, 1, 0, // imports, functions
+                13, 3, 1, 0, 0, // one tag of type zero
+                6, 6, 1, 0x7f, 1, 0x41, 0, 0x0b, // one global
+                7, 1, 0, 12, 1, 1, 10, 1, 0, 11, 3, 1, 1, 0,
+            ]
+        );
+    }
 
     #[test]
     fn leb128_matches_the_specification_examples() {

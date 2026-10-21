@@ -20098,3 +20098,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   stored before its constructor runs, as on the JVM. Tests: `wasm::codegen::tests`, the
   `wasm_*` regressions in `tests/kotlin_box_wasm_conformance.rs`, and
   `backend::class_tables::tests`.
+
+- **Wasm catch-only exception transport preserves the Throwable object.** Both Wasm targets use
+  one module-owned exception tag carrying the existing GC reference ABI. `throw` and a single
+  `catch (e: Throwable)` transfer the original object across functions and separately analyzed
+  module boundaries; a handler's own throw escapes that handler. Normal `try` results, return,
+  and loop branches retain their checked control-flow meaning. An explicitly selected platform
+  stdlib authenticates `Throwable()` and `Throwable(String?)` plus the exact nullable `message`
+  getter before publishing their callable identities. The Wasm carrier retains the supplied
+  message and a null cause; an identical ordinary dependency gets no compiler realization.
+  This slice does not realize cause-taking constructors, Throwable subclasses, other catch types,
+  multiple catches, or `finally`: unsupported forms still decline the entire compilation.
+  Arithmetic traps and foreign host exceptions do not become Kotlin exceptions implicitly.
+  Tests: shared `THROWABLE_TRANSPORT` and `TRY_NORMAL_COMPLETION` multimodule cases with the
+  kotlinc/JVM oracle and Native/Wasm matrix, provider `throwables::tests`, Wasm encoder tests,
+  and `wasm::codegen::tests::a_try_with_finally_still_declines_without_an_artifact`.

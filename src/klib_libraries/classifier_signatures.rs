@@ -30,6 +30,8 @@ pub(super) struct SignedConstructor {
 
 /// A class joined with its identity, its validated shape, and its signed members.
 pub(super) struct SignedClassifier {
+    /// This declaration belongs to the explicitly selected platform stdlib input.
+    pub(super) compiler_builtin_owner: bool,
     /// The class's shape without its callables.
     pub(super) shape: LibraryType,
     /// Exact declaring KLIB module identity, when this classifier came from an archive.
@@ -227,6 +229,7 @@ pub(super) fn sign_package_classes(
                 Some(type_parameters.identities()),
                 internal_friend,
             )?;
+            signed.compiler_builtin_owner = compiler_builtin_owner;
             signed.module = module.map(str::to_owned);
             if !declared.insert((module.map(str::to_owned), signed.signature.clone())) {
                 continue;
@@ -248,6 +251,7 @@ pub(super) fn sign_package_classes(
         published.push((
             identity,
             SignedClassifier {
+                compiler_builtin_owner,
                 shape,
                 module: module.map(str::to_owned),
                 modality: class.modality,

@@ -272,6 +272,10 @@ impl PackageInventory {
                         module.as_deref(),
                         native_interop_library,
                     )
+                    .map(|mut signed| {
+                        signed.compiler_builtin_owner = compiler_builtin_owner;
+                        signed
+                    })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             for property in signed {

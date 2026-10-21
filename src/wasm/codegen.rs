@@ -301,6 +301,43 @@ mod tests {
     }
 
     #[test]
+    fn a_try_with_finally_still_declines_without_an_artifact() {
+        // Wasm backend contract, not a portable semantic claim: finally lowering is a later slice.
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(
+                target,
+                "fun box(): String = try { \"OK\" } finally { val unused = 0 }",
+            );
+            assert_eq!(outputs, Vec::<Artifact>::new());
+            assert_eq!(
+                diagnostics,
+                ["krusty: the wasm backend does not support a `try` with `finally` yet"]
+            );
+        }
+    }
+
+    #[test]
+    fn checked_reference_identity_operators_accept_reference_carriers() {
+        // Backend IR contract: source identity reaches PrimitiveBinOp, not structural Equality.
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(
+                target,
+                "class Box(val value: Int)\n\
+                 fun box(): String {\n\
+                 \x20   val first = Box(7)\n\
+                 \x20   val alias = first\n\
+                 \x20   val different = Box(7)\n\
+                 \x20   if (first !== alias) return \"alias\"\n\
+                 \x20   if (first === different) return \"different\"\n\
+                 \x20   return \"OK\"\n\
+                 }",
+            );
+            assert_eq!(diagnostics, Vec::<String>::new());
+            assert_eq!(outputs.len(), 2);
+        }
+    }
+
+    #[test]
     fn a_program_is_one_module_and_the_loader_that_runs_it() {
         for target in WasmTarget::ALL {
             let (outputs, diagnostics) = compile(target, "fun box(): String = \"OK\"");
