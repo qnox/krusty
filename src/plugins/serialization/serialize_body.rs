@@ -517,7 +517,8 @@ impl SerializeBody<'_> {
                     init: Some(read),
                     named: false,
                 });
-                stmts.insert(0, declaration);
+                // kotlinc reads the cache after the superclass's `write$Self` has run.
+                stmts.insert(usize::from(inherited.is_some()), declaration);
             }
             // Every statement of `write$Self` is one of the class's own declaration, so it carries
             // the class's start line: kotlinc opens the method on that line at its first
