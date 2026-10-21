@@ -707,6 +707,7 @@ mod tests {
             declared_callables: HashMap::default(),
             declared_callable_order: Vec::new(),
             members: Vec::new(),
+            methods_as_declarations: false,
             companion: Vec::new(),
             constants: HashMap::default(),
             sam_eligible: false,
