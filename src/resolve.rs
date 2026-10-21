@@ -24105,6 +24105,7 @@ val result = object { fun value(): String = captured }
             declared_callables: HashMap::default(),
             declared_callable_order: Vec::new(),
             members: Vec::new(),
+            methods_as_declarations: false,
             companion: Vec::new(),
             constants: HashMap::default(),
             sam_eligible: false,
@@ -26505,6 +26506,7 @@ fun box(): String {
                         .then(|| vec!["prop".to_string()])
                         .unwrap_or_default(),
                     members: vec![],
+                    methods_as_declarations: false,
                     companion: vec![],
                     constants: HashMap::default(),
                     sam_eligible: false,
@@ -26638,6 +26640,7 @@ fun box(): String {
                     declared_callables,
                     declared_callable_order: names.iter().map(|name| (*name).to_string()).collect(),
                     members: vec![],
+                    methods_as_declarations: false,
                     companion,
                     constants: HashMap::default(),
                     sam_eligible: false,

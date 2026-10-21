@@ -132,7 +132,8 @@ pub(crate) fn semantic_sam_signature(
                 .annotations
                 .iter()
                 .any(|annotation| receiver_annotations.contains(&annotation.annotation));
-        for member in &classifier.members {
+        for member in classifier.member_records() {
+            let member = member.as_ref();
             collect_member(
                 member,
                 if function_type {

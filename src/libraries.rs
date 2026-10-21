@@ -24,6 +24,7 @@ mod generic_signature;
 mod inline_body;
 mod inline_kind;
 mod member_flags;
+mod member_records;
 mod metadata_normalization;
 mod param_flags;
 pub(crate) mod physical_parameter_plan;
@@ -2331,8 +2332,15 @@ pub struct LibraryType {
     /// Source order for [`Self::declared_callables`], used where interface delegation or metadata
     /// emission materializes the full declaration surface.
     pub declared_callable_order: Vec<String>,
-    /// Instance members (member functions and property accessors).
+    /// Stored flat instance-member records (member functions and property accessors). Read the
+    /// complete flat view through [`Self::member_records`]: with
+    /// [`Self::methods_as_declarations`], ordinary methods are not stored here.
     pub members: Vec<LibraryMember>,
+    /// This record publishes each ordinary member function once, as its
+    /// [`Self::declared_callables`] declaration, and [`Self::members`] holds only the records that
+    /// have no such declaration (member extensions). The flat record of a method is projected from
+    /// its declaration on demand instead of being kept as a second copy.
+    pub methods_as_declarations: bool,
     /// Companion-object members — accessed as `Type.member(…)` (the JVM realizes these as statics).
     pub companion: Vec<LibraryMember>,
     /// Compile-time constants declared by this classifier. For `Int.Companion.MAX_VALUE`, this map is
@@ -2497,6 +2505,7 @@ impl LibraryType {
             declared_callables: HashMap::default(),
             declared_callable_order: Vec::new(),
             members: Vec::new(),
+            methods_as_declarations: false,
             companion: Vec::new(),
             constants: HashMap::default(),
             sam_eligible: false,
@@ -2790,6 +2799,7 @@ mod tests {
             declared_callables: crate::fx_hash::HashMap::default(),
             declared_callable_order: Vec::new(),
             members: vec![],
+            methods_as_declarations: false,
             companion: vec![],
             constants: crate::fx_hash::HashMap::default(),
             sam_eligible: false,

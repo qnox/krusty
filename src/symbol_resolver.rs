@@ -1010,10 +1010,7 @@ impl<'a> SymbolResolver<'a> {
             let Some(t) = self.src.classifier(cur) else {
                 continue;
             };
-            if t.members
-                .iter()
-                .any(|m| m.name == name || m.physical_name.as_deref() == Some(name))
-            {
+            if t.has_member_record_spelled(name) {
                 return true;
             }
             work.extend(t.supertypes.iter_ids());
