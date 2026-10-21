@@ -12,10 +12,10 @@
 //! version)`. A new non-pass, a stale entry, or any transition between pass/fail/not-applicable
 //! fails until the reviewed inventory is updated; compiler panics are never expected.
 //!
-//! The harness reads the corpus from `KRUSTY_KOTLIN_BOX_DIR` (as the JVM gate does). A local run
-//! without it falls back to the vendored cases under `tests/box_data/`, which the committed
-//! inventory does not describe; a scheduled gate run requires the provisioned corpus instead, so a
-//! broken setup fails rather than reporting a green lane over nothing.
+//! The harness joins `KRUSTY_KOTLIN_BOX_DIR` with owned portable regressions in one inventory.
+//! Every sweep requires its provisioned corpus and lane; the separate vendored smoke test does
+//! not stand in for missing sweep setup. Owned fixtures require a JVM oracle before compilation,
+//! and their harness errors, panics and applicability exclusions can never be blessed.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::Read;
@@ -148,12 +148,6 @@ fn validate_bless(bless: bool, full_run: bool, provisioned: bool, ci: bool) -> R
         );
     }
     Ok(())
-}
-
-/// The corpus: the reference checkout when provisioned, else the vendored cases.
-fn corpus_dir() -> PathBuf {
-    krusty::toolchain::box_corpus_dir()
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/box_data"))
 }
 
 pub struct Scratch(pub PathBuf);
@@ -887,21 +881,84 @@ pub fn prepare_sources(
     Ok(sources)
 }
 
+fn checked_outcome(file: &Path, result: &Outcome) -> Result<box_ratchet::Outcome, String> {
+    if super::box_inventory::owned(file)
+        && matches!(
+            result,
+            Outcome::Harness(_) | Outcome::CompilerPanic(_) | Outcome::NotApplicable(_)
+        )
+    {
+        return Err(format!(
+            "owned box case {} has fatal outcome: {result:?}",
+            file.display()
+        ));
+    }
+    Ok(ratchet_outcome(result))
+}
+
+#[test]
+fn owned_fatal_outcomes_cannot_be_blessed_as_box_failures() {
+    let file =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/box_regressions/multimodule/example.kt");
+    for result in [
+        Outcome::Harness("missing executable".into()),
+        Outcome::CompilerPanic("panic".into()),
+        Outcome::NotApplicable("target directive"),
+    ] {
+        assert_eq!(
+            checked_outcome(&file, &result),
+            Err(format!(
+                "owned box case {} has fatal outcome: {result:?}",
+                file.display()
+            ))
+        );
+    }
+    assert_eq!(
+        checked_outcome(&file, &Outcome::Pass),
+        Ok(box_ratchet::Outcome::Pass)
+    );
+    assert_eq!(
+        checked_outcome(&file, &Outcome::Declined("unsupported".into())),
+        Ok(box_ratchet::Outcome::Fail)
+    );
+    assert_eq!(
+        checked_outcome(
+            Path::new("/upstream/a.kt"),
+            &Outcome::Harness("existing policy".into())
+        ),
+        Ok(box_ratchet::Outcome::Fail)
+    );
+}
+
 fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path) -> Outcome {
     let source = match std::fs::read_to_string(file) {
         Ok(source) => source,
         Err(error) => return Outcome::Harness(format!("reading case: {error}")),
     };
+    let stem = file
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("Case");
+    if super::box_inventory::owned(file) {
+        if let Err(error) = super::box_reference_classes::checked_box(&source, stem) {
+            return Outcome::Harness(format!("required JVM oracle: {error}"));
+        }
+        if lane.platform() == box_ratchet::Platform::Native && source.contains("// MODULE:") {
+            let answer =
+                super::kotlin_native_multimodule_support::kotlin_native_multimodule_box(&source);
+            if answer.as_deref() != Some("OK") {
+                return Outcome::Harness(format!(
+                    "required Native oracle must return OK, got {answer:?}"
+                ));
+            }
+        }
+    }
     if let Some(reason) = lane.not_applicable(&source) {
         return Outcome::NotApplicable(reason);
     }
     if let Some(reason) = lane.harness_limitation(&source) {
         return Outcome::Harness(reason.to_string());
     }
-    let stem = file
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("Case");
     if source.contains("// MODULE:") {
         let prepared = krusty::conformance::prepare_test_source(&source, lane.test_target());
         let Some(mut modules) = krusty::conformance::split_modules(&prepared) else {
@@ -963,43 +1020,13 @@ fn may_write_blessed_expectations(bless: bool, compiler_panics: usize) -> bool {
 pub fn run(lane: &dyn Lane) {
     let env = |knob: &str| format!("KRUSTY_{}_{knob}", lane.env_infix());
     let label = lane.label();
-    // A scheduled gate may not report green over a missing toolchain or corpus. A plain local run
-    // may still skip or fall back.
-    let gate =
-        std::env::var_os(format!("KRUSTY_REQUIRE_{}_CONFORMANCE", lane.env_infix())).is_some();
     let unavailable = lane.unavailable();
-    if gate {
-        assert!(
-            unavailable.is_none(),
-            "scheduled {label} conformance cannot run here: {}",
-            unavailable.as_deref().unwrap_or_default()
-        );
-        assert!(
-            krusty::toolchain::box_corpus_dir().is_some(),
-            "scheduled {label} conformance needs the provisioned box corpus \
-             (KRUSTY_KOTLIN_BOX_DIR); the vendored fallback is for local runs"
-        );
-    }
-    if let Some(reason) = unavailable {
-        eprintln!("{label} conformance: skipped ({reason})");
-        return;
-    }
-    let corpus = corpus_dir();
-    // The committed expectations describe the provisioned corpus; the vendored fallback is a
-    // smoke test they say nothing about.
     let provisioned = krusty::toolchain::box_corpus_dir().is_some();
-    let files = krusty::conformance::kotlin_files(&corpus);
-    let relative = |file: &Path| {
-        file.strip_prefix(&corpus)
-            .unwrap_or(file)
-            .to_string_lossy()
-            .into_owned()
-    };
-    assert!(
-        !files.is_empty(),
-        "no Kotlin sources under {}",
-        corpus.display()
-    );
+    super::box_inventory::require_setup(unavailable.as_deref(), provisioned)
+        .unwrap_or_else(|error| panic!("{label}: {error}"));
+    let corpus = krusty::toolchain::box_corpus_dir().expect("validated corpus setup");
+    let files = super::box_inventory::discover(&corpus).unwrap_or_else(|error| panic!("{error}"));
+    let relative = |file: &Path| box_ratchet::corpus_key(&corpus, file);
     let platform = lane.platform();
     let version = krusty::kotlin_version::target();
     let corpus_cases: BTreeSet<String> = files.iter().map(|file| relative(file)).collect();
@@ -1092,7 +1119,7 @@ pub fn run(lane: &dyn Lane) {
     let mut current = BTreeMap::new();
     for (file, result) in outcomes {
         let relative = relative(file);
-        let observed = ratchet_outcome(&result);
+        let observed = checked_outcome(file, &result).unwrap_or_else(|error| panic!("{error}"));
         assert!(
             current.insert(relative.clone(), observed).is_none(),
             "corpus contains the duplicate path {relative:?}"

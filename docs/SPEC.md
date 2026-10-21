@@ -13544,7 +13544,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   root-package class is spelled `<root>.Token` there) and tests an `as?` before its `checkcast`.
   (`tests/type_intrinsics_e2e.rs`,
   `tests/native_function_type_checks_e2e.rs`,
-  `tests/multimodule_conformance_cases.rs`,
+  `tests/box_regressions/multimodule/multimoduleDependencyFunctionImplementationMarkers.kt`,
   `jvm::inliner::reified::tests::a_suspend_function_argument_tests_the_marker_and_the_jvm_arity`,
   `fir::body_check::local_function_tests::suspend_local_function_reference_keeps_its_suspend_function_type`.)
   Corpus: `coroutines/featureIntersection/suspendFunctionIsAs.kt`.
@@ -17593,8 +17593,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   module-qualified key, so an ordinary dependency cannot supply the default or body selected from
   an equal-signature friend declaration. Neither path treats the signature alone, package spelling,
   dependency order, or friend package as an origin. Tests:
-  `multimodule_conformance_cases::EQUAL_INTERNAL_SIGNATURES` through
-  `multimodule_conformance_cases::multimodule_cases_run_through_the_matrix_selected_backend`,
+  `tests/box_regressions/multimodule/multimoduleEqualInternalSignatures.kt` through the common box inventory,
   `klib_libraries::tests::classes::a_friend_classifier_is_not_hidden_by_an_equal_nonfriend_signature`,
   `klib_libraries::parameter_defaults::tests::equal_signatures_keep_each_modules_own_default`,
   `klib_lowering::tests::equal_internal_body_signatures_from_distinct_modules_remain_distinct`.
@@ -17618,8 +17617,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   classifier FQNs. Function/default-wrapper, property accessor, file initializer, constructor, and
   value-class box/unbox entry points therefore include the exact source module before their stable
   declaration component. File-local class/runtime symbols remain local linkage. Tests:
-  `multimodule_conformance_cases::{DEFAULT_CALLABLE_IDS, PROPERTY_IDS}` through
-  `multimodule_conformance_cases::multimodule_cases_run_through_the_matrix_selected_backend`, and
+  `tests/box_regressions/multimodule/{multimoduleDefaultCallableIds,multimodulePropertyIds}.kt`
+  through the common box inventory, and
   the Native-specific `native_module_abi_symbols_keep_same_named_internal_classifiers_distinct`.
 
 - **A KLIB body's call of a dependency function lowers that function too.** A call of a public
@@ -17881,16 +17880,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   view, as a top-level or member function does. Tests:
   `klib_lowering::tests::inline_templates::*`,
   `klib_lowering::tests::only_a_declared_function_invocation_has_invocation_semantics`,
-  `multimodule_conformance_cases::FLOATING_BITS` (Native, a member call from a template),
+  `tests/box_regressions/multimodule/multimoduleFloatingBits.kt` (Native, a member call from a template),
   `klib_libraries::tests::prepared_inline_selection_takes_every_inline_declaration_of_its_module`,
-  `multimodule_conformance_cases::RECEIVER_RETURNING_SCOPE_FUNCTIONS` and
-  `multimodule_conformance_cases::REIFIED_CALLABLE_ORIGINS` (JVM, Native and Wasm), and
+  `tests/box_regressions/multimodule/multimoduleReceiverReturningScopeFunctions.kt` and
+  `tests/box_regressions/multimodule/multimoduleReifiedCallableOrigins.kt` (JVM, Native and Wasm), and
   `wasm_a_declined_required_inline_body_rejects_the_caller` /
   `native_a_declined_required_inline_body_rejects_the_caller` (a library reified inline function
   with no template), and `wasm_a_declined_required_stdlib_template_rejects_the_caller` /
   `native_a_declined_required_stdlib_template_rejects_the_caller` (`compareBy`, whose prepared
   factory contains an unsupported rich function reference). The original `repeat` caller is
-  retained separately as `multimodule_conformance_cases::INLINE_STDLIB_REPEAT`; its template now
+  retained separately as `tests/box_regressions/multimodule/inlineStdlibRepeat.kt`; its template now
   binds the inherited iterator declaration instead of asserting that the old gap remains.
 
 - **A KLIB template lowers the forms kotlinc's prepared copy introduces.** A constructor call
@@ -17923,7 +17922,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_dependency_constructor_call_constructs_by_the_provider_identity` and
   `a_dependency_property_read_reads_the_provider_property`), `klib_lowering::tests::body_forms::*`,
   `klib_lowering::tests::returnable_blocks::*`, and the shared JVM/Native/Wasm declaration graph
-  `multimodule_conformance_cases::INLINE_NULL_CHECK_RETURNS`.
+  `tests/box_regressions/multimodule/inlineNullCheckReturnTargets.kt`.
 - **A KLIB template lowers objects, class literals, conversions, loops and `try` as their source.**
   A singleton read is the source object value when the provider says the classifier is an object.
   `C::class`, `T::class` and `value::class` are the source class literals. A member of a generic
@@ -17960,8 +17959,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   after checking its complete signature and the selected platform stdlib's authority, including
   kotlin-test's helpers contained in that stdlib. Native consumes those facts without an
   owner/name fallback.
-  Tests: the `INLINE_*` cases in `tests/multimodule_conformance_cases.rs`, run by the selected JVM,
-  Native or Wasm matrix runner, and `klib_libraries::builtin_realizations::library_helpers::tests`.
+  Tests: the `inline*.kt` cases in `tests/box_regressions/multimodule`, through the ordinary box
+  inventory and its backend-owned expectations, and
+  `klib_libraries::builtin_realizations::library_helpers::tests`.
 
 - **A KLIB `when` keeps its source form.** A `when` with an `else` (a final branch whose condition
   is the constant `true`) of origin `WHEN` lowers to one flat `when` recorded as exhaustive at its

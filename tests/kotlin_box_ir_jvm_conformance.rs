@@ -854,56 +854,6 @@ fn compile_module_test(
     })
 }
 
-/// Check the common JVM oracle before any backend judges a portable module graph.
-pub(super) fn check_multimodule_reference(case: &super::multimodule_conformance_cases::Case) {
-    assert!(
-        krusty::conformance::backend_targeted(case.source, &["JVM", "JVM_IR"])
-            && !krusty::conformance::backend_muted(case.source, &["JVM", "JVM_IR"]),
-        "{}: portable multimodule cases may not skip JVM",
-        case.stem
-    );
-    let jdk = common::jdk_modules();
-    let classpath = common::classpath_jars_for(case.source);
-    let reference = super::box_reference_classes::reference_compile(
-        case.source,
-        case.stem,
-        &classpath,
-        krusty::conformance::BoxJdk::Full {
-            root: Some(jdk.as_path()),
-        },
-        COROUTINE_HELPERS,
-    )
-    .unwrap_or_else(|error| panic!("{}: pinned kotlinc module oracle: {error}", case.stem));
-    let reference: Vec<_> = reference
-        .qualified()
-        .map(|((_, name), bytes)| (name.to_owned(), bytes.to_vec()))
-        .collect();
-    let reference_box = find_box_class(&reference)
-        .unwrap_or_else(|| panic!("{}: pinned kotlinc module graph must emit box()", case.stem));
-    assert_eq!(
-        common::run_box(&reference, &reference_box, &classpath),
-        Some("OK".to_string()),
-        "{}: pinned kotlinc must run the exact module graph as OK",
-        case.stem
-    );
-}
-
-/// Run one case selected by the shared backend-neutral multimodule conformance inventory.
-pub(super) fn run_multimodule_case(case: &super::multimodule_conformance_cases::Case) {
-    let jdk = common::jdk_modules();
-    let classpath = common::classpath_jars_for(case.source);
-    let classes = compile_module_test(case.source, &classpath, Some(jdk.as_path()), &|_| {})
-        .unwrap_or_else(|| panic!("{}: JVM must compile the exact module graph", case.stem));
-    let box_class = find_box_class(&classes.flat)
-        .unwrap_or_else(|| panic!("{}: JVM module graph must emit box()", case.stem));
-    assert_eq!(
-        common::run_box(&classes.flat, &box_class, &classpath),
-        Some("OK".to_string()),
-        "{}: JVM must run the exact separately compiled module graph",
-        case.stem
-    );
-}
-
 /// Compile one box case with krusty through the topology its markers select: `// MODULE:` builds,
 /// then `// FILE:` multi-file sets (also used for `// WITH_COROUTINES`, which needs the generated
 /// `helpers` source compiled alongside it), then a single source file.
@@ -1570,10 +1520,9 @@ fn kotlin_codegen_box_conformance() {
     eprintln!("box setup: discover corpus");
     let box_dir = discover_box_dir();
     eprintln!("box setup: corpus={}", box_dir.display());
-    let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
-        eprintln!("skipping box conformance: set JAVA_HOME");
-        return;
-    };
+    let java_home = env("KRUSTY_REF_JAVA_HOME")
+        .or_else(|| env("JAVA_HOME"))
+        .expect("box conformance requires KRUSTY_REF_JAVA_HOME or JAVA_HOME");
     let java = format!("{java_home}/bin/java");
     // The JDK bootclasspath as an explicit `-classpath` entry, selected per test like JetBrains'
     // runner: the corpus checkout's mock `rt.jar` unless the test declares `// FULL_JDK`, which
@@ -1618,7 +1567,8 @@ fn kotlin_codegen_box_conformance() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(usize::MAX);
 
-    let mut files = krusty::conformance::kotlin_files(&box_dir);
+    let mut files =
+        super::box_inventory::discover(&box_dir).unwrap_or_else(|error| panic!("{error}"));
     let corpus: BTreeSet<String> = files
         .iter()
         .map(|file| box_ratchet::corpus_key(&box_dir, file))
@@ -1767,7 +1717,8 @@ fn kotlin_codegen_box_conformance() {
                 }
                 let tc0 = std::time::Instant::now();
                 let tr0 = std::time::Instant::now();
-                let src = fs::read_to_string(file).unwrap_or_default();
+                let src = fs::read_to_string(file)
+                    .unwrap_or_else(|error| panic!("reading box case {}: {error}", file.display()));
                 // Apply the target- and feature-specific corpus placeholders before compilation.
                 let src = krusty::conformance::prepare_test_source(
                     &src,
@@ -1775,6 +1726,20 @@ fn kotlin_codegen_box_conformance() {
                 );
                 t_read.fetch_add(tr0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 let __ret = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let owned = super::box_inventory::owned(file);
+                    assert!(
+                        !owned || !no_run,
+                        "owned box regressions require execution, not KRUSTY_NO_RUN"
+                    );
+                    let stem = file
+                        .file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .unwrap_or("File")
+                        .to_string();
+                    let owned_reference = owned.then(|| {
+                        box_reference_classes::checked_box(&src, &stem)
+                            .unwrap_or_else(|error| panic!("required JVM oracle: {error}"))
+                    });
                     if !gate_applicable(&src, no_run) {
                         return (
                             file.clone(),
@@ -1782,19 +1747,16 @@ fn kotlin_codegen_box_conformance() {
                             box_byte_score::CaseScore::NotScored,
                         );
                     }
-                    // In-process compilation. A `// WITH_STDLIB` test gets the kotlin-stdlib jar on krusty's
-                    // classpath (so stdlib aliases/types resolve); others compile with no stdlib.
-                    let stem = file
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("File")
-                        .to_string();
                     // Directive-exact compile classpath (WITH_STDLIB/WITH_REFLECT/STDLIB_JDK8/WITH_COROUTINES).
                     mark_box_case_phase(&active, tid, file, "classpath");
                     let tj0 = std::time::Instant::now();
                     let compile_cp = common::classpath_jars_for(&src);
                     t_cpjars.fetch_add(tj0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                    let jdk = jdk_roots.select(&src);
+                    let owned_jdk = owned.then(common::jdk_modules);
+                    let jdk = match owned_jdk.as_deref() {
+                        Some(root) => krusty::conformance::BoxJdk::Full { root: Some(root) },
+                        None => jdk_roots.select(&src),
+                    };
                     let jdk_modules = jdk.classpath_root();
 
                     // Box outcome and krusty's module-qualified classes (`None` when krusty emitted
@@ -1892,14 +1854,19 @@ fn kotlin_codegen_box_conformance() {
                     // opt-in byte diff.
                     let reference = (score_on || byte_diff_on).then(|| {
                         mark_box_case_phase(&active, tid, file, "reference");
-                        box_reference_classes::reference_compile(
-                            &src,
-                            &stem,
-                            &compile_cp,
-                            jdk,
-                            COROUTINE_HELPERS,
-                        )
-                        .map(|reference| box_byte_score::qualified_from_reference(&reference))
+                        owned_reference
+                            .clone()
+                            .map(Ok)
+                            .unwrap_or_else(|| {
+                                box_reference_classes::reference_compile(
+                                    &src,
+                                    &stem,
+                                    &compile_cp,
+                                    jdk,
+                                    COROUTINE_HELPERS,
+                                )
+                            })
+                            .map(|reference| box_byte_score::qualified_from_reference(&reference))
                     });
                     if let (true, Some(compiled), Some(reference)) =
                         (byte_diff_on, compiled.as_ref(), reference.as_ref())
@@ -2265,6 +2232,10 @@ fn check_jvm_outcomes(
         .filter_map(|(file, result, _)| match result {
             TestResult::Fail(reason) => Some(format!(
                 "{}: {reason}",
+                box_ratchet::corpus_key(box_dir, file)
+            )),
+            TestResult::NotApplicable if super::box_inventory::owned(file) => Some(format!(
+                "{}: owned portable box case may not be not-applicable",
                 box_ratchet::corpus_key(box_dir, file)
             )),
             TestResult::Pass | TestResult::NotApplicable => None,

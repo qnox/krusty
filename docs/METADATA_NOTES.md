@@ -626,7 +626,7 @@ keeps a lexical target stack for every block, including the sole-tail-return fas
 anonymous result storage only for structural frames. Repeated enclosing target declarations,
 reads of a target as a value, and value frames with reachable fallthrough reject explicitly.
 The existing IR decoder and metadata wire format are unchanged. Structural tests live in
-`klib_lowering::tests::returnable_blocks`; `INLINE_NULL_CHECK_RETURNS` supplies one shared
+`klib_lowering::tests::returnable_blocks`; `tests/box_regressions/multimodule/inlineNullCheckReturnTargets.kt` supplies one shared
 JVM/Native/Wasm declaration graph with reference/scalar results, exact failure messages and
 single evaluation of its argument.
 

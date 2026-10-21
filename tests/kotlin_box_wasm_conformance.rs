@@ -499,37 +499,14 @@ fn focused_wasm_lane_available(lane: &WasmLane, stem: &str) -> bool {
     false
 }
 
-/// Run one case selected by the shared backend-neutral multimodule conformance inventory.
-pub(super) fn run_multimodule_case(
-    case: &super::multimodule_conformance_cases::Case,
-    target: WasmTarget,
-) -> Outcome {
-    let modules = krusty::conformance::split_modules(case.source).expect("valid module test shape");
-    let units = krusty::conformance::module_units(&modules);
-    let lane = WasmLane { target };
-    if let Some(reason) = lane.not_applicable(case.source) {
-        return Outcome::NotApplicable(reason);
-    }
-    if let Some(reason) = lane.unavailable() {
-        return Outcome::Harness(format!(
-            "required {} setup is unavailable: {reason}",
-            lane.label()
-        ));
-    }
-    lane.compile_modules_and_run(
-        &std::env::temp_dir(),
-        &format!("{}-{}", target.name(), case.stem),
-        &units,
-        case.source,
-    )
-}
-
 /// A required inline dependency function whose body cannot become a template rejects its caller:
 /// it is never compiled as a direct call of the dependency function.
 // PLATFORM-SPECIFIC: Wasm expands required KLIB inline bodies in common IR; JVM uses bytecode.
 #[test]
 fn wasm_a_declined_required_inline_body_rejects_the_caller() {
-    let case = super::multimodule_conformance_cases::DECLINED_REQUIRED_INLINE_BODY;
+    let case = super::dependency_template_rejections::DECLINED_REQUIRED_INLINE_BODY;
+    super::box_reference_classes::checked_box(case.source, case.stem)
+        .expect("pinned kotlinc must run the required-inline rejection fixture");
     let modules = krusty::conformance::split_modules(case.source).expect("valid module test shape");
     let units = krusty::conformance::module_units(&modules);
     for target in WasmTarget::ALL {
@@ -542,7 +519,7 @@ fn wasm_a_declined_required_inline_body_rejects_the_caller() {
             lane.compile_modules_and_run(&std::env::temp_dir(), &stem, &units, case.source);
         assert!(
             matches!(&outcome, Outcome::Frontend(message)
-                if super::multimodule_conformance_cases::required_inline_rejection(message).is_some()),
+                if super::dependency_template_rejections::required_inline_rejection(message).is_some()),
             "{stem}: {outcome:?}"
         );
     }
@@ -552,8 +529,8 @@ fn wasm_a_declined_required_inline_body_rejects_the_caller() {
 // PLATFORM-SPECIFIC: this tests the Wasm KLIB template-decline contract, not Kotlin behavior.
 #[test]
 fn wasm_a_declined_required_stdlib_template_rejects_the_caller() {
-    super::multimodule_conformance_cases::verify_declined_stdlib_source_with_kotlinc();
-    let src = super::multimodule_conformance_cases::DECLINED_STDLIB_INLINE_BODY;
+    super::dependency_template_rejections::verify_declined_stdlib_source_with_kotlinc();
+    let src = super::dependency_template_rejections::DECLINED_STDLIB_INLINE_BODY;
     for target in WasmTarget::ALL {
         let lane = WasmLane { target };
         let stem = format!("{}-declinedRequiredStdlibTemplate", target.name());
@@ -568,7 +545,7 @@ fn wasm_a_declined_required_stdlib_template_rejects_the_caller() {
         );
         assert!(
             matches!(&outcome, Outcome::Frontend(message)
-                if super::multimodule_conformance_cases::required_inline_rejection(message).is_some()),
+                if super::dependency_template_rejections::required_inline_rejection(message).is_some()),
             "{stem}: {outcome:?}"
         );
     }
