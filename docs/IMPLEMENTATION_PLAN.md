@@ -5729,3 +5729,10 @@ write the dependency libraries itself; kotlinc only supplies the expected progra
   module's KLIB with this backend, the dependent compilation reads it through the KLIB library
   provider, and Native links and runs `box()`; the expected-failure ratchet records each case until
   it runs.
+
+## KLIB inline migration debt
+
+The maintainer approved #2459's remaining Native/Wasm conformance regressions as a one-time
+baseline transition, with exact per-release loaded-blob proof and normal shrink-only checks
+afterward. This is not an all-backend support claim. Small capability follow-ups #2520–#2525
+restore measured cases independently; see [KLIB inline migration](KLIB_INLINE_MIGRATION.md).

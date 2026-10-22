@@ -18233,6 +18233,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   not authorize erasure or invent a subtype relationship. Tests:
   `klib_lowering::tests::varargs`, `dispatch_slots_cannot_carry_a_vararg_marker`.
 
+- **The inline-body migration has one explicitly approved outcome reset.** The Native/Wasm
+  failures recorded for #2459 are migration debt, not a claim of supported behavior. Exact loaded
+  manifest blobs and effective releases pin the one-time exception; subsequent changes remain
+  shrink-only. JVM, applicability, panic and owned-fixture setup policies are unchanged. See
+  [KLIB inline migration](KLIB_INLINE_MIGRATION.md) for the evidence contract and small follow-ups.
+
 - **A KLIB inline function expands from its prepared body through the module inliner.** When the
   backend expands same-module inline calls in IR (Native, Wasm), every `inline` declaration of a
   dependency KLIB has its prepared-inline IR body decoded and, on its first call in a file, lowered

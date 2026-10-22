@@ -859,6 +859,13 @@ realizations; an ordinary dependency with identical metadata may not. This does 
 metadata or change source overload selection. Wasm owns the GC fields and exception tag; common IR
 keeps the selected constructor/getter identities and typed `Try` / `Throw` nodes.
 
+## Inline-body migration outcomes
+
+The approved #2459 Native/Wasm outcome reset changes no metadata encoding or declaration
+authority. It records known implementation debt for small follow-ups, pinned to exact loaded
+manifest blobs and effective releases. JVM/applicability and fatal-outcome policies remain
+unchanged; see [KLIB inline migration](KLIB_INLINE_MIGRATION.md).
+
 ## Authenticated String concatenation declarations
 
 The member `String.plus(Any?): String` and nullable extension `String?.plus(Any?): String`
