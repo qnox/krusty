@@ -3966,6 +3966,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the postponed call, so `fun f() = produce { onSend.send("x") }` inside the dispatch receiver's
   class still infers `Channel<Any?>`. Test: `tests/builder_inference_receivers_e2e.rs`
   (`a_member_extension_argument_infers_the_builder_variable`); box: `inference/pcla/issues/kt47744.kt`.
+- **A member-extension `invoke` keeps its own type parameters open while its receiver is
+  matched.** `operator fun <T> Key<in List<T>>.invoke(vararg values: T)` declared in an implicit
+  dispatch receiver (the shape of the scripting API's `PropertiesCollection` builders) is selected
+  for `items("a", "b")` on a `Key<List<String>>` by matching the declared receiver with the
+  method's `T` still a variable; substituting it away first matched no candidate. A generic
+  extension `invoke` commits its type-variable intersections like any generic call. A vararg is
+  packed as an array of its substituted element: `Array<out E>` stays projected, any other
+  reference array is `Array<E>` and a primitive array stays primitive, so `T = Int` packs an
+  `Integer[]`. An inapplicable invoke is reported with kotlinc's diagnostics, never assumed
+  selected. Test: `tests/projected_member_extension_invoke_e2e.rs`.
 - **A local class member's lambda reads the class's captured builder receiver.** In
   `build outerBuild@ { class L { fun m() { build innerBuild@ { this@outerBuild.f(x) } } } }`
   (KT-49160) the member's checked body resolves `this@outerBuild` to the receiver the local class
