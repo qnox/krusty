@@ -10,15 +10,47 @@
 //! generators that write or read the object (`write$Self`, the deserialization constructor) address
 //! fields; the ones that describe the wire shape (descriptor, child serializers, `deserialize`)
 //! address elements. [`SerialElements`] is the one mapping between the two.
+//!
+//! A class whose superclass is itself a serializable class in this file inherits that class's
+//! elements: they come first, in the superclass's own element order, and the class's own follow
+//! them. The superclass's `write$Self` writes its part and its deserialization constructor stores
+//! it, so the class's own generators address only their own fields, offset by the inherited count;
+//! the wire-shape generators address every element ([`SerialElements::wire`]).
 
 use crate::ir::{ClassId, IrConst, IrFile};
+use crate::plugins::PluginContext;
 use crate::types::{type_name, Ty};
 
-use super::{serializer_name, TRANSIENT_FQ};
+use super::{custom_serializer_of, serializer_name, SERIALIZABLE_FQ, TRANSIENT_FQ};
 
-/// The backing-field index of each serial element, in element (declaration) order.
+/// The class's serial elements: the ones it inherits from a serializable superclass, then the
+/// backing field of each of its own, in element (declaration) order.
 pub(super) struct SerialElements {
+    parent: Option<ClassId>,
+    inherited: Vec<ElementSource>,
     fields: Vec<usize>,
+}
+
+/// Where an element is stored: the class whose property declares it, and that property's backing
+/// field in the class.
+#[derive(Clone, Copy, Debug)]
+struct ElementSource {
+    class: ClassId,
+    field: usize,
+}
+
+/// One element of the wire shape, as the descriptor, `childSerializers` and `deserialize` see it.
+#[derive(Clone, Debug)]
+pub(super) struct WireElement {
+    /// The class whose property declares the element, for the per-property annotation questions.
+    pub(super) class: ClassId,
+    /// The property's backing field in [`Self::class`].
+    pub(super) field: usize,
+    pub(super) name: String,
+    /// The backing field's type.
+    pub(super) ty: Ty,
+    /// The type as the SERIALIZER sees it, which is not always the field's own type.
+    pub(super) serializer_ty: Ty,
 }
 
 impl SerialElements {
@@ -27,42 +59,122 @@ impl SerialElements {
     /// transient when `@kotlinx.serialization.Transient` is among them however the source spelled
     /// it: an import alias or a `typealias` resolves to the same identity, and an unrelated
     /// annotation class that is also called `Transient` does not.
-    pub(super) fn of(ir: &IrFile, class_id: ClassId) -> Self {
-        let class = &ir.classes[class_id as usize];
-        let transient_identity = type_name(TRANSIENT_FQ);
-        let transient = class
-            .properties
-            .iter()
-            .filter(|property| property.annotations.contains(&transient_identity))
-            .filter_map(|property| property.backing_field)
-            .map(|field| field as usize)
-            .collect::<Vec<_>>();
-        let fields = (0..class.fields.len())
-            .filter(|field| !transient.contains(field))
-            .collect();
+    pub(super) fn of(ctx: &PluginContext, ir: &IrFile, class_id: ClassId) -> Self {
+        let fields = own_fields(ir, class_id);
+        let parent = serializable_superclass(ctx, ir, class_id);
+        let inherited = parent.map_or_else(Vec::new, |parent| {
+            let parent_elements = SerialElements::of(ctx, ir, parent);
+            parent_elements.sources_of(parent).collect()
+        });
         crate::trace_compiler!(
             "lower",
-            "serialization elements class_id={class_id} fields={fields:?} transient={transient:?}"
+            "serialization elements class_id={class_id} parent={parent:?} inherited={} fields={fields:?}",
+            inherited.len()
         );
-        SerialElements { fields }
+        SerialElements {
+            parent,
+            inherited,
+            fields,
+        }
     }
 
-    /// The backing-field index of each element.
+    /// The serializable superclass whose elements precede the class's own.
+    pub(super) fn parent(&self) -> Option<ClassId> {
+        self.parent
+    }
+
+    /// How many elements the class inherits; its own element `i` is wire element
+    /// `inherited_count() + i`.
+    pub(super) fn inherited_count(&self) -> usize {
+        self.inherited.len()
+    }
+
+    /// The backing-field index of each of the class's own elements.
     pub(super) fn fields(&self) -> &[usize] {
         &self.fields
     }
 
-    /// Per-field facts restated in element order.
-    pub(super) fn select<T: Clone>(&self, per_field: &[T]) -> Vec<T> {
-        self.fields
-            .iter()
-            .map(|&field| per_field[field].clone())
-            .collect()
+    /// Every element of `class_id`'s wire shape, inherited ones first.
+    pub(super) fn wire(&self, ir: &IrFile, class_id: ClassId) -> Vec<WireElement> {
+        let mut properties: Vec<(ClassId, SerializedProperties)> = Vec::new();
+        let mut wire = Vec::with_capacity(self.inherited.len() + self.fields.len());
+        for source in self.sources_of(class_id) {
+            let index = match properties
+                .iter()
+                .position(|(class, _)| *class == source.class)
+            {
+                Some(index) => index,
+                None => {
+                    properties.push((source.class, SerializedProperties::of(ir, source.class)));
+                    properties.len() - 1
+                }
+            };
+            let class_properties = &properties[index].1;
+            let (name, ty) = class_properties.fields[source.field].clone();
+            wire.push(WireElement {
+                class: source.class,
+                field: source.field,
+                name,
+                ty,
+                serializer_ty: class_properties.serializer_types[source.field],
+            });
+        }
+        wire
+    }
+
+    fn sources(&self) -> impl Iterator<Item = ElementSource> + '_ {
+        self.inherited.iter().copied()
+    }
+
+    fn sources_of(&self, class_id: ClassId) -> impl Iterator<Item = ElementSource> + '_ {
+        self.sources()
+            .chain(self.fields.iter().map(move |&field| ElementSource {
+                class: class_id,
+                field,
+            }))
     }
 }
 
+/// `class_id`'s own elements: every backing field but a `@Transient` property's.
+fn own_fields(ir: &IrFile, class_id: ClassId) -> Vec<usize> {
+    let class = &ir.classes[class_id as usize];
+    let transient_identity = type_name(TRANSIENT_FQ);
+    let transient = class
+        .properties
+        .iter()
+        .filter(|property| property.annotations.contains(&transient_identity))
+        .filter_map(|property| property.backing_field)
+        .map(|field| field as usize)
+        .collect::<Vec<_>>();
+    (0..class.fields.len())
+        .filter(|field| !transient.contains(field))
+        .collect()
+}
+
+/// The superclass of `class_id` declared in this file whose serializer the plugin generates, which
+/// `class_id`'s generated members extend. A superclass from another module, or a generic one, is
+/// not read here.
+fn serializable_superclass(ctx: &PluginContext, ir: &IrFile, class_id: ClassId) -> Option<ClassId> {
+    let superclass = ir.classes[class_id as usize].superclass;
+    let parent = ir
+        .classes
+        .iter()
+        .position(|class| class.fq_name_id() == superclass)? as ClassId;
+    let class = &ir.classes[parent as usize];
+    let generated = ctx.has_annotation(parent, type_name(SERIALIZABLE_FQ))
+        && custom_serializer_of(ctx, ir, parent).is_none()
+        && !class.is_enum
+        && !class.is_object
+        && !class.is_sealed
+        && !class.is_value
+        && ir
+            .class_signature_name(superclass)
+            .is_none_or(|signature| signature.type_params.is_empty());
+    generated.then_some(parent)
+}
+
 /// Per-FIELD facts about a serializable class's properties, as the body generators consume them.
-/// Every vector is indexed by backing field; [`SerialElements::select`] restates one in element
+/// Every vector is indexed by backing field; [`SerialElements::wire`] restates them in element
 /// order for a generator that addresses elements.
 pub(super) struct SerializedProperties {
     /// Name and type of each field. A `@JvmInline value class` field is its underlying type (nullable

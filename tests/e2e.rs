@@ -1279,6 +1279,8 @@ mod java_not_null_null_argument_e2e;
 mod java_parameters_attribute_e2e;
 #[path = "java_platform_type_publication_e2e.rs"]
 mod java_platform_type_publication_e2e;
+#[path = "java_source_constant_e2e.rs"]
+mod java_source_constant_e2e;
 #[path = "java_source_interop_e2e.rs"]
 mod java_source_interop_e2e;
 mod java_static_modules;
@@ -2465,6 +2467,8 @@ mod secondary_ctor_noprimary_e2e;
 mod secondary_ctor_this_sibling_e2e;
 #[path = "self_call_type_variables_e2e.rs"]
 mod self_call_type_variables_e2e;
+#[path = "serializable_inheritance_e2e.rs"]
+mod serializable_inheritance_e2e;
 #[path = "serializable_noarg_constructor_order_e2e.rs"]
 mod serializable_noarg_constructor_order_e2e;
 #[path = "serializable_value_class_cache_accessor_order_e2e.rs"]
