@@ -490,6 +490,34 @@ mod tests {
         assert!(!file.classes[0].declarations_complete);
     }
 
+    #[test]
+    fn a_companion_object_is_named_by_its_resolved_identity() {
+        let round = round(&[(
+            "/src/Companions.kt",
+            "package p\n\nclass Outer {\n    companion object\n}\n\nclass Named {\n    companion object Factory {\n        object Deep\n    }\n}\n",
+        )])
+        .expect("every declaration is readable");
+        fn names(classes: &[KspClass], out: &mut Vec<(String, String)>) {
+            for class in classes {
+                out.push((class.simple_name.clone(), class.qualified_name.clone()));
+                names(&class.classes, out);
+            }
+        }
+        let mut listed = Vec::new();
+        names(&round.files[0].classes, &mut listed);
+        assert_eq!(
+            listed,
+            [
+                ("Outer", "p.Outer"),
+                ("Companion", "p.Outer.Companion"),
+                ("Named", "p.Named"),
+                ("Factory", "p.Named.Factory"),
+                ("Deep", "p.Named.Factory.Deep"),
+            ]
+            .map(|(simple, qualified)| (simple.to_string(), qualified.to_string()))
+        );
+    }
+
     fn parameter(name: &str, flags: (bool, bool, bool, bool)) -> KspParameter {
         let (is_val, is_var, is_vararg, has_default) = flags;
         KspParameter {

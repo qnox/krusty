@@ -74,9 +74,10 @@ final class PrimaryConstructor implements KSFunctionDeclaration {
         return NAME;
     }
 
+    // KSP2 gives a constructor no qualified name.
     @Override
     public KSName getQualifiedName() {
-        return new Name(owner.getQualifiedName().asString() + ".<init>");
+        return null;
     }
 
     @Override

@@ -3,22 +3,21 @@ package krusty.ksphost;
 import com.google.devtools.ksp.symbol.FileLocation;
 import com.google.devtools.ksp.symbol.KSDeclaration;
 import java.util.Collections;
-import java.util.Iterator;
 import java.util.List;
 import kotlin.sequences.Sequence;
-import kotlin.sequences.SequencesKt;
 
 // What every node of the host's symbol model shares.
 final class Nodes {
     private Nodes() {}
 
+    // A view of `list` that takes a fresh iterator for each traversal, as KSP's collection-backed
+    // sequences do: a processor may keep a returned sequence and read it more than once.
     static <T> Sequence<T> sequence(List<T> list) {
-        return SequencesKt.asSequence(list.iterator());
+        return list::iterator;
     }
 
     static <T> Sequence<T> empty() {
-        Iterator<T> none = Collections.emptyIterator();
-        return SequencesKt.asSequence(none);
+        return sequence(Collections.<T>emptyList());
     }
 
     static NotImplemented notImplemented(String member) {
