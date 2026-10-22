@@ -21,9 +21,11 @@ class Values : Collection<Int>, Counted {
 
 fun makeValues(): Iterable<Int> = Values()
 
+fun asCounted(values: Any): Counted = values as Counted
+
 fun box(): String {
     val values = makeValues()
-    val counted = values as Counted
+    val counted = asCounted(values)
     val mapped = values.map { it + counted.count() }
     if (mapped != listOf(41, 42)) return "values $mapped"
     if (sizeReads != 1) return "size read $sizeReads times"
