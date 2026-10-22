@@ -6,7 +6,8 @@
 //! compile a consumer with both compilers under the argument and compare the classes byte for
 //! byte. The third is the reservation of the `kotlin` package for the standard library, which a
 //! source declaring that package passes only with `-Xallow-kotlin-package`. The fourth is the
-//! warning kotlinc reports for a `@Suppress` that names an error diagnostic.
+//! warning kotlinc reports for a `@Suppress` that names an error diagnostic. The fifth is the warning
+//! kotlinc reports that expect/actual classes are Beta.
 
 use std::path::{Path, PathBuf};
 
@@ -190,4 +191,70 @@ fn not_warning_on_error_suppression_compiles_as_kotlinc_does() {
         ),
         "kotlinc without {ARGUMENT}"
     );
+}
+
+/// kotlinc warns that expect/actual classes are Beta unless this argument is given; krusty never
+/// reports that warning, so under the argument both compilers compile a refined fragment silently.
+#[test]
+fn allowing_expect_actual_classes_compiles_as_kotlinc_does() {
+    const ARGUMENT: &str = "-Xexpect-actual-classes";
+    let work = common::scratch_dir().expect("allocate a scratch directory");
+    let path = |name: &str| -> PathBuf { work.join(name) };
+    let text = |path: &Path| path.to_string_lossy().into_owned();
+    std::fs::write(
+        path("Common.kt"),
+        "package p\nexpect class Box() {\n    fun v(): String\n}\n",
+    )
+    .expect("write the common source");
+    std::fs::write(
+        path("Platform.kt"),
+        "package p\nactual class Box actual constructor() {\n    actual fun v() = \"OK\"\n}\n",
+    )
+    .expect("write the platform source");
+    let compile = |output: &str, with_argument: bool| {
+        let mut arguments = vec![
+            text(&path("Common.kt")),
+            text(&path("Platform.kt")),
+            "-Xmulti-platform".to_string(),
+            "-Xfragments=common,jvm".to_string(),
+            format!("-Xfragment-sources=common:{}", text(&path("Common.kt"))),
+            format!("-Xfragment-sources=jvm:{}", text(&path("Platform.kt"))),
+            "-Xfragment-refines=jvm:common".to_string(),
+            "-d".into(),
+            text(&path(output)),
+        ];
+        if with_argument {
+            arguments.push(ARGUMENT.to_string());
+        }
+        arguments
+    };
+    let (code, without) = kotlinc(&compile("without", false));
+    let beta_warnings = without
+        .lines()
+        .filter(|line| line.contains(": warning: 'expect'/'actual' classes"))
+        .count();
+    assert_eq!(
+        (code, beta_warnings),
+        (0, 2),
+        "kotlinc without {ARGUMENT}: {without}"
+    );
+    let (code_with, stderr) = kotlinc(&compile("kotlinc", true));
+    assert_eq!((code_with, stderr.as_str()), (0, ""), "kotlinc {ARGUMENT}");
+
+    let result = std::process::Command::new(common::krusty_binary())
+        .args(compile("krusty", true))
+        .output()
+        .expect("run krusty");
+    assert_eq!(
+        (
+            result.status.code(),
+            String::from_utf8_lossy(&result.stderr).as_ref()
+        ),
+        (Some(0), ""),
+        "krusty {ARGUMENT}"
+    );
+    let expected = classes(&path("kotlinc"));
+    assert!(!expected.is_empty(), "kotlinc emitted no classes");
+    assert_eq!(classes(&path("krusty")), expected, "{ARGUMENT}");
+    let _ = std::fs::remove_dir_all(work);
 }
