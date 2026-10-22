@@ -5,7 +5,6 @@
 
 use super::lambda_route::SpliceReason;
 use super::*;
-use crate::ir::lambda_exits::LambdaExit;
 use crate::jvm::classreader::{ExcEntry, MethodLocal};
 use crate::jvm::method_node::{CodeAttribute, LabelId};
 use crate::types::TyKind;
@@ -246,14 +245,9 @@ impl Emitter<'_> {
         if self.suspends_within(lambda.inline_body) || lambda.parameter_types.len() != arity {
             return Ok(Some(SpliceReason::SuspendingLambda));
         }
-        match self
-            .ir
+        self.ir
             .lambda_exit(lambda.inline_body)
-            .ok_or("an inline lambda reached emission without its recorded non-local exit")?
-        {
-            LambdaExit::FrameReturn => return Ok(Some(SpliceReason::FrameReturn)),
-            LambdaExit::Local | LambdaExit::Return | LambdaExit::Jump => {}
-        }
+            .ok_or("an inline lambda reached emission without its recorded non-local exit")?;
         if lambda
             .parameter_coercions
             .iter()
@@ -280,12 +274,13 @@ impl Emitter<'_> {
     }
 
     /// Whether the literal lambda `argument` leaves by a `break` or `continue` of a loop outside
-    /// it, which no real call of its function could carry out.
+    /// it or by a return of an inline expansion outside it, which no real call of its function
+    /// could carry out.
     pub(in crate::jvm::ir_emit) fn literal_jumps_out(&self, argument: u32) -> bool {
         self.literal_lambda(argument).is_ok_and(|(lambda, _)| {
             self.ir
                 .lambda_exit(lambda.inline_body)
-                .is_some_and(|exit| exit >= LambdaExit::Jump)
+                .is_some_and(|exit| exit.jumps || exit.frame_returns)
         })
     }
 

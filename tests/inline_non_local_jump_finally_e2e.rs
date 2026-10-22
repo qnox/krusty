@@ -86,3 +86,50 @@ fn non_local_jumps_through_finally_are_byte_identical() {
     .expect("reference kotlinc is provisioned")
     .expect("InlineNonLocalJumpFinallyKt byte-identical to kotlinc");
 }
+
+/// One literal that both returns from an enclosing inline expansion (`return@outer`) and breaks or
+/// continues the caller's loop: each way out runs the inlined function's `finally`. Compared with
+/// kotlinc's run only: kotlinc parks the returned value below `withLock`'s catch local here, a slot
+/// order krusty does not reproduce inside a same-module inline lambda yet (see
+/// `docs/IMPLEMENTATION_PLAN.md`, 3d).
+const MIXED: &str = "import java.util.concurrent.locks.ReentrantLock\n\
+import kotlin.concurrent.withLock\n\
+val log = StringBuilder()\n\
+class Lk : ReentrantLock() { override fun unlock() { log.append(\"u\"); super.unlock() } }\n\
+inline fun <T> ownRun(f: () -> T): T = f()\n\
+fun mixedBreak(l: Lk, xs: List<Int>): String {\n\
+    var r = \"\"\n\
+    for (x in xs) {\n\
+        r += ownRun outer@{ l.withLock { if (x == 2) return@outer \"r\"; if (x == 4) break; x.toString() } }\n\
+    }\n\
+    return r\n\
+}\n\
+fun mixedContinue(l: Lk, xs: List<Int>): String {\n\
+    var r = \"\"\n\
+    for (x in xs) {\n\
+        r += ownRun outer@{ l.withLock { if (x == 2) continue; if (x == 4) return@outer \"r\"; x.toString() } }\n\
+    }\n\
+    return r\n\
+}\n\
+fun frameOnly(l: Lk, xs: List<Int>): String {\n\
+    var r = \"\"\n\
+    for (x in xs) {\n\
+        r += ownRun outer@{ l.withLock { if (x == 2) return@outer \"r\"; x.toString() } }\n\
+    }\n\
+    return r\n\
+}\n\
+fun box(): String {\n\
+    val l = Lk()\n\
+    val r = StringBuilder()\n\
+    r.append(mixedBreak(l, listOf(1, 2, 3, 4, 5))).append(' ')\n\
+    r.append(mixedContinue(l, listOf(1, 2, 3, 4, 5))).append(' ')\n\
+    r.append(frameOnly(l, listOf(1, 2, 3))).append(' ')\n\
+    r.append(l.isLocked).append(' ').append(l.holdCount).append(' ').append(log)\n\
+    val expected = \"1r3 13r5 1r3 false 0 uuuuuuuuuuuu\"\n\
+    return if (r.toString() == expected) \"OK\" else r.toString()\n\
+}\n";
+
+#[test]
+fn a_literal_that_returns_from_an_enclosing_expansion_and_jumps_runs_every_finally() {
+    common::expect_box_same_as_kotlinc(MIXED, "InlineMixedFrameReturnJump");
+}
