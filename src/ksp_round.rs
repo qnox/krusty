@@ -11,11 +11,16 @@
 //! describe, it says so (`declarations_complete`), and the host refuses a processor that asks for
 //! the rest rather than answer with a part of it.
 
-use krusty_plugin_ir::{KspAnnotation, KspClass, KspClassKind, KspFile, KspParameter, KspRound};
+mod type_model;
+
+use krusty_plugin_ir::{
+    KspAnnotation, KspClass, KspClassKind, KspFile, KspParameter, KspRound, KspType,
+    KspTypeParameter,
+};
 
 use crate::ast::{AnnotationRef, ClassDecl, ClassKind, Decl, DeclId, File};
 use crate::frontend::{FrontendClassSig, FrontendSymbols, SourceSetAnalysis};
-use crate::types::TypeName;
+use type_model::{class_type, modifiers, qualified_name, TypeParameterScope};
 
 /// The round a processor reads from `analysis`, whose files are at `paths` (one per source, in the
 /// analysis's order). `analysis` collects every file's signatures and checks no body
@@ -70,7 +75,7 @@ impl Source<'_> {
             }
             match self.file.decl(id) {
                 Decl::Class(class) => {
-                    classes.push(self.class(id, class, &package_name, None)?);
+                    classes.push(self.class(id, class, &TypeParameterScope::default())?);
                 }
                 Decl::Fun(_) | Decl::Property(_) => declarations_complete = false,
             }
@@ -108,20 +113,17 @@ impl Source<'_> {
         &self,
         id: DeclId,
         class: &ClassDecl,
-        package_name: &str,
-        owner: Option<&str>,
+        enclosing: &TypeParameterScope,
     ) -> Result<KspClass, String> {
-        let simple_name = self
-            .file
-            .hoisted_classifier_source_names
-            .get(&id)
-            .cloned()
-            .unwrap_or_else(|| class.name.clone());
-        let qualified_name = match (owner, package_name) {
-            (Some(owner), _) => format!("{owner}.{simple_name}"),
-            (None, "") => simple_name.clone(),
-            (None, package) => format!("{package}.{simple_name}"),
+        let Some(signature) = self.declared.get(&(self.index, id)) else {
+            return Err(self.refusal(class, "has no resolved declaration"));
         };
+        // The resolved identity names the classifier, a companion object's implicit name included.
+        let simple_name = match signature.internal.nested_owner() {
+            Some(_) => signature.internal.nested_segment_ref().to_string(),
+            None => signature.internal.segment(),
+        };
+        let qualified_name = qualified_name(signature.internal);
         let kind = match class.kind {
             ClassKind::Interface => KspClassKind::Interface,
             ClassKind::Enum => KspClassKind::EnumClass,
@@ -129,9 +131,14 @@ impl Source<'_> {
             ClassKind::Class if class.singleton => KspClassKind::Object,
             ClassKind::Class => KspClassKind::Class,
         };
-        let Some(signature) = self.declared.get(&(self.index, id)) else {
-            return Err(self.refusal(class, "has no resolved declaration"));
-        };
+        let scope = enclosing.with(
+            &qualified_name,
+            signature
+                .type_params()
+                .iter()
+                .zip(class.type_parameters.type_params())
+                .map(|(identity, name)| (identity.as_str(), name.as_str())),
+        );
         let mut annotations = Vec::with_capacity(class.annotations.len());
         for annotation in &class.annotations {
             annotations.push(self.annotation(class, annotation)?);
@@ -142,12 +149,7 @@ impl Source<'_> {
                 continue;
             }
             if let Decl::Class(nested_class) = self.file.decl(nested) {
-                classes.push(self.class(
-                    nested,
-                    nested_class,
-                    package_name,
-                    Some(&qualified_name),
-                )?);
+                classes.push(self.class(nested, nested_class, &scope)?);
             }
         }
         let primary_constructor = self.primary_constructor(class, kind, signature)?;
@@ -164,6 +166,13 @@ impl Source<'_> {
             kind,
             line: class.decl_line,
             annotations,
+            modifiers: self
+                .file
+                .declaration_prefixes
+                .at(class.name_span.lo)
+                .map(|prefix| modifiers(prefix.modifiers)),
+            type_parameters: type_parameters(class, signature, &scope),
+            super_types: super_types(signature, &scope),
             primary_constructor,
             classes,
             declarations_complete,
@@ -243,21 +252,62 @@ impl Source<'_> {
     }
 }
 
-/// KSP's dot-separated qualified name of a classifier: its package, then each enclosing classifier
-/// and itself.
-fn qualified_name(class: TypeName) -> String {
-    match class.nested_owner() {
-        Some(owner) => format!("{}.{}", qualified_name(owner), class.nested_segment_ref()),
-        None => {
-            let package = class.package().replace('/', ".");
-            let segment = class.segment();
-            if package.is_empty() {
-                segment
-            } else {
-                format!("{package}.{segment}")
-            }
-        }
+/// The classifier's type parameters with their upper bounds in written order, or `None` when one
+/// does not have the shape the resolved declaration has or a bound is not a type KSP's model here
+/// describes.
+fn type_parameters(
+    class: &ClassDecl,
+    signature: &FrontendClassSig,
+    scope: &TypeParameterScope,
+) -> Option<Vec<KspTypeParameter>> {
+    let names = class.type_parameters.type_params();
+    if names.len() != signature.type_params().len()
+        || signature.type_parameter_extra_bounds.len() != names.len()
+    {
+        return None;
     }
+    names
+        .iter()
+        .zip(signature.type_param_bounds())
+        .zip(signature.type_param_variances())
+        .zip(&signature.type_parameter_extra_bounds)
+        .map(|(((name, &first), &variance), extra)| {
+            scope.type_parameter(
+                name,
+                variance,
+                std::iter::once(first).chain(extra.iter().copied()),
+            )
+        })
+        .collect()
+}
+
+/// The classifier's direct supertypes in written order, or `kotlin.Any` when it writes none.
+fn super_types(signature: &FrontendClassSig, scope: &TypeParameterScope) -> Option<Vec<KspType>> {
+    if signature.interface_type_args.len() != signature.interfaces.len() {
+        return None;
+    }
+    let interfaces: Vec<_> = signature
+        .interfaces
+        .iter()
+        .zip(&signature.interface_type_args)
+        .collect();
+    let before = (signature.interfaces_before_superclass as usize).min(interfaces.len());
+    let superclass = signature
+        .super_internal
+        .map(|class| (class, &signature.super_type_args));
+    let mut super_types = Vec::with_capacity(interfaces.len() + 1);
+    for (class, arguments) in interfaces[..before]
+        .iter()
+        .copied()
+        .chain(superclass)
+        .chain(interfaces[before..].iter().copied())
+    {
+        super_types.push(scope.applied(class, arguments)?);
+    }
+    if super_types.is_empty() {
+        super_types.push(class_type("kotlin.Any"));
+    }
+    Some(super_types)
 }
 
 #[cfg(test)]
@@ -267,6 +317,7 @@ mod tests {
     use crate::features::LangFeatures;
     use crate::frontend::{analyze_source_set_prefix_with_features, PlatformProvider, SourceInput};
     use crate::libraries::EmptySymbolSource;
+    use krusty_plugin_ir::{KspModifier, KspTypeArgument, KspTypeDeclaration};
 
     fn round(sources: &[(&str, &str)]) -> Result<KspRound, String> {
         let inputs: Vec<_> = sources
@@ -306,6 +357,15 @@ mod tests {
                     qualified_name: qualified_name.to_string(),
                 })
                 .collect(),
+            modifiers: Some(match kind {
+                KspClassKind::AnnotationClass => vec![KspModifier::Annotation],
+                _ => Vec::new(),
+            }),
+            type_parameters: Some(Vec::new()),
+            super_types: Some(vec![type_model::class_type(match kind {
+                KspClassKind::AnnotationClass => "kotlin.Annotation",
+                _ => "kotlin.Any",
+            })]),
             primary_constructor: (kind != KspClassKind::Interface).then(Vec::new),
             classes,
             declarations_complete: true,
@@ -383,14 +443,20 @@ mod tests {
                                 &marker,
                                 vec![]
                             ),
-                            class(
-                                "Tag",
-                                "sample.Tag",
-                                KspClassKind::AnnotationClass,
-                                18,
-                                &[],
-                                vec![]
-                            ),
+                            KspClass {
+                                modifiers: Some(vec![
+                                    KspModifier::Internal,
+                                    KspModifier::Annotation
+                                ]),
+                                ..class(
+                                    "Tag",
+                                    "sample.Tag",
+                                    KspClassKind::AnnotationClass,
+                                    18,
+                                    &[],
+                                    vec![]
+                                )
+                            },
                         ],
                         declarations_complete: true,
                     },
@@ -512,6 +578,102 @@ mod tests {
         assert_eq!(
             round(&[("/src/Missing.kt", "package missing\n\n@Absent\nclass Annotated\n")]),
             Err("/src/Missing.kt:4: KSP cannot read class Annotated: it has the annotation @Absent, which did not resolve".to_string())
+        );
+    }
+
+    fn render(ty: &KspType) -> String {
+        let mut out = match &ty.declaration {
+            KspTypeDeclaration::Class(name) => name.clone(),
+            KspTypeDeclaration::TypeParameter { owner, name } => format!("{owner}.{name}"),
+        };
+        if !ty.arguments.is_empty() {
+            let arguments: Vec<String> = ty
+                .arguments
+                .iter()
+                .map(|argument| match argument {
+                    KspTypeArgument::Star => "*".to_string(),
+                    KspTypeArgument::Invariant(ty) => render(ty),
+                    KspTypeArgument::Out(ty) => format!("out {}", render(ty)),
+                    KspTypeArgument::In(ty) => format!("in {}", render(ty)),
+                })
+                .collect();
+            out = format!("{out}<{}>", arguments.join(", "));
+        }
+        if ty.nullable {
+            out.push('?');
+        }
+        out
+    }
+
+    fn header(class: &KspClass) -> String {
+        let modifiers: Vec<&str> = class
+            .modifiers
+            .as_ref()
+            .expect("modifiers")
+            .iter()
+            .map(|modifier| modifier.name())
+            .collect();
+        let parameters: Vec<String> = class
+            .type_parameters
+            .as_ref()
+            .expect("type parameters")
+            .iter()
+            .map(|parameter| {
+                let bounds: Vec<String> = parameter.bounds.iter().map(render).collect();
+                format!(
+                    "{} {:?} {}",
+                    parameter.name,
+                    parameter.variance,
+                    bounds.join(" & ")
+                )
+            })
+            .collect();
+        let super_types: Vec<String> = class
+            .super_types
+            .as_ref()
+            .expect("supertypes")
+            .iter()
+            .map(render)
+            .collect();
+        format!(
+            "{} [{}] [{}] {}",
+            class.qualified_name,
+            modifiers.join(","),
+            parameters.join("; "),
+            super_types.join(", ")
+        )
+    }
+
+    #[test]
+    fn a_header_has_its_written_modifiers_type_parameters_and_supertypes() {
+        let round = round(&[(
+            "/src/Headers.kt",
+            "package headers\n\ninterface Named\n\ninterface Box<in V>\n\nabstract class Base<T : Any, in I> : Named\n\nopen class Middle<out E : Named?> : Base<Array<E>, String>(), Box<Middle<*>>\n\nsealed interface Shape<S> : Named where S : Named, S : Box<S>\n\nprivate class Hidden : Shape<Hidden>, Box<Hidden>\n\ninternal annotation class Marker\n\nenum class Color { RED }\n\nclass Outer {\n    inner class In<X> : Named, Box<X?>\n\n    data object Single\n\n    companion object\n}\n\nfun interface Action : () -> Unit\n",
+        )])
+        .expect("every declaration is readable");
+        let headers: Vec<String> = round.files[0]
+            .classes
+            .iter()
+            .chain(&round.files[0].classes[8].classes)
+            .map(header)
+            .collect();
+        assert_eq!(
+            headers,
+            [
+                "headers.Named [] [] kotlin.Any",
+                "headers.Box [] [V In kotlin.Any?] kotlin.Any",
+                "headers.Base [ABSTRACT] [T Invariant kotlin.Any; I In kotlin.Any?] headers.Named",
+                "headers.Middle [OPEN] [E Out headers.Named?] headers.Base<kotlin.Array<headers.Middle.E>, kotlin.String>, headers.Box<headers.Middle<*>>",
+                "headers.Shape [SEALED] [S Invariant headers.Named & headers.Box<headers.Shape.S>] headers.Named",
+                "headers.Hidden [PRIVATE] [] headers.Shape<headers.Hidden>, headers.Box<headers.Hidden>",
+                "headers.Marker [INTERNAL,ANNOTATION] [] kotlin.Annotation",
+                "headers.Color [ENUM] [] kotlin.Enum<headers.Color>",
+                "headers.Outer [] [] kotlin.Any",
+                "headers.Action [FUN] [] kotlin.Function0<kotlin.Unit>",
+                "headers.Outer.In [INNER] [X Invariant kotlin.Any?] headers.Named, headers.Box<headers.Outer.In.X?>",
+                "headers.Outer.Single [DATA] [] kotlin.Any",
+                "headers.Outer.Companion [] [] kotlin.Any",
+            ]
         );
     }
 }

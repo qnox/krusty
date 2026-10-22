@@ -273,3 +273,28 @@ fn primary_constructors_and_their_parameters_are_what_ksp2_reports() {
         .collect();
     assert_eq!(run.log, expected);
 }
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn class_headers_are_what_ksp2_reports() {
+    let (runtime, env) = runtime();
+    let processor = processor(&runtime, "Headers", "headers.HeadersProvider");
+    let out = scratch("ksp-outputs-headers");
+    let outputs = KspOutputs {
+        kotlin: out.join("kotlin"),
+        java: out.join("java"),
+        classes: out.join("classes"),
+        resources: out.join("resources"),
+    };
+    let sources = [fixtures().join("headers/Headers.kt")];
+    let run = run(&runtime, &env, &processor, &sources, &outputs)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(run.generated, Vec::<String>::new());
+    let expected: Vec<String> = std::fs::read_to_string(fixtures().join("headers.expected"))
+        .unwrap()
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(run.log, expected);
+}

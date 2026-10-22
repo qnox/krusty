@@ -4,6 +4,7 @@
 use super::{Parser, TokenKind};
 use crate::ast::{
     AnnotationRef, DeclarationPrefix, ExprId, ExternalModifierTarget, ExternalModifierUse,
+    ModifierKeyword, WrittenModifiers,
 };
 use crate::diag::Span;
 use crate::types::Visibility;
@@ -42,6 +43,7 @@ pub(super) fn modality_from_modifiers(modifiers: &[String]) -> crate::ast::Modal
 pub(super) struct PrefixInProgress {
     first_modifier: Option<Span>,
     visibility: Option<Visibility>,
+    modifiers: WrittenModifiers,
 }
 
 impl Parser<'_> {
@@ -208,6 +210,9 @@ impl Parser<'_> {
                 }
                 self.note_declaration_prefix_token(self.t[self.i].span);
                 let prefix = &mut self.declaration_prefix;
+                if let Some(modifier) = ModifierKeyword::from_keyword(&text) {
+                    prefix.modifiers.insert(modifier);
+                }
                 if matches!(
                     text.as_str(),
                     "public" | "protected" | "internal" | "private"
@@ -366,21 +371,32 @@ impl Parser<'_> {
     /// the parser, so its keyword and name are found past them; each is a key the declaration can
     /// find its prefix by.
     pub(super) fn record_declaration_prefix(&mut self, start: u32) {
-        let prefix = std::mem::take(&mut self.declaration_prefix);
+        let mut prefix = std::mem::take(&mut self.declaration_prefix);
         let after = self.tok().span;
         let mut keys = vec![start, after.lo];
         let mut classifier_keyword = None;
         let mut index = self.i;
-        while self.t.get(index).is_some_and(|token| {
-            ["data", "enum", "annotation", "companion"]
-                .iter()
-                .any(|word| self.token_keyword_text(*token, word))
-                || (token.kind == TokenKind::KwFun
+        while let Some(token) = self.t.get(index).copied() {
+            let kind_word = [
+                ModifierKeyword::Data,
+                ModifierKeyword::Enum,
+                ModifierKeyword::Annotation,
+                ModifierKeyword::Companion,
+            ]
+            .into_iter()
+            .find(|word| self.token_keyword_text(token, word.keyword()))
+            .or_else(|| {
+                (token.kind == TokenKind::KwFun
                     && self
                         .t
                         .get(index + 1)
                         .is_some_and(|next| self.token_keyword_text(*next, "interface")))
-        }) {
+                .then_some(ModifierKeyword::Fun)
+            });
+            let Some(kind_word) = kind_word else {
+                break;
+            };
+            prefix.modifiers.insert(kind_word);
             index += 1;
         }
         if let Some(keyword) = self.t.get(index).filter(|token| {
@@ -401,6 +417,7 @@ impl Parser<'_> {
                 visibility: prefix.visibility,
                 declaration_start: start,
                 classifier_keyword,
+                modifiers: prefix.modifiers,
             },
         );
     }
