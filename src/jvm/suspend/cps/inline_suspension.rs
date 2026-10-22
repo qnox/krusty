@@ -322,16 +322,26 @@ fn operand_spliceable(ir: &IrFile, expression: ExprId, child: ExprId, spliceable
 }
 
 /// The arguments of `call` bound to an inline parameter, the only literals the method inliner
-/// expands in place; a `noinline` literal or any other operand stays an ordinary value.
+/// expands in place; a `noinline` literal or any other operand stays an ordinary value. Neither
+/// is a suspend literal of a function that is not itself suspend: such a body cannot invoke it,
+/// only hand it to an object it constructs, whose method runs the literal in its own frame.
 fn inline_parameter_arguments(ir: &IrFile, call: ExprId) -> Vec<ExprId> {
     let IrExpr::Call { args, .. } = &ir.exprs[call as usize] else {
         return Vec::new();
     };
+    let suspending_callee = ir.suspend_calls.contains_key(&call);
     args.iter()
         .enumerate()
         .filter(|&(parameter, _)| is_inline_parameter(ir, call, parameter) == Some(true))
         .map(|(_, &argument)| argument)
+        .filter(|&argument| suspending_callee || !is_suspend_literal(ir, argument))
         .collect()
+}
+
+/// Whether `expression` is a suspend lambda literal.
+fn is_suspend_literal(ir: &IrFile, expression: ExprId) -> bool {
+    matches!(&ir.exprs[expression as usize], IrExpr::Lambda { impl_fn, .. }
+        if ir.suspend_funs.contains(impl_fn))
 }
 
 /// The suspensions of `body` that sit in the literal lambda of a call whose callee the method

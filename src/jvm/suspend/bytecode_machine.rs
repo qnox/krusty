@@ -18,7 +18,7 @@
 //! from its `$$forInline` copy, is taken as a point of this frame once the method inliner places
 //! the lambda. Other interface bodies, and other spliced inline bodies, keep the IR machine.
 
-mod spliced_lambdas;
+pub(super) mod spliced_lambdas;
 
 use crate::fx_hash::HashSet;
 
@@ -130,25 +130,6 @@ pub(super) fn route(
         suspensions,
         lambda: None,
         fake_continuations: fake_continuations.clone(),
-    };
-    // A suspend lambda every inline call splices: the bodies the calls place suspend where they
-    // land, so their points join the machine. The lambda's own method is written only when a call
-    // keeps it as a value.
-    let mut suspensions = suspensions;
-    let mut placed_continuations = Vec::new();
-    if let Some(values) = crate::jvm::lambda_classes::spliced_values(ir, fid) {
-        let Some(placed) = spliced_lambdas::placed_suspensions(ir, fid, &values, &mut route) else {
-            return Routed::Failed;
-        };
-        suspensions.extend(placed.suspensions);
-        placed_continuations = placed.continuations;
-    }
-    let machine = |suspensions| {
-        let mut machine = machine(suspensions);
-        machine
-            .fake_continuations
-            .extend(placed_continuations.iter().copied());
-        machine
     };
     // A function only ever inlined is never called: no continuation class re-enters it.
     if crate::jvm::suspend_inline_functions::keeps_marked_body(ir, fid) {
@@ -306,8 +287,12 @@ pub(super) fn eligible_points(
         ),
         (
             &|| match subject {
-                Subject::NamedFunction => reads_continuation_outside_fake_reads(ir, body, true),
-                Subject::SuspendLambda => reads_continuation_outside_fake_reads(ir, body, false),
+                Subject::NamedFunction => {
+                    reads_continuation_outside_fake_reads(ir, body, true, suspend_set)
+                }
+                Subject::SuspendLambda => {
+                    reads_continuation_outside_fake_reads(ir, body, false, suspend_set)
+                }
             },
             "reads its own continuation",
         ),
@@ -392,19 +377,32 @@ fn binds_inline_continuation_operand(ir: &IrFile, declaration: ExprId) -> bool {
 }
 
 /// Whether the body reads its own continuation where kotlinc has no fake one in its place: outside
-/// a `suspendCoroutineUninterceptedOrReturn` block and an inline suspend lambda's operands.
-fn reads_continuation_outside_fake_reads(ir: &IrFile, expression: ExprId, blocks: bool) -> bool {
+/// a `suspendCoroutineUninterceptedOrReturn` block and an inline suspend lambda's operands. The
+/// body of a suspend lambda an inline call places in an object is that object's method's.
+fn reads_continuation_outside_fake_reads(
+    ir: &IrFile,
+    expression: ExprId,
+    blocks: bool,
+    suspend_set: &HashSet<u32>,
+) -> bool {
     if blocks && ir.is_unintercepted_suspension(expression)
         || binds_inline_continuation_operand(ir, expression)
     {
         return false;
+    }
+    if let IrExpr::Lambda { captures, .. } = &ir.exprs[expression as usize] {
+        if spliced_lambdas::placed_in_an_object(ir, expression, suspend_set) {
+            return captures.iter().any(|&capture| {
+                reads_continuation_outside_fake_reads(ir, capture, blocks, suspend_set)
+            });
+        }
     }
     if let IrExpr::CurrentContinuation = ir.exprs[expression as usize] {
         return true;
     }
     let mut found = false;
     for_each_child(&ir.exprs, expression, &mut |child| {
-        found = found || reads_continuation_outside_fake_reads(ir, child, blocks);
+        found = found || reads_continuation_outside_fake_reads(ir, child, blocks, suspend_set);
     });
     found
 }

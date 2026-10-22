@@ -32,6 +32,8 @@ fun plusOne(s: Source<Int>) = source { s.next() + 1 }
 
 fun greeting(name: String) = source { "hi " + name }
 
+suspend fun deferred(s: Source<Int>) = source { s.next() + 1 }
+
 fun ticks(s: Source<Unit>) = source {
     s.next()
     s.next()
@@ -48,6 +50,8 @@ fn crossinline_suspend_lambdas_regenerate_the_object_like_kotlinc() {
         [
             "SuspendingKt",
             "SuspendingKt$answer$$inlined$source$1",
+            "SuspendingKt$deferred$$inlined$source$1",
+            "SuspendingKt$deferred$$inlined$source$1$1",
             "SuspendingKt$greeting$$inlined$source$1",
             "SuspendingKt$plusOne$$inlined$source$1",
             "SuspendingKt$plusOne$$inlined$source$1$1",
@@ -71,6 +75,8 @@ class Later : Source<Int> {
 
 fun plusOne(s: Source<Int>) = source { s.next() + 1 }
 
+suspend fun deferred(s: Source<Int>) = source { s.next() + 1 }
+
 fun box(): String {
     var result: Any? = null
     suspend { plusOne(Later()).next() }
@@ -78,6 +84,11 @@ fun box(): String {
     if (result != null) return "FAIL completed before resuming: $result"
     pending!!.resume(41)
     if (result != 42) return "FAIL resumed: $result"
+    result = null
+    suspend { deferred(Later()).next() }
+        .startCoroutine(Continuation(EmptyCoroutineContext) { result = it.getOrThrow() })
+    pending!!.resume(1)
+    if (result != 2) return "FAIL deferred: $result"
     return "OK"
 }
 "#;

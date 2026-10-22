@@ -7,6 +7,7 @@
 //! its coroutine transformer builds the machine over it. A body placed in a suspend function's own frame belongs to
 //! that function's machine instead, which collects its points itself.
 
+use crate::fx_hash::HashSet;
 use crate::ir::{ExprId, IrExpr, IrFile};
 
 use super::super::append_continuation;
@@ -15,16 +16,43 @@ use super::{owned_suspensions, Route, Subject};
 
 /// The suspension points of a suspend lambda's placed bodies.
 #[derive(Default)]
-pub(super) struct PlacedSuspensions {
-    pub(super) suspensions: Vec<TransformedSuspension>,
+struct PlacedSuspensions {
+    suspensions: Vec<TransformedSuspension>,
     /// The continuation each point passes, written as a fake one.
-    pub(super) continuations: Vec<ExprId>,
+    continuations: Vec<ExprId>,
+}
+
+/// Give the placed bodies of each suspend lambda in `fids` whose machine the transformer took, and
+/// whose every value an inline call splices, their suspension points, and add them to the lambda's
+/// machine. This runs once every function is lowered: lowering a function that holds such a value
+/// gives its body nodes of its own, the placed body's among them. `false` when a call could not
+/// be given its continuation.
+pub(in crate::jvm::suspend) fn place_bodies(
+    fids: &[u32],
+    ir: &mut IrFile,
+    mut route: Route<'_, '_, '_>,
+) -> bool {
+    for &fid in fids {
+        if route.machines.transformed(fid).is_none() {
+            continue;
+        }
+        let Some(values) = crate::jvm::lambda_classes::spliced_values(ir, fid) else {
+            continue;
+        };
+        let Some(placed) = placed_suspensions(ir, fid, &values, &mut route) else {
+            return false;
+        };
+        route
+            .machines
+            .add_placed_suspensions(fid, placed.suspensions, placed.continuations);
+    }
+    true
 }
 
 /// Give each placed body of `fid`'s lambda values `values` the CPS form of its suspension points,
 /// which pass a fake continuation, and return the points. `None` when a call could not be given
 /// its continuation.
-pub(super) fn placed_suspensions(
+fn placed_suspensions(
     ir: &mut IrFile,
     fid: u32,
     values: &[ExprId],
@@ -39,7 +67,7 @@ pub(super) fn placed_suspensions(
         else {
             continue;
         };
-        if placed_in_suspend_frame(ir, value, route) {
+        if placed_in_suspend_frame(ir, value, route.suspend_set) {
             continue;
         }
         let suspensions = owned_suspensions(ir, fid, body, route, Subject::NamedFunction)?;
@@ -66,12 +94,24 @@ pub(super) fn placed_suspensions(
     Some(placed)
 }
 
-/// Whether the lambda value `value` is written in a suspend function, whose own lowering takes the
-/// body's suspension points where an inline suspend call places it.
-fn placed_in_suspend_frame(ir: &IrFile, value: ExprId, route: &Route<'_, '_, '_>) -> bool {
-    route.suspend_set.iter().any(|&function| {
-        ir.functions[function as usize]
-            .body
-            .is_some_and(|body| crate::ir::value_namespace_expressions(ir, body).contains(&value))
+/// Whether the lambda value `value` is passed to a suspend inline call, which invokes it in its
+/// own body: the caller's lowering takes the body's suspension points where the call places it.
+/// A function that is not suspend cannot invoke a suspend lambda, only pass it to an object it
+/// constructs, so the body lands in that object's method wherever the call is written.
+fn placed_in_suspend_frame(ir: &IrFile, value: ExprId, suspend_set: &HashSet<u32>) -> bool {
+    ir.exprs.iter().enumerate().any(|(call, expression)| {
+        matches!(expression, IrExpr::Call { args, .. } if args.contains(&value))
+            && super::super::is_suspension_point(
+                ir,
+                ExprId::try_from(call).expect("IR expression index exceeds ExprId"),
+                suspend_set,
+            )
     })
+}
+
+/// Whether `value` is a suspend lambda whose body an inline call places in an object it constructs,
+/// not in the frame of the function the lambda is written in.
+pub(super) fn placed_in_an_object(ir: &IrFile, value: ExprId, suspend_set: &HashSet<u32>) -> bool {
+    matches!(&ir.exprs[value as usize], IrExpr::Lambda { impl_fn, .. } if suspend_set.contains(impl_fn))
+        && !placed_in_suspend_frame(ir, value, suspend_set)
 }
