@@ -158,6 +158,7 @@ pub(crate) fn publish_checked_declaration_annotations(
                 owner,
                 class,
                 &info,
+                file.property_annotation_default_target_mode,
                 &mut constructor_properties,
             );
         }
@@ -254,10 +255,12 @@ fn checked_applications<'a>(
         .collect()
 }
 
-/// A constructor property's checked values outlive its file's annotation fold, not its syntax or
-/// TypeInfo. Partition only after every source annotation class has published its target policy.
+/// Retain checked values and declaration policy, not syntax or TypeInfo. Select destinations only
+/// after every source annotation classifier has published its target policy.
 struct PendingConstructorPropertyAnnotations {
     declaration: crate::fir::DeclarationId,
+    host: crate::types::PropertyAnnotationHost,
+    mode: crate::types::PropertyAnnotationDefaultTargetMode,
     applications: Vec<(
         Option<crate::types::PropertyAnnotationSite>,
         crate::types::AppliedAnnotation,
@@ -274,14 +277,14 @@ impl PendingConstructorPropertyAnnotations {
                     .annotation_targets()
                     .semantic(annotation.internal)
                     .unwrap_or(annotation.targets);
-                let site = explicit_site.or_else(|| targets.property_declaration_site(true));
-                (site == Some(crate::types::PropertyAnnotationSite::Property)).then_some(
-                    crate::types::ResolvedAnnotation {
+                let sites = targets.property_declaration_sites(self.host, self.mode, explicit_site);
+                sites
+                    .contains(crate::types::PropertyAnnotationSite::Property)
+                    .then_some(crate::types::ResolvedAnnotation {
                         annotation: annotation.internal,
                         arguments: annotation.values,
                         facts: annotation.facts,
-                    },
-                )
+                    })
             })
             .collect();
         index.publish_declaration_applied_annotations(self.declaration, applications);
@@ -295,6 +298,7 @@ fn publish_classifier_member_annotations(
     owner: crate::fir::DeclarationId,
     class: &ClassDecl,
     info: &TypeInfo,
+    default_target_mode: crate::types::PropertyAnnotationDefaultTargetMode,
     constructor_properties: &mut Vec<PendingConstructorPropertyAnnotations>,
 ) {
     for (method_index, method) in class.methods.iter().enumerate() {
@@ -370,6 +374,11 @@ fn publish_classifier_member_annotations(
         };
         constructor_properties.push(PendingConstructorPropertyAnnotations {
             declaration,
+            host: crate::types::PropertyAnnotationHost {
+                constructor_parameter: true,
+                has_backing_field: class.kind != crate::ast::ClassKind::Annotation,
+            },
+            mode: default_target_mode,
             applications: parameter
                 .annotations
                 .iter()
@@ -1012,6 +1021,7 @@ impl Checker<'_> {
             facts,
             retention,
             targets,
+            property_sites: None,
         })
     }
 }

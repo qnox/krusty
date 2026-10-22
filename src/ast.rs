@@ -1914,6 +1914,8 @@ pub struct File {
     /// instead of being unconditionally public. Signature collection combines it with the per-class
     /// `kotlin.ConsistentCopyVisibility` / `kotlin.ExposedCopyVisibility` annotations.
     pub data_copy_respects_ctor_visibility: bool,
+    /// Configured property-parameter annotation defaulting, projected once from language features.
+    pub property_annotation_default_target_mode: crate::types::PropertyAnnotationDefaultTargetMode,
     /// `+UnitConversionsOnArbitraryExpressions`: a call argument whose function value returns
     /// non-`Unit` may be converted to a function type returning `Unit`.
     pub unit_conversions_on_arbitrary_expressions: bool,

@@ -3,7 +3,7 @@
 //! The applicable set decides two things. A checker rejects an application on a declaration whose
 //! target the set does not list (kotlinc's WRONG_ANNOTATION_TARGET), naming the set in its message.
 //! And an application written on a property declaration without a use-site prefix lands on the
-//! first applicable of `param` → `property` → `field`, three different places in a class file.
+//! configured default sites among `param`, `property` and `field`.
 
 /// A Kotlin annotation target (`kotlin.annotation.AnnotationTarget`), in kotlinc's `KotlinTarget`
 /// order.
@@ -181,6 +181,35 @@ pub enum PropertyAnnotationSite {
     SetterParameter,
 }
 
+/// Default placement selected at the compilation's language-feature boundary.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PropertyAnnotationDefaultTargetMode {
+    #[default]
+    FirstOnly,
+    ParamProperty,
+}
+
+/// The checked destinations of one property annotation application, not its declared targets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PropertyAnnotationSites(u8);
+
+impl PropertyAnnotationSites {
+    pub fn contains(self, site: PropertyAnnotationSite) -> bool {
+        self.0 & (1 << site as u8) != 0
+    }
+
+    fn insert(&mut self, site: PropertyAnnotationSite) {
+        self.0 |= 1 << site as u8;
+    }
+}
+
+/// Storage and parameter facts of the property declaration owning an application.
+#[derive(Clone, Copy)]
+pub(crate) struct PropertyAnnotationHost {
+    pub constructor_parameter: bool,
+    pub has_backing_field: bool,
+}
+
 impl PropertyAnnotationSite {
     /// The source keyword kotlinc names when diagnosing an explicit use-site target.
     pub(crate) fn keyword(self) -> &'static str {
@@ -297,6 +326,37 @@ impl AnnotationTargets {
         self.allows(KotlinTarget::Field)
             .then_some(PropertyAnnotationSite::Field)
     }
+
+    /// Select once from the owning declaration's facts. Modern defaulting adds a parameter and,
+    /// independently, a property (or an available backing field). Accessors are never implicit.
+    /// Explicit sites remain singleton selections; the checker validates their host contracts.
+    pub(crate) fn property_declaration_sites(
+        self,
+        host: PropertyAnnotationHost,
+        mode: PropertyAnnotationDefaultTargetMode,
+        explicit: Option<PropertyAnnotationSite>,
+    ) -> PropertyAnnotationSites {
+        let mut selected = PropertyAnnotationSites::default();
+        if let Some(site) = explicit {
+            selected.insert(site);
+            return selected;
+        }
+        if mode == PropertyAnnotationDefaultTargetMode::FirstOnly {
+            if let Some(site) = self.property_declaration_site(host.constructor_parameter) {
+                selected.insert(site);
+            }
+            return selected;
+        }
+        if host.constructor_parameter && self.allows(KotlinTarget::ValueParameter) {
+            selected.insert(PropertyAnnotationSite::ValueParameter);
+        }
+        if self.property_site && self.allows(KotlinTarget::Property) {
+            selected.insert(PropertyAnnotationSite::Property);
+        } else if host.has_backing_field && self.allows(KotlinTarget::Field) {
+            selected.insert(PropertyAnnotationSite::Field);
+        }
+        selected
+    }
 }
 
 /// The `@Target` policies published for annotation classes, keyed by classifier identity.
@@ -350,6 +410,118 @@ impl DeclaredTargetPolicies {
 #[cfg(test)]
 mod tests {
     use super::{AnnotationTargets, KotlinTarget};
+
+    #[test]
+    fn modern_default_selects_parameter_plus_property_instead_of_field_or_accessor() {
+        use super::{PropertyAnnotationDefaultTargetMode as Mode, PropertyAnnotationSite as Site};
+        let targets = AnnotationTargets::kotlin([
+            KotlinTarget::ValueParameter,
+            KotlinTarget::Property,
+            KotlinTarget::Field,
+            KotlinTarget::PropertyGetter,
+        ]);
+        let host = super::PropertyAnnotationHost {
+            constructor_parameter: true,
+            has_backing_field: true,
+        };
+        let modern = targets.property_declaration_sites(host, Mode::ParamProperty, None);
+        assert_eq!(
+            modern,
+            super::PropertyAnnotationSites(
+                (1 << Site::ValueParameter as u8) | (1 << Site::Property as u8)
+            )
+        );
+        let old = targets.property_declaration_sites(host, Mode::FirstOnly, None);
+        assert_eq!(
+            old,
+            super::PropertyAnnotationSites(1 << Site::ValueParameter as u8)
+        );
+        let body = targets.property_declaration_sites(
+            super::PropertyAnnotationHost {
+                constructor_parameter: false,
+                ..host
+            },
+            Mode::ParamProperty,
+            None,
+        );
+        assert_eq!(
+            body,
+            super::PropertyAnnotationSites(1 << Site::Property as u8)
+        );
+    }
+
+    #[test]
+    fn modern_field_default_requires_real_backing_storage() {
+        use super::{PropertyAnnotationDefaultTargetMode as Mode, PropertyAnnotationSite as Site};
+        let targets =
+            AnnotationTargets::kotlin([KotlinTarget::ValueParameter, KotlinTarget::Field]);
+        let fieldless = super::PropertyAnnotationHost {
+            constructor_parameter: true,
+            has_backing_field: false,
+        };
+        assert_eq!(
+            targets.property_declaration_sites(fieldless, Mode::ParamProperty, None),
+            super::PropertyAnnotationSites(1 << Site::ValueParameter as u8)
+        );
+        let stored = targets.property_declaration_sites(
+            super::PropertyAnnotationHost {
+                has_backing_field: true,
+                ..fieldless
+            },
+            Mode::ParamProperty,
+            None,
+        );
+        assert_eq!(
+            stored,
+            super::PropertyAnnotationSites(
+                (1 << Site::ValueParameter as u8) | (1 << Site::Field as u8)
+            )
+        );
+    }
+
+    #[test]
+    fn explicit_property_sites_are_singletons_in_both_modes() {
+        use super::{PropertyAnnotationDefaultTargetMode as Mode, PropertyAnnotationSite as Site};
+        for mode in [Mode::FirstOnly, Mode::ParamProperty] {
+            for site in [
+                Site::ValueParameter,
+                Site::Property,
+                Site::Field,
+                Site::Getter,
+                Site::Setter,
+                Site::SetterParameter,
+            ] {
+                let selected = AnnotationTargets::DEFAULT.property_declaration_sites(
+                    super::PropertyAnnotationHost {
+                        constructor_parameter: true,
+                        has_backing_field: true,
+                    },
+                    mode,
+                    Some(site),
+                );
+                assert_eq!(selected, super::PropertyAnnotationSites(1 << site as u8));
+            }
+        }
+    }
+
+    #[test]
+    fn normalized_java_default_targets_select_parameter_and_field_not_property() {
+        use super::{PropertyAnnotationDefaultTargetMode as Mode, PropertyAnnotationSite as Site};
+        let selected = AnnotationTargets::java(&[]).property_declaration_sites(
+            super::PropertyAnnotationHost {
+                constructor_parameter: true,
+                has_backing_field: true,
+            },
+            Mode::ParamProperty,
+            None,
+        );
+        assert_eq!(
+            selected,
+            super::PropertyAnnotationSites(
+                (1 << Site::ValueParameter as u8) | (1 << Site::Field as u8)
+            )
+        );
+    }
 
     fn described(targets: AnnotationTargets) -> Vec<&'static str> {
         targets
