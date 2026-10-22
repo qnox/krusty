@@ -24,8 +24,8 @@ jobs:
       projects: ${{ steps.select.outputs.projects }}
     steps:
       - uses: actions/checkout@v7
-      - name: test the comparison
-        run: python3 scripts/oss-corpus/test_compare.py
+      - name: test the corpus scripts
+        run: python3 -m unittest discover -s scripts/oss-corpus -p 'test_*.py'
       - name: select projects
         id: select
         env:

@@ -4,8 +4,8 @@ build with the krusty Gradle plugin).
 
 usage: compare.py <work dir> <name> <reference build exit code>
 
-Reads <work dir>/out/<name>/{kotlinc,krusty}, <work dir>/logs/<name>.compilations.tsv (the reference
-build's compile tasks and their output directories) and <work dir>/logs/<name>.krusty.log. Writes
+Reads <work dir>/out/<name>/{kotlinc,krusty}, <work dir>/logs/<name>.kotlinc.compilations.tsv (the
+reference build's compile tasks and their output directories) and <work dir>/logs/<name>.krusty.log. Writes
 <work dir>/out/<name>/compare.json and prints one line per compilation.
 """
 import glob
@@ -70,14 +70,18 @@ def lines_of_code(checkout):
 
 
 def compare(work, name):
+    """The compared compilations, and the listed compile tasks for which kotlinc wrote no class
+    (a source set without sources): those are reported apart, with any classes krusty wrote."""
     kotlinc, krusty = os.path.join(work, 'out', name, 'kotlinc'), os.path.join(work, 'out', name, 'krusty')
     found = fallbacks(os.path.join(work, 'logs', name + '.krusty.log'))
-    rows = []
-    for task, rel in compilations(os.path.join(work, 'logs', name + '.compilations.tsv')):
+    rows, empty = [], []
+    for task, rel in compilations(os.path.join(work, 'logs', name + '.kotlinc.compilations.tsv')):
         reference = files(os.path.join(kotlinc, rel))
-        if not any(k.endswith('.class') for k in reference):
-            continue
         candidate = files(os.path.join(krusty, rel))
+        if not any(k.endswith('.class') for k in reference):
+            empty.append(dict(task=task, dir=rel,
+                              krusty_classes=sum(1 for k in candidate if k.endswith('.class'))))
+            continue
         fallback = found.get(task)
         # A compile left to kotlinc wrote kotlinc's classes: it is a miss, not a match.
         built = fallback is None and any(k.endswith('.class') for k in candidate)
@@ -88,12 +92,12 @@ def compare(work, name):
                          identical=identical if built else 0,
                          only_kotlinc=len(set(reference) - set(candidate)) if built else None,
                          only_krusty=len(set(candidate) - set(reference)) if built else None))
-    return rows
+    return rows, empty
 
 
 def main():
     work, name, reference_exit = sys.argv[1], sys.argv[2], int(sys.argv[3])
-    rows = compare(work, name)
+    rows, empty = compare(work, name)
     summary = dict(
         name=name,
         reference_exit=reference_exit,
@@ -103,6 +107,7 @@ def main():
         classes=sum(r['classes'] for r in rows),
         identical=sum(r['identical'] for r in rows),
         rows=rows,
+        no_reference_classes=empty,
     )
     with open(os.path.join(work, 'out', name, 'compare.json'), 'w') as f:
         json.dump(summary, f, indent=1)
@@ -113,6 +118,8 @@ def main():
         print(f"  {state} {r['task']} ({r['dir']}): {r['identical']}/{r['classes']}"
               + (f" left to kotlinc: {r['fallback']}" if r['fallback'] else '')
               + (f" only_kotlinc={r['only_kotlinc']} only_krusty={r['only_krusty']}" if r['built'] else ''))
+    for r in empty:
+        print(f"  --- {r['task']} ({r['dir']}): kotlinc wrote no class; krusty wrote {r['krusty_classes']}")
 
 
 if __name__ == '__main__':
