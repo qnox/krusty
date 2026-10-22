@@ -15515,6 +15515,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   offsets, lines and columns as kotlinc. Verified against kotlinc 2.4.20.
   (`crates/krusty-plugin-host/tests/module_ir.rs`,
   `krusty_measures_a_file_with_carriage_returns_as_kotlinc_reads_it`.)
+- **A KSP class header is what KSP2 reports.** A krusty-hosted KSP processor reads a classifier's
+  header as KSP2 2.3.12 reports it. `modifiers` are the modifier keywords the declaration wrote,
+  with the classifier kind words (`data`, `enum`, `annotation`, `fun`, `inner`, `value`), and never
+  implied ones: an interface is not `abstract` and a companion object has no modifier (KSP
+  reports it through `isCompanionObject`). `typeParameters` carry their declaration-site variance
+  and their upper bounds in written order, `where` bounds included, or `kotlin.Any?` when none is
+  written. A type parameter's qualified name is its owner's followed by its name
+  (`headers.Base.T`). `superTypes` are the direct supertypes in written order, the superclass
+  where it was written among the interfaces. A classifier that writes none reports `kotlin.Any`,
+  an annotation class `kotlin.Annotation` and an enum class `kotlin.Enum<E>`; a `fun interface`
+  over a function type reports `kotlin.Function0<kotlin.Unit>`. A classifier is named by its
+  resolved identity, so a bare `companion object` is `Outer.Companion`. A header krusty cannot
+  describe (a supertype or bound such as a platform or intersection type) is refused for that
+  query only, and the build falls back to KSP2.
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `class_headers_are_what_ksp2_reports`;
+  `ksp_round` unit test `a_header_has_its_written_modifiers_type_parameters_and_supertypes`.)
 
 ## 8. Success criteria for the PoC
 
