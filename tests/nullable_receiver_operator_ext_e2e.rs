@@ -113,12 +113,12 @@ fun box(): String {\n\
     val joined = join(null, 1) + \"|\" + join(\"a\", 2)\n\
     return if (joined == \"null: 1|a: 2\") \"OK\" else \"fail: $joined\"\n\
 }\n";
-    let dir = std::env::temp_dir().join(format!("krusty_repository_stdlib_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("create repository directory");
+    let dir = common::scratch_dir().expect("allocate repository directory");
     let stdlib = dir.join("kotlin-stdlib-2.4.21.jar");
     std::fs::copy(common::stdlib_jar(), &stdlib).expect("copy stdlib under its repository name");
+    let classpath = [stdlib];
+    let reference = common::kotlinc_box_result_with_classpath(SRC, &classpath);
     let jdk = common::jdk_modules();
-    let result = common::expect_box_run(SRC, "Main", &[stdlib], Some(jdk.as_path()));
-    let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!(result, "OK");
+    let krusty = common::expect_box_run(SRC, "Main", &classpath, Some(jdk.as_path()));
+    assert_eq!((reference.as_str(), krusty.as_str()), ("OK", "OK"));
 }
