@@ -24,6 +24,8 @@ mod cast_operand_reread_e2e;
 mod classfile_low_priority_annotation_e2e;
 #[path = "common/mod.rs"]
 mod common_core;
+#[path = "jvm_conformance_deadline_e2e.rs"]
+mod jvm_conformance_deadline_e2e;
 #[cfg(test)]
 pub(crate) use common_core::server_pool::Pool as ServerPool;
 #[path = "common/compiler_plugin_fixture.rs"]
@@ -140,6 +142,8 @@ mod backtick_keyword_identifier_e2e;
 mod bare_accessor_and_setter_bridge_e2e;
 #[path = "bazel_cli_contract_e2e.rs"]
 mod bazel_cli_contract_e2e;
+#[path = "bazel_module_release_e2e.rs"]
+mod bazel_module_release_e2e;
 #[path = "block_slot_reuse_e2e.rs"]
 mod block_slot_reuse_e2e;
 #[path = "boolean_literal_equality_e2e.rs"]

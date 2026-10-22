@@ -323,6 +323,24 @@ fn publish_classifier_member_annotations(
         else {
             continue;
         };
+        let applications = checked_applications(
+            info,
+            parameter.annotations.iter().filter(|annotation| {
+                info.applied_annotation(annotation).is_some_and(|applied| {
+                    // Same-file annotation policies are published after folding their uses.
+                    // Prefer that now-complete declaration policy to the earlier application.
+                    let targets = index
+                        .annotation_targets()
+                        .semantic(applied.internal)
+                        .unwrap_or(applied.targets);
+                    annotation
+                        .property_site
+                        .or_else(|| targets.property_declaration_site(true))
+                        == Some(crate::types::PropertyAnnotationSite::Property)
+                })
+            }),
+        );
+        index.publish_declaration_applied_annotations(declaration, applications);
         publish_property_accessor_applications(
             index,
             declaration,

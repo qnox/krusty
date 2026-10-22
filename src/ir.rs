@@ -70,7 +70,7 @@ mod intrinsic;
 mod jvm_delegate_realization;
 mod jvm_static_realization;
 mod lambda_classes;
-mod lambda_exits;
+pub(crate) mod lambda_exits;
 mod lifting_sequences;
 mod local_class_names;
 mod local_delegates;

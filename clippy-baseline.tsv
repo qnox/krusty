@@ -202,8 +202,6 @@
 1	src/resolve/streaming_signature_bridge/operator_conventions.rs	this block may be rewritten with the `?` operator
 1	src/resolve/streaming_signature_bridge/rejected_member_call.rs	this function has too many arguments (10/7)
 1	src/resolve/streaming_signature_bridge/selected_result_publication.rs	this function has too many arguments (13/7)
-1	src/resolve/streaming_signature_bridge/semantics.rs	this `if let` can be collapsed into the outer `if let`
-1	src/resolve/streaming_signature_bridge/semantics.rs	this expression creates a reference which is immediately dereferenced by the compiler: help: change this to: `arguments`
 1	src/resolve/streaming_signature_bridge/semantics.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/resolve/streaming_signature_tests.rs	called `Iterator::last` on a `DoubleEndedIterator`; this will needlessly iterate the entire iterator
 1	src/resolve/type_parameter_owners.rs	this loop could be written as a `while let` loop: help: try: `while let Some(header) = index.declaration_header(current) { .. }`
@@ -277,7 +275,6 @@
 2	src/resolve/streaming_signature_bridge/local_signatures.rs	this function has too many arguments (8/7)
 2	src/resolve/streaming_signature_bridge/operator_conventions.rs	this function has too many arguments (8/7)
 2	src/resolve/streaming_signature_bridge/qualified_calls.rs	explicit call to `.into_iter()` in function argument accepting `IntoIterator`
-2	src/resolve/streaming_signature_bridge/semantics.rs	matching on `Some` with `ok()` is redundant
 2	src/resolve/streaming_signature_bridge/semantics.rs	this function has too many arguments (8/7)
 2	tests/private_inline_property_ref_e2e.rs	writing `&PathBuf` instead of `&Path` involves a new object where a slice will do
 2	tests/reified_anonymous_object_e2e.rs	very complex type used. Consider factoring parts into `type` definitions

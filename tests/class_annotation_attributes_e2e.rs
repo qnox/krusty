@@ -202,6 +202,38 @@ annotation class Marked(val name: String, val n: Int, val kinds: Array<String>)
     );
 }
 
+/// A classifier annotation may name a top-level `const val`, directly, in a string template, in an
+/// array, or through another constant. Its arguments fold before the class's annotations are
+/// published, wherever the constant is declared in the file.
+#[test]
+fn a_class_annotation_folds_top_level_constants() {
+    let src = r#"
+@Retention(AnnotationRetention.BINARY)
+annotation class Marked(val name: String, val n: Int, val kinds: Array<String>)
+
+const val PREFIX = "pre"
+const val FULL = PREFIX + "-full"
+
+@Marked(PREFIX, COUNT, ["$PREFIX-a", FULL]) class WithConstants
+
+const val COUNT = 1 + 2
+"#;
+    let Some((krusty_dir, kotlinc_dir)) = compile_both("constants", src) else {
+        return; // toolchain not provisioned
+    };
+    let krusty = class_annotations(&krusty_dir, "WithConstants");
+    assert_eq!(
+        krusty,
+        class_annotations(&kotlinc_dir, "WithConstants"),
+        "WithConstants: the folded constant arguments must match kotlinc's"
+    );
+    assert_eq!(
+        krusty["RuntimeInvisibleAnnotations"].len(),
+        1,
+        "WithConstants: the annotation must be recorded: {krusty:?}"
+    );
+}
+
 /// A value class declared with the deprecated `inline` modifier is realized as `@JvmInline`:
 /// kotlinc writes that annotation into the class file after the declared ones, for a top-level and
 /// a nested class alike. The `@Metadata` keeps only the declared annotations, so its

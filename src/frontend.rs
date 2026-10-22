@@ -1490,6 +1490,15 @@ where
             }
         }
         crate::resolve::project_finalized_signatures(&index, &mut symbols);
+        // A `const val` initializer is a stable declaration dependency. Check each such bounded
+        // fragment now, while Pass 1 still owns its AST and exact operator selections can be
+        // consumed; retain only the folded payload before the signature graph and arenas die.
+        // Declaration annotations fold next and read these payloads: a classifier annotation's
+        // argument may name a top-level constant.
+        crate::resolve::publish_checked_compile_time_constants(
+            &files[..inferred_end],
+            &mut symbols,
+        );
         crate::resolve::publish_checked_declaration_annotations(
             &files[..inferred_end],
             &mut index,
@@ -1525,13 +1534,6 @@ where
                 diags,
             );
         }
-        // A `const val` initializer is a stable declaration dependency. Check each such bounded
-        // fragment now, while Pass 1 still owns its AST and exact operator selections can be
-        // consumed; retain only the folded payload before the signature graph and arenas die.
-        crate::resolve::publish_checked_compile_time_constants(
-            &files[..inferred_end],
-            &mut symbols,
-        );
         crate::resolve::publish_checked_type_use_annotations(
             &files[..inferred_end],
             &mut index,

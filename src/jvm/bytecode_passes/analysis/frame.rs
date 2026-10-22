@@ -349,11 +349,12 @@ impl<V: Value> Frame<V> {
             IRETURN..=ARETURN => {
                 let value = self.pop(at)?;
                 interpreter.unary_operation(at, &value)?;
-                let expected = self
-                    .return_value
-                    .clone()
-                    .ok_or_else(|| error(at, "a value returned from a void method"))?;
-                interpreter.return_operation(at, &value, &expected)?;
+                // ASM hands a void method's missing return value to `returnOperation`, which
+                // kotlinc's interpreters ignore: a lambda's non-local return returns a value of the
+                // function it leaves from inside the lambda's own `void` method.
+                if let Some(expected) = self.return_value.clone() {
+                    interpreter.return_operation(at, &value, &expected)?;
+                }
             }
             RETURN => {
                 if self.return_value.is_some() {

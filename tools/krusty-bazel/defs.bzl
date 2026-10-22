@@ -4,7 +4,7 @@
 compiles `srcs` with the krusty CLI and returns a `JavaInfo`, so ordinary `java_*`/`kt_*` rules can
 depend on it without knowing which compiler produced the jar.
 
-    load("@krusty//bazel:defs.bzl", "krusty_jvm_library")
+    load("@krusty//:defs.bzl", "krusty_jvm_library")
 
     krusty_jvm_library(
         name = "util",
@@ -33,9 +33,16 @@ Two limits hold in both modes. krusty has no Java front end, so a target mixing 
 sources cannot be built by this rule at all — the worker REFUSES such a request rather than emitting
 a jar missing those classes. And no reduced ABI jar is produced: `--abi-out` receives a copy of the
 full jar, so a dependent rebuilds on any change rather than only on an ABI change.
+
+The compiler is the `@krusty//:toolchain_type` toolchain a released module registers for the
+execution platform, unless `--@krusty//:krusty_binary` names another executable. `JAVA_HOME`, which
+gives krusty its platform classpath, comes from the execution platform's Java runtime toolchain;
+an `env` entry overrides it.
 """
 
 load("@rules_java//java:defs.bzl", "JavaInfo")
+load("@rules_java//java/common:java_common.bzl", "java_common")
+load(":toolchain.bzl", "krusty_compiler")
 
 def _worker_arguments(ctx, output_jar, compile_jars):
     """The `jvm-inc-builder` vocabulary, which krusty's `--persistent_worker` mode parses.
@@ -73,6 +80,13 @@ def _worker_arguments(ctx, output_jar, compile_jars):
 
 def _krusty_jvm_library_impl(ctx):
     output_jar = ctx.actions.declare_file(ctx.label.name + ".jar")
+    compiler = krusty_compiler(ctx)
+    java_runtime = compiler.java_runtime
+
+    # The rule's `env` REPLACES the action environment, so JAVA_HOME is supplied here rather than
+    # left to `--action_env`; a target's own `env` still wins.
+    env = {"JAVA_HOME": java_runtime.java_home}
+    env.update(ctx.attr.env)
 
     # Both `deps` and `exports` are visible while compiling this target. `exports` additionally
     # propagates to consumers through the JavaInfo below; omitting it here makes a source that
@@ -95,7 +109,8 @@ def _krusty_jvm_library_impl(ctx):
 
     # `-classpath` takes ONE argument, so the entries are joined here rather than added one by one.
     # `omit_if_empty` keeps a target with no dependencies from passing an empty `-classpath`.
-    args.add_joined("-classpath", compile_jars, join_with = ":", omit_if_empty = True)
+    # The separator is the one the compiler's own platform splits on: `;` on Windows.
+    args.add_joined("-classpath", compile_jars, join_with = compiler.classpath_separator, omit_if_empty = True)
 
     # The project's own kotlinc flags, verbatim.
     args.add_all(ctx.attr.kotlinc_opts)
@@ -108,11 +123,12 @@ def _krusty_jvm_library_impl(ctx):
         ctx.actions.run(
             mnemonic = "KrustyCompile",
             progress_message = "Compiling %%{label} with krusty worker (%d source(s))" % len(ctx.files.srcs),
-            executable = ctx.executable._krusty,
+            executable = compiler.executable,
+            toolchain = compiler.toolchain,
             arguments = [_worker_arguments(ctx, output_jar, compile_jars)],
-            inputs = depset(ctx.files.srcs, transitive = [compile_jars]),
+            inputs = depset(ctx.files.srcs, transitive = [compile_jars, java_runtime.files]),
             outputs = outputs,
-            env = ctx.attr.env,
+            env = env,
             execution_requirements = {
                 "supports-workers": "1",
                 # krusty's worker speaks line-delimited JSON, not the protobuf protocol.
@@ -123,11 +139,12 @@ def _krusty_jvm_library_impl(ctx):
         ctx.actions.run(
             mnemonic = "KrustyCompile",
             progress_message = "Compiling %%{label} with krusty (%d source(s))" % len(ctx.files.srcs),
-            executable = ctx.executable._krusty,
+            executable = compiler.executable,
+            toolchain = compiler.toolchain,
             arguments = [args],
-            inputs = depset(ctx.files.srcs, transitive = [compile_jars]),
+            inputs = depset(ctx.files.srcs, transitive = [compile_jars, java_runtime.files]),
             outputs = outputs,
-            env = ctx.attr.env,
+            env = env,
         )
 
     return [
@@ -181,13 +198,20 @@ krusty_jvm_library = rule(
             default = False,
         ),
         "env": attr.string_dict(
-            doc = "Environment for the compile action (e.g. JAVA_HOME for the platform classpath).",
+            doc = "Environment for the compile action. `JAVA_HOME` defaults to the execution " +
+                  "platform's Java runtime; an entry here replaces it.",
         ),
         "_krusty": attr.label(
-            doc = "The krusty compiler binary, selected by `--@krusty//bazel:krusty_binary`.",
-            default = Label("//bazel:krusty_binary"),
-            executable = True,
+            doc = "`--@krusty//:krusty_binary`: an executable, or by default the resolved toolchain.",
+            default = Label("//:krusty_binary"),
             cfg = "exec",
         ),
+        "_java_runtime": attr.label(
+            doc = "The Java runtime beside a `krusty_binary` override; a toolchain brings its own.",
+            default = Label("@rules_java//toolchains:current_java_runtime"),
+            cfg = "exec",
+            providers = [java_common.JavaRuntimeInfo],
+        ),
     },
+    toolchains = [config_common.toolchain_type(Label("//:toolchain_type"), mandatory = False)],
 )
