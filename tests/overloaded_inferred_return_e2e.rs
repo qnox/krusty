@@ -407,3 +407,45 @@ fun box(): String = with(Scope()) { Target()[1] }
     };
     assert_eq!(out, "OK");
 }
+
+/// An inferred return selects among overloads whose members omit different defaults. No single
+/// argument mapping fits the family, so each declaration is mapped on its own and the one omitting
+/// the fewest defaults wins: `mk()` is `mk(source)`, as kotlinc selects. Signature inference used to
+/// give up with "module signatures were not finalized".
+const FEWEST_OMITTED_DEFAULTS: &str =
+    "fun mk(id: String = \"\", source: Any? = null): String = \"two\"\n\
+fun mk(source: Any? = null): String = \"one\"\n\
+fun n() = mk()\n\
+fun box(): String = if (n() == \"one\") \"OK\" else n()\n";
+
+#[test]
+fn an_inferred_return_selects_the_overload_omitting_the_fewest_defaults() {
+    common::expect_box_same_as_kotlinc(FEWEST_OMITTED_DEFAULTS, "FewestOmittedDefaults");
+}
+
+#[test]
+fn an_inferred_return_over_omitted_defaults_is_byte_identical_to_kotlinc() {
+    let result = common::byte_diff_against_kotlinc_cp(
+        "FewestOmittedDefaults",
+        FEWEST_OMITTED_DEFAULTS,
+        "FewestOmittedDefaultsKt",
+        &[common::stdlib_jar()],
+    )
+    .expect("kotlinc and the stdlib are provisioned");
+    assert_eq!(result, Ok(()));
+}
+
+/// Two overloads omitting the same number of defaults stay kotlinc's overload ambiguity.
+#[test]
+fn an_inferred_return_over_equally_many_omitted_defaults_is_ambiguous() {
+    let result = common::compiler_diagnostics(
+        &[(
+            "Main.kt",
+            "fun mk(id: String = \"\"): Int = 1\n\
+             fun mk(source: Any? = null): Int = 2\n\
+             fun n() = mk()\n",
+        )],
+        &[],
+    );
+    common::expect_identical_rejection(&result, "equally_many_omitted_defaults");
+}

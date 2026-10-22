@@ -1920,31 +1920,66 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             // that distinction: a bottom-typed argument is applicable to every parameter, so an
             // inferred declaration such as `fun f() = overloaded(boom())` can fail specifically
             // with overload ambiguity before Pass 2. Ask the same selector about each declaration
-            // separately; two or more individually applicable declarations combined with no
-            // family winner is exactly an ambiguity, without reproducing applicability or
-            // specificity rules in the signature evaluator.
-            let individually_applicable = candidates
+            // separately, under that declaration's own argument mapping: a family whose members
+            // omit different defaults (`mk(id = "", source = null)` and `mk(source = null)` for
+            // `mk()`) has no single mapping. The applicable declarations omitting the fewest
+            // defaults win, as in the body checker's candidate ranking; two or more of those with
+            // no family winner are exactly an ambiguity.
+            let mut individually_applicable = candidates
                 .iter()
                 .filter(|candidate| candidate.kind == crate::libraries::FnKind::TopLevel)
-                .filter(|candidate| {
-                    let family = vec![(*candidate).clone()];
-                    resolver
+                .filter_map(|candidate| {
+                    let family = vec![candidate.clone()];
+                    let (kinds, types) =
+                        Self::mapped_call_arguments(&family, arguments, trailing_lambda)?;
+                    let omitted = kinds
+                        .iter()
+                        .filter(|kind| {
+                            matches!(kind, crate::symbol_resolver::CallArgKind::OmittedDefault)
+                        })
+                        .count();
+                    let (selected, callable) = resolver
                         .select_top_level_function_candidates_with_expected(
                             spelling,
                             family,
-                            &selected_arguments,
+                            &kinds,
                             &resolved_type_arguments,
                             expected.map(crate::fir::ResolvedTy::get),
-                        )
-                        .is_some()
+                        )?;
+                    Some((omitted, selected, callable, types))
                 })
-                .take(2)
-                .count();
-            if individually_applicable > 1 {
-                return Some((
-                    SelectedTopLevelCall::Ambiguous,
-                    selected_argument_types.clone(),
-                ));
+                .collect::<Vec<_>>();
+            if let Some(fewest) = individually_applicable
+                .iter()
+                .map(|(omitted, ..)| *omitted)
+                .min()
+            {
+                individually_applicable.retain(|(omitted, ..)| *omitted == fewest);
+            }
+            match individually_applicable.len() {
+                0 => {}
+                1 => {
+                    let (_, selected, callable, types) = individually_applicable.remove(0);
+                    return Some((
+                        SelectedTopLevelCall::Callable {
+                            parameter_by_argument: Self::selected_argument_parameters(
+                                &selected,
+                                arguments,
+                                trailing_lambda,
+                            ),
+                            source: selected.source_key,
+                            declaration: selected.stable_declaration,
+                            callable: Box::new(callable),
+                        },
+                        types,
+                    ));
+                }
+                _ => {
+                    return Some((
+                        SelectedTopLevelCall::Ambiguous,
+                        selected_argument_types.clone(),
+                    ));
+                }
             }
             let symbol = resolver.select_symbol(
                 crate::symbol_resolver::SymRecv::TopLevel,
