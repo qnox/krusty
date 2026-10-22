@@ -26,15 +26,15 @@ trap 'rm -rf "$stage"' EXIT
   clean test publishAllPublicationsToReleaseRepository
 
 built_jar=$project/build/libs/krusty-gradle-plugin-$version.jar
-published_jar=$project/build/release-repository/me/qnox/krusty/krusty-gradle-plugin/$version/krusty-gradle-plugin-$version.jar
-marker=$project/build/release-repository/me/qnox/krusty/me.qnox.krusty.gradle.plugin/$version/me.qnox.krusty.gradle.plugin-$version.pom
+published_jar=$project/build/release-repository/dev/krustythecompiler/krusty-gradle-plugin/$version/krusty-gradle-plugin-$version.jar
+marker=$project/build/release-repository/dev/krustythecompiler/dev.krustythecompiler.gradle.plugin/$version/dev.krustythecompiler.gradle.plugin-$version.pom
 test -f "$built_jar"
 test -f "$published_jar"
 test -f "$marker"
 cmp "$built_jar" "$published_jar"
-unzip -p "$built_jar" META-INF/gradle-plugins/me.qnox.krusty.properties \
+unzip -p "$built_jar" META-INF/gradle-plugins/dev.krustythecompiler.properties \
   | grep -qx 'implementation-class=krusty.KrustyKotlinPlugin'
-grep -q '<groupId>me.qnox.krusty</groupId>' "$marker"
+grep -q '<groupId>dev.krustythecompiler</groupId>' "$marker"
 grep -q '<artifactId>krusty-gradle-plugin</artifactId>' "$marker"
 grep -q "<version>$version</version>" "$marker"
 
@@ -69,7 +69,7 @@ pluginManagement {
 // build.gradle.kts
 plugins {
     kotlin("jvm") version "$newest_kotlin" // supported: $supported_kotlin
-    id("me.qnox.krusty") version "$version"
+    id("dev.krustythecompiler") version "$version"
 }
 \`\`\`
 
@@ -94,10 +94,10 @@ Validated Gradle boundaries: 7.6.3, 8.14.3, 9.5.0, and 9.7.0.
 EOF
 
 cat > "$root/manifest.txt" <<EOF
-plugin-id=me.qnox.krusty
+plugin-id=dev.krustythecompiler
 plugin-version=$version
-implementation=me.qnox.krusty:krusty-gradle-plugin:$version
-marker=me.qnox.krusty:me.qnox.krusty.gradle.plugin:$version
+implementation=dev.krustythecompiler:krusty-gradle-plugin:$version
+marker=dev.krustythecompiler:dev.krustythecompiler.gradle.plugin:$version
 kotlin-gradle-plugin=$(paste -sd, <<<"$kotlin_versions")
 gradle=7.6.3,8.14.3,9.5.0,9.7.0
 EOF

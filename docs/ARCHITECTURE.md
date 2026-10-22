@@ -83,7 +83,7 @@ from the real `kotlin` command, and refuses by name whatever it does not impleme
 [KOTLIN_TOOLCHAIN.md](KOTLIN_TOOLCHAIN.md).
 
 Gradle projects are compiled by running that project's `./gradlew`, not by reimplementing the
-Kotlin plugin. `tools/krusty-gradle` is a Gradle plugin (`id("me.qnox.krusty")`, sources under
+Kotlin plugin. `tools/krusty-gradle` is a Gradle plugin (`id("dev.krustythecompiler")`, sources under
 `src/main/kotlin`). A build applies both its selected `org.jetbrains.kotlin.jvm` 2.4.x plugin and
 `krusty`; source sets, `kotlin {}`, compiler options, and `KotlinJvmCompile` stay. Source checkouts
 can use `--include-build`; releases include a portable local Maven repository with the implementation
