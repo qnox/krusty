@@ -34,6 +34,8 @@ mod reference_compiler_support;
 mod reference_recording_support;
 #[path = "common/reference_targets.rs"]
 mod reference_targets_support;
+#[path = "super_call_vararg_e2e.rs"]
+mod super_call_vararg_e2e;
 #[path = "common/target_diagnostics.rs"]
 mod target_diagnostics_support;
 

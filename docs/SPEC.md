@@ -10087,6 +10087,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   receiver of an unboxed value class now takes the `box-impl` box. Tests:
   `tests/value_class_super_call_e2e.rs`, box `inlineClasses/anySuperCall{,Generic}.kt`,
   `inlineClasses/interfaceMethodCalls/interfaceSuperCall{,Generic}.kt`.
+- **A `super` call passes each `vararg` argument as one element.** The selected super target
+  carries its declaration's `vararg` index, and checked FIR maps the call's arguments through it as
+  an ordinary call does: `super.performClear(true, "a", "b")` (the shape Room's generated
+  `clearAllTables` uses) packs both strings into the `String[]`, `super.count(1, 2, *values)`
+  builds an `IntSpreadBuilder`, and no element passes an empty array. Test:
+  `tests/super_call_vararg_e2e.rs`.
 - **A value class's `equals-impl`/`hashCode-impl` treat the sole property as a data class treats
   one.** kotlinc builds both with the generator it uses for data classes. The hash is the declared
   type's own (`String.hashCode()`, `Integer.hashCode(I)`, `Arrays.hashCode`, a nested value class's
