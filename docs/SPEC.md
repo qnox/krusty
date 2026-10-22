@@ -18848,6 +18848,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/enum_secondary_constructor_e2e.rs` and the enum fixture in
   `tests/java_parameters_attribute_e2e.rs`.
 
+- **JVM metadata readers preserve a vararg's declared packed-array type.** A function's generic
+  signature decodes `ValueParameter.type` (or `type_id`) just as it does for an ordinary parameter.
+  `vararg_element_type` separately declares the vararg call shape; rebuilding an array from it
+  loses the declared `out` projection and must not manufacture a missing parameter type. Inline
+  and table-backed declarations retain the same contract, including primitive arrays. Listed
+  operands are values of the array's readable element type, not its projection wrapper; argument
+  conversion and evaluation-order spills preserve nullable/value-class boxing. A spread still
+  carries the complete declared array type. Tests: `tests/vararg_spread_shapes_e2e.rs` and
+  `jvm::metadata::vararg_signature_tests::function_vararg_signatures_keep_the_declared_packed_array`
+  and `…::selected_stdlib_vararg_signatures_preserve_metadata_projections`.
 - **Primary-ctor varargs and non-derivable member descriptors survive into class `@Metadata`.** A
   `vararg` primary-constructor parameter records `ValueParameter.vararg_element_type` (f4) — without
   it a consumer demands a literal array argument and rejects `Words()` ("no value passed for

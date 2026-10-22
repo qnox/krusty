@@ -2931,6 +2931,15 @@ bodies exist only as jar bytecode):
   this is the safe landing strip for phase 421 (flip `resolve_callable` to the `@Metadata` Kotlin types).
   Unit test `jvm_class_map::tests::collection_types_erase_to_jvm_at_emit`.
 
+### Declared JVM vararg array types
+
+- Decode the packed parameter from its declared metadata type, preserving projections and
+  primitive-array identity; do not reconstruct it from the separate vararg element field.
+- Cover inline/table-backed forms, missing declarations and the actual selected stdlib factories.
+- Keep projection wrappers out of listed-element value conversions and operand spills, including
+  adapted references and constructor calls. Nullable/value-class boxing and mixed spreads are
+  differential regressions; declared arrays and whole-array spread operands keep their projections.
+
 ### Phase 419 — `@Metadata` function return-type decoding (read-only/mutable foundation)  ✅
 - ROOT CAUSE found (with the maintainer): krusty erases `List`/`MutableList` (and `Map`/`MutableMap`, …)
   to `java/util/List` in the FRONT END, so it can't distinguish a read-only collection from a mutable one
