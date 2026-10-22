@@ -72,9 +72,6 @@ fn normalized_function(
     enclosing: &crate::libraries::EnclosingBounds,
 ) -> FunctionInfo {
     let mut function = published_function(&libraries.identities, signed, placement, enclosing);
-    if let CallablePlacement::Member { owner, .. } = placement {
-        builtin_realizations::realize_member(owner, &mut function);
-    }
     let realization = libraries
         .external_callable(
             function

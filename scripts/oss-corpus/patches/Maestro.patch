@@ -1,0 +1,23 @@
+diff --git a/maestro-android/build.gradle.kts b/maestro-android/build.gradle.kts
+index a9fc6a9..691018e 100644
+--- a/maestro-android/build.gradle.kts
++++ b/maestro-android/build.gradle.kts
+@@ -1,4 +1,4 @@
+-import org.jetbrains.kotlin.config.JvmTarget
++import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+ 
+ plugins {
+     alias(libs.plugins.android.application)
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index fed838e..f07de3e 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -18,7 +18,7 @@ dependencyResolutionManagement {
+ 
+ 
+ include("maestro-utils")
+-include("maestro-android")
++// include("maestro-android")
+ include("maestro-cli")
+ include("maestro-client")
+ include("maestro-ios")

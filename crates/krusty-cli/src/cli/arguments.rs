@@ -334,7 +334,7 @@ pub(super) fn apply(
         // modes; `jvm` and `legacy` name runtime-checked shapes it does not reproduce yet.
         "-Xassertions" => match text {
             "always-enable" | "always-disable" => opts.assertions = Some(text.to_string()),
-            "jvm" | "legacy" => opts.errors.push(format!(
+            "jvm" | "legacy" => opts.refuse(format!(
                 "{name}={text} selects an output shape krusty does not emit"
             )),
             _ => opts.errors.push(format!(
@@ -346,7 +346,7 @@ pub(super) fn apply(
         // target default, so naming either `indy` mode explicitly is not modeled yet.
         "-Xstring-concat" => match text {
             "inline" => opts.inline_string_concat = true,
-            "indy" | "indy-with-constants" => opts.errors.push(format!(
+            "indy" | "indy-with-constants" => opts.refuse(format!(
                 "{name}={text} selects an output shape krusty does not emit"
             )),
             _ => opts.errors.push(format!(
@@ -514,11 +514,11 @@ pub(super) fn finish_language_settings(
     match LanguageSettings::for_release(reference_version, language_version, api_version, &settings)
     {
         Ok(settings) => {
-            opts.errors
-                .extend(language_features::unmodeled_feature_errors(
-                    &feature_arguments,
-                    &settings.features,
-                ));
+            for refusal in
+                language_features::unmodeled_feature_errors(&feature_arguments, &settings.features)
+            {
+                opts.refuse(refusal);
+            }
             let (cannot_disable, pre_release) = language_features::manual_setting_checks(
                 &manual,
                 table,
@@ -535,11 +535,11 @@ pub(super) fn finish_language_settings(
             for setting in &common {
                 before_progressive.set(&setting.feature, setting.enabled);
             }
-            opts.errors
-                .extend(language_features::unmodeled_progressive_error(
-                    &progressive,
-                    &before_progressive,
-                ));
+            if let Some(refusal) =
+                language_features::unmodeled_progressive_error(&progressive, &before_progressive)
+            {
+                opts.refuse(refusal);
+            }
             let redundant = language_features::redundancy_warnings(
                 &feature_arguments,
                 &defaults,
@@ -561,11 +561,11 @@ pub(super) fn finish_language_settings(
                 language_version,
                 api_version.unwrap_or(language_version),
             );
-            opts.errors
-                .extend(language_features::unmodeled_feature_errors(
-                    &feature_arguments,
-                    &features,
-                ));
+            for refusal in
+                language_features::unmodeled_feature_errors(&feature_arguments, &features)
+            {
+                opts.refuse(refusal);
+            }
             opts.errors.push(error);
         }
     }

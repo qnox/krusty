@@ -5,9 +5,7 @@
 //! another module, calls it, so it is public under its plain name, and so is the
 //! deserialization constructor's metadata. An open or abstract class's metadata also lists its own
 //! elements in program order (`propertiesNamesInProgramOrder`), leaving out a `@Transient`
-//! property. A `write$Self` without elements is a bare `return` with no line. An abstract class's
-//! companion (its `PolymorphicSerializer`) is not generated yet, so only its `write$Self` is
-//! compared.
+//! property. A `write$Self` without elements is a bare `return` with no line.
 
 use super::common::compare_with_kotlinc_plugin;
 use super::serialization_companion_byte_parity_e2e::plugin_and_runtime;
@@ -53,33 +51,9 @@ fn an_open_class_without_elements_has_a_lineless_write_self() {
     assert_byte_identical("Empty");
 }
 
-/// One method's `javap -c -v` listing, up to the blank line that ends it.
-fn method_listing<'a>(javap: &'a str, header: &str) -> &'a str {
-    let start = javap
-        .find(header)
-        .unwrap_or_else(|| panic!("`{header}` is missing from:\n{javap}"));
-    let end = javap[start..]
-        .find("\n\n")
-        .map_or(javap.len(), |end| start + end);
-    &javap[start..end]
-}
-
-/// An abstract class is not compared whole: kotlinc gives its companion a `PolymorphicSerializer`
-/// behind `$cachedSerializer`, which krusty does not generate yet. Its `write$Self` is this
-/// change's, and must match exactly.
 #[test]
 fn an_abstract_class_publishes_its_write_self() {
-    let (plugin, cp) = plugin_and_runtime()
-        .expect("the serialization plugin and runtime must be available to this regression");
-    let extra = vec![format!("-Xplugin={}", plugin.display())];
-    let built =
-        compare_with_kotlinc_plugin("OpenSerializableWriteSelf", SRC, "Shape", &cp, "25", &extra)
-            .expect("the reference compiler and javap must be available to this regression");
-    let header = "  public static final void write$Self(";
-    assert_eq!(
-        method_listing(&built.krusty, header),
-        method_listing(&built.reference, header)
-    );
+    assert_byte_identical("Shape");
 }
 
 #[test]

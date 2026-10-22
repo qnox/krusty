@@ -81,6 +81,8 @@ fn prebuild_runtime() -> Result<(), String> {
     }
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/native/target_contract.rs");
+    // Relative source mtimes alone cannot identify an older sibling checkout in a shared target.
+    println!("cargo:rerun-if-env-changed=KRUSTY_BUILD_CHECKOUT");
     println!("cargo:rerun-if-env-changed=KRUSTY_RUNTIME_CC");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));

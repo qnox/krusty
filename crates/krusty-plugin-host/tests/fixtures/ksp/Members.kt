@@ -70,7 +70,7 @@ class MembersProcessor(private val env: SymbolProcessorEnvironment) : SymbolProc
                     .append(" receiver=").append(type(declaration.extensionReceiver))
                     .append(" (")
                     .append(declaration.parameters.joinToString(", ") {
-                        it.name?.asString() + ": " + type(it.type) + " vararg=" + it.isVararg + " default=" + it.hasDefault
+                        "${it.name?.asString()}: ${type(it.type)} vararg=${it.isVararg} default=${it.hasDefault}"
                     })
                     .append("): ").append(type(declaration.returnType))
                 for (annotation in declaration.annotations) out.append(" @").append(annotation.shortName.asString())

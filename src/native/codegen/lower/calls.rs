@@ -281,12 +281,10 @@ impl BodyLowering<'_, '_, '_> {
                 owner.render()
             ));
         };
-        let name = &*record.name;
         if record.owner != Some(owner) {
-            return Err(declined!(
-                "an inherited member of `{}` declared in another file (`{name}`)",
-                owner.render()
-            ));
+            // An inherited member sits at the number the plan gave its declaration, which every
+            // table below the declaring class keeps.
+            return self.planned_member_call(owner, target, receiver, args);
         }
         use crate::fir::DeclarationFlags as Flags;
         let overridable = record.flags.has(Flags::OPEN)
@@ -301,10 +299,7 @@ impl BodyLowering<'_, '_, '_> {
             _ => false,
         };
         if !single_body {
-            return Err(declined!(
-                "a virtual call to a member of `{}`, which is not declared in this file",
-                owner.render()
-            ));
+            return self.planned_member_call(owner, target, receiver, args);
         }
         // The receiver crosses as the declaring file's member takes it: a value class's member
         // takes the value, every other member the object.
@@ -330,6 +325,55 @@ impl BodyLowering<'_, '_, '_> {
         let func_ref = self.func_ref(id);
         let call = self.emit_call(func_ref, &arguments)?;
         Ok(self.builder.inst_results(call).first().copied())
+    }
+
+    /// A call dispatched through the table of `owner`, a class another file of the module
+    /// declares: the slot is the one the module plan gave `target`, which the declaring file
+    /// fills, and the call crosses with the declaration's carriers as every override's body takes
+    /// them.
+    fn planned_member_call(
+        &mut self,
+        owner: TypeName,
+        target: crate::fir::CallableId,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<Option<Value>, Unsupported> {
+        let qualified = || owner.render().replace('/', ".");
+        let table = match self.file.slot_plan.table(owner) {
+            Some(Ok(table)) => table,
+            Some(Err(reason)) => {
+                return Err(declined!(
+                    "a virtual call through `{}`, which has no module-wide layout: {reason}",
+                    qualified()
+                ))
+            }
+            None => {
+                return Err(declined!(
+                    "a virtual call to a member of `{}`, which is not declared in this file",
+                    qualified()
+                ))
+            }
+        };
+        let Some(&slot) = table
+            .slots
+            .get(&crate::backend::class_tables::module_slots::PlanKey::Callable(target))
+        else {
+            return Err(declined!(
+                "a virtual call to a member `{}` does not plan",
+                qualified()
+            ));
+        };
+        let record = &self.file.ir.referenced_module_callables[&target];
+        let params = record.parameters.to_vec();
+        let ret = record.result;
+        let Some(object) = self.receiver(receiver)? else {
+            return Ok(None);
+        };
+        let arguments = self.arguments(args, &params)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        self.dispatch(object, slot, &params, ret, &arguments)
     }
 
     /// Run the defining file's top-level initializers before using anything it exports.
@@ -1102,11 +1146,6 @@ impl BodyLowering<'_, '_, '_> {
                             .physical_params
                             .first()
                             .is_some_and(|ty| ty.non_null().is_reference_array());
-                        if let Some(realized) =
-                            self.list_construction(signature, packs_a_vararg, args)
-                        {
-                            return realized;
-                        }
                         if let Some(realized) =
                             self.map_construction(signature, packs_a_vararg, args)
                         {

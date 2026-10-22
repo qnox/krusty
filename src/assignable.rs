@@ -427,11 +427,26 @@ fn obj_assignable(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bool
             {
                 crate::types::TypeVariance::Out => assignable_inner(cx, oracle, a, p),
                 crate::types::TypeVariance::In => assignable_inner(cx, oracle, p, a),
-                crate::types::TypeVariance::Invariant => same_flexible_type_with(
-                    oracle,
-                    normalized_type_argument(cx, a),
-                    normalized_type_argument(cx, p),
-                ),
+                crate::types::TypeVariance::Invariant => match a.kind() {
+                    // `A<in X>` captures its argument as `C` with lower bound `X` and the
+                    // parameter's declared upper bounds. kotlinc compares that captured type for
+                    // equality with the invariant argument, so `Class<in Any!>` is a `Class<Any>`:
+                    // a Java parameter's `Any!` bound reaches it.
+                    TyKind::InProjection(lower) => {
+                        assignable_inner(cx, oracle, p, lower)
+                            && target
+                                .map(|owner| oracle.type_param_upper_bounds(owner, index))
+                                .filter(|bounds| !bounds.is_empty())
+                                .unwrap_or_else(|| vec![Ty::nullable(Ty::obj("kotlin/Any"))])
+                                .into_iter()
+                                .all(|bound| assignable_inner(cx, oracle, bound, p))
+                    }
+                    _ => same_flexible_type_with(
+                        oracle,
+                        normalized_type_argument(cx, a),
+                        normalized_type_argument(cx, p),
+                    ),
+                },
             }
         })
 }
