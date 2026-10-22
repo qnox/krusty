@@ -70,7 +70,7 @@ impl Source<'_> {
             }
             match self.file.decl(id) {
                 Decl::Class(class) => {
-                    classes.push(self.class(id, class, &package_name, None)?);
+                    classes.push(self.class(id, class)?);
                 }
                 Decl::Fun(_) | Decl::Property(_) => declarations_complete = false,
             }
@@ -104,33 +104,22 @@ impl Source<'_> {
         self.file.hoisted_classifier_owners.get(&id).copied() == owner
     }
 
-    fn class(
-        &self,
-        id: DeclId,
-        class: &ClassDecl,
-        package_name: &str,
-        owner: Option<&str>,
-    ) -> Result<KspClass, String> {
-        let simple_name = self
-            .file
-            .hoisted_classifier_source_names
-            .get(&id)
-            .cloned()
-            .unwrap_or_else(|| class.name.clone());
-        let qualified_name = match (owner, package_name) {
-            (Some(owner), _) => format!("{owner}.{simple_name}"),
-            (None, "") => simple_name.clone(),
-            (None, package) => format!("{package}.{simple_name}"),
+    fn class(&self, id: DeclId, class: &ClassDecl) -> Result<KspClass, String> {
+        let Some(signature) = self.declared.get(&(self.index, id)) else {
+            return Err(self.refusal(class, "has no resolved declaration"));
         };
+        // The resolved identity names the classifier, a companion object's implicit name included.
+        let simple_name = match signature.internal.nested_owner() {
+            Some(_) => signature.internal.nested_segment_ref().to_string(),
+            None => signature.internal.segment(),
+        };
+        let qualified_name = qualified_name(signature.internal);
         let kind = match class.kind {
             ClassKind::Interface => KspClassKind::Interface,
             ClassKind::Enum => KspClassKind::EnumClass,
             ClassKind::Annotation => KspClassKind::AnnotationClass,
             ClassKind::Class if class.singleton => KspClassKind::Object,
             ClassKind::Class => KspClassKind::Class,
-        };
-        let Some(signature) = self.declared.get(&(self.index, id)) else {
-            return Err(self.refusal(class, "has no resolved declaration"));
         };
         let mut annotations = Vec::with_capacity(class.annotations.len());
         for annotation in &class.annotations {
@@ -142,12 +131,7 @@ impl Source<'_> {
                 continue;
             }
             if let Decl::Class(nested_class) = self.file.decl(nested) {
-                classes.push(self.class(
-                    nested,
-                    nested_class,
-                    package_name,
-                    Some(&qualified_name),
-                )?);
+                classes.push(self.class(nested, nested_class)?);
             }
         }
         let primary_constructor = self.primary_constructor(class, kind, signature)?;
@@ -422,6 +406,34 @@ mod tests {
         let file = &round.files[0];
         assert!(!file.declarations_complete);
         assert!(!file.classes[0].declarations_complete);
+    }
+
+    #[test]
+    fn a_companion_object_is_named_by_its_resolved_identity() {
+        let round = round(&[(
+            "/src/Companions.kt",
+            "package p\n\nclass Outer {\n    companion object\n}\n\nclass Named {\n    companion object Factory {\n        object Deep\n    }\n}\n",
+        )])
+        .expect("every declaration is readable");
+        fn names(classes: &[KspClass], out: &mut Vec<(String, String)>) {
+            for class in classes {
+                out.push((class.simple_name.clone(), class.qualified_name.clone()));
+                names(&class.classes, out);
+            }
+        }
+        let mut listed = Vec::new();
+        names(&round.files[0].classes, &mut listed);
+        assert_eq!(
+            listed,
+            [
+                ("Outer", "p.Outer"),
+                ("Companion", "p.Outer.Companion"),
+                ("Named", "p.Named"),
+                ("Factory", "p.Named.Factory"),
+                ("Deep", "p.Named.Factory.Deep"),
+            ]
+            .map(|(simple, qualified)| (simple.to_string(), qualified.to_string()))
+        );
     }
 
     fn parameter(name: &str, flags: (bool, bool, bool, bool)) -> KspParameter {

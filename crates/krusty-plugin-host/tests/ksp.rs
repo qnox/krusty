@@ -273,3 +273,32 @@ fn primary_constructors_and_their_parameters_are_what_ksp2_reports() {
         .collect();
     assert_eq!(run.log, expected);
 }
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn a_kept_sequence_reads_again_and_through_two_iterators_as_under_ksp2() {
+    let (runtime, env) = runtime();
+    let processor = processor(&runtime, "Traverse", "traverse.TraverseProvider");
+    let out = scratch("ksp-outputs-traverse");
+    let outputs = KspOutputs {
+        kotlin: out.join("kotlin"),
+        java: out.join("java"),
+        classes: out.join("classes"),
+        resources: out.join("resources"),
+    };
+    let sources = [
+        fixtures().join("sources/Sample.kt"),
+        fixtures().join("companions/Companions.kt"),
+        fixtures().join("sources/Other.kt"),
+    ];
+    let run = run(&runtime, &env, &processor, &sources, &outputs)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(run.generated, Vec::<String>::new());
+    let expected: Vec<String> = std::fs::read_to_string(fixtures().join("traverse.expected"))
+        .unwrap()
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(run.log, expected);
+}
