@@ -14,8 +14,8 @@ use crate::types::Ty;
 /// One element's decode and the seen-mask bit that records it arrived — the same block on the
 /// sequential fast path and in the index-driven loop, so it is built once and used twice.
 struct ElementDecode<'a> {
-    serialized_class: ClassId,
-    fields: &'a [(String, Ty)],
+    /// Every element of the wire shape, each with the class its property is declared on.
+    fields: &'a [super::WireElement],
     type_parameter_serializers: super::type_parameter_serializers::TypeParameterSerializers<'a>,
     bounded_type_parameters: bool,
     descriptor_local: u32,
@@ -94,7 +94,7 @@ impl ElementDecode<'_> {
         [dk, idxc, cdk]: [ExprId; 3],
         serializer: ExprId,
     ) -> ExprId {
-        let ty = self.fields[k].1;
+        let ty = self.fields[k].ty;
         let inst = narrowed(
             ir,
             serializer,
@@ -134,11 +134,12 @@ impl ElementDecode<'_> {
     }
 
     fn block(&self, ir: &mut IrFile, ctx: &PluginContext, k: usize) -> ExprId {
-        let ty = self.fields[k].1;
+        let ty = self.fields[k].ty;
         let dk = ir.add_expr(IrExpr::GetValue(self.descriptor_local));
         let idxc = ir.add_expr(IrExpr::Const(IrConst::Int(k as i32)));
         let cdk = ir.add_expr(IrExpr::GetValue(self.composite_local));
-        let contextual = property_is_contextual(ctx, ir, self.serialized_class, &self.fields[k].0);
+        let contextual =
+            property_is_contextual(ctx, ir, self.fields[k].class, &self.fields[k].name);
         let contextual = if contextual {
             self.cached_slot(ir, k)
                 .or_else(|| contextual_serializer_for(ir, true, &ty))
@@ -149,15 +150,15 @@ impl ElementDecode<'_> {
             // Contextual element: its cached `ContextualSerializer`, else one built here.
             self.decode_serializable(ir, k, [dk, idxc, cdk], inst)
         } else if let Some(internal) =
-            declared_serializer_of(ctx, ir, self.serialized_class, &self.fields[k].0)
+            declared_serializer_of(ctx, ir, self.fields[k].class, &self.fields[k].name)
         {
             // An explicit per-property serializer takes precedence over the property's type, as it
             // does in `serialize` and `childSerializers`: what `X` wrote only `X` can read back.
             let annotated = super::type_argument_serializers::declared_type_spelling(
                 ctx,
                 ir,
-                self.serialized_class,
-                &self.fields[k].0,
+                self.fields[k].class,
+                &self.fields[k].name,
             );
             let inst = build_field_serializer_instance(
                 ir,
@@ -183,8 +184,8 @@ impl ElementDecode<'_> {
                         &super::type_argument_serializers::declared_type_spelling(
                             ctx,
                             ir,
-                            self.serialized_class,
-                            &self.fields[k].0,
+                            self.fields[k].class,
+                            &self.fields[k].name,
                         ),
                     )
                 })
@@ -232,7 +233,8 @@ pub(super) struct DeserializeBody<'a> {
     pub(super) function: u32,
     pub(super) serializer_class: ClassId,
     pub(super) serialized_class: ClassId,
-    pub(super) fields: &'a [(String, Ty)],
+    /// Every element of the wire shape, inherited ones first.
+    pub(super) fields: &'a [super::WireElement],
     /// The serializers of the class's type parameters, on the generic `$serializer`.
     pub(super) type_parameter_serializers:
         super::type_parameter_serializers::TypeParameterSerializers<'a>,
@@ -256,7 +258,6 @@ impl DeserializeBody<'_> {
             cache: cache_plan,
         } = self;
         let ser_idx = serializer_class as usize;
-        let class_id = foo_id;
         // deserialize(decoder=1):
         //   val c = decoder.beginStructure(descriptor)            [local 2]
         //   var f0 = <default>; var f1 = <default>                 [locals 4, 5, ...]
@@ -283,9 +284,10 @@ impl DeserializeBody<'_> {
             super::complete_generated_body(ir, fid, body);
             return;
         }
-        let decodable = fields.iter().all(|(pname, t)| {
-            if property_is_contextual(ctx, ir, class_id, pname)
-                || declared_serializer_of(ctx, ir, class_id, pname).is_some()
+        let decodable = fields.iter().all(|element| {
+            let (declaring, pname, t) = (element.class, &element.name, &element.ty);
+            if property_is_contextual(ctx, ir, declaring, pname)
+                || declared_serializer_of(ctx, ir, declaring, pname).is_some()
             {
                 return true;
             }
@@ -303,7 +305,9 @@ impl DeserializeBody<'_> {
                 ctx,
                 t,
                 type_parameter_serializers,
-                &super::type_argument_serializers::declared_type_spelling(ctx, ir, class_id, pname),
+                &super::type_argument_serializers::declared_type_spelling(
+                    ctx, ir, declaring, pname,
+                ),
             )
             .is_some()
         });
@@ -372,7 +376,6 @@ impl DeserializeBody<'_> {
         let composite =
             |ir: &mut IrFile| -> ExprId { ir.add_expr(IrExpr::GetValue(composite_local)) };
         let elements = ElementDecode {
-            serialized_class: class_id,
             fields,
             type_parameter_serializers,
             bounded_type_parameters,
@@ -421,7 +424,7 @@ impl DeserializeBody<'_> {
             }
             // Field locals start at their JVM zero. Optional defaults belong solely to
             // the synthetic constructor and must not be evaluated before decoding.
-            for (k, (_, ty)) in fields.iter().enumerate() {
+            for (k, ty) in fields.iter().map(|element| &element.ty).enumerate() {
                 let ty = decode_local_ty(ir, *ty, bounded_type_parameters);
                 let dc = IrConst::zero_for_value_type(ty);
                 let init = ir.add_expr(IrExpr::Const(dc));

@@ -11305,6 +11305,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   bare `return` with no line. (A sealed class's `write$Self` and an abstract class's
   `PolymorphicSerializer` companion are not generated yet.)
   Test: `tests/open_serializable_write_self_e2e.rs`.
+- **A serializable subclass of a serializable class serializes the parent's elements first.** For a
+  same-file, non-generic `@Serializable` superclass, kotlinc numbers the parent's elements ahead of
+  the subclass's own: the descriptor, `childSerializers` and `deserialize` cover all of them, the
+  subclass's `write$Self` calls the parent's public `write$Self` before encoding its own elements
+  at their shifted indices, and its deserialization constructor checks the full required mask, then
+  delegates the masks, the inherited elements and the marker to the parent's deserialization
+  constructor before storing its own fields. (A superclass from another module or a generic one is
+  not handled yet.)
+  Test: `tests/serializable_inheritance_e2e.rs`.
 - **`write$Self` reads an overridable property through its getter.** It reads a final property's
   backing field, as kotlinc's JVM lowering does for a default getter, but an open or overriding
   property's getter can be overridden, so kotlinc calls it: `override val name` is read with
