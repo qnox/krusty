@@ -103,16 +103,9 @@ pub fn expect_native_decline(src: &str, stem: &str, reason: &str) {
     }
 }
 
-/// [`expect_native_decline`] for a multi-file module, comparing the COMPLETE decline: `sources`
-/// is `(stem, text)`, and `reason` is the whole diagnostic the backend gives.
-pub fn expect_native_sources_decline(sources: &[(&str, &str)], reason: &str) {
-    if let Some(said) = native_decline(sources) {
-        assert_eq!(said, reason);
-    }
-}
-
-/// What the native backend says declining `sources`, or `None` where this host cannot link.
-fn native_decline(sources: &[(&str, &str)]) -> Option<String> {
+/// What the native backend says declining the module `sources` (`(stem, text)`), or `None` where
+/// this host cannot link. Emitting or running the program fails the test.
+pub fn native_decline(sources: &[(&str, &str)]) -> Option<String> {
     let target = krusty::native::NativeTarget::host()?;
     if !krusty::native::can_link(target) {
         return None;

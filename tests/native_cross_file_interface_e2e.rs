@@ -5,9 +5,14 @@
 //! calling file needs nothing but the number, so the interface, its implementors and the caller can
 //! sit in separate files. Each program is first run on the JVM, then on Native.
 
-use crate::common::{
-    expect_box_ok_files_with_stdlib, expect_native_sources, expect_native_sources_decline,
-};
+use crate::common::{expect_box_ok_files_with_stdlib, expect_native_sources, native_decline};
+
+/// The native backend must decline the module `sources` with exactly `reason`.
+fn expect_native_sources_decline(sources: &[(&str, &str)], reason: &str) {
+    if let Some(said) = native_decline(sources) {
+        assert_eq!(said, reason);
+    }
+}
 
 /// A portable multi-file program: the JVM answer is established first, then Native must agree.
 fn expect_portable_sources(sources: &[(&str, &str)]) {
