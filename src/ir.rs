@@ -1092,6 +1092,17 @@ impl IrClass {
         self.fq_name
     }
 
+    /// A sealed classifier's direct subclasses in kotlinc's order: by simple name, then by path.
+    pub(crate) fn sorted_sealed_subclasses(&self) -> Vec<TypeName> {
+        let mut subclasses: Vec<TypeName> = self.sealed_subclasses.iter_ids().collect();
+        subclasses.sort_by(|a, b| {
+            a.nested_segment_ref()
+                .cmp(b.nested_segment_ref())
+                .then_with(|| a.path_cmp(*b))
+        });
+        subclasses
+    }
+
     /// Whether the property named `name` carries `@JvmField`. Production common lowering retains the
     /// resolved annotation identity on [`IrProperty`]; the richer field-annotation record remains the
     /// legacy metadata path's equivalent source of the same semantic fact.

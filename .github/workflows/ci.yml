@@ -60,7 +60,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.cache/krusty/plugin-host
-          key: plugin-host-${{ hashFiles('crates/krusty-plugin-host/src/pins/*.tsv', 'crates/krusty-plugin-host/adapter/*') }}
+          key: plugin-host-${{ hashFiles('crates/krusty-plugin-host/src/pins/*.tsv', 'crates/krusty-plugin-host/adapter/*', 'crates/krusty-plugin-host/ksp-adapter/**') }}
       # Outside the default members and the coverage packages, so no other job runs its tests.
       - name: plugin host tests
         run: cargo test -p krusty-plugin-host -- --include-ignored
@@ -598,6 +598,11 @@ jobs:
       - name: run non-box conformance ${{ matrix.version }}
         if: matrix.target == 'jvm'
         env:
+          # Required KSP/serialization toolchains can be cold. Keep the local 120-second default;
+          # this complete CI pass includes provisioning, processor compilation and code generation.
+          KRUSTY_CONFORMANCE_TIMEOUT_SECONDS: "600"
+          # The pinned KSP compiler needs JDK 21; reuse it instead of downloading another JDK.
+          KSP_E2E_JDK: ${{ env.JAVA_HOME_21_X64 }}
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
           KRUSTY_RECORD_CLASS_DUMPS: "0"
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}
@@ -649,7 +654,7 @@ jobs:
   # which fails this aggregate too.
   ci-and-conformance:
     name: ci-and-conformance
-    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools]
+    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, bazel]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -662,6 +667,7 @@ jobs:
           GRADLE_PLUGIN_RESULT: ${{ needs.build-gradle-plugin.result }}
           GRADLE_RESULT: ${{ needs.gradle.result }}
           BUILD_TOOLS_RESULT: ${{ needs.build-tools.result }}
+          BAZEL_RESULT: ${{ needs.bazel.result }}
         run: |
           echo "ci: $CI_RESULT"
           echo "lint: $LINT_RESULT"
@@ -670,14 +676,16 @@ jobs:
           echo "build-gradle-plugin: $GRADLE_PLUGIN_RESULT"
           echo "gradle: $GRADLE_RESULT"
           echo "build-tools: $BUILD_TOOLS_RESULT"
+          echo "bazel: $BAZEL_RESULT"
           if [ "$CI_RESULT" != success ] \
             || [ "$LINT_RESULT" != success ] \
             || [ "$CONFORMANCE_RESULT" != success ] \
             || [ "$KLIB_CONFORMANCE_RESULT" != success ] \
             || [ "$GRADLE_PLUGIN_RESULT" != success ] \
             || [ "$GRADLE_RESULT" != success ] \
-            || [ "$BUILD_TOOLS_RESULT" != success ]; then
-            echo "lint, coverage, conformance (including KLIB semantics), every Gradle gate, and every build-tools lane must succeed" >&2
+            || [ "$BUILD_TOOLS_RESULT" != success ] \
+            || [ "$BAZEL_RESULT" != success ]; then
+            echo "lint, coverage, conformance (including KLIB semantics), every Gradle gate, every build-tools lane, and every Bazel lane must succeed" >&2
             exit 1
           fi
 
@@ -832,6 +840,36 @@ jobs:
           KRUSTY_GRADLE_BIN=$(command -v gradle) \
             ./krusty-build-tests --ignored $tests
 
+  # Build Kotlin with the Bazel module the release would publish, as a consumer depends on it,
+  # with the toolchain's compiler and an override, in action and worker mode.
+  bazel:
+    needs: [build-tool-bins]
+    strategy:
+      fail-fast: false
+      matrix:
+        bazel: [8.4.2, 9.3.1]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - uses: actions/download-artifact@v8
+        with:
+          name: tool-bins
+      - name: build the packaged Bazel module with Bazel ${{ matrix.bazel }}
+        env:
+          USE_BAZEL_VERSION: ${{ matrix.bazel }}
+        run: |
+          set -euo pipefail
+          chmod +x krusty
+          kotlin=$(just max-version)
+          curl -fsSLo "$RUNNER_TEMP/kotlin-stdlib.jar" \
+            "https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/$kotlin/kotlin-stdlib-$kotlin.jar"
+          scripts/bazel-smoke.sh "$PWD/krusty" "$RUNNER_TEMP/kotlin-stdlib.jar"
+
   # Build the release binaries per OS/arch only after coverage proves that this master commit is
   # still the publishable tip. Superseded master runs keep all validation but do not occupy six
   # runners with artifacts the monotonic publisher will reject. Cap the surviving matrix so release
@@ -903,7 +941,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, build-tool-bins, build-release]
+    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, bazel, build-tool-bins, build-release]
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     # Shorter than the release lock's TTL, so a lock that outlives it belongs to a dead job.
@@ -971,6 +1009,10 @@ jobs:
         if: steps.tip.outputs.publish == 'true'
         shell: bash
         run: just package-zed
+      # The Bazel module of this release, naming the SHA-256 of each compiler archive above.
+      - name: package Bazel module
+        if: steps.tip.outputs.publish == 'true'
+        run: scripts/package-bazel-module.sh "${{ steps.v.outputs.ver }}" dist
       - name: publish
         if: steps.tip.outputs.publish == 'true'
         uses: softprops/action-gh-release@v3
@@ -978,6 +1020,8 @@ jobs:
           tag_name: ${{ steps.v.outputs.tag }}
           name: "krusty ${{ steps.v.outputs.ver }}: Kotlin compiler written in Rust"
           target_commitish: ${{ github.sha }}
+          # The titles of the pull requests merged since the previous release, each linked.
+          generate_release_notes: true
           files: dist/**
           fail_on_unmatched_files: true
       # The Gradle Plugin Portal gets every published release under the same version. A Portal

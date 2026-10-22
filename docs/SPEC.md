@@ -6475,6 +6475,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Plain line breaks only; an explicit `;` still terminates the expression. Test:
   `nested_string_template_e2e::template_interpolation_allows_newlines_around_expression`.
 
+- **A cast continues across line breaks on either side of `as`/`as?`.** `asExpression:
+  prefixUnaryExpression (NL* asOperator NL* type)*` per the Kotlin grammar, so `value` then
+  `as? String` then `?: "none"` on separate lines is one expression, and `x as` may leave its type
+  on the next line. Plain line breaks only; an explicit `;` still ends the operand. `as` cannot
+  begin a statement, so looking past the line breaks never joins two statements. Test:
+  `cast_line_break_e2e`.
+
 - **A Java source class sees the member types it inherits.** A simple type name inside a Java class
   body denotes a member type declared in the class, else one inherited from its supertypes (JLS
   §8.5), before the enclosing class, imports, and package are consulted; two distinct inherited
@@ -11357,6 +11364,35 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   whole mask), and the class's `$childSerializers` has no `access$get$childSerializers$cp`, which
   only a `$serializer` reads. A subclass reads its own cache after the parent's `write$Self` runs.
   Test: `tests/abstract_serializable_e2e.rs`.
+- **A serializable sealed class caches a `SealedClassSerializer` over its concrete subclasses.**
+  A non-generic sealed `@Serializable` class gets no `$serializer`. Its `Companion.serializer()`
+  returns `new SealedClassSerializer(<serial name>, C::class, [Sub::class…], [<Sub serializer>…],
+  <serial-info annotations>)`, cached in a `$cachedSerializer$delegate` exactly like an abstract
+  class's. The class keeps `write$Self` and its deserialization constructor, and a subclass
+  serializes the sealed parent's elements first. The subclasses are the sealed class's direct
+  subclasses in metadata order (by simple name, then by path), with every sealed subclass
+  replaced, recursively, by its own subclasses. A subclass's serializer is its
+  `$serializer.INSTANCE`, an object's `ObjectSerializer`, or, for a generic subclass,
+  `new Sub$$serializer(PolymorphicSerializer(B::class, []), …)` with one operand per type
+  parameter. `B` is the parameter's representative upper bound, as kotlinc's
+  `getRepresentativeUpperBound` picks it: the first bound that is a class rather than an interface,
+  else the first bound, else `Any` (`Free<T>` uses `Any`, `Bounded<T : Bound>` uses `Bound`,
+  `Marked<T : Marker>` uses `Marker`, and `T : Marker, T : Bound` uses `Bound`). A bound that is
+  itself a type parameter is not supported yet: its serializer stays an unresolved plugin
+  placeholder, so krusty declines the file instead of giving it another serializer. The cache's `access$…$cp` accessor follows the private primary's marker accessor. A
+  sealed interface builds the same serializer in its companion's `serializer()`. An element typed
+  by a sealed class, a sealed interface or a non-generic abstract class reads that type's
+  `Companion.serializer()` through the child-serializer cache. Test:
+  `tests/sealed_serializable_e2e.rs`.
+- **A subclass reaches a private primary constructor's accessor on the delegation line.** The
+  `DefaultConstructorMarker` null that the call to a sealed or value-class primary's accessor
+  appends has no position. When the delegation's arguments sit on another line, the line entry
+  returns at the `invokespecial` itself, not at the marker. Test:
+  `tests/sealed_serializable_e2e.rs` (`Expr$Lit`).
+- **A sealed class's `PermittedSubclasses` attribute follows `BootstrapMethods`.** kotlinc's class
+  writer appends the bootstrap table before the permitted subclasses, so a sealed class with an
+  `invokedynamic` (such as a cached serializer's `lazy` initializer) writes them in that order.
+  Test: `tests/sealed_serializable_e2e.rs` (`Expr$Bin`).
 - **`write$Self` reads an overridable property through its getter.** It reads a final property's
   backing field, as kotlinc's JVM lowering does for a default getter, but an open or overriding
   property's getter can be overridden, so kotlinc calls it: `override val name` is read with
@@ -14788,8 +14824,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   flags are present, independent of order. Kotlinc's command-line configuration warnings remain
   visible under plain `-nowarn`. An explicit named `warning`, `error`, or `disabled` level wins over
   either global flag. Gradle's `compilerOptions.allWarningsAsErrors` forwards `-Werror` into that
-  same policy. `compilerVersion` must equal the applied Kotlin Gradle plugin version, which must be
-  an exact supported release; a pre-release or RC suffix is rejected.
+  same policy. A `compilerVersion` other than the applied Kotlin Gradle plugin version, or a Kotlin
+  Gradle plugin version that is not an exact supported release (a pre-release, RC, or dev suffix
+  included), leaves the compile to kotlinc, reported.
   (`warning_level_configures_named_diagnostics` in `crates/krusty-cli/src/cli.rs`;
   `named_warning_policy_controls_deprecation` in `tests/deprecation_usage_e2e.rs`;
   `warning_level_is_forwarded_to_the_typed_cli_policy` in `crates/krusty-cli/src/worker.rs`;

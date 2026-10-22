@@ -1,4 +1,4 @@
-//! The command-line contract `bazel/defs.bzl` depends on.
+//! The command-line contract `tools/krusty-bazel/defs.bzl` depends on.
 //!
 //! The Starlark rule is not executable from this test suite — it needs a bazel invocation — but
 //! everything it assumes about the krusty CLI is: a `@file` param file in Bazel's `multiline`
@@ -252,7 +252,7 @@ fn a_broken_source_fails_the_action() {
 ///
 /// This is the binary-side end-to-end proof for `use_worker = True`: translation unit tests cover
 /// the argument surface, while this exercises the real long-lived binary and declared outputs. The
-/// Starlark action itself is covered by the real Bazel smoke described in `bazel/intellij.md`.
+/// Starlark action itself is covered by the real Bazel smoke described in `tools/krusty-bazel/intellij.md`.
 #[test]
 fn the_persistent_worker_serves_intellijs_argument_surface() {
     let dir = workspace("worker");

@@ -165,7 +165,6 @@ fn serializable_superclass(ctx: &PluginContext, ir: &IrFile, class_id: ClassId) 
         && custom_serializer_of(ctx, ir, parent).is_none()
         && !class.is_enum
         && !class.is_object
-        && !class.is_sealed
         && !class.is_value
         && ir
             .class_signature_name(superclass)

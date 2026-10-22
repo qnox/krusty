@@ -2,7 +2,8 @@
 //!
 //! kotlinc builds the primary constructor's delegating call at the declaration's start, annotations
 //! included, so its operands mark their own lines and the call itself is back on that line. The
-//! placeholders of omitted defaults, the mask words and the marker belong to the call as well.
+//! placeholders of omitted defaults, the mask words and their marker belong to the call as well;
+//! the marker of a private constructor's accessor has no position of its own.
 
 use super::*;
 
@@ -35,16 +36,17 @@ impl Emitter<'_> {
         let super_args = capture_order::physical_for(self.ir, c.superclass, c.super_args.clone());
         self.emit_constructor_delegation_arguments(&super_args, &super_ctor_params, &[], ctor);
         // The call is back on the delegation's line after an operand on another, at its first
-        // synthesized operand when it has one.
-        if let Some(line) = delegation_line {
-            ctor.mark_line(line);
-        }
+        // default mask when it has one. The marker an accessor call appends carries no position,
+        // so without masks the line returns at the call itself.
         let super_defaults = self
             .ir
             .super_constructor_default_arguments
             .get(&c.fq_name_id())
             .map(Vec::as_slice)
             .unwrap_or_default();
+        if let Some(line) = delegation_line.filter(|_| !super_defaults.is_empty()) {
+            ctor.mark_line(line);
+        }
         if !super_defaults.is_empty() {
             super_param_tys = jvm_tys(&super_ctor_params);
             for mask in constructor_default_masks(super_defaults, super_ctor_params.len()) {
@@ -55,6 +57,9 @@ impl Emitter<'_> {
             super_param_tys.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
         } else if super_accessor {
             ctor.aconst_null();
+        }
+        if let Some(line) = delegation_line.filter(|_| super_defaults.is_empty()) {
+            ctor.mark_line(line);
         }
         let aw: i32 = super_param_tys.iter().map(|t| slot_words(*t) as i32).sum();
         let super_descriptor = self

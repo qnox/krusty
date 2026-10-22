@@ -50,7 +50,9 @@ import javax.inject.Inject
  * A compile that requests a compiler plugin (Compose, Parcelize, any third-party FIR/IR plugin) or
  * a kotlinc argument krusty does not implement stays with kotlinc: a check task asks the krusty
  * binary what of the request it refuses, reports it, and then the Kotlin task runs instead of its
- * replacement. kapt's stub generation is never replaced; see [replaceKotlinJvmCompiles].
+ * replacement. So does a request this plugin cannot derive krusty's arguments from, such as a free
+ * argument that reaches a plugin-owned one. kapt's stub generation is never replaced; see
+ * [replaceKotlinJvmCompiles].
  */
 abstract class KrustyKotlinPlugin @Inject constructor(
     private val javaToolchains: JavaToolchainService,
@@ -154,9 +156,12 @@ private fun replaceKotlinJvmCompiles(
             .orElse(project.providers.environmentVariable("KRUSTY_BIN"))
             .orElse(releasedBinary)
         val compilerPluginArguments = kotlinTask.pluginOptions.map(::pluginOptionArguments)
-        val kotlincArguments = pluginVersion.map { version ->
-            compilerArguments(kotlinTask, supportedKotlinPluginVersion(version))
+        val compilerVersion = project.extensions.getByType(KotlinTopLevelExtension::class.java)
+            .compilerVersion.orElse(pluginVersion)
+        val request = pluginVersion.zip(compilerVersion) { version, compiler ->
+            kotlincRequest(kotlinTask, version, compiler)
         }
+        val kotlincArguments = request.map(KotlincRequest::arguments)
         val compilerChoice = project.layout.buildDirectory
             .file("krusty/${kotlinTask.name}/refusals.txt").get().asFile
         val supportCheck = project.tasks.register(
@@ -166,6 +171,7 @@ private fun replaceKotlinJvmCompiles(
             description = "Checks whether krusty implements everything ${kotlinTask.path} requests"
             compileTaskPath.set(kotlinTask.path)
             compilerArguments.set(kotlincArguments)
+            pluginRefusals.set(request.map(KotlincRequest::refusals))
             compilerPluginClasspath.from(kotlinTask.pluginClasspath)
             compilerPluginOptions.set(compilerPluginArguments)
             kotlinPluginVersion.set(pluginVersion)
@@ -189,10 +195,6 @@ private fun replaceKotlinJvmCompiles(
             // classpath (`-Xplugin`) and its per-plugin options (`-P plugin:<id>:<key>=<value>`).
             compilerPluginClasspath.from(kotlinTask.pluginClasspath)
             compilerPluginOptions.set(compilerPluginArguments)
-            compilerVersion.set(
-                project.extensions.getByType(KotlinTopLevelExtension::class.java)
-                    .compilerVersion.orElse(pluginVersion),
-            )
             binary.set(project.layout.file(binaryPath.map(::File)))
             // A build that adds a source directory by path wires its generator onto the Kotlin
             // task (`compileKotlin { dependsOn(generator) }`), not onto the directory. The compile
@@ -299,9 +301,6 @@ abstract class KrustyCompileTask @Inject constructor(
     @get:Input
     abstract val kotlinPluginVersion: Property<String>
 
-    @get:Input
-    abstract val compilerVersion: Property<String>
-
     @get:Classpath
     abstract val compilerPluginClasspath: ConfigurableFileCollection
 
@@ -366,11 +365,6 @@ abstract class KrustyCompileTask @Inject constructor(
             )
         }
         val pluginVersion = supportedKotlinPluginVersion(kotlinPluginVersion.get())
-        if (compilerVersion.get() != pluginVersion) {
-            throw GradleException(
-                "Kotlin compiler ${compilerVersion.get()} differs from Kotlin Gradle plugin $pluginVersion",
-            )
-        }
         if (!compilerPluginClasspath.isEmpty) {
             arguments.add(
                 "-Xplugin=" + compilerPluginClasspath.files.joinToString(",", transform = File::getAbsolutePath),
@@ -412,7 +406,8 @@ abstract class KrustyCompileTask @Inject constructor(
  * Asks the krusty binary which of a compile's kotlinc arguments and requested compiler plugins it
  * refuses, and records them, one per line, in [refusals]: an empty file means krusty compiles the
  * request itself. The binary's argument dispositions and plugin registry are the single place that
- * knows what krusty implements.
+ * knows what krusty implements. A request this plugin cannot derive krusty's arguments from
+ * ([pluginRefusals]) is refused without asking.
  */
 abstract class KrustySupportCheckTask @Inject constructor(
     private val execOperations: ExecOperations,
@@ -422,6 +417,9 @@ abstract class KrustySupportCheckTask @Inject constructor(
 
     @get:Input
     abstract val compilerArguments: ListProperty<String>
+
+    @get:Input
+    abstract val pluginRefusals: ListProperty<String>
 
     @get:Classpath
     abstract val compilerPluginClasspath: ConfigurableFileCollection
@@ -441,6 +439,11 @@ abstract class KrustySupportCheckTask @Inject constructor(
 
     @TaskAction
     fun check() {
+        val refusedByPlugin = pluginRefusals.get()
+        if (refusedByPlugin.isNotEmpty()) {
+            record(refusedByPlugin)
+            return
+        }
         val arguments = ArrayList<String>()
         arguments.add("refusals")
         arguments.addAll(compilerArguments.get())
@@ -467,19 +470,21 @@ abstract class KrustySupportCheckTask @Inject constructor(
         val refused = output.toString(Charsets.UTF_8).lines().filter(String::isNotBlank)
         when (result.exitValue) {
             0 -> refusals.get().asFile.writeText("")
-            1 -> {
-                logger.warn(
-                    "krusty: task '{}' is left to kotlinc: krusty does not implement everything it requests\n{}",
-                    compileTaskPath.get(),
-                    refused.joinToString("\n") { "  $it" },
-                )
-                refusals.get().asFile.writeText(refused.joinToString("\n", postfix = "\n"))
-            }
+            1 -> record(refused)
             // A command line kotlinc itself rejects is no refusal: the build fails with the
             // errors the compilation would report, and neither compiler runs.
             2 -> throw GradleException(errors.toString(Charsets.UTF_8).trimEnd())
             else -> throw GradleException("$executable exited with ${result.exitValue} for $path")
         }
+    }
+
+    private fun record(refused: List<String>) {
+        logger.warn(
+            "krusty: task '{}' is left to kotlinc: krusty does not implement everything it requests\n{}",
+            compileTaskPath.get(),
+            refused.joinToString("\n") { "  $it" },
+        )
+        refusals.get().asFile.writeText(refused.joinToString("\n", postfix = "\n"))
     }
 }
 
@@ -503,38 +508,55 @@ private fun validateJvmTargets(kotlin: String, java: String, mode: String, warn:
     }
 }
 
-private fun compilerArguments(task: KotlinJvmCompile, kotlinVersion: String): List<String> {
-    val options = task.compilerOptions
-    fun reject(condition: Boolean, name: String) {
-        if (condition) throw GradleException("krusty does not support compilerOptions.$name")
+/**
+ * The kotlinc arguments krusty receives for a compile, derived from its structured task inputs and
+ * its free arguments, or the reasons this plugin cannot derive them. A compile with refusals is
+ * left to kotlinc, which receives the task's own request unchanged.
+ */
+private class KotlincRequest(val arguments: List<String>, val refusals: List<String>)
+
+private fun kotlincRequest(task: KotlinJvmCompile, pluginVersion: String, compilerVersion: String): KotlincRequest {
+    fun refused(reason: String) = KotlincRequest(emptyList(), listOf(reason))
+    if (pluginVersion !in supportedKotlinVersions) {
+        return refused(unsupportedKotlinPluginVersion(pluginVersion))
     }
+    if (compilerVersion != pluginVersion) {
+        return refused("Kotlin compiler $compilerVersion differs from Kotlin Gradle plugin $pluginVersion")
+    }
+    val options = task.compilerOptions
+    val unsupported = listOf(
+        "extraWarnings" to options.extraWarnings,
+        "suppressWarnings" to options.suppressWarnings,
+        // Named `-Xwarning-level` policy is forwarded to the compiler, whose diagnostic registry
+        // is the authoritative place to validate names and apply severities. `-Werror` is the
+        // global form of that policy: the compiler fails the compilation when any warning is
+        // emitted.
+        "verbose" to options.verbose,
+        "multiPlatformEnabled" to task.multiPlatformEnabled,
+        // `useModuleDetection` (set on every Android compile) only configures kotlinc's
+        // multi-module incremental compilation, never a compiler argument; a full krusty compile
+        // has nothing to detect.
+    ).filter { (_, enabled) -> enabled.getOrElse(false) }
+        .map { (name, _) -> "krusty does not support compilerOptions.$name" }
+    if (unsupported.isNotEmpty()) return KotlincRequest(emptyList(), unsupported)
     val languageVersion = options.languageVersion.orNull?.version
     val apiVersion = options.apiVersion.orNull?.version
-    reject(options.extraWarnings.getOrElse(false), "extraWarnings")
-    reject(options.suppressWarnings.getOrElse(false), "suppressWarnings")
-    // Named `-Xwarning-level` policy is forwarded to the compiler, whose diagnostic registry is
-    // the authoritative place to validate names and apply severities. `-Werror` is the global
-    // form of that policy: the compiler fails the compilation when any warning is emitted.
-    reject(options.verbose.getOrElse(false), "verbose")
-    reject(task.multiPlatformEnabled.getOrElse(false), "multiPlatformEnabled")
-    // `useModuleDetection` (set on every Android compile) only configures kotlinc's multi-module
-    // incremental compilation, never a compiler argument; a full krusty compile has nothing to detect.
 
-    val structuredOptIns = validateStructuredOptIns(options.optIn.getOrElse(emptyList()))
+    val structuredOptIns = options.optIn.getOrElse(emptyList())
     val freeArguments = options.freeCompilerArgs.getOrElse(emptyList())
-    val arguments = validateFreeArguments(freeArguments, kotlinVersion)
+    structuredOptInRefusal(structuredOptIns)?.let { return refused(it) }
+    freeArgumentRefusal(freeArguments, pluginVersion)?.let { return refused(it) }
     structuredOptIns.firstOrNull { marker -> "-opt-in=$marker" in freeArguments }?.let { marker ->
-        throw GradleException(
+        return refused(
             "compilerOptions.optIn and freeCompilerArg '-opt-in=$marker' both request marker '$marker'; configure exactly one",
         )
     }
     freeArguments.firstOrNull(::isFreeJvmDefault)?.let { free ->
         if (options.jvmDefault.orNull != null) {
-            throw GradleException(
-                "compilerOptions.jvmDefault and freeCompilerArg '$free' are both set; configure exactly one",
-            )
+            return refused("compilerOptions.jvmDefault and freeCompilerArg '$free' are both set; configure exactly one")
         }
     }
+    val arguments = ArrayList(freeArguments)
     languageVersion?.let { arguments.addPair("-language-version", it) }
     apiVersion?.let { arguments.addPair("-api-version", it) }
     structuredOptIns.forEach { marker ->
@@ -551,34 +573,34 @@ private fun compilerArguments(task: KotlinJvmCompile, kotlinVersion: String): Li
     if (options.allWarningsAsErrors.getOrElse(false) && "-Werror" !in freeArguments) {
         arguments.add("-Werror")
     }
-    return arguments
+    return KotlincRequest(arguments, emptyList())
 }
 
 private fun isFreeJvmDefault(argument: String): Boolean =
     argument == "-jvm-default" || argument == "-Xjvm-default" ||
         argument.startsWith("-jvm-default=") || argument.startsWith("-Xjvm-default=")
 
-private fun validateStructuredOptIns(markers: List<String>): List<String> {
+private fun structuredOptInRefusal(markers: List<String>): String? {
     val seen = HashSet<String>()
     for (marker in markers) {
-        if (marker.isBlank()) {
-            throw GradleException("compilerOptions.optIn contains an empty marker")
-        }
-        if (!seen.add(marker)) {
-            throw GradleException("compilerOptions.optIn contains duplicate marker '$marker'")
-        }
+        if (marker.isBlank()) return "compilerOptions.optIn contains an empty marker"
+        if (!seen.add(marker)) return "compilerOptions.optIn contains duplicate marker '$marker'"
     }
-    return markers
+    return null
 }
 
 private fun supportedKotlinPluginVersion(version: String): String =
     if (version in supportedKotlinVersions) {
         version
     } else {
-        val expected = supportedKotlinVersions.dropLast(1).joinToString(", ") +
-            ", or " + supportedKotlinVersions.last()
-        throw GradleException("unsupported Kotlin Gradle plugin $version; expected $expected")
+        throw GradleException(unsupportedKotlinPluginVersion(version))
     }
+
+private fun unsupportedKotlinPluginVersion(version: String): String {
+    val expected = supportedKotlinVersions.dropLast(1).joinToString(", ") +
+        ", or " + supportedKotlinVersions.last()
+    return "unsupported Kotlin Gradle plugin $version; expected $expected"
+}
 
 private fun MutableList<String>.addPair(name: String, value: String) {
     add(name)

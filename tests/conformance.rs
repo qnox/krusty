@@ -30,8 +30,6 @@ mod kotlin_box_wasm_conformance;
 mod kotlin_cli_jvm_conformance;
 #[path = "common/kotlin_native_multimodule.rs"]
 mod kotlin_native_multimodule_support;
-#[path = "ksp_real_e2e.rs"]
-mod ksp_real_e2e;
 mod multimodule_conformance_cases;
 #[path = "common/reference_recording.rs"]
 mod reference_recording_support;

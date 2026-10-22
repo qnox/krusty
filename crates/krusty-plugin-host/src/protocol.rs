@@ -22,7 +22,7 @@ const HELLO: u8 = 0;
 const LOAD: u8 = 1;
 const LOADED: u8 = 2;
 const FAILED: u8 = 3;
-const SHUTDOWN: u8 = 4;
+pub(crate) const SHUTDOWN: u8 = 4;
 const UNLOAD: u8 = 5;
 const UNLOADED: u8 = 6;
 const OPEN_SESSION: u8 = 7;
@@ -61,7 +61,6 @@ pub(crate) enum Request<'a> {
     Resolve(&'a [CallableIdentity]),
     /// Build the module's IR in the session and run the loaded plugins' IR generation over it.
     Generate(&'a ModuleIr),
-    Shutdown,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -127,7 +126,6 @@ pub(crate) fn write_request(out: &mut impl Write, request: &Request) -> io::Resu
             payload.push(GENERATE);
             module_ir::put_module(&mut payload, module);
         }
-        Request::Shutdown => payload.push(SHUTDOWN),
     }
     write_frame(out, &payload)
 }
@@ -171,14 +169,14 @@ pub(crate) fn read_reply(input: &mut impl Read) -> io::Result<Reply> {
     }
 }
 
-fn write_frame(out: &mut impl Write, payload: &[u8]) -> io::Result<()> {
+pub(crate) fn write_frame(out: &mut impl Write, payload: &[u8]) -> io::Result<()> {
     let length = u32::try_from(payload.len()).map_err(|_| malformed("a frame over 4 GB".into()))?;
     out.write_all(&length.to_be_bytes())?;
     out.write_all(payload)?;
     out.flush()
 }
 
-fn read_frame(input: &mut impl Read) -> io::Result<Vec<u8>> {
+pub(crate) fn read_frame(input: &mut impl Read) -> io::Result<Vec<u8>> {
     let mut length = [0u8; 4];
     input.read_exact(&mut length)?;
     let length = u32::from_be_bytes(length);
@@ -192,7 +190,7 @@ fn read_frame(input: &mut impl Read) -> io::Result<Vec<u8>> {
 
 /// A path as the host reads it. kotlinc takes paths as strings, so one that is not UTF-8 cannot be
 /// passed on unchanged.
-fn utf8(path: &std::path::Path) -> io::Result<&str> {
+pub(crate) fn utf8(path: &std::path::Path) -> io::Result<&str> {
     path.to_str().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -270,19 +268,23 @@ fn put_argument(payload: &mut Vec<u8>, argument: &TypeArgument) {
     }
 }
 
-fn put_str(payload: &mut Vec<u8>, value: &str) {
+pub(crate) fn put_str(payload: &mut Vec<u8>, value: &str) {
     payload.extend_from_slice(&(value.len() as u32).to_be_bytes());
     payload.extend_from_slice(value.as_bytes());
 }
 
-fn put_list<T>(payload: &mut Vec<u8>, items: &[T], mut put: impl FnMut(&mut Vec<u8>, &T)) {
+pub(crate) fn put_list<T>(
+    payload: &mut Vec<u8>,
+    items: &[T],
+    mut put: impl FnMut(&mut Vec<u8>, &T),
+) {
     payload.extend_from_slice(&(items.len() as u32).to_be_bytes());
     for item in items {
         put(payload, item);
     }
 }
 
-struct Payload<'a>(&'a [u8]);
+pub(crate) struct Payload<'a>(pub(crate) &'a [u8]);
 
 impl Payload<'_> {
     fn take(&mut self, n: usize) -> io::Result<&[u8]> {
@@ -294,22 +296,22 @@ impl Payload<'_> {
         Ok(head)
     }
 
-    fn byte(&mut self) -> io::Result<u8> {
+    pub(crate) fn byte(&mut self) -> io::Result<u8> {
         Ok(self.take(1)?[0])
     }
 
-    fn u32(&mut self) -> io::Result<u32> {
+    pub(crate) fn u32(&mut self) -> io::Result<u32> {
         let bytes = self.take(4)?;
         Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 
-    fn string(&mut self) -> io::Result<String> {
+    pub(crate) fn string(&mut self) -> io::Result<String> {
         let length = self.u32()? as usize;
         String::from_utf8(self.take(length)?.to_vec())
             .map_err(|_| malformed("a string that is not UTF-8".into()))
     }
 
-    fn list<T>(
+    pub(crate) fn list<T>(
         &mut self,
         mut element: impl FnMut(&mut Self) -> io::Result<T>,
     ) -> io::Result<Vec<T>> {
@@ -318,7 +320,7 @@ impl Payload<'_> {
     }
 }
 
-fn malformed(detail: String) -> io::Error {
+pub(crate) fn malformed(detail: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, detail)
 }
 

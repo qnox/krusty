@@ -46,3 +46,9 @@ test("og:image is an absolute URL to a built image of the declared size", () => 
   assert.equal(meta("property", "og:image:type"), "image/png");
   assert.ok(meta("property", "og:image:alt"));
 });
+
+test("structured data names the same image as the link-preview tags", () => {
+  const block = html.match(/<script type="application\/ld\+json">([^<]*)<\/script>/);
+  assert.ok(block, "missing JSON-LD block");
+  assert.equal(JSON.parse(block[1]).image, meta("property", "og:image"));
+});
