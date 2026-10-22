@@ -337,35 +337,26 @@ impl CallLinker for TemplateCalls<'_> {
                 "the provider realizes no declaration of the exact serialized callee".to_owned(),
             )));
         };
-        let (
-            ExternalCallableKind::Constructor,
-            Some(SemanticCallableOwner::Classifier(classifier)),
-        ) = (realization.kind, realization.declaration_owner)
-        else {
-            return Err(declined(KlibBodyDeclineReason::SignatureMismatch(format!(
-                "the serialized constructor is selected as a {:?} of {:?}",
-                realization.kind, realization.declaration_owner
-            ))));
-        };
-        // A class type parameter in a constructor parameter would need the call's class type
-        // arguments substituted, which this lowering does not model yet.
-        if realization.callable.context_count != 0
-            || realization
-                .callable
-                .params
-                .iter()
-                .any(|param| param.mentions_ty_param())
-        {
-            return Err(KlibBodyDeclineReason::UnsupportedOperation(
-                "a constructor call of a generic or contextual parameter list",
-            ));
-        }
+        let selected = realization
+            .klib_body_callable()
+            .filter(|selected| selected.identity() == &identity)
+            .ok_or_else(|| {
+                declined(KlibBodyDeclineReason::SignatureMismatch(
+                    "the constructor provider rebound a different declaration".to_owned(),
+                ))
+            })?;
+        let declaration =
+            super::constructor_calls::authenticate(selected, self.callees.declarations)
+                .map_err(declined)?;
         Ok(LinkedConstructor {
             target,
-            classifier,
-            params: realization.callable.params.clone(),
-            semantic_role: realization.callable.semantic_role,
+            declaration,
         })
+    }
+
+    fn constructor_bound(&self, parameters: &KlibTypeParameters, argument: Ty, bound: Ty) -> bool {
+        let oracle = crate::symbol_resolver::SourceOracle(self.callees.source);
+        super::constructor_bounds::satisfies(Some(&oracle), parameters, argument, bound)
     }
 
     fn link_accessor(

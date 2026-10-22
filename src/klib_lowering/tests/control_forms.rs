@@ -603,12 +603,13 @@ fn try_lowers_as_the_source_try_does() {
 }
 
 #[test]
-fn a_constructor_call_declines_by_its_form() {
+fn a_constructor_call_requires_an_exact_serialized_constructor() {
     let demo = demo(&[("f", &[T::Throwable], T::Nothing)], |_, body| {
         let KlibIrSignature::Public(signature) = body.function.signature.clone() else {
             unreachable!("a demo function is public");
         };
-        // Any constructor: the form declines before its callee is read.
+        // A constructor cannot borrow the identity of a top-level function. Its producer must
+        // actually publish that constructor declaration before a provider handle can be linked.
         let constructed = body.expr(
             T::Throwable,
             KlibIrExprKind::ConstructorCall {
@@ -625,7 +626,7 @@ fn a_constructor_call_declines_by_its_form() {
     });
     assert_eq!(
         demo.declined("f", &[]),
-        "the KLIB body of `demo.f` (it uses a constructor call)"
+        "the KLIB body of `demo.f` (it calls `demo.f`, which no reachable library serializes its declaration)"
     );
 }
 

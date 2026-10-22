@@ -18076,9 +18076,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   full bounds, variance and own/captured count. Provider lookup and both frozen declaration views
   retain that contract. Class formals are not function-owned constructor parameters: the callable
   invocation result stays `Unit`, without a function generic signature, even when source inference
-  constructs a parameterized class type. Retaining this header alone does not admit an unsupported
-  serialized constructor body or establish a checked class substitution.
-  Test: `klib_lowering::tests::constructor_contracts`.
+  constructs a parameterized class type. Ordinary bodies and prepared-inline templates share one
+  authenticator for the exact raw class membership, constructor slot, parameter identities,
+  visibility, declared defaults and packed-vararg position. The serialized result must be that
+  class applied to its own formals. Call-site class arguments bind simultaneously, satisfy every
+  substituted upper bound using authenticated caller bounds and explicit hierarchy evidence, and
+  produce exactly the declared class application. Constructor-owned generics and captured outer
+  formals remain unsupported. Constructors are explicit external construction leaves, even when
+  their KLIB contains a body; they are not emitted as ordinary top-level support functions.
+  Emission inventories walk only executed body expressions, not unused defaults or nested
+  declaration bodies, and do not widen the separate call-only intrinsic-root proof. A declared
+  default permits an omission but does not establish an available default implementation.
+  Tests: `klib_lowering::tests::constructor_contracts`, `::constructor_calls`.
 
 - **A KLIB vararg retains one packed array parameter.** The declaration's vararg position is
   frozen independently of call-site specialization, in the same context/extension/value ordering

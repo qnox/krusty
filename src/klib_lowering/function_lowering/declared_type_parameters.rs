@@ -121,6 +121,14 @@ pub(super) fn bind(
                 "type parameter {index} has different serialized and selected upper bounds"
             )));
         }
+        if !types.record_bounds(
+            selected.type_parameters()[index],
+            signature.formal_bounds[index].clone(),
+        ) {
+            return Err(mismatch(
+                "a function formal repeats an enclosing formal identity".to_owned(),
+            ));
+        }
     }
     if !reified.is_empty() {
         return Err(KlibBodyDeclineReason::UnsupportedDeclaration(

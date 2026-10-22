@@ -28,7 +28,7 @@ mod type_operators;
 use super::decline::KlibBodyDeclineReason;
 use super::function_lowering::FunctionHeader;
 use super::ir_builtins::IrBuiltinOperators;
-use super::klib_types::semantic_type;
+use super::klib_types::{semantic_type, KlibTypeParameters};
 use super::local_values::LocalValues;
 use crate::ir::{
     complete_bottom_value, Callee, ExprId, FunId, IrBindingStability, IrConst, IrExpr, IrFile,
@@ -98,15 +98,17 @@ pub(super) trait CallLinker {
     /// Whether `sub` is a subtype of `sup` in the calling compilation's semantic model, which a
     /// producer-checked body uses a value of the one where the other is expected for.
     fn is_subtype(&self, sub: Ty, sup: Ty) -> bool;
+
+    /// Constructor generic bounds consume explicit hierarchy/full-formal evidence without
+    /// changing the independent operand-coercion capability.
+    fn constructor_bound(&self, parameters: &KlibTypeParameters, argument: Ty, bound: Ty) -> bool;
 }
 
 /// The dependency constructor a constructor call invokes: the provider's identity, the class it
 /// constructs and its declared value parameters.
 pub(super) struct LinkedConstructor {
     pub(super) target: crate::fir::ExternalCallableId,
-    pub(super) classifier: TypeName,
-    pub(super) params: Vec<Ty>,
-    pub(super) semantic_role: Option<crate::types::SemanticCallRole>,
+    pub(super) declaration: super::constructor_calls::ConstructorDeclaration,
 }
 
 /// The dependency property a call of one of its accessors reads or writes, as a source access of

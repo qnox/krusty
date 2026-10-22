@@ -34,7 +34,7 @@ fn array_header_fixture(
     let contract = selected.class_contract().unwrap();
     let member = libraries
         .declaration_bodies()
-        .primitive_member_header(selected.identity(), &contract.signature)
+        .class_member_header(selected.identity(), &contract.signature)
         .unwrap()
         .unwrap();
     let mut class: KlibIrClass = member.class.clone();

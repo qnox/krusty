@@ -26,13 +26,29 @@ use crate::types::{builtin_semantic, type_name_child, wk, Ty, TyKind, TypeName};
 /// The type parameters a body may name, each bound to the semantic type parameter its
 /// declaration's provider record uses for it.
 #[derive(Clone, Debug, Default)]
-pub(super) struct KlibTypeParameters(HashMap<KlibIrSymbol, Ty>);
+pub(super) struct KlibTypeParameters {
+    bindings: HashMap<KlibIrSymbol, Ty>,
+    bounds: HashMap<String, Vec<Ty>>,
+}
 
 impl KlibTypeParameters {
     /// Bind the serialized type parameter `symbol` to `semantic`. A repeated symbol is a malformed
     /// declaration.
     pub(super) fn bind(&mut self, symbol: &KlibIrSymbol, semantic: Ty) -> bool {
-        self.0.insert(symbol.clone(), semantic).is_none()
+        self.bindings.insert(symbol.clone(), semantic).is_none()
+    }
+
+    pub(super) fn record_bounds(&mut self, formal: Ty, bounds: Vec<Ty>) -> bool {
+        let TyKind::TyParam(identity, _) = formal.kind() else {
+            return false;
+        };
+        self.bounds
+            .insert(identity.as_str().to_owned(), bounds)
+            .is_none()
+    }
+
+    pub(super) fn declared_bounds(&self, name: &str) -> Option<&[Ty]> {
+        self.bounds.get(name).map(Vec::as_slice)
     }
 }
 
@@ -63,27 +79,26 @@ pub(super) fn semantic_type(
             return Err(KlibBodyDeclineReason::UnsupportedType("an error type"))
         }
     };
-    let semantic =
-        match classifier.kind {
-            KlibIrSymbolKind::Class => {
-                class_type(arena, parameters, classifier, arguments, annotations)?
+    let semantic = match classifier.kind {
+        KlibIrSymbolKind::Class => {
+            class_type(arena, parameters, classifier, arguments, annotations)?
+        }
+        KlibIrSymbolKind::TypeParameter => {
+            if !arguments.is_empty() {
+                return Err(mismatch("a type parameter is applied to type arguments"));
             }
-            KlibIrSymbolKind::TypeParameter => {
-                if !arguments.is_empty() {
-                    return Err(mismatch("a type parameter is applied to type arguments"));
-                }
-                parameters.0.get(classifier).copied().ok_or(
-                    KlibBodyDeclineReason::UnsupportedType(
-                        "a type parameter its declaration does not bind",
-                    ),
-                )?
-            }
-            _ => {
-                return Err(KlibBodyDeclineReason::UnsupportedType(
-                    "a type whose classifier is not a class",
-                ))
-            }
-        };
+            parameters.bindings.get(classifier).copied().ok_or(
+                KlibBodyDeclineReason::UnsupportedType(
+                    "a type parameter its declaration does not bind",
+                ),
+            )?
+        }
+        _ => {
+            return Err(KlibBodyDeclineReason::UnsupportedType(
+                "a type whose classifier is not a class",
+            ))
+        }
+    };
     Ok(match nullability {
         KlibIrNullability::MarkedNullable => Ty::nullable(semantic),
         // A class type the serializer marks definitely non-null is its ordinary non-null type; on

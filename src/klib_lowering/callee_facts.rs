@@ -17,6 +17,8 @@ pub struct KlibCalleeFacts<'a> {
     callables: HashMap<&'a KlibDependencyCallable, IndexedKlibCallee<'a>>,
     /// Header evidence is not a checked source call which requires an executable export.
     selected: HashSet<&'a KlibDependencyCallable>,
+    /// Explicit same-compilation hierarchy evidence, used only for constructor bounds.
+    class_type_oracle: Option<&'a dyn crate::assignable::TypeOracle>,
 }
 
 #[derive(Clone)]
@@ -36,6 +38,55 @@ pub(super) enum KlibCalleeFact<'facts, 'callable> {
 }
 
 impl<'a> KlibCalleeFacts<'a> {
+    pub(crate) fn with_type_oracle(
+        mut self,
+        oracle: &'a dyn crate::assignable::TypeOracle,
+    ) -> Self {
+        self.class_type_oracle = Some(oracle);
+        self
+    }
+
+    pub(super) fn constructor_bound(
+        &self,
+        parameters: &super::klib_types::KlibTypeParameters,
+        argument: crate::types::Ty,
+        bound: crate::types::Ty,
+    ) -> bool {
+        super::constructor_bounds::satisfies(self.class_type_oracle, parameters, argument, bound)
+    }
+
+    pub(super) fn constructor(
+        &self,
+        identity: &KlibDependencyCallable,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<
+        Option<super::constructor_calls::ConstructorDeclaration>,
+        super::decline::KlibBodyDeclineReason,
+    > {
+        match self.get(identity) {
+            Some(KlibCalleeFact::Ambiguous) => {
+                Err(super::decline::KlibBodyDeclineReason::SignatureMismatch(
+                    "conflicting provider contracts for a constructor declaration".to_owned(),
+                ))
+            }
+            Some(KlibCalleeFact::Selected(callables))
+                if callables[0].kind() == crate::libraries::ExternalCallableKind::Constructor =>
+            {
+                super::constructor_calls::authenticate(callables[0], bodies).map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub(crate) fn authenticates_constructor(
+        &self,
+        identity: &KlibDependencyCallable,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<bool, super::decline::KlibBodyDeclineReason> {
+        self.constructor(identity, bodies)
+            .map(|constructor| constructor.is_some())
+    }
+
     /// Authenticate a declaration the target implements without lowering its serialized body.
     pub(crate) fn target_intrinsic(
         &self,

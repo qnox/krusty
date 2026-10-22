@@ -10,7 +10,7 @@ use crate::metadata::protobuf::Pb;
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{type_name, SemanticCallableOwner, Ty, TyKind, TypeVariance};
 
-fn different_mask(signature: &KlibPublicIdSignature) -> KlibPublicIdSignature {
+pub(super) fn different_mask(signature: &KlibPublicIdSignature) -> KlibPublicIdSignature {
     let mut strings = Vec::new();
     let mut common = Pb::new();
     for (field, segments) in [
@@ -90,7 +90,7 @@ fn klib_constructor_class_contract_survives_declared_and_frozen_views() {
     );
     let raw = libraries
         .declaration_bodies()
-        .primitive_member_header(&identity, &contract.signature)
+        .class_member_header(&identity, &contract.signature)
         .expect("the exact declaring class")
         .expect("the constructor is a direct class member");
     assert!(raw.function.constructor);

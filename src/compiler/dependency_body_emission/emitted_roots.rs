@@ -51,7 +51,7 @@ pub(super) fn declarations(
         let realization = match platform.external_callable_by_dependency(&identity) {
             Some((_, realization)) => realization,
             None if raw_header_capability && known_target.is_none() => {
-                pending.extend(bodies.direct_callees(&identity));
+                pending.extend(bodies.direct_body_callables(&identity));
                 continue;
             }
             None => {
@@ -67,6 +67,9 @@ pub(super) fn declarations(
             .klib_body_callable()
             .ok_or("a dependency provider has no KLIB body contract")?;
         let facts = capabilities.callees.with_declaration(selected);
+        let constructor = facts
+            .authenticates_constructor(&identity, bodies)
+            .map_err(|reason| format!("an invalid constructor declaration: {reason:?}"))?;
         let primitive = facts
             .common_primitive(&identity, bodies)
             .map_err(|reason| format!("an invalid common primitive declaration: {reason:?}"))?;
@@ -74,6 +77,7 @@ pub(super) fn declarations(
             .target_intrinsic(&identity, bodies, capabilities.target_realizes_intrinsic)
             .map_err(|reason| format!("an invalid target declaration: {reason:?}"))?;
         let emits_body = !externals.contains_key(&identity)
+            && !constructor
             && primitive.is_none()
             && target.is_none()
             && intrinsics.get(&identity).is_none()
@@ -90,7 +94,7 @@ pub(super) fn declarations(
             return Err(format!("a transitive KLIB body has no supported ordinary declaration contract: {identity:?}"));
         }
         if emits_body {
-            pending.extend(bodies.direct_callees(&identity));
+            pending.extend(bodies.direct_body_callables(&identity));
         }
         declarations.push(realization);
     }

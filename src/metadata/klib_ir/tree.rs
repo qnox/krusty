@@ -108,6 +108,19 @@ impl KlibIrArena {
         calls.into_iter()
     }
 
+    /// Calls and constructions reached by executing exactly this body. Parameter defaults and
+    /// nested declaration bodies are separate execution roots, not edges of this graph.
+    pub(crate) fn callable_symbols_in_body<'a>(
+        &'a self,
+        function: &'a KlibIrFunction,
+    ) -> impl Iterator<Item = &'a KlibIrSymbol> {
+        let mut pending = Vec::new();
+        if let Some(KlibIrBody::Block(statements)) = &function.body {
+            push_statement_expressions(self, statements, &mut pending);
+        }
+        self.callable_symbols_from(pending)
+    }
+
     /// Calls and constructions in a prepared body's executable graph, including defaults.
     /// This broader inventory is only for reference binding, not intrinsic-root authority.
     pub(crate) fn callable_symbols<'a>(
@@ -126,6 +139,13 @@ impl KlibIrArena {
                 .chain(&function.regular_parameters)
                 .filter_map(|parameter| parameter.default_value),
         );
+        self.callable_symbols_from(pending)
+    }
+
+    fn callable_symbols_from(
+        &self,
+        mut pending: Vec<KlibIrExprId>,
+    ) -> impl Iterator<Item = &KlibIrSymbol> {
         let mut calls = Vec::new();
         while let Some(id) = pending.pop() {
             let expression = self.expr(id);
@@ -878,6 +898,79 @@ mod tests {
                 .cloned()
                 .collect::<Vec<_>>(),
             [selected_callee]
+        );
+    }
+
+    #[test]
+    fn klib_constructor_inventory_excludes_unused_defaults_and_nested_declarations() {
+        let mut arena = KlibIrArena::default();
+        let ty = arena.push_type(KlibIrType::Error {
+            annotations: Vec::new(),
+        });
+        let constructor = |symbol| KlibIrExprKind::ConstructorCall {
+            access: KlibIrMemberAccess {
+                symbol,
+                arguments: KlibIrArguments::Flat(Vec::new()),
+                type_arguments: Vec::new(),
+                origin: None,
+            },
+            constructor_type_arguments: 0,
+        };
+        let executed = local(KlibIrSymbolKind::Constructor, 1);
+        let unused_default = local(KlibIrSymbolKind::Constructor, 2);
+        let nested = local(KlibIrSymbolKind::Constructor, 3);
+        let executed_expr = arena.push_expr(Some(ty), constructor(executed.clone()));
+        let default_expr = arena.push_expr(Some(ty), constructor(unused_default.clone()));
+        let nested_expr = arena.push_expr(Some(ty), constructor(nested));
+        let nested_function = arena.push_function(function(
+            local(KlibIrSymbolKind::Function, 11),
+            ty,
+            nested_expr,
+        ));
+        let block = arena.push_expr(
+            Some(ty),
+            KlibIrExprKind::Block {
+                statements: vec![
+                    KlibIrStatement::Function(nested_function),
+                    KlibIrStatement::Expression(executed_expr),
+                ],
+                origin: None,
+            },
+        );
+        let mut selected = function(local(KlibIrSymbolKind::Function, 10), ty, block);
+        selected.regular_parameters.push(KlibIrParameter {
+            base: KlibIrDeclarationBase {
+                symbol: local(KlibIrSymbolKind::ValueParameter, 12),
+                origin: "DEFINED".into(),
+                flags: 0,
+                annotations: Vec::new(),
+            },
+            name: "unused".into(),
+            ty,
+            vararg_element_type: None,
+            default_value: Some(default_expr),
+        });
+        let selected = arena.push_function(selected);
+        let selected = arena.function(selected);
+        assert_eq!(
+            arena
+                .callable_symbols_in_body(selected)
+                .cloned()
+                .collect::<Vec<_>>()
+                .as_slice(),
+            std::slice::from_ref(&executed)
+        );
+        assert_eq!(
+            arena.call_symbols_in_body(selected).count(),
+            0,
+            "construction is not intrinsic call-root evidence"
+        );
+        assert_eq!(
+            arena
+                .callable_symbols(selected)
+                .cloned()
+                .collect::<Vec<_>>(),
+            [unused_default, executed]
         );
     }
 

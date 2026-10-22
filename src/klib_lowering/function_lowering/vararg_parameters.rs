@@ -37,12 +37,12 @@ pub(super) fn reject_dispatch_marker(
 }
 
 #[derive(Default)]
-pub(super) struct VarargParameters {
+pub(in super::super) struct VarargParameters {
     index: Option<usize>,
 }
 
 impl VarargParameters {
-    pub(super) fn record(
+    pub(in super::super) fn record(
         &mut self,
         index: usize,
         regular_value: bool,
@@ -63,7 +63,7 @@ impl VarargParameters {
         Ok(())
     }
 
-    pub(super) fn authenticate(
+    pub(in super::super) fn authenticate(
         self,
         selected: Option<KlibBodyCallable<'_>>,
         companion_receiver: bool,

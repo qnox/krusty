@@ -5634,8 +5634,13 @@ non-inline callers, still reads the field directly. Test:
   target array representation and all existing-pass preservation gates still need validation.
 - Constructor provider lookup now preserves the exact declaring-class contract through both frozen
   views, including class formals, full bounds and variance. Invocation types remain `Unit` and do not
-  gain function-owned generic parameters. General raw constructor authentication, checked class
-  substitution and serialized constructor emission remain required before this enables execution.
+  gain function-owned generic parameters. Shared raw constructor authentication now checks direct
+  membership, complete class bounds, visibility, parameter roles, declared defaults and packed
+  varargs. Ordinary and prepared body lowering instantiate all class arguments together and retain
+  explicit external constructor handles instead of exporting constructor bodies as top-level
+  functions. Caller-bound proof is separate from casts/spreads; dependency planning walks only
+  executed constructor/call expressions, leaving intrinsic-root authority call-only. Full actual-KLIB
+  release and Native/Wasm runtime preservation remain landing gates for this execution path.
 - Declaration-owned vararg positions survive provider and frozen handoffs separately from
   call-site specialization. Raw/prepared headers authenticate the exact packed-array element and
   regular-value slot, including context/extension coordinates; dispatch markers are rejected.

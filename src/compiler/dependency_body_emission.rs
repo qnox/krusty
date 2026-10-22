@@ -82,7 +82,8 @@ pub(super) fn emit_dependencies<B: Backend>(
     let bodies = facts.bodies();
     let intrinsics = facts.intrinsics();
     let selected = source.callables.klib_body_callables();
-    let callees = KlibCalleeFacts::new(selected.iter().copied());
+    let type_oracle = crate::symbol_resolver::SourceOracle(platform);
+    let callees = KlibCalleeFacts::new(selected.iter().copied()).with_type_oracle(&type_oracle);
     let mut roots: Vec<crate::libraries::KlibBodyCallable<'_>> = Vec::new();
     for callable in selected.iter().copied().filter(|callable| {
         !support_state.emitted.contains_key(callable.identity())
@@ -151,7 +152,8 @@ pub(super) fn emit_dependencies<B: Backend>(
             declarations
                 .iter()
                 .filter_map(|declaration| declaration.klib_body_callable()),
-        );
+        )
+        .with_type_oracle(&type_oracle);
         let capabilities = DependencyLeafCapabilities {
             unit: &unit,
             callees: &callees,
@@ -391,9 +393,32 @@ fn prepare_bodyless_externals(
         if !visited.insert(identity.clone()) {
             continue;
         }
-        for callee in bodies.direct_callees(&identity) {
+        for callee in bodies.direct_body_callables(&identity) {
             if externals.contains_key(&callee) {
                 continue;
+            }
+            match capabilities
+                .callees
+                .authenticates_constructor(&callee, bodies)
+            {
+                Ok(true) => {
+                    let Some(external) = provider_external(platform, &callee, diags) else {
+                        return false;
+                    };
+                    externals.insert(
+                        callee,
+                        EmittedDependencyCallable::constructor(external.target()),
+                    );
+                    continue;
+                }
+                Ok(false) => {}
+                Err(reason) => {
+                    diags.error(
+                        Span::new(0, 0),
+                        format!("invalid KLIB constructor declaration: {reason:?}"),
+                    );
+                    return false;
+                }
             }
             if capabilities.folds_common_builtin(&callee) {
                 continue;

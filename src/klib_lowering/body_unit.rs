@@ -32,15 +32,21 @@ use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrBody, KlibIrFunction, Kl
 use crate::metadata::klib_ir::KlibIrSymbol;
 use crate::types::{Ty, TypeName};
 
-/// A dependency declaration emitted by an earlier support unit, rebound to this compilation's
-/// opaque provider handle while retaining the semantic receiver contract frozen at emission.
+/// An exact dependency edge linked outside this support unit. Body exports, target instruction
+/// leaves and constructor calls have distinct realization contracts.
 #[derive(Clone, Copy)]
 pub(crate) struct EmittedDependencyCallable {
     target: ExternalCallableId,
-    /// A target-supplied provider leaf is not a previously emitted body export.
-    target_intrinsic: Option<crate::libraries::CompilerIntrinsic>,
+    realization: DependencyExternalRealization,
     singleton_dispatch: Option<Ty>,
     singleton_classifier: Option<TypeName>,
+}
+
+#[derive(Clone, Copy)]
+enum DependencyExternalRealization {
+    EmittedBody,
+    TargetIntrinsic(crate::libraries::CompilerIntrinsic),
+    Constructor,
 }
 
 impl EmittedDependencyCallable {
@@ -51,7 +57,7 @@ impl EmittedDependencyCallable {
     ) -> Self {
         Self {
             target,
-            target_intrinsic: None,
+            realization: DependencyExternalRealization::EmittedBody,
             singleton_dispatch,
             singleton_classifier,
         }
@@ -66,9 +72,27 @@ impl EmittedDependencyCallable {
         operation: crate::libraries::CompilerIntrinsic,
     ) -> Self {
         Self {
-            target_intrinsic: Some(operation),
+            realization: DependencyExternalRealization::TargetIntrinsic(operation),
             ..Self::new(target, None, None)
         }
+    }
+
+    pub(crate) fn constructor(target: ExternalCallableId) -> Self {
+        Self {
+            realization: DependencyExternalRealization::Constructor,
+            ..Self::new(target, None, None)
+        }
+    }
+
+    fn target_intrinsic(self) -> Option<crate::libraries::CompilerIntrinsic> {
+        match self.realization {
+            DependencyExternalRealization::TargetIntrinsic(operation) => Some(operation),
+            _ => None,
+        }
+    }
+
+    fn is_constructor(self) -> bool {
+        matches!(self.realization, DependencyExternalRealization::Constructor)
     }
 
     pub(crate) fn singleton_dispatch(self) -> Option<Ty> {
@@ -476,11 +500,41 @@ impl CallLinker for Linker<'_, '_> {
 
     fn link_constructor(
         &mut self,
-        _callee: &KlibPublicIdSignature,
+        callee: &KlibPublicIdSignature,
     ) -> Result<LinkedConstructor, KlibBodyDeclineReason> {
-        Err(KlibBodyDeclineReason::UnsupportedOperation(
-            "a constructor call",
-        ))
+        let identity = self.callee_identity(callee)?;
+        let declaration = self
+            .sources
+            .callees
+            .constructor(&identity, self.sources.bodies)?
+            .ok_or_else(|| KlibBodyDeclineReason::UndeclaredCallee(Box::new(callee.clone())))?;
+        let target = self
+            .sources
+            .externals
+            .get(&identity)
+            .filter(|external| external.is_constructor())
+            .ok_or_else(|| {
+                KlibBodyDeclineReason::SignatureMismatch(
+                    "an authenticated constructor has no exact constructor external handle"
+                        .to_owned(),
+                )
+            })?
+            .target();
+        Ok(LinkedConstructor {
+            target,
+            declaration,
+        })
+    }
+
+    fn constructor_bound(
+        &self,
+        parameters: &super::klib_types::KlibTypeParameters,
+        argument: Ty,
+        bound: Ty,
+    ) -> bool {
+        self.sources
+            .callees
+            .constructor_bound(parameters, argument, bound)
     }
 
     fn singleton(&self, _classifier: TypeName) -> Result<(), KlibBodyDeclineReason> {
@@ -608,7 +662,12 @@ impl CallLinker for Linker<'_, '_> {
             });
         }
         if let Some(&emitted) = self.sources.externals.get(&identity) {
-            if let Some(operation) = emitted.target_intrinsic {
+            if emitted.is_constructor() {
+                return Err(callee_declined(KlibBodyDeclineReason::SignatureMismatch(
+                    "a constructor external is called as a function".to_owned(),
+                )));
+            }
+            if let Some(operation) = emitted.target_intrinsic() {
                 if self
                     .sources
                     .callees
@@ -621,7 +680,7 @@ impl CallLinker for Linker<'_, '_> {
                     )));
                 }
             }
-            let purpose = if emitted.target_intrinsic.is_some() || declaration.body.is_none() {
+            let purpose = if emitted.target_intrinsic().is_some() || declaration.body.is_none() {
                 HeaderPurpose::External
             } else {
                 HeaderPurpose::Body(emitted.singleton_dispatch())
@@ -649,7 +708,7 @@ impl CallLinker for Linker<'_, '_> {
                 ret,
                 context_count,
                 singleton_dispatch: emitted.singleton_classifier(),
-                type_parameters: if emitted.target_intrinsic.is_some() {
+                type_parameters: if emitted.target_intrinsic().is_some() {
                     selected
                         .and_then(|selected| selected.generic_signature())
                         .map_or_else(Vec::new, |signature| signature.formals.clone())
