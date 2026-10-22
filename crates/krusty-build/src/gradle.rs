@@ -761,18 +761,24 @@ mod tests {
 
         // A value-taking option introduced in 2.4.20 must consume its following token only under
         // the grammar of 2.4.20 and later. Under 2.4.0/2.4.10, the same token is an unknown -X option and
-        // the following free -d remains visible to the plugin-owned destination check.
-        // Under 2.4.20 the option is one krusty does not implement, so the compile is left to
-        // kotlinc rather than failing the build.
+        // the following free -d remains visible to the plugin-owned destination check, which
+        // leaves the compile to kotlinc without asking krusty. Under 2.4.20 the option is one
+        // krusty does not implement, so the compile is left to kotlinc too. kotlinc itself runs
+        // only where it reads the option: before 2.4.20 the probe stops after the check.
         let _ = std::fs::remove_file(&log);
         let _ = std::fs::remove_file(&fixture.probes);
-        let release_boundary = build()
-            .property("krusty.negative", "release-specific-argument-boundary")
-            .tasks([":compiler:util:compileKotlin"])
-            .run_output();
         let release = krusty::kotlin_version::KotlinVersion::parse(&kgp)
             .unwrap_or_else(|| panic!("Kotlin Gradle plugin {kgp} is not a release version"));
-        if release >= krusty::kotlin_version::KotlinVersion::V2_4_20 {
+        let reads_option = release >= krusty::kotlin_version::KotlinVersion::V2_4_20;
+        let release_boundary = build()
+            .property("krusty.negative", "release-specific-argument-boundary")
+            .tasks([if reads_option {
+                ":compiler:util:compileKotlin"
+            } else {
+                ":compiler:util:compileKotlinKrustyCheck"
+            }])
+            .run_output();
+        if reads_option {
             let output = release_boundary
                 .unwrap_or_else(|error| panic!("release boundary probe failed: {error}"));
             let check = single_invocation(&fixture.probes);
@@ -788,27 +794,29 @@ mod tests {
                 "kotlinc, not krusty, compiles a refused argument"
             );
         } else {
-            let rendered = release_boundary
-                .expect_err("release boundary probe succeeded")
-                .to_string();
-            assert_eq!(
-                rendered
-                    .lines()
-                    .filter(|line| {
-                        line.trim()
-                            == "> freeCompilerArg '-d=forbidden' conflicts with the plugin-owned destination; configure the structured Gradle input instead"
-                    })
-                    .count(),
-                1,
-                "{kgp}: {rendered}",
+            let output = release_boundary
+                .unwrap_or_else(|error| panic!("{kgp}: release boundary probe failed: {error}"));
+            assert_left_to_kotlinc(
+                &output,
+                ":compiler:util:compileKotlin",
+                &["freeCompilerArg '-d=forbidden' conflicts with the plugin-owned destination; configure the structured Gradle input instead"
+                    .to_string()],
+            );
+            assert!(
+                !fixture.probes.exists(),
+                "{kgp}: the plugin refuses the free -d without asking krusty"
             );
             assert!(
                 !log.exists(),
-                "{kgp}: release boundary must fail before exec"
+                "{kgp}: kotlinc, not krusty, compiles a refused argument"
             );
         }
 
         if kgp == "2.4.10" {
+            // A request the plugin cannot derive krusty's arguments from is valid for kotlinc: the
+            // check reports it without asking krusty, and the compile is left to kotlinc. The
+            // probe stops after the check, since several of these requests name files that do not
+            // exist.
             for (case, expected) in [
                 (
                     "structured-option",
@@ -859,6 +867,10 @@ mod tests {
                     "freeCompilerArg '-Xcompiler-plugin=forbidden.jar' conflicts with compiler plugin configuration; configure the structured Gradle input instead",
                 ),
                 (
+                    "plugin-option-free-argument",
+                    "freeCompilerArg '-P' conflicts with compiler plugin configuration; configure the structured Gradle input instead",
+                ),
+                (
                     "reference-version-free-argument",
                     "freeCompilerArg '-Xkotlin-reference-version=2.4.0' conflicts with the Kotlin Gradle plugin version; configure the structured Gradle input instead",
                 ),
@@ -882,32 +894,77 @@ mod tests {
                     "opt-in-overlap",
                     "compilerOptions.optIn and freeCompilerArg '-opt-in=krusty.fixture.ExperimentalFirstApi' both request marker 'krusty.fixture.ExperimentalFirstApi'; configure exactly one",
                 ),
-                (
-                    "jvm-target",
-                    "Kotlin JVM target 17 differs from Java target 11",
-                ),
             ] {
                 let _ = std::fs::remove_file(&log);
-                let result = build()
+                let _ = std::fs::remove_file(&fixture.probes);
+                let output = build()
                     .property("krusty.negative", case)
-                    .tasks([":compiler:util:compileKotlin"])
-                    .run();
-                let error = match result {
-                    Ok(()) => panic!("negative case {case} succeeded"),
-                    Err(error) => error,
-                };
-                let rendered = error.to_string();
-                let expected_line = format!("> {expected}");
-                assert_eq!(
-                    rendered
-                        .lines()
-                        .filter(|line| line.trim() == expected_line)
-                        .count(),
-                    1,
-                    "{case}: {rendered}",
+                    .tasks([":compiler:util:compileKotlinKrustyCheck"])
+                    .run_output()
+                    .unwrap_or_else(|error| panic!("{case}: {error}"));
+                assert_left_to_kotlinc(
+                    &output,
+                    ":compiler:util:compileKotlin",
+                    &[expected.to_string()],
                 );
-                assert!(!log.exists(), "{case} must fail before execing krusty");
+                assert!(
+                    !fixture.probes.exists(),
+                    "{case}: the plugin refuses without asking krusty"
+                );
+                assert!(!log.exists(), "{case} must not compile with krusty");
             }
+
+            // End to end, such a compile is kotlinc's: the replacement is skipped and the Kotlin
+            // task writes the classes. A free `-progressive` is one kotlinc compiles as it is.
+            let _ = std::fs::remove_file(&log);
+            let _ = std::fs::remove_file(&fixture.probes);
+            let _ = std::fs::remove_dir_all(&kotlin_classes);
+            let output = build()
+                .property("krusty.negative", "progressive-free-argument")
+                .tasks([":compiler:util:compileKotlin"])
+                .run_output()
+                .unwrap_or_else(|error| panic!("progressive-free-argument: {error}"));
+            assert_left_to_kotlinc(
+                &output,
+                ":compiler:util:compileKotlin",
+                &["freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead"
+                    .to_string()],
+            );
+            assert!(
+                !fixture.probes.exists(),
+                "the plugin refuses a free -progressive without asking krusty"
+            );
+            assert!(
+                !log.exists(),
+                "kotlinc, not krusty, compiles a refused request"
+            );
+            assert!(
+                kotlin_classes
+                    .join("org/jetbrains/kotlin/util/UtilKt.class")
+                    .is_file(),
+                "kotlinc wrote the module's classes"
+            );
+
+            // A Kotlin JVM target that differs from the Java one fails the build, as it does with
+            // kotlinc under the default validation mode.
+            let _ = std::fs::remove_file(&log);
+            let rendered = build()
+                .property("krusty.negative", "jvm-target")
+                .tasks([":compiler:util:compileKotlin"])
+                .run()
+                .expect_err("negative case jvm-target succeeded")
+                .to_string();
+            assert_eq!(
+                rendered
+                    .lines()
+                    .filter(
+                        |line| line.trim() == "> Kotlin JVM target 17 differs from Java target 11"
+                    )
+                    .count(),
+                1,
+                "jvm-target: {rendered}",
+            );
+            assert!(!log.exists(), "jvm-target must fail before execing krusty");
 
             // A compiler plugin krusty does not implement leaves the compile to kotlinc, reported.
             let _ = std::fs::remove_file(&log);
@@ -2799,6 +2856,7 @@ val generateKotlin = tasks.register<GenerateKotlin>("generateKotlin") {
 kotlin {
     when (krustyNegative) {
         "compiler-version" -> compilerVersion.set("2.4.0")
+        "dev-compiler-version" -> compilerVersion.set("KGP_VERSION-dev-7885")
         else -> {}
     }
     sourceSets.named("main") {
@@ -2808,16 +2866,6 @@ kotlin {
     }
     sourceSets.named("test") {
         kotlin.srcDir("test-src")
-    }
-}
-
-// Override krusty's own task input, not KotlinTopLevelExtension.compilerVersion: changing the
-// latter asks KGP to resolve a different build-tools implementation before krusty can validate it.
-afterEvaluate {
-    if (krustyNegative == "dev-compiler-version") {
-        tasks.withType<krusty.KrustyCompileTask>().configureEach {
-            compilerVersion.set("KGP_VERSION-dev-7885")
-        }
     }
 }
 
@@ -2869,6 +2917,7 @@ tasks.withType<KotlinJvmCompile>().configureEach {
             "classpath-alias" -> freeCompilerArgs.addAll("-cp", "elsewhere.jar")
             "progressive-alias" -> freeCompilerArgs.add("-Xprogressive")
             "compiler-plugin-alias" -> freeCompilerArgs.add("-Xcompiler-plugin=forbidden.jar")
+            "plugin-option-free-argument" -> freeCompilerArgs.addAll("-P", "plugin:org.example.widget:annotation=probe.Open")
             "reference-version-free-argument" -> freeCompilerArgs.add("-Xkotlin-reference-version=2.4.0")
             "dependency-policy-free-argument" -> freeCompilerArgs.add("-no-stdlib=false")
             "release-specific-argument-boundary" -> freeCompilerArgs.addAll(
