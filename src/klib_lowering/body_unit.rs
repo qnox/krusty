@@ -503,11 +503,27 @@ impl CallLinker for Linker<'_, '_> {
         callee: &KlibPublicIdSignature,
     ) -> Result<LinkedConstructor, KlibBodyDeclineReason> {
         let identity = self.callee_identity(callee)?;
+        let (_, function) = self.sources.bodies.function(&identity).ok_or_else(|| {
+            KlibBodyDeclineReason::SignatureMismatch(
+                "a constructor call has no serialized function header".to_owned(),
+            )
+        })?;
+        super::constructor_calls::require_constructor_kind(function)?;
+        if matches!(self.sources.callees.get(&identity), Some(KlibCalleeFact::Selected(callables))
+            if callables[0].kind() != crate::libraries::ExternalCallableKind::Constructor)
+        {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "a constructor call selected a non-constructor provider declaration".to_owned(),
+            ));
+        }
         let declaration = self
             .sources
             .callees
             .constructor(&identity, self.sources.bodies)?
-            .ok_or_else(|| KlibBodyDeclineReason::UndeclaredCallee(Box::new(callee.clone())))?;
+            // Producer lookup above already proved the serialized declaration exists. Without
+            // exact provider evidence this unit cannot realize construction; that is not a
+            // missing declaration and must not invent a constructor handle.
+            .ok_or_else(|| KlibBodyDeclineReason::UnsupportedCallee(Box::new(callee.clone())))?;
         let target = self
             .sources
             .externals

@@ -5639,8 +5639,10 @@ non-inline callers, still reads the field directly. Test:
   varargs. Ordinary and prepared body lowering instantiate all class arguments together and retain
   explicit external constructor handles instead of exporting constructor bodies as top-level
   functions. Caller-bound proof is separate from casts/spreads; dependency planning walks only
-  executed constructor/call expressions, leaving intrinsic-root authority call-only. Full actual-KLIB
-  release and Native/Wasm runtime preservation remain landing gates for this execution path.
+  executed constructor/call expressions, leaving intrinsic-root authority call-only.
+  Constructor absence, missing provider capability and contradictory kind/handle facts retain
+  distinct fail-closed diagnostics and empty-unit rollback; no stdlib absence assertion is waived.
+  Full actual-KLIB release and Native/Wasm runtime preservation remain landing gates for this path.
 - Declaration-owned vararg positions survive provider and frozen handoffs separately from
   call-site specialization. Raw/prepared headers authenticate the exact packed-array element and
   regular-value slot, including context/extension coordinates; dispatch markers are rejected.

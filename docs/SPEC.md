@@ -18127,6 +18127,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Emission inventories walk only executed body expressions, not unused defaults or nested
   declaration bodies, and do not widen the separate call-only intrinsic-root proof. A declared
   default permits an omission but does not establish an available default implementation.
+  A producer-proven serialized constructor without provider evidence declines as an unrealized
+  callee, not as a missing declaration. Contradictory raw/frozen constructor kinds and an
+  authenticated constructor without its exact construction handle remain hard mismatches.
   Tests: `klib_lowering::tests::constructor_contracts`, `::constructor_calls`.
 
 - **A KLIB vararg retains one packed array parameter.** The declaration's vararg position is

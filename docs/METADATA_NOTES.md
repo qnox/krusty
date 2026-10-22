@@ -778,7 +778,9 @@ the constructor's exact parameter count; unknown non-KLIB defaults remain unknow
 authentication checks constructor kind and slot, exact class application and all parameter facts
 before ordinary or prepared bodies instantiate class arguments and their complete upper bounds.
 The executed-body inventory includes construction without treating serialized constructor bodies
-as top-level support exports or granting intrinsic-root authority. Tests:
+as top-level support exports or granting intrinsic-root authority.
+Missing optional provider evidence does not erase a proven raw constructor declaration: the
+body declines its realization, while contradictory kind/handle evidence remains a hard mismatch. Tests:
 `klib_lowering::tests::constructor_contracts`, `::constructor_calls`.
 
 ## Declaration-owned KLIB vararg coordinates

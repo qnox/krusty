@@ -10,7 +10,7 @@ use crate::klib_libraries::KlibDeclarationBodies;
 use crate::libraries::{
     ExternalCallableKind, KlibBodyCallable, KlibBodyClassParameters, ParamFlags,
 };
-use crate::metadata::klib_ir::tree::{KlibIrNullability, KlibIrType};
+use crate::metadata::klib_ir::tree::{KlibIrFunction, KlibIrNullability, KlibIrType};
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbolKind};
 use crate::types::{Ty, TyKind, TypeName};
 
@@ -24,6 +24,17 @@ pub(super) struct ConstructorDeclaration {
 
 fn mismatch(detail: &str) -> KlibBodyDeclineReason {
     KlibBodyDeclineReason::SignatureMismatch(detail.to_owned())
+}
+
+pub(super) fn require_constructor_kind(
+    function: &KlibIrFunction,
+) -> Result<(), KlibBodyDeclineReason> {
+    if function.base.symbol.kind != KlibIrSymbolKind::Constructor || !function.constructor {
+        return Err(mismatch(
+            "the selected constructor is not serialized in a constructor slot",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn authenticate(
@@ -42,11 +53,7 @@ pub(super) fn authenticate(
     }
     let header = class_headers::authenticate(selected, bodies)?;
     let function = header.function;
-    if function.base.symbol.kind != KlibIrSymbolKind::Constructor || !function.constructor {
-        return Err(mismatch(
-            "the selected constructor is not serialized in a constructor slot",
-        ));
-    }
+    require_constructor_kind(function)?;
     if !function.type_parameters.is_empty() {
         return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
             "constructor-owned type parameters",

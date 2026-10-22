@@ -608,8 +608,8 @@ fn a_constructor_call_requires_an_exact_serialized_constructor() {
         let KlibIrSignature::Public(signature) = body.function.signature.clone() else {
             unreachable!("a demo function is public");
         };
-        // A constructor cannot borrow the identity of a top-level function. Its producer must
-        // actually publish that constructor declaration before a provider handle can be linked.
+        // A serialized ordinary function is not a constructor slot, even if the call site labels
+        // the reference as a Constructor. Known contradictory kinds remain hard mismatches.
         let constructed = body.expr(
             T::Throwable,
             KlibIrExprKind::ConstructorCall {
@@ -626,7 +626,8 @@ fn a_constructor_call_requires_an_exact_serialized_constructor() {
     });
     assert_eq!(
         demo.declined("f", &[]),
-        "the KLIB body of `demo.f` (it calls `demo.f`, which no reachable library serializes its declaration)"
+        "the KLIB body of `demo.f` (its serialized declaration disagrees with the selected one: \
+         the selected constructor is not serialized in a constructor slot)"
     );
 }
 

@@ -257,6 +257,89 @@ fn klib_constructor_rejects_malformed_raw_declaration_contracts() {
 }
 
 #[test]
+fn klib_constructor_requires_exact_provider_evidence_and_a_constructor_handle() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let symbols = libraries.symbols(SymbolNamespace::Package(type_name("kotlin")), "to");
+    let [to] = symbols.callables.functions() else {
+        panic!("the generic to declaration")
+    };
+    let to = libraries
+        .external_callable(to.callable.external_identity.unwrap())
+        .unwrap();
+    let selected = to.klib_body_callable().unwrap();
+    let provider = pair_constructor(&libraries);
+    let target = provider.callable.external_identity.unwrap();
+    let mut wrong_kind = provider.clone();
+    wrong_kind.kind = ExternalCallableKind::TopLevel;
+    let wrong_kind = wrong_kind.klib_body_callable().unwrap();
+    let constructor = provider.klib_body_callable().unwrap();
+    let (_, raw) = libraries
+        .declaration_bodies()
+        .function(constructor.identity())
+        .expect("the constructor declaration really exists");
+    assert_eq!(raw.base.symbol.kind, KlibIrSymbolKind::Constructor);
+    assert!(raw.constructor);
+    let KlibDeclarationSignature::Public(signature) = constructor.signature() else {
+        panic!("constructor signature")
+    };
+    let constructor_external = crate::fx_hash::HashMap::from_iter([(
+        constructor.identity().clone(),
+        super::super::EmittedDependencyCallable::constructor(target),
+    )]);
+    let body_external = crate::fx_hash::HashMap::from_iter([(
+        constructor.identity().clone(),
+        super::super::EmittedDependencyCallable::new(target, None, None),
+    )]);
+    let handle_error = KlibBodyDeclineReason::SignatureMismatch(
+        "an authenticated constructor has no exact constructor external handle".to_owned(),
+    );
+    for (facts, externals, reason) in [
+        (
+            KlibCalleeFacts::new([selected]),
+            constructor_external,
+            KlibBodyDeclineReason::UnsupportedCallee(Box::new(signature.clone())),
+        ),
+        (
+            KlibCalleeFacts::new([selected, constructor]),
+            crate::fx_hash::HashMap::default(),
+            handle_error.clone(),
+        ),
+        (
+            KlibCalleeFacts::new([selected, constructor]),
+            body_external,
+            handle_error,
+        ),
+        (
+            KlibCalleeFacts::new([selected, wrong_kind]),
+            crate::fx_hash::HashMap::default(),
+            KlibBodyDeclineReason::SignatureMismatch(
+                "a constructor call selected a non-constructor provider declaration".to_owned(),
+            ),
+        ),
+    ] {
+        let mut unit = DependencyBodyUnit::default();
+        let decline = unit
+            .lower_function_with_intrinsics_and_externals(
+                selected,
+                libraries.declaration_bodies(),
+                &facts,
+                KlibIntrinsicFacts::empty(),
+                &externals,
+            )
+            .expect_err("construction needs both independent proofs");
+        assert_eq!(decline.reason(), &reason);
+        assert_eq!(
+            decline.is_internal_inconsistency(),
+            matches!(reason, KlibBodyDeclineReason::SignatureMismatch(_))
+        );
+        super::demo_package::assert_unit_is_empty(&unit);
+    }
+}
+
+#[test]
 fn klib_generic_constructor_ordinary_body_retains_class_formals() {
     let Some(root) = distribution_root() else {
         return;

@@ -1082,10 +1082,11 @@ fn a_signature_lowers_into_one_function() {
 }
 
 #[test]
-fn a_body_that_constructs_declines_by_its_form() {
+fn a_body_constructor_requires_its_own_serialized_declaration() {
     let message = declined(|parts, arena| {
         let less = parts.call(arena, less_int());
-        // Any constructor: the form declines before its callee is read.
+        // A constructor cannot borrow a function signature, including a builtin relation.
+        // Failed exact declaration authentication must leave the whole unit unchanged.
         let constructed = arena.push_expr(
             Some(parts.nothing),
             KlibIrExprKind::ConstructorCall {
@@ -1108,7 +1109,7 @@ fn a_body_that_constructs_declines_by_its_form() {
     });
     assert_eq!(
         message,
-        "the KLIB body of `kotlin.ranges.coerceAtLeast` (it uses a constructor call)"
+        "the KLIB body of `kotlin.ranges.coerceAtLeast` (it calls `kotlin.internal.ir.less`, which no reachable library serializes its declaration)"
     );
 }
 
@@ -1596,7 +1597,7 @@ fn stdlib_coerce_bodies_lower_as_their_source_does() {
 }
 
 #[test]
-fn stdlib_coerce_in_declines_by_its_exception_construction() {
+fn stdlib_coerce_in_requires_an_exact_constructor_realization() {
     let Some(root) = distribution_root() else {
         return;
     };
@@ -1616,10 +1617,10 @@ fn stdlib_coerce_in_declines_by_its_exception_construction() {
             bodies,
             &KlibCalleeFacts::default(),
         )
-        .expect_err("coerceIn constructs the exception it throws on an empty range");
+        .expect_err("the unit has no provider realization for the exception constructor");
     assert_eq!(
         decline.to_string(),
-        "the KLIB body of `kotlin.ranges.coerceIn` (it uses a constructor call)"
+        "the KLIB body of `kotlin.ranges.coerceIn` (it calls `kotlin.IllegalArgumentException.<init>`)"
     );
     assert!(unit.ir().exprs.is_empty());
 }

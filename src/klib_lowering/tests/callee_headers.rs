@@ -1506,6 +1506,7 @@ fn stdlib_calls_reach_header_declared_callees() {
     let expected =
         if crate::kotlin_version::target() >= crate::kotlin_version::KotlinVersion::V2_4_20 {
             vec![
+                ("it calls `kotlin.ArithmeticException.<init>`)", 2),
                 ("it converts a value implicitly)", 1),
                 ("it declares a parameter default)", 27),
                 ("it declares type parameters)", 173),
@@ -1517,12 +1518,12 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ),
                 ("it uses a call through a property accessor signature)", 29),
                 ("it uses a constant of another type than its value's)", 6),
-                ("it uses a constructor call)", 2),
                 ("it uses a loop whose body is not a block)", 2),
                 ("its library serializes none)", 73),
             ]
         } else {
             vec![
+                ("it calls `kotlin.ArithmeticException.<init>`)", 2),
                 ("it converts a value implicitly)", 1),
                 ("it declares a parameter default)", 20),
                 ("it declares type parameters)", 155),
@@ -1534,7 +1535,6 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ),
                 ("it uses a call through a property accessor signature)", 29),
                 ("it uses a constant of another type than its value's)", 6),
-                ("it uses a constructor call)", 2),
                 ("it uses a loop whose body is not a block)", 2),
                 ("its library serializes none)", 73),
             ]
