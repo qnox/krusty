@@ -660,11 +660,15 @@ impl P<'_> {
             matches!(&self.t[keyword], Tok::Ident(word) if word == "new" || word == "instanceof")
         })
     }
-    /// Skip a balanced `<...>` type-argument list, the cursor on its `<`.
+    /// Skip a balanced `<...>` type-argument list, the cursor on its `<`. A type-use annotation's
+    /// arguments are expressions, so `@A(1 > 0)` is skipped whole rather than counted.
     fn skip_type_arguments(&mut self) -> Option<()> {
         let mut depth = 0u32;
         loop {
             match self.bump()? {
+                Tok::Punct('@') => {
+                    self.skip_annotation()?;
+                }
                 Tok::Punct('<') => depth += 1,
                 Tok::Punct('>') => {
                     depth -= 1;
