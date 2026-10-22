@@ -1682,7 +1682,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constructor `val`/`var` parameter's annotation reaches the PARAMETER only when
   `AnnotationTargets::property_declaration_site` resolves to `ValueParameter`, leaving the property-
   and field-targeted ones to the marker method and the backing field; a plain function parameter has
-  no such choice. Retention stays SEMANTIC through lowering (one ordered list per parameter) and is
+  no such choice. Pass 1 also publishes a constructor property's checked PROPERTY applications,
+  including folded class literals, under its stable property identity before plugin constructor
+  selection. Parameter- and accessor-targeted applications must not enter that property payload.
+  `frontend::tests::annotation_publication::pass_one_retains_constructor_property_payloads_only_at_their_checked_use_site`
+  covers default and explicit sites; the unchanged property-level custom serializer runtime
+  regression exercises the resulting selected constructor through common IR.
+  Retention stays SEMANTIC through lowering (one ordered list per parameter) and is
   split into the two JVM attributes at emission via `split_declaration_annotations`, so the two
   halves cannot diverge. GAP: an annotation WITH ARGUMENTS is left out of
   `@Metadata` (`class_builder::records_annotation`) because the `Annotation.Argument.Value` model is
@@ -5532,6 +5538,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reading a `noinline` parameter does not), with
   `tests/inline_deep_coverage_e2e.rs` (`inline_nonlocal_return_two_frames`) and
   `tests/nested_inline_lambda_e2e.rs` for a caller's literal forwarded through two inline frames.
+
+- **A lambda's non-local `return` runs every `finally` it leaves, as kotlinc copies them.** An
+  inline function that holds the lambda in a `try`/`finally` (`synchronized`, `withLock`,
+  `ReentrantReadWriteLock.write`) is still inlined from its compiled body: the lambda node marks each
+  of its returns that is not its own (`$$$$$NON_LOCAL_RETURN$$$$$`), every return kept by
+  `LocalReturnsNormalizer` and `processReturns`. Before the root's returns are processed, the
+  inlined function's own `finally` bodies (found between the `finallyStart`/`finallyEnd` depth
+  markers) are copied in front of each marked return with the returned value spilled above every
+  local, the covering try ranges and local-variable ranges are split around the copy, and the try
+  blocks are re-sorted (`InternalFinallyBlockInliner.processInlineFunFinallyBlocks`). Where the
+  inlined code is written into the caller, the caller's own active `finally` blocks run in front of
+  each marked return, above every local of the inlined code with their lines marked afresh
+  (`generateAndInsertFinallyBlocks`), and the marker is dropped. kotlinc's analyzer does not execute
+  a return, so a value return inside a `void` lambda body is accepted. The bytes match kotlinc for
+  conditional returns, except a line entry kotlinc keeps for dead code after an unconditional one.
+  Tests: `tests/inline_non_local_return_finally_e2e.rs` (a run of every shape, including returns
+  through the caller's own `finally` and through `ReentrantReadWriteLock.write`, and kotlinc's bytes
+  for the conditional ones) and `ir::lambda_exits::tests`.
 
 - **A same-module inline call with function arguments is inlined from the compiled body too.**
   A literal lambda or callable reference passed to an inline parameter (one that is function-typed
@@ -15684,6 +15708,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   offsets, lines and columns as kotlinc. Verified against kotlinc 2.4.20.
   (`crates/krusty-plugin-host/tests/module_ir.rs`,
   `krusty_measures_a_file_with_carriage_returns_as_kotlinc_reads_it`.)
+- **A KSP class header is what KSP2 reports.** A krusty-hosted KSP processor reads a classifier's
+  header as KSP2 2.3.12 reports it. `modifiers` are the modifier keywords the declaration wrote,
+  with the classifier kind words (`data`, `enum`, `annotation`, `fun`, `inner`, `value`), and never
+  implied ones: an interface is not `abstract`. `companion` is not among them (KSP reports it
+  through `isCompanionObject`), while a companion's other written keywords, such as `private`, are. `typeParameters` carry their declaration-site variance
+  and their upper bounds in written order, `where` bounds included, or `kotlin.Any?` when none is
+  written. A type parameter's qualified name is its owner's followed by its name
+  (`headers.Base.T`). `superTypes` are the direct supertypes in written order, the superclass
+  where it was written among the interfaces. A classifier that writes none reports `kotlin.Any`,
+  an annotation class `kotlin.Annotation` and an enum class `kotlin.Enum<E>`; a function-type
+  supertype is its `kotlin.FunctionN` classifier applied to its parameter and return types
+  (`fun interface Action : () -> Unit` reports `kotlin.Function0<kotlin.Unit>`). A classifier is named by its
+  resolved identity, so a bare `companion object` is `Outer.Companion`. A header krusty cannot
+  describe (a supertype or bound such as a platform or intersection type) is refused for that
+  query only, and the build falls back to KSP2.
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `class_headers_are_what_ksp2_reports`;
+  `ksp_round` unit test `a_header_has_its_written_modifiers_type_parameters_and_supertypes`.)
 
 ## 8. Success criteria for the PoC
 

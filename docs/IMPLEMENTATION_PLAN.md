@@ -12,6 +12,15 @@ projections. Encode their complete values at the existing retention-ordered visi
 source target selection and semantic annotation publication outside the writer. This is independent
 of the cross-file publication and configured default-target-mode follow-ups.
 
+## Constructor-property annotation publication
+
+Publish checked PROPERTY-targeted constructor-parameter applications by stable property identity,
+so plugin constructor selection sees the same folded payload as common IR. Keep parameter and
+accessor sites separate. Pure serialization runtime fixtures explicitly supply the compile-time
+JDK image, without putting that image on the runtime jar classpath or changing no-JDK tests.
+Constructor-plan discovery uses source declarations, not the optional spelling sidecar. Forward
+cross-file annotation target-policy publication remains a separate reverse-file-order follow-up.
+
 ## String operation authority publication
 
 The shared StringPlus operation requires the existing selected-stdlib authority for both member
@@ -5292,8 +5301,17 @@ regress.
     hosts. A literal-lambda call's route is planned before it is emitted
     (`bytecode_inline_call::lambda_route`): the port, or the splice for a named shape it does not
     own yet, never one after the other. Still on the splice: lambdas that suspend (until the
-    coroutine transformer runs on inlined bytecode), value-class adapters other than an unboxed non-null value class, non-local returns,
-    materialized lambdas and callee shapes of later stages; callable references are not ported.
+    coroutine transformer runs on inlined bytecode), value-class adapters other than an unboxed non-null value class, non-local
+    `break`/`continue`, materialized lambdas and callee shapes of later stages; callable references
+    are not ported.
+  - ✓ 3c. Non-local returns are marked (`$$$$$NON_LOCAL_RETURN$$$$$`) and stay returns of the
+    caller, with the inlined function's `finally` bodies copied in front of each one
+    (`inliner::finally_blocks`, `InternalFinallyBlockInliner`) and the caller's own `finally`
+    blocks run in front of it where the inlined code is written (`generateAndInsertFinallyBlocks`).
+    Open: kotlinc keeps a `line N: 0` entry for dead code after an unconditional non-local return,
+    which krusty's code builder does not represent; non-local `break`/`continue` through a
+    `finally` still go through the splice, which skips the `finally` (a lock held by `withLock`
+    stays held).
 - ◐ 4. `AnonymousObjectTransformer`: anonymous objects and crossinline lambdas in an inlined body
   are regenerated as `$$inlined$` classes.
   - ◐ 4a. Anonymous objects of a classpath inline body with no lambda arguments, inlined into a
