@@ -36,9 +36,17 @@ impl ClassHeader<'_> {
     }
 
     /// The type of the property primary-constructor parameter `index` declares: the resolved
-    /// slot, which for a `vararg` parameter is its array.
+    /// slot, which for a `vararg` parameter is its array, `Array<out T>` for a reference element.
     fn constructor_property_type(&self, index: usize) -> Option<KspType> {
         let (ty, _) = *self.signature.ctor_param_shapes.get(index)?;
+        let ty = if self.class.props.get(index)?.is_vararg && ty.is_reference_array() {
+            Ty::obj_args_name(
+                crate::types::wk::array(),
+                &[Ty::out_projection(ty.array_read_elem()?)],
+            )
+        } else {
+            ty
+        };
         self.scope.ty(ty)
     }
 
