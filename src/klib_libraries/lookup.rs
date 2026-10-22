@@ -170,13 +170,21 @@ pub(super) fn published_function(
     function.callable.inline_body_plan = signed.inline_body_plan.clone();
     // A KLIB declaration's implementation is its serialized IR body unless provider normalization
     // authenticated an exact shared builtin or target-stdlib intrinsic declaration.
-    if let CallablePlacement::Package(package) = placement {
-        builtin_realizations::realize_package_function(
+    match placement {
+        CallablePlacement::Package(package) => builtin_realizations::realize_package_function(
             package,
             signed.compiler_builtin_owner,
             &signed.signature,
             &mut function,
-        );
+        ),
+        // Publish the same authenticated operation with the source declaration and both
+        // frozen identity lookups, rather than attaching it after identity assignment.
+        CallablePlacement::Member { owner, .. } => builtin_realizations::realize_member(
+            owner,
+            signed.compiler_builtin_owner,
+            &mut function,
+        ),
+        CallablePlacement::Associated { .. } => {}
     }
     if let Some(intrinsic) = &signed.target_intrinsic {
         function.callable.compiler_intrinsic = Some(intrinsic.operation);

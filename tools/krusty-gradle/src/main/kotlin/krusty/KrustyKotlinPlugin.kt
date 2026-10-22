@@ -32,6 +32,7 @@ import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension
 import org.jetbrains.kotlin.gradle.plugin.CompilerPluginConfig
 import org.jetbrains.kotlin.gradle.plugin.KotlinBasePlugin
+import org.jetbrains.kotlin.gradle.tasks.KaptGenerateStubs
 import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -46,10 +47,10 @@ import javax.inject.Inject
  * task incrementality; krusty does not try to infer Kotlin dependency invalidation from class-file
  * names or partial ABI snapshots.
  *
- * A compile that requests a compiler plugin (Compose, Parcelize, kapt's stub generation, any
- * third-party FIR/IR plugin) or a kotlinc argument krusty does not implement stays with kotlinc: a
- * check task asks the krusty binary what of the request it refuses, reports it, and then the Kotlin
- * task runs instead of its replacement.
+ * A compile that requests a compiler plugin (Compose, Parcelize, any third-party FIR/IR plugin) or
+ * a kotlinc argument krusty does not implement stays with kotlinc: a check task asks the krusty
+ * binary what of the request it refuses, reports it, and then the Kotlin task runs instead of its
+ * replacement. kapt's stub generation is never replaced; see [replaceKotlinJvmCompiles].
  */
 abstract class KrustyKotlinPlugin @Inject constructor(
     private val javaToolchains: JavaToolchainService,
@@ -117,8 +118,12 @@ private fun replaceKotlinJvmCompiles(
         // A KotlinJvmCompile outside every source-set compilation is not a krusty compile either:
         // kotlin-dsl's `compilePluginsBlocks` compiles the `plugins {}` blocks it extracts from
         // precompiled script plugins as scripts, with no source set, Java sibling or classes output.
+        // kapt's stub generation is a KotlinJvmCompile too, but it runs kotlinc with the kapt
+        // plugin to write Java stubs, not classes; the compile after annotation processing is the
+        // krusty compile, and a replacement here would depend on the processing that needs the stubs.
         val sourceSetName = kotlinTask.sourceSetName.orNull
         val kotlincReason = when {
+            kotlinTask is KaptGenerateStubs -> "it generates kapt stubs"
             sourceSetName == null -> "it belongs to no source set"
             kotlinDsl -> "its project applies kotlin-dsl"
             else -> null

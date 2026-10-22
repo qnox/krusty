@@ -117,7 +117,8 @@ krusty -cp deps.jar:classes/ App.kt -d out/  # with a classpath</code></pre>
           <tr><td>no-arg (<code>plugin.noarg</code>, <code>plugin.jpa</code>)</td><td>Supported, with the <code>jpa</code> preset; <code>invokeInitializers=true</code> is not implemented.</td></tr>
           <tr><td>sam-with-receiver</td><td>Supported.</td></tr>
           <tr><td>KSP (KSP2)</td><td>Supported through a build system: under Gradle, KSP's own <code>kspKotlin</code> task runs the processors and krusty compiles what they generate (KSP's Gradle plugin needs Gradle 8 or newer); under the Kotlin Toolchain, processors from Maven artifacts run before the module compiles, but only their generated classes and resources are picked up; a processor that generates Kotlin or Java sources fails the module for now. The plain command line has no codegen host and rejects the KSP plugin.</td></tr>
-          <tr><td>Compose, Parcelize, assignment, kapt and every other FIR/IR plugin</td><td>Not supported. The command line fails with an error. The Gradle plugin reports the unsupported plugin and leaves that compile task to kotlinc, so the build still succeeds.</td></tr>
+          <tr><td>kapt</td><td>Supported under Gradle: kapt's own tasks generate stubs and run the annotation processors with kotlinc, and krusty compiles the module after them. kapt's jar alone, which the Kotlin Gradle plugin passes to every compile of a kapt project, changes nothing; kapt options on the command line fail with an error.</td></tr>
+          <tr><td>Compose, Parcelize, assignment and every other FIR/IR plugin</td><td>Not supported. The command line fails with an error. The Gradle plugin reports the unsupported plugin and leaves that compile task to kotlinc, so the build still succeeds.</td></tr>
           <tr><td>Kotlin scripts (<code>.kts</code>)</td><td>Not supported.</td></tr>
         </tbody>
       </table>
