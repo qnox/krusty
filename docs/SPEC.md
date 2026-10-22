@@ -1676,7 +1676,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constructor `val`/`var` parameter's annotation reaches the PARAMETER only when
   `AnnotationTargets::property_declaration_site` resolves to `ValueParameter`, leaving the property-
   and field-targeted ones to the marker method and the backing field; a plain function parameter has
-  no such choice. Retention stays SEMANTIC through lowering (one ordered list per parameter) and is
+  no such choice. Pass 1 also publishes a constructor property's checked PROPERTY applications,
+  including folded class literals, under its stable property identity before plugin constructor
+  selection. Parameter- and accessor-targeted applications must not enter that property payload.
+  `frontend::tests::annotation_publication::pass_one_retains_constructor_property_payloads_only_at_their_checked_use_site`
+  covers default and explicit sites; the unchanged property-level custom serializer runtime
+  regression exercises the resulting selected constructor through common IR.
+  Retention stays SEMANTIC through lowering (one ordered list per parameter) and is
   split into the two JVM attributes at emission via `split_declaration_annotations`, so the two
   halves cannot diverge. GAP: an annotation WITH ARGUMENTS is left out of
   `@Metadata` (`class_builder::records_annotation`) because the `Annotation.Argument.Value` model is
