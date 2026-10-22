@@ -55,11 +55,8 @@ fn main() {
     let opts = cli::parse(argv);
 
     // kotlinc rejects a malformed command line before anything else, in these words.
-    if !opts.argument_errors.is_empty() {
-        for error in &opts.argument_errors {
-            eprintln!("error: {}", kotlinc_arguments::render(error));
-        }
-        eprintln!("info: use -help for more information");
+    if let Some(report) = argument_error_report(&opts) {
+        eprint!("{report}");
         std::process::exit(1);
     }
     if opts.print_version {
@@ -70,25 +67,11 @@ fn main() {
         println!("{}", cli::HELP);
         return;
     }
-    if !opts.errors.is_empty() {
-        for error in &opts.errors {
-            eprintln!("krusty: error: {error}");
-        }
+    if let Some(report) = error_report(&opts) {
+        eprint!("{report}");
         std::process::exit(2);
     }
-    for warning in &opts.argument_warnings {
-        eprintln!("warning: {}", kotlinc_arguments::render(warning));
-    }
-    for problem in &opts.language_feature_problems {
-        let severity = if problem.is_error { "error" } else { "warning" };
-        eprintln!(
-            "{severity}: {}",
-            kotlinc_arguments::render(&problem.message)
-        );
-    }
-    for ig in &opts.ignored {
-        eprintln!("krusty: ignoring unsupported option '{ig}'");
-    }
+    eprint!("{}", parse_report(&opts));
     if opts.sources.is_empty() {
         eprintln!("krusty: no source files. Use -help for usage.");
         std::process::exit(2);
@@ -128,25 +111,25 @@ fn run_cinterop(arguments: &[String]) {
 /// exit 0 when krusty compiles the whole request. These are the refusals a compilation with the
 /// same arguments reports as errors before it reads a source: a kotlinc argument, output shape or
 /// language feature krusty does not implement, or a compiler plugin it neither reimplements nor
-/// hosts. A command line kotlinc itself rejects is no refusal: it exits 2 with the errors the
-/// compilation would report, so that neither compiler runs.
+/// hosts. A command line that fails for any other reason fails kotlinc too, so it is no refusal:
+/// this exits 2 with the report the compilation fails with, and neither compiler runs.
 fn run_refusals(argv: Vec<String>) {
     let opts = cli::parse(argv);
-    if !opts.argument_errors.is_empty() {
-        for error in &opts.argument_errors {
-            eprintln!("error: {}", kotlinc_arguments::render(error));
-        }
-        std::process::exit(2);
-    }
-    let invalid = opts
-        .errors
-        .iter()
-        .filter(|error| !opts.refusals.contains(error))
-        .collect::<Vec<_>>();
-    if !invalid.is_empty() {
-        for error in invalid {
-            eprintln!("krusty: error: {error}");
-        }
+    let invalid = argument_error_report(&opts)
+        .or_else(|| {
+            opts.errors
+                .iter()
+                .any(|error| !opts.refusals.contains(error))
+                .then(|| error_report(&opts))
+                .flatten()
+        })
+        .or_else(|| {
+            configuration_report(&opts)
+                .err()
+                .map(|report| parse_report(&opts) + &report)
+        });
+    if let Some(report) = invalid {
+        eprint!("{report}");
         std::process::exit(2);
     }
     let refused = opts
@@ -267,13 +250,60 @@ fn compile_work_unit(unit: krusty_cli::worker::WorkUnit) -> Result<(), String> {
 /// Compile one source set, as configured. Returns the number of emitted class files, or a rendered
 /// error report.
 ///
-/// Extracted from `main` so the Bazel persistent worker can run a compilation and REPORT its failure
-/// instead of terminating: a worker that exits on a broken source takes the whole build's worker
-/// process down with it.
-pub fn compile(opts: &cli::Options) -> Result<usize, String> {
-    // kotlinc reports the configuration errors, then the configuration warnings, some of which
-    // `-Xwarning-level` may promote. Any error, or an error among the `-XXLanguage` problems already
-    // printed, fails the invocation once everything is reported.
+/// kotlinc's syntax errors, which reject the command line before anything else, in its words.
+fn argument_error_report(opts: &cli::Options) -> Option<String> {
+    if opts.argument_errors.is_empty() {
+        return None;
+    }
+    let mut report = String::new();
+    for error in &opts.argument_errors {
+        report.push_str(&format!("error: {}\n", kotlinc_arguments::render(error)));
+    }
+    report.push_str("info: use -help for more information\n");
+    Some(report)
+}
+
+/// The options krusty reports and exits on before compiling: invalid ones, and ones it refuses.
+fn error_report(opts: &cli::Options) -> Option<String> {
+    if opts.errors.is_empty() {
+        return None;
+    }
+    Some(
+        opts.errors
+            .iter()
+            .map(|error| format!("krusty: error: {error}\n"))
+            .collect(),
+    )
+}
+
+/// What a compilation reports once the command line parses: kotlinc's syntax warnings and its
+/// `-XXLanguage` problems, then the options krusty skips.
+fn parse_report(opts: &cli::Options) -> String {
+    let mut report = String::new();
+    for warning in &opts.argument_warnings {
+        report.push_str(&format!(
+            "warning: {}\n",
+            kotlinc_arguments::render(warning)
+        ));
+    }
+    for problem in &opts.language_feature_problems {
+        let severity = if problem.is_error { "error" } else { "warning" };
+        report.push_str(&format!(
+            "{severity}: {}\n",
+            kotlinc_arguments::render(&problem.message)
+        ));
+    }
+    for ig in &opts.ignored {
+        report.push_str(&format!("krusty: ignoring unsupported option '{ig}'\n"));
+    }
+    report
+}
+
+/// kotlinc reports the configuration errors, then the configuration warnings, some of which
+/// `-Xwarning-level` may promote. Any error, or an error among the `-XXLanguage` problems the
+/// [`parse_report`] holds, fails the invocation once everything is reported: the report is then
+/// the error.
+fn configuration_report(opts: &cli::Options) -> Result<String, String> {
     let mut report = String::new();
     let mut failed = opts
         .language_feature_problems
@@ -307,7 +337,16 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
         report.push_str("error: warnings found and -Werror specified\n");
         return Err(report);
     }
+    Ok(report)
+}
+
+/// Extracted from `main` so the Bazel persistent worker can run a compilation and REPORT its failure
+/// instead of terminating: a worker that exits on a broken source takes the whole build's worker
+/// process down with it.
+pub fn compile(opts: &cli::Options) -> Result<usize, String> {
+    let report = configuration_report(opts)?;
     eprint!("{report}");
+
     let version = match opts.kotlin_reference_version {
         Some(version) => version,
         None => krusty::kotlin_version::configured_target()

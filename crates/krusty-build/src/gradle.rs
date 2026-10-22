@@ -1020,22 +1020,8 @@ mod tests {
                     "{case}: {check:?}",
                 );
                 assert_eq!(
-                    rendered
-                        .lines()
-                        .filter(|line| line.trim() == format!("> {expected}"))
-                        .count(),
-                    1,
-                    "{case}: {rendered}",
-                );
-                assert_eq!(
-                    rendered
-                        .lines()
-                        .filter(|line| {
-                            line.trim()
-                                == "Execution failed for task ':compiler:util:compileKotlinKrustyCheck'."
-                        })
-                        .count(),
-                    1,
+                    task_failure(&rendered, ":compiler:util:compileKotlinKrustyCheck"),
+                    [expected.as_str()],
                     "{case}: {rendered}",
                 );
                 assert!(!log.exists(), "{case} must fail before compiling");
@@ -1050,18 +1036,36 @@ mod tests {
             // release-specific version table in the plugin. The shared compiler settings boundary
             // rejects values unavailable in the selected 2.4.10 compiler after seeing the exact
             // standard argument.
-            for (case, option) in [
-                ("old-language-version", "-language-version"),
-                ("old-api-version", "-api-version"),
+            for (case, option, kind) in [
+                ("old-language-version", "-language-version", "language"),
+                ("old-api-version", "-api-version", "API"),
             ] {
                 let _ = std::fs::remove_file(&log);
                 let _ = std::fs::remove_file(&fixture.probes);
-                let result = build()
+                let _ = std::fs::remove_dir_all(&kotlin_classes);
+                let rendered = build()
                     .property("krusty.negative", case)
                     .tasks([":compiler:util:compileKotlin"])
-                    .run();
-                assert!(result.is_err(), "negative case {case} succeeded");
+                    .run()
+                    .expect_err("negative case succeeded")
+                    .to_string();
+                assert_eq!(
+                    task_failure(&rendered, ":compiler:util:compileKotlinKrustyCheck"),
+                    [
+                        format!("krusty: error: unknown {kind} version: 1.9"),
+                        format!(
+                            "Supported {kind} versions: 2.0 (deprecated), 2.1 (deprecated), 2.2, \
+                             2.3, 2.4, 2.5 (experimental)"
+                        ),
+                    ],
+                    "{case}: {rendered}",
+                );
                 assert!(!log.exists(), "{case} must fail before compiling");
+                assert!(
+                    !kotlin_classes.exists(),
+                    "{case} wrote to {}",
+                    kotlin_classes.display()
+                );
                 let invocation = single_invocation(&fixture.probes);
                 assert_eq!(
                     invocation
@@ -2027,6 +2031,30 @@ fun main() {
             plugin: assignments.remove(0),
         };
         assert_left_to_kotlinc(output, task, &[refusal.message()]);
+    }
+
+    /// The message `task` failed with, as Gradle reports it under "What went wrong", one entry
+    /// per non-empty line.
+    fn task_failure(rendered: &str, task: &str) -> Vec<String> {
+        let header = format!("Execution failed for task '{task}'.");
+        let lines = rendered.lines().collect::<Vec<_>>();
+        let at = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.trim() == header)
+            .map(|(at, _)| at)
+            .collect::<Vec<_>>();
+        assert_eq!(at.len(), 1, "{header}\n{rendered}");
+        lines[at[0] + 1..]
+            .iter()
+            .take_while(|line| !line.starts_with("* "))
+            .map(|line| {
+                line.strip_prefix("> ")
+                    .or_else(|| line.strip_prefix("  "))
+                    .unwrap_or(line)
+                    .to_string()
+            })
+            .collect()
     }
 
     /// The build reports that `task` is left to kotlinc, followed by exactly `refusals`.

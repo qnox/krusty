@@ -291,7 +291,7 @@ pub(super) fn apply(
                 "indy" => LambdaMode::Indy,
                 "class" => LambdaMode::Class,
                 _ => {
-                    opts.refuse(format!(
+                    opts.errors.push(format!(
                         "{name}={text} selects an output shape krusty does not emit"
                     ));
                     return;

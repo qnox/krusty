@@ -437,8 +437,8 @@ fn refusals_lists_the_arguments_and_plugins_krusty_refuses() {
             String::new()
         )
     );
-    // A value kotlinc itself rejects is not a refusal: the check fails with the compilation's
-    // error, so neither compiler runs.
+    // A value kotlinc itself rejects is not a refusal: the check fails with the errors the
+    // compilation reports, in its order, so neither compiler runs.
     assert_eq!(
         check(&[
             "-Xexplicit-api=sideways".to_string(),
@@ -448,7 +448,55 @@ fn refusals_lists_the_arguments_and_plugins_krusty_refuses() {
             Some(2),
             String::new(),
             "krusty: error: unknown value for parameter -Xexplicit-api: 'sideways'. Value should be one \
-             of {disable, strict, warning}\n"
+             of {disable, strict, warning}\n\
+             krusty: error: krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'\n"
+                .to_string()
+        )
+    );
+    for argument in ["-Xlambdas", "-Xsam-conversions"] {
+        assert_eq!(
+            check(&[format!("{argument}=nonesuch")]),
+            (
+                Some(2),
+                String::new(),
+                format!(
+                    "krusty: error: {argument}=nonesuch selects an output shape krusty does not emit\n"
+                )
+            ),
+            "{argument}"
+        );
+    }
+    // A configuration error fails the check with the report the compilation fails with.
+    assert_eq!(
+        check(&[
+            "-Xfragments=main".to_string(),
+            "-Xfragment-sources=broken".to_string(),
+        ]),
+        (
+            Some(2),
+            String::new(),
+            "error: incorrect syntax for -Xfragment-sources argument. `<module name>:<source file>` \
+             expected but got `broken`\n"
+                .to_string()
+        )
+    );
+    assert_eq!(
+        check(&["-XXLanguage:-TrailingCommas".to_string()]),
+        (
+            Some(2),
+            String::new(),
+            "warning: ATTENTION!\n\
+             This build uses unsafe internal compiler arguments:\n\
+             \n\
+             -XXLanguage:-TrailingCommas\n\
+             \n\
+             This mode is not recommended for production use,\n\
+             as no stability/compatibility guarantees are given on\n\
+             compiler or generated code. Use it at your own risk!\n\
+             \n\
+             error: the following features cannot be disabled manually, because the version they \
+             first appeared in is no longer supported:\n\
+             TrailingCommas\n"
                 .to_string()
         )
     );
