@@ -17,6 +17,10 @@
 //! (`adapter/`, compiled once per Kotlin version by that version's compiler) in front of the
 //! compiler, which loads plugin jars the way kotlinc's `-Xplugin` does, and opens a compilation's
 //! session over the build's classpath, where IR plugins find the build's declarations.
+//!
+//! The crate runs KSP processors the same way ([`KspHost`]): [`provision_ksp`] finds the JDK and
+//! KSP's API jar, and the host serves the processors krusty's own analysis of the module, with no
+//! compiler in its JVM.
 
 mod adapter;
 mod artifacts;
@@ -25,7 +29,9 @@ mod environment;
 mod host;
 mod install;
 mod jdk;
+mod ksp;
 mod pins;
+mod process;
 mod protocol;
 mod provision;
 mod session;
@@ -35,12 +41,15 @@ pub use environment::{Environment, Platform};
 pub use host::{Host, HostError};
 pub use krusty_plugin_ir::{
     BodyIr, CallIr, CallableIdentity, CallableKind, Callee, ClassName, Classifier, Constant,
-    ExpressionIr, ExpressionKind, FileIr, FunctionIr, ModuleIr, ParameterIr, Span, StatementIr,
-    TypeArgument, TypeIdentity, TypeParameterOwner, ValueId, VariableIr, Visibility,
+    ExpressionIr, ExpressionKind, FileIr, FunctionIr, KspAnnotation, KspClass, KspClassKind,
+    KspFile, KspRound, ModuleIr, ParameterIr, Span, StatementIr, TypeArgument, TypeIdentity,
+    TypeParameterOwner, ValueId, VariableIr, Visibility,
 };
+pub use ksp::{GeneratedKind, KspGenerated, KspHost, KspLoad, KspOutcome, KspOutputs};
 pub use pins::{ArtifactPin, JdkPin, Pins};
 pub use protocol::LoadedPlugin;
 pub use provision::{
-    provision, provision_artifact, HostRuntime, ProvisionError, Request, COMPILER_MIN_JAVA,
+    provision, provision_artifact, provision_ksp, HostRuntime, KspRequest, KspRuntime,
+    ProvisionError, Request, COMPILER_MIN_JAVA,
 };
 pub use session::SessionRequest;

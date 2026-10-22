@@ -16,6 +16,8 @@ mod bytecode_comparison_support;
 mod captured_field_storage_e2e;
 #[path = "captured_receiver_names_e2e.rs"]
 mod captured_receiver_names_e2e;
+#[path = "cast_line_break_e2e.rs"]
+mod cast_line_break_e2e;
 #[path = "cast_operand_reread_e2e.rs"]
 mod cast_operand_reread_e2e;
 #[path = "classfile_low_priority_annotation_e2e.rs"]
@@ -1161,6 +1163,8 @@ mod inherited_reference_owner_e2e;
 mod init_block_lines_e2e;
 #[path = "e2e/inline.rs"]
 mod inline;
+#[path = "inline_member_super_arguments_e2e.rs"]
+mod inline_member_super_arguments_e2e;
 #[path = "inlined_code_inner_classes_e2e.rs"]
 mod inlined_code_inner_classes_e2e;
 #[path = "inlined_lambda_stack_spill_e2e.rs"]
@@ -1333,8 +1337,6 @@ mod kotlinc_argument_conformance_e2e;
 mod krusty_dep_dir_e2e;
 #[path = "krusty_roundtrip_class_metadata_e2e.rs"]
 mod krusty_roundtrip_class_metadata_e2e;
-#[path = "ksp_apt_loop_e2e.rs"]
-mod ksp_apt_loop_e2e;
 #[path = "ksp_provision_e2e.rs"]
 mod ksp_provision_e2e;
 #[path = "labeled_expression_e2e.rs"]
@@ -1635,6 +1637,8 @@ mod safe_call_null_line_e2e;
 mod sam_lambda_parameter_inference_e2e;
 #[path = "same_module_inline_frame_markers_e2e.rs"]
 mod same_module_inline_frame_markers_e2e;
+#[path = "sealed_serializable_e2e.rs"]
+mod sealed_serializable_e2e;
 #[path = "serialization_explicit_companion_e2e.rs"]
 mod serialization_explicit_companion_e2e;
 #[path = "setter_return_line_e2e.rs"]
