@@ -8,9 +8,9 @@
 //!      They run as compiler passes and can synthesize or mutate declarations. Reference impl:
 //!      [`serialization`].
 //!
-//!   2. CODEGEN HOSTS ([`ksp`]) — the in-process host for codegen-only annotation processors
-//!      (KSP, APT: Micronaut, Dagger, Room). They run on a JVM sidecar through a shim that
-//!      implements their interfaces, read a resolved symbol view, and emit new source files.
+//!   2. CODEGEN HOSTS — codegen-only annotation processors (KSP: Micronaut, Dagger, Room). They
+//!      run in a JVM host that implements KSP's interfaces over the module's resolved declarations
+//!      ([`crate::ksp_round`]), read that view, and emit new files.
 //!
 //! AST vs IR (see the doc): declaration/supertype generation belongs before type checking so
 //! generated symbols resolve. Body and expression rewriting belongs at the IR level.
@@ -18,9 +18,7 @@
 pub mod allopen;
 pub mod class_metadata;
 pub mod cli;
-pub mod codegen_loop;
 pub mod deps;
-pub mod ksp;
 pub mod noarg;
 pub mod registry;
 pub mod sam_with_receiver;

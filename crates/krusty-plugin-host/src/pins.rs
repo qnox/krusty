@@ -8,6 +8,7 @@ use crate::environment::Platform;
 
 const JDK_TABLE: &str = include_str!("pins/jdk.tsv");
 const COMPILER_TABLE: &str = include_str!("pins/kotlin-compiler.tsv");
+const KSP_TABLE: &str = include_str!("pins/ksp.tsv");
 
 /// The release of the JDK in `pins/jdk.tsv`, as its archives name it.
 const JDK_RELEASE: &str = "temurin-21.0.8+9";
@@ -78,17 +79,28 @@ impl ArtifactPin {
     }
 }
 
-/// The JDK to download for this platform, and the compiler classpath of each Kotlin version a host
-/// can run.
+/// The JDK to download for this platform, the compiler classpath of each Kotlin version a plugin
+/// host can run, and the API classpath of each KSP version a KSP host can run.
 #[derive(Clone, Debug)]
 pub struct Pins {
     jdk: Option<JdkPin>,
     compilers: Vec<(String, Vec<ArtifactPin>)>,
+    ksp: Vec<(String, Vec<ArtifactPin>)>,
 }
 
 impl Pins {
     pub fn new(jdk: Option<JdkPin>, compilers: Vec<(String, Vec<ArtifactPin>)>) -> Self {
-        Pins { jdk, compilers }
+        Pins {
+            jdk,
+            compilers,
+            ksp: Vec::new(),
+        }
+    }
+
+    /// These pins, with `classpath` as the API classpath of KSP `version`.
+    pub fn with_ksp(mut self, version: &str, classpath: Vec<ArtifactPin>) -> Self {
+        self.ksp.push((version.to_string(), classpath));
+        self
     }
 
     /// The tables this crate ships, with the JDK for `platform` when one is pinned for it.
@@ -104,22 +116,11 @@ impl Pins {
                 java: PathBuf::from(row[5]),
             })
             .next();
-        let mut compilers: Vec<(String, Vec<ArtifactPin>)> = Vec::new();
-        for row in rows(COMPILER_TABLE) {
-            let mut coordinate = row[1].split(':');
-            let pin = ArtifactPin {
-                group: coordinate.next().expect("pins: group").to_string(),
-                artifact: coordinate.next().expect("pins: artifact").to_string(),
-                version: coordinate.next().expect("pins: version").to_string(),
-                sha256: row[2].to_string(),
-                size: row[3].parse().expect("pins/kotlin-compiler.tsv: size"),
-            };
-            match compilers.last_mut() {
-                Some((version, classpath)) if version == row[0] => classpath.push(pin),
-                _ => compilers.push((row[0].to_string(), vec![pin])),
-            }
+        Pins {
+            jdk,
+            compilers: classpaths(COMPILER_TABLE),
+            ksp: classpaths(KSP_TABLE),
         }
-        Pins { jdk, compilers }
     }
 
     pub fn jdk(&self) -> Option<&JdkPin> {
@@ -141,6 +142,42 @@ impl Pins {
             .map(|(version, _)| version.clone())
             .collect()
     }
+
+    /// The API classpath pinned for exactly KSP `ksp_version`.
+    pub fn ksp_classpath(&self, ksp_version: &str) -> Option<&[ArtifactPin]> {
+        self.ksp
+            .iter()
+            .find(|(version, _)| version == ksp_version)
+            .map(|(_, classpath)| classpath.as_slice())
+    }
+
+    pub fn ksp_versions(&self) -> Vec<String> {
+        self.ksp
+            .iter()
+            .map(|(version, _)| version.clone())
+            .collect()
+    }
+}
+
+/// A table of classpaths, one row per jar: the version the classpath is for, the jar's
+/// `group:artifact:version`, its SHA-256 and its size. Rows of one classpath are adjacent.
+fn classpaths(table: &str) -> Vec<(String, Vec<ArtifactPin>)> {
+    let mut classpaths: Vec<(String, Vec<ArtifactPin>)> = Vec::new();
+    for row in rows(table) {
+        let mut coordinate = row[1].split(':');
+        let pin = ArtifactPin {
+            group: coordinate.next().expect("pins: group").to_string(),
+            artifact: coordinate.next().expect("pins: artifact").to_string(),
+            version: coordinate.next().expect("pins: version").to_string(),
+            sha256: row[2].to_string(),
+            size: row[3].parse().expect("pins: size"),
+        };
+        match classpaths.last_mut() {
+            Some((version, classpath)) if version == row[0] => classpath.push(pin),
+            _ => classpaths.push((row[0].to_string(), vec![pin])),
+        }
+    }
+    classpaths
 }
 
 fn rows(table: &str) -> impl Iterator<Item = Vec<&str>> {
@@ -182,6 +219,26 @@ mod tests {
                 assert!(pin.sha256.bytes().all(|b| b.is_ascii_hexdigit()), "{pin:?}");
             }
         }
+    }
+
+    #[test]
+    fn every_pinned_ksp_version_runs_on_its_own_api_jar() {
+        let pins = Pins::builtin(&Platform::current());
+        assert_eq!(pins.ksp_versions(), ["2.3.12"]);
+        let classpath = pins.ksp_classpath("2.3.12").unwrap();
+        let coordinates: Vec<String> = classpath
+            .iter()
+            .map(|pin| format!("{}:{}:{}", pin.group, pin.artifact, pin.version))
+            .collect();
+        assert_eq!(
+            coordinates,
+            [
+                "com.google.devtools.ksp:symbol-processing-api:2.3.12",
+                "org.jetbrains.kotlin:kotlin-stdlib:2.3.20",
+                "org.jetbrains:annotations:13.0",
+            ]
+        );
+        assert!(pins.ksp_classpath("2.3.12-RC").is_none());
     }
 
     #[test]

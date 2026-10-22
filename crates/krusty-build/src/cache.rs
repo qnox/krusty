@@ -16,7 +16,7 @@
 //! | [`CacheKeyInputs::friend_paths`] | Friendship is exact path-set membership (`src/jvm/classpath.rs`), so adding or removing an associate changes which `internal` declarations are visible — changing both acceptance and emission. |
 //! | [`CacheKeyInputs::environment`] | `KRUSTY_NO_CLASS_METADATA` switches off per-class `@Metadata` outright; `KRUSTY_LANGUAGE_VERSION` selects the reference version. Both change emitted bytes from outside the command line. |
 //! | [`CacheKeyInputs::jdk_identity`] | `-jvm-target` sets the class-file major, but the BOOTCLASSPATH decides what `java.*` resolves to and what supertypes look like. JDK 17 and 21 compile the same sources differently. |
-//! | [`CacheKeyInputs::plugins`] | KSP processors are external jars that GENERATE sources (`src/plugins/ksp.rs` runs a fixpoint), and `KspToolchain` is build-resolved — so processor identity is a compile input the build layer alone can see. |
+//! | [`CacheKeyInputs::plugins`] | KSP processors are external jars that GENERATE sources over rounds (`src/ksp_round.rs` describes each round to the KSP host), and `KspToolchain` is build-resolved — so processor identity is a compile input the build layer alone can see. |
 //!
 //! One thing deliberately NOT reused: `src/jvm/classpath.rs`'s `path_identity`, which mixes
 //! dev/ino/ctime/mtime. That is correct for an in-process memo and wrong for a build cache — a
