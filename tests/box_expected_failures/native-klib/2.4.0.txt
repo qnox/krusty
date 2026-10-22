@@ -388,7 +388,6 @@ controlStructures/forInSequenceWithIndex/forInSequenceWithIndexNoIndexVar.kt
 controlStructures/forInSequenceWithIndex/forInSequenceWithIndexNoIndexVarCheckSideEffects.kt
 controlStructures/forInSequenceWithIndex/forInSequenceWithIndexWithExplicitlyTypedIndexVariable.kt
 controlStructures/kt513.kt
-controlStructures/tryCatchInExpressions/kt8608.kt
 controlflow/break.kt
 controlflow/break1.kt
 controlflow/for_loops.kt
@@ -1062,7 +1061,6 @@ fp/atan2ZeroGuadrantsDouble.kt
 fp/powDouble.kt
 fp/powFloat.kt
 funInterface/basicFunInterfaceConversionClash.kt
-funInterface/funInterfaceInheritance.kt
 funInterface/funInterfaceWithSuspendMethod.kt
 funInterface/implIsNotFunction.kt
 funInterface/inlinedSamWrapper.kt
@@ -1076,8 +1074,6 @@ funInterface/kt79092-sam.kt
 funInterface/kt79092.kt
 funInterface/multimodule.kt
 funInterface/nonTrivialProjectionInSuperType.kt
-funInterface/primitiveConversions.kt
-funInterface/samConstructorExplicitInvocation.kt
 funInterface/subtypeOfFunctionalTypeToFunInterfaceConversion.kt
 funInterface/suspendFunInterfaceConversionCodegen.kt
 function/defaults.kt
@@ -1121,10 +1117,8 @@ ieee754/explicitEqualsCall.kt
 ieee754/safeCall.kt
 increment/augmentedAssignmentWithComplexRhs.kt
 inference/builderInferenceLeakingVariable.kt
-inference/capturedSelfInsideIntersection.kt
 inference/integerLiteralTypeInLamdaReturnType.kt
 inference/kt35684.kt
-inference/kt38664.kt
 inference/kt39824.kt
 inference/kt49838.kt
 inference/overrideDefaultProperty.kt
@@ -1202,7 +1196,6 @@ inline/defaultArgsMultipleModules.kt
 inline/dontInlineFunctionCall.kt
 inline/expressionBodyWithLambdaCall.kt
 inline/extensionWithManyArguments.kt
-inline/fakeOverrideInlining.kt
 inline/genericFunctionReference.kt
 inline/identityEquals.kt
 inline/incrementProperty.kt
@@ -1494,7 +1487,6 @@ ir/kt41765.kt
 ir/kt52677.kt
 ir/kt55318.kt
 ir/privateSignatures/enumEntryArguments.kt
-ir/recursiveGeneric.kt
 ir/serializationRegressions/anonFakeOverride.kt
 ir/serializationRegressions/innerClassInEnumEntryClass.kt
 ir/serializationRegressions/useImportedMember.kt
@@ -1561,20 +1553,13 @@ multiplatform/k2/basic/delegatedByExpectExtensionProperty.kt
 multiplatform/k2/basic/expectActualFakeOverrides2.kt
 multiplatform/k2/basic/expectActualFakeOverrides3.kt
 multiplatform/k2/basic/expectActualFakeOverridesWithTypeParameters.kt
-multiplatform/k2/basic/expectActualFakeOverridesWithTypeParameters2.kt
-multiplatform/k2/basic/expectActualIntersectionOverride.kt
 multiplatform/k2/basic/expectActualIntersectionOverride2.kt
 multiplatform/k2/basic/expectActualOverloads.kt
 multiplatform/k2/basic/expectActualTypeParameters.kt
 multiplatform/k2/basic/expectInterfaceInSupertypes.kt
-multiplatform/k2/basic/expectInterfaceInSupertypes2.kt
 multiplatform/k2/basic/extensionAndFakeOverride.kt
-multiplatform/k2/basic/extensionFunctionInDelegatedSam.kt
-multiplatform/k2/basic/fakeOverridesInPlatformModule.kt
 multiplatform/k2/basic/interfaceMethodFromSuperTypeIsImplementedInOtherExpectSuperClass.kt
-multiplatform/k2/basic/intersectionOverrideInCommonModule.kt
 multiplatform/k2/basic/intersectionOverrideWithDefaultParameterInCommonModule.kt
-multiplatform/k2/basic/localIntersectionOverrideInCommonModule.kt
 multiplatform/k2/basic/localIntersectionOverrideWithDefaultParameterInCommonModule.kt
 multiplatform/k2/basic/localSubstitutionOverrideInCommonModule.kt
 multiplatform/k2/basic/nameBasedDestructuringFullForm.kt
@@ -1601,12 +1586,7 @@ multiplatform/k2/defaultArguments/nestedEnumEntryValue.kt
 multiplatform/k2/defaultArguments/suspend.kt
 multiplatform/k2/defaultArguments/withTypeParameter.kt
 multiplatform/k2/delegation/delegationToExpectInterfaceByExpectFun.kt
-multiplatform/k2/delegation/delegationToExpectInterfaceWithOverride_noNewMembers.kt
 multiplatform/k2/delegation/delegationToExpectInterface_noNewMembers.kt
-multiplatform/k2/delegation/delegationToExpectInterface_withNewMembers.kt
-multiplatform/k2/delegation/delegationToExpectInterface_withNewMembersSameName.kt
-multiplatform/k2/delegation/delegationToExpectInterface_withOverrideInDelegated.kt
-multiplatform/k2/delegation/delegationWithIntersection.kt
 multiplatform/k2/enumStaticMethods.kt
 multiplatform/k2/exhaustiveness/commonEnum.kt
 multiplatform/k2/extensionPropertiesOverloads.kt
@@ -1658,11 +1638,9 @@ multiplatform/k2/hmpp/overloadAliasTwoLibs.kt
 multiplatform/k2/hmpp/propertyAlias3-3.kt
 multiplatform/k2/hmpp/propertyAliasTwoLibs.kt
 multiplatform/k2/hmpp/typealiasNameClash.kt
-multiplatform/k2/hmpp/typealiasReturnType.kt
 multiplatform/k2/internalOverride.kt
 multiplatform/k2/internalOverride2.kt
 multiplatform/k2/internalSetterInCommon.kt
-multiplatform/k2/kt-65249.kt
 multiplatform/k2/kt66970.kt
 multiplatform/k2/mergedOverrides.kt
 multiplatform/k2/migratedOldTests/mpp_default_args.kt
@@ -2548,6 +2526,7 @@ reified/multipleTypeParameters.kt
 reified/noValueParameters.kt
 reified/parameterSwap.kt
 reified/reifiedIntersectionType.kt
+reified/reifiedIntersectionTypeArgument.kt
 reified/reifiedIntersectionTypeArgumentCrossModule.kt
 reified/reifiedTypeArgumentWithIntersectionTypeAsTypeArgument.kt
 reified/safecast.kt
@@ -2656,7 +2635,6 @@ topLevelInitializtion/failInInitializer2.kt
 topLevelInitializtion/failInInitializer3.kt
 topLevelInitializtion/failInInitializer4.kt
 traits/doubleGenericDiamond.kt
-traits/kt36973.kt
 traits/kt5393_property.kt
 traits/multiple.kt
 try/catch3.kt
