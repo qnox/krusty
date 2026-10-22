@@ -52,9 +52,10 @@ final class SourceClass implements KSClassDeclaration {
         this.declarationsComplete = declarationsComplete;
     }
 
-    void addPrimaryConstructor() {
+    PrimaryConstructor addPrimaryConstructor() {
         primaryConstructor = new PrimaryConstructor(this);
         declarations.add(primaryConstructor);
+        return primaryConstructor;
     }
 
     SourceFile file() {

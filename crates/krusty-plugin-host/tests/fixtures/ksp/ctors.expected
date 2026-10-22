@@ -1,0 +1,9 @@
+# What KSP2 2.3.12 (KSPJvmMain) logs with Ctors.kt over constructors/: each top-level
+# classifier's primary constructor, its parent and its parameters.
+w: [ksp] constructors.Implicit primary=<init> parent=constructors.Implicit ()
+w: [ksp] constructors.Explicit primary=<init> parent=constructors.Explicit (first val=false var=false vararg=false default=false, second val=false var=false vararg=false default=true)
+w: [ksp] constructors.SecondaryOnly primary=null
+w: [ksp] constructors.Both primary=<init> parent=constructors.Both (a val=true var=false vararg=false default=false, b val=false var=true vararg=false default=true, c val=false var=false vararg=true default=false)
+w: [ksp] constructors.Single primary=<init> parent=constructors.Single ()
+w: [ksp] constructors.Marker primary=<init> parent=constructors.Marker (name val=true var=false vararg=false default=false)
+w: [ksp] constructors.Shape primary=null

@@ -16,16 +16,19 @@ import com.google.devtools.ksp.symbol.KSVisitor;
 import com.google.devtools.ksp.symbol.Location;
 import com.google.devtools.ksp.symbol.Modifier;
 import com.google.devtools.ksp.symbol.Origin;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import kotlin.sequences.Sequence;
 
-// A source classifier's primary constructor, which KSP lists first among its declarations. Only its
-// identity is served yet; its signature arrives with members.
+// A source classifier's primary constructor, which KSP lists first among its declarations. Its
+// identity and parameters are served; the rest of its signature arrives with members.
 final class PrimaryConstructor implements KSFunctionDeclaration {
     private static final Name NAME = new Name("<init>");
 
     private final SourceClass owner;
+    final List<KSValueParameter> parameters = new ArrayList<>();
 
     PrimaryConstructor(SourceClass owner) {
         this.owner = owner;
@@ -53,7 +56,7 @@ final class PrimaryConstructor implements KSFunctionDeclaration {
 
     @Override
     public List<KSValueParameter> getParameters() {
-        throw Nodes.notImplemented("KSFunctionDeclaration.parameters of a constructor");
+        return Collections.unmodifiableList(parameters);
     }
 
     @Override

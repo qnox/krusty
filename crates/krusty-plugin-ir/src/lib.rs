@@ -12,7 +12,7 @@ pub use identity::{
     CallableIdentity, CallableKind, ClassName, Classifier, TypeArgument, TypeIdentity,
     TypeParameterOwner,
 };
-pub use ksp::{KspAnnotation, KspClass, KspClassKind, KspFile, KspRound};
+pub use ksp::{KspAnnotation, KspClass, KspClassKind, KspFile, KspParameter, KspRound};
 pub use module::{
     BodyIr, CallIr, Callee, Constant, ExpressionIr, ExpressionKind, FileIr, FunctionIr, ModuleIr,
     ParameterIr, Span, StatementIr, ValueId, VariableIr, Visibility,

@@ -45,7 +45,9 @@ final class Symbols {
             int line = in.readInt();
             List<String[]> annotations =
                     Wire.readList(in, a -> new String[] {Wire.readString(a), Wire.readString(a)});
-            boolean primaryConstructor = Wire.readBoolean(in);
+            List<Object[]> primaryParameters = Wire.readBoolean(in)
+                    ? Wire.readList(in, p -> new Object[] {Wire.readString(p), p.readByte()})
+                    : null;
             boolean complete = Wire.readBoolean(in);
             SourceClass declaration =
                     new SourceClass(file, owner, simpleName, qualifiedName, kind, line, complete);
@@ -53,8 +55,18 @@ final class Symbols {
                 declaration.annotations.add(
                         new SourceAnnotation(declaration, annotation[0], annotation[1], this));
             }
-            if (primaryConstructor) {
-                declaration.addPrimaryConstructor();
+            if (primaryParameters != null) {
+                PrimaryConstructor constructor = declaration.addPrimaryConstructor();
+                for (Object[] parameter : primaryParameters) {
+                    byte flags = (Byte) parameter[1];
+                    constructor.parameters.add(new Parameter(
+                            constructor,
+                            (String) parameter[0],
+                            (flags & 1) != 0,
+                            (flags & 2) != 0,
+                            (flags & 4) != 0,
+                            (flags & 8) != 0));
+                }
             }
             readClasses(in, file, declaration, declaration.declarations);
             sourceClasses.put(qualifiedName, declaration);

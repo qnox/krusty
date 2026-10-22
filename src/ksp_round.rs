@@ -11,10 +11,10 @@
 //! describe, it says so (`declarations_complete`), and the host refuses a processor that asks for
 //! the rest rather than answer with a part of it.
 
-use krusty_plugin_ir::{KspAnnotation, KspClass, KspClassKind, KspFile, KspRound};
+use krusty_plugin_ir::{KspAnnotation, KspClass, KspClassKind, KspFile, KspParameter, KspRound};
 
 use crate::ast::{AnnotationRef, ClassDecl, ClassKind, Decl, DeclId, File};
-use crate::frontend::{FrontendSymbols, SourceSetAnalysis};
+use crate::frontend::{FrontendClassSig, FrontendSymbols, SourceSetAnalysis};
 use crate::types::TypeName;
 
 /// The round a processor reads from `analysis`, whose files are at `paths` (one per source, in the
@@ -29,11 +29,11 @@ pub fn ksp_round(analysis: &SourceSetAnalysis, paths: &[String]) -> Result<KspRo
             analysis.files.len()
         ));
     }
-    let declared: crate::fx_hash::HashSet<(u32, DeclId)> = analysis
+    let declared: crate::fx_hash::HashMap<(u32, DeclId), &FrontendClassSig> = analysis
         .symbols
         .classes
         .values()
-        .filter_map(|signature| Some((signature.source_file, signature.source_decl?)))
+        .filter_map(|signature| Some(((signature.source_file, signature.source_decl?), signature)))
         .collect();
     let mut files = Vec::with_capacity(paths.len());
     for (index, (file, path)) in analysis.files.iter().zip(paths).enumerate() {
@@ -55,8 +55,8 @@ struct Source<'a> {
     file: &'a File,
     path: &'a str,
     symbols: &'a FrontendSymbols,
-    /// The source classifiers the module's symbols declare, by file and declaration.
-    declared: &'a crate::fx_hash::HashSet<(u32, DeclId)>,
+    /// The resolved signature of each source classifier, by file and declaration.
+    declared: &'a crate::fx_hash::HashMap<(u32, DeclId), &'a FrontendClassSig>,
 }
 
 impl Source<'_> {
@@ -129,9 +129,9 @@ impl Source<'_> {
             ClassKind::Class if class.singleton => KspClassKind::Object,
             ClassKind::Class => KspClassKind::Class,
         };
-        if !self.declared.contains(&(self.index, id)) {
+        let Some(signature) = self.declared.get(&(self.index, id)) else {
             return Err(self.refusal(class, "has no resolved declaration"));
-        }
+        };
         let mut annotations = Vec::with_capacity(class.annotations.len());
         for annotation in &class.annotations {
             annotations.push(self.annotation(class, annotation)?);
@@ -150,9 +150,7 @@ impl Source<'_> {
                 )?);
             }
         }
-        // KSP lists a primary constructor first for every classifier but an interface: the one
-        // written, or the implicit one of a class without secondary constructors.
-        let primary_constructor = kind != KspClassKind::Interface;
+        let primary_constructor = self.primary_constructor(class, kind, signature)?;
         let declarations_complete = kind != KspClassKind::EnumClass
             && class.props.is_empty()
             && class.methods.is_empty()
@@ -170,6 +168,44 @@ impl Source<'_> {
             classes,
             declarations_complete,
         })
+    }
+
+    /// The parameters of the primary constructor the resolved declaration has: the one written, or
+    /// the implicit one of a class without secondary constructors. An interface has no constructor.
+    fn primary_constructor(
+        &self,
+        class: &ClassDecl,
+        kind: KspClassKind,
+        signature: &FrontendClassSig,
+    ) -> Result<Option<Vec<KspParameter>>, String> {
+        if kind == KspClassKind::Interface || !signature.has_primary_ctor {
+            return Ok(None);
+        }
+        // The signature names each parameter and whether it has a default; the declaration says
+        // how each was written.
+        if signature.ctor_param_names.len() != class.props.len() {
+            return Err(self.refusal(
+                class,
+                &format!(
+                    "has {} primary-constructor parameters resolved for {} written",
+                    signature.ctor_param_names.len(),
+                    class.props.len()
+                ),
+            ));
+        }
+        let parameters = signature
+            .ctor_param_names
+            .iter()
+            .zip(&class.props)
+            .map(|((name, has_default), written)| KspParameter {
+                name: name.clone(),
+                is_val: written.is_property && !written.is_var,
+                is_var: written.is_property && written.is_var,
+                is_vararg: written.is_vararg,
+                has_default: *has_default,
+            })
+            .collect();
+        Ok(Some(parameters))
     }
 
     fn annotation(
@@ -270,7 +306,7 @@ mod tests {
                     qualified_name: qualified_name.to_string(),
                 })
                 .collect(),
-            primary_constructor: kind != KspClassKind::Interface,
+            primary_constructor: (kind != KspClassKind::Interface).then(Vec::new),
             classes,
             declarations_complete: true,
         }
@@ -386,6 +422,71 @@ mod tests {
         let file = &round.files[0];
         assert!(!file.declarations_complete);
         assert!(!file.classes[0].declarations_complete);
+    }
+
+    fn parameter(name: &str, flags: (bool, bool, bool, bool)) -> KspParameter {
+        let (is_val, is_var, is_vararg, has_default) = flags;
+        KspParameter {
+            name: name.to_string(),
+            is_val,
+            is_var,
+            is_vararg,
+            has_default,
+        }
+    }
+
+    #[test]
+    fn a_primary_constructor_is_the_resolved_declarations_with_its_written_parameters() {
+        let round = round(&[(
+            "/src/Constructors.kt",
+            "package constructors\n\nclass Implicit\n\nclass Explicit(first: Int, second: String = \"\")\n\nclass SecondaryOnly {\n    constructor(value: Int)\n}\n\nclass Both(val a: Int, var b: String = \"\", vararg c: Int) {\n    constructor() : this(1)\n}\n\nobject Single\n\nannotation class Marker(val name: String)\n\ninterface Shape\n\nclass Outer {\n    inner class In(val x: Int)\n}\n",
+        )])
+        .expect("every declaration is readable");
+        let constructors: Vec<(&str, Option<Vec<KspParameter>>)> = round.files[0]
+            .classes
+            .iter()
+            .chain(&round.files[0].classes[7].classes)
+            .map(|class| {
+                (
+                    class.qualified_name.as_str(),
+                    class.primary_constructor.clone(),
+                )
+            })
+            .collect();
+        let plain = (false, false, false, false);
+        assert_eq!(
+            constructors,
+            [
+                ("constructors.Implicit", Some(vec![])),
+                (
+                    "constructors.Explicit",
+                    Some(vec![
+                        parameter("first", plain),
+                        parameter("second", (false, false, false, true)),
+                    ])
+                ),
+                ("constructors.SecondaryOnly", None),
+                (
+                    "constructors.Both",
+                    Some(vec![
+                        parameter("a", (true, false, false, false)),
+                        parameter("b", (false, true, false, true)),
+                        parameter("c", (false, false, true, false)),
+                    ])
+                ),
+                ("constructors.Single", Some(vec![])),
+                (
+                    "constructors.Marker",
+                    Some(vec![parameter("name", (true, false, false, false))])
+                ),
+                ("constructors.Shape", None),
+                ("constructors.Outer", Some(vec![])),
+                (
+                    "constructors.Outer.In",
+                    Some(vec![parameter("x", (true, false, false, false))])
+                ),
+            ]
+        );
     }
 
     #[test]

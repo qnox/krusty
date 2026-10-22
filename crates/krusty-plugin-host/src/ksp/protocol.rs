@@ -110,7 +110,21 @@ fn put_class(payload: &mut Vec<u8>, class: &KspClass) {
         put_str(payload, &annotation.short_name);
         put_str(payload, &annotation.qualified_name);
     });
-    payload.push(u8::from(class.primary_constructor));
+    match &class.primary_constructor {
+        Some(parameters) => {
+            payload.push(1);
+            put_list(payload, parameters, |payload, parameter| {
+                put_str(payload, &parameter.name);
+                payload.push(
+                    u8::from(parameter.is_val)
+                        | u8::from(parameter.is_var) << 1
+                        | u8::from(parameter.is_vararg) << 2
+                        | u8::from(parameter.has_default) << 3,
+                );
+            });
+        }
+        None => payload.push(0),
+    }
     payload.push(u8::from(class.declarations_complete));
     put_list(payload, &class.classes, put_class);
 }
@@ -166,7 +180,7 @@ fn outcome(payload: &mut Payload) -> io::Result<KspOutcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use krusty_plugin_ir::{KspAnnotation, KspFile};
+    use krusty_plugin_ir::{KspAnnotation, KspFile, KspParameter};
 
     #[test]
     fn a_round_frames_each_class_with_its_nested_classes_after_its_own_facts() {
@@ -183,7 +197,13 @@ mod tests {
                         short_name: "M".into(),
                         qualified_name: "p.M".into(),
                     }],
-                    primary_constructor: true,
+                    primary_constructor: Some(vec![KspParameter {
+                        name: "x".into(),
+                        is_val: true,
+                        is_var: false,
+                        is_vararg: false,
+                        has_default: true,
+                    }]),
                     classes: Vec::new(),
                     declarations_complete: true,
                 }],
@@ -203,7 +223,9 @@ mod tests {
         expected.extend([4, 0, 0, 0, 3]);
         expected.extend([0, 0, 0, 1, 0, 0, 0, 1, b'M', 0, 0, 0, 3]);
         expected.extend(b"p.M");
-        expected.extend([1, 1, 0, 0, 0, 0]);
+        // A primary constructor with one `val x = …` parameter, then the complete declarations.
+        expected.extend([1, 0, 0, 0, 1, 0, 0, 0, 1, b'x', 0b1001]);
+        expected.extend([1, 0, 0, 0, 0]);
         let mut frame = (expected.len() as u32).to_be_bytes().to_vec();
         frame.extend(expected);
         assert_eq!(framed, frame);

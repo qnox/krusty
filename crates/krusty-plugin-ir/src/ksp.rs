@@ -31,14 +31,27 @@ pub struct KspClass {
     /// The 1-based line of the classifier's name, which `KSNode.location` reports.
     pub line: u32,
     pub annotations: Vec<KspAnnotation>,
-    /// Whether KSP lists a primary constructor (`<init>`) first among the declarations.
-    pub primary_constructor: bool,
+    /// The primary constructor's parameters, or `None` when the classifier has no primary
+    /// constructor. KSP lists one (`<init>`) first among the declarations.
+    pub primary_constructor: Option<Vec<KspParameter>>,
     /// Classifiers declared in this one's body, in source order.
     pub classes: Vec<KspClass>,
     /// Whether the primary constructor and [`Self::classes`] are every declaration KSP lists. When
     /// the body declares anything else, the host refuses to list declarations rather than list a
     /// part of them.
     pub declarations_complete: bool,
+}
+
+/// A primary-constructor parameter as `KSValueParameter` describes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KspParameter {
+    pub name: String,
+    /// Written `val`: the parameter also declares a read-only property.
+    pub is_val: bool,
+    /// Written `var`: the parameter also declares a mutable property.
+    pub is_var: bool,
+    pub is_vararg: bool,
+    pub has_default: bool,
 }
 
 /// KSP's `ClassKind`.
