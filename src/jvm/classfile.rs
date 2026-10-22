@@ -1832,7 +1832,8 @@ impl ClassWriter {
                 }
             }
         }
-        // Assemble the class attribute table in kotlinc's fixed order. `self.class_attributes` is empty
+        // Assemble the class attribute table in kotlinc's fixed order (ASM's: `BootstrapMethods`
+        // precedes `PermittedSubclasses`). `self.class_attributes` is empty
         // in practice (nothing pushes to it outside `finish`); it is prepended to preserve the API.
         let mut ordered: Vec<(u16, Vec<u8>)> = std::mem::take(&mut self.class_attributes);
         // `InnerClasses`, then `EnclosingMethod`, then `Signature` — kotlinc's order for a generic
@@ -1853,8 +1854,8 @@ impl ClassWriter {
                 deprecated_attr,
                 rva_attr,
                 ria_attr,
-                permitted_attr,
                 bootstrap_attr,
+                permitted_attr,
             ]
             .into_iter()
             .flatten(),

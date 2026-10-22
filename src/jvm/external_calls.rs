@@ -890,6 +890,7 @@ pub(super) fn realize(
                 | crate::libraries::CompilerIntrinsic::ArrayGet
                 | crate::libraries::CompilerIntrinsic::ArraySet
                 | crate::libraries::CompilerIntrinsic::ArrayFactory(_)
+                | crate::libraries::CompilerIntrinsic::ListStorageConstruction(_)
                 | crate::libraries::CompilerIntrinsic::CharCode
                 | crate::libraries::CompilerIntrinsic::StringLength
                 | crate::libraries::CompilerIntrinsic::Assert

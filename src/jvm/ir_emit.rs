@@ -1113,7 +1113,7 @@ fn register_sealed_subtypes(cw: &mut ClassWriter, ir: &IrFile, c: &IrClass, emit
         return;
     }
     let self_identity = c.fq_name_id();
-    let subs = crate::metadata::class_declarations::sorted_sealed_subclasses(c);
+    let subs = c.sorted_sealed_subclasses();
     if subs.is_empty() {
         return;
     }

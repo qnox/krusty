@@ -131,6 +131,17 @@ impl BodyLowering<'_, '_, '_> {
             return Some(self.intrinsic(operation, ret, receiver, args));
         }
         match intrinsic {
+            Some(crate::backend::BackendCompilerIntrinsic::ListStorageConstruction(plan)) => {
+                if receiver.is_some()
+                    || extension_receiver_parameter.is_some()
+                    || !ret.is_reference()
+                {
+                    return Some(Err(
+                        "a list storage construction with malformed receiver or result".into(),
+                    ));
+                }
+                Some(self.list_storage_construction(plan, args))
+            }
             Some(crate::backend::BackendCompilerIntrinsic::StringPlus) => {
                 let (Some(receiver), [argument]) = (receiver, args) else {
                     return Some(Err("a malformed `String.plus`".into()));

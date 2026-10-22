@@ -1,7 +1,11 @@
 //! Java source syntax shared by compiler stubs and editor analysis.
 
+mod constants;
+
 use crate::diag::Span;
 use crate::fx_hash::HashSet;
+
+pub(crate) use constants::JavaConstant;
 
 const ACC_PUBLIC: u16 = 0x0001;
 const ACC_PRIVATE: u16 = 0x0002;
@@ -19,6 +23,10 @@ pub(crate) const STUB_DEFAULT: u16 = 0x8000;
 enum Tok {
     Ident(String),
     StringLiteral(String),
+    /// The raw text between the quotes of a character literal.
+    CharLiteral(String),
+    /// A numeric literal as spelled, with its radix prefix and type suffix.
+    Number(String),
     Punct(char),
 }
 
@@ -75,18 +83,40 @@ pub(crate) fn lex_java(src: &str) -> LexedJava {
             }
         } else if c == '\'' {
             let quote = c;
+            let start = i;
             i += width;
+            let content_start = i;
             while i < src.len() {
                 let next = src[i..].chars().next().unwrap();
+                let next_start = i;
                 i += next.len_utf8();
                 if next == '\\' {
                     if i < src.len() {
                         i += src[i..].chars().next().unwrap().len_utf8();
                     }
                 } else if next == quote {
+                    tokens.push(Tok::CharLiteral(src[content_start..next_start].to_string()));
+                    spans.push(Span::new(start as u32, i as u32));
                     break;
                 }
             }
+        } else if c.is_ascii_digit()
+            || (c == '.' && src[i + 1..].starts_with(|next: char| next.is_ascii_digit()))
+        {
+            let start = i;
+            let hex = src[i..].starts_with("0x") || src[i..].starts_with("0X");
+            i += 1;
+            while let Some(next) = src[i..].chars().next() {
+                let previous = src.as_bytes()[i - 1].to_ascii_lowercase();
+                let exponent_sign =
+                    (next == '+' || next == '-') && previous == if hex { b'p' } else { b'e' };
+                if !(next.is_ascii_alphanumeric() || next == '_' || next == '.' || exponent_sign) {
+                    break;
+                }
+                i += 1;
+            }
+            tokens.push(Tok::Number(src[start..i].to_string()));
+            spans.push(Span::new(start as u32, i as u32));
         } else if c.is_alphabetic() || c == '_' || c == '$' {
             let start = i;
             i += width;
@@ -225,11 +255,6 @@ pub(crate) struct Member {
     pub(crate) throws: Vec<SrcType>,
     pub(crate) access: u16,
     pub(crate) has_annotation_default: bool,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) enum JavaConstant {
-    String(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -612,9 +637,52 @@ impl P<'_> {
         }
     }
 
+    /// Whether the `<` at the cursor opens type arguments rather than comparing: it follows a `.`
+    /// (explicit method type arguments, `Collections.<K, V>emptyMap()`) or ends the type named by
+    /// `new` or `instanceof`. These are the expression positions where the grammar admits only a
+    /// type, so a comma inside them never separates field declarators.
+    fn opens_type_arguments(&self) -> bool {
+        let Some(mut at) = self.i.checked_sub(1) else {
+            return false;
+        };
+        match &self.t[at] {
+            Tok::Punct('.') => return true,
+            Tok::Ident(_) => {}
+            _ => return false,
+        }
+        while at >= 2
+            && self.t[at - 1] == Tok::Punct('.')
+            && matches!(self.t[at - 2], Tok::Ident(_))
+        {
+            at -= 2;
+        }
+        at.checked_sub(1).is_some_and(|keyword| {
+            matches!(&self.t[keyword], Tok::Ident(word) if word == "new" || word == "instanceof")
+        })
+    }
+    /// Skip a balanced `<...>` type-argument list, the cursor on its `<`. A type-use annotation's
+    /// arguments are expressions, so `@A(1 > 0)` is skipped whole rather than counted.
+    fn skip_type_arguments(&mut self) -> Option<()> {
+        let mut depth = 0u32;
+        loop {
+            match self.bump()? {
+                Tok::Punct('@') => {
+                    self.skip_annotation()?;
+                }
+                Tok::Punct('<') => depth += 1,
+                Tok::Punct('>') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
     /// Consume one field initializer without consuming its following comma/semicolon. A constant is
-    /// returned only when the complete expression is one string literal; compound Java constant
-    /// evaluation remains outside this bounded source-header parser.
+    /// returned only when the complete expression is one literal, a numeric one optionally signed;
+    /// compound Java constant evaluation remains outside this bounded source-header parser.
     fn field_initializer(&mut self) -> Option<Option<JavaConstant>> {
         if !self.eat_punct('=') {
             return Some(None);
@@ -634,6 +702,10 @@ impl P<'_> {
                 Some(Tok::Punct(']')) => brackets -= 1,
                 Some(Tok::Punct('{')) => braces += 1,
                 Some(Tok::Punct('}')) => braces -= 1,
+                Some(Tok::Punct('<')) if self.opens_type_arguments() => {
+                    self.skip_type_arguments()?;
+                    continue;
+                }
                 Some(_) => {}
                 None => return None,
             }
@@ -641,6 +713,12 @@ impl P<'_> {
         }
         Some(match &self.t[start..self.i] {
             [Tok::StringLiteral(raw)] => decode_java_string(raw).map(JavaConstant::String),
+            [Tok::CharLiteral(raw)] => decode_java_char(raw).map(JavaConstant::Char),
+            [Tok::Ident(word)] if word == "true" => Some(JavaConstant::Boolean(true)),
+            [Tok::Ident(word)] if word == "false" => Some(JavaConstant::Boolean(false)),
+            [Tok::Number(literal)] => constants::number_literal(literal, false),
+            [Tok::Punct('+'), Tok::Number(literal)] => constants::number_literal(literal, false),
+            [Tok::Punct('-'), Tok::Number(literal)] => constants::number_literal(literal, true),
             _ => None,
         })
     }
@@ -687,6 +765,12 @@ fn decode_java_string(raw: &str) -> Option<String> {
         }
     }
     Some(out)
+}
+
+/// The one UTF-16 code unit a character literal's raw text denotes.
+fn decode_java_char(raw: &str) -> Option<u16> {
+    let mut units = decode_java_string(raw)?.encode_utf16().collect::<Vec<_>>();
+    (units.len() == 1).then(|| units.remove(0))
 }
 
 const MODIFIERS: &[&str] = &[

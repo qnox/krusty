@@ -12,6 +12,44 @@
 //! Each box() checks the RUNTIME packing (joined elements + flag), not just acceptance.
 use super::common;
 
+#[test]
+fn declared_projected_varargs_keep_nullable_element_values_and_spread_order() {
+    const SOURCE: &str = r#"
+        var effects = ""
+        fun next(value: Int): Int { effects += value; return value }
+        fun box(): String {
+            val middle = arrayOf<Int?>(null, 2)
+            val values = listOf<Int?>(next(1), *middle, next(3))
+            return if (values.size == 4 && values[0] == 1 && values[1] == null &&
+                       values[2] == 2 && values[3] == 3 && effects == "13") "OK" else "fail"
+        }
+    "#;
+    assert_eq!(common::kotlinc_box_result(SOURCE), "OK");
+    assert_eq!(
+        common::expect_box_run_with_stdlib(SOURCE, "projected_nullable_vararg"),
+        "OK"
+    );
+}
+
+#[test]
+fn declared_projected_varargs_box_nullable_value_classes_and_heterogeneous_values() {
+    const SOURCE: &str = r#"
+        @JvmInline value class Stamp(val value: Int)
+        fun box(): String {
+            val stamps = listOf<Stamp?>(Stamp(7), null, Stamp(9))
+            if (stamps[0]?.value != 7 || stamps[1] != null || stamps[2]?.value != 9) return "stamp"
+            val mixed = listOf<Any?>(1, 2L, "K", null)
+            return if (mixed[0] == 1 && mixed[1] == 2L && mixed[2] == "K" &&
+                       mixed[3] == null) "OK" else "mixed"
+        }
+    "#;
+    assert_eq!(common::kotlinc_box_result(SOURCE), "OK");
+    assert_eq!(
+        common::expect_box_run_with_stdlib(SOURCE, "projected_boxed_vararg"),
+        "OK"
+    );
+}
+
 /// Multi-file fixtures in this module exercise the backend boundary, so a front-end-clean `None`
 /// is a failure, not an acceptable skip. Keeping that strict contract in one helper prevents a new
 /// source-origin case from accidentally weakening runtime coverage while still reporting useful

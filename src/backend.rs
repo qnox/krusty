@@ -106,6 +106,13 @@ pub trait Backend {
         false
     }
 
+    /// Whether this backend numbers the dispatch slots of the module's classes itself, so a file
+    /// needs the module's class shapes ([`BackendModuleFacts::with_classes`]) to dispatch through
+    /// a class another file declares.
+    fn numbers_slots(&self) -> bool {
+        false
+    }
+
     /// Whether a dependency-support body may call an exact provider declaration which has no
     /// serialized KLIB body. Such a call is admitted only when the target's ordinary dependency
     /// registry can realize the frozen provider handle directly.

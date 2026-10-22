@@ -78,3 +78,26 @@ fn a_delegated_property_reaches_the_delegate_through_its_accessors() {
         "DelegatedPropertySelection",
     );
 }
+
+#[test]
+fn an_inherited_property_is_dispatched_through_a_subclass_type() {
+    expect_portable(
+        "open class A {\n\
+         \x20   open val p: String = \"A\"\n\
+         \x20   open var q: Int = 1\n\
+         }\n\
+         open class B : A()\n\
+         class C : B() {\n\
+         \x20   override val p: String get() = \"C\"\n\
+         \x20   override var q: Int = 10\n\
+         \x20       set(value) { field = value * 2 }\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val b: B = C()\n\
+         \x20   b.q = 21\n\
+         \x20   val result = b.p + b.q + B().p\n\
+         \x20   return if (result == \"C42A\") \"OK\" else result\n\
+         }\n",
+        "InheritedPropertySelection",
+    );
+}

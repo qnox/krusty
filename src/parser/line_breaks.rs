@@ -87,6 +87,24 @@ impl Parser<'_> {
         }
     }
 
+    /// Consume the `.` that ends a declaration's receiver type (or one of its qualifier segments),
+    /// with the line breaks Kotlin allows on either side of it: `receiverType NL* '.' NL*`.
+    pub(super) fn eat_receiver_dot(&mut self) -> bool {
+        self.skip_plain_newlines_before(TokenKind::Dot);
+        let dot = self.eat(TokenKind::Dot);
+        if dot {
+            self.skip_plain_newlines();
+        }
+        dot
+    }
+
+    /// [`Self::eat_receiver_dot`], reporting a missing `.`.
+    pub(super) fn expect_receiver_dot(&mut self) {
+        if !self.eat_receiver_dot() {
+            self.diags.error(self.tok().span, "expected '.'");
+        }
+    }
+
     /// Kotlin treats a newline before `||`, `&&`, or `?:` as a line CONTINUATION, not a statement
     /// terminator (`cond\n  && other`, `x\n  ?: default`): the operator cannot begin a statement, so
     /// the expression keeps going. Peek past the newline(s); if such an operator follows, consume them
