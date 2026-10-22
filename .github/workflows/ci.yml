@@ -54,8 +54,8 @@ jobs:
           tool: just
       - name: lint
         run: just lint
-      # The ignored tests start a real host: the pinned kotlinc 2.4.20 classpath from Maven Central
-      # on the runner's JDK, with the adapter compiled by it. Both stay in krusty's cache.
+      # The ignored tests start real compiler-plugin and KSP hosts from their pinned toolchains
+      # on the runner's JDK. The toolchains and compiled adapters stay in krusty's cache.
       - name: cache plugin host runtime
         uses: actions/cache@v6
         with:
@@ -598,18 +598,14 @@ jobs:
       - name: run non-box conformance ${{ matrix.version }}
         if: matrix.target == 'jvm'
         env:
-          # Required KSP/serialization toolchains can be cold. Keep the local 120-second default;
-          # this complete CI pass includes provisioning, processor compilation and code generation.
+          # Required serialization/reference CLI toolchains can be cold. Keep the local
+          # 120-second default; this complete CI pass includes their provisioning and compilation.
           KRUSTY_CONFORMANCE_TIMEOUT_SECONDS: "600"
-          # The pinned KSP compiler needs JDK 21; reuse it instead of downloading another JDK.
-          KSP_E2E_JDK: ${{ env.JAVA_HOME_21_X64 }}
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
           KRUSTY_RECORD_CLASS_DUMPS: "0"
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}
           KRUSTY_CLASS_DUMP_COMPILE_MISSING: ${{ steps.recorded-mode.outputs.compile_missing }}
           KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
-          KRUSTY_KSP_E2E: "1"
-          KRUSTY_REQUIRE_KSP_E2E: "1"
           KRUSTY_REQUIRE_SERIALIZATION_CONFORMANCE: "1"
         run: just conformance-regressions "$PWD/conformance-bin" "${{ matrix.version }}"
       - name: save recorded kotlinc bytes (${{ matrix.version }})
