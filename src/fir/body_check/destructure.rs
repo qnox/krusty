@@ -392,6 +392,7 @@ impl BodyFirChecker<'_> {
                         origin,
                     )?),
                     arguments: Box::new([]),
+                    parameter_types: self.published_parameter_types(span, &local.sig.params)?,
                 });
             }
             ResolvedCall::TopLevel(_)

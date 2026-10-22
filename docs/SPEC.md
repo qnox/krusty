@@ -2683,6 +2683,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   against its own type parameters, not their erasure; only the descriptor erases them. An
   anonymous function is signed the same way, while a lambda literal's method carries no
   `Signature` (`tests/local_function_signature_e2e.rs`).
+- **Local-call applied parameters.** Checked local calls retain every selected value parameter in
+  declaration order, including context slots but excluding extension receivers and lifted captures.
+  Generic vararg packing uses that applied array type, not the local declaration's erased array;
+  `T = Int` packs a reference `Array<Int>`, while the declaration's own parameter and generic
+  signature stay unchanged. Physical capture/default mapping and declaration-boundary coercions
+  remain separate. A mismatched checked/declaration value arity is rejected, not reconstructed.
+  Tests: `local_function_signature_e2e::local_generic_vararg_arrays_keep_the_selected_element_at_runtime`
+  and the companion strict whole-class comparison, plus checked-FIR parameter/arity units.
 - **Lifted captured value order (kotlinc's `ClosureAnnotator`).** The captured values lead a lifted
   local function's parameters in the order its closure first sees them, never by name: first the
   values its defaults and body read, in source order, then the closures of the local functions it

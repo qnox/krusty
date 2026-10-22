@@ -1119,6 +1119,9 @@ pub enum FirExprKind {
         target: FirLocalCallableRef,
         extension_receiver: Option<FirReceiver>,
         arguments: Box<[FirCallArgument]>,
+        /// Checker-applied value parameters, including context slots but excluding the extension
+        /// receiver and lifted captures. Varargs retain their complete selected array type.
+        parameter_types: Box<[ResolvedTy]>,
     },
     /// Invocation of an already-typed function value. The callable expression and final parameter
     /// types are semantic inputs; lowering only chooses their backend representation.
@@ -1527,12 +1530,17 @@ impl FirExprKind {
                     + object.super_arguments.len()
                         * std::mem::size_of::<FirAnonymousSuperArgument>()
             }
-            FirExprKind::LocalCall { arguments, .. } => {
+            FirExprKind::LocalCall {
+                arguments,
+                parameter_types,
+                ..
+            } => {
                 arguments.len() * std::mem::size_of::<FirCallArgument>()
                     + arguments
                         .iter()
                         .map(FirCallArgument::storage_payload_bytes)
                         .sum::<usize>()
+                    + parameter_types.len() * std::mem::size_of::<ResolvedTy>()
             }
             FirExprKind::FunctionInvoke {
                 context_arguments,

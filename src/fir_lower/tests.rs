@@ -24,6 +24,7 @@ mod inline_only;
 mod inline_plan_tests;
 mod integral_constants;
 mod lambda_return_flow;
+mod local_call_parameters;
 mod local_classifier_provenance;
 mod lowering_temporaries;
 mod ranges;
@@ -1335,6 +1336,7 @@ fn local_function_is_lifted_once_and_receives_its_checked_capture() {
             },
             extension_receiver: None,
             arguments: Box::new([]),
+            parameter_types: Box::new([]),
         },
     });
     let call_statement = body.add_statement(FirStatement {

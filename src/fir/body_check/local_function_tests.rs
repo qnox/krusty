@@ -77,6 +77,47 @@ fn local_function_declaration_and_call_use_body_local_callable_identity() {
 }
 
 #[test]
+fn generic_local_call_retains_all_selected_parameters_in_declaration_order() {
+    let (body, _) = checked_function_body(
+        "fun outer(): Int {\n\
+             fun <T> local(first: T, other: Any): Int = 1\n\
+             return local<String>(other = 42, first = \"OK\")\n\
+         }\n",
+        "outer",
+    );
+    let calls = (0..body.expression_count())
+        .filter_map(|raw| {
+            let expression = body.expr(FirExprId::from_raw(raw as u32))?;
+            let FirExprKind::LocalCall {
+                arguments,
+                parameter_types,
+                ..
+            } = &expression.kind
+            else {
+                return None;
+            };
+            Some((
+                parameter_types
+                    .iter()
+                    .map(|ty| ty.get())
+                    .collect::<Vec<_>>(),
+                arguments
+                    .iter()
+                    .map(|argument| match argument {
+                        FirCallArgument::Expression { parameter, .. } => *parameter,
+                        _ => panic!("both named operands must remain expressions"),
+                    })
+                    .collect::<Vec<_>>(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        calls,
+        [(vec![Ty::String, Ty::obj("kotlin/Any")], vec![1, 0])]
+    );
+}
+
+#[test]
 fn local_generic_bound_preserves_enclosing_type_argument() {
     let (body, _) = checked_function_body(
         "class Holder<T : Any>(val value: T)\n\
@@ -553,6 +594,7 @@ fn bare_local_extension_call_falls_through_to_enclosing_rung() {
                     target,
                     extension_receiver: Some(_),
                     arguments,
+                    ..
                 } => selected.push((arguments.len(), target.body_depth)),
                 FirExprKind::Lambda { body, .. } => collect_local_extension_calls(body, selected),
                 _ => {}
@@ -1040,11 +1082,22 @@ fn context_local_function_call_keeps_selected_context_binding() {
     else {
         panic!("return must contain the local call")
     };
-    let FirExprKind::LocalCall { arguments, .. } = &body.expr(call).expect("local call").kind
+    let FirExprKind::LocalCall {
+        arguments,
+        parameter_types,
+        ..
+    } = &body.expr(call).expect("local call").kind
     else {
         panic!("context local invocation must remain a local call")
     };
     assert_eq!(arguments.len(), 2);
+    assert_eq!(
+        parameter_types
+            .iter()
+            .map(|ty| ty.get())
+            .collect::<Vec<_>>(),
+        [Ty::obj("Session"), Ty::Int]
+    );
     assert!(matches!(
         arguments[0],
         FirCallArgument::Expression { parameter: 0, .. }
