@@ -3,7 +3,9 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 mod analysis_group;
-use analysis_group::{project_group_inputs, project_group_uris, ProjectAnalysisGroup};
+use analysis_group::{
+    project_group_inputs, project_group_script_stems, project_group_uris, ProjectAnalysisGroup,
+};
 mod canonical_support;
 use canonical_support::{register_canonical_support, OpenDocumentSlots};
 use std::io;
@@ -1775,7 +1777,8 @@ impl krusty_lsp::Analysis for WorkerHost {
                 )
             });
             if let Some((classpath, language_arguments)) = group_config.as_ref() {
-                let inputs = project_group_inputs(documents, &group);
+                let script_stems = project_group_script_stems(documents, &group);
+                let inputs = project_group_inputs(documents, &group, &script_stems);
                 let retained_uris = project_group_uris(documents, &group);
                 let retained_sources = inputs
                     .iter()
@@ -1824,7 +1827,8 @@ impl krusty_lsp::Analysis for WorkerHost {
                         &self.options,
                     )
                 });
-                let inputs = project_group_inputs(documents, &group);
+                let script_stems = project_group_script_stems(documents, &group);
+                let inputs = project_group_inputs(documents, &group, &script_stems);
                 let result = self.worker.analyze_inputs_prefix_with_config(
                     &inputs,
                     documents.len(),
@@ -2379,7 +2383,8 @@ mod tests {
             Vec::new(),
             Vec::new(),
         );
-        let texts = project_group_inputs(&documents, &group)
+        let texts_stems = project_group_script_stems(&documents, &group);
+        let texts = project_group_inputs(&documents, &group, &texts_stems)
             .iter()
             .map(|input| input.text)
             .collect::<Vec<_>>();
@@ -2477,7 +2482,9 @@ mod tests {
             Vec::new(),
             vec![(3, 4), (4, 0)],
         );
-        let dependency_inputs = project_group_inputs(&documents, &dependency_group);
+        let dependency_inputs_stems = project_group_script_stems(&documents, &dependency_group);
+        let dependency_inputs =
+            project_group_inputs(&documents, &dependency_group, &dependency_inputs_stems);
         assert_eq!(
             dependency_inputs
                 .iter()
@@ -2485,7 +2492,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             [documents[0].1, "", "", dependency_support.1]
         );
-        let consumer_inputs = project_group_inputs(&documents, &consumer_group);
+        let consumer_inputs_stems = project_group_script_stems(&documents, &consumer_group);
+        let consumer_inputs =
+            project_group_inputs(&documents, &consumer_group, &consumer_inputs_stems);
         assert_eq!(
             consumer_inputs
                 .iter()
@@ -2828,7 +2837,9 @@ mod tests {
             (consumer_uri.as_str(), "fun consumer() {}"),
         ];
 
-        let inputs = project_group_inputs(&documents, &group);
+        let script_stems = project_group_script_stems(&documents, &group);
+
+        let inputs = project_group_inputs(&documents, &group, &script_stems);
         let uris = project_group_uris(&documents, &group);
 
         assert_eq!(
@@ -2871,7 +2882,8 @@ mod tests {
             (unowned_uri.as_str(), "fun unowned() {}"),
             (consumer_uri.as_str(), "fun consumer() {}"),
         ];
-        let inputs = project_group_inputs(&documents, &group);
+        let script_stems = project_group_script_stems(&documents, &group);
+        let inputs = project_group_inputs(&documents, &group, &script_stems);
         let uris = project_group_uris(&documents, &group);
         let sources = inputs
             .iter()
