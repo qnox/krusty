@@ -1260,6 +1260,8 @@ mod java_instance_e2e;
 #[path = "java_interface_mutable_collection_face_e2e.rs"]
 mod java_interface_mutable_collection_face_e2e;
 mod java_member_modules;
+#[path = "java_nonfinal_constant_e2e.rs"]
+mod java_nonfinal_constant_e2e;
 #[path = "java_self_bounded_constructor_e2e.rs"]
 mod java_self_bounded_constructor_e2e;
 #[path = "local_class_capture_order_e2e.rs"]
@@ -1834,6 +1836,8 @@ mod native_concurrency_e2e;
 mod native_const_reference_e2e;
 #[path = "native_context_parameter_sam_e2e.rs"]
 mod native_context_parameter_sam_e2e;
+#[path = "native_cross_file_dispatch_e2e.rs"]
+mod native_cross_file_dispatch_e2e;
 #[path = "native_cross_file_e2e.rs"]
 mod native_cross_file_e2e;
 #[path = "native_data_class_array_rendering_e2e.rs"]
@@ -2189,6 +2193,8 @@ mod nested_data_class_tostring_recipe_e2e;
 mod nested_inline_delegate_e2e;
 #[path = "nullable_sam_e2e.rs"]
 mod nullable_sam_e2e;
+#[path = "open_serializable_write_self_e2e.rs"]
+mod open_serializable_write_self_e2e;
 #[path = "operator_declarations_e2e.rs"]
 mod operator_declarations_e2e;
 #[path = "operator_expected_result_seeding_e2e.rs"]

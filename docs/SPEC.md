@@ -110,6 +110,10 @@ A literal is an input occurrence of a nullable `@OnlyInputTypes` solution as wel
 (`tests/only_input_integer_literal_e2e.rs`).
 Public static fields are valid class-qualified property reads, including in inferred property
 initializers.
+A Java static field's `ConstantValue` makes it a compile-time constant only when the field is
+`final` (JLS §4.12.4): such a read inlines the value, while a non-final static that carries one, as
+every resource id in the Android Gradle plugin's compile `R.jar` does, stays a `getstatic`, as in
+kotlinc (`tests/java_nonfinal_constant_e2e.rs`).
 
 Public Java instance fields are valid value-qualified property reads. Selection uses the same
 classifier/property hierarchy for Java source stubs, compiled dependencies, and source/module
@@ -11312,6 +11316,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   line: the method opens on it at its first instruction, whether that is the child-serializer cache
   read, an unconditional element or a default-value guard, and a guard's comparison returns to it.
   Test: `tests/serialization_generated_debug_e2e.rs::write_self_opens_on_the_class_line_at_its_first_instruction`.
+- **An inheritable serializable class's `write$Self` is public.** kotlinc keeps a final class's
+  `write$Self` internal, so its JVM name carries the module (`write$Self$main`), but an open or
+  abstract class's subclass, possibly in another module, calls it, so it is public under its plain
+  name `write$Self`, and the deserialization constructor's metadata is public too. Kotlin metadata
+  lists a class's properties sorted by name, so kotlinc's plugin also writes an open or abstract
+  class's own elements in program order into its metadata (`propertiesNamesInProgramOrder`, field
+  18000, leaving out `@Transient` properties): a subclass's serializer in another module rebuilds
+  the parent's element order from it. As in kotlinc, a plugin owns the class metadata fields it
+  registers and writes them only when the target serializes the class's record: krusty's metadata
+  writer asks each plugin in registration order, and the serialization plugin reads the field off
+  the checked class then, so nothing is recorded for it beforehand. A `write$Self` without elements is a
+  bare `return` with no line. (A sealed class's `write$Self` and an abstract class's
+  `PolymorphicSerializer` companion are not generated yet.)
+  Test: `tests/open_serializable_write_self_e2e.rs`.
 - **`write$Self` reads an overridable property through its getter.** It reads a final property's
   backing field, as kotlinc's JVM lowering does for a default getter, but an open or overriding
   property's getter can be overridden, so kotlinc calls it: `override val name` is read with
@@ -14691,6 +14709,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`an_is_check_names_a_class_declared_in_another_file`,
   `a_when_over_a_sealed_hierarchy_from_another_file_selects_its_branch`,
   `an_exception_declared_in_another_file_is_caught_by_its_class`).
+- **Native: a virtual call through a class declared in another file dispatches by a module-wide
+  slot number.** Every named, non-local class of the module is numbered once from the
+  declaration headers (`backend::module_classes`, `backend::class_tables::module_slots`), by the
+  rules a single file applies to its own classes: `kotlin.Any`'s members and the function slot
+  first, then the superclass's table, then each member in source order, taking the slot of the
+  class member it overrides when both carry values alike, or a new slot with a bridge left in the
+  base's. The declaring file fills those numbers from its IR, and another file indexes the
+  receiver's table with the number the plan gave the member the call selected, so an open,
+  abstract or inherited member and an override declared in another file dispatch alike. A member
+  the declaring file realizes but the headers do not declare declines the file, since another file
+  could not know its number; the forwarders of `I by d` are the exception, since no class number
+  names an interface member alone: they take numbers past the planned ones, and a subclass renumbers
+  the ones it inherits past its own. A forwarder that also realizes an inherited class member
+  (`class E : B(), C by D()`) fills that member's number instead. Interface numbers stay per file.
+  Tests: `tests/native_cross_file_dispatch_e2e.rs`
+  (`an_open_member_dispatches_to_the_override_from_another_file`,
+  `an_abstract_member_dispatches_to_its_implementation`,
+  `an_inherited_member_dispatches_through_a_subclass_type`,
+  `a_generic_member_reaches_an_override_through_its_bridge`,
+  `an_overridden_to_string_dispatches_through_the_base`,
+  `an_open_property_dispatches_to_its_override`,
+  `a_delegated_member_replaces_the_inherited_class_member`).
 - **Native: the public C ABI is primitives, String, and a Unit result.** A public top-level
   function whose parameters are primitives or `String` and whose result is one of those types or
   `Unit` is declared in the module's C header and exported under that declaration. The export runs

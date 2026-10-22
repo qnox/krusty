@@ -33,6 +33,8 @@ pub struct JvmClassSignatures<'a> {
     pub properties: Vec<JvmPropertySignature>,
     /// The functions' realizations, parallel to the declaration's.
     pub functions: Vec<JvmFunctionSignature>,
+    /// The compiler plugins asked for their extension fields as the record is written.
+    pub plugin_metadata: Option<crate::plugins::class_metadata::PluginClassMetadata<'a>>,
 }
 
 /// A constructor's `JvmMethodSignature`: `<init>` or a value class's static `constructor-impl`.
@@ -193,8 +195,28 @@ impl ClassCarrier for JvmCarrier<'_, '_> {
         extensions
     }
 
-    fn class_trailer(&self, _: &mut StringTable<'_>) -> Pb {
-        Pb::new()
+    fn class_trailer(&self, st: &mut StringTable<'_>) -> Pb {
+        let mut trailer = Pb::new();
+        if let Some(plugins) = &self.signatures.plugin_metadata {
+            plugins.write(&mut PluginExtensionRecord {
+                record: &mut trailer,
+                strings: st,
+            });
+        }
+        trailer
+    }
+}
+
+/// The class record's trailer as compiler plugins append their extension fields to it.
+struct PluginExtensionRecord<'w, 's> {
+    record: &'w mut Pb,
+    strings: &'w mut StringTable<'s>,
+}
+
+impl crate::plugins::class_metadata::ClassMetadataSink for PluginExtensionRecord<'_, '_> {
+    fn repeated_string(&mut self, field: u32, value: &str) {
+        self.record
+            .repeated_varint(field, u64::from(self.strings.local(value)));
     }
 }
 

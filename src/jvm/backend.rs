@@ -661,6 +661,8 @@ pub fn shipping_emit_options(
         // compiler invocation overrides it through `EmitOptions::with_annotations_in_metadata`.
         annotations_in_metadata: true,
         pre_release_metadata: false,
+        // The backend that ran the compilation's plugins installs them for the metadata writer.
+        plugins: std::rc::Rc::default(),
     }
 }
 
@@ -964,6 +966,7 @@ struct BackendReadyIr<'a> {
     pass_facts: BackendPassFacts,
     metadata: Option<crate::jvm::ir_emit::KotlinMetadata>,
     has_facade_members: bool,
+    native_plugins: &'a crate::plugins::registry::NativePlugins,
 }
 
 impl JvmBackend {
@@ -1063,6 +1066,7 @@ impl JvmBackend {
                 pass_facts,
                 metadata,
                 has_facade_members,
+                native_plugins,
             },
             state,
             diags,
@@ -1088,6 +1092,7 @@ impl JvmBackend {
             pass_facts,
             metadata,
             has_facade_members,
+            native_plugins,
         } = ready;
         let mut outputs = Vec::new();
         if !self.param_assertions {
@@ -1110,6 +1115,7 @@ impl JvmBackend {
                 .with_pre_release_metadata(self.pre_release_metadata)
                 .with_java_parameters(self.java_parameters);
         emit_opts.inner_class_resolver = Some(inner_class_resolver);
+        emit_opts.plugins = std::rc::Rc::new(native_plugins.host(module_name));
         let run = crate::jvm::ir_emit::EmitRun::default();
         let emit_metadata = crate::jvm::ir_emit::EmitMetadata {
             facade: metadata.as_ref(),

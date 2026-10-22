@@ -1286,26 +1286,15 @@ impl<'a> CommonIrBodySink<'a> {
                 }
                 return Err(FirFileLoweringFailure::MissingCallable(declaration));
             };
-            let compiler_generated = declaration_header
-                .flags
-                .has(crate::fir::DeclarationFlags::COMPILER_GENERATED);
             // A companion-block declaration is represented during lookup as an extension on the
             // associated classifier, but the checked FIR deliberately carries no value receiver.
             // The association is a name-resolution coordinate, not a common-IR parameter.
             let companion_associated = declaration_header
                 .flags
                 .has(crate::fir::DeclarationFlags::COMPANION);
-            let mut params = signature
-                .parameters
-                .iter()
-                .map(|parameter| {
-                    if compiler_generated {
-                        crate::types::stored_value_ty(parameter.get())
-                    } else {
-                        parameter.get()
-                    }
-                })
-                .collect::<Vec<_>>();
+            let (params, ret) = index
+                .callable_carriers(callable.id)
+                .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
             let mut identities = (0..index.callable_parameter_name_count(callable.id))
                 .map(|ordinal| {
                     super::callable_parameter_identity(
@@ -1317,18 +1306,15 @@ impl<'a> CommonIrBodySink<'a> {
                     .expect("published parameter-name count must address every identity")
                 })
                 .collect::<Vec<_>>();
-            if !companion_associated {
-                if let Some(receiver) = callable.shape.extension_receiver {
-                    let position = callable.shape.context_parameter_count as usize;
-                    if position > params.len() || position > identities.len() {
-                        return Err(FirFileLoweringFailure::MissingCallable(declaration));
-                    }
-                    params.insert(position, receiver.get());
-                    identities.insert(
-                        position,
-                        crate::ir::IrParameterIdentity::extension_receiver(),
-                    );
+            if !companion_associated && callable.shape.extension_receiver.is_some() {
+                let position = callable.shape.context_parameter_count as usize;
+                if position > identities.len() {
+                    return Err(FirFileLoweringFailure::MissingCallable(declaration));
                 }
+                identities.insert(
+                    position,
+                    crate::ir::IrParameterIdentity::extension_receiver(),
+                );
             }
             let entry_class = anchor
                 .owner
@@ -1370,11 +1356,7 @@ impl<'a> CommonIrBodySink<'a> {
                 name: source_name.clone(),
                 param_checks: vec![None; params.len()],
                 params,
-                ret: if compiler_generated {
-                    crate::types::stored_value_ty(signature.result.get())
-                } else {
-                    signature.result.get()
-                },
+                ret,
                 body: None,
                 is_static: class.is_none(),
                 dispatch_receiver: class.map(|class| self.ir.classes[class as usize].fq_name_id()),

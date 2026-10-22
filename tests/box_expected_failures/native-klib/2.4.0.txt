@@ -101,7 +101,6 @@ callableReference/adaptedReferences/suspendConversion/withContextParametersAsASu
 callableReference/adaptedReferences/suspendConversion/withParameters.kt
 callableReference/adaptedReferences/suspendUnitConversion.kt
 callableReference/bound/companionObjectReceiverInheritsFromOuter.kt
-callableReference/bound/genericBoundPropertyAsCrossinline.kt
 callableReference/bound/kt15446.kt
 callableReference/equality/conversionCombinations.kt
 callableReference/equality/suspendFunctionEquality.kt

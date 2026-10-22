@@ -106,6 +106,12 @@ pub struct CodegenModule {
     next_dependency_support_object: usize,
     next_disambiguated_source_object: usize,
     used_object_stems: crate::fx_hash::HashSet<String>,
+    /// The dispatch numbering of the named classes of the module being emitted, planned from its
+    /// headers by the first of its files; see `backend::class_tables::module_slots`.
+    slot_plan: Option<(
+        String,
+        crate::backend::class_tables::module_slots::ModuleSlotPlan,
+    )>,
 }
 
 impl CodegenModule {
@@ -153,6 +159,10 @@ impl Backend for CraneliftBackend {
     }
 
     fn emits_dependency_support(&self) -> bool {
+        true
+    }
+
+    fn numbers_slots(&self) -> bool {
         true
     }
 
@@ -235,6 +245,29 @@ impl Backend for CraneliftBackend {
                 return Vec::new();
             }
         };
+        if state
+            .slot_plan
+            .as_ref()
+            .is_none_or(|(module, _)| module != file.module_name)
+        {
+            let classes = file.classifiers.module().classes();
+            let plan = match super::value_classes::NativeValueClasses::of_module_classes(
+                classes.iter().map(|(name, _)| name),
+                classes.iter().flat_map(|(_, class)| class.carried_types()),
+                &file.classifiers,
+            ) {
+                Ok(values) => super::classes::module_plan(classes, &values),
+                Err(unsupported) => {
+                    diags.error(
+                        crate::diag::Span::new(0, 0),
+                        format!("krusty: the native backend does not support {unsupported} yet"),
+                    );
+                    return Vec::new();
+                }
+            };
+            state.slot_plan = Some((file.module_name.to_owned(), plan));
+        }
+        let slot_plan = &state.slot_plan.as_ref().expect("planned just above").1;
         let mut dependency_exports = crate::fx_hash::HashMap::default();
         let mut exports = file.dependency_exports.callables().collect::<Vec<_>>();
         // `DependencyExportSignatures` is a lookup map; target symbol allocation must not inherit
@@ -298,6 +331,7 @@ impl Backend for CraneliftBackend {
                 imported_abis: &mut state.imported_abis,
                 dependency_properties: &properties,
                 value_classes: &value_classes,
+                slot_plan,
                 source: file.source,
                 module_name: file.module_name,
                 unit_kind: file.kind,
