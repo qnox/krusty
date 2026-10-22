@@ -970,6 +970,8 @@ jobs:
           tag_name: ${{ steps.v.outputs.tag }}
           name: "krusty ${{ steps.v.outputs.ver }}: Kotlin compiler written in Rust"
           target_commitish: ${{ github.sha }}
+          # The titles of the pull requests merged since the previous release, each linked.
+          generate_release_notes: true
           files: dist/**
           fail_on_unmatched_files: true
       - name: record the published commit
