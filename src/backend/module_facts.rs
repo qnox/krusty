@@ -176,6 +176,8 @@ pub struct BackendModuleFacts {
     source_declarations: HashMap<TypeName, SourceDeclaration>,
     /// Each source's checked file-annotation applications, for sources that declare any.
     file_annotations: HashMap<crate::fir::SourceFileId, Box<[crate::types::ResolvedAnnotation]>>,
+    /// The dispatch shape of every named class, for a target that numbers slots itself.
+    classes: super::class_tables::module_classes::ModuleClasses,
 }
 
 impl BackendModuleFacts {
@@ -383,6 +385,7 @@ impl BackendModuleFacts {
                 .filter(|(_, applications)| !applications.is_empty())
                 .map(|(source, applications)| (source, Box::from(applications)))
                 .collect(),
+            classes: Default::default(),
         })
     }
 
@@ -418,6 +421,7 @@ impl BackendModuleFacts {
             inherited_defaults: HashMap::default(),
             source_declarations: HashMap::default(),
             file_annotations: HashMap::default(),
+            classes: Default::default(),
         })
     }
 
@@ -443,6 +447,19 @@ impl BackendModuleFacts {
 
     pub fn is_body_local(&self, classifier: TypeName) -> bool {
         self.body_local_classifiers.contains(&classifier)
+    }
+
+    /// These facts with the dispatch shape of every named class of `index`, which only a target
+    /// that numbers dispatch slots itself reads ([`Backend::numbers_slots`](super::Backend)).
+    pub(crate) fn with_classes(mut self, index: &crate::fir::ResolvedModuleIndex) -> Self {
+        self.classes =
+            super::class_tables::module_classes::ModuleClasses::from_resolved_index(index);
+        self
+    }
+
+    /// The dispatch shape of every named class of the module, when the target asked for it.
+    pub(crate) fn classes(&self) -> &super::class_tables::module_classes::ModuleClasses {
+        &self.classes
     }
 
     pub fn source_value_classes(&self) -> &HashMap<TypeName, Ty> {

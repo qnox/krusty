@@ -177,6 +177,7 @@ fn emit_analyzed_into<B: Backend>(
     let (mut index, mut inline_bodies, mut default_arguments, mut source_map) = module.into_parts();
     let backend_module_facts = match crate::backend::BackendModuleFacts::from_resolved_index(&index)
     {
+        Ok(facts) if backend.numbers_slots() => facts.with_classes(&index),
         Ok(facts) => facts,
         Err(error) => {
             diags.error(

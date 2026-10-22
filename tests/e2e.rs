@@ -1281,6 +1281,8 @@ mod java_not_null_null_argument_e2e;
 mod java_parameters_attribute_e2e;
 #[path = "java_platform_type_publication_e2e.rs"]
 mod java_platform_type_publication_e2e;
+#[path = "java_source_constant_e2e.rs"]
+mod java_source_constant_e2e;
 #[path = "java_source_interop_e2e.rs"]
 mod java_source_interop_e2e;
 mod java_static_modules;
@@ -1838,6 +1840,8 @@ mod native_concurrency_e2e;
 mod native_const_reference_e2e;
 #[path = "native_context_parameter_sam_e2e.rs"]
 mod native_context_parameter_sam_e2e;
+#[path = "native_cross_file_dispatch_e2e.rs"]
+mod native_cross_file_dispatch_e2e;
 #[path = "native_cross_file_e2e.rs"]
 mod native_cross_file_e2e;
 #[path = "native_data_class_array_rendering_e2e.rs"]

@@ -8483,6 +8483,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   module names + classpath probe) — an unresolvable type aborts stub generation (skip, never guess).
   Tests: `jvm::java_stub::tests` (unit), `java_source_interop_e2e::java_extends_kotlin_via_stub_pipeline`.
 
+- **A Java-source `static final` field initialized by one literal is a constant, as for javac's
+  class.** JLS §4.12.4 makes such a field a constant variable, and kotlinc inlines a Kotlin read of
+  it (`BuildConfig.DEBUG` compiles to `iconst_0`, not `getstatic`), whether the Java arrives as source
+  or as a class. The header stub evaluates a `boolean`, character, string, or optionally signed
+  numeric literal (every radix, `_` separators, `L`/`f`/`d` suffixes) and converts it to the field's
+  type by assignment conversion (JLS §5.2): widening, plus narrowing an `int` constant to
+  `byte`/`short`/`char` when it fits. A compound initializer (`1 << 3`, `A + 1`, a cast) is not
+  evaluated yet and stays a field read. Test: `java_source_constant_e2e`.
+
 - **Member overloads with different erased signatures (`listIterator()` / `listIterator(Int)`).**
   `ClassSig.methods` (and the lowerer's `ClassInfo.methods`) hold per-name overload LISTS in
   declaration order; call sites select by argument types (`method_matching` mirrors the top-level
@@ -14672,6 +14681,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`an_is_check_names_a_class_declared_in_another_file`,
   `a_when_over_a_sealed_hierarchy_from_another_file_selects_its_branch`,
   `an_exception_declared_in_another_file_is_caught_by_its_class`).
+- **Native: a virtual call through a class declared in another file dispatches by a module-wide
+  slot number.** Every named, non-local class of the module is numbered once from the
+  declaration headers (`backend::module_classes`, `backend::class_tables::module_slots`), by the
+  rules a single file applies to its own classes: `kotlin.Any`'s members and the function slot
+  first, then the superclass's table, then each member in source order, taking the slot of the
+  class member it overrides when both carry values alike, or a new slot with a bridge left in the
+  base's. The declaring file fills those numbers from its IR, and another file indexes the
+  receiver's table with the number the plan gave the member the call selected, so an open,
+  abstract or inherited member and an override declared in another file dispatch alike. A member
+  the declaring file realizes but the headers do not declare declines the file, since another file
+  could not know its number; the forwarders of `I by d` are the exception, since no class number
+  names an interface member alone: they take numbers past the planned ones, and a subclass renumbers
+  the ones it inherits past its own. A forwarder that also realizes an inherited class member
+  (`class E : B(), C by D()`) fills that member's number instead. Interface numbers stay per file.
+  Tests: `tests/native_cross_file_dispatch_e2e.rs`
+  (`an_open_member_dispatches_to_the_override_from_another_file`,
+  `an_abstract_member_dispatches_to_its_implementation`,
+  `an_inherited_member_dispatches_through_a_subclass_type`,
+  `a_generic_member_reaches_an_override_through_its_bridge`,
+  `an_overridden_to_string_dispatches_through_the_base`,
+  `an_open_property_dispatches_to_its_override`,
+  `a_delegated_member_replaces_the_inherited_class_member`).
 - **Native: the public C ABI is primitives, String, and a Unit result.** A public top-level
   function whose parameters are primitives or `String` and whose result is one of those types or
   `Unit` is declared in the module's C header and exported under that declaration. The export runs
