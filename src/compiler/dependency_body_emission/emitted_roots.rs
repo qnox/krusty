@@ -44,9 +44,13 @@ pub(super) fn declarations(
             && !externals.contains_key(&identity)
             && intrinsics.get(&identity).is_none()
             && bodies.function_has_body(&identity) == Some(true);
+        let known_target = capabilities
+            .callees
+            .target_intrinsic(&identity, bodies, capabilities.target_realizes_intrinsic)
+            .map_err(|reason| format!("an invalid target declaration: {reason:?}"))?;
         let realization = match platform.external_callable_by_dependency(&identity) {
             Some((_, realization)) => realization,
-            None if raw_header_capability => {
+            None if raw_header_capability && known_target.is_none() => {
                 pending.extend(bodies.direct_callees(&identity));
                 continue;
             }
@@ -62,13 +66,16 @@ pub(super) fn declarations(
         let selected = realization
             .klib_body_callable()
             .ok_or("a dependency provider has no KLIB body contract")?;
-        let primitive = capabilities
-            .callees
-            .with_declaration(selected)
+        let facts = capabilities.callees.with_declaration(selected);
+        let primitive = facts
             .common_primitive(&identity, bodies)
             .map_err(|reason| format!("an invalid common primitive declaration: {reason:?}"))?;
+        let target = facts
+            .target_intrinsic(&identity, bodies, capabilities.target_realizes_intrinsic)
+            .map_err(|reason| format!("an invalid target declaration: {reason:?}"))?;
         let emits_body = !externals.contains_key(&identity)
             && primitive.is_none()
+            && target.is_none()
             && intrinsics.get(&identity).is_none()
             && bodies.function_has_body(&identity) == Some(true);
         if requires_ordinary
@@ -94,7 +101,9 @@ pub(super) fn ordinary_roots<'a>(
     source: &'a CheckedIrFile<'_>,
     bodies: &KlibDeclarationBodies,
     intrinsics: &KlibIntrinsicFacts,
-) -> Result<Vec<KlibBodyCallable<'a>>, &'static str> {
+    callees: &crate::klib_lowering::KlibCalleeFacts<'a>,
+    target_realizes_intrinsic: &dyn Fn(crate::libraries::CompilerIntrinsic) -> bool,
+) -> Result<Vec<KlibBodyCallable<'a>>, String> {
     let mut roots = Vec::new();
     let mut seen = HashSet::default();
     for expression in crate::ir::emitted_body_roots(&source.ir)
@@ -138,6 +147,13 @@ pub(super) fn ordinary_roots<'a>(
         let Some(selected) = source.callables.klib_body_callable_at(expression, target) else {
             continue;
         };
+        if callees
+            .target_intrinsic(selected.identity(), bodies, target_realizes_intrinsic)
+            .map_err(|reason| format!("an invalid target declaration: {reason:?}"))?
+            .is_some()
+        {
+            continue;
+        }
         let Some(modifiers) = callable.klib_body_declaration_modifiers else {
             continue;
         };

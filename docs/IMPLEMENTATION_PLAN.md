@@ -5652,8 +5652,12 @@ non-inline callers, still reads the field directly. Test:
   empty/singleton/packed storage plan. JVM alias expansion stays in the JVM provider.
 - Replace Native's factory spelling/physical-array matcher with consumption of that exact plan;
   preserve singleton-array identity, readonly sharing and mutable copying through existing E2Es.
-- Validate actual JVM and all target-KLIB declarations plus malformed-contract negatives. The
-  inline-template branch still needs to use the same positive capability in its dependency graph.
+- Validate actual JVM and all target-KLIB declarations plus malformed-contract negatives.
+- The inline-template branch shares Native's positive storage projection between emitted roots,
+  both closure walks and emission. Target leaves authenticate external headers and retain generic
+  formals; previously emitted bodies keep their distinct export contract. Unit regressions cover
+  primitive/reference calls and malformed/conflicting declarations. Full preservation surveys and
+  the remaining Wasm call/export and generic representation gates still block that branch.
 
 ## KLIB writer — krusty compiles a module to a Kotlin library  ◐
 

@@ -37,6 +37,8 @@ use crate::types::{Ty, TypeName};
 #[derive(Clone, Copy)]
 pub(crate) struct EmittedDependencyCallable {
     target: ExternalCallableId,
+    /// A target-supplied provider leaf is not a previously emitted body export.
+    target_intrinsic: Option<crate::libraries::CompilerIntrinsic>,
     singleton_dispatch: Option<Ty>,
     singleton_classifier: Option<TypeName>,
 }
@@ -49,6 +51,7 @@ impl EmittedDependencyCallable {
     ) -> Self {
         Self {
             target,
+            target_intrinsic: None,
             singleton_dispatch,
             singleton_classifier,
         }
@@ -56,6 +59,16 @@ impl EmittedDependencyCallable {
 
     pub(crate) fn target(self) -> ExternalCallableId {
         self.target
+    }
+
+    pub(crate) fn target_realization(
+        target: ExternalCallableId,
+        operation: crate::libraries::CompilerIntrinsic,
+    ) -> Self {
+        Self {
+            target_intrinsic: Some(operation),
+            ..Self::new(target, None, None)
+        }
     }
 
     pub(crate) fn singleton_dispatch(self) -> Option<Ty> {
@@ -595,7 +608,20 @@ impl CallLinker for Linker<'_, '_> {
             });
         }
         if let Some(&emitted) = self.sources.externals.get(&identity) {
-            let purpose = if declaration.body.is_none() {
+            if let Some(operation) = emitted.target_intrinsic {
+                if self
+                    .sources
+                    .callees
+                    .target_intrinsic(&identity, self.sources.bodies, &|found| found == operation)
+                    .map_err(callee_declined)?
+                    != Some(operation)
+                {
+                    return Err(callee_declined(KlibBodyDeclineReason::SignatureMismatch(
+                        "a target leaf has no matching provider declaration".to_owned(),
+                    )));
+                }
+            }
+            let purpose = if emitted.target_intrinsic.is_some() || declaration.body.is_none() {
                 HeaderPurpose::External
             } else {
                 HeaderPurpose::Body(emitted.singleton_dispatch())
@@ -623,7 +649,13 @@ impl CallLinker for Linker<'_, '_> {
                 ret,
                 context_count,
                 singleton_dispatch: emitted.singleton_classifier(),
-                type_parameters: Vec::new(),
+                type_parameters: if emitted.target_intrinsic.is_some() {
+                    selected
+                        .and_then(|selected| selected.generic_signature())
+                        .map_or_else(Vec::new, |signature| signature.formals.clone())
+                } else {
+                    Vec::new()
+                },
                 class_type_parameters: Vec::new(),
             });
         }

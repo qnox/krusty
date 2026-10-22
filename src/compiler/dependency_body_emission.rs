@@ -97,7 +97,14 @@ pub(super) fn emit_dependencies<B: Backend>(
             roots.push(callable);
         }
     }
-    let ordinary = match emitted_roots::ordinary_roots(source, bodies, intrinsics) {
+    let target_realizes_intrinsic = |operation| backend.realizes_dependency_intrinsic(operation);
+    let ordinary = match emitted_roots::ordinary_roots(
+        source,
+        bodies,
+        intrinsics,
+        &callees,
+        &target_realizes_intrinsic,
+    ) {
         Ok(roots) => roots,
         Err(error) => {
             diags.error(Span::new(0, 0), format!("internal error: {error}"));
@@ -119,6 +126,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             unit: &unit,
             callees: &callees,
             target_realizes_bodyless: backend.realizes_bodyless_dependency_support(),
+            target_realizes_intrinsic: &target_realizes_intrinsic,
         };
         let declarations = match emitted_roots::declarations(
             platform,
@@ -148,6 +156,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             unit: &unit,
             callees: &callees,
             target_realizes_bodyless: backend.realizes_bodyless_dependency_support(),
+            target_realizes_intrinsic: &target_realizes_intrinsic,
         };
         if !prepare_bodyless_externals(
             platform,
@@ -353,6 +362,7 @@ struct DependencyLeafCapabilities<'a> {
     unit: &'a DependencyBodyUnit,
     callees: &'a KlibCalleeFacts<'a>,
     target_realizes_bodyless: bool,
+    target_realizes_intrinsic: &'a dyn Fn(crate::libraries::CompilerIntrinsic) -> bool,
 }
 
 impl DependencyLeafCapabilities<'_> {
@@ -395,6 +405,30 @@ fn prepare_bodyless_externals(
                     diags.error(
                         Span::new(0, 0),
                         format!("invalid common KLIB primitive: {reason:?}"),
+                    );
+                    return false;
+                }
+            }
+            match capabilities.callees.target_intrinsic(
+                &callee,
+                bodies,
+                capabilities.target_realizes_intrinsic,
+            ) {
+                Ok(Some(operation)) => {
+                    let Some(external) = provider_external(platform, &callee, diags) else {
+                        return false;
+                    };
+                    externals.insert(
+                        callee,
+                        EmittedDependencyCallable::target_realization(external.target(), operation),
+                    );
+                    continue;
+                }
+                Ok(None) => {}
+                Err(reason) => {
+                    diags.error(
+                        Span::new(0, 0),
+                        format!("invalid target KLIB declaration: {reason:?}"),
                     );
                     return false;
                 }

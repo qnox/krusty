@@ -88,6 +88,16 @@ impl BodyLowering<'_, '_, '_> {
         extension_receiver_parameter: Option<u32>,
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
+        if let Some(plan) =
+            intrinsic.and_then(super::super::dependency_intrinsics::list_storage_plan)
+        {
+            if receiver.is_some() || extension_receiver_parameter.is_some() || !ret.is_reference() {
+                return Some(Err(
+                    "a list storage construction with malformed receiver or result".into(),
+                ));
+            }
+            return Some(self.list_storage_construction(plan, args));
+        }
         if intrinsic == Some(crate::backend::BackendCompilerIntrinsic::ReinterpretBits) {
             let operand = match (receiver, args) {
                 (Some(receiver), []) => receiver,
@@ -258,17 +268,6 @@ impl BodyLowering<'_, '_, '_> {
             return Some(self.intrinsic(operation, ret, receiver, args));
         }
         match intrinsic {
-            Some(crate::backend::BackendCompilerIntrinsic::ListStorageConstruction(plan)) => {
-                if receiver.is_some()
-                    || extension_receiver_parameter.is_some()
-                    || !ret.is_reference()
-                {
-                    return Some(Err(
-                        "a list storage construction with malformed receiver or result".into(),
-                    ));
-                }
-                Some(self.list_storage_construction(plan, args))
-            }
             Some(crate::backend::BackendCompilerIntrinsic::StringPlus) => {
                 let (Some(receiver), [argument]) = (receiver, args) else {
                     return Some(Err("a malformed `String.plus`".into()));

@@ -10,6 +10,7 @@ mod demo_package;
 mod inline_templates;
 mod primitive_calls;
 mod returnable_blocks;
+mod target_calls;
 mod varargs;
 
 use super::*;

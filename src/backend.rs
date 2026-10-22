@@ -117,6 +117,12 @@ pub trait Backend {
         false
     }
 
+    /// A positive target implementation of a provider-authenticated declaration. This does not
+    /// authorize common folding or replace a retained dependency export.
+    fn realizes_dependency_intrinsic(&self, _operation: BackendCompilerIntrinsic) -> bool {
+        false
+    }
+
     /// How common lowering realizes calls to same-module inline functions for this backend. A
     /// backend that compiles each inline function's body and inlines it at the call keeps the calls
     /// it can inline that way; every other backend has them expanded in IR.

@@ -18,6 +18,7 @@
 //! native track keeps. Nothing is ever emitted on a guess.
 
 use crate::compilation_target::CompilationTarget;
+mod dependency_intrinsics;
 mod lower;
 
 use crate::backend::{Artifact, Backend, CheckedIrFile};
@@ -157,6 +158,13 @@ impl Backend for CraneliftBackend {
 
     fn realizes_bodyless_dependency_support(&self) -> bool {
         true
+    }
+
+    fn realizes_dependency_intrinsic(
+        &self,
+        operation: crate::backend::BackendCompilerIntrinsic,
+    ) -> bool {
+        dependency_intrinsics::list_storage_plan(operation).is_some()
     }
 
     fn lower_ir_file(

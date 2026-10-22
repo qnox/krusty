@@ -36,6 +36,40 @@ pub(super) enum KlibCalleeFact<'facts, 'callable> {
 }
 
 impl<'a> KlibCalleeFacts<'a> {
+    /// Authenticate a declaration the target implements without lowering its serialized body.
+    pub(crate) fn target_intrinsic(
+        &self,
+        identity: &KlibDependencyCallable,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+        supports: &dyn Fn(crate::libraries::CompilerIntrinsic) -> bool,
+    ) -> Result<Option<crate::libraries::CompilerIntrinsic>, super::decline::KlibBodyDeclineReason>
+    {
+        use super::decline::KlibBodyDeclineReason;
+        use super::function_lowering::{raw_function_header, HeaderPurpose};
+        let selected = match self.get(identity) {
+            Some(KlibCalleeFact::Ambiguous) => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "conflicting provider contracts for a target declaration".to_owned(),
+                ));
+            }
+            Some(KlibCalleeFact::Selected(callables)) => callables[0],
+            None => return Ok(None),
+        };
+        let Some(operation) = selected
+            .compiler_intrinsic()
+            .filter(|operation| supports(*operation))
+        else {
+            return Ok(None);
+        };
+        let (arena, declaration) = bodies
+            .function(identity)
+            .ok_or(KlibBodyDeclineReason::Unjoined)?;
+        // A body-bearing target leaf still authenticates its complete declared header, not the
+        // narrower set of declarations whose executable bodies common lowering supports.
+        raw_function_header(Some(selected), HeaderPurpose::External, arena, declaration)?;
+        Ok(Some(operation))
+    }
+
     pub(crate) fn with_declaration(&self, declaration: KlibBodyCallable<'a>) -> Self {
         let mut facts = self.clone();
         facts.record(declaration, false);

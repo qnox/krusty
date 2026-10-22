@@ -808,7 +808,10 @@ parameter/result uses, declared vararg position and modifiers before call-site s
 The JVM provider supplies its metadata typealias expansion for `ArrayList`; KLIB supplies its
 declared classifier. This adds no Kotlin metadata field or wire encoding. Frozen callable facts
 carry the typed plan, and Native uses it instead of recovering an operation from a facade name or
-physical parameter. Broader dependency-root admission remains separate work.
+physical parameter. Dependency graph admission also requires the target's positive implementation
+capability and complete serialized/header agreement. Body-bearing target leaves retain their raw
+external signature and generic formals; they are not previously emitted body exports. Neither this
+capability nor its bookkeeping adds a metadata encoding or publishes a private implementation.
 
 ## Authenticated Throwable realization
 

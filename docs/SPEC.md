@@ -13862,7 +13862,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Native consumes only this plan: a singleton array remains one list element, readonly packed
   storage wraps its array and mutable storage copies it. Malformed operand counts reject rather
   than retry by name or physical array shape. Other backends retain their ordinary selected call.
-  This storage fact alone does not widen dependency-body root admission. Tests:
+  This storage fact alone does not widen dependency-body root admission. A target additionally
+  supplies a positive implementation capability, shared by emitted-root selection, both dependency
+  closure walks and its actual call emission. A target leaf authenticates its complete raw external
+  header even when the producer serialized a body, preserves declared generic formals and checked
+  substitutions, and is never published as an emitted body export. Existing emitted exports retain
+  priority. Targets without the capability still owe the ordinary body; unknown, conflicting or
+  malformed declarations never become leaves. Tests: `klib_lowering::tests::target_calls`,
   `builtin_top_level_realization::tests::list_storage_construction_*`,
   `provider_normalization_tests::list_storage_plans_use_the_selected_stdlib_and_its_array_list_alias`,
   `klib_libraries::tests::builtin_operations::target_stdlib_list_factories_publish_their_exact_storage_plans`
