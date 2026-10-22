@@ -11351,8 +11351,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   subclass's `write$Self` calls the parent's public `write$Self` before encoding its own elements
   at their shifted indices, and its deserialization constructor checks the full required mask, then
   delegates the masks, the inherited elements and the marker to the parent's deserialization
-  constructor before storing its own fields. (A superclass from another module or a generic one is
-  not handled yet.)
+  constructor before storing its own fields. A generic superclass's elements are typed by the
+  subclass's type arguments, and the subclass hands the parent's `write$Self` one serializer per
+  type argument after the descriptor (`StringSerializer.INSTANCE` for `Envelope<String>`, the
+  subclass's own `typeSerial0` for `Outcome<T>`). (A superclass from another module is not handled
+  yet.)
   Test: `tests/serializable_inheritance_e2e.rs`.
 - **A serializable abstract class is serialized polymorphically.** kotlinc gives a non-generic,
   non-sealed abstract `@Serializable` class no `$serializer`: `Companion.serializer()` returns
@@ -11364,6 +11367,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   whole mask), and the class's `$childSerializers` has no `access$get$childSerializers$cp`, which
   only a `$serializer` reads. A subclass reads its own cache after the parent's `write$Self` runs.
   Test: `tests/abstract_serializable_e2e.rs`.
+- **A generic abstract or sealed serializable class builds its serializer on every call.** kotlinc
+  gives it no `$serializer` either, but caches nothing: `Companion.serializer(typeSerial0, …)`
+  returns a new `PolymorphicSerializer(C::class, [])` for an abstract class, or a new
+  `SealedClassSerializer` for a sealed one. The class keeps a `write$Self` that takes one serializer
+  per type parameter after the descriptor, and a deserialization constructor that checks no missing
+  fields, so it has no `$cachedDescriptor`. A sealed class's generic subclass whose type parameter is
+  the sealed class's `j`-th type argument is constructed over the accessor's own `typeSerial<j>`. An
+  element typed by a generic sealed class reads `serializer(…)` with its type arguments'
+  serializers; one typed by a generic abstract class reads it with
+  `UnitSerializer.INSTANCE` for each type parameter, which a `PolymorphicSerializer` never reads.
+  Both go through the child-serializer cache. Test: `tests/generic_serializable_parent_e2e.rs`.
 - **A serializable sealed class caches a `SealedClassSerializer` over its concrete subclasses.**
   A non-generic sealed `@Serializable` class gets no `$serializer`. Its `Companion.serializer()`
   returns `new SealedClassSerializer(<serial name>, C::class, [Sub::class…], [<Sub serializer>…],
@@ -11381,7 +11395,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   itself a type parameter is not supported yet: its serializer stays an unresolved plugin
   placeholder, so krusty declines the file instead of giving it another serializer. The cache's `access$…$cp` accessor follows the private primary's marker accessor. A
   sealed interface builds the same serializer in its companion's `serializer()`. An element typed
-  by a sealed class, a sealed interface or a non-generic abstract class reads that type's
+  by a sealed class, a sealed interface or an abstract class reads that type's
   `Companion.serializer()` through the child-serializer cache. Test:
   `tests/sealed_serializable_e2e.rs`.
 - **A subclass reaches a private primary constructor's accessor on the delegation line.** The

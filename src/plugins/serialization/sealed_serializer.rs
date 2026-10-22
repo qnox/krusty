@@ -40,7 +40,7 @@ pub(super) fn sealed_class_serializer(
         .collect();
     let sub_serializers: Vec<ExprId> = subclasses
         .iter()
-        .map(|&subclass| subclass_serializer(ir, ctx, subclass))
+        .map(|&subclass| subclass_serializer(ir, ctx, class_name, subclass))
         .collect();
     let kclass_array = ir.add_expr(IrExpr::Vararg {
         array_type: Ty::obj_args("kotlin/Array", &[class_ty("kotlin/reflect/KClass")]),
@@ -102,22 +102,44 @@ fn concrete_subclasses(ir: &IrFile, class_id: ClassId) -> Vec<TypeName> {
 
 /// A subclass's serializer, as kotlinc derives an element's: a non-generic class's
 /// `$serializer.INSTANCE` and an object's `ObjectSerializer`. A generic class's `$serializer` is
-/// constructed directly, over a `PolymorphicSerializer` of each type parameter's representative
-/// upper bound.
-fn subclass_serializer(ir: &mut IrFile, ctx: &PluginContext, subclass: TypeName) -> ExprId {
+/// constructed directly, over one serializer per type parameter: the generic sealed base's own
+/// `typeSerial<j>` when the parameter is the base's `j`-th type argument, else a
+/// `PolymorphicSerializer` of the parameter's representative upper bound.
+fn subclass_serializer(
+    ir: &mut IrFile,
+    ctx: &PluginContext,
+    base: TypeName,
+    subclass: TypeName,
+) -> ExprId {
     if local_generic_serializable_class(ir, ctx, subclass) {
-        let bounds: Vec<Ty> =
+        let formals: Vec<(String, Ty)> =
             ir.class_signature_name(subclass)
                 .map_or_else(Vec::new, |signature| {
                     signature
                         .type_params
                         .iter()
-                        .map(representative_upper_bound)
+                        .map(|parameter| {
+                            (
+                                parameter.semantic_name.clone(),
+                                representative_upper_bound(parameter),
+                            )
+                        })
                         .collect()
                 });
-        let arguments: Vec<ExprId> = bounds
+        let base_arguments = base_type_arguments(ir, base, subclass);
+        let arguments: Vec<ExprId> = formals
             .iter()
-            .map(|&bound| type_parameter_serializer(ir, subclass, bound))
+            .map(|(identity, bound)| {
+                match base_arguments
+                    .iter()
+                    .position(|argument| argument.ty_param_name() == Some(identity.as_str()))
+                {
+                    // The base's `serializer(typeSerial0, …)` is a companion member: its
+                    // serializers follow `this`.
+                    Some(j) => ir.add_expr(IrExpr::GetValue(1 + j as u32)),
+                    None => type_parameter_serializer(ir, subclass, *bound),
+                }
+            })
             .collect();
         let descriptor = format!(
             "({})V",
@@ -127,6 +149,19 @@ fn subclass_serializer(ir: &mut IrFile, ctx: &PluginContext, subclass: TypeName)
     }
     let ty = Ty::obj_name(subclass);
     element_serializer_expr(ir, ctx, &ty).unwrap_or_else(|| unsupported_element_serializer(ir, ty))
+}
+
+/// The type arguments `subclass` gives the generic sealed `base` as its direct supertype; none when
+/// the base is not generic or is reached through an intermediate sealed class.
+fn base_type_arguments(ir: &IrFile, base: TypeName, subclass: TypeName) -> Vec<Ty> {
+    let Some(subclass_id) = local_class(ir, subclass) else {
+        return Vec::new();
+    };
+    ir.classes[subclass_id as usize]
+        .supertypes
+        .iter()
+        .find(|supertype| supertype.kotlin_class_internal() == Some(base))
+        .map_or_else(Vec::new, |supertype| supertype.type_args().to_vec())
 }
 
 /// kotlinc's representative upper bound of a type parameter: its first bound that is a class
