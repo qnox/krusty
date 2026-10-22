@@ -46,3 +46,11 @@ data class Hidden private constructor(val v: Int)
 
 @ConsistentCopyVisibility
 data class Kept private constructor(val v: Int)
+
+class Packed(vararg val words: String)
+
+class Numbers(vararg val ids: Int)
+
+class NativeApi {
+    external fun ping(): Int
+}

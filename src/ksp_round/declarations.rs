@@ -35,6 +35,13 @@ impl ClassHeader<'_> {
         ty
     }
 
+    /// The type of the property primary-constructor parameter `index` declares: the resolved
+    /// slot, which for a `vararg` parameter is its array.
+    fn constructor_property_type(&self, index: usize) -> Option<KspType> {
+        let (ty, _) = *self.signature.ctor_param_shapes.get(index)?;
+        self.scope.ty(ty)
+    }
+
     /// The resolved type of the primary constructor's parameter at `index`.
     fn constructor_parameter_type(&self, index: usize) -> Option<KspType> {
         let (ty, _) = *self.signature.ctor_param_shapes.get(index)?;
@@ -189,7 +196,16 @@ impl Source<'_> {
             } else {
                 KspFunctionKind::TopLevel
             },
-            is_abstract: is_member && matches!(function.body, FunBody::None),
+            // A member is abstract when it says so or is an interface's without a body; an
+            // `external` one has no body either and is not.
+            is_abstract: match owner {
+                Owner::Class { header, .. } => {
+                    function.is_abstract()
+                        || (header.kind == KspClassKind::Interface
+                            && matches!(function.body, FunBody::None))
+                }
+                Owner::TopLevel { .. } => false,
+            },
             line: Some(function.decl_line),
             annotations: self.annotations(subject, &function.annotations)?,
             modifiers: self.written_modifiers(function.declaration_span.lo),
@@ -308,17 +324,11 @@ impl Source<'_> {
             // The parameter's annotations apply to the parameter unless a use-site target says
             // otherwise, which the round does not describe yet.
             annotations: Vec::new(),
-            modifiers: self
-                .written_modifiers(parameter.declaration_span.lo)
-                .map(|modifiers| {
-                    modifiers
-                        .into_iter()
-                        .filter(|modifier| *modifier != KspModifier::Vararg)
-                        .collect()
-                }),
+            // KSP2 lists a `vararg` parameter's modifier on the property it declares too.
+            modifiers: self.written_modifiers(parameter.declaration_span.lo),
             type_parameters: Some(Vec::new()),
             extension_receiver: KspTypeSlot::Absent,
-            ty: header.constructor_parameter_type(index),
+            ty: header.constructor_property_type(index),
         }
     }
 

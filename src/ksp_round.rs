@@ -725,6 +725,29 @@ mod tests {
     }
 
     #[test]
+    fn a_vararg_property_has_its_array_and_an_external_member_is_not_abstract() {
+        let round = round(&[(
+            "/src/Members.kt",
+            "package members\n\nclass Packed(vararg val words: String)\n\nclass Numbers(vararg val ids: Int)\n\nclass NativeApi {\n    external fun ping(): Int\n}\n",
+        )])
+        .expect("every declaration is readable");
+        assert_eq!(
+            dumped(&round),
+            [
+                "CLASS members.Packed modifiers= typeParameters= supertypes=kotlin.Any",
+                "  property words mutable=false modifiers=VARARG: kotlin.Array<out kotlin.String>",
+                "  fun <init> kind=MEMBER abstract=false modifiers=FINAL typeParameters= receiver=null (words: kotlin.String vararg=true default=false): members.Packed",
+                "CLASS members.Numbers modifiers= typeParameters= supertypes=kotlin.Any",
+                "  property ids mutable=false modifiers=VARARG: kotlin.IntArray",
+                "  fun <init> kind=MEMBER abstract=false modifiers=FINAL typeParameters= receiver=null (ids: kotlin.Int vararg=true default=false): members.Numbers",
+                "CLASS members.NativeApi modifiers= typeParameters= supertypes=kotlin.Any",
+                "  fun ping kind=MEMBER abstract=false modifiers=EXTERNAL typeParameters= receiver=null (): kotlin.Int",
+                "  fun <init> kind=MEMBER abstract=false modifiers=FINAL,PUBLIC typeParameters= receiver=null (): members.NativeApi",
+            ]
+        );
+    }
+
+    #[test]
     fn declarations_are_in_ksps_order_with_the_members_the_language_contributes() {
         let order = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),

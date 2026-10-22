@@ -15545,7 +15545,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `private`. Types come from the resolved declarations, an inferred one included: a vararg
   parameter's type is its element type, a function type is its `kotlin.FunctionN` classifier, and
   a parameter of an overriding function has the default a function it overrides declares. An
-  interface function without a body is abstract. A primary constructor has the annotations written
+  interface function without a body is abstract; an `external` one is not. A `vararg val`
+  constructor parameter's property keeps the `vararg` modifier and has the array type (an
+  `IntArray` for `Int`), while the parameter has the element type. A primary constructor has the annotations written
   on it. A top-level extension property has its resolved receiver. A type krusty cannot describe,
   a member extension property's receiver and type, a generic property's type parameters, and whether an override of a library
   function's parameter has a default are refused for that query only. A body krusty does not
