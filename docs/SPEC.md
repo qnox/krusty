@@ -3729,7 +3729,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Pass 1 found no candidate and stopped with "module signatures were not finalized" (koin-core).
   The body checker follows the same order: `h(x = null)` over `h(a: Int = 0, b: Int = 0, x:
   String?)` and `h(x: Any?)` selects the `String?` overload, as kotlinc does, where it used to let
-  the fewer omitted defaults win first. Tests: `an_inferred_return_*` in
+  the fewer omitted defaults win first. A call written with fewer arguments than parameters gets
+  the same rule in the shared selector: `lazy { mk() }` on an implicit `T : Comp` receiver over
+  `T.mk(id: String = "", source: Any? = null, arch: Int? = null)` and `T.mk(source: Any? = null)`
+  selects the one-default extension, as kotlinc does, where both used to tie (koin-core's
+  `createScope()`). Tests: `an_inferred_return_*` and `an_implicit_receiver_call_*` in
   `tests/overloaded_inferred_return_e2e.rs`.
 - **A platform-typed implicit receiver exposes its members.** In
   `KeyPairGenerator.getInstance("RSA").apply { initialize(1024) }` the `apply` receiver is the

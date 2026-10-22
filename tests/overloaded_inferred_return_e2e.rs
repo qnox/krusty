@@ -480,3 +480,37 @@ fn an_inferred_return_over_a_more_specific_overload_is_byte_identical_to_kotlinc
     .expect("kotlinc and the stdlib are provisioned");
     assert_eq!(result, Ok(()));
 }
+
+/// An extension family called on an implicit receiver, with no argument: the overload omitting
+/// the fewest defaults wins in an inferred return, inside a lambda, and in a declared one.
+const IMPLICIT_RECEIVER_FEWEST_DEFAULTS: &str = "interface Comp\n\
+fun <T : Comp> T.mk(id: String = \"\", source: Any? = null, arch: Int? = null): String = \"three\"\n\
+fun <T : Comp> T.mk(source: Any? = null): String = \"O\"\n\
+fun <T : Comp> T.inferred() = mk()\n\
+fun <T : Comp> T.deferred() = lazy { mk() }\n\
+fun Comp.declared(): String = mk()\n\
+object C : Comp\n\
+fun box(): String {\n\
+    val all = C.inferred() + C.deferred().value + C.declared()\n\
+    return if (all == \"OOO\") \"OK\" else all\n\
+}\n";
+
+#[test]
+fn an_implicit_receiver_call_selects_the_extension_omitting_the_fewest_defaults() {
+    common::expect_box_same_as_kotlinc(
+        IMPLICIT_RECEIVER_FEWEST_DEFAULTS,
+        "ImplicitReceiverFewestDefaults",
+    );
+}
+
+#[test]
+fn an_implicit_receiver_call_over_omitted_defaults_is_byte_identical_to_kotlinc() {
+    let result = common::byte_diff_against_kotlinc_cp(
+        "ImplicitReceiverFewestDefaults",
+        IMPLICIT_RECEIVER_FEWEST_DEFAULTS,
+        "ImplicitReceiverFewestDefaultsKt",
+        &[common::stdlib_jar()],
+    )
+    .expect("kotlinc and the stdlib are provisioned");
+    assert_eq!(result, Ok(()));
+}
