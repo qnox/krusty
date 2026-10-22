@@ -598,6 +598,11 @@ jobs:
       - name: run non-box conformance ${{ matrix.version }}
         if: matrix.target == 'jvm'
         env:
+          # Required KSP/serialization toolchains can be cold. Keep the local 120-second default;
+          # this complete CI pass includes provisioning, processor compilation and code generation.
+          KRUSTY_CONFORMANCE_TIMEOUT_SECONDS: "600"
+          # The pinned KSP compiler needs JDK 21; reuse it instead of downloading another JDK.
+          KSP_E2E_JDK: ${{ env.JAVA_HOME_21_X64 }}
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
           KRUSTY_RECORD_CLASS_DUMPS: "0"
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}

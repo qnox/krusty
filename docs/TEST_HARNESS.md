@@ -156,7 +156,10 @@ target test consumes JVM artifacts and no target waits for another target's corp
 code per Kotlin version or target. Toolchain and box/serialization corpora are isolated by version.
 JVM rows opt into KSP and require both KSP and pinned serialization-runtime
 provisioning, so missing prerequisites fail rather than turning those tests into passing skips. Each
-row uses its target's configurable process-group deadline. JVM rows upload `pct-<version>` and
+row uses its target's configurable process-group deadline. The complete JVM non-box CI pass has a
+600-second cold-toolchain budget and selects the runner's installed JDK 21 for pinned KSP, instead
+of downloading a second JDK. The local 120-second default and the test inventory are unchanged;
+an exhausted deadline still fails. JVM rows upload `pct-<version>` and
 `jvm-byte-equality-<version>`; Native rows upload `native-pct-<version>`. A release publishes only
 after all target rows pass and every row matches its platform/version expectations.
 
