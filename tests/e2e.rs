@@ -2,8 +2,12 @@
 //! crate, so product e2e modules live behind one target to keep link time and target size bounded.
 //! External corpus/reference-toolchain suites live in `conformance.rs`.
 
+#[path = "abstract_serializable_e2e.rs"]
+mod abstract_serializable_e2e;
 #[path = "annotation_documented_mirror_e2e.rs"]
 mod annotation_documented_mirror_e2e;
+#[path = "backticked_dotted_package_qualifier_e2e.rs"]
+mod backticked_dotted_package_qualifier_e2e;
 #[path = "bridge_result_cast_e2e.rs"]
 mod bridge_result_cast_e2e;
 #[path = "common/bytecode_comparison.rs"]
@@ -34,6 +38,8 @@ mod reference_compiler_support;
 mod reference_recording_support;
 #[path = "common/reference_targets.rs"]
 mod reference_targets_support;
+#[path = "super_call_vararg_e2e.rs"]
+mod super_call_vararg_e2e;
 #[path = "common/target_diagnostics.rs"]
 mod target_diagnostics_support;
 
@@ -1281,6 +1287,8 @@ mod java_parameters_attribute_e2e;
 mod java_platform_type_publication_e2e;
 #[path = "java_source_constant_e2e.rs"]
 mod java_source_constant_e2e;
+#[path = "java_source_field_initializer_e2e.rs"]
+mod java_source_field_initializer_e2e;
 #[path = "java_source_interop_e2e.rs"]
 mod java_source_interop_e2e;
 mod java_static_modules;

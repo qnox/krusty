@@ -637,6 +637,49 @@ impl P<'_> {
         }
     }
 
+    /// Whether the `<` at the cursor opens type arguments rather than comparing: it follows a `.`
+    /// (explicit method type arguments, `Collections.<K, V>emptyMap()`) or ends the type named by
+    /// `new` or `instanceof`. These are the expression positions where the grammar admits only a
+    /// type, so a comma inside them never separates field declarators.
+    fn opens_type_arguments(&self) -> bool {
+        let Some(mut at) = self.i.checked_sub(1) else {
+            return false;
+        };
+        match &self.t[at] {
+            Tok::Punct('.') => return true,
+            Tok::Ident(_) => {}
+            _ => return false,
+        }
+        while at >= 2
+            && self.t[at - 1] == Tok::Punct('.')
+            && matches!(self.t[at - 2], Tok::Ident(_))
+        {
+            at -= 2;
+        }
+        at.checked_sub(1).is_some_and(|keyword| {
+            matches!(&self.t[keyword], Tok::Ident(word) if word == "new" || word == "instanceof")
+        })
+    }
+    /// Skip a balanced `<...>` type-argument list, the cursor on its `<`. A type-use annotation's
+    /// arguments are expressions, so `@A(1 > 0)` is skipped whole rather than counted.
+    fn skip_type_arguments(&mut self) -> Option<()> {
+        let mut depth = 0u32;
+        loop {
+            match self.bump()? {
+                Tok::Punct('@') => {
+                    self.skip_annotation()?;
+                }
+                Tok::Punct('<') => depth += 1,
+                Tok::Punct('>') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
     /// Consume one field initializer without consuming its following comma/semicolon. A constant is
     /// returned only when the complete expression is one literal, a numeric one optionally signed;
     /// compound Java constant evaluation remains outside this bounded source-header parser.
@@ -659,6 +702,10 @@ impl P<'_> {
                 Some(Tok::Punct(']')) => brackets -= 1,
                 Some(Tok::Punct('{')) => braces += 1,
                 Some(Tok::Punct('}')) => braces -= 1,
+                Some(Tok::Punct('<')) if self.opens_type_arguments() => {
+                    self.skip_type_arguments()?;
+                    continue;
+                }
                 Some(_) => {}
                 None => return None,
             }
