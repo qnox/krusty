@@ -1,5 +1,9 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+Wasm's erased-reference binary equality realization uses the already checked operator and the
+runtime GC representation. It changes no metadata, callable identity, or provider authorization;
+explicit dependency `Any.equals` realization remains a separate authenticated-callable contract.
+
 Goal: emit `@kotlin.Metadata` so krusty output is consumable as a **Kotlin** library (Java consumers
 need only the signatures, already matched in Phase 5a). This is the single largest remaining piece —
 effectively a re-implementation of `kotlinx-metadata-jvm`'s writer.

@@ -369,7 +369,13 @@ pub const TRY_NORMAL_COMPLETION: Case = Case {
              }\n",
 };
 
+pub const ERASED_REFERENCE_EQUALITY: Case = Case {
+    stem: "erasedReferenceEquality",
+    source: include_str!("box_regressions/erasedReferenceEquality.kt"),
+};
+
 pub const ALL: &[Case] = &[
+    ERASED_REFERENCE_EQUALITY,
     THROWABLE_TRANSPORT,
     TRY_NORMAL_COMPLETION,
     TOP_LEVEL_DEPENDENCY,

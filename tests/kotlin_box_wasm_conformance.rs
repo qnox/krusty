@@ -699,6 +699,15 @@ fun box(): String {
 }
 
 #[test]
+fn wasm_erased_reference_equality_preserves_contents_dispatch_and_effects() {
+    // Platform-specific guard: require both Wasm hosts after the shared graph's real JVM oracle.
+    // The portable source also runs through ALL with the normal matrix-selected backend.
+    let case = &super::multimodule_conformance_cases::ERASED_REFERENCE_EQUALITY;
+    super::kotlin_box_ir_jvm_conformance::run_multimodule_case(case);
+    run_multimodule_case(case);
+}
+
+#[test]
 fn wasm_declines_kotlin_any_rendering_it_has_no_body_for() {
     expect_wasm_decline(
         "class Plain\nfun box(): String = if (\"${Plain()}\" == \"\") \"fail\" else \"OK\"",
