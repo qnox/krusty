@@ -104,12 +104,15 @@ pub enum ExternalCallableKind {
 pub struct KlibBodyCallable<'a> {
     name: &'a str,
     kind: ExternalCallableKind,
+    visibility: crate::types::Visibility,
+    semantic_role: Option<crate::types::SemanticCallRole>,
     params: &'a [Ty],
     ret: Ty,
     parameter_identities: &'a [crate::fir::ResolvedParameterIdentity],
     context_count: usize,
     /// Declaration-owned packed parameter position, including contexts and extension receiver.
     vararg_index: Option<usize>,
+    parameter_defaults: Option<super::ParamFlags>,
     generic_signature: Option<&'a super::GenericSig>,
     type_parameters: &'a [Ty],
     reified_type_parameter_ordinals: &'a [u32],
@@ -134,11 +137,14 @@ pub struct KlibBodyCallable<'a> {
 pub(crate) struct KlibBodyCallableShape<'a> {
     pub(crate) name: &'a str,
     pub(crate) kind: ExternalCallableKind,
+    pub(crate) visibility: crate::types::Visibility,
+    pub(crate) semantic_role: Option<crate::types::SemanticCallRole>,
     pub(crate) params: &'a [Ty],
     pub(crate) ret: Ty,
     pub(crate) parameter_identities: &'a [crate::fir::ResolvedParameterIdentity],
     pub(crate) context_count: usize,
     pub(crate) vararg_index: Option<usize>,
+    pub(crate) parameter_defaults: Option<super::ParamFlags>,
     pub(crate) generic_signature: Option<&'a super::GenericSig>,
     pub(crate) type_parameters: &'a [Ty],
     pub(crate) reified_type_parameter_ordinals: &'a [u32],
@@ -158,11 +164,14 @@ impl<'a> KlibBodyCallable<'a> {
         let KlibBodyCallableShape {
             name,
             kind,
+            visibility,
+            semantic_role,
             params,
             ret,
             parameter_identities,
             context_count,
             vararg_index,
+            parameter_defaults,
             generic_signature,
             type_parameters,
             reified_type_parameter_ordinals,
@@ -173,11 +182,14 @@ impl<'a> KlibBodyCallable<'a> {
         Some(Self {
             name,
             kind,
+            visibility,
+            semantic_role,
             params,
             ret,
             parameter_identities,
             context_count,
             vararg_index,
+            parameter_defaults,
             generic_signature,
             type_parameters,
             reified_type_parameter_ordinals,
@@ -209,6 +221,14 @@ impl<'a> KlibBodyCallable<'a> {
 
     pub(crate) fn kind(self) -> ExternalCallableKind {
         self.kind
+    }
+
+    pub(crate) fn visibility(self) -> crate::types::Visibility {
+        self.visibility
+    }
+
+    pub(crate) fn semantic_role(self) -> Option<crate::types::SemanticCallRole> {
+        self.semantic_role
     }
 
     pub(crate) fn params(self) -> &'a [Ty] {
@@ -243,6 +263,10 @@ impl<'a> KlibBodyCallable<'a> {
         self.vararg_index
     }
 
+    pub(crate) fn parameter_defaults(self) -> Option<super::ParamFlags> {
+        self.parameter_defaults
+    }
+
     pub(crate) fn compiler_intrinsic(self) -> Option<CompilerIntrinsic> {
         self.compiler_intrinsic
     }
@@ -269,11 +293,14 @@ impl<'a> KlibBodyCallable<'a> {
     pub(crate) fn same_declaration_contract(self, other: Self) -> bool {
         self.name == other.name
             && self.kind == other.kind
+            && self.visibility == other.visibility
+            && self.semantic_role == other.semantic_role
             && self.params == other.params
             && self.ret == other.ret
             && self.parameter_identities == other.parameter_identities
             && self.context_count == other.context_count
             && self.vararg_index == other.vararg_index
+            && self.parameter_defaults == other.parameter_defaults
             && self.generic_signature == other.generic_signature
             && self.type_parameters == other.type_parameters
             && self.reified_type_parameter_ordinals == other.reified_type_parameter_ordinals
@@ -335,6 +362,7 @@ pub struct ExternalCallableRealization {
     pub(crate) klib_body_declaration_modifiers: Option<super::KlibBodyDeclarationModifiers>,
     pub(crate) klib_body_class_contract: Option<super::KlibBodyClassContract>,
     pub(crate) klib_body_vararg_index: Option<usize>,
+    pub(crate) klib_body_parameter_defaults: Option<crate::libraries::ParamFlags>,
 }
 
 impl ExternalCallableRealization {
@@ -347,11 +375,14 @@ impl ExternalCallableRealization {
             KlibBodyCallableShape {
                 name: &self.callable.name,
                 kind: self.kind,
+                visibility: self.callable.visibility,
+                semantic_role: self.callable.semantic_role,
                 params: &self.callable.params,
                 ret: self.callable.ret,
                 parameter_identities: &self.parameter_identities,
                 context_count: self.callable.context_count,
                 vararg_index: self.klib_body_vararg_index,
+                parameter_defaults: self.klib_body_parameter_defaults,
                 generic_signature: self.callable.generic_sig.as_deref(),
                 type_parameters: &self.klib_body_type_parameters,
                 reified_type_parameter_ordinals: &self.callable.reified_type_parameter_ordinals,

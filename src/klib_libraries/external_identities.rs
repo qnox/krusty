@@ -16,6 +16,7 @@ use crate::types::{SemanticCallableOwner, TypeName};
 #[derive(Default)]
 struct BodyContract {
     vararg_index: Option<usize>,
+    parameter_defaults: Option<crate::libraries::ParamFlags>,
     companion_receiver: Option<KlibBodyCompanionReceiver>,
     type_parameters: Box<[crate::types::Ty]>,
     declaration_modifiers: Option<KlibBodyDeclarationModifiers>,
@@ -63,6 +64,7 @@ impl ExternalIdentities {
                         )
                 }),
                 companion_receiver,
+                parameter_defaults: None,
                 declaration_modifiers: Some(KlibBodyDeclarationModifiers::function(
                     &signed.declaration,
                 )),
@@ -100,6 +102,7 @@ impl ExternalIdentities {
             BodyContract {
                 vararg_index: None,
                 companion_receiver: companion_receiver.clone(),
+                parameter_defaults: None,
                 declaration_modifiers: Some(KlibBodyDeclarationModifiers::accessor(
                     &signed.declaration,
                     &signed.declaration.getter_modifiers,
@@ -132,6 +135,7 @@ impl ExternalIdentities {
                 BodyContract {
                     vararg_index: None,
                     companion_receiver,
+                    parameter_defaults: None,
                     declaration_modifiers: Some(KlibBodyDeclarationModifiers::accessor(
                         &signed.declaration,
                         &signed.declaration.setter_modifiers,
@@ -179,7 +183,15 @@ impl ExternalIdentities {
             parameters,
             internal_friend,
             module,
-            BodyContract::default(),
+            BodyContract {
+                vararg_index: constructor.call_sig.vararg_index,
+                parameter_defaults: Some(if constructor.call_sig.param_defaults.is_empty() {
+                    crate::libraries::ParamFlags::repeat(false, constructor.params.len())
+                } else {
+                    constructor.call_sig.param_defaults
+                }),
+                ..Default::default()
+            },
             None,
             &mut callable,
         );
@@ -299,6 +311,7 @@ impl ExternalIdentities {
             klib_body_declaration_modifiers: body.declaration_modifiers,
             klib_body_class_contract: None,
             klib_body_vararg_index: body.vararg_index,
+            klib_body_parameter_defaults: body.parameter_defaults,
         });
         self.by_signature.borrow_mut().insert(key, identity);
     }

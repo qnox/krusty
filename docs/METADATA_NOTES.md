@@ -772,8 +772,14 @@ Constructors retain the same class contract through provider lookup and both fro
 join requires the exact declaring module and complete constructor signature, including its mask.
 Class-owned formals and bounds stay in that contract; they are not constructor-owned function
 parameters. The invocation result remains `Unit`, without a function generic signature, independently
-of source inference's constructed type. This header preservation does not enable serialized generic
-constructor lowering. Test: `klib_lowering::tests::constructor_contracts`.
+of source inference's constructed type. The body view separately retains known constructor-default
+flags, vararg position, visibility and semantic role. Empty canonical metadata defaults expand to
+the constructor's exact parameter count; unknown non-KLIB defaults remain unknown. Shared raw
+authentication checks constructor kind and slot, exact class application and all parameter facts
+before ordinary or prepared bodies instantiate class arguments and their complete upper bounds.
+The executed-body inventory includes construction without treating serialized constructor bodies
+as top-level support exports or granting intrinsic-root authority. Tests:
+`klib_lowering::tests::constructor_contracts`, `::constructor_calls`.
 
 ## Declaration-owned KLIB vararg coordinates
 

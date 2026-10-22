@@ -141,10 +141,10 @@ impl std::fmt::Display for KlibDeclarationBodiesError {
 impl std::error::Error for KlibDeclarationBodiesError {}
 
 impl KlibDeclarationBodies {
-    /// Exactly one raw class header in this module with the requested primitive function/getter
+    /// Exactly one raw class header in this module with the requested function/constructor/getter
     /// as a direct member. The current property primitives are reads: a getter stored in a setter
     /// slot grants no authority. Equal names in other archives and inherited members do not join.
-    pub(crate) fn primitive_member_header(
+    pub(crate) fn class_member_header(
         &self,
         identity: &KlibDependencyCallable,
         signature: &KlibPublicIdSignature,
@@ -432,6 +432,27 @@ impl KlibDeclarationBodies {
             .collect()
     }
 
+    /// Exact callable edges of the executed body, including construction but excluding unused
+    /// defaults and nested declarations. This inventory grants no intrinsic-root capability.
+    pub(crate) fn direct_body_callables(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Vec<KlibDependencyCallable> {
+        let Some((arena, function)) = self.function(identity) else {
+            return Vec::new();
+        };
+        arena
+            .callable_symbols_in_body(function)
+            .filter_map(|symbol| declaration_signature(&symbol.signature))
+            .filter_map(
+                |declaration| match self.callee_origin(&identity.module, &declaration) {
+                    KlibCalleeOrigin::Exact(callee) => Some(callee),
+                    KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
+                },
+            )
+            .collect()
+    }
+
     /// Whether `identity` is an executable dependency-support root: its own serialized body has a
     /// direct call edge to an intrinsic declaration authenticated from these same selected inputs,
     /// or a direct call edge to one such declaration.
@@ -450,20 +471,9 @@ impl KlibDeclarationBodies {
         if self.directly_calls_authenticated_intrinsic(identity, intrinsics) {
             return true;
         }
-        let Some((arena, function)) = self.function(identity) else {
-            return false;
-        };
-        arena.call_symbols_in_body(function).any(|symbol| {
-            let Some(declaration) = declaration_signature(&symbol.signature) else {
-                return false;
-            };
-            let KlibCalleeOrigin::Exact(callee) =
-                self.callee_origin(&identity.module, &declaration)
-            else {
-                return false;
-            };
-            self.directly_calls_authenticated_intrinsic(&callee, intrinsics)
-        })
+        self.direct_callees(identity)
+            .iter()
+            .any(|callee| self.directly_calls_authenticated_intrinsic(callee, intrinsics))
     }
 
     fn directly_calls_authenticated_intrinsic(

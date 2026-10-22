@@ -252,6 +252,20 @@ pub(super) fn prepared_inline_header(
     }
     // The extension receiver is serialized either in its own slot or as the leading value
     // parameter; both orders follow the selected declaration's.
+    if let Some(signature) = selected.generic_signature() {
+        if signature.formal_bounds.len() != formals.len() {
+            return Err(mismatch(
+                "the prepared template has non-parallel declared bounds".to_owned(),
+            ));
+        }
+        for (formal, bounds) in formals.iter().zip(&signature.formal_bounds) {
+            if !type_parameters.record_bounds(*formal, bounds.clone()) {
+                return Err(mismatch(
+                    "a prepared template repeats a formal identity".to_owned(),
+                ));
+            }
+        }
+    }
     let regular = &function.regular_parameters[usize::from(flattened_dispatch)..];
     let serialized = function
         .context_parameters

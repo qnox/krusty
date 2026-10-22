@@ -14,6 +14,9 @@
 mod body_lowering;
 mod body_unit;
 mod callee_facts;
+mod class_headers;
+mod constructor_bounds;
+mod constructor_calls;
 mod decline;
 mod function_lowering;
 mod inline_templates;
