@@ -958,6 +958,10 @@ jobs:
         if: steps.tip.outputs.publish == 'true'
         shell: bash
         run: just package-zed
+      # The Bazel module of this release, naming the SHA-256 of each compiler archive above.
+      - name: package Bazel module
+        if: steps.tip.outputs.publish == 'true'
+        run: scripts/package-bazel-module.sh "${{ steps.v.outputs.ver }}" dist
       - name: publish
         if: steps.tip.outputs.publish == 'true'
         uses: softprops/action-gh-release@v3

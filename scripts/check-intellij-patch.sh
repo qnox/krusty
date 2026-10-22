@@ -4,7 +4,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 revision=3f14adc599ef
-patch="$root/bazel/intellij/0001-krusty-backend.patch"
+patch="$root/tools/krusty-bazel/intellij/0001-krusty-backend.patch"
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 

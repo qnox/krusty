@@ -138,6 +138,8 @@ mod backtick_keyword_identifier_e2e;
 mod bare_accessor_and_setter_bridge_e2e;
 #[path = "bazel_cli_contract_e2e.rs"]
 mod bazel_cli_contract_e2e;
+#[path = "bazel_module_release_e2e.rs"]
+mod bazel_module_release_e2e;
 #[path = "block_slot_reuse_e2e.rs"]
 mod block_slot_reuse_e2e;
 #[path = "boolean_literal_equality_e2e.rs"]

@@ -5,26 +5,26 @@ Bazel can be checked by running it rather than taken on trust.
 
 ## Running it
 
-All paths below are relative to this directory (`bazel/smoke`).
+All paths below are relative to this directory (`tools/krusty-bazel/smoke`).
 
 1. Build the compiler, and provision the Kotlin distribution the jar below comes from:
 
-       (cd ../.. && cargo build --release && just kotlinc)
+       (cd ../../.. && cargo build --release && just kotlinc)
 
    `just kotlinc` populates `target/cache/kotlinc/<ver>/`, where `<ver>` is `just max-version`
-   (2.4.10 at the time of writing) — or just look at `ls ../../target/cache/kotlinc/`.
+   (2.4.10 at the time of writing) — or just look at `ls ../../../target/cache/kotlinc/`.
 
 2. Copy the stdlib in (`lib/*.jar` is gitignored; the directory is committed):
 
-       cp ../../target/cache/kotlinc/2.4.10/kotlinc/lib/kotlin-stdlib.jar lib/
+       cp ../../../target/cache/kotlinc/2.4.10/kotlinc/lib/kotlin-stdlib.jar lib/
 
-3. **Edit the two paths in `BUILD.bazel`** — `JAVA_HOME` and `KRUSTY_BINARY` are passed through the
-   rule's `env` attribute, which REPLACES the action environment, so they cannot be supplied with
-   `--action_env` from the command line.
+3. **Edit the `KRUSTY_BINARY` path in `BUILD.bazel`.** It is passed through the rule's `env`
+   attribute, which REPLACES the action environment, so it cannot be supplied with `--action_env`
+   from the command line. `JAVA_HOME` comes from Bazel's Java runtime toolchain.
 
 4. Build:
 
-       bazel build //:greet --@krusty//bazel:krusty_binary=//tools/krusty:krusty
+       bazel build //:greet --@krusty//:krusty_binary=//tools/krusty:krusty
 
    Under Bazel 9 this prints a `rules_java` version-skew warning (the fixture pins 8.14.0, Bazel 9
    resolves 9.1.0). It is noise, not a failure.
@@ -36,8 +36,9 @@ manifest, and the build log reports one `KrustyCompile` worker.
 
 * The rule drives krusty as a Bazel persistent worker and produces a loadable jar. Verified on
   Bazel 9 and 8.4.2.
-* `JAVA_HOME` must reach the action: `src/Greet.kt` uses `java.util.ArrayList` ON PURPOSE, so a
-  wrong path fails the build instead of passing quietly.
+* The Java runtime toolchain's `JAVA_HOME` reaches the action: `src/Greet.kt` uses
+  `java.util.ArrayList` ON PURPOSE, so a missing or wrong one fails the build instead of passing
+  quietly.
 * Bazel gives an action no environment beyond what the rule passes — no `HOME`, no `PATH`. A
   wrapper script that builds its path from `$HOME` under `set -u` dies with "HOME: unbound
   variable"; this is not sandbox-specific, `--spawn_strategy=local` behaves the same.

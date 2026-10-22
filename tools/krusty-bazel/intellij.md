@@ -9,7 +9,7 @@ checked against the worker in this repository.
 
 CI downloads the three affected files from the pinned revision, checks that the patch applies, and
 asserts the eligibility guards and both action mnemonics after applying it. The worker protocol is
-covered separately by `tests/bazel_cli_contract_e2e.rs`. `bazel/smoke/` remains the executable
+covered separately by `tests/bazel_cli_contract_e2e.rs`. `smoke/` remains the executable
 integration recipe: it compiles a Kotlin target with `krusty_jvm_library` and produces
 `bazel-bin/greet.jar` holding `smoke/Greeter.class`, `META-INF/smoke.kotlin_module`, and a manifest,
 with `1 worker` in the build's process summary (the `KrustyCompile` mnemonic itself shows only under
@@ -51,33 +51,33 @@ worker option.
 
 ## Wiring
 
-Add krusty to `MODULE.bazel` and point the flag at a built binary. krusty is not published to any
-registry, so `bazel_dep` alone does not resolve — it needs a local override naming the checkout:
+Add a krusty release to `MODULE.bazel` as `README.md` describes; its compiler comes as a toolchain,
+so no flag is needed. To run a compiler built from a checkout instead, override the module with
+that checkout's `tools/krusty-bazel` and point the flag at the binary:
 
 ```python
 bazel_dep(name = "krusty", version = "0.0.1")
-local_path_override(module_name = "krusty", path = "/path/to/krusty")
+local_path_override(module_name = "krusty", path = "/path/to/krusty/tools/krusty-bazel")
 ```
 
 `//tools:krusty` below is a target the CONSUMING repository defines to wrap the binary built by
-`cargo` (see `bazel/BUILD.bazel` for the shape, and `bazel/smoke/tools/krusty/` for a working one);
-it is not provided by krusty. Two constraints that wrapper must respect, both found by running it:
-Bazel gives an action no environment beyond what the rule passes — so a `set -u` script building its
-path from `$HOME` dies with "HOME: unbound variable", and this is not sandbox-specific
-(`--spawn_strategy=local` behaves the same); and under Bazel 9 `sh_binary` is no longer native and
-must be loaded from `rules_shell`.
+`cargo` (see `smoke/tools/krusty/` for a working one); it is not provided by krusty. Two
+constraints that wrapper must respect, both found by running it: Bazel gives an action no
+environment beyond what the rule passes — so a `set -u` script building its path from `$HOME` dies
+with "HOME: unbound variable", and this is not sandbox-specific (`--spawn_strategy=local` behaves
+the same); and under Bazel 9 `sh_binary` is no longer native and must be loaded from `rules_shell`.
 
 ```bash
 cargo build --release          # in the krusty checkout
 bazel build //some:target \
-  --@krusty//bazel:krusty_binary=//tools:krusty
+  --@krusty//:krusty_binary=//tools:krusty
 ```
 
 Then, for a target you want krusty to build, swap the loaded symbol:
 
 ```python
 # was: load("@rules_jvm//:jvm.bzl", "jvm_library")
-load("@krusty//bazel:defs.bzl", krusty_jvm_library = "krusty_jvm_library")
+load("@krusty//:defs.bzl", krusty_jvm_library = "krusty_jvm_library")
 
 krusty_jvm_library(
     name = "util",
@@ -93,14 +93,12 @@ krusty_jvm_library(
     # `-no-stdlib` opts out and takes the stdlib from `deps` instead.
     kotlinc_opts = ["-no-stdlib", "-Xjvm-default=all", "-progressive"],
     use_worker = True,
-    # Without JAVA_HOME krusty has no platform classpath and every `java.*` reference is
-    # unresolved, so a real module fails without this. It must be set HERE: the rule passes `env`
-    # to `ctx.actions.run`, which REPLACES the action environment — `--action_env` is not merged.
-    # Measured, an action sees only what this dict carries plus TMPDIR; notably no HOME and no PATH,
-    # so anything else the compiler needs (KRUSTY_KOTLINC, KRUSTY_TRACE) must be listed here too —
-    # including KRUSTY_BINARY if, like `bazel/smoke/tools/krusty/`, the wrapper reads it.
+    # JAVA_HOME comes from the execution platform's Java runtime toolchain. Anything else the
+    # compiler needs (KRUSTY_KOTLINC, KRUSTY_TRACE) must be listed here: the rule passes `env` to
+    # `ctx.actions.run`, which REPLACES the action environment — `--action_env` is not merged.
+    # Measured, an action sees only what this dict carries plus TMPDIR; notably no HOME and no PATH.
+    # That includes KRUSTY_BINARY if, like `smoke/tools/krusty/`, a wrapper reads it.
     env = {
-        "JAVA_HOME": "/path/to/jdk",
         "KRUSTY_BINARY": "/path/to/krusty/target/release/krusty",
     },
 )
@@ -228,7 +226,7 @@ KRUSTY_BINARY=/path/to/krusty/target/gate/krusty \
 
 ## Compiling the project's own `jvm_library` targets
 
-Rewriting every `BUILD.bazel` to load `krusty_jvm_library` does not scale. `bazel/intellij/*.patch`
+Rewriting every `BUILD.bazel` to load `krusty_jvm_library` does not scale. `tools/krusty-bazel/intellij/*.patch`
 is applied to an intellij-community checkout and leaves `jvm_library` in place. With
 `KRUSTY_BINARY` unset the patch is a stub and the JPS builder is unchanged. With it set to a built
 `krusty` executable, a target is compiled by krusty when it has no Java sources, no source jars,
