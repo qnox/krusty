@@ -914,6 +914,37 @@ mod tests {
                 assert!(!log.exists(), "{case} must not compile with krusty");
             }
 
+            // End to end, such a compile is kotlinc's: the replacement is skipped and the Kotlin
+            // task writes the classes. A free `-progressive` is one kotlinc compiles as it is.
+            let _ = std::fs::remove_file(&log);
+            let _ = std::fs::remove_file(&fixture.probes);
+            let _ = std::fs::remove_dir_all(&kotlin_classes);
+            let output = build()
+                .property("krusty.negative", "progressive-free-argument")
+                .tasks([":compiler:util:compileKotlin"])
+                .run_output()
+                .unwrap_or_else(|error| panic!("progressive-free-argument: {error}"));
+            assert_left_to_kotlinc(
+                &output,
+                ":compiler:util:compileKotlin",
+                &["freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead"
+                    .to_string()],
+            );
+            assert!(
+                !fixture.probes.exists(),
+                "the plugin refuses a free -progressive without asking krusty"
+            );
+            assert!(
+                !log.exists(),
+                "kotlinc, not krusty, compiles a refused request"
+            );
+            assert!(
+                kotlin_classes
+                    .join("org/jetbrains/kotlin/util/UtilKt.class")
+                    .is_file(),
+                "kotlinc wrote the module's classes"
+            );
+
             // A Kotlin JVM target that differs from the Java one fails the build, as it does with
             // kotlinc under the default validation mode.
             let _ = std::fs::remove_file(&log);

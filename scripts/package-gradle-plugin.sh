@@ -87,8 +87,8 @@ compile tasks outside any source set stay with kotlinc; the plugin logs each tas
 Compile with \`./gradlew -Pkrusty.binary=/path/to/krusty krustyCompile\`.
 The Kotlin/JVM plugin is an explicit consumer dependency and is not bundled here. This local-repo
 distribution does not claim availability from the Gradle Plugin Portal. A Build Tools API
-\`compilerVersion\` override is rejected; use the compiler version supplied by the selected Kotlin
-Gradle plugin.
+\`compilerVersion\` override, like any request krusty does not implement, leaves that compile task
+to kotlinc.
 Validated Gradle boundaries: 7.6.3, 8.14.3, 9.5.0, and 9.7.0.
 EOF
 

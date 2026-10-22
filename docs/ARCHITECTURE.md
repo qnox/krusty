@@ -111,9 +111,12 @@ reject the build, so neither is replaced and neither joins `krustyCompile`.
 (`kotlin_dsl_build_src_compiles_through_krusty` in `crates/krusty-build/src/gradle.rs`.)
 
 The adapter derives Kotlin semantics from `KotlinBasePlugin.pluginVersion`. It reads the experimental
-Build Tools API `compilerVersion` property behind the two exact KGP/BTA opt-ins only to reject an
+Build Tools API `compilerVersion` property behind the two exact KGP/BTA opt-ins only to detect an
 override which would make those semantics diverge; it does not use the experimental compiler path.
-A pre-release, RC, or dev suffix is a different version and is rejected. `allWarningsAsErrors` is
+Such an override, a pre-release, RC, or dev suffix included, is a different compiler: the compile is
+reported and left to kotlinc, as is any request the adapter cannot derive krusty's arguments from
+(a free argument that reaches a plugin-owned one, an argument file, an unsupported structured
+option). `allWarningsAsErrors` is
 forwarded as `-Werror`; an explicit `-Werror` alongside it is the same idempotent policy and is
 forwarded exactly once.
 

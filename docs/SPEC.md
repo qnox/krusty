@@ -14757,8 +14757,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   flags are present, independent of order. Kotlinc's command-line configuration warnings remain
   visible under plain `-nowarn`. An explicit named `warning`, `error`, or `disabled` level wins over
   either global flag. Gradle's `compilerOptions.allWarningsAsErrors` forwards `-Werror` into that
-  same policy. `compilerVersion` must equal the applied Kotlin Gradle plugin version, which must be
-  an exact supported release; a pre-release or RC suffix is rejected.
+  same policy. A `compilerVersion` other than the applied Kotlin Gradle plugin version, or a Kotlin
+  Gradle plugin version that is not an exact supported release (a pre-release, RC, or dev suffix
+  included), leaves the compile to kotlinc, reported.
   (`warning_level_configures_named_diagnostics` in `crates/krusty-cli/src/cli.rs`;
   `named_warning_policy_controls_deprecation` in `tests/deprecation_usage_e2e.rs`;
   `warning_level_is_forwarded_to_the_typed_cli_policy` in `crates/krusty-cli/src/worker.rs`;
