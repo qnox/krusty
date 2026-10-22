@@ -15384,6 +15384,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   its receiver is a value. File annotations' policies are resolved once per source and reach
   every checking unit. Verified against kotlinc 2.4.20. (`tests/opt_in_usage_e2e.rs`.)
 
+- **A classifier annotation reads top-level constants.** A class, object, interface or enum
+  annotation may name a top-level `const val` of the module, directly, inside a string template or
+  an array, or through another constant, wherever the constant is declared in the file: the
+  module's constant payloads are folded before declaration annotations are published, so the
+  argument folds as it does on a function. (`tests/class_annotation_attributes_e2e.rs`,
+  `a_class_annotation_folds_top_level_constants`.)
+
 - **A non-constant annotation argument is reported on the argument, by kind.** As kotlinc's
   `FirAnnotationArgumentChecker` does, each argument (or array-literal element) that does not fold
   gets one diagnostic at its own position. A class literal whose receiver failed to resolve, and any
