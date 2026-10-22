@@ -23,6 +23,8 @@ const jsonLd = {
   url: Astro.site?.href,
   codeRepository: repo,
   downloadUrl: `${repo}/releases/latest`,
+  // Google picks a result thumbnail from structured data before guessing from the page.
+  image: card,
 };
 ---
 <!doctype html>
