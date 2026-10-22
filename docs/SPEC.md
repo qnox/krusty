@@ -18208,7 +18208,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   into that file as an inline-only template function. The checked call then expands exactly as a
   same-module inline call does: the inliner takes an `InlineCallee` that is either a module
   `CallableId` or the dependency's `ExternalCallableId` with its template, and nothing else about
-  the expansion differs. The template keeps the declaration's parameter order (dispatch receiver,
+  the expansion differs. A successful dependency expansion records its final expression, including
+  any operand-evaluation prelude, as both an inline region and an external-inline expansion in
+  common IR. A declined expansion publishes no such provenance marker. The template keeps the
+  declaration's parameter order (dispatch receiver,
   context parameters, extension receiver, value parameters) and its parameter defaults, lowered in
   the callee's scope. kotlinc's prepared copy of a member carries its dispatch receiver as the
   leading regular parameter; the template reads it back as the dispatch receiver, and the

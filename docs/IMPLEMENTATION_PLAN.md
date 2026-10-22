@@ -5583,6 +5583,9 @@ non-inline callers, still reads the field directly. Test:
 
 ## Prepared KLIB inline return frames  🚧
 
+- Successful dependency-template expansion records the final common IR root as an external-inline
+  region. The real kotlinc-native producer/consumer test verifies both explicit-argument and
+  default-argument reified calls, including membership in the ordinary inline-region inventory.
 - Branch-local returns in prepared stdlib inline bodies use an exact serialized block target,
   anonymous result storage and a labelled structural exit; sole-tail returns keep their direct
   value path. Both paths reject repeated enclosing target declarations. A block target never

@@ -173,6 +173,7 @@ impl BodyLowering<'_> {
             })
         };
         self.ir.inline_regions.insert(expanded);
+        self.ir.external_inline_expansions.insert(expanded);
         Some(expanded)
     }
 }

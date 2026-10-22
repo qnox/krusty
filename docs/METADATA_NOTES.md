@@ -629,6 +629,10 @@ spellings move with it. Tests: `tests/metadata_supertype_order_e2e.rs`.
 
 ## Prepared KLIB inline return targets
 
+Successful prepared dependency expansion retains external-inline provenance on its final common IR
+root, including the operand prelude when present. This is an IR fact, not a metadata wire-format
+change; the real kotlinc-native producer test requires a distinct marked region for each call.
+
 The selected Native stdlib's prepared `requireNotNull` and `checkNotNull` bodies contain
 branch-local returns to serialized returnable-block symbols. Those symbols are control-flow
 identities, not local-value declarations or returns from the containing callable. Common lowering
