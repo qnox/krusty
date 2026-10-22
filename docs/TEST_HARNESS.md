@@ -859,6 +859,17 @@ KRUSTY_KOTLINC=/path/to/kotlinc/bin/kotlinc \
 CARGO_TARGET_DIR=/path/to/main/target cargo test --profile gate --test e2e native_runtime
 ```
 
+Invoke Cargo from the checkout root (the canonical harness does this). The checked-in Cargo
+configuration supplies a forced, checkout-relative `KRUSTY_BUILD_CHECKOUT` identity, which the
+runtime build script tracks alongside every runtime source and compiler selection. Switching
+between existing worktrees sharing one target directory therefore rebuilds their runtime objects
+even when the newly selected sources have older timestamps; unchanged inputs still reuse them.
+Cargo invoked outside the checkout with only `--manifest-path` does not discover that checkout's
+configuration and is not covered by this workflow. No per-worktree dependency cache is required.
+The standalone shared-runtime cache fixture clears inherited Rust instrumentation flags and wrappers
+for its nested Cargo workspace. Compiler/toolchain selection and the recorded C compiler remain
+unchanged; parent nightly coverage settings must not contaminate this C-object cache contract.
+
 ## Environment Overrides
 
 The harness usually sets these itself through `just`. Override them only when testing a specific local

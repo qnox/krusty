@@ -2300,6 +2300,7 @@ fn a_missing_runtime_compiler_leaves_the_native_target_unavailable() {
              cargo:rerun-if-changed=src/native/runtime/krusty_posix.h\n\
              cargo:rerun-if-changed=build.rs\n\
              cargo:rerun-if-changed=src/native/target_contract.rs\n\
+             cargo:rerun-if-env-changed=KRUSTY_BUILD_CHECKOUT\n\
              cargo:rerun-if-env-changed=KRUSTY_RUNTIME_CC\n\
              cargo:rustc-env=KRUSTY_RUNTIME_COMPILER={0}\n\
              cargo:warning=native runtime: compiler `{0}` was not found; no native target will be available. Install clang, or set KRUSTY_RUNTIME_CC.\n\
@@ -2368,6 +2369,7 @@ fn a_failing_runtime_compiler_fails_the_build() {
              cargo:rerun-if-changed=src/native/runtime/krusty_posix.h\n\
              cargo:rerun-if-changed=build.rs\n\
              cargo:rerun-if-changed=src/native/target_contract.rs\n\
+             cargo:rerun-if-env-changed=KRUSTY_BUILD_CHECKOUT\n\
              cargo:rerun-if-env-changed=KRUSTY_RUNTIME_CC\n\
              cargo:rustc-env=KRUSTY_RUNTIME_COMPILER={}\n",
             compiler.display()
@@ -2436,6 +2438,7 @@ fn a_runtime_compiler_that_emits_another_machines_code_fails_the_build() {
              cargo:rerun-if-changed=src/native/runtime/krusty_posix.h\n\
              cargo:rerun-if-changed=build.rs\n\
              cargo:rerun-if-changed=src/native/target_contract.rs\n\
+             cargo:rerun-if-env-changed=KRUSTY_BUILD_CHECKOUT\n\
              cargo:rerun-if-env-changed=KRUSTY_RUNTIME_CC\n\
              cargo:rustc-env=KRUSTY_RUNTIME_COMPILER={}\n",
             compiler.display()
@@ -2517,6 +2520,7 @@ fn a_runtime_object_aligned_past_the_targets_page_fails_the_build() {
              cargo:rerun-if-changed=src/native/runtime/krusty_posix.h\n\
              cargo:rerun-if-changed=build.rs\n\
              cargo:rerun-if-changed=src/native/target_contract.rs\n\
+             cargo:rerun-if-env-changed=KRUSTY_BUILD_CHECKOUT\n\
              cargo:rerun-if-env-changed=KRUSTY_RUNTIME_CC\n\
              cargo:rustc-env=KRUSTY_RUNTIME_COMPILER={}\n",
             compiler.display()
