@@ -14,8 +14,8 @@ use crate::types::{type_name, TypeName};
 
 impl Classpath {
     /// The body of `internal`'s method `name descriptor`: the part's when `internal` is a facade
-    /// that forwards to or extends a part, otherwise its own, and `None` when no class in the chain
-    /// declares one.
+    /// that forwards to or extends a part, otherwise its own. `None` when no class in the chain
+    /// declares one, or when the part a forwarder names has no readable body.
     pub(super) fn method_code_through_parts(
         &self,
         internal: TypeName,
@@ -30,13 +30,14 @@ impl Classpath {
                 .as_ref()
                 .map(|class| class.meta.multifile_parts.as_slice())
                 .unwrap_or_default();
-            let part = forwarded_part(&own, name, descriptor, parts);
-            return Some(
-                part.and_then(|part| {
+            // A forwarder names the implementation: its part's body, or none when that body is
+            // unavailable. The forwarder itself is never the function's body.
+            return match forwarded_part(&own, name, descriptor, parts) {
+                Some(part) => {
                     self.own_method_code(type_name(part), name, descriptor, catalog_complete)
-                })
-                .unwrap_or(own),
-            );
+                }
+                None => Some(own),
+            };
         }
         let mut superclass = class.and_then(|class| class.super_class);
         while let Some(current) = superclass {

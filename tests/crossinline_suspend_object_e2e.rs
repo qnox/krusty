@@ -253,20 +253,24 @@ fn a_sam_wrapper_in_a_regenerated_method_is_copied_like_kotlinc() {
     assert!(differences.is_empty(), "{}", differences.join("\n\n"));
 }
 
-/// The copied wrapper runs: the regenerated method suspends, resumes, and reads the label through
-/// it.
+/// The copied wrapper runs: the regenerated method really suspends, resumes through its
+/// continuation, and reads the label through the wrapper.
 #[test]
 fn a_sam_wrapper_copied_into_a_regenerated_method_runs() {
     const MAIN: &str = r#"
 import lib.*
 import kotlin.coroutines.*
 
-fun answer() = labelled("!") { 42 }
+var pending: Continuation<Int>? = null
+
+fun answer() = labelled("!") { suspendCoroutine<Int> { pending = it } }
 
 fun box(): String {
     var result: Any? = null
     suspend { answer().next() }
         .startCoroutine(Continuation(EmptyCoroutineContext) { result = it.getOrThrow() })
+    if (result != null) return "FAIL completed before resuming: $result"
+    pending!!.resume(42)
     return if (result == "42!") "OK" else "FAIL $result"
 }
 "#;

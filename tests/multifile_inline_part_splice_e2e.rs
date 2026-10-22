@@ -49,6 +49,70 @@ fn a_facade_function_is_the_part_its_forwarder_names_like_kotlinc() {
     assert_consumer_matches_kotlinc(&[("A.kt", PRIVATE_PART), ("B.kt", PUBLIC_PART)], PICK_MAIN);
 }
 
+const PLAIN: &str = "package dependency\n\
+    fun plain(value: String): String = \"plain:$value\"\n";
+
+/// The classpath answers a facade function's body from the part its forwarder names, and nothing
+/// when that part's body is unavailable: the forwarder is never the function's body. A class that
+/// forwards nowhere keeps its own body.
+#[test]
+fn a_facade_body_is_its_forwarded_part_or_nothing() {
+    use krusty::jvm::classpath::Classpath;
+    const PICK: &str = "(Ljava/lang/String;)Ljava/lang/String;";
+    let library = common::kotlinc_libraries(&[
+        ("A.kt", PRIVATE_PART),
+        ("B.kt", PUBLIC_PART),
+        ("C.kt", PLAIN),
+    ])
+    .expect("reference kotlinc is provisioned");
+    let classpath = Classpath::new(vec![library.clone()]);
+    let body = |classpath: &Classpath, owner: &str| {
+        classpath
+            .method_code(owner, "pick", PICK)
+            .map(|code| code.code)
+    };
+    let part = body(&classpath, "dependency/Api__BKt").expect("the public part's body");
+    assert_eq!(body(&classpath, "dependency/Api"), Some(part));
+    let own = classpath
+        .method_code("dependency/CKt", "plain", PICK)
+        .expect("a single-file class's own body");
+    assert!(!own.code.is_empty());
+
+    // The same library without the part the forwarder names.
+    let scratch = common::scratch_dir().expect("scratch directory");
+    let copy = scratch.join("library");
+    std::fs::create_dir_all(copy.join("dependency")).expect("create library copy");
+    for entry in std::fs::read_dir(library.join("dependency")).expect("library classes") {
+        let path = entry.expect("library class entry").path();
+        let file = path.file_name().expect("class file name");
+        if file != "Api__BKt.class" {
+            std::fs::copy(&path, copy.join("dependency").join(file)).expect("copy class");
+        }
+    }
+    for entry in std::fs::read_dir(&library).expect("library root") {
+        let path = entry.expect("library root entry").path();
+        if path.is_dir() && path.file_name() == Some("META-INF".as_ref()) {
+            let target = copy.join("META-INF");
+            std::fs::create_dir_all(&target).expect("create META-INF copy");
+            for module in std::fs::read_dir(&path).expect("module files") {
+                let module = module.expect("module file").path();
+                std::fs::copy(
+                    &module,
+                    target.join(module.file_name().expect("module name")),
+                )
+                .expect("copy module file");
+            }
+        }
+    }
+    let without_part = Classpath::new(vec![copy]);
+    let forwarder = without_part.method_code("dependency/Api", "pick", PICK);
+    let _ = std::fs::remove_dir_all(scratch);
+    assert!(
+        forwarder.is_none(),
+        "the facade's forwarder stands in for an unavailable part body"
+    );
+}
+
 /// Builds `library` with kotlinc (krusty does not write multifile classes yet), compiles `main`
 /// against it with both compilers, and requires kotlinc's classes byte for byte and its result.
 fn assert_consumer_matches_kotlinc(library: &[(&str, &str)], main: &str) {
