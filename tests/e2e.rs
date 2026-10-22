@@ -1577,6 +1577,8 @@ mod module_override_boxed_result_e2e;
 mod mpp_expect_actual_e2e;
 #[path = "mpp_requires_the_feature_e2e.rs"]
 mod mpp_requires_the_feature_e2e;
+#[path = "multifile_inline_part_splice_e2e.rs"]
+mod multifile_inline_part_splice_e2e;
 #[path = "nested_block_comment_e2e.rs"]
 mod nested_block_comment_e2e;
 #[path = "nested_class_annotation_scope_e2e.rs"]
@@ -2040,8 +2042,6 @@ mod noarg_plugin_e2e;
 mod non_field_ctor_metadata_e2e;
 #[path = "non_generic_overload_wins_e2e.rs"]
 mod non_generic_overload_wins_e2e;
-#[path = "non_reified_inline_splice_fallback_e2e.rs"]
-mod non_reified_inline_splice_fallback_e2e;
 #[path = "not_null_assert_e2e.rs"]
 mod not_null_assert_e2e;
 #[path = "nothing_call_branch_e2e.rs"]

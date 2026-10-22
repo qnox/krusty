@@ -1,4 +1,5 @@
-//! Runtime differential for a declined splice of a public, non-reified inline declaration.
+//! A public, non-reified inline function of a multifile class is spliced from its facade part, as
+//! kotlinc does: the facade only forwards to the part, so the part holds the body to inline.
 
 use super::common;
 
@@ -16,7 +17,7 @@ const MAIN: &str = "package consumer\n\
     }\n";
 
 #[test]
-fn a_declined_non_reified_splice_matches_kotlinc_runtime_behavior() {
+fn a_multifile_inline_body_is_spliced_from_its_part_like_kotlinc() {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
     let scratch = common::scratch_dir().expect("scratch directory");
@@ -74,25 +75,12 @@ fn a_declined_non_reified_splice_matches_kotlinc_runtime_behavior() {
         .iter()
         .find_map(|(name, bytes)| (name == "consumer/MainKt").then_some(bytes))
         .expect("exact consumer facade");
-    let body = krusty::jvm::classreader::read_method_code(bytes, "box", "()Ljava/lang/String;")
-        .expect("consumer box body");
-    let calls = krusty::jvm::inline::disassemble(&body.code)
-        .expect("consumer instructions")
-        .iter()
-        .filter_map(|instruction| krusty::jvm::inline::invoked_method(instruction, &body.source_cp))
-        .filter(|(owner, _, _, _)| *owner == "dependency/Api")
-        .map(|(owner, name, descriptor, _)| {
-            (owner.to_owned(), name.to_owned(), descriptor.to_owned())
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        calls,
-        vec![(
-            "dependency/Api".to_string(),
-            "retain".to_string(),
-            "(Ljava/lang/Object;Z)Ljava/lang/Object;".to_string(),
-        )],
-        "the unsupported public non-reified body must use its legal direct call",
+    let reference_bytes = std::fs::read(reference_output.join("consumer/MainKt.class"))
+        .expect("kotlinc consumer facade");
+    assert!(
+        *bytes == reference_bytes,
+        "{}",
+        common::exact_class_difference("consumer/MainKt", &reference_bytes, bytes)
     );
     let krusty_result =
         common::run_box(&classes, "consumer.MainKt", &[library_output, stdlib, jdk])

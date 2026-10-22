@@ -55,6 +55,11 @@ impl NameGenerator {
         self.child(class)
     }
 
+    /// The generator of `class`, an object [`Self::next_object`] already named.
+    pub(crate) fn object(&mut self, class: &str) -> Option<&mut NameGenerator> {
+        self.children.get_mut(class)
+    }
+
     fn child(&mut self, class: String) -> &mut NameGenerator {
         debug_assert!(
             !self.children.contains_key(&class),

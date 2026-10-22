@@ -6704,8 +6704,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `$continuation`, `$result` and suspension marker first. The lambda is no function of its own: no
   `access$…$lambda$0` bridge is written for it, nor the continuation its lowering prepared, unless
   a call keeps it as a value. A library object without the `$$forInline` copy keeps the lambda as a
-  value. Nested objects (the `FlowCollector` that `Flow.map`'s object creates) are not regenerated
-  yet. Test: `tests/crossinline_suspend_object_e2e.rs`.
+  value. An object the copied method constructs that reads the lambda through the copy's field (the
+  `FlowCollector` that `Flow.map`'s object creates) is regenerated too, as kotlinc's
+  `MethodInliner` does: it takes the copy's next number after the continuation
+  (`…$map$1$2`, its own continuation `…$map$1$2$1`), the lambda is inlined into its methods, and
+  its continuation is rebuilt by the same transformer. A regenerated continuation drops the
+  original's `@DebugMetadata` for the new one, keeps the spill fields the original already
+  declares instead of declaring them twice, and writes `line 0` where kotlinc's transformer has no
+  call-site line. A multifile facade (kotlinx's `FlowKt`) only forwards to its parts, so an inline
+  body is read from the part that declares it (also for a plain inline function, which krusty used
+  to call through the facade). Tests: `tests/crossinline_suspend_object_e2e.rs`,
+  `tests/multifile_inline_part_splice_e2e.rs`.
 
 - **A lambda inlined into a classpath inline body runs on an empty operand stack.** kotlinc's
   `MethodInliner` brackets each inlined lambda with `InlineMarker.beforeInlineCall` /

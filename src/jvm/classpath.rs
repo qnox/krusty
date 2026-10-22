@@ -3265,11 +3265,19 @@ impl Classpath {
             }
         }
         cache_stat!(bodies, false);
-        let mut code = self.own_method_code(internal, name, descriptor, catalog_complete);
+        // A multifile facade's function is declared by one of its parts; a facade that does not
+        // inherit its parts only forwards to that part, whose body is the function's own.
+        let jvm = super::jvm_class_map::to_jvm_type_name(internal);
+        let part_code = self.find_name(jvm).and_then(|class| {
+            class.meta.multifile_parts.iter().find_map(|part| {
+                self.own_method_code(type_name(part), name, descriptor, catalog_complete)
+            })
+        });
+        let mut code = part_code
+            .or_else(|| self.own_method_code(internal, name, descriptor, catalog_complete));
         if code.is_none() {
             // A multifile facade (`StandardKt`) has no method bodies — they live in its part classes,
             // which the facade *extends* (a superclass chain: `StandardKt` → `StandardKt__StandardKt`).
-            let jvm = super::jvm_class_map::to_jvm_type_name(internal);
             let mut cur = self.find_name(jvm).and_then(|class| class.super_class);
             while let Some(superclass) = cur {
                 if superclass == crate::types::wk::java_object() {

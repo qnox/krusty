@@ -18,6 +18,8 @@ mod constructor;
 use constructor::DeclaredCapture;
 mod lambda_inlining;
 use lambda_inlining::FieldLambda;
+mod nested_objects;
+use nested_objects::NestedObjects;
 mod sam_wrapper;
 mod suspend_methods;
 mod type_remapper;
@@ -231,6 +233,8 @@ pub(crate) fn regenerate(
                 METADATA_DESC => metadata = Some(annotation),
                 // The copy's map is written with the class; kotlinc drops the original's.
                 SOURCE_DEBUG_EXTENSION_DESC => {}
+                // So is a continuation's `@DebugMetadata`, which its machine describes.
+                DEBUG_METADATA_DESC if regeneration.continuation.is_some() => {}
                 _ => {
                     let mut annotation = annotation.clone();
                     remapper.remap_annotation(&mut annotation)?;
@@ -353,10 +357,9 @@ pub(crate) fn regenerate(
                         "a $$forInline method without a continuation",
                     ))?
                     .to_string();
-                let names = names.next_object();
-                let copy = names.class().to_string();
+                let copy = names.next_object().class().to_string();
                 remapper.add_mapping(&original, &copy);
-                Some((original, copy, names))
+                Some((original, copy))
             }
             _ => None,
         };
@@ -372,19 +375,44 @@ pub(crate) fn regenerate(
             let code = if lambda_inlining::reads_lambda(code, &lambdas) {
                 let mut code = code.clone();
                 remapper.remap_method(&mut code)?;
-                lambda_inlining::inline_into(
+                let mut objects = NestedObjects {
+                    regeneration,
+                    names: &mut *names,
+                    method: suspend_methods::for_inline_original(&method.name)
+                        .unwrap_or(&method.name),
+                    descriptor: &method.desc,
+                    renamed: Vec::new(),
+                    classes: Vec::new(),
+                };
+                let code = lambda_inlining::inline_into(
                     &code,
                     new,
                     &lambdas,
                     &mut lines,
                     regeneration.caller_lines,
-                )?
+                    &mut objects,
+                )?;
+                for (original, copy) in &objects.renamed {
+                    remapper.add_mapping(original, copy);
+                }
+                nested.extend(objects.classes);
+                code
             } else {
+                if code.instructions().any(|insn| {
+                    references_other_regenerated_class(
+                        insn,
+                        regeneration.classes,
+                        old,
+                        &continuations,
+                    )
+                }) {
+                    return Err(RegenerationError::Unsupported("a nested anonymous object"));
+                }
                 copy_body(code, &remapper, &mut lines)?
             };
             method.code = Some(code);
         }
-        let Some((original_continuation, continuation, continuation_names)) = continuation else {
+        let Some((original_continuation, continuation)) = continuation else {
             cw.add_copied_method(&method)
                 .map_err(RegenerationError::Copy)?;
             continue;
@@ -439,7 +467,9 @@ pub(crate) fn regenerate(
                 continuation: Some(&machine),
                 ..*regeneration
             },
-            continuation_names,
+            names
+                .object(&continuation)
+                .unwrap_or_else(|| unreachable!("the continuation's name was taken")),
         )?;
         nested.extend(regenerated.nested);
         nested.push((continuation, regenerated.bytes));
@@ -484,10 +514,17 @@ pub(crate) fn regenerate(
     cw.seed_name_and_type(call_site.method, call_site.descriptor);
     cw.set_enclosing_method(call_site.owner, call_site.method, call_site.descriptor);
     // The machine's spill fields and `@DebugMetadata`, which the transformer adds to the
-    // continuation once it built the machine.
+    // continuation once it built the machine. A spill field the original's own machine declared
+    // is already copied.
     if let Some(machine) = regeneration.continuation {
         for field in &machine.fields {
-            cw.add_field_sig(0, &field.name, &field.descriptor, None);
+            let copied = original
+                .fields
+                .iter()
+                .any(|own| own.name == field.name && own.desc == field.descriptor);
+            if !copied {
+                cw.add_field_sig(0, &field.name, &field.descriptor, None);
+            }
         }
         cw.set_debug_metadata(&machine.debug_metadata);
     }
@@ -635,14 +672,16 @@ fn check_supported(
     {
         return Err(RegenerationError::Unsupported("a coroutine"));
     }
-    if original
-        .visible_annotations
-        .iter()
-        .any(|annotation| annotation.desc == DEBUG_METADATA_DESC)
+    // A copied continuation's `@DebugMetadata` is the copy's machine's, written anew.
+    if !copied_continuation
+        && original
+            .visible_annotations
+            .iter()
+            .any(|annotation| annotation.desc == DEBUG_METADATA_DESC)
     {
         return Err(RegenerationError::Unsupported("coroutine debug metadata"));
     }
-    if original.source_file.is_none() {
+    if original.source_file.is_none() && !copied_continuation {
         return Err(RegenerationError::Unsupported(
             "a class without a source file",
         ));
@@ -671,9 +710,13 @@ fn check_supported(
                 "a class initializer requiring reification",
             ));
         }
-        if code.instructions().any(|insn| {
-            references_other_regenerated_class(insn, classes, &original.name, continuations)
-        }) {
+        // A method's nested objects are regenerated while its lambdas are inlined into it; a
+        // constructor or initializer is copied as it is.
+        if matches!(method.name.as_str(), "<init>" | "<clinit>")
+            && code.instructions().any(|insn| {
+                references_other_regenerated_class(insn, classes, &original.name, continuations)
+            })
+        {
             return Err(RegenerationError::Unsupported("a nested anonymous object"));
         }
     }
@@ -816,12 +859,30 @@ struct CopiedLines {
 
 impl CopiedLines {
     fn of(original: &ClassNode) -> Result<CopiedLines, RegenerationError> {
-        let source_file = original
-            .source_file
-            .clone()
-            .ok_or(RegenerationError::Unsupported(
+        let lineless = || CopiedLines {
+            map: SourceMap::default(),
+            original: None,
+            path: original.name.clone(),
+            source_file: String::new(),
+            lineless: true,
+        };
+        let has_lines = || {
+            original
+                .methods
+                .iter()
+                .filter_map(|method| method.code.as_ref())
+                .flat_map(|code| &code.nodes)
+                .any(|entry| matches!(entry, Node::Line { .. }))
+        };
+        // A continuation kotlinc writes without a source file has no lines either.
+        let Some(source_file) = original.source_file.clone() else {
+            if original.source_debug.is_none() && !has_lines() {
+                return Ok(lineless());
+            }
+            return Err(RegenerationError::Unsupported(
                 "a class without a source file",
-            ))?;
+            ));
+        };
         let (map, parsed) = match &original.source_debug {
             Some(text) => {
                 let parsed = DependencyMap::parse(text)
@@ -851,11 +912,8 @@ impl CopiedLines {
                     .max()
                 else {
                     return Ok(CopiedLines {
-                        map: SourceMap::default(),
-                        original: None,
-                        path: original.name.clone(),
                         source_file,
-                        lineless: true,
+                        ..lineless()
                     });
                 };
                 (
