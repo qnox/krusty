@@ -11373,7 +11373,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `SealedClassSerializer` for a sealed one. The class keeps a `write$Self` that takes one serializer
   per type parameter after the descriptor, and a deserialization constructor that checks no missing
   fields, so it has no `$cachedDescriptor`. A sealed class's generic subclass whose type parameter is
-  the sealed class's `j`-th type argument is constructed over the accessor's own `typeSerial<j>`. An
+  the sealed class's `j`-th type argument is constructed over the accessor's own `typeSerial<j>`. A
+  subclass reached through intermediate sealed classes composes each step's type arguments from the
+  leaf up to the base, as kotlinc does: for `Mid<X, Y> : Root<Y, X>` and `Leaf<V, W> : Mid<V, W>`,
+  `Root.serializer(a, b)` builds `Leaf$$serializer(b, a)`. An
   element typed by a generic sealed class reads `serializer(…)` with its type arguments'
   serializers; one typed by a generic abstract class reads it with
   `UnitSerializer.INSTANCE` for each type parameter, which a `PolymorphicSerializer` never reads.

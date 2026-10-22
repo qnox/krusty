@@ -39,11 +39,32 @@ const SRC: &str = "import kotlinx.serialization.Serializable\n\
                    \x20   val l: Envelope<List<Long>>,\n\
                    )\n";
 
+/// A sealed chain whose intermediate class renames and reorders the base's type parameters: `Leaf`'s
+/// `V` is `Root`'s `B` and its `W` is `Root`'s `A`, so `Root.serializer(a, b)` builds
+/// `Leaf$$serializer(b, a)`.
+const CHAIN_SRC: &str = "import kotlinx.serialization.Serializable\n\
+                         @Serializable\n\
+                         sealed class Root<A, B>\n\
+                         @Serializable\n\
+                         sealed class Mid<X, Y> : Root<Y, X>()\n\
+                         @Serializable\n\
+                         class Leaf<V, W>(val v: V, val w: W) : Mid<V, W>()\n\
+                         @Serializable\n\
+                         sealed class Top<T>\n\
+                         @Serializable\n\
+                         sealed class Between<U> : Top<U>()\n\
+                         @Serializable\n\
+                         class Bottom<S>(val s: S) : Between<S>()\n";
+
 fn assert_byte_identical(class: &str) {
+    assert_byte_identical_in(SRC, class);
+}
+
+fn assert_byte_identical_in(src: &str, class: &str) {
     let (plugin, cp) = plugin_and_runtime()
         .expect("the serialization plugin and runtime must be available to this regression");
     let extra = vec![format!("-Xplugin={}", plugin.display())];
-    let built = compare_with_kotlinc_plugin("GenericParents", SRC, class, &cp, "25", &extra)
+    let built = compare_with_kotlinc_plugin("GenericParents", src, class, &cp, "25", &extra)
         .expect("the reference compiler and javap must be available to this regression");
     assert!(
         built.krusty_bytes == built.reference_bytes,
@@ -90,6 +111,25 @@ fn properties_typed_by_generic_polymorphic_classes_use_companion_serializers() {
     }
 }
 
+/// A sealed class's serializer reaches a subclass through intermediate sealed classes by composing
+/// each step's type arguments.
+#[test]
+fn a_generic_sealed_class_maps_type_arguments_through_intermediate_sealed_classes() {
+    for class in [
+        "Root",
+        "Root$Companion",
+        "Mid",
+        "Mid$Companion",
+        "Leaf",
+        "Leaf$$serializer",
+        "Top$Companion",
+        "Between$Companion",
+        "Bottom$$serializer",
+    ] {
+        assert_byte_identical_in(CHAIN_SRC, class);
+    }
+}
+
 const ROUND_TRIP_SRC: &str = "import kotlinx.serialization.Serializable\n\
                               import kotlinx.serialization.builtins.serializer\n\
                               import kotlinx.serialization.json.Json\n\
@@ -106,7 +146,28 @@ const ROUND_TRIP_SRC: &str = "import kotlinx.serialization.Serializable\n\
                               \x20   @Serializable\n\
                               \x20   class Failed(val reason: String) : Outcome<Int>()\n\
                               }\n\
+                              @Serializable\n\
+                              sealed class Root<A, B>\n\
+                              @Serializable\n\
+                              sealed class Mid<X, Y> : Root<Y, X>()\n\
+                              @Serializable\n\
+                              class Leaf<V, W>(val v: V, val w: W) : Mid<V, W>()\n\
+                              @Serializable\n\
+                              sealed class Top<T>\n\
+                              @Serializable\n\
+                              sealed class Between<U> : Top<U>()\n\
+                              @Serializable\n\
+                              class Bottom<S>(val s: S) : Between<S>()\n\
                               fun box(): String {\n\
+                              \x20   val rootSerializer = Root.serializer(String.serializer(), Int.serializer())\n\
+                              \x20   val leaf = Json.encodeToString(rootSerializer, Leaf(1, \"s\"))\n\
+                              \x20   if (leaf != \"{\\\"type\\\":\\\"Leaf\\\",\\\"v\\\":1,\\\"w\\\":\\\"s\\\"}\") return leaf\n\
+                              \x20   val leafBack = Json.decodeFromString(rootSerializer, leaf) as Leaf<Int, String>\n\
+                              \x20   if (leafBack.v != 1 || leafBack.w != \"s\") return \"leaf\"\n\
+                              \x20   val topSerializer = Top.serializer(String.serializer())\n\
+                              \x20   val bottom = Json.encodeToString(topSerializer, Bottom(\"b\"))\n\
+                              \x20   if (bottom != \"{\\\"type\\\":\\\"Bottom\\\",\\\"s\\\":\\\"b\\\"}\") return bottom\n\
+                              \x20   if ((Json.decodeFromString(topSerializer, bottom) as Bottom<String>).s != \"b\") return \"bottom\"\n\
                               \x20   val note = Json.encodeToString(Note.serializer(), Note(1))\n\
                               \x20   if (note != \"{\\\"payload\\\":\\\"x\\\",\\\"n\\\":1}\") return note\n\
                               \x20   val noteBack = Json.decodeFromString(Note.serializer(), note)\n\

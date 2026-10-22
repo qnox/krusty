@@ -213,7 +213,7 @@ fn superclass_type_arguments(ir: &IrFile, class_id: ClassId, parent: ClassId) ->
 }
 
 /// The semantic identity of each of `class_id`'s own type parameters, in declaration order.
-fn type_parameter_identities(ir: &IrFile, class_id: ClassId) -> Vec<String> {
+pub(super) fn type_parameter_identities(ir: &IrFile, class_id: ClassId) -> Vec<String> {
     ir.class_signature_name(ir.classes[class_id as usize].fq_name_id())
         .map_or_else(Vec::new, |signature| {
             signature

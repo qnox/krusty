@@ -12,12 +12,14 @@ use super::cached_serializer::{
     serial_info_annotations,
 };
 use super::element_serializer::{element_serializer_expr, unsupported_element_serializer};
+use super::serial_elements::type_parameter_identities;
 use super::{
     class_ty, complete_frontend_serializer_accessor, kserializer_of, serializer_accessor_owner,
 };
+use crate::fx_hash::HashMap;
 use crate::ir::{ClassId, ExprId, IrConst, IrExpr, IrFile, IrTypeOp, IrTypeParameter};
 use crate::plugins::PluginContext;
-use crate::types::{Ty, TypeName};
+use crate::types::{ty_subst_keep_unbound, Ty, TypeName};
 
 const SEALED_CLASS_SERIALIZER_FQ: &str = "kotlinx/serialization/SealedClassSerializer";
 
@@ -151,17 +153,38 @@ fn subclass_serializer(
     element_serializer_expr(ir, ctx, &ty).unwrap_or_else(|| unsupported_element_serializer(ir, ty))
 }
 
-/// The type arguments `subclass` gives the generic sealed `base` as its direct supertype; none when
-/// the base is not generic or is reached through an intermediate sealed class.
+/// The type arguments `subclass` gives the generic sealed `base`, in terms of the subclass's own
+/// type parameters. A subclass reached through intermediate sealed classes composes each step's
+/// arguments along its declared inheritance path, as kotlinc's plugin walks it from the leaf up to
+/// the base; none when no path of this file's classes reaches the base.
 fn base_type_arguments(ir: &IrFile, base: TypeName, subclass: TypeName) -> Vec<Ty> {
     let Some(subclass_id) = local_class(ir, subclass) else {
         return Vec::new();
     };
-    ir.classes[subclass_id as usize]
-        .supertypes
-        .iter()
-        .find(|supertype| supertype.kotlin_class_internal() == Some(base))
-        .map_or_else(Vec::new, |supertype| supertype.type_args().to_vec())
+    for supertype in ir.classes[subclass_id as usize].supertypes.iter() {
+        let Some(parent) = supertype.kotlin_class_internal() else {
+            continue;
+        };
+        if parent == base {
+            return supertype.type_args().to_vec();
+        }
+        let Some(parent_id) = local_class(ir, parent) else {
+            continue;
+        };
+        let through_parent = base_type_arguments(ir, base, parent);
+        if through_parent.is_empty() {
+            continue;
+        }
+        let bindings: HashMap<String, Ty> = type_parameter_identities(ir, parent_id)
+            .into_iter()
+            .zip(supertype.type_args().iter().copied())
+            .collect();
+        return through_parent
+            .into_iter()
+            .map(|argument| ty_subst_keep_unbound(argument, &bindings))
+            .collect();
+    }
+    Vec::new()
 }
 
 /// kotlinc's representative upper bound of a type parameter: its first bound that is a class
