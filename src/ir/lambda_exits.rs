@@ -84,7 +84,13 @@ impl IrFile {
 /// inside `expression`. A nested lambda's inline body is placed in this one, so its exits count.
 fn lambda_exit(ir: &IrFile, expression: ExprId, loops: &mut Vec<String>) -> LambdaExit {
     let label = match ir.expr(expression) {
-        IrExpr::Return(_) => return LambdaExit::Return,
+        // The returned value is evaluated first, and can itself leave by an outer loop's
+        // `break` or `continue` (`return if (c) break else x`).
+        IrExpr::Return(value) => {
+            return value.map_or(LambdaExit::Return, |value| {
+                LambdaExit::Return.max(lambda_exit(ir, value, loops))
+            });
+        }
         IrExpr::Break { label } | IrExpr::Continue { label } => {
             let outer = match label {
                 None => loops.is_empty(),
@@ -193,6 +199,25 @@ mod tests {
             assert!(ir.record_lambda_exit(body));
             assert_eq!(ir.lambda_exit(body), Some(LambdaExit::Jump));
         }
+    }
+
+    #[test]
+    fn a_jump_inside_a_returned_value_is_a_jump() {
+        let mut ir = IrFile::default();
+        let jump = ir.add_expr(IrExpr::Continue { label: None });
+        let exit = ir.add_expr(IrExpr::Return(Some(jump)));
+        let body = block(&mut ir, vec![exit]);
+        assert!(ir.record_lambda_exit(body));
+        assert_eq!(ir.lambda_exit(body), Some(LambdaExit::Jump));
+
+        // A loop inside the returned value owns its own `break`.
+        let mut ir = IrFile::default();
+        let jump = ir.add_expr(IrExpr::Break { label: None });
+        let inner = looping(&mut ir, jump, None);
+        let exit = ir.add_expr(IrExpr::Return(Some(inner)));
+        let body = block(&mut ir, vec![exit]);
+        assert!(ir.record_lambda_exit(body));
+        assert_eq!(ir.lambda_exit(body), Some(LambdaExit::Return));
     }
 
     #[test]

@@ -79,3 +79,37 @@ fn conditional_non_local_returns_through_finally_are_byte_identical() {
     .expect("reference kotlinc is provisioned")
     .expect("NonLocalReturnFinallyKt byte-identical to kotlinc");
 }
+
+/// A `break` or `continue` of the caller's loop inside the value a lambda returns non-locally
+/// (`return if (…) seen else continue`): the jump decides the lambda's route, not the return.
+const JUMP_IN_RETURNED_VALUE: &str = "fun firstOver(xs: List<Int>, limit: Int): Int {\n\
+    var seen = 0\n\
+    for (x in xs) {\n\
+        run {\n\
+            seen += x\n\
+            return if (x > limit) seen else if (x % 2 == 0) continue else break\n\
+        }\n\
+    }\n\
+    return -seen\n\
+}\n\
+fun box(): String {\n\
+    val r = \"\" + firstOver(listOf(2, 4, 9), 5) + firstOver(listOf(2, 3, 9), 5) + firstOver(listOf(2, 4), 5)\n\
+    return if (r == \"15-5-6\") \"OK\" else r\n\
+}\n";
+
+#[test]
+fn a_jump_inside_a_returned_value_runs() {
+    common::expect_box_same_as_kotlinc(JUMP_IN_RETURNED_VALUE, "JumpInReturnedValue");
+}
+
+#[test]
+fn a_jump_inside_a_returned_value_is_byte_identical() {
+    common::byte_diff_against_kotlinc_cp(
+        "JumpInReturnedValue",
+        JUMP_IN_RETURNED_VALUE,
+        "JumpInReturnedValueKt",
+        &[common::stdlib_jar()],
+    )
+    .expect("reference kotlinc is provisioned")
+    .expect("JumpInReturnedValueKt byte-identical to kotlinc");
+}
