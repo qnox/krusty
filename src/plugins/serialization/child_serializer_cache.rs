@@ -596,7 +596,7 @@ impl ChildSerializersBody<'_> {
 #[cfg(test)]
 mod tests {
     use super::add_child_serializer_cache;
-    use crate::ir::{IrExpr, IrFile};
+    use crate::ir::{IrExpr, IrFile, IrGeneratedClassRole};
     use crate::plugins::{synthetic_class, PluginContext};
     use crate::types::Ty;
 
@@ -669,6 +669,12 @@ mod tests {
         let element = Ty::obj_args("kotlin/collections/List", &[Ty::String]);
         let (mut ir, class_id, fields) = holder(element);
         let serialized = ir.classes[class_id as usize].fq_name_id();
+        let serializer = ir.add_class(synthetic_class("demo/Holder$$serializer"));
+        ir.record_generated_class(
+            serialized,
+            IrGeneratedClassRole::SerializationSerializer,
+            serializer,
+        );
 
         add_child_serializer_cache(
             &mut ir,
@@ -696,6 +702,34 @@ mod tests {
                 .iter()
                 .any(|&m| ir.functions[m as usize].name == "access$get$childSerializers$cp"),
             "and the accessor the `$serializer` reads it through"
+        );
+    }
+
+    /// An abstract class has no `$serializer`, so its cache is built without the `$cp` accessor.
+    #[test]
+    fn a_cache_without_a_serializer_has_no_accessor() {
+        let element = Ty::obj_args("kotlin/collections/List", &[Ty::String]);
+        let (mut ir, class_id, fields) = holder(element);
+        let serialized = ir.classes[class_id as usize].fq_name_id();
+
+        add_child_serializer_cache(
+            &mut ir,
+            &PluginContext::default(),
+            class_id,
+            serialized,
+            &fields,
+        );
+
+        assert!(
+            ir.statics.iter().any(|s| s.name == "$childSerializers"),
+            "the subclasses' `write$Self` still read the cache"
+        );
+        assert!(
+            !ir.classes[class_id as usize]
+                .methods
+                .iter()
+                .any(|&m| ir.functions[m as usize].name == "access$get$childSerializers$cp"),
+            "no `$serializer` reads it through an accessor"
         );
     }
 }

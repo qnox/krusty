@@ -601,7 +601,7 @@ fn complete_class_members(
             plugin,
             ir,
             class_id,
-            &serializer_type_parameters,
+            serializer_type_parameters,
             write_self_line,
         );
     }
@@ -686,9 +686,9 @@ fn complete_class_members(
             ir,
             class_id,
             serializer,
-            &foo_fields,
-            &elements,
-            &wire,
+            foo_fields,
+            elements,
+            wire,
             cached_descriptor,
         );
     }
