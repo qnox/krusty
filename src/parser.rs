@@ -4110,12 +4110,13 @@ impl<'a> Parser<'a> {
             let mut receiver = self.parse_type();
             let receiver_hi = self.t[self.i.saturating_sub(1)].span.hi;
             receiver.span = Span::new(receiver_start, receiver_hi);
-            self.expect(TokenKind::Dot, "'.'");
+            self.expect_receiver_dot();
             return (Some(receiver), self.ident_or_error(name_context));
         }
 
         let receiver_start = self.tok().span.lo;
         let first = self.ident_or_error(name_context);
+        self.skip_plain_newlines_before(TokenKind::Dot);
         if !self.at(TokenKind::Dot) && !self.at(TokenKind::Lt) && !self.at(TokenKind::Question) {
             return (None, first);
         }
@@ -4127,7 +4128,7 @@ impl<'a> Parser<'a> {
         };
         let mut nullable = self.eat_type_nullable();
         let mut receiver_hi = self.t[self.i.saturating_sub(1)].span.hi;
-        self.expect(TokenKind::Dot, "'.'");
+        self.expect_receiver_dot();
         let mut receiver_name = first;
 
         let declaration_name = loop {
@@ -4149,8 +4150,8 @@ impl<'a> Parser<'a> {
                 applied.extend(receiver_targs);
                 receiver_targs = applied;
                 receiver_hi = self.t[self.i.saturating_sub(1)].span.hi;
-                self.expect(TokenKind::Dot, "'.'");
-            } else if self.eat(TokenKind::Dot) {
+                self.expect_receiver_dot();
+            } else if self.eat_receiver_dot() {
                 receiver_name.push('.');
                 receiver_name.push_str(&segment);
                 nullable = false;

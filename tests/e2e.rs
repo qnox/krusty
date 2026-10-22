@@ -1609,6 +1609,8 @@ mod primitive_explicit_equals_e2e;
 mod primitive_hash_code_e2e;
 #[path = "public_inline_property_access_e2e.rs"]
 mod public_inline_property_access_e2e;
+#[path = "receiver_type_line_break_e2e.rs"]
+mod receiver_type_line_break_e2e;
 #[path = "reference_carrier_cast_e2e.rs"]
 mod reference_carrier_cast_e2e;
 #[path = "reified_type_arguments_e2e.rs"]
