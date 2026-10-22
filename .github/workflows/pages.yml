@@ -1,4 +1,6 @@
-# Builds the Astro landing page in site/ and publishes it to GitHub Pages (krustythecompiler.dev).
+# Builds the Astro landing page in site/ and publishes it to GitHub Pages (krustythecompiler.dev),
+# with the Bazel registry (krustythecompiler.dev/bazel-registry) generated from the GitHub releases.
+# The release job dispatches this workflow after each release, so the registry lists it.
 # One-time setup: Settings -> Pages -> Source: "GitHub Actions", Custom domain: krustythecompiler.dev.
 name: pages
 
@@ -33,6 +35,11 @@ jobs:
       - name: build
         working-directory: site
         run: npm ci && npm run build && npm test
+      - name: generate the Bazel registry
+        working-directory: site
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/bazel-registry.mjs dist/bazel-registry
       - uses: actions/configure-pages@v6
       - uses: actions/upload-pages-artifact@v5
         with:

@@ -948,6 +948,8 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: write
+      # Dispatches the pages workflow, which regenerates the Bazel registry.
+      actions: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1058,6 +1060,12 @@ jobs:
           fi
           tools/krusty-gradle/gradlew --no-daemon -p tools/krusty-gradle \
             -PkrustyPluginVersion="${{ steps.v.outputs.ver }}" publishPlugins
+      # Rebuild the site, whose Bazel registry is generated from the releases, so it lists this one.
+      - name: refresh the Bazel registry
+        if: steps.tip.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run pages.yml --ref master
       - name: record the published commit
         if: steps.tip.outputs.publish == 'true'
         run: scripts/release-publisher.sh record
