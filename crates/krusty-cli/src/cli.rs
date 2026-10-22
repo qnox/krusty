@@ -102,6 +102,11 @@ pub struct Options {
     /// Invalid or explicitly requested-but-unemittable options. The driver reports these and exits
     /// before compilation rather than silently producing a different artifact.
     pub errors: Vec<String>,
+    /// The entries of `errors` that are krusty's limits rather than the command line's: a kotlinc
+    /// argument, output shape, fragment layout or language feature that kotlinc compiles and
+    /// krusty does not implement. A build tool leaves a compilation whose only errors are these to
+    /// kotlinc.
+    pub refusals: Vec<String>,
     /// `-version` / `-help` requested (handled before compiling).
     pub print_version: bool,
     pub print_help: bool,
@@ -189,6 +194,7 @@ impl Default for Options {
             warning_policy: WarningPolicy::default(),
             warnings: Vec::new(),
             errors: Vec::new(),
+            refusals: Vec::new(),
             print_version: false,
             print_help: false,
             jdk_home: None,
@@ -339,7 +345,7 @@ fn read(argv: impl IntoIterator<Item = String>, reading: Reading) -> Options {
                 // A refused argument that changes language features is a language error too;
                 // any other is the compilation's concern alone.
                 if reading == Reading::Compilation || occurrence.spec.changes_language_features() {
-                    opts.errors.push(unsupported(occurrence));
+                    opts.refuse(unsupported(occurrence));
                 }
             }
         }
@@ -352,7 +358,9 @@ fn read(argv: impl IntoIterator<Item = String>, reading: Reading) -> Options {
         collect_sources(source, &mut opts.sources, &mut opts.ignored);
     }
     let fragments = fragments::check(&parsed.fragments, &tokenized.free);
-    opts.errors.extend(fragments.unsupported);
+    if let Some(refusal) = fragments.unsupported {
+        opts.refuse(refusal);
+    }
     opts.configuration_errors
         .extend(fragments.configuration_errors);
     opts.plugins.finish();
@@ -384,6 +392,12 @@ pub struct PluginResolution {
 }
 
 impl Options {
+    /// Report something kotlinc compiles that krusty does not implement.
+    fn refuse(&mut self, refusal: String) {
+        self.refusals.push(refusal.clone());
+        self.errors.push(refusal);
+    }
+
     /// Resolve the requested compiler plugins against krusty's extension registry, which alone knows
     /// which plugins krusty implements. A jar that does not exist is kotlinc's own error; a plugin
     /// krusty can neither substitute nor host is an error too, because ignoring it would compile
