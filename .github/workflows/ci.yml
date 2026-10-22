@@ -649,7 +649,7 @@ jobs:
   # which fails this aggregate too.
   ci-and-conformance:
     name: ci-and-conformance
-    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools]
+    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, bazel]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -662,6 +662,7 @@ jobs:
           GRADLE_PLUGIN_RESULT: ${{ needs.build-gradle-plugin.result }}
           GRADLE_RESULT: ${{ needs.gradle.result }}
           BUILD_TOOLS_RESULT: ${{ needs.build-tools.result }}
+          BAZEL_RESULT: ${{ needs.bazel.result }}
         run: |
           echo "ci: $CI_RESULT"
           echo "lint: $LINT_RESULT"
@@ -670,14 +671,16 @@ jobs:
           echo "build-gradle-plugin: $GRADLE_PLUGIN_RESULT"
           echo "gradle: $GRADLE_RESULT"
           echo "build-tools: $BUILD_TOOLS_RESULT"
+          echo "bazel: $BAZEL_RESULT"
           if [ "$CI_RESULT" != success ] \
             || [ "$LINT_RESULT" != success ] \
             || [ "$CONFORMANCE_RESULT" != success ] \
             || [ "$KLIB_CONFORMANCE_RESULT" != success ] \
             || [ "$GRADLE_PLUGIN_RESULT" != success ] \
             || [ "$GRADLE_RESULT" != success ] \
-            || [ "$BUILD_TOOLS_RESULT" != success ]; then
-            echo "lint, coverage, conformance (including KLIB semantics), every Gradle gate, and every build-tools lane must succeed" >&2
+            || [ "$BUILD_TOOLS_RESULT" != success ] \
+            || [ "$BAZEL_RESULT" != success ]; then
+            echo "lint, coverage, conformance (including KLIB semantics), every Gradle gate, every build-tools lane, and every Bazel lane must succeed" >&2
             exit 1
           fi
 
@@ -827,6 +830,36 @@ jobs:
           KRUSTY_GRADLE_BIN=$(command -v gradle) \
             ./krusty-build-tests --ignored $tests
 
+  # Build Kotlin with the Bazel module the release would publish, as a consumer depends on it,
+  # with the toolchain's compiler and an override, in action and worker mode.
+  bazel:
+    needs: [build-tool-bins]
+    strategy:
+      fail-fast: false
+      matrix:
+        bazel: [8.4.2, 9.3.1]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - uses: actions/download-artifact@v8
+        with:
+          name: tool-bins
+      - name: build the packaged Bazel module with Bazel ${{ matrix.bazel }}
+        env:
+          USE_BAZEL_VERSION: ${{ matrix.bazel }}
+        run: |
+          set -euo pipefail
+          chmod +x krusty
+          kotlin=$(just max-version)
+          curl -fsSLo "$RUNNER_TEMP/kotlin-stdlib.jar" \
+            "https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/$kotlin/kotlin-stdlib-$kotlin.jar"
+          scripts/bazel-smoke.sh "$PWD/krusty" "$RUNNER_TEMP/kotlin-stdlib.jar"
+
   # Build the release binaries per OS/arch only after coverage proves that this master commit is
   # still the publishable tip. Superseded master runs keep all validation but do not occupy six
   # runners with artifacts the monotonic publisher will reject. Cap the surviving matrix so release
@@ -898,7 +931,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, build-tool-bins, build-release]
+    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, bazel, build-tool-bins, build-release]
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     # Shorter than the release lock's TTL, so a lock that outlives it belongs to a dead job.

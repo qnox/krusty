@@ -232,3 +232,33 @@ fn the_release_job_packages_the_module_before_publishing() {
     assert!(collect < package && version < package && package < publish);
     assert!(steps[package].contains("if: steps.tip.outputs.publish == 'true'"));
 }
+
+#[test]
+fn every_merge_builds_the_packaged_module_under_bazel() {
+    let workflow =
+        fs::read_to_string(root().join(".github/workflows/ci.yml")).expect("read ci.yml");
+    let start = workflow.find("\n  bazel:\n").expect("bazel job");
+    let job = &workflow[start..];
+    let job = &job[..job[1..].find("\n  # ").map_or(job.len(), |end| end + 1)];
+    assert!(job.contains("    needs: [build-tool-bins]\n"), "{job}");
+    assert!(job.contains("        bazel: [8.4.2, 9.3.1]\n"), "{job}");
+    assert!(
+        job.contains("          USE_BAZEL_VERSION: ${{ matrix.bazel }}\n"),
+        "{job}"
+    );
+    assert!(
+        job.contains(
+            "          scripts/bazel-smoke.sh \"$PWD/krusty\" \"$RUNNER_TEMP/kotlin-stdlib.jar\"\n"
+        ),
+        "{job}"
+    );
+    let smoke = fs::read_to_string(root().join("scripts/bazel-smoke.sh")).expect("read smoke");
+    assert!(smoke.contains(
+        "for exec_groups in --incompatible_auto_exec_groups --noincompatible_auto_exec_groups; do\n"
+    ));
+    assert!(smoke
+        .contains("  for compiler in toolchain --@krusty//:krusty_binary=//tools:krusty; do\n"));
+    assert!(
+        smoke.contains("    for name, use_worker in [(\"actions\", False), (\"worker\", True)]\n")
+    );
+}

@@ -81,7 +81,7 @@ def _worker_arguments(ctx, output_jar, compile_jars):
 def _krusty_jvm_library_impl(ctx):
     output_jar = ctx.actions.declare_file(ctx.label.name + ".jar")
     compiler = krusty_compiler(ctx)
-    java_runtime = ctx.attr._java_runtime[java_common.JavaRuntimeInfo]
+    java_runtime = compiler.java_runtime
 
     # The rule's `env` REPLACES the action environment, so JAVA_HOME is supplied here rather than
     # left to `--action_env`; a target's own `env` still wins.
@@ -124,6 +124,7 @@ def _krusty_jvm_library_impl(ctx):
             mnemonic = "KrustyCompile",
             progress_message = "Compiling %%{label} with krusty worker (%d source(s))" % len(ctx.files.srcs),
             executable = compiler.executable,
+            toolchain = compiler.toolchain,
             arguments = [_worker_arguments(ctx, output_jar, compile_jars)],
             inputs = depset(ctx.files.srcs, transitive = [compile_jars, java_runtime.files]),
             outputs = outputs,
@@ -139,6 +140,7 @@ def _krusty_jvm_library_impl(ctx):
             mnemonic = "KrustyCompile",
             progress_message = "Compiling %%{label} with krusty (%d source(s))" % len(ctx.files.srcs),
             executable = compiler.executable,
+            toolchain = compiler.toolchain,
             arguments = [args],
             inputs = depset(ctx.files.srcs, transitive = [compile_jars, java_runtime.files]),
             outputs = outputs,
@@ -205,7 +207,7 @@ krusty_jvm_library = rule(
             cfg = "exec",
         ),
         "_java_runtime": attr.label(
-            doc = "The execution platform's Java runtime, whose home becomes `JAVA_HOME`.",
+            doc = "The Java runtime beside a `krusty_binary` override; a toolchain brings its own.",
             default = Label("@rules_java//toolchains:current_java_runtime"),
             cfg = "exec",
             providers = [java_common.JavaRuntimeInfo],

@@ -61,4 +61,6 @@ The root module's tag replaces the module's own; hosts it leaves out get no tool
 This directory is the module root. A source checkout carries no release, so it registers no
 toolchain and builds need `--@krusty//:krusty_binary`. `smoke/` is the smallest workspace that
 builds against it, and `intellij.md` covers building intellij-community targets. The release job
-packages the module with `scripts/package-bazel-module.sh`.
+packages the module with `scripts/package-bazel-module.sh`; CI's `bazel` job runs
+`scripts/bazel-smoke.sh`, which builds a consumer of that package with the toolchain and with an
+override, in action and worker mode, with automatic execution groups on and off.
