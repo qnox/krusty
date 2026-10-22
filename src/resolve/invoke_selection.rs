@@ -1230,11 +1230,10 @@ impl Checker<'_> {
                     // (`"case" { … }` inside a receiver-DSL lambda). Keep the selected member-
                     // extension target and publish the same invoke handoff every other invoke
                     // convention uses; lowering must not rediscover this call from its name shape.
-                    let target = self
-                        .resolved_calls
-                        .get(&call)
-                        .cloned()
-                        .expect("selected member-extension invoke target was recorded");
+                    // A rejected candidate has been reported and records no target.
+                    let Some(target) = self.resolved_calls.get(&call).cloned() else {
+                        return InvokeResolution::Selected(Ty::Error);
+                    };
                     let params = match &target {
                         ResolvedCall::MemberExtension {
                             params,
@@ -1347,7 +1346,30 @@ impl Checker<'_> {
                             &implicit_context_args,
                         );
                     }
-                    let ret = selected.callable.ret;
+                    // Publish the inferred type arguments under the call, as an explicit
+                    // `receiver.invoke(args)` does: a generic vararg's array is created for its
+                    // inferred element type.
+                    let ret = match selected.generic_sig.clone() {
+                        Some(signature) => {
+                            let (mut bindings, mut intersections) =
+                                (selected.bindings.clone(), selected.intersection_bindings.clone());
+                            self.commit_selected_call_intersections(
+                                call,
+                                &signature,
+                                &[],
+                                &shape.parameter_indices,
+                                &shape.call_sig,
+                                &mut bindings,
+                                &mut intersections,
+                                selected.ret,
+                                selected.callable.ret,
+                            )
+                        }
+                        None => {
+                            self.clear_selected_generic_call(call);
+                            selected.callable.ret
+                        }
+                    };
                     let target =
                         if selected.stable_declaration.is_some() || selected.source_key.is_some() {
                             self.resolved_source_extension_call(
