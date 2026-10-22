@@ -29,7 +29,15 @@ const SRC: &str = "import kotlinx.serialization.Serializable\n\
                    \x20   class Failed(val reason: String) : Outcome<Int>()\n\
                    \x20   @Serializable\n\
                    \x20   object Pending : Outcome<Int>()\n\
-                   }\n";
+                   }\n\
+                   @Serializable\n\
+                   class Holder(\n\
+                   \x20   val e: Envelope<Int>,\n\
+                   \x20   val o: Outcome<String>,\n\
+                   \x20   val s: Envelope<String>,\n\
+                   \x20   val q: Outcome<Int>,\n\
+                   \x20   val l: Envelope<List<Long>>,\n\
+                   )\n";
 
 fn assert_byte_identical(class: &str) {
     let (plugin, cp) = plugin_and_runtime()
@@ -68,6 +76,16 @@ fn a_generic_sealed_class_serves_its_subclasses_with_its_own_type_serializers() 
         "Outcome$Failed",
         "Outcome$Failed$$serializer",
     ] {
+        assert_byte_identical(class);
+    }
+}
+
+/// A property typed by a generic abstract class is served by its companion's `serializer` with a
+/// `UnitSerializer` per type parameter; one typed by a generic sealed class by its companion's
+/// `serializer` with the serializers of the property's type arguments. Both are cached.
+#[test]
+fn properties_typed_by_generic_polymorphic_classes_use_companion_serializers() {
+    for class in ["Holder", "Holder$$serializer"] {
         assert_byte_identical(class);
     }
 }
@@ -122,26 +140,4 @@ fn generic_parents_round_trip_through_json() {
             .expect("the generic round trip must compile and run"),
         "OK"
     );
-}
-
-#[test]
-fn zz_probe_holder() {
-    let src =
-        format!("{SRC}@Serializable\nclass Holder(val e: Envelope<Int>, val o: Outcome<String>, val s: Envelope<String>, val q: Outcome<Int>, val l: Envelope<List<Long>>)\n");
-    let (plugin, cp) = plugin_and_runtime().unwrap();
-    let extra = vec![format!("-Xplugin={}", plugin.display())];
-    let dir = "/home/user/wt-inherit/probeout";
-    let _ = std::fs::remove_dir_all(dir);
-    std::fs::create_dir_all(dir).unwrap();
-    for class in ["Holder", "Holder$$serializer"] {
-        match compare_with_kotlinc_plugin("GenericHolder", &src, class, &cp, "25", &extra) {
-            Some(built) => {
-                let same = built.krusty_bytes == built.reference_bytes;
-                eprintln!("PROBE {class}: {}", if same { "same" } else { "DIFF" });
-                std::fs::write(format!("{dir}/{class}.k"), &built.reference).unwrap();
-                std::fs::write(format!("{dir}/{class}.r"), &built.krusty).unwrap();
-            }
-            None => eprintln!("PROBE {class}: unavailable"),
-        }
-    }
 }
