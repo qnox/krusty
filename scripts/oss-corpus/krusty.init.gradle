@@ -1,0 +1,15 @@
+// Applies the krusty Gradle plugin to every Kotlin/JVM and Kotlin Multiplatform project of the
+// build, from the local Maven repository the corpus workflow unpacked.
+def repo = new File(System.getenv('KRUSTY_PLUGIN_REPOSITORY')).toURI()
+def version = System.getenv('KRUSTY_PLUGIN_VERSION')
+settingsEvaluated { s ->
+    s.pluginManagement.repositories { maven { url = repo } }
+}
+gradle.rootProject { p ->
+    p.buildscript.repositories { maven { url = repo } }
+    p.buildscript.dependencies { classpath "dev.krusty:krusty-gradle-plugin:$version" }
+}
+gradle.allprojects { p ->
+    p.pluginManager.withPlugin('org.jetbrains.kotlin.jvm') { p.pluginManager.apply('krusty') }
+    p.pluginManager.withPlugin('org.jetbrains.kotlin.multiplatform') { p.pluginManager.apply('krusty') }
+}

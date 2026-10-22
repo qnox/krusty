@@ -1,0 +1,71 @@
+// Adds `corpusCompile`: every Kotlin/JVM (non-Android) compile task in the build. Tasks are picked
+// by name before they are realized: realizing every registered task would configure unrelated ones
+// (a GraalVM native-image task fails without its JDK).
+gradle.projectsEvaluated { g ->
+    def root = g.rootProject
+    def picked = []
+    root.allprojects { p ->
+        def android = ['com.android.base', 'com.android.library', 'com.android.application']
+            .any { p.plugins.hasPlugin(it) }
+        if (android || p.plugins.hasPlugin('org.gradle.kotlin.kotlin-dsl.base')) return
+        p.tasks.names.findAll { it ==~ /compile.*Kotlin.*/ }.each { n ->
+            def t = p.tasks.named(n).get()
+            if (t.class.name.replace('_Decorated', '') == 'org.jetbrains.kotlin.gradle.tasks.KotlinCompile') {
+                picked << t
+            }
+        }
+    }
+    root.tasks.register('corpusCompile') { dependsOn { picked } }
+}
+
+// Records the plugins each project applies, for the corpus plugin survey: every Gradle plugin by
+// its id (read from the `META-INF/gradle-plugins` descriptor of the jar that holds its class), and
+// every Kotlin compiler plugin jar on a Kotlin/JVM compile task's plugin classpath.
+def pluginIds = [:]
+def idsOf = { Class c ->
+    def name = c.name.replace('_Decorated', '')
+    if (pluginIds.containsKey(name)) return pluginIds[name]
+    def ids = []
+    try {
+        def location = c.protectionDomain?.codeSource?.location
+        if (location != null && location.path.endsWith('.jar')) {
+            def jar = new java.util.jar.JarFile(new File(location.toURI()))
+            jar.entries().each { e ->
+                if (e.name.startsWith('META-INF/gradle-plugins/') && e.name.endsWith('.properties')) {
+                    def props = new Properties()
+                    jar.getInputStream(e).withCloseable { props.load(it) }
+                    if (props.getProperty('implementation-class') == name) {
+                        ids << e.name.substring('META-INF/gradle-plugins/'.length(), e.name.length() - '.properties'.length())
+                    }
+                }
+            }
+            jar.close()
+        }
+    } catch (Throwable ignored) {}
+    pluginIds[name] = ids
+    ids
+}
+gradle.projectsEvaluated { g ->
+    def survey = System.getenv('CORPUS_PLUGIN_SURVEY')
+    if (survey == null) return
+    def lines = new TreeSet()
+    g.rootProject.allprojects { p ->
+        p.plugins.each { plugin ->
+            def ids = idsOf(plugin.class)
+            // Prefer the qualified id over Gradle's short core aliases (`java` and `org.gradle.java`).
+            def id = ids.find { it.contains('.') } ?: ids.find() ?: plugin.class.name.replace('_Decorated', '')
+            lines << "gradle\t${p.path}\t${id}"
+        }
+        p.tasks.names.findAll { it ==~ /compile.*Kotlin.*/ }.each { n ->
+            try {
+                def t = p.tasks.named(n).get()
+                if (t.class.name.replace('_Decorated', '') != 'org.jetbrains.kotlin.gradle.tasks.KotlinCompile') return
+                t.pluginClasspath.files.each { f -> lines << "compiler\t${p.path}\t${f.name}" }
+                (t.compilerOptions.freeCompilerArgs.getOrElse([]).findAll { it.startsWith('-Xplugin') || it.startsWith('-P') }).each {
+                    lines << "compiler-arg\t${p.path}\t${it}"
+                }
+            } catch (Throwable ignored) {}
+        }
+    }
+    new File(survey).text = lines.join('\n') + '\n'
+}

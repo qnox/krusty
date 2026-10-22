@@ -1,0 +1,24 @@
+diff --git a/moshi-kotlin-tests/build.gradle.kts b/moshi-kotlin-tests/build.gradle.kts
+index cd1f3c6..786869d 100644
+--- a/moshi-kotlin-tests/build.gradle.kts
++++ b/moshi-kotlin-tests/build.gradle.kts
+@@ -35,7 +35,6 @@ tasks.withType<KotlinCompile>().configureEach {
+     allWarningsAsErrors.set(true)
+     freeCompilerArgs.addAll(
+       "-opt-in=kotlin.ExperimentalStdlibApi",
+-      "-Xannotation-default-target=param-property",
+     )
+   }
+ }
+diff --git a/moshi-kotlin-tests/codegen-only/build.gradle.kts b/moshi-kotlin-tests/codegen-only/build.gradle.kts
+index 5c307b3..1142eb4 100644
+--- a/moshi-kotlin-tests/codegen-only/build.gradle.kts
++++ b/moshi-kotlin-tests/codegen-only/build.gradle.kts
+@@ -36,7 +36,6 @@ tasks.withType<KotlinCompile>().configureEach {
+     allWarningsAsErrors.set(true)
+     freeCompilerArgs.addAll(
+       "-opt-in=kotlin.ExperimentalStdlibApi",
+-      "-Xannotation-default-target=param-property",
+     )
+   }
+ }
