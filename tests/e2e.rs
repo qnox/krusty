@@ -1930,6 +1930,8 @@ mod native_receiver_property_e2e;
 mod native_reflection_type_checks_e2e;
 #[path = "native_reified_declarations_e2e.rs"]
 mod native_reified_declarations_e2e;
+#[path = "native_runtime_cache_e2e.rs"]
+mod native_runtime_cache_e2e;
 #[path = "native_runtime_e2e.rs"]
 mod native_runtime_e2e;
 #[path = "native_sam_e2e.rs"]
