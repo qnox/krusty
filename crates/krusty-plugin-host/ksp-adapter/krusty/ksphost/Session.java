@@ -120,7 +120,12 @@ final class Session {
             seenPaths.add(file.getFilePath());
         }
         for (SymbolProcessor processor : processors) {
-            processor.process(resolver);
+            // KSP hands the symbols a processor defers to it again in the next round and reports
+            // the ones still deferred at the end; until the host can, it refuses rather than drop
+            // them.
+            if (!processor.process(resolver).isEmpty()) {
+                throw Nodes.notImplemented("SymbolProcessor.process deferring symbols to a later round");
+            }
         }
         return new Outcome(codeGen.drain(), logger.drain(), logger.hasError());
     }

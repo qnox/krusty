@@ -58,12 +58,13 @@ fn platform(runtime: &KspRuntime) -> krusty::frontend::PlatformProvider {
     krusty::frontend::PlatformProvider::jvm(Box::new(libraries))
 }
 
-/// Compiles the processor with krusty into a classpath directory that registers its provider.
-fn processor(runtime: &KspRuntime) -> PathBuf {
-    let out = scratch("ksp-processor");
-    let text = std::fs::read_to_string(fixtures().join("Dump.kt")).unwrap();
-    let inputs = [krusty::source::SourceInput::kotlin(&text).with_file_stem("Dump")];
-    let stems = ["Dump".to_string()];
+/// Compiles the processor `fixtures/ksp/<stem>.kt` with krusty into a classpath directory that
+/// registers `provider`.
+fn processor(runtime: &KspRuntime, stem: &str, provider: &str) -> PathBuf {
+    let out = scratch(&format!("ksp-processor-{stem}"));
+    let text = std::fs::read_to_string(fixtures().join(format!("{stem}.kt"))).unwrap();
+    let inputs = [krusty::source::SourceInput::kotlin(&text).with_file_stem(stem)];
+    let stems = [stem.to_string()];
     let mut diags = krusty::diag::DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
@@ -74,7 +75,10 @@ fn processor(runtime: &KspRuntime) -> PathBuf {
     let backend = krusty::jvm::JvmBackend::new(classpath(runtime));
     let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
     let messages: Vec<&str> = diags.diags.iter().map(|diag| diag.msg.as_str()).collect();
-    assert!(!diags.has_errors(), "krusty refused Dump.kt: {messages:?}");
+    assert!(
+        !diags.has_errors(),
+        "krusty refused {stem}.kt: {messages:?}"
+    );
     for (path, bytes) in artifacts {
         let file = out.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -84,7 +88,7 @@ fn processor(runtime: &KspRuntime) -> PathBuf {
     std::fs::create_dir_all(&services).unwrap();
     std::fs::write(
         services.join("com.google.devtools.ksp.processing.SymbolProcessorProvider"),
-        "dump.DumpProvider\n",
+        format!("{provider}\n"),
     )
     .unwrap();
     out
@@ -121,7 +125,7 @@ fn run(
         log_level: 3,
         warnings_as_errors: false,
     })?;
-    assert_eq!(providers, ["dump.DumpProvider"]);
+    assert_eq!(providers.len(), 1);
     let mut sources = sources.to_vec();
     let mut run = Run {
         generated: Vec::new(),
@@ -188,7 +192,7 @@ fn relative(kind: GeneratedKind, path: &Path, outputs: &KspOutputs) -> String {
 #[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
 fn a_processor_sees_generates_and_logs_what_it_does_under_ksp2() {
     let (runtime, env) = runtime();
-    let processor = processor(&runtime);
+    let processor = processor(&runtime, "Dump", "dump.DumpProvider");
     let out = scratch("ksp-outputs");
     let outputs = KspOutputs {
         kotlin: out.join("kotlin"),
@@ -217,5 +221,30 @@ fn a_processor_sees_generates_and_logs_what_it_does_under_ksp2() {
     assert_eq!(
         std::fs::read_to_string(outputs.kotlin.join("gen/Generated.kt")).unwrap(),
         "package gen\n\n@sample.Marker\nclass Generated {\n    class Nested\n}\n"
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn a_processor_deferring_symbols_is_refused_rather_than_dropping_them() {
+    let (runtime, env) = runtime();
+    let processor = processor(&runtime, "Defer", "defer.DeferProvider");
+    let out = scratch("ksp-outputs-defer");
+    let outputs = KspOutputs {
+        kotlin: out.join("kotlin"),
+        java: out.join("java"),
+        classes: out.join("classes"),
+        resources: out.join("resources"),
+    };
+    let sources = [
+        fixtures().join("sources/Sample.kt"),
+        fixtures().join("sources/Other.kt"),
+    ];
+    let error = run(&runtime, &env, &processor, &sources, &outputs)
+        .err()
+        .expect("the host refuses a deferring processor");
+    assert_eq!(
+        error.to_string(),
+        "krusty's KSP host does not implement SymbolProcessor.process deferring symbols to a later round yet, which a processor uses"
     );
 }

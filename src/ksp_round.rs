@@ -84,9 +84,15 @@ impl Source<'_> {
     }
 
     /// Whether `id` is declared directly in `owner`'s body, or at the top level when `owner` is
-    /// `None`. Local and anonymous classifiers are in neither: KSP does not list them.
+    /// `None`. Local and anonymous classifiers are in neither: KSP does not list them. Nor is a
+    /// classifier in an enum entry's body, which the round does not describe: its enum class says
+    /// its list is incomplete.
     fn is_member_of(&self, id: DeclId, owner: Option<DeclId>) -> bool {
-        if self.file.local_declarations.contains(&id)
+        if self
+            .file
+            .enum_entry_nested_classifier_owners
+            .contains_key(&id)
+            || self.file.local_declarations.contains(&id)
             || self
                 .file
                 .local_class_enclosing_declarations
@@ -379,6 +385,24 @@ mod tests {
         .expect("every declaration is readable");
         let file = &round.files[0];
         assert!(!file.declarations_complete);
+        assert!(!file.classes[0].declarations_complete);
+    }
+
+    #[test]
+    fn a_classifier_in_an_enum_entry_body_is_not_listed_in_its_file() {
+        let round = round(&[(
+            "/src/Entries.kt",
+            "package entries\n\nenum class Choice {\n    First {\n        class Nested\n    }\n}\n",
+        )])
+        .expect("every declaration is readable");
+        let file = &round.files[0];
+        let names: Vec<&str> = file
+            .classes
+            .iter()
+            .map(|class| class.qualified_name.as_str())
+            .collect();
+        assert_eq!(names, ["entries.Choice"]);
+        assert!(file.classes[0].classes.is_empty());
         assert!(!file.classes[0].declarations_complete);
     }
 
