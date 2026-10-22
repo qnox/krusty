@@ -5527,6 +5527,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/inline_deep_coverage_e2e.rs` (`inline_nonlocal_return_two_frames`) and
   `tests/nested_inline_lambda_e2e.rs` for a caller's literal forwarded through two inline frames.
 
+- **A lambda's non-local `return` runs every `finally` it leaves, as kotlinc copies them.** An
+  inline function that holds the lambda in a `try`/`finally` (`synchronized`, `withLock`,
+  `ReentrantReadWriteLock.write`) is still inlined from its compiled body: the lambda node marks each
+  of its returns that is not its own (`$$$$$NON_LOCAL_RETURN$$$$$`), every return kept by
+  `LocalReturnsNormalizer` and `processReturns`. Before the root's returns are processed, the
+  inlined function's own `finally` bodies (found between the `finallyStart`/`finallyEnd` depth
+  markers) are copied in front of each marked return with the returned value spilled above every
+  local, the covering try ranges and local-variable ranges are split around the copy, and the try
+  blocks are re-sorted (`InternalFinallyBlockInliner.processInlineFunFinallyBlocks`). Where the
+  inlined code is written into the caller, the caller's own active `finally` blocks run in front of
+  each marked return, above every local of the inlined code with their lines marked afresh
+  (`generateAndInsertFinallyBlocks`), and the marker is dropped. kotlinc's analyzer does not execute
+  a return, so a value return inside a `void` lambda body is accepted. The bytes match kotlinc for
+  conditional returns, except a line entry kotlinc keeps for dead code after an unconditional one.
+  Tests: `tests/inline_non_local_return_finally_e2e.rs` (a run of every shape, including returns
+  through the caller's own `finally` and through `ReentrantReadWriteLock.write`, and kotlinc's bytes
+  for the conditional ones) and `ir::lambda_exits::tests`.
+
 - **A same-module inline call with function arguments is inlined from the compiled body too.**
   A literal lambda or callable reference passed to an inline parameter (one that is function-typed
   and not `noinline`) replaces the compiled body's `invoke`s, exactly as a library callee's
