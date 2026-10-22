@@ -53,6 +53,51 @@ pub struct SourceSetAnalysis {
     pub(crate) streamed: Option<StreamedPassState>,
 }
 
+impl SourceSetAnalysis {
+    /// The classifier that declares the member function `declaration` and the function's index
+    /// among the classifier's written functions (`ClassDecl::methods`), or `None` when
+    /// `declaration` is no member function this analysis published.
+    pub fn member_function_slot(
+        &self,
+        declaration: FrontendDeclarationId,
+    ) -> Option<(FrontendDeclarationId, u32)> {
+        let anchor = self
+            .streamed
+            .as_ref()?
+            .module
+            .index()
+            .declaration_anchor(declaration)?;
+        if anchor.kind != crate::fir::DeclarationKind::Function {
+            return None;
+        }
+        Some((anchor.owner?, anchor.sibling))
+    }
+
+    /// The functions the member function `declaration` of the classifier `owner` directly
+    /// overrides: each one this module declares, or `None` for one a library declares.
+    pub fn overridden_functions(
+        &self,
+        owner: FrontendDeclarationId,
+        declaration: FrontendDeclarationId,
+    ) -> Vec<Option<FrontendDeclarationId>> {
+        use crate::fir::ResolvedFunctionOverrideTarget as Target;
+        let Some(streamed) = &self.streamed else {
+            return Vec::new();
+        };
+        let index = streamed.module.index();
+        let declared = |target: Target| match target {
+            Target::Module(callable) => index.callable(callable).map(|header| header.declaration),
+            Target::External(_) => None,
+        };
+        index
+            .function_overrides(owner)
+            .iter()
+            .filter(|edge| declared(edge.implementation) == Some(declaration))
+            .map(|edge| declared(edge.overridden))
+            .collect()
+    }
+}
+
 /// Production result after Pass 1 has been consumed.
 ///
 /// Unlike [`SourceSetAnalysis`], this type has no slot for parsed files, AST-keyed type tables, or

@@ -33,7 +33,7 @@ final class SourceClass implements KSClassDeclaration {
     boolean declarationsComplete;
     final List<KSAnnotation> annotations = new ArrayList<>();
     final List<KSDeclaration> declarations = new ArrayList<>();
-    private PrimaryConstructor primaryConstructor;
+    SourceFunction primaryConstructor;
     // Each is null when krusty could not describe it; the query is then refused.
     Set<Modifier> modifiers;
     List<KSTypeParameter> typeParameters;
@@ -52,12 +52,6 @@ final class SourceClass implements KSClassDeclaration {
         this.qualifiedName = new Name(qualifiedName);
         this.kind = kind;
         this.line = line;
-    }
-
-    PrimaryConstructor addPrimaryConstructor() {
-        primaryConstructor = new PrimaryConstructor(this);
-        declarations.add(primaryConstructor);
-        return primaryConstructor;
     }
 
     SourceFile file() {

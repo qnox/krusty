@@ -1,0 +1,35 @@
+# What KSP2 2.3.12 (KSPJvmMain) logs with Members.kt over order/: the order KSP lists a file's and
+# a class's declarations in, synthetic members included.
+w: [ksp] fun afterClass kind=TOP_LEVEL abstract=false modifiers= typeParameters= receiver=null (): kotlin.Unit
+w: [ksp] property last mutable=false modifiers=: kotlin.Int
+w: [ksp] CLASS order.First modifiers= typeParameters= supertypes=kotlin.Any
+w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL,PUBLIC typeParameters= receiver=null (): order.First
+w: [ksp] CLASS order.Mixed modifiers= typeParameters= supertypes=kotlin.Any
+w: [ksp]   property a mutable=false modifiers=: kotlin.Int
+w: [ksp]   fun f kind=MEMBER abstract=false modifiers= typeParameters= receiver=null (): kotlin.Unit
+w: [ksp]   property p mutable=false modifiers=: kotlin.Int
+w: [ksp]   fun g kind=MEMBER abstract=false modifiers= typeParameters= receiver=null (): kotlin.Unit
+w: [ksp]   property q mutable=true modifiers=: kotlin.Int
+w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL typeParameters= receiver=null (a: kotlin.Int vararg=false default=false): order.Mixed
+w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL typeParameters= receiver=null (): order.Mixed
+w: [ksp]   CLASS order.Mixed.Nested modifiers= typeParameters= supertypes=kotlin.Any
+w: [ksp]     fun <init> kind=MEMBER abstract=false modifiers=FINAL,PUBLIC typeParameters= receiver=null (): order.Mixed.Nested
+w: [ksp]   OBJECT order.Mixed.Obj modifiers= typeParameters= supertypes=kotlin.Any
+w: [ksp]     fun <init> kind=MEMBER abstract=false modifiers=FINAL,PUBLIC typeParameters= receiver=null (): order.Mixed.Obj
+w: [ksp]   ENUM_CLASS order.Mixed.E modifiers=ENUM typeParameters= supertypes=kotlin.Enum<order.Mixed.E>
+w: [ksp]     fun <init> kind=MEMBER abstract=false modifiers=FINAL,PRIVATE typeParameters= receiver=null (): order.Mixed.E
+w: [ksp]     ENUM_ENTRY order.Mixed.E.X modifiers= typeParameters= supertypes=
+w: [ksp]     ENUM_ENTRY order.Mixed.E.Y modifiers= typeParameters= supertypes=
+w: [ksp]     fun values kind=STATIC abstract=false modifiers=FINAL,JAVA_STATIC,PUBLIC typeParameters= receiver=null (): kotlin.Array<order.Mixed.E>
+w: [ksp]     fun valueOf kind=STATIC abstract=false modifiers=FINAL,JAVA_STATIC,PUBLIC typeParameters= receiver=null (value: kotlin.String vararg=false default=false): order.Mixed.E
+w: [ksp]     property entries mutable=false modifiers=FINAL,JAVA_STATIC,PUBLIC: kotlin.enums.EnumEntries<order.Mixed.E>
+w: [ksp] KSTypeAlias Alias
+w: [ksp] ENUM_CLASS order.Color modifiers=ENUM typeParameters= supertypes=kotlin.Enum<order.Color>
+w: [ksp]   property rgb mutable=false modifiers=: kotlin.Int
+w: [ksp]   fun hex kind=MEMBER abstract=false modifiers= typeParameters= receiver=null (): kotlin.String
+w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL,PRIVATE typeParameters= receiver=null (rgb: kotlin.Int vararg=false default=false): order.Color
+w: [ksp]   ENUM_ENTRY order.Color.RED modifiers= typeParameters= supertypes=
+w: [ksp]   ENUM_ENTRY order.Color.GREEN modifiers= typeParameters= supertypes=
+w: [ksp]   fun values kind=STATIC abstract=false modifiers=FINAL,JAVA_STATIC,PUBLIC typeParameters= receiver=null (): kotlin.Array<order.Color>
+w: [ksp]   fun valueOf kind=STATIC abstract=false modifiers=FINAL,JAVA_STATIC,PUBLIC typeParameters= receiver=null (value: kotlin.String vararg=false default=false): order.Color
+w: [ksp]   property entries mutable=false modifiers=FINAL,JAVA_STATIC,PUBLIC: kotlin.enums.EnumEntries<order.Color>
