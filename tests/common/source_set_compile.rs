@@ -66,14 +66,24 @@ pub(crate) fn compile_source_set(
     let mut diags = DiagSink::new();
     let stems = sources
         .iter()
-        .map(|(name, _)| name.trim_end_matches(".kt").to_string())
+        .map(|(name, _)| {
+            name.strip_suffix(".java")
+                .unwrap_or_else(|| name.trim_end_matches(".kt"))
+                .to_string()
+        })
         .collect::<Vec<_>>();
+    // A `.java` source joins the module as Java, the way kotlinc reads a Java path it is given.
     let inputs = sources
         .iter()
         .zip(&stems)
         .enumerate()
-        .map(|(index, ((_, source), stem))| {
-            let input = SourceInput::kotlin(source).with_file_stem(stem);
+        .map(|(index, ((name, source), stem))| {
+            let input = if name.ends_with(".java") {
+                SourceInput::java(source)
+            } else {
+                SourceInput::kotlin(source)
+            }
+            .with_file_stem(stem);
             if index < common {
                 input.common()
             } else {

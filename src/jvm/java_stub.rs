@@ -26,7 +26,7 @@ use super::classfile::{
 use crate::fx_hash::{HashMap, HashSet};
 use crate::java_source::{
     lex_java, parse_raw_file, primitive_desc, resolve_internal_name_with_depth, DeclKind, FileCtx,
-    JavaConstant, Member, RawDecl, ResolvedJavaName, SrcType, SrcWildcard, STUB_DEFAULT,
+    Member, RawDecl, ResolvedJavaName, SrcType, SrcWildcard, STUB_DEFAULT,
 };
 
 #[cfg(test)]
@@ -753,11 +753,7 @@ impl Resolver<'_> {
             let constant = (acc & (ACC_STATIC | ACC_FINAL) == (ACC_STATIC | ACC_FINAL))
                 .then_some(constant.as_ref())
                 .flatten()
-                .map(|constant| match constant {
-                    JavaConstant::String(value) => {
-                        crate::ir::IrConst::String(crate::kt_string::KtString::from(value.clone()))
-                    }
-                });
+                .and_then(|constant| constant.field_constant(&desc));
             let nullability = self.nullability_annotation(ty);
             w.add_field_late_sig(
                 acc,
