@@ -324,9 +324,14 @@ impl Numbering<'_> {
                         if setter && !self.mutable.get(&overridden).copied().unwrap_or(false) {
                             continue;
                         }
+                        // A member extension's receiver crosses the accessor like its value.
+                        let receiver = edge.declared_receiver.zip(edge.implementation_receiver);
                         let bridged = !self
                             .representation
-                            .same(edge.declared_type, edge.implementation_type);
+                            .same(edge.declared_type, edge.implementation_type)
+                            || receiver.is_some_and(|(declared, implemented)| {
+                                !self.representation.same(declared, implemented)
+                            });
                         group.push((key(overridden), bridged));
                     }
                     groups.push(group);

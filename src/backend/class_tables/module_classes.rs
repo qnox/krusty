@@ -99,7 +99,21 @@ pub(crate) struct ModulePropertyOverride {
     pub(crate) overridden_is_interface: bool,
     pub(crate) declared_type: Ty,
     pub(crate) implementation_type: Ty,
+    /// A member extension's receiver on each side (`val T.v` over `val Int.v`), `None` for a
+    /// member property. It crosses an accessor like the value does, so it decides a bridge too.
+    pub(crate) declared_receiver: Option<Ty>,
+    pub(crate) implementation_receiver: Option<Ty>,
     pub(crate) depth: u32,
+}
+
+impl ModulePropertyOverride {
+    /// The value and receiver types either side of the edge carries.
+    fn carried_types(&self) -> impl Iterator<Item = Ty> {
+        [self.declared_type, self.implementation_type]
+            .into_iter()
+            .chain(self.declared_receiver)
+            .chain(self.implementation_receiver)
+    }
 }
 
 impl ModuleClass {
@@ -120,7 +134,7 @@ impl ModuleClass {
             .chain(
                 self.property_overrides
                     .iter()
-                    .flat_map(|edge| [edge.declared_type, edge.implementation_type]),
+                    .flat_map(ModulePropertyOverride::carried_types),
             )
     }
 }
@@ -143,7 +157,7 @@ impl ModuleInterface {
             .chain(
                 self.property_overrides
                     .iter()
-                    .flat_map(|edge| [edge.declared_type, edge.implementation_type]),
+                    .flat_map(ModulePropertyOverride::carried_types),
             )
     }
 }
@@ -241,6 +255,10 @@ impl ModuleClasses {
                             overridden_is_interface: edge.overridden_is_interface,
                             declared_type: edge.declared_type.get(),
                             implementation_type: edge.implementation_type.get(),
+                            declared_receiver: edge.declared_receiver.map(|ty| ty.get()),
+                            implementation_receiver: edge
+                                .implementation_receiver
+                                .map(|ty| ty.get()),
                             depth: edge.depth,
                         })
                     })
