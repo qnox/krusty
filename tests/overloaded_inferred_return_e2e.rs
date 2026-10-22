@@ -407,3 +407,160 @@ fun box(): String = with(Scope()) { Target()[1] }
     };
     assert_eq!(out, "OK");
 }
+
+/// An inferred return selects among overloads whose members omit different defaults. No single
+/// argument mapping fits the family, so each declaration is mapped on its own and the one omitting
+/// the fewest defaults wins: `mk()` is `mk(source)`, as kotlinc selects. Signature inference used to
+/// give up with "module signatures were not finalized".
+const FEWEST_OMITTED_DEFAULTS: &str =
+    "fun mk(id: String = \"\", source: Any? = null): String = \"two\"\n\
+fun mk(source: Any? = null): String = \"one\"\n\
+fun n() = mk()\n\
+fun box(): String = if (n() == \"one\") \"OK\" else n()\n";
+
+#[test]
+fn an_inferred_return_selects_the_overload_omitting_the_fewest_defaults() {
+    common::expect_box_same_as_kotlinc(FEWEST_OMITTED_DEFAULTS, "FewestOmittedDefaults");
+}
+
+#[test]
+fn an_inferred_return_over_omitted_defaults_is_byte_identical_to_kotlinc() {
+    let result = common::byte_diff_against_kotlinc_cp(
+        "FewestOmittedDefaults",
+        FEWEST_OMITTED_DEFAULTS,
+        "FewestOmittedDefaultsKt",
+        &[common::stdlib_jar()],
+    )
+    .expect("kotlinc and the stdlib are provisioned");
+    assert_eq!(result, Ok(()));
+}
+
+/// Two overloads omitting the same number of defaults stay kotlinc's overload ambiguity.
+#[test]
+fn an_inferred_return_over_equally_many_omitted_defaults_is_ambiguous() {
+    let result = common::compiler_diagnostics(
+        &[(
+            "Main.kt",
+            "fun mk(id: String = \"\"): Int = 1\n\
+             fun mk(source: Any? = null): Int = 2\n\
+             fun n() = mk()\n",
+        )],
+        &[],
+    );
+    common::expect_identical_rejection(&result, "equally_many_omitted_defaults");
+}
+
+/// Specificity of the parameters the supplied arguments map to outranks the defaults a declaration
+/// omits: `h(x = null)` binds `String?` over `Any?` even though that overload omits two defaults,
+/// both for an inferred return and in a body with a declared one.
+const SPECIFIC_OVER_FEWER_DEFAULTS: &str =
+    "fun f(a: Int = 0, b: Long = 0, x: String): String = \"O\"\n\
+fun f(c: Boolean = false, x: Any): String = \"f\"\n\
+fun g(a: Int = 0, x: String = \"\"): String = \"K\"\n\
+fun g(x: Any = 1): String = \"g\"\n\
+fun h(a: Int = 0, b: Int = 0, x: String?): String = \"\"\n\
+fun h(x: Any?): String = \"h\"\n\
+fun n() = f(x = \"\") + g(x = \"\") + h(x = null)\n\
+fun m(): String = h(x = null)\n\
+fun box(): String = n() + m()\n";
+
+#[test]
+fn an_inferred_return_prefers_the_more_specific_overload_to_fewer_omitted_defaults() {
+    common::expect_box_same_as_kotlinc(SPECIFIC_OVER_FEWER_DEFAULTS, "SpecificOverFewerDefaults");
+}
+
+#[test]
+fn an_inferred_return_over_a_more_specific_overload_is_byte_identical_to_kotlinc() {
+    let result = common::byte_diff_against_kotlinc_cp(
+        "SpecificOverFewerDefaults",
+        SPECIFIC_OVER_FEWER_DEFAULTS,
+        "SpecificOverFewerDefaultsKt",
+        &[common::stdlib_jar()],
+    )
+    .expect("kotlinc and the stdlib are provisioned");
+    assert_eq!(result, Ok(()));
+}
+
+/// A low-priority declaration leaves a family whose members map the arguments differently as it
+/// leaves any other: the ordinary declaration is selected in an inferred and a declared return,
+/// though the low-priority one's `String` parameter is more specific than its `Any`.
+const LOW_PRIORITY_UNDER_SEPARATE_MAPPINGS: &str = "@file:Suppress(\"INVISIBLE_REFERENCE\", \"INVISIBLE_MEMBER\")\n\
+@kotlin.internal.LowPriorityInOverloadResolution\n\
+fun choose(a: Int = 0, value: String): Int = 7\n\
+fun choose(b: Boolean = false, c: Long = 0, value: Any): String = \"normal\"\n\
+fun inferred() = choose(value = \"x\")\n\
+fun declared(): String = choose(value = \"x\")\n\
+fun box(): String = if (inferred() == \"normal\" && declared() == \"normal\") \"OK\" else \"fail\"\n";
+
+#[test]
+fn a_low_priority_overload_yields_under_separate_argument_mappings() {
+    common::expect_box_same_as_kotlinc(
+        LOW_PRIORITY_UNDER_SEPARATE_MAPPINGS,
+        "LowPriorityUnderSeparateMappings",
+    );
+}
+
+#[test]
+fn a_low_priority_overload_under_separate_mappings_is_byte_identical_to_kotlinc() {
+    let result = common::byte_diff_against_kotlinc_cp(
+        "LowPriorityUnderSeparateMappings",
+        LOW_PRIORITY_UNDER_SEPARATE_MAPPINGS,
+        "LowPriorityUnderSeparateMappingsKt",
+        &[common::stdlib_jar()],
+    )
+    .expect("kotlinc and the stdlib are provisioned");
+    assert_eq!(result, Ok(()));
+}
+
+/// An extension family called on an implicit receiver, with no argument: the overload omitting
+/// the fewest defaults wins in an inferred return, inside a lambda, and in a declared one.
+const IMPLICIT_RECEIVER_FEWEST_DEFAULTS: &str = "interface Comp\n\
+fun <T : Comp> T.mk(id: String = \"\", source: Any? = null, arch: Int? = null): String = \"three\"\n\
+fun <T : Comp> T.mk(source: Any? = null): String = \"O\"\n\
+fun <T : Comp> T.inferred() = mk()\n\
+fun <T : Comp> T.deferred() = lazy { mk() }\n\
+fun Comp.declared(): String = mk()\n\
+object C : Comp\n\
+fun box(): String {\n\
+    val all = C.inferred() + C.deferred().value + C.declared()\n\
+    return if (all == \"OOO\") \"OK\" else all\n\
+}\n";
+
+#[test]
+fn an_implicit_receiver_call_selects_the_extension_omitting_the_fewest_defaults() {
+    common::expect_box_same_as_kotlinc(
+        IMPLICIT_RECEIVER_FEWEST_DEFAULTS,
+        "ImplicitReceiverFewestDefaults",
+    );
+}
+
+#[test]
+fn an_implicit_receiver_call_over_omitted_defaults_is_byte_identical_to_kotlinc() {
+    let result = common::byte_diff_against_kotlinc_cp(
+        "ImplicitReceiverFewestDefaults",
+        IMPLICIT_RECEIVER_FEWEST_DEFAULTS,
+        "ImplicitReceiverFewestDefaultsKt",
+        &[common::stdlib_jar()],
+    )
+    .expect("kotlinc and the stdlib are provisioned");
+    assert_eq!(result, Ok(()));
+}
+
+/// Two declarations mapping a named argument to different positions, each omitting one default,
+/// project onto the same `[String]` shape: kotlinc reports the overload ambiguity between both.
+#[test]
+fn separately_mapped_overloads_with_one_shape_are_ambiguous() {
+    const SRC: &str = "fun choose(a: Int = 0, value: String): Int = 1\n\
+        fun choose(value: String, b: Boolean = false): Int = 2\n\
+        fun inferred() = choose(value = \"x\")\n";
+    common::assert_error_blocks_match_kotlinc(&[("SeparateMappingsAmbiguity.kt", SRC)], &[]);
+}
+
+/// The same ambiguity where the argument is an integer literal adapted to both declarations' `Long`.
+#[test]
+fn separately_mapped_integer_literal_overloads_with_one_shape_are_ambiguous() {
+    const SRC: &str = "fun choose(a: Int = 0, value: Long): Int = 1\n\
+        fun choose(value: Long, b: Boolean = false): Int = 2\n\
+        fun inferred() = choose(value = 1)\n";
+    common::assert_error_blocks_match_kotlinc(&[("SeparateMappingsLiteralAmbiguity.kt", SRC)], &[]);
+}

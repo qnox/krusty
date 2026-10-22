@@ -23,6 +23,22 @@ impl ResolvedQualifier {
     }
 }
 
+/// The subpackage of `parent` that the written segment `segment` names. kotlinc joins a
+/// qualifier's segments into one fully qualified name, so a backticked segment that contains dots
+/// names one package edge per dot-separated part: protobuf's generated Kotlin DSL qualifies its
+/// own package as `` `com.example`.FooKt ``. A declaration name cannot contain a dot, so the
+/// segment can only name a package.
+pub(super) fn subpackage<S: SymbolSource + ?Sized>(
+    source: &S,
+    parent: TypeName,
+    segment: &str,
+) -> Option<TypeName> {
+    segment.split('.').try_fold(parent, |package, part| {
+        (!part.is_empty() && source.package_exists(package, part))
+            .then(|| crate::types::type_name_child(package, part))
+    })
+}
+
 /// Why a qualifier walk could not commit its next segment. The syntax path that owns the final
 /// expression decides whether and where to report it.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -93,9 +109,9 @@ fn walk_qualifier_with_binding_identity<S: SymbolSource + ?Sized>(
                         first_segment + u32::try_from(offset).expect("too many qualifier segments"),
                     );
                     ResolvedQualifier::Classifier(classifier)
-                } else if source.package_exists(package, segment) {
+                } else if let Some(child) = subpackage(source, package, segment) {
                     declaration_identity = None;
-                    ResolvedQualifier::Package(crate::types::type_name_child(package, segment))
+                    ResolvedQualifier::Package(child)
                 } else {
                     return Err(QualifierError::UnresolvedSegment {
                         expression: *segment_expression,
@@ -158,8 +174,7 @@ pub(super) fn walk_qualifier_namespace_facets_with_binding_identity<S: SymbolSou
             1,
         );
     }
-    if source.package_exists(TypeName::ROOT, root_name) {
-        let package = crate::types::type_name_child(TypeName::ROOT, root_name);
+    if let Some(package) = subpackage(source, TypeName::ROOT, root_name) {
         return walk_qualifier_with_binding_identity(
             source,
             ResolvedQualifier::Package(package),

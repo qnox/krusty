@@ -236,6 +236,32 @@ pub struct KotlinTypeAlias {
     pub visibility: Visibility,
 }
 
+/// One property's independently declared getter or setter, before target realization.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KotlinAccessorModifiers {
+    pub visibility: Visibility,
+    pub modality: KotlinModality,
+    pub is_default: bool,
+    pub is_inline: bool,
+    pub is_external: bool,
+    /// This accessor's own annotation identities, not the property's annotations.
+    pub annotations: Vec<crate::types::TypeName>,
+}
+
+impl KotlinAccessorModifiers {
+    /// The metadata default inherits visibility and modality, but no implementation modifiers.
+    pub fn default_for(visibility: Visibility, modality: KotlinModality) -> Self {
+        Self {
+            visibility,
+            modality,
+            is_default: true,
+            is_inline: false,
+            is_external: false,
+            annotations: Vec::new(),
+        }
+    }
+}
+
 /// One Kotlin property: a top-level one, or a member of the class that lists it.
 pub struct KotlinProperty {
     pub name: String,
@@ -247,9 +273,11 @@ pub struct KotlinProperty {
     pub visibility: Visibility,
     /// Always [`KotlinModality::Final`] for a top-level property.
     pub modality: KotlinModality,
-    /// The setter's own visibility (`var x: Int private set`); the property's visibility when
-    /// metadata records no setter flags. Meaningful only for a `var`.
-    pub setter_visibility: Visibility,
+    pub getter_modifiers: KotlinAccessorModifiers,
+    /// Meaningful only for a `var`; an absent flag word inherits the property's declaration prefix.
+    pub setter_modifiers: KotlinAccessorModifiers,
+    /// The property's external status is independent of each accessor's external status.
+    pub is_external: bool,
     /// Source name of an explicitly declared setter value parameter; `None` for a default setter.
     pub setter_parameter_name: Option<String>,
     pub is_var: bool,

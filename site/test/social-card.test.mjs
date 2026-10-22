@@ -23,6 +23,8 @@ test("X selects a large-image card and finds its own tags without falling back t
   assert.equal(meta("name", "twitter:description"), meta("property", "og:description"));
   assert.equal(meta("name", "twitter:image"), meta("property", "og:image"));
   assert.equal(meta("name", "twitter:image:alt"), meta("property", "og:image:alt"));
+  assert.equal(meta("name", "twitter:site"), "@qnox");
+  assert.equal(meta("name", "twitter:creator"), "@qnox");
 });
 
 test("Open Graph names the page", () => {
@@ -43,4 +45,10 @@ test("og:image is an absolute URL to a built image of the declared size", () => 
   assert.equal(`${width}x${height}`, "1200x630");
   assert.equal(meta("property", "og:image:type"), "image/png");
   assert.ok(meta("property", "og:image:alt"));
+});
+
+test("structured data names the same image as the link-preview tags", () => {
+  const block = html.match(/<script type="application\/ld\+json">([^<]*)<\/script>/);
+  assert.ok(block, "missing JSON-LD block");
+  assert.equal(JSON.parse(block[1]).image, meta("property", "og:image"));
 });

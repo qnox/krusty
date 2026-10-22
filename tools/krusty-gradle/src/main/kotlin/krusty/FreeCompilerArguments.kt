@@ -73,43 +73,35 @@ private val reservedArguments: Map<String, String> = mapOf(
 )
 
 /**
- * Walk the free arguments the way kotlinc's parser does and refuse any that would reach a
- * plugin-owned argument. kotlinc expands an `@argfile` wherever it appears, before parsing, so a
- * token starting with `@` is refused in any position.
+ * Walk the free arguments the way kotlinc's parser does and return why one would reach a
+ * plugin-owned argument, or null when none does. kotlinc expands an `@argfile` wherever it appears,
+ * before parsing, so a token starting with `@` is refused in any position.
  */
-internal fun validateFreeArguments(input: List<String>, kotlinVersion: String): ArrayList<String> {
+internal fun freeArgumentRefusal(input: List<String>, kotlinVersion: String): String? {
     val kotlincArguments = kotlincArgumentsByVersion[kotlinVersion]
         ?: throw GradleException("the krusty plugin has no kotlinc argument table for Kotlin $kotlinVersion")
     input.firstOrNull { it.startsWith("@") }?.let { argument ->
-        throw GradleException(
-            "freeCompilerArg '$argument' is an argument file, which could hide plugin-owned arguments; pass its arguments as freeCompilerArgs instead",
-        )
+        return "freeCompilerArg '$argument' is an argument file, which could hide plugin-owned arguments; pass its arguments as freeCompilerArgs instead"
     }
     var index = 0
     while (index < input.size) {
         val argument = input[index++]
         if (argument == "--") {
-            throw GradleException(
-                "freeCompilerArg '--' would make the arguments after it sources; add sources to the task's source set instead",
-            )
+            return "freeCompilerArg '--' would make the arguments after it sources; add sources to the task's source set instead"
         }
         val key = argument.substringBefore(if (argument.startsWith("-XXLanguage")) ':' else '=')
         val spec = kotlincArguments[key]
         reservedArguments[spec?.name ?: key]?.let { owner ->
-            throw GradleException(
-                "freeCompilerArg '$argument' conflicts with $owner; configure the structured Gradle input instead",
-            )
+            return "freeCompilerArg '$argument' conflicts with $owner; configure the structured Gradle input instead"
         }
         if (spec == null) {
             if (!argument.startsWith("-")) {
-                throw GradleException(
-                    "freeCompilerArg '$argument' would be compiled as a source; add sources to the task's source set instead",
-                )
+                return "freeCompilerArg '$argument' would be compiled as a source; add sources to the task's source set instead"
             }
         } else if (spec.takesValue && key == argument) {
             // The next token is this argument's value, whatever it looks like.
             index++
         }
     }
-    return ArrayList(input)
+    return null
 }

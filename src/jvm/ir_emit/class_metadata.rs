@@ -234,6 +234,11 @@ impl<'a> JvmClassRealization<'a> {
                 .then(|| opts.jvm_default.interface_jvm_class_flags())
                 .flatten(),
             local_properties: locals.of(c.fq_name_id()),
+            plugin_metadata: Some(crate::plugins::class_metadata::PluginClassMetadata {
+                plugins: &opts.plugins,
+                ir: self.ir,
+                class: c,
+            }),
             // Kotlin annotation classes expose a language-level constructor in metadata, but their
             // classfile is an annotation interface and therefore has no `<init>` method.
             primary_constructor: (record.emit_primary_ctor && !c.is_annotation)

@@ -217,3 +217,43 @@ fun box(): String {\n\
 }\n";
     common::expect_box_same_as_kotlinc(SRC, "NestedNothingValue");
 }
+
+/// Java's `Class<? super T>` read from `Class<Any>` is `Class<in Any!>`. Capturing `in Any!` meets
+/// the Java parameter's flexible `Any!` bound, so kotlinc accepts it as an invariant `Class<Any>`;
+/// a lambda feeding that result back into `generateSequence`'s `T` must therefore settle.
+const SUPERCLASS_CHAIN: &str = "class Chain {\n\
+    fun depth(start: Class<Any>): Int {\n\
+        val classes = generateSequence(start) { it.superclass }.iterator()\n\
+        var n = 0\n\
+        while (classes.hasNext()) {\n\
+            classes.next()\n\
+            n++\n\
+        }\n\
+        return n\n\
+    }\n\
+}\n\
+fun parent(c: Class<Any>): Class<Any>? = c.superclass\n\
+fun grandparent(c: Class<in Any>): Class<in Any>? = c.superclass\n\
+fun box(): String = if (Chain().depth(Any::class.java) == 1 && parent(Any::class.java) == null) \"OK\" else \"fail\"\n";
+
+#[test]
+fn a_java_superclass_chain_settles_and_runs() {
+    assert_eq!(
+        common::expect_box_run_with_stdlib(SUPERCLASS_CHAIN, "SuperclassChain"),
+        "OK"
+    );
+}
+
+#[test]
+fn a_java_superclass_chain_is_byte_identical_to_kotlinc() {
+    for class in ["Chain", "SuperclassChainKt"] {
+        let result = common::byte_diff_against_kotlinc_cp(
+            "SuperclassChain",
+            SUPERCLASS_CHAIN,
+            class,
+            &[common::stdlib_jar()],
+        )
+        .expect("kotlinc and the stdlib are provisioned");
+        assert_eq!(result, Ok(()), "{class}");
+    }
+}

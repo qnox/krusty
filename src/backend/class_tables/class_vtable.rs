@@ -195,7 +195,8 @@ pub(super) fn class_table(
         // interface region, which is pointed at this method's slot once that slot is known.
         // The interface bases this method satisfies, each with the declaration a BRIDGE against
         // that number would wear — `None` where the representations already agree.
-        let mut interface_keys: Vec<(SlotKey, Option<FunId>)> = Vec::new();
+        let interface_keys =
+            interface_keys(representation, ir, function, &overridden_functions, fid)?;
         let mut class_replaces = None;
         // A base whose signature has a different REPRESENTATION keeps its own slot and gets a
         // bridge placed in it once this method's slot is known. A class base can always take one;
@@ -218,15 +219,10 @@ pub(super) fn class_table(
                         function.name
                     )
                 })?;
-            let key = function_key(ir, owner, overridden);
             if ir.classes[owner as usize].is_interface {
-                // The interface's number is placed program-wide rather than in this vtable, so
-                // there is no entry HERE to put a bridge in. The bridge is recorded against the
-                // interface's own key instead, and read where that number is filled — which is
-                // the arrangement a property accessor's interface bridge already uses.
-                interface_keys.push((key, (!matches).then_some(overridden)));
                 continue;
             }
+            let key = function_key(ir, owner, overridden);
             let slot = slots.get(&key).copied().ok_or_else(|| {
                 format!("an override with no slot to replace (`{}`)", function.name)
             })?;
@@ -300,24 +296,14 @@ pub(super) fn class_table(
                 target: fid,
             };
         }
-        for (key, bridge) in interface_keys {
-            // The number wears the INTERFACE's signature and converts; the slot map still points
-            // at this method, because everything else that reads the map wants the
-            // implementation. Which of the two a caller gets is decided where the number is
-            // filled, and it prefers the bridge.
-            if let Some(declared) = bridge {
-                interface_bridges
-                    .entry(key.clone())
-                    .or_insert(Slot::Bridge {
-                        declared,
-                        // An INTERFACE's entry is a default an implementor inherits, and this
-                        // slot is the interface's own table index — not that implementor's.
-                        target_slot: (!class.is_interface).then_some(slot),
-                        target: fid,
-                    });
-            }
-            slots.insert(key, slot);
-        }
+        register_interface_keys(
+            class,
+            fid,
+            slot,
+            interface_keys,
+            &mut slots,
+            &mut interface_bridges,
+        );
         // The base keeps its own slot and its own signature; what changes is only what stands in
         // it. Forwarding by DISPATCH rather than to this method by id is what keeps a further
         // subclass's override reachable through the same base.
@@ -457,7 +443,7 @@ pub(super) fn class_table(
 /// the rest of `A`'s — so what is missing is only the interface's number pointing at that slot,
 /// which nothing in the loop over the class's OWN members could have added. The frontend records
 /// the edge on the class that brings the two together, which is this one.
-fn register_inherited_interface_members(
+pub(super) fn register_inherited_interface_members(
     representation: &dyn Representation,
     ir: &IrFile,
     class: &IrClass,
@@ -570,6 +556,73 @@ fn register_inherited_interface_members(
     Ok(())
 }
 
+/// The interface members `fid` implements, by the interface's own key, each with the declaration
+/// a bridge against that number has to wear: `None` where the representations already agree.
+///
+/// The interface's number is placed program-wide rather than in a class's vtable, so there is no
+/// entry in the class's table to put a bridge in. The bridge is recorded against the interface's
+/// own key instead, and read where that number is filled — which is the arrangement a property
+/// accessor's interface bridge already uses.
+pub(super) fn interface_keys(
+    representation: &dyn Representation,
+    ir: &IrFile,
+    function: &IrFunction,
+    overridden_functions: &HashMap<FunId, Vec<FunId>>,
+    fid: FunId,
+) -> Result<Vec<(SlotKey, Option<FunId>)>, Unsupported> {
+    let mut keys = Vec::new();
+    for &overridden in overridden_functions.get(&fid).into_iter().flatten() {
+        let owner = ir.functions[overridden as usize]
+            .dispatch_receiver
+            .and_then(|owner| ir.class_id_by_name(owner))
+            .ok_or_else(|| {
+                format!(
+                    "an override of a method declared outside this file (`{}`)",
+                    function.name
+                )
+            })?;
+        if !ir.classes[owner as usize].is_interface {
+            continue;
+        }
+        let matches =
+            same_representation(representation, function, &ir.functions[overridden as usize]);
+        keys.push((
+            function_key(ir, owner, overridden),
+            (!matches).then_some(overridden),
+        ));
+    }
+    Ok(keys)
+}
+
+/// Point each interface key `fid` implements at `slot`, its own entry in `class`'s table.
+pub(super) fn register_interface_keys(
+    class: &IrClass,
+    fid: FunId,
+    slot: u32,
+    keys: Vec<(SlotKey, Option<FunId>)>,
+    slots: &mut HashMap<SlotKey, u32>,
+    interface_bridges: &mut HashMap<SlotKey, Slot>,
+) {
+    for (key, bridge) in keys {
+        // The number wears the INTERFACE's signature and converts; the slot map still points at
+        // this method, because everything else that reads the map wants the implementation.
+        // Which of the two a caller gets is decided where the number is filled, and it prefers
+        // the bridge.
+        if let Some(declared) = bridge {
+            interface_bridges
+                .entry(key.clone())
+                .or_insert(Slot::Bridge {
+                    declared,
+                    // An INTERFACE's entry is a default an implementor inherits, and this slot is
+                    // the interface's own table index — not that implementor's.
+                    target_slot: (!class.is_interface).then_some(slot),
+                    target: fid,
+                });
+        }
+        slots.insert(key, slot);
+    }
+}
+
 fn external_invoke_slot(
     representation: &dyn Representation,
     edge: &crate::ir::IrFunctionOverride,
@@ -591,7 +644,7 @@ fn external_invoke_slot(
 /// Kotlin permits a covariant return (`A` → `B`, both references), which changes nothing here, and
 /// generic specialization (`T` → `Int`), which changes the machine representation. The second needs
 /// a [`Slot::Bridge`] in the base's slot; this is the question that says which.
-fn same_representation(
+pub(super) fn same_representation(
     representation: &dyn Representation,
     implementation: &IrFunction,
     overridden: &IrFunction,

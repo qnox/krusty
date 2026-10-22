@@ -821,6 +821,25 @@ mod tests {
     }
 
     #[test]
+    fn the_ksp_round_reads_only_the_declaration_only_analysis() {
+        // It describes a module's declaration headers to a KSP host: the parsed declarations and
+        // what their annotations resolved to. It never checks a body, lowers or reaches a backend.
+        // Its tests analyze sources against an empty platform.
+        assert_allowed_crate_modules(
+            "src/ksp_round.rs",
+            &[
+                "ast",
+                "diag",
+                "features",
+                "frontend",
+                "fx_hash",
+                "libraries",
+                "types",
+            ],
+        );
+    }
+
+    #[test]
     fn frontend_tools_use_only_their_declared_frontend_handoff_dependencies() {
         assert_allowed_crate_modules("src/bin/check.rs", &["diag", "frontend"]);
         assert_allowed_crate_modules(

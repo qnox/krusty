@@ -4,6 +4,16 @@ Goal: emit `@kotlin.Metadata` so krusty output is consumable as a **Kotlin** lib
 need only the signatures, already matched in Phase 5a). This is the single largest remaining piece —
 effectively a re-implementation of `kotlinx-metadata-jvm`'s writer.
 
+## Declared JVM vararg array types
+
+The generic signature reader decodes each `ValueParameter.type`/`type_id` independently of its
+vararg element field. The former carries the packed array and its projection; the latter supplies
+the vararg marker/element call facts. Reconstructing `Array<T>` from that element would discard
+`Array<out T>`, and an absent declared type must not be repaired from the element. Inline and
+type-table forms share the same decoding path; no metadata encoding changes. Consumers retain the
+packed array projection but use the readable element value type for listed-argument conversions,
+adapted references and evaluation-order spills; whole-array spreads keep the array type.
+
 ## Reference (`fun f(a: Int): Int = a` in `M.kt` → class `MKt`)
 
 > The `d1` byte capture below was taken from kotlinc **1.9.24** when this format was first
@@ -617,6 +627,19 @@ Both lists lead with the superclass. The emitter then moves it to the slot that 
 in `ResolvedClassifierHeader` and lowering published as `IrFile::class_superclass_positions`, so the
 spellings move with it. Tests: `tests/metadata_supertype_order_e2e.rs`.
 
+## KLIB accessor declaration modifiers
+
+Property getter and setter words are decoded independently, including visibility, modality,
+non-default, external and inline status. An absent word takes only the shared property prefix
+(bits 0-5); an explicit zero remains zero. Property external (bit 14) is separate from accessor
+external (bit 7). Accessor inline is bit 8 and non-default is bit 6. Inline or external on a
+default accessor is rejected as inconsistent metadata. The semantic declaration keeps each
+accessor's own annotations (modern fields 15/16, BuiltIns fields 152/153, KLIB fields 177/178);
+`InlineOnly` obligation comes from the selected accessor, not the property's annotation list.
+Each accessor also carries the property's declaration-owned reified formal ordinals. These are
+existing schema facts, not new intrinsic markers or a metadata format change. This producer fix
+alone does not enable ordinary dependency-body or inline-accessor emission.
+
 ## Authenticated KLIB collection classifier roles
 
 Collection kind and read-only/mutable face are normalized provider facts, not new metadata fields.
@@ -651,6 +674,16 @@ declaration: the JVM adds it to its own `@Metadata` record after the handoff.
 `klib_class_surface_e2e::serialization_plugin_declarations_match_kotlinc_native` compares the whole
 fragment with kotlinc-native's bytes.
 
+## Authenticated collection storage construction
+
+Package-function normalization can freeze an empty/singleton/packed list-storage plan only for
+the selected stdlib's full generic declaration. It checks the formal's complete bounds, exact
+parameter/result uses, declared vararg position and modifiers before call-site substitution.
+The JVM provider supplies its metadata typealias expansion for `ArrayList`; KLIB supplies its
+declared classifier. This adds no Kotlin metadata field or wire encoding. Frozen callable facts
+carry the typed plan, and Native uses it instead of recovering an operation from a facade name or
+physical parameter. Broader dependency-root admission remains separate work.
+
 ## Authenticated Throwable realization
 
 KLIB classifier and property records retain the selected platform-stdlib input's existing archive
@@ -659,3 +692,15 @@ authority before constructor/accessor identities are published. The exact base `
 realizations; an ordinary dependency with identical metadata may not. This does not rewrite Kotlin
 metadata or change source overload selection. Wasm owns the GC fields and exception tag; common IR
 keeps the selected constructor/getter identities and typed `Try` / `Throw` nodes.
+
+## Authenticated String concatenation declarations
+
+The member `String.plus(Any?): String` and nullable extension `String?.plus(Any?): String`
+require the compilation-selected stdlib's existing archive authority before receiving the shared
+StringPlus operation. Loading identical archive bytes as an ordinary dependency does not grant it.
+Member function normalization now precedes callable identity publication. The target-free body
+view projects the normalized member operation just as it projects a package-function operation,
+so source candidates, opaque callable lookup and module-qualified serialized-declaration lookup
+retain the same operation.
+No Kotlin metadata encoding or declaration identity changes. The actual Native stdlib regression
+checks both declaration forms through all three views, with and without platform authority.

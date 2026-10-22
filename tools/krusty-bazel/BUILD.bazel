@@ -1,0 +1,32 @@
+# The krusty compiler as a Bazel tool, plus the rule that drives it.
+#
+# krusty is consumed as a PREBUILT binary rather than something Bazel builds from source: the
+# compiler is a Cargo workspace, and wiring a Rust toolchain into every consumer's build is a far
+# larger dependency than the archives every krusty release already publishes.
+#
+# A released module registers those archives as toolchains (extensions.bzl), one per host, so a
+# build needs no flag. To run another binary, point the flag at it:
+#
+#     bazel build //... --@krusty//:krusty_binary=//tools:krusty
+#
+# where `//tools:krusty` is any target providing an executable file (an `sh_binary`, a
+# `native_binary` from bazel_skylib, or a repository rule that downloads one).
+
+load(":toolchain.bzl", "compiler_from_toolchain")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "defs.bzl",
+    "toolchain.bzl",
+])
+
+toolchain_type(name = "toolchain_type")
+
+label_flag(
+    name = "krusty_binary",
+    build_setting_default = ":toolchain_compiler",
+)
+
+# The flag's default: the compiler of the toolchain resolved for the action's execution platform.
+compiler_from_toolchain(name = "toolchain_compiler")

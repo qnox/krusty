@@ -411,6 +411,15 @@ fn expression_type(
         {
             *elem
         }
+        // Common lowering leaves the inner call at its declaration's result, and records the
+        // selected result on a separate coercion. Consume that exact provenance, not a type
+        // reconstructed from the callee, operands or an enclosing use.
+        IrExpr::Call { .. }
+            if ir.checked_type(id).is_none()
+                && let Some(&result) = ir.call_declared_ret.get(&id) =>
+        {
+            result
+        }
         node => ir
             .checked_type(id)
             .ok_or_else(|| format!("{} without a checked type", describe_node(node)))?,
@@ -2031,6 +2040,74 @@ fn describe_node(node: &IrExpr) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_untyped_call_uses_only_its_published_declared_result() {
+        let mut ir = IrFile::default();
+        let formal = Ty::ty_param("declaration-owned-T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let function = ir.add_fun(crate::ir::IrFunction {
+            name: "sample".to_owned(),
+            params: Vec::new(),
+            ret: formal,
+            param_checks: Vec::new(),
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+        });
+        let call = ir.add_expr(IrExpr::Call {
+            callee: Box::new(Callee::Local(function)),
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+        let coercion = ir.add_expr(IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::ImplicitCoercion,
+            arg: call,
+            type_operand: Ty::String,
+        });
+        ir.call_declared_ret.insert(call, formal);
+        ir.logical_types.insert(coercion, Ty::String);
+        assert_eq!(ir.checked_type(call), None);
+        assert_eq!(
+            expression_type(&ir, &HashMap::default(), call),
+            Ok(Some(formal))
+        );
+        assert_eq!(
+            expression_type(&ir, &HashMap::default(), coercion),
+            Ok(Some(Ty::String))
+        );
+
+        ir.call_declared_ret.remove(&call);
+        assert_eq!(
+            expression_type(&ir, &HashMap::default(), call),
+            Err("the expression `Call` without a checked type".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_checked_call_keeps_its_checked_type_over_declared_provenance() {
+        let mut ir = IrFile::default();
+        let declared = Ty::nullable(Ty::obj("kotlin/Any"));
+        let function = ir.add_fun(crate::ir::IrFunction {
+            name: "sample".to_owned(),
+            params: Vec::new(),
+            ret: declared,
+            param_checks: Vec::new(),
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+        });
+        let call = ir.add_expr(IrExpr::Call {
+            callee: Box::new(Callee::Local(function)),
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+        ir.call_declared_ret.insert(call, declared);
+        ir.logical_types.insert(call, Ty::String);
+        assert_eq!(
+            expression_type(&ir, &HashMap::default(), call),
+            Ok(Some(Ty::String))
+        );
+    }
 
     #[test]
     fn an_untyped_sequencing_block_retains_its_final_child_type() {

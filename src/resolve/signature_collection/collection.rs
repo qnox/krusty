@@ -3073,6 +3073,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         companion: direct_companion,
                         kind: frontend_class_kind(classifier_flags, classifier_is_enum),
                         is_sealed: classifier_flags.has(ClassFlags::SEALED),
+                        is_abstract: classifier_flags.has(ClassFlags::ABSTRACT),
                         type_parameters: &class_type_parameters,
                         annotations: &resolved_annotations,
                         annotation_class_arguments: &resolved_annotation_class_arguments,
