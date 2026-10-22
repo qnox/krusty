@@ -5,6 +5,14 @@ front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
 
+## Shared-target plugin model identity
+
+The compiler/plugin IR crate records the existing checkout build input in Rust dep-info. Switching
+checkouts rebuilds that checkout's typed model and its consumers without cleaning shared storage;
+repeating a build in the same checkout retains cached artifacts. A two-checkout Cargo regression
+copies the real crate, changes its model API, and checks A → B → B → A → A outputs and cache reuse.
+This changes no plugin wire format or Kotlin semantics.
+
 ## Constructor-property annotation publication
 
 Publish checked PROPERTY-targeted constructor-parameter applications by stable property identity,

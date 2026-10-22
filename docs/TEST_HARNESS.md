@@ -3,6 +3,15 @@
 Use `./run-tests.sh` as the canonical test entrypoint. It is self-provisioning and normally needs no
 parameters.
 
+## Compiler/plugin model reuse across worktrees
+
+`krusty-plugin-ir` records the workspace's existing `KRUSTY_BUILD_CHECKOUT` input in Rust dep-info.
+Its `shared_checkout` integration test builds two copies of the real model crate against one Cargo
+target, proves each consumer sees its own model API, and checks unchanged-checkout artifact reuse.
+The nested Cargo fixtures are dependency-free, offline and unoptimized; they do not inherit the
+parent compiler's coverage flags or wrappers. Keep the shared target intact when reproducing this
+case: cleaning it hides the ownership defect.
+
 `just versioning-tests` checks the release-version recipes against disposable Git history, without
 building the compiler. It is also part of `just lint`: missing or unrelated manifest baselines must
 fail without emitting a release version, while valid baseline and root counts remain exact.
