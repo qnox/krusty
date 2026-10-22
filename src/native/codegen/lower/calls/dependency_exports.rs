@@ -11,74 +11,20 @@ impl BodyLowering<'_, '_, '_> {
         site: u32,
         operation: &IrCheckedOperation,
     ) -> Option<Result<Option<Value>, Unsupported>> {
-        let (property, dispatch, receiver, arguments, parameters, result, write) = match operation {
-            IrCheckedOperation::ExternalPropertyRead {
-                target,
-                dispatch,
-                receiver,
-                arguments,
-                parameters,
-                result,
-                ..
-            } => (
-                *target, *dispatch, *receiver, arguments, parameters, *result, false,
-            ),
-            IrCheckedOperation::ExternalPropertyWrite {
-                target,
-                dispatch,
-                receiver,
-                arguments,
-                parameters,
-                result,
-                ..
-            } => (
-                *target, *dispatch, *receiver, arguments, parameters, *result, true,
-            ),
-            _ => return None,
-        };
-        let property = self.file.callables.property(property)?;
-        let target = if write {
-            property.setter?
-        } else {
-            property.getter
-        };
-        let realization = self.file.callables.callable(target)?;
+        let access = self.file.callables.dependency_accessor(operation)?;
+        let realization = access.callable;
         let identity = realization.dependency_callable.as_ref()?;
         let export = self.file.dependency_symbols.get(identity)?;
         Some((|| {
-            if dispatch != crate::ir::IrPropertyDispatch::Ordinary {
-                return Err("a dependency accessor export called through super".into());
-            }
-            if realization
-                .generic_sig
-                .as_ref()
-                .is_some_and(|signature| !signature.formals.is_empty())
-            {
-                return Err("a dependency property without checked generic substitutions".into());
-            }
-            // Source extensions may retain a separate receiver. Serialized extension accesses
-            // already flatten it at the declaration's context coordinate; member extensions
-            // retain class dispatch separately in both forms.
-            let extension_receiver_parameter =
-                if realization.is_member_extension()
-                    || (realization.is_extension() && receiver.is_none())
-                {
-                    Some(u32::try_from(realization.context_count).map_err(|_| {
-                        Unsupported::from("an invalid accessor receiver coordinate")
-                    })?)
-                } else {
-                    None
-                };
-            let callee = Callee::External {
-                target,
-                default_provider: None,
-                params: parameters.clone(),
-                ret: result,
-                substitutions: Vec::new(),
-                defaults: Vec::new(),
-                extension_receiver_parameter,
-            };
-            self.emitted_dependency_call(site, export, realization, &callee, receiver, arguments)
+            let callee = access.callee().map_err(Unsupported::from)?;
+            self.emitted_dependency_call(
+                site,
+                export,
+                realization,
+                &callee,
+                access.receiver,
+                access.arguments,
+            )
         })())
     }
 
@@ -137,22 +83,25 @@ impl BodyLowering<'_, '_, '_> {
                 })
             }
         });
-        let call = dependency_export_call(
-            realization.is_top_level_function(),
-            realization.is_extension(),
-            instantiated.receiver,
-            realization.context_count,
-            &instantiated.parameters,
-            params,
-            *extension_receiver_parameter,
-            dispatch_receiver.is_some(),
+        let call = DependencyCallShape {
+            is_top_level_function: realization.is_top_level_function(),
+            is_extension: realization.is_extension(),
+            source_receiver: instantiated.receiver,
+            context_count: realization.context_count,
+            emitted_params: &instantiated.parameters,
+            call_params: params,
+            extension_receiver_parameter: *extension_receiver_parameter,
+            has_dispatch_receiver: dispatch_receiver.is_some(),
             unread_receiver,
-            realization.klib_body_companion_receiver_position(),
-            export
+            companion_receiver_position: realization.klib_body_companion_receiver_position(),
+            member_receiver: export
                 .member_receiver
                 .map(|receiver| receiver.semantic_type()),
-            receiver_is_exact_singleton && export.singleton_member_receiver.is_some(),
-        )?;
+            receiver_is_exact_singleton: receiver_is_exact_singleton
+                && export.singleton_member_receiver.is_some(),
+        }
+        .authenticate()
+        .map_err(Unsupported::from)?;
         let abi = export.signature.parameters();
         let inserts_receiver = matches!(
             call,

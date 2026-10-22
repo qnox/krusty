@@ -8,8 +8,9 @@
 use crate::fx_hash::HashMap;
 
 use crate::backend::{
-    CheckedBackendCallables, DependencyExportSignatures, DependencyMemberReceiver,
-    KlibDependencyCallable, SingletonExtensionUnreadReceiver, SingletonMemberReceiver,
+    CheckedBackendCallables, DependencyExportSignatures, DependencyFunctionSignature,
+    DependencyMemberReceiver, KlibDependencyCallable, SingletonExtensionUnreadReceiver,
+    SingletonMemberReceiver,
 };
 use crate::fir::{CallableId, ExternalCallableId};
 use crate::ir::{Callee, ExprId, IrExpr, IrFile};
@@ -36,6 +37,7 @@ pub(super) struct CallableRegistry {
     module: HashMap<CallableId, u32>,
     module_defaults: HashMap<CallableId, u32>,
     dependencies: HashMap<KlibDependencyCallable, u32>,
+    signatures: HashMap<KlibDependencyCallable, DependencyFunctionSignature>,
     member_receivers: HashMap<KlibDependencyCallable, DependencyMemberReceiver>,
     singleton_member_receivers: HashMap<KlibDependencyCallable, SingletonMemberReceiver>,
     singleton_extension_unread_receivers:
@@ -46,6 +48,7 @@ pub(super) struct FileCallTargets {
     module: HashMap<CallableId, u32>,
     module_defaults: HashMap<CallableId, u32>,
     external: HashMap<ExternalCallableId, u32>,
+    signatures: HashMap<ExternalCallableId, DependencyFunctionSignature>,
     member_receivers: HashMap<ExternalCallableId, DependencyMemberReceiver>,
     singleton_member_receivers: HashMap<ExternalCallableId, SingletonMemberReceiver>,
     singleton_extension_unread_receivers:
@@ -168,6 +171,7 @@ impl CallableRegistry {
             module: HashMap::default(),
             module_defaults: HashMap::default(),
             external: HashMap::default(),
+            signatures: HashMap::default(),
             member_receivers: HashMap::default(),
             singleton_member_receivers: HashMap::default(),
             singleton_extension_unread_receivers: HashMap::default(),
@@ -176,15 +180,31 @@ impl CallableRegistry {
             .into_iter()
             .flat_map(|root| crate::ir::value_namespace_expressions(ir, root))
         {
-            let IrExpr::Call {
-                callee,
-                dispatch_receiver,
-                ..
-            } = ir.expr(expression)
-            else {
-                continue;
+            let accessor_call;
+            let (callee, dispatch_receiver) = match ir.expr(expression) {
+                IrExpr::Call {
+                    callee,
+                    dispatch_receiver,
+                    ..
+                } => (&**callee, *dispatch_receiver),
+                IrExpr::Checked(operation) => {
+                    let Some(access) = callables.dependency_accessor(operation) else {
+                        continue;
+                    };
+                    if !access
+                        .callable
+                        .dependency_callable
+                        .as_ref()
+                        .is_some_and(|identity| self.dependencies.contains_key(identity))
+                    {
+                        continue;
+                    }
+                    accessor_call = access.callee().map_err(str::to_owned)?;
+                    (&accessor_call, access.receiver)
+                }
+                _ => continue,
             };
-            match &**callee {
+            match callee {
                 Callee::Module { target, .. } if dispatch_receiver.is_none() => {
                     targets
                         .module
@@ -222,6 +242,10 @@ impl CallableRegistry {
                     if callable
                         .compiler_intrinsic
                         .is_some_and(super::lower::is_direct_operation)
+                        && !callable
+                            .dependency_callable
+                            .as_ref()
+                            .is_some_and(|identity| self.dependencies.contains_key(identity))
                     {
                         // Emission realizes this exact operation; there is no dependency entry.
                         continue;
@@ -231,6 +255,13 @@ impl CallableRegistry {
                         *extension_receiver_parameter,
                         dispatch_receiver.is_some(),
                     );
+                    // A published exact export owns even a specialized generic call. Its actual
+                    // operand roles are authenticated from checked substitutions during emission,
+                    // not by comparing specialized parameters to the uninstantiated declaration.
+                    let published = callable
+                        .dependency_callable
+                        .as_ref()
+                        .is_some_and(|identity| self.dependencies.contains_key(identity));
                     let serialized_companion_candidate = dispatch_receiver.is_none()
                         && callable.is_top_level_function()
                         && extension_receiver_parameter
@@ -238,7 +269,7 @@ impl CallableRegistry {
                             .is_some_and(|position| {
                                 callable.klib_body_companion_receiver_position() == Some(position)
                             });
-                    if !supported_shape && !serialized_companion_candidate {
+                    if !published && !supported_shape && !serialized_companion_candidate {
                         continue;
                     }
                     let identity = callable.dependency_callable.as_ref().ok_or_else(|| {
@@ -249,7 +280,8 @@ impl CallableRegistry {
                         .singleton_extension_unread_receivers
                         .get(identity)
                         .copied();
-                    if !supported_shape
+                    if !published
+                        && !supported_shape
                         && callable
                             .serialized_companion_receiver_position(
                                 params,
@@ -265,6 +297,15 @@ impl CallableRegistry {
                         "a dependency callable whose target code was not emitted".to_string()
                     })?;
                     targets.external.insert(*target, index);
+                    targets.signatures.insert(
+                        *target,
+                        self.signatures
+                            .get(identity)
+                            .ok_or_else(|| {
+                                "an emitted dependency without its declared signature".to_owned()
+                            })?
+                            .clone(),
+                    );
                     if let Some(receiver) = self.member_receivers.get(identity).copied() {
                         targets.member_receivers.insert(*target, receiver);
                     }
@@ -287,6 +328,7 @@ impl CallableRegistry {
     /// have been defined.
     pub(super) fn publish(
         &mut self,
+        ir: &IrFile,
         exports: &DependencyExportSignatures,
         functions: &[Option<u32>],
     ) -> Result<(), Unsupported> {
@@ -297,12 +339,26 @@ impl CallableRegistry {
                 .ok_or_else(|| "an invalid exported callable identity".to_string())?;
             let index = emitted
                 .ok_or_else(|| "an inline-only function exported as Wasm code".to_string())?;
+            let signature = DependencyFunctionSignature::from_ir(
+                ir,
+                function,
+                exports.member_receiver(function),
+            )
+            .map_err(str::to_owned)?;
+            if self
+                .signatures
+                .get(identity)
+                .is_some_and(|previous| previous != &signature)
+            {
+                return Err("two functions exported incompatible dependency signatures".to_owned());
+            }
             match self.dependencies.insert(identity.clone(), index) {
                 Some(previous) if previous != index => {
                     return Err("two functions exported one KLIB declaration identity".to_string())
                 }
                 _ => {}
             }
+            self.signatures.insert(identity.clone(), signature);
             if let Some(receiver) = exports.member_receiver(function) {
                 match self.member_receivers.insert(identity.clone(), receiver) {
                     Some(previous) if previous != receiver => {
@@ -411,6 +467,13 @@ impl FileCallTargets {
 
     pub(super) fn external(&self, target: ExternalCallableId) -> Option<u32> {
         self.external.get(&target).copied()
+    }
+
+    pub(super) fn signature(
+        &self,
+        target: ExternalCallableId,
+    ) -> Option<&DependencyFunctionSignature> {
+        self.signatures.get(&target)
     }
 
     pub(super) fn member_receiver(
@@ -634,8 +697,10 @@ mod tests {
             Ty::obj_name(type_name("demo/Companion")),
             true,
         );
+        let mut ir = IrFile::default();
+        ir.add_fun(function("answer", None));
         registry
-            .publish(&exports, &[Some(library_index)])
+            .publish(&ir, &exports, &[Some(library_index)])
             .expect("the library export is valid");
         assert_eq!(
             registry.singleton_extension_unread_receivers[&identity].semantic_type(),
@@ -652,6 +717,43 @@ mod tests {
         let application_index = registry.module_index(local, &mut wasm);
         assert_ne!(application_index, library_index);
         assert_eq!(registry.dependencies[&identity], library_index);
+    }
+
+    #[test]
+    fn a_dependency_export_retains_one_declared_abi_and_rejects_contradictions() {
+        let mut registry = CallableRegistry::default();
+        let mut wasm = Module::default();
+        let mut ir = IrFile::default();
+        let formal = Ty::ty_param("provider-owned-T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let mut declaration = function("identity", None);
+        declaration.params = vec![formal];
+        declaration.ret = formal;
+        ir.add_fun(declaration);
+        let identity = KlibDependencyCallable {
+            module: "lib".to_owned(),
+            declaration: signature("identity"),
+        };
+        let mut exports = DependencyExportSignatures::default();
+        exports.record_callable(0, identity.clone());
+        let index = wasm.declare();
+        registry.publish(&ir, &exports, &[Some(index)]).unwrap();
+        assert_eq!(registry.dependencies[&identity], index);
+        assert_eq!(registry.signatures[&identity].parameters(), [formal]);
+        assert_eq!(registry.signatures[&identity].result(), formal);
+        let foreign = KlibDependencyCallable {
+            module: "other-lib".to_owned(),
+            declaration: identity.declaration.clone(),
+        };
+        assert!(!registry.dependencies.contains_key(&foreign));
+        assert!(!registry.signatures.contains_key(&foreign));
+        ir.functions[0].params = vec![Ty::Int];
+        ir.functions[0].ret = Ty::Int;
+        assert_eq!(
+            registry.publish(&ir, &exports, &[Some(index)]),
+            Err("two functions exported incompatible dependency signatures".to_owned())
+        );
+        assert_eq!(registry.signatures[&identity].parameters(), [formal]);
+        assert_eq!(registry.signatures[&identity].result(), formal);
     }
 
     #[test]

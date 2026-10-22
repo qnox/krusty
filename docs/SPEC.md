@@ -18132,6 +18132,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   authenticated constructor without its exact construction handle remain hard mismatches.
   Tests: `klib_lowering::tests::constructor_contracts`, `::constructor_calls`.
 
+- **A selected dependency accessor is a call of its exact export.** Both Wasm hosts join the
+  frozen property identity to its selected getter or setter, then to the complete module-qualified
+  dependency identity. The published function's declared signature owns operand/result carriers;
+  a specialized use cannot replace it. Native and Wasm share the source-versus-serialized receiver
+  shape proof, but keep target conversion and instruction emission separate. Accessors without
+  checked generic substitutions and accesses through `super` do not use this ordinary export path.
+  Receiver and value operands execute once in the recorded order. Tests:
+  `backend::dependency_facts::tests::dependency_accessors_*`,
+  `wasm::codegen::callable_registry::tests::a_dependency_export_retains_one_declared_abi_and_rejects_contradictions`,
+  `multimoduleDependencyAccessors.kt`, `floatingSign.kt`.
+  A Unit-typed statement block consumed as a value still requires a value unless common IR proves
+  it always transfers control. After that proven return/throw there is no conversion to perform;
+  live Unit blocks remain rejected. Tests:
+  `wasm::codegen::lower::tests::only_a_proven_nonreturning_unit_operand_can_satisfy_a_value_use`,
+  `wasm::codegen::tests::an_explicitly_returning_getter_does_not_require_a_unit_value`.
+
 - **A KLIB vararg retains one packed array parameter.** The declaration's vararg position is
   frozen independently of call-site specialization, in the same context/extension/value ordering
   as its declared parameter types. Raw and prepared headers authenticate a unique regular value

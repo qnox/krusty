@@ -5,6 +5,8 @@
 pub(crate) mod class_tables;
 pub(crate) mod coroutines;
 pub(crate) mod counted_loops;
+mod dependency_accessor;
+mod dependency_call_shape;
 mod dependency_facts;
 mod dependency_metadata;
 mod dependency_signature;
@@ -12,6 +14,7 @@ mod entry;
 pub(crate) mod local_properties;
 mod module_facts;
 
+pub(crate) use dependency_call_shape::{DependencyCallShape, DependencyExportCall};
 #[cfg(test)]
 pub(crate) use dependency_facts::referenced_dependencies;
 pub use dependency_facts::{

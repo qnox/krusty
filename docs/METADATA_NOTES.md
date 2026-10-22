@@ -783,6 +783,12 @@ Missing optional provider evidence does not erase a proven raw constructor decla
 body declines its realization, while contradictory kind/handle evidence remains a hard mismatch. Tests:
 `klib_lowering::tests::constructor_contracts`, `::constructor_calls`.
 
+Wasm dependency publication retains the actual function's declared semantic ABI beside its exact
+module-qualified identity. Selected property operations use frozen getter/setter identities to join
+the same export registry as ordinary calls; they never invent property globals or recover accessor
+spellings. Native and Wasm share receiver-coordinate authentication. Property IR currently carries
+no checked generic substitutions, so generic accessors remain explicitly unsupported by this route.
+
 ## Declaration-owned KLIB vararg coordinates
 
 Metadata value-parameter vararg indices include context parameters but exclude an extension

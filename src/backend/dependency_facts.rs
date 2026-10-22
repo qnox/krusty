@@ -270,10 +270,9 @@ impl BackendCallableFact {
 mod tests {
     use super::*;
 
-    #[test]
-    fn dependency_extensions_keep_their_provider_receiver_coordinate() {
+    fn extension_fact() -> BackendCallableFact {
         let params = vec![Ty::String, Ty::Float, Ty::Int];
-        let mut fact = BackendCallableFact {
+        BackendCallableFact {
             name: "sample".to_string(),
             physical_name: None,
             reflection_name: None,
@@ -288,7 +287,7 @@ mod tests {
             overridden_declarations: Box::new([]),
             member_realization: MemberRealization::Dispatch,
             params: params.clone(),
-            physical_params: params.clone(),
+            physical_params: params,
             parameter_identities: Box::new([]),
             physical_parameter_plan: None,
             ret: Ty::Unit,
@@ -314,7 +313,13 @@ mod tests {
             klib_body_class_contract: None,
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
-        };
+        }
+    }
+
+    #[test]
+    fn dependency_extensions_keep_their_provider_receiver_coordinate() {
+        let mut fact = extension_fact();
+        let params = fact.params.clone();
         assert!(fact.matches_dependency_body_call(&params, Some(1), false));
         assert!(!fact.matches_dependency_body_call(&params, Some(0), false));
         assert!(!fact.matches_dependency_body_call(&params, Some(1), true));
@@ -324,6 +329,163 @@ mod tests {
         assert!(fact.matches_dependency_body_call(&params, Some(1), true));
         assert!(!fact.matches_dependency_body_call(&params, Some(0), true));
         assert!(!fact.matches_dependency_body_call(&params, Some(1), false));
+    }
+
+    fn accessor_facts() -> CheckedBackendCallables {
+        let mut facts = CheckedBackendCallables::default();
+        let mut getter = extension_fact();
+        getter.params.pop();
+        getter.ret = Ty::Long;
+        facts
+            .callables
+            .insert(ExternalCallableId::from_raw(1), getter);
+        facts
+            .callables
+            .insert(ExternalCallableId::from_raw(2), extension_fact());
+        facts.properties.insert(
+            ExternalPropertyId::from_raw(0),
+            BackendPropertyFact {
+                name: "selected".into(),
+                getter: ExternalCallableId::from_raw(1),
+                setter: Some(ExternalCallableId::from_raw(2)),
+                owner: TypeName::ROOT,
+                result: Ty::Long,
+                declares_value_class_storage: false,
+                compile_time_constant: None,
+            },
+        );
+        facts
+    }
+
+    fn property_read(receiver: Option<u32>) -> crate::ir::IrCheckedOperation {
+        crate::ir::IrCheckedOperation::ExternalPropertyRead {
+            target: ExternalPropertyId::from_raw(0),
+            dispatch: crate::ir::IrPropertyDispatch::Ordinary,
+            receiver,
+            arguments: if receiver.is_some() {
+                vec![20]
+            } else {
+                vec![20, 10]
+            },
+            parameters: if receiver.is_some() {
+                vec![Ty::String]
+            } else {
+                vec![Ty::String, Ty::Float]
+            },
+            result: Ty::Long,
+            source_receiver: None,
+        }
+    }
+
+    #[test]
+    fn dependency_accessors_retain_exact_targets_and_receiver_coordinates() {
+        let facts = accessor_facts();
+        for (receiver, expected_position) in [(Some(10), None), (None, Some(1))] {
+            let operation = property_read(receiver);
+            let access = facts.dependency_accessor(&operation).unwrap();
+            assert_eq!(access.target, ExternalCallableId::from_raw(1));
+            assert_eq!(access.receiver, receiver);
+            let crate::ir::Callee::External {
+                target,
+                params,
+                ret,
+                substitutions,
+                defaults,
+                extension_receiver_parameter,
+                default_provider,
+            } = access.callee().unwrap()
+            else {
+                panic!("an exact external getter")
+            };
+            assert_eq!(target, ExternalCallableId::from_raw(1));
+            assert_eq!(
+                params,
+                if receiver.is_some() {
+                    vec![Ty::String]
+                } else {
+                    vec![Ty::String, Ty::Float]
+                }
+            );
+            assert_eq!(ret, Ty::Long);
+            assert!(substitutions.is_empty());
+            assert!(defaults.is_empty());
+            assert_eq!(default_provider, None);
+            assert_eq!(extension_receiver_parameter, expected_position);
+        }
+        let operation = crate::ir::IrCheckedOperation::ExternalPropertyWrite {
+            target: ExternalPropertyId::from_raw(0),
+            dispatch: crate::ir::IrPropertyDispatch::Ordinary,
+            receiver: Some(10),
+            arguments: vec![20, 30],
+            parameters: vec![Ty::String, Ty::Int],
+            result: Ty::Unit,
+            source_receiver: None,
+        };
+        let access = facts.dependency_accessor(&operation).unwrap();
+        assert_eq!(access.target, ExternalCallableId::from_raw(2));
+        assert_eq!(access.arguments, [20, 30]);
+        assert!(
+            matches!(access.callee().unwrap(), crate::ir::Callee::External {
+            target, ret: Ty::Unit, extension_receiver_parameter: None, ..
+        } if target == ExternalCallableId::from_raw(2))
+        );
+    }
+
+    #[test]
+    fn dependency_accessors_do_not_invent_setters_or_generic_substitutions() {
+        let mut facts = accessor_facts();
+        let mut operation = property_read(Some(10));
+        if let crate::ir::IrCheckedOperation::ExternalPropertyRead { dispatch, .. } = &mut operation
+        {
+            *dispatch = crate::ir::IrPropertyDispatch::Super {
+                owner: TypeName::ROOT,
+                interface: false,
+            };
+        }
+        assert_eq!(
+            facts
+                .dependency_accessor(&operation)
+                .unwrap()
+                .callee()
+                .unwrap_err(),
+            "a dependency accessor export called through super"
+        );
+        facts
+            .callables
+            .get_mut(&ExternalCallableId::from_raw(1))
+            .unwrap()
+            .generic_sig = Some(Box::new(GenericSig {
+            formals: vec!["owned-T".to_owned()],
+            formal_bounds: vec![Vec::new()],
+            receiver: None,
+            params: Vec::new(),
+            ret: Ty::Long,
+            return_policy: Default::default(),
+        }));
+        let operation = property_read(Some(10));
+        assert_eq!(
+            facts
+                .dependency_accessor(&operation)
+                .unwrap()
+                .callee()
+                .unwrap_err(),
+            "a dependency property without checked generic substitutions"
+        );
+        facts
+            .properties
+            .get_mut(&ExternalPropertyId::from_raw(0))
+            .unwrap()
+            .setter = None;
+        let operation = crate::ir::IrCheckedOperation::ExternalPropertyWrite {
+            target: ExternalPropertyId::from_raw(0),
+            dispatch: crate::ir::IrPropertyDispatch::Ordinary,
+            receiver: Some(10),
+            arguments: vec![20, 30],
+            parameters: vec![Ty::String, Ty::Int],
+            result: Ty::Unit,
+            source_receiver: None,
+        };
+        assert!(facts.dependency_accessor(&operation).is_none());
     }
 
     #[test]

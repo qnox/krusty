@@ -5643,6 +5643,12 @@ non-inline callers, still reads the field directly. Test:
   Constructor absence, missing provider capability and contradictory kind/handle facts retain
   distinct fail-closed diagnostics and empty-unit rollback; no stdlib absence assertion is waived.
   Full actual-KLIB release and Native/Wasm runtime preservation remain landing gates for this path.
+- Wasm selected accessors join exact frozen getter/setter identities to the canonical dependency
+  export ABI. Receiver-shape validation is shared with Native; target coercion remains local.
+  Ordinary calls and property operations use the stored declared signature, never a specialized
+  call's carriers. Preserve source/serialized extension coordinates and strict generic-accessor
+  refusal until checked property substitutions exist. Validate both Wasm hosts after the JVM oracle
+  and retain the full Native/Wasm preservation gates.
 - Declaration-owned vararg positions survive provider and frozen handoffs separately from
   call-site specialization. Raw/prepared headers authenticate the exact packed-array element and
   regular-value slot, including context/extension coordinates; dispatch markers are rejected.
