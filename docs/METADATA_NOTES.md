@@ -674,6 +674,16 @@ declaration: the JVM adds it to its own `@Metadata` record after the handoff.
 `klib_class_surface_e2e::serialization_plugin_declarations_match_kotlinc_native` compares the whole
 fragment with kotlinc-native's bytes.
 
+## Authenticated collection storage construction
+
+Package-function normalization can freeze an empty/singleton/packed list-storage plan only for
+the selected stdlib's full generic declaration. It checks the formal's complete bounds, exact
+parameter/result uses, declared vararg position and modifiers before call-site substitution.
+The JVM provider supplies its metadata typealias expansion for `ArrayList`; KLIB supplies its
+declared classifier. This adds no Kotlin metadata field or wire encoding. Frozen callable facts
+carry the typed plan, and Native uses it instead of recovering an operation from a facade name or
+physical parameter. Broader dependency-root admission remains separate work.
+
 ## Authenticated Throwable realization
 
 KLIB classifier and property records retain the selected platform-stdlib input's existing archive
