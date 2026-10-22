@@ -27,7 +27,7 @@ pub(super) fn module_function_symbol(
 }
 
 /// Injective target spelling of a source-module identity.
-fn module_namespace(module_name: &str) -> String {
+pub(super) fn module_namespace(module_name: &str) -> String {
     let mut namespace = String::new();
     mangle_name(&mut namespace, module_name);
     namespace

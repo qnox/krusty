@@ -39,6 +39,7 @@ use declared_capabilities::{
 mod functions;
 mod implementor_dispatch;
 mod imported_functions;
+mod interface_records;
 pub(super) use imported_functions::ImportedAbis;
 mod lists;
 mod local_delegates;
@@ -596,6 +597,15 @@ impl<'a> FileLowering<'a> {
     /// A runtime function by symbol, declared as an import on first use.
     fn import(&mut self, symbol: &str, params: &[Ty], ret: Ty) -> Result<FuncId, Unsupported> {
         let signature = self.signature_of(params, ret)?;
+        self.import_signature(symbol, signature)
+    }
+
+    /// Import `symbol` with exactly `signature`.
+    fn import_signature(
+        &mut self,
+        symbol: &str,
+        signature: Signature,
+    ) -> Result<FuncId, Unsupported> {
         if let Some(id) = self.imports.existing(symbol, &signature)? {
             return Ok(id);
         }

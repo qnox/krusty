@@ -14694,8 +14694,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   or the body the most derived interface declaring the member supplies, which a subclass inherits.
   A function default declared in another file is that file's exported member entry point, taking
   the receiver and the member's declared carriers. A call through an interface in any file, and a
-  property read or write through one, loads the receiver's interface table and calls the entry at
-  the member's number. Refused, by file: a property default of an interface of another file, a
+  property read or write through one, calls the member's stub, which the link writes from every
+  type of the program (`docs/NATIVE.md`, "Interface calls: decided at the link"): a direct call
+  when one function implements the member, a type comparison when two do and one of them is reached
+  from a single type, and otherwise the entry at the member's number in the receiver's interface
+  table. Refused, by file: a property default of an interface of another file, a
   default of another file reached through a bridge, an implementation of an interface member of
   another file that carries values differently, an interface member implemented by a declaration
   this file has no slot for (one outside the module), an instantiable class leaving a member with
@@ -14710,7 +14713,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_generic_member_reaches_an_implementation_through_its_bridge`,
   `a_lambda_converted_to_a_functional_interface_answers_another_file`,
   `a_default_declared_in_another_file_answers_for_an_implementor`,
-  `a_default_reached_through_a_bridge_of_another_file_declines`).
+  `a_default_reached_through_a_bridge_of_another_file_declines`) and
+  `tests/native_interface_call_stubs_e2e.rs`.
 - **Native: the public C ABI is primitives, String, and a Unit result.** A public top-level
   function whose parameters are primitives or `String` and whose result is one of those types or
   `Unit` is declared in the module's C header and exported under that declaration. The export runs

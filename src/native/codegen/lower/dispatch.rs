@@ -32,10 +32,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         )
     }
 
-    /// A call through one of the receiver's tables: its vtable by class slot, or its interface
-    /// table by module-wide member number — `receiver.type.itable[n](receiver, args…)`. An
-    /// interface table is as long as the highest number the receiver's class implements, and a
-    /// call names a member through a type the receiver has, so the index is always inside it.
+    /// A call through one of the receiver's tables: its vtable by class slot —
+    /// `receiver.type.vtable[slot](receiver, args…)` — or, for a module interface member, the
+    /// member's stub, which the final link writes from every implementation in the program (see
+    /// `native::interface_calls`).
     pub(super) fn dispatch_through(
         &mut self,
         receiver: Value,
@@ -45,26 +45,38 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         arguments: &[Value],
     ) -> Result<Option<Value>, Unsupported> {
         self.null_check(receiver)?;
+        let mut all_params = vec![any()];
+        all_params.extend_from_slice(params);
+        let mut all_arguments = vec![receiver];
+        all_arguments.extend_from_slice(arguments);
+        let slot = match through {
+            model::Dispatch::Class(slot) => slot,
+            model::Dispatch::Interface(number) => {
+                let stub = super::super::super::interface_calls::stub_symbol(
+                    self.file.module_name,
+                    number,
+                );
+                let stub = self.file.import(&stub, &all_params, ret)?;
+                let func_ref = self.func_ref(stub);
+                let call = self.emit_call(func_ref, &all_arguments)?;
+                return Ok(self.builder.inst_results(call).first().copied());
+            }
+        };
         let flags = trusted();
         let ty = self
             .builder
             .ins()
             .load(types::I64, flags, receiver, TYPE_OFFSET);
-        let (table, index) = match through {
-            model::Dispatch::Class(slot) => (ktype::VTABLE, slot),
-            model::Dispatch::Interface(number) => (ktype::ITABLE, number),
-        };
-        let table = self.builder.ins().load(types::I64, flags, ty, table as i32);
+        let table = self
+            .builder
+            .ins()
+            .load(types::I64, flags, ty, ktype::VTABLE as i32);
         let function = self
             .builder
             .ins()
-            .load(types::I64, flags, table, (index * 8) as i32);
-        let mut all_params = vec![any()];
-        all_params.extend_from_slice(params);
+            .load(types::I64, flags, table, (slot * 8) as i32);
         let signature = self.file.signature_of(&all_params, ret)?;
         let signature = self.builder.import_signature(signature);
-        let mut all_arguments = vec![receiver];
-        all_arguments.extend_from_slice(arguments);
         let call = self
             .builder
             .ins()

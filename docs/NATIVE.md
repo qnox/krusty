@@ -66,6 +66,28 @@ page. The runtime is built non-PIC with a small code model, so the handful of re
 psABI defines for that model is all it applies. The limits are listed in
 `docs/IMPLEMENTATION_PLAN.md` ("Native linker").
 
+### Interface calls: decided at the link
+
+A call through a member of a module interface goes to the member's stub, `kt_itf_<module>_<n>`,
+which no object defines. Every object records, for each type it emits that has instances, which
+function stands at each number of the type's interface table (section
+`.kt_interface_implementations.<module>`, read by the link and not loaded). A record holds the
+member number rather than a reference to the stub: an implementation's own signature can differ
+from the member's (a value-class property implementing a generic one), and the stubs that exist
+are exactly the ones calls use. Only the link sees every type
+of the program, so it decides each member there, in the spirit of the JVM's devirtualization of
+interfaces with one or two implementations, but ahead of time and without deoptimization:
+
+- one function implements the member: the stub symbol is bound to that function, so every call is
+  a direct call;
+- two functions implement it, and one of them is reached from a single type: the stub compares the
+  receiver's type with that type and jumps directly to either function;
+- otherwise: the stub reads `receiver.type.itable[n]` and jumps through it.
+
+A stub never makes a frame: it jumps, so the implementation returns straight to the caller. The
+records are what makes this sound, so every type descriptor with instances writes them; a
+descriptor that is only ever a supertype (an interface, an abstract or sealed class) writes none.
+
 ### Importing from shared libraries: Go's split
 
 Which programs depend on a C library at run time follows Go and its cgo mode:
