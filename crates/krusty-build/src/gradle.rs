@@ -2246,11 +2246,13 @@ fun main() {
 
     /// The message `task` failed with, as Gradle reports it under "What went wrong", one entry
     /// per non-empty line. Gradle 9 names the plugin that registered the task in the header
-    /// (`Execution failed for task ':a' (registered by plugin 'krusty').`); Gradle 8 does not.
+    /// (`Execution failed for task ':a' (registered by plugin 'dev.krustythecompiler').`);
+    /// Gradle 8 does not.
     fn task_failure(rendered: &str, task: &str) -> Vec<String> {
         let header = format!("Execution failed for task '{task}'.");
-        let registered =
-            format!("Execution failed for task '{task}' (registered by plugin 'krusty').");
+        let registered = format!(
+            "Execution failed for task '{task}' (registered by plugin 'dev.krustythecompiler')."
+        );
         let lines = rendered.lines().collect::<Vec<_>>();
         let at = lines
             .iter()
