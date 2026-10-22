@@ -1,6 +1,7 @@
-// Adds `corpusCompile`: every Kotlin/JVM (non-Android) compile task in the build. Tasks are picked
-// by name before they are realized: realizing every registered task would configure unrelated ones
-// (a GraalVM native-image task fails without its JDK).
+// Adds `corpusCompile`: every Kotlin/JVM (non-Android) compile task in the build, and lists them in
+// `$CORPUS_COMPILATIONS` when it is set. Tasks are picked by name before they are realized:
+// realizing every registered task would configure unrelated ones (a GraalVM native-image task
+// fails without its JDK).
 gradle.projectsEvaluated { g ->
     def root = g.rootProject
     def picked = []
@@ -16,6 +17,14 @@ gradle.projectsEvaluated { g ->
         }
     }
     root.tasks.register('corpusCompile') { dependsOn { picked } }
+    // One line per picked task, its path and its output directory relative to the build root: the
+    // comparison reads compilations from here rather than guessing them from directory names.
+    def manifest = System.getenv('CORPUS_COMPILATIONS')
+    if (manifest != null) {
+        new File(manifest).text = picked.collect { t ->
+            "${t.path}\t${root.projectDir.toPath().relativize(t.destinationDirectory.get().asFile.toPath())}\n"
+        }.join('')
+    }
 }
 
 // Records the plugins each project applies, for the corpus plugin survey: every Gradle plugin by

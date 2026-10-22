@@ -74,7 +74,7 @@ build() {
   )
 }
 
-CORPUS_PLUGIN_SURVEY=$logs/$name.plugins.tsv build kotlinc
+CORPUS_PLUGIN_SURVEY=$logs/$name.plugins.tsv CORPUS_COMPILATIONS=$logs/$name.compilations.tsv build kotlinc
 reference=$?
 KRUSTY_PLUGIN_REPOSITORY=$plugin_repository KRUSTY_PLUGIN_VERSION=$plugin_version \
   build krusty -I "$here/krusty.init.gradle" -Pkrusty.binary="$krusty"

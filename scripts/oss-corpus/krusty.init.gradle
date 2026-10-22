@@ -11,5 +11,20 @@ gradle.rootProject { p ->
 }
 gradle.allprojects { p ->
     p.pluginManager.withPlugin('org.jetbrains.kotlin.jvm') { p.pluginManager.apply('krusty') }
-    p.pluginManager.withPlugin('org.jetbrains.kotlin.multiplatform') { p.pluginManager.apply('krusty') }
+    p.pluginManager.withPlugin('org.jetbrains.kotlin.multiplatform') {
+        // A plugin build without Kotlin Multiplatform support rejects the project. Its compiles
+        // then stay with kotlinc, and each is reported the way the plugin reports a fallback, so
+        // the comparison counts it as a miss rather than as kotlinc's output matching itself.
+        try {
+            p.pluginManager.apply('krusty')
+        } catch (Exception rejected) {
+            def reason = rejected.cause?.message ?: rejected.message
+            p.afterEvaluate {
+                p.tasks.names.findAll { it ==~ /compile.*Kotlin.*/ }.each { n ->
+                    def path = p.path == ':' ? ":$n" : "${p.path}:$n"
+                    p.logger.lifecycle("krusty: task '$path' is left to kotlinc: $reason")
+                }
+            }
+        }
+    }
 }

@@ -4,7 +4,8 @@ build with the krusty Gradle plugin).
 
 usage: compare.py <work dir> <name> <reference build exit code>
 
-Reads <work dir>/out/<name>/{kotlinc,krusty} and <work dir>/logs/<name>.krusty.log. Writes
+Reads <work dir>/out/<name>/{kotlinc,krusty}, <work dir>/logs/<name>.compilations.tsv (the reference
+build's compile tasks and their output directories) and <work dir>/logs/<name>.krusty.log. Writes
 <work dir>/out/<name>/compare.json and prints one line per compilation.
 """
 import glob
@@ -15,8 +16,7 @@ import sys
 
 
 def fallbacks(log_path):
-    """Compile tasks the krusty plugin left to kotlinc, with the reason it logged:
-    {(project path segments, task name): reason}."""
+    """Compile tasks the krusty plugin left to kotlinc, with the reason it logged: {task path: reason}."""
     found = {}
     try:
         text = open(log_path, errors='replace').read()
@@ -24,46 +24,31 @@ def fallbacks(log_path):
         return found
     lines = text.splitlines()
     for i, line in enumerate(lines):
-        m = re.match(r"krusty: task '(:?[^']*):(compile\w*Kotlin\w*)' is left to kotlinc: (.*)", line)
+        m = re.match(r"krusty: task '([^']*:compile\w*Kotlin\w*)' is left to kotlinc: (.*)", line)
         if not m:
             continue
-        project, task, reason = m.groups()
+        task, reason = m.groups()
         detail = [l.strip() for l in lines[i + 1:i + 6] if l.startswith('  ')]
         if detail:
             reason += ' (' + '; '.join(detail) + ')'
-        found[(tuple(s for s in project.split(':') if s), task)] = reason
+        found[task] = reason
     return found
 
 
-def task_dir(task):
-    """The build/classes/kotlin/<dir> a compile task writes: compileKotlin -> main,
-    compileTestKotlin -> test, compileKotlinJvm / compileTestKotlinJvm -> jvm."""
-    m = re.match(r'compile(Test)?Kotlin(\w*)$', task)
-    if not m:
-        return None
-    target = m.group(2)
-    if target:
-        return target[0].lower() + target[1:]
-    return 'test' if m.group(1) else 'main'
-
-
-def fallback_reason(rel, found):
-    module, _, sourceset = rel.partition('/build/classes/kotlin/')
-    segments = tuple(s for s in module.split('/') if s and s != '.')
-    for (project, task), reason in found.items():
-        if task_dir(task) == sourceset and (segments[-len(project):] == project if project else segments == ()):
-            return reason
-    return None
+def compilations(manifest):
+    """The compile tasks the reference build ran, as (task path, output directory relative to the
+    Gradle root), from the manifest `corpus.init.gradle` writes. Each task is one compilation: a
+    Kotlin Multiplatform JVM target's main and test compilations write `<target>/main` and
+    `<target>/test` and stay separate."""
+    try:
+        with open(manifest) as f:
+            return sorted(tuple(line.rstrip('\n').split('\t')) for line in f if line.strip())
+    except OSError:
+        return []
 
 
 def files(d):
     return {os.path.relpath(p, d): p for p in glob.glob(d + '/**/*', recursive=True) if os.path.isfile(p)}
-
-
-def class_dirs(root):
-    # <module>/build/classes/kotlin/<source set>
-    return sorted(os.path.relpath(p, root) for p in glob.glob(root + '/**/build/classes/kotlin/*', recursive=True)
-                  if os.path.isdir(p))
 
 
 def same_bytes(left, right):
@@ -88,18 +73,18 @@ def compare(work, name):
     kotlinc, krusty = os.path.join(work, 'out', name, 'kotlinc'), os.path.join(work, 'out', name, 'krusty')
     found = fallbacks(os.path.join(work, 'logs', name + '.krusty.log'))
     rows = []
-    for rel in class_dirs(kotlinc):
+    for task, rel in compilations(os.path.join(work, 'logs', name + '.compilations.tsv')):
         reference = files(os.path.join(kotlinc, rel))
         if not any(k.endswith('.class') for k in reference):
             continue
         candidate = files(os.path.join(krusty, rel))
-        fallback = fallback_reason(rel, found)
+        fallback = found.get(task)
         # A compile left to kotlinc wrote kotlinc's classes: it is a miss, not a match.
         built = fallback is None and any(k.endswith('.class') for k in candidate)
         classes = sum(1 for k in reference if k.endswith('.class'))
         identical = sum(1 for k, p in reference.items()
                         if k.endswith('.class') and k in candidate and same_bytes(p, candidate[k]))
-        rows.append(dict(dir=rel, built=built, fallback=fallback, classes=classes,
+        rows.append(dict(task=task, dir=rel, built=built, fallback=fallback, classes=classes,
                          identical=identical if built else 0,
                          only_kotlinc=len(set(reference) - set(candidate)) if built else None,
                          only_krusty=len(set(candidate) - set(reference)) if built else None))
@@ -125,7 +110,7 @@ def main():
           f"built by krusty; classes identical {summary['identical']}/{summary['classes']}")
     for r in rows:
         state = 'ok ' if r['built'] else ('KTC' if r['fallback'] else 'ERR')
-        print(f"  {state} {r['dir']}: {r['identical']}/{r['classes']}"
+        print(f"  {state} {r['task']} ({r['dir']}): {r['identical']}/{r['classes']}"
               + (f" left to kotlinc: {r['fallback']}" if r['fallback'] else '')
               + (f" only_kotlinc={r['only_kotlinc']} only_krusty={r['only_krusty']}" if r['built'] else ''))
 

@@ -7,11 +7,14 @@ Gradle build:
 1. **Reference:** a plain build, which compiles with kotlinc.
 2. **krusty:** the same build with the krusty Gradle plugin applied by `krusty.init.gradle`. The
    plugin replaces every Kotlin/JVM compile task, including the JVM targets of multiplatform
-   modules. Compiler arguments are never captured or replayed.
+   modules. A plugin build that rejects a multiplatform module leaves its compile tasks to
+   kotlinc, and the init script reports each as a fallback. Compiler arguments are never captured
+   or replayed.
 
 `corpus.init.gradle` adds the `corpusCompile` task, which depends on every non-Android Kotlin/JVM
-compile task, and records the Gradle and compiler plugins each project applies. `compare.py`
-compares the class files of every compile task byte for byte. A compile task the plugin leaves to
+compile task, lists each with its output directory, and records the Gradle and compiler plugins
+each project applies. `compare.py` compares the class files of every listed compile task byte for
+byte; `test_compare.py` covers it. A compile task the plugin leaves to
 kotlinc (an unsupported compiler plugin or option) counts as a miss, with the plugin's reason.
 `summarize.py` turns the per-project results into the run's summary table.
 
