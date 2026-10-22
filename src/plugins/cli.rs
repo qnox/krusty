@@ -23,6 +23,9 @@ pub const SAM_WITH_RECEIVER_PLUGIN_ID: &str = "org.jetbrains.kotlin.samWithRecei
 /// kotlinc's default scripting plugin, which kotlinc loads into every compilation and the Kotlin
 /// Gradle plugin also passes explicitly on every JVM compile's `-Xplugin` classpath.
 pub const SCRIPTING_PLUGIN_ID: &str = "kotlin.scripting";
+/// kapt's plugin, which the Kotlin Gradle plugin puts on the `-Xplugin` classpath of every JVM
+/// compile in a project that applies kapt, and configures only for kapt's own tasks.
+pub const KAPT_PLUGIN_ID: &str = "org.jetbrains.kotlin.kapt3";
 
 /// The plugin id kotlinc shows for an `-Xcompiler-plugin` option, which names no plugin.
 pub const MODERN_OPTION_ID: &str = "<NO_ID>";

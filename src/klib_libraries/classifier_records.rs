@@ -48,7 +48,6 @@ pub(super) fn classifier_record(
         {
             published.callable.semantic_role = Some(crate::types::SemanticCallRole::DataClassCopy);
         }
-        builtin_realizations::realize_member(identity, &mut published);
         shape.members.push(member_record(&published));
         functions.push((function.declaration.name.clone(), published));
     }

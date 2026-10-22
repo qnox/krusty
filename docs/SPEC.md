@@ -20347,3 +20347,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: shared `THROWABLE_TRANSPORT` and `TRY_NORMAL_COMPLETION` multimodule cases with the
   kotlinc/JVM oracle and Native/Wasm matrix, provider `throwables::tests`, Wasm encoder tests,
   and `wasm::codegen::tests::a_try_with_finally_still_declines_without_an_artifact`.
+
+- **Compiler String concatenation authenticates the selected stdlib declaration.** Both
+  `String.plus(Any?): String` and `String?.plus(Any?): String` require the selected platform
+  stdlib's archive authority, not just matching declarations or archive bytes. The published
+  source candidate and both frozen callable lookups carry the same authenticated operation;
+  an ordinary dependency carries none. Test:
+  `klib_libraries::tests::builtin_operations::klib_string_plus_requires_selected_stdlib_authority`.
