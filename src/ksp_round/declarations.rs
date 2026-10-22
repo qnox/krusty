@@ -255,17 +255,31 @@ impl Source<'_> {
             name: &property.name,
             line: property.decl_line,
         };
-        let ty = match owner {
-            Owner::TopLevel { id, .. } => self
-                .symbols
-                .source_props
-                .get(&(self.index, id.0))
-                .and_then(|resolved| scope.ty(resolved.ty)),
-            Owner::Class { header, .. } => header
-                .signature
-                .declared_props
-                .get(&property.name)
-                .and_then(|resolved| scope.ty(resolved.ty)),
+        // The extension receiver it writes, resolved or not, and its type.
+        let (receiver, ty) = match owner {
+            Owner::TopLevel { id, .. } if property.receiver.is_some() => {
+                match self.symbols.source_extension_property((self.index, id.0)) {
+                    Some(resolved) => (Some(Some(resolved.receiver)), scope.ty(resolved.ty)),
+                    None => (Some(None), None),
+                }
+            }
+            Owner::TopLevel { id, .. } => (
+                None,
+                self.symbols
+                    .source_props
+                    .get(&(self.index, id.0))
+                    .and_then(|resolved| scope.ty(resolved.ty)),
+            ),
+            // A member extension property is not described yet.
+            Owner::Class { .. } if property.receiver.is_some() => (Some(None), None),
+            Owner::Class { header, .. } => (
+                None,
+                header
+                    .signature
+                    .declared_props
+                    .get(&property.name)
+                    .and_then(|resolved| scope.ty(resolved.ty)),
+            ),
         };
         Ok(KspProperty {
             name: property.name.clone(),
@@ -275,12 +289,7 @@ impl Source<'_> {
             modifiers: self.written_modifiers(property.declaration_span.lo),
             // A generic property's type parameters are not described yet.
             type_parameters: property.type_params.is_empty().then(Vec::new),
-            // An extension property's receiver is not described yet.
-            extension_receiver: if property.receiver.is_some() {
-                KspTypeSlot::Undescribed
-            } else {
-                KspTypeSlot::Absent
-            },
+            extension_receiver: receiver_slot(receiver, scope),
             ty,
         })
     }
@@ -356,11 +365,22 @@ impl Source<'_> {
         let visibility = class
             .primary_ctor_visibility_span
             .map(|_| class.primary_ctor_visibility);
+        let annotations = match &class.primary_ctor_annotations {
+            Some(annotations) => self.annotations(
+                Subject {
+                    kind: "constructor of",
+                    name: &class.name,
+                    line: class.primary_ctor_lines.decl_line,
+                },
+                annotations,
+            )?,
+            None => Vec::new(),
+        };
         Ok(Some(constructor(
             header,
             KspFunctionKind::PrimaryConstructor,
             written.then_some(class.primary_ctor_lines.decl_line),
-            Vec::new(),
+            annotations,
             Some(constructor_modifiers(header.kind, written, visibility)),
             parameters,
         )))
@@ -446,7 +466,21 @@ impl Source<'_> {
             .enumerate()
             .filter(|(_, parameter)| parameter.is_property)
             .collect();
-        let public_final = vec![KspModifier::Final, KspModifier::Public];
+        // `copy` has the visibility the resolved declaration the compiler generated has: public, or
+        // the primary constructor's where the language or `@ConsistentCopyVisibility` says so.
+        let copy_visibility = header
+            .signature
+            .methods
+            .get("copy")
+            .into_iter()
+            .flatten()
+            .find(|copy| {
+                copy.stable_declaration
+                    .is_some_and(|declaration| self.analysis.is_compiler_generated(declaration))
+            })
+            .map_or(Visibility::Public, |copy| copy.visibility);
+        let mut copy_modifiers = vec![KspModifier::Final];
+        copy_modifiers.extend(visibility_modifier(copy_visibility));
         let mut members: Vec<KspDeclaration> = properties
             .iter()
             .enumerate()
@@ -485,7 +519,7 @@ impl Source<'_> {
         members.push(KspDeclaration::Function(synthetic_function(
             "copy".to_string(),
             KspFunctionKind::Member,
-            public_final,
+            copy_modifiers,
             properties
                 .iter()
                 .map(|(index, property)| KspParameter {
@@ -619,14 +653,19 @@ fn constructor_modifiers(
         (_, None) if !written => Some(Visibility::Public),
         (_, None) => None,
     };
-    modifiers.extend(visibility.and_then(|visibility| match visibility {
+    modifiers.extend(visibility.and_then(visibility_modifier));
+    modifiers
+}
+
+/// The modifier KSP reports for a Kotlin visibility.
+fn visibility_modifier(visibility: Visibility) -> Option<KspModifier> {
+    match visibility {
         Visibility::Public => Some(KspModifier::Public),
         Visibility::Internal => Some(KspModifier::Internal),
         Visibility::Protected => Some(KspModifier::Protected),
         Visibility::Private => Some(KspModifier::Private),
         Visibility::PackagePrivate => None,
-    }));
-    modifiers
+    }
 }
 
 fn constructor(

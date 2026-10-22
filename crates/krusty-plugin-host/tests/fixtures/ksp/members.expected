@@ -2,6 +2,7 @@
 # modifiers, type parameters, supertypes and types, in KSP's order.
 w: [ksp] fun topLevel kind=TOP_LEVEL abstract=false modifiers= typeParameters= receiver=null (items: kotlin.Array<out members.Item> vararg=false default=false, sink: kotlin.collections.MutableMap<in kotlin.String, *> vararg=false default=false): kotlin.Unit
 w: [ksp] property topValue mutable=false modifiers=: kotlin.collections.List<kotlin.collections.Set<kotlin.Int>>
+w: [ksp] property shout mutable=false modifiers=: kotlin.String receiver=kotlin.String
 w: [ksp] INTERFACE members.Named modifiers= typeParameters= supertypes=kotlin.Any
 w: [ksp]   property name mutable=false modifiers=: kotlin.String
 w: [ksp]   fun describe kind=MEMBER abstract=true modifiers= typeParameters= receiver=null (prefix: kotlin.String vararg=false default=true): kotlin.String
@@ -27,3 +28,18 @@ w: [ksp]   OBJECT members.Item.Companion modifiers= typeParameters= supertypes=k
 w: [ksp]     property LIMIT mutable=false modifiers=CONST: kotlin.Int
 w: [ksp]     fun empty kind=MEMBER abstract=false modifiers= typeParameters= receiver=null (): members.Item
 w: [ksp]     fun <init> kind=MEMBER abstract=false modifiers=FINAL,PUBLIC typeParameters= receiver=null (): members.Item.Companion
+w: [ksp] ANNOTATION_CLASS members.Mark modifiers=ANNOTATION typeParameters= supertypes=kotlin.Annotation
+w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL,PUBLIC typeParameters= receiver=null (): members.Mark
+w: [ksp] CLASS members.Marked modifiers= typeParameters= supertypes=kotlin.Any
+w: [ksp]   property v mutable=false modifiers=: kotlin.Int
+w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL typeParameters= receiver=null (v: kotlin.Int vararg=false default=false): members.Marked @Mark
+w: [ksp] CLASS members.Hidden modifiers=DATA typeParameters= supertypes=kotlin.Any
+w: [ksp]   property v mutable=false modifiers=: kotlin.Int
+w: [ksp]   fun component1 kind=MEMBER abstract=false modifiers=FINAL,OPERATOR,OVERRIDE,PUBLIC typeParameters= receiver=null (): kotlin.Int
+w: [ksp]   fun copy kind=MEMBER abstract=false modifiers=FINAL,PUBLIC typeParameters= receiver=null (v: kotlin.Int vararg=false default=true): members.Hidden
+w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL,PRIVATE typeParameters= receiver=null (v: kotlin.Int vararg=false default=false): members.Hidden
+w: [ksp] CLASS members.Kept modifiers=DATA typeParameters= supertypes=kotlin.Any
+w: [ksp]   property v mutable=false modifiers=: kotlin.Int
+w: [ksp]   fun component1 kind=MEMBER abstract=false modifiers=FINAL,OPERATOR,OVERRIDE,PUBLIC typeParameters= receiver=null (): kotlin.Int
+w: [ksp]   fun copy kind=MEMBER abstract=false modifiers=FINAL,PRIVATE typeParameters= receiver=null (v: kotlin.Int vararg=false default=true): members.Kept
+w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL,PRIVATE typeParameters= receiver=null (v: kotlin.Int vararg=false default=false): members.Kept

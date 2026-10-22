@@ -35,3 +35,14 @@ data class Item(override val name: String, var count: Int = 0) : Base<String>(nu
 fun topLevel(items: Array<out Item>, sink: MutableMap<in String, *>): Unit {}
 
 val topValue: List<Set<Int>> = emptyList()
+
+val String.shout: String get() = uppercase()
+
+annotation class Mark
+
+class Marked @Mark constructor(val v: Int)
+
+data class Hidden private constructor(val v: Int)
+
+@ConsistentCopyVisibility
+data class Kept private constructor(val v: Int)

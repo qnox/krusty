@@ -532,8 +532,13 @@ mod tests {
             .map(|parameter| parameter.name.as_str())
             .collect();
         let parameters: Vec<String> = function.parameters.iter().map(parameter).collect();
+        let annotations: String = function
+            .annotations
+            .iter()
+            .map(|annotation| format!(" @{}", annotation.short_name))
+            .collect();
         format!(
-            "fun {} kind={} abstract={} modifiers={} typeParameters={} receiver={receiver} ({}): {}",
+            "fun {} kind={} abstract={} modifiers={} typeParameters={} receiver={receiver} ({}): {}{annotations}",
             function.name,
             match function.kind {
                 KspFunctionKind::TopLevel => "TOP_LEVEL",
@@ -549,8 +554,13 @@ mod tests {
     }
 
     fn property(property: &KspProperty) -> String {
+        let receiver = match &property.extension_receiver {
+            KspTypeSlot::Absent => String::new(),
+            KspTypeSlot::Present(ty) => format!(" receiver={}", render(ty)),
+            KspTypeSlot::Undescribed => " receiver=<undescribed>".to_string(),
+        };
         format!(
-            "property {} mutable={} modifiers={}: {}",
+            "property {} mutable={} modifiers={}: {}{receiver}",
             property.name,
             property.is_mutable,
             modifiers(&property.modifiers),

@@ -73,12 +73,14 @@ class MembersProcessor(private val env: SymbolProcessorEnvironment) : SymbolProc
                         it.name?.asString() + ": " + type(it.type) + " vararg=" + it.isVararg + " default=" + it.hasDefault
                     })
                     .append("): ").append(type(declaration.returnType))
+                for (annotation in declaration.annotations) out.append(" @").append(annotation.shortName.asString())
             }
             is KSPropertyDeclaration -> {
                 out.append("property ").append(declaration.simpleName.asString())
                     .append(" mutable=").append(declaration.isMutable)
                     .append(" modifiers=").append(modifiers(declaration))
                     .append(": ").append(type(declaration.type))
+                declaration.extensionReceiver?.let { out.append(" receiver=").append(type(it)) }
             }
             else -> out.append(declaration::class.java.interfaces.first().simpleName).append(' ')
                 .append(declaration.simpleName.asString())

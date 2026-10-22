@@ -15535,8 +15535,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **KSP members are listed as KSP2 lists them.** A file lists its functions and properties in
   source order, then its classifiers and type aliases in source order. A class lists its
   constructor properties, then its properties and functions interleaved in source order, then a
-  data class's `componentN` (`final operator override public`) and `copy` (`final public`, every
-  parameter with a default), then its primary and secondary constructors, then its nested classes
+  data class's `componentN` (`final operator override public`) and `copy` (`final`, the
+  visibility of the generated declaration, every parameter with a default: `public` under 2.3,
+  the primary constructor's with `@ConsistentCopyVisibility`), then its primary and secondary constructors, then its nested classes
   and enum entries in source order, then an enum class's `values`, `valueOf` (static,
   `final java_static public`) and, where the language has them, `entries`. A constructor is named
   `<init>`, returns its class applied to stars and has its class's type parameters; it is `final`
@@ -15544,8 +15545,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `private`. Types come from the resolved declarations, an inferred one included: a vararg
   parameter's type is its element type, a function type is its `kotlin.FunctionN` classifier, and
   a parameter of an overriding function has the default a function it overrides declares. An
-  interface function without a body is abstract. A type krusty cannot describe, an extension
-  property's receiver, a generic property's type parameters, and whether an override of a library
+  interface function without a body is abstract. A primary constructor has the annotations written
+  on it. A top-level extension property has its resolved receiver. A type krusty cannot describe,
+  a member extension property's receiver and type, a generic property's type parameters, and whether an override of a library
   function's parameter has a default are refused for that query only. A body krusty does not
   describe fully (an enum entry's body, a nested type alias) says its list is incomplete.
   (`crates/krusty-plugin-host/tests/ksp.rs`, `members_and_their_types_are_what_ksp2_reports` and

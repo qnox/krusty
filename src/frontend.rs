@@ -73,6 +73,18 @@ impl SourceSetAnalysis {
         Some((anchor.owner?, anchor.sibling))
     }
 
+    /// Whether the compiler generated `declaration`, as it does a data class's `copy`.
+    pub fn is_compiler_generated(&self, declaration: FrontendDeclarationId) -> bool {
+        self.streamed
+            .as_ref()
+            .and_then(|streamed| streamed.module.index().declaration_header(declaration))
+            .is_some_and(|header| {
+                header
+                    .flags
+                    .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
+            })
+    }
+
     /// The functions the member function `declaration` of the classifier `owner` directly
     /// overrides: each one this module declares, or `None` for one a library declares.
     pub fn overridden_functions(
