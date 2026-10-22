@@ -13891,6 +13891,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `provider_normalization_tests::list_storage_plans_use_the_selected_stdlib_and_its_array_list_alias`,
   `klib_libraries::tests::builtin_operations::target_stdlib_list_factories_publish_their_exact_storage_plans`
   and `tests/native_lists_e2e.rs`.
+- **Native dependency leaves consume typed target operations.** The already authenticated
+  `String.plus(Any?): String` member and nullable `String?.plus(Any?): String` extension share
+  Native's existing string representation operation. The same target plan drives dependency
+  admission and emission; complete raw declaration authentication still runs. A member receiver
+  stays separate, while a serialized extension receiver occupies only its declared slot zero.
+  Both operands evaluate once, left to right, including null values. A foreign module, changed
+  result or mismatched target operation never gains this capability. Library algorithm adapters
+  (assertion helpers, collection sizing, trim, Result helpers and unsigned division) remain outside
+  this positive target-leaf capability. Tests: `klib_target_string_plus_*`,
+  `library_algorithm_adapters_are_not_native_dependency_capabilities`, and
+  `native_dependency_reference_e2e::a_nullable_extension_reference_keeps_its_operand_roles`.
 - **A native list is Kotlin's collection interfaces, and equals any `List`.** The growable list is
   `kotlin.collections.ArrayList` and implements `MutableList`, `List`, `MutableCollection`,
   `Collection`, `MutableIterable`, `Iterable` and `RandomAccess`, each an interface descriptor an

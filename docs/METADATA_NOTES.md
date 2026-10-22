@@ -830,6 +830,16 @@ capability and complete serialized/header agreement. Body-bearing target leaves 
 external signature and generic formals; they are not previously emitted body exports. Neither this
 capability nor its bookkeeping adds a metadata encoding or publishes a private implementation.
 
+Native's typed dependency plan also consumes the provider's existing authenticated `StringPlus`
+operation for both member and nullable-extension declarations. This publishes no new metadata fact:
+raw headers still prove the exact module, receiver roles, argument and result. A serialized extension
+retains its receiver coordinate; target emission does not recover it from a callable spelling. The
+positive plan does not admit ordinary library algorithm adapters or bypass declaration checks.
+Both member and package normalization require the compilation-selected stdlib input's existing
+authority before publishing StringPlus. The identical archive opened as an ordinary dependency
+receives no such operation, including either frozen callable lookup path; matching bytes, module
+names and complete signatures do not grant platform authority.
+
 ## Authenticated Throwable realization
 
 KLIB classifier and property records retain the selected platform-stdlib input's existing archive

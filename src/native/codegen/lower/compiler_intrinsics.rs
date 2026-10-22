@@ -88,15 +88,33 @@ impl BodyLowering<'_, '_, '_> {
         extension_receiver_parameter: Option<u32>,
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
-        if let Some(plan) =
-            intrinsic.and_then(super::super::dependency_intrinsics::list_storage_plan)
+        if let Some(plan) = intrinsic.and_then(super::super::dependency_intrinsics::operation_plan)
         {
-            if receiver.is_some() || extension_receiver_parameter.is_some() || !ret.is_reference() {
-                return Some(Err(
-                    "a list storage construction with malformed receiver or result".into(),
-                ));
-            }
-            return Some(self.list_storage_construction(plan, args));
+            use super::super::dependency_intrinsics::DependencyOperation;
+            return Some(match plan {
+                DependencyOperation::ListStorage(plan) => {
+                    if receiver.is_some()
+                        || extension_receiver_parameter.is_some()
+                        || !ret.is_reference()
+                    {
+                        return Some(Err(
+                            "a list storage construction with malformed receiver or result".into(),
+                        ));
+                    }
+                    self.list_storage_construction(plan, args)
+                }
+                DependencyOperation::StringPlus => {
+                    let Some((left, right)) =
+                        exact_extension_pair(receiver, args, extension_receiver_parameter)
+                    else {
+                        return Some(Err("a malformed `String.plus`".into()));
+                    };
+                    if ret != Ty::obj("kotlin/String") {
+                        return Some(Err("a `String.plus` with a non-String result".into()));
+                    }
+                    self.string_plus(left, right, ret)
+                }
+            });
         }
         if intrinsic == Some(crate::backend::BackendCompilerIntrinsic::ReinterpretBits) {
             let operand = match (receiver, args) {
@@ -268,12 +286,6 @@ impl BodyLowering<'_, '_, '_> {
             return Some(self.intrinsic(operation, ret, receiver, args));
         }
         match intrinsic {
-            Some(crate::backend::BackendCompilerIntrinsic::StringPlus) => {
-                let (Some(receiver), [argument]) = (receiver, args) else {
-                    return Some(Err("a malformed `String.plus`".into()));
-                };
-                Some(self.string_plus(receiver, *argument, ret))
-            }
             Some(crate::backend::BackendCompilerIntrinsic::BooleanNot) => {
                 let (Some(receiver), []) = (receiver, args) else {
                     return Some(Err("a malformed `Boolean.not`".into()));

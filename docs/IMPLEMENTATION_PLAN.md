@@ -5672,6 +5672,12 @@ non-inline callers, still reads the field directly. Test:
   formals; previously emitted bodies keep their distinct export contract. Unit regressions cover
   primitive/reference calls and malformed/conflicting declarations. Full preservation surveys and
   the remaining Wasm call/export and generic representation gates still block that branch.
+- Share the same target-owned operation plan for the authenticated StringPlus member and nullable
+  extension. Preserve their separate/source and flattened/serialized operand roles, with exact
+  provider/raw-header and target-handle negative tests. Algorithm adapters remain non-capabilities;
+  pin Native extension-reference operands/effects in target ABI E2Es after the JVM oracle and rerun
+  preservation. A new shared Any?-typed concatenation case still needs Wasm string-template support
+  before it joins the portable box inventory; no failure allowance is added for it.
 
 ## KLIB writer — krusty compiles a module to a Kotlin library  ◐
 
