@@ -117,6 +117,12 @@ typedef struct KType {
     const char *simple_name;
     uint32_t simple_name_length;
     uint32_t class_names;
+    /* Interface dispatch: one entry per interface member number of the module, the same number in
+       every implementor whichever file declares it, so a call through an interface-typed receiver
+       is `itable[number]`. A class's table ends after the highest number it implements, and a type
+       implementing no interface of the program has none: nothing dispatches through it here.
+       Appended, like the names above, so no existing initializer moves. */
+    const kt_fn *itable;
 } KType;
 
 /* What a descriptor publishes about its class's names, in `KType.class_names`.

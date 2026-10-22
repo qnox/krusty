@@ -490,11 +490,11 @@ impl BodyLowering<'_, '_, '_> {
         };
         let class = self.file.class_of(owner, "a property accessor of")?;
         let key = model::function_key(self.file.ir, class, function);
-        let Some(slot) = self.file.model.slot(class, &key) else {
+        let Some(slot) = self.file.dispatch_of(class, &key) else {
             return Err("a member accessor with no dispatch slot".into());
         };
         let ret = self.file.ir.functions[function as usize].ret;
-        self.dispatch(object, slot, &parameters, ret, &arguments[1..])
+        self.dispatch_through(object, slot, &parameters, ret, &arguments[1..])
     }
 }
 

@@ -7,6 +7,7 @@ use crate::fir::{ResolvedFunctionOverrideTarget, ResolvedPropertyOverrideTarget}
 use crate::ir::{ClassId, FunId, IrClass, IrFile};
 use crate::types::Ty;
 
+use super::module_interfaces::ModuleInterfaces;
 use super::{SlotKey, Unsupported};
 
 /// The fixed `kotlin.Any` slot named by one exact checked override edge.
@@ -244,10 +245,13 @@ pub(crate) fn overridden_property_slot(
 }
 
 /// Implementation method → the method it overrides, for the methods `class` declares. Both ends
-/// must be functions of this file.
+/// must be functions of this file, except an override of an interface member another file
+/// declares, which `numbered` gives a module-wide number: its interface table entry is filled from
+/// the override edge itself ([`super::planned_itable`]).
 pub(crate) fn overridden_functions(
     ir: &IrFile,
     class: &IrClass,
+    numbered: &ModuleInterfaces,
 ) -> Result<HashMap<FunId, Vec<FunId>>, Unsupported> {
     let mut map: HashMap<FunId, Vec<FunId>> = HashMap::default();
     let Some(overrides) = ir.function_overrides.get(&class.fq_name_id()) else {
@@ -277,6 +281,10 @@ pub(crate) fn overridden_functions(
                             targets.push(overridden);
                         }
                     }
+                    None if edge.overridden_is_interface
+                        && numbered
+                            .number(super::module_slots::PlanKey::Callable(*callable))
+                            .is_some() => {}
                     None => {
                         return Err(format!(
                             "an override of a method declared in another file (`{}.{}`)",

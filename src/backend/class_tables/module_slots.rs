@@ -11,11 +11,12 @@
 //! function slot); each member takes the slot of the class member it overrides when both carry
 //! values alike, or a new slot with a bridge left in the base's; an override of `kotlin.Any`'s
 //! members takes their fixed slots, and `invoke` over a function type the fixed function slot.
-//! Interface members are numbered elsewhere.
+//! Interface members are numbered in [`super::module_interfaces`].
 
 use crate::fx_hash::{HashMap, HashSet};
 
 use super::module_classes::{ModuleClass, ModuleClasses, ModuleMember};
+use super::module_interfaces::ModuleInterfaces;
 use crate::fir::{
     CallableId, PropertyId, ResolvedFunctionOverrideTarget, ResolvedPropertyOverrideTarget,
 };
@@ -76,6 +77,7 @@ pub(crate) struct PlannedTable {
 #[derive(Debug, Default)]
 pub(crate) struct ModuleSlotPlan {
     tables: HashMap<TypeName, Result<PlannedTable, Unsupported>>,
+    interfaces: ModuleInterfaces,
 }
 
 impl ModuleSlotPlan {
@@ -111,7 +113,13 @@ impl ModuleSlotPlan {
         }
         Self {
             tables: planner.tables,
+            interfaces: ModuleInterfaces::build(classes, representation),
         }
+    }
+
+    /// The module-wide numbers of interface members.
+    pub(crate) fn interfaces(&self) -> &ModuleInterfaces {
+        &self.interfaces
     }
 
     /// The planned table of `classifier`, `None` when the plan does not cover it at all.
