@@ -272,21 +272,6 @@ fn collect_pass_one_roots(file: &File) -> Reachable {
                         retain_parameter_defaults(&mut retained, file, &method.params);
                     }
                 }
-                if class_owns_signature_default(class) {
-                    // Checking any signature default of this class re-enters it in
-                    // SignatureDefaults mode, whose primary-constructor header check evaluates the
-                    // `super(…)` arguments and each interface-delegation value unconditionally.
-                    // Those expressions must survive compaction; init blocks, property
-                    // initializers, and constructor delegation arguments stay per-selection.
-                    retained.roots(file, class.base_args.iter().copied());
-                    retained.roots(
-                        file,
-                        class
-                            .interface_delegations
-                            .iter()
-                            .map(|delegation| delegation.value),
-                    );
-                }
                 let has_inline_body = class.methods.iter().any(FunDecl::is_inline)
                     || class.body_props.iter().any(|property| {
                         property.getter_inline
@@ -305,6 +290,22 @@ fn collect_pass_one_roots(file: &File) -> Reachable {
                                         .is_some_and(|setter| setter.is_inline)
                             })
                     });
+                if class_owns_signature_default(class) || has_inline_body {
+                    // Checking any signature default of this class re-enters it in
+                    // SignatureDefaults mode, and checking a selected inline member enters it
+                    // through the ordinary class checker. Both header checks evaluate the
+                    // `super(…)` arguments and each interface-delegation value unconditionally.
+                    // Those expressions must survive compaction; init blocks, property
+                    // initializers, and constructor delegation arguments stay per-selection.
+                    retained.roots(file, class.base_args.iter().copied());
+                    retained.roots(
+                        file,
+                        class
+                            .interface_delegations
+                            .iter()
+                            .map(|delegation| delegation.value),
+                    );
+                }
                 if has_inline_body {
                     // Checking a selected inline member enters its enclosing class through the
                     // ordinary class checker. That checker folds every class-owned declaration

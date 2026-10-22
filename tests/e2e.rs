@@ -1161,6 +1161,8 @@ mod inherited_reference_owner_e2e;
 mod init_block_lines_e2e;
 #[path = "e2e/inline.rs"]
 mod inline;
+#[path = "inline_member_super_arguments_e2e.rs"]
+mod inline_member_super_arguments_e2e;
 #[path = "inlined_code_inner_classes_e2e.rs"]
 mod inlined_code_inner_classes_e2e;
 #[path = "inlined_lambda_stack_spill_e2e.rs"]
