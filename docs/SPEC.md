@@ -15649,6 +15649,32 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   offsets, lines and columns as kotlinc. Verified against kotlinc 2.4.20.
   (`crates/krusty-plugin-host/tests/module_ir.rs`,
   `krusty_measures_a_file_with_carriage_returns_as_kotlinc_reads_it`.)
+- **Kotlin scripts (`.kts`) compile like kotlinc's standard script definition.** A script is the
+  class named after its file (`build.gradle.kts` → `Build_gradle`, `my-script.kts` →
+  `My_script`) extending `kotlin.script.templates.standard.ScriptTemplateWithArgs`. Its constructor
+  takes `args: Array<String>`, passes it to the template and stores it in a package-private final
+  field that `@Metadata` does not list; its statements run in the constructor in source order. The
+  constructor's first line entry sits at the script's start: the last token of its file header
+  (file annotations, package, imports), else the file's start or the first non-blank character
+  after a shebang line. Declarations become members; classes nest in the script class. A script
+  ending with an expression statement keeps its value in the public `$$result` field and getter,
+  typed as the statement it is (`if` without `else` and a non-exhaustive `when` are `Unit`; `x++`
+  is a value). A `Unit`, `Nothing` or `Nothing?` value keeps no property, and only `$$result` may
+  have type `Nothing`. A script's own declarations are reached lexically; a template member
+  (`args`, `hashCode()`) is read through the template type, with a `checkcast` to it. A delegated
+  script property has no dispatch receiver: its delegate gets `null` as `thisRef` and a
+  `KProperty0`. A static `main(String[])` calls `RunnerKt.runCompiledScript` and follows the
+  declared members, unless the script declares a function named `main`. `@Metadata` sets the
+  script flag (`xi` 52), lists no supertypes and no constructor, and records an explicit field
+  descriptor for a property typed by a script class. No class in a script file carries nullability
+  annotations. kotlinc adds `kotlin-script-runtime.jar` beside the standard library to every
+  compilation, and so does the `krusty` CLI. When the template is not on the classpath (`-no-stdlib`
+  without the script runtime, or an editor module that lacks it), the script class extends nothing:
+  its constructor takes no arguments, has no line entry for the script's start, and a template
+  member such as `args` is an unresolved reference. Not yet supported: a class that uses the script
+  instance (kotlinc makes it implicitly inner), top-level destructuring, type aliases declared in a
+  script, and a template-typed implicit receiver for extension calls such as `run { }`. Verified
+  against kotlinc 2.4.21 and kotlinc's own script test corpus. (`tests/kotlin_script_e2e.rs`.)
 
 ## 8. Success criteria for the PoC
 

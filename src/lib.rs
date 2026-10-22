@@ -61,6 +61,7 @@ pub mod plugins;
 mod program_entry;
 mod resolve;
 pub mod runtime;
+pub mod script_definitions;
 pub mod source;
 pub mod spelling;
 pub mod symbol_resolver;

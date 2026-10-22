@@ -23,7 +23,8 @@ impl Checker<'_> {
     /// Declare the primary-constructor parameters visible in a property initializer or an `init`
     /// block. Kotlin 2 resolves a `val`/`var` parameter named there to the property it declares, so
     /// only plain parameters become values of this rung; supertype arguments, delegation
-    /// expressions and parameter defaults declare every parameter instead.
+    /// expressions and parameter defaults declare every parameter instead. A script's parameters
+    /// are not in its statements' scope at all.
     pub(super) fn declare_initializer_parameters(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -31,7 +32,7 @@ impl Checker<'_> {
         types: impl IntoIterator<Item = Ty>,
     ) {
         for (parameter, ty) in parameters.iter().zip(types) {
-            if !parameter.is_property {
+            if !parameter.is_property && !parameter.is_script_parameter {
                 self.declare(scope, &parameter.name, ty, parameter.is_var);
             }
         }

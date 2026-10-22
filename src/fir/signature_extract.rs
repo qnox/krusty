@@ -1976,12 +1976,17 @@ impl SignatureConstraintExtractor {
                     (then_completion, then_state),
                     (else_completion, else_state),
                 ]);
-                let operands = self.graph.add_operands([then_value, else_value]);
-                self.graph.add_expr(SigExpr::Join {
-                    operands,
-                    scope,
-                    origin: node_origin,
-                })
+                if else_branch.is_none() {
+                    // An `if` without `else` is a statement of type `Unit`, whatever its branch is.
+                    else_value
+                } else {
+                    let operands = self.graph.add_operands([then_value, else_value]);
+                    self.graph.add_expr(SigExpr::Join {
+                        operands,
+                        scope,
+                        origin: node_origin,
+                    })
+                }
             }
             Expr::Try {
                 body,

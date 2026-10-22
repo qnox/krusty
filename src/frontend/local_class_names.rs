@@ -257,9 +257,6 @@ fn walk<'a>(
             }
         }
     }
-    if let Some(script) = file.script_body {
-        inventor.expr(script, &file_chain);
-    }
     inventor.names
 }
 

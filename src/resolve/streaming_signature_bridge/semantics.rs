@@ -962,11 +962,12 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         declaration: crate::fir::DeclarationId,
         result: crate::fir::ResolvedTy,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
+        // Only a script's `$$result` may be `Nothing`: the script ends by throwing.
         if result.get() == Ty::Nothing
-            && self
-                .headers
-                .stub(declaration)
-                .is_some_and(|stub| stub.kind == crate::fir::DeclarationKind::Property)
+            && self.headers.stub(declaration).is_some_and(|stub| {
+                stub.kind == crate::fir::DeclarationKind::Property
+                    && !stub.flags.has(crate::fir::DeclarationFlags::SCRIPT_RESULT)
+            })
         {
             return Err(self.record_missing_signature(declaration));
         }

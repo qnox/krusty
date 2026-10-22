@@ -1531,7 +1531,7 @@ impl<'a> CommonIrBodySink<'a> {
         }
         if matches!(
             anchor.kind,
-            DeclarationKind::Initializer | DeclarationKind::EnumEntry | DeclarationKind::Script
+            DeclarationKind::Initializer | DeclarationKind::EnumEntry
         ) {
             return accept_non_callable_body(
                 declaration,

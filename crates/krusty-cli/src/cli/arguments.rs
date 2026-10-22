@@ -136,20 +136,18 @@ fn split_classpath(v: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-pub(super) fn collect_sources(path: &str, out: &mut Vec<String>, ignored: &mut Vec<String>) {
+pub(super) fn collect_sources(path: &str, out: &mut Vec<String>) {
     let p = std::path::Path::new(path);
     if p.is_dir() {
         if let Ok(rd) = std::fs::read_dir(p) {
             let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
             entries.sort();
             for e in entries {
-                collect_sources(&e.to_string_lossy(), out, ignored);
+                collect_sources(&e.to_string_lossy(), out);
             }
         }
     } else if krusty::source::is_batch_compilable_path(p) {
         out.push(path.to_string());
-    } else if krusty::source::kind(p).is_some() {
-        ignored.push(format!("{path} (script compilation is not supported yet)"));
     }
 }
 

@@ -54,6 +54,18 @@ fn source_kind_from_uri(uri: &str) -> krusty::source::SourceKind {
         .unwrap_or(krusty::source::SourceKind::Kotlin)
 }
 
+/// A document's worker input. A script also gets its file stem, which names its class: the last
+/// URI segment without its extension, still percent-encoded.
+fn source_input<'a>(uri: &'a str, text: &'a str) -> krusty::source::SourceInput<'a> {
+    let kind = source_kind_from_uri(uri);
+    let input = krusty::source::SourceInput::new(kind, text);
+    if kind != krusty::source::SourceKind::KotlinScript {
+        return input;
+    }
+    let name = uri.rsplit('/').next().unwrap_or(uri);
+    input.with_file_stem(name.rsplit_once('.').map_or(name, |(stem, _)| stem))
+}
+
 /// The group's worker slots in wire order, each paired with the URI it may be dumped under.
 ///
 /// One traversal so the source inputs and the dump URIs cannot drift apart: a slot's URI is empty
@@ -79,18 +91,15 @@ pub(super) fn project_group_slots<'a>(
             let in_group = group.contains_document(index);
             (
                 if in_group { *uri } else { "" },
-                krusty::source::SourceInput::new(
-                    source_kind_from_uri(uri),
-                    if in_group { source } else { "" },
-                ),
+                source_input(uri, if in_group { source } else { "" }),
             )
         })
-        .chain(group.support_documents.iter().map(|source| {
-            (
-                "",
-                krusty::source::SourceInput::new(source_kind_from_uri(source.uri()), source.text()),
-            )
-        }))
+        .chain(
+            group
+                .support_documents
+                .iter()
+                .map(|source| ("", source_input(source.uri(), source.text()))),
+        )
 }
 
 pub(super) fn project_group_inputs<'a>(

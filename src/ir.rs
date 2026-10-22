@@ -881,6 +881,9 @@ pub struct IrClass {
     /// `data class` — carried so the metadata emitter can reproduce kotlinc's `IS_DATA` class flag and
     /// its synthesized `componentN`/`copy`/`equals`/`hashCode`/`toString` function metadata.
     pub is_data: bool,
+    /// The class a Kotlin script compiles to. Its constructor parameters are stored in fields of
+    /// their own, it records its last expression's value, and it has a `main` that runs it.
+    pub is_script: bool,
     /// 1-based source line of the class declaration (0 = unknown). The emitter maps the
     /// `LineNumberTable` of synthesized members (ctor/accessors) to this line, as kotlinc does.
     pub decl_line: u32,
@@ -1475,7 +1478,6 @@ pub struct IrFile {
     pub checked_class_initializers: Vec<IrCheckedClassInitializer>,
     pub checked_enum_entry_bodies:
         crate::fx_hash::HashMap<crate::fir::DeclarationId, IrCheckedEnumEntryBody>,
-    pub checked_script_body: Option<ExprId>,
     /// Lifted function parameter that carries a mutable capture's shared holder, keyed by
     /// `(function, parameter)`. `Ty` is the logical captured element type; each backend chooses its
     /// holder representation. Keeping this sparse semantic edge separate prevents JVM `Ref` classes
@@ -2442,6 +2444,11 @@ pub struct IrAppliedClassifier {
 }
 
 impl IrFile {
+    /// Whether this file is a Kotlin script, which compiles to its script class.
+    pub fn is_script(&self) -> bool {
+        self.classes.iter().any(|class| class.is_script)
+    }
+
     /// The checked FIR origin of an expression lowering recorded one for; `None` for a node a
     /// later pass built.
     pub fn node_origin(&self, expression: ExprId) -> Option<crate::fir::OriginId> {
