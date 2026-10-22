@@ -15,6 +15,8 @@ use super::type_checks::{is_runtime_constructed, ThrowableOperands};
 use super::*;
 use crate::types::TypeName;
 
+#[cfg(test)]
+mod layout_tests;
 mod walking;
 pub(super) use walking::WalkMembers;
 
