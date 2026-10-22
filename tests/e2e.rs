@@ -1281,6 +1281,8 @@ mod java_parameters_attribute_e2e;
 mod java_platform_type_publication_e2e;
 #[path = "java_source_constant_e2e.rs"]
 mod java_source_constant_e2e;
+#[path = "java_source_field_initializer_e2e.rs"]
+mod java_source_field_initializer_e2e;
 #[path = "java_source_interop_e2e.rs"]
 mod java_source_interop_e2e;
 mod java_static_modules;
