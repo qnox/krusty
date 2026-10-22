@@ -1,7 +1,7 @@
 //! Resolver-backed evaluation of compact signature expressions.
 
 use super::callable_references::AppliedSourceAlias;
-use super::top_level_call::{IndividuallyApplicableCall, SelectedTopLevelCall};
+use super::top_level_call::SelectedTopLevelCall;
 use super::*;
 use crate::resolve::implicit_rungs::ImplicitRung;
 
@@ -1371,8 +1371,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         );
                     }
                 }
-                if let Some((declaration, selected_argument_types)) = self
-                    .with_resolver(scope, |resolver| {
+                if let Ok((declaration, selected_argument_types)) =
+                    self.with_resolver(scope, |resolver| {
                         Self::selected_constructor_arguments(
                             resolver,
                             internal,
@@ -1382,7 +1382,6 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         )
                         .map(|(declaration, arguments)| (declaration, arguments.types))
                     })
-                    .ok()
                 {
                     let result = self.constructor_result(
                         scope,
@@ -1777,8 +1776,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             // `Owner(args)` is therefore the owner's ordinary constructor call; treating `Owner`
             // only as a companion value would incorrectly search `Owner.Companion.invoke`.
             if self.classifier_source_spelling(classifier) == spelling {
-                if let Some((declaration, selected_argument_types)) = self
-                    .with_resolver(scope, |resolver| {
+                if let Ok((declaration, selected_argument_types)) =
+                    self.with_resolver(scope, |resolver| {
                         Self::selected_constructor_arguments(
                             resolver,
                             classifier,
@@ -1788,7 +1787,6 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         )
                         .map(|(declaration, arguments)| (declaration, arguments.types))
                     })
-                    .ok()
                 {
                     return self.constructor_result(
                         scope,
@@ -1884,102 +1882,85 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 arguments.len(),
                 trailing_lambda,
             );
-            let mapped = Self::mapped_call_arguments(&candidates, arguments, trailing_lambda);
+            // Declarations that map the source arguments to different parameters (they name or
+            // omit different ones: `mk(id = "", source = null)` and `mk(source = null)` for
+            // `mk()`) are selected each under its own mapping, by the same selector.
+            let separately_mapped =
+                Self::separately_mapped_candidates(&candidates, arguments, trailing_lambda);
+            let mapped = if separately_mapped.is_some() {
+                None
+            } else {
+                Self::mapped_call_arguments(&candidates, arguments, trailing_lambda)
+            };
             let (selected_arguments, selected_argument_types) = mapped
                 .clone()
                 .unwrap_or_else(|| (argument_kinds.clone(), argument_types.clone()));
-            let selected_top_level = resolver.select_top_level_function_candidates_with_expected(
+            let (calls, separate_types): (Option<Vec<_>>, Option<Vec<_>>) =
+                match separately_mapped {
+                    Some(separate) => {
+                        let (calls, types) = separate.into_iter().unzip();
+                        (Some(calls), Some(types))
+                    }
+                    None => (None, None),
+                };
+            let selection = resolver.select_top_level_candidates(
                 spelling,
                 candidates.clone(),
-                &selected_arguments,
+                match &calls {
+                    Some(calls) => crate::symbol_resolver::TopLevelArguments::PerCandidate {
+                        calls,
+                        source: &argument_kinds,
+                    },
+                    None => crate::symbol_resolver::TopLevelArguments::Shared(&selected_arguments),
+                },
                 &resolved_type_arguments,
                 expected.map(crate::fir::ResolvedTy::get),
+                false,
             );
             crate::trace_compiler!(
                 "signature",
-                "projected top-level selection spelling={spelling} arguments={selected_arguments:?} type_arguments={resolved_type_arguments:?} selected={}",
-                selected_top_level.is_some(),
+                "projected top-level selection spelling={spelling} arguments={selected_arguments:?} separately_mapped={} type_arguments={resolved_type_arguments:?} selected={}",
+                calls.is_some(),
+                matches!(selection, crate::symbol_resolver::CandidateSelection::Selected(_)),
             );
-            if let Some((selected, callable)) = selected_top_level {
-                return Some((
-                    SelectedTopLevelCall::Callable {
-                        parameter_by_argument: Self::selected_argument_parameters(
-                            &selected,
-                            arguments,
-                            trailing_lambda,
-                        ),
-                        source: selected.source_key,
-                        declaration: selected.stable_declaration,
-                        callable: Box::new(callable),
-                    },
-                    selected_argument_types.clone(),
-                ));
-            }
-            // The shared overload selector intentionally returns `None` for both an empty
-            // applicable set and an ambiguous applicable set. Signature inference must preserve
-            // that distinction: a bottom-typed argument is applicable to every parameter, so an
-            // inferred declaration such as `fun f() = overloaded(boom())` can fail specifically
-            // with overload ambiguity before Pass 2. Ask the same selector about each declaration
-            // separately, under that declaration's own argument mapping: a family whose members
-            // omit different defaults (`mk(id = "", source = null)` and `mk(source = null)` for
-            // `mk()`) has no single mapping. The applicable declarations are then ranked as the
-            // body checker ranks them; no single winner is exactly an ambiguity.
-            let individually_applicable = candidates
-                .iter()
-                .filter(|candidate| candidate.kind == crate::libraries::FnKind::TopLevel)
-                .filter_map(|candidate| {
-                    let family = vec![candidate.clone()];
-                    let (kinds, argument_types) =
-                        Self::mapped_call_arguments(&family, arguments, trailing_lambda)?;
-                    let omitted_defaults = kinds
-                        .iter()
-                        .filter(|kind| {
-                            matches!(kind, crate::symbol_resolver::CallArgKind::OmittedDefault)
+            match selection {
+                crate::symbol_resolver::CandidateSelection::Selected((selected, callable)) => {
+                    // The selected declaration's own mapped argument types under separate mappings.
+                    let selected_types = separate_types
+                        .and_then(|separate| {
+                            candidates
+                                .iter()
+                                .zip(separate)
+                                .find(|(candidate, _)| {
+                                    candidate.stable_declaration == selected.stable_declaration
+                                })
+                                .map(|(_, types)| types)
                         })
-                        .count();
-                    let (declaration, callable) = resolver
-                        .select_top_level_function_candidates_with_expected(
-                            spelling,
-                            family,
-                            &kinds,
-                            &resolved_type_arguments,
-                            expected.map(crate::fir::ResolvedTy::get),
-                        )?;
-                    Some(IndividuallyApplicableCall {
-                        omitted_defaults,
-                        declaration,
-                        callable,
-                        argument_types,
-                    })
-                })
-                .collect::<Vec<_>>();
-            if !individually_applicable.is_empty() {
-                let module =
-                    crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-                let source = crate::symbol_source::CompositeSource::new(vec![
-                    &module as &dyn crate::symbol_source::SymbolSource,
-                    &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-                ]);
-                let Some((selected, parameter_by_argument)) = Self::most_specific_individual_call(
-                    &source,
-                    arguments,
-                    trailing_lambda,
-                    individually_applicable,
-                ) else {
+                        .unwrap_or_else(|| selected_argument_types.clone());
+                    return Some((
+                        SelectedTopLevelCall::Callable {
+                            parameter_by_argument: Self::selected_argument_parameters(
+                                &selected,
+                                arguments,
+                                trailing_lambda,
+                            ),
+                            source: selected.source_key,
+                            declaration: selected.stable_declaration,
+                            callable: Box::new(callable),
+                        },
+                        selected_types,
+                    ));
+                }
+                // A bottom-typed argument is applicable to every parameter, so an inferred
+                // declaration such as `fun f() = overloaded(boom())` can fail specifically with
+                // overload ambiguity before Pass 2.
+                crate::symbol_resolver::CandidateSelection::Ambiguous => {
                     return Some((
                         SelectedTopLevelCall::Ambiguous,
                         selected_argument_types.clone(),
                     ));
-                };
-                return Some((
-                    SelectedTopLevelCall::Callable {
-                        parameter_by_argument,
-                        source: selected.declaration.source_key,
-                        declaration: selected.declaration.stable_declaration,
-                        callable: Box::new(selected.callable),
-                    },
-                    selected.argument_types,
-                ));
+                }
+                crate::symbol_resolver::CandidateSelection::None => {}
             }
             let symbol = resolver.select_symbol(
                 crate::symbol_resolver::SymRecv::TopLevel,
@@ -1995,14 +1976,12 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             // Callable selection above already used the common file/module visibility gate. This
             // symbol query supplies the remaining value facet. Constructor selection below starts
             // from the already-bound classifier and retains its exact source-argument mapping.
-            if let Some(symbol) = symbol {
-                if let crate::symbol_resolver::Symbol::Member(facets) = &symbol {
-                    if let [property] = facets.values.as_slice() {
-                        return Some((
-                            SelectedTopLevelCall::Value(Box::new(property.clone())),
-                            argument_types.clone(),
-                        ));
-                    }
+            if let Some(crate::symbol_resolver::Symbol::Member(facets)) = &symbol {
+                if let [property] = facets.values.as_slice() {
+                    return Some((
+                        SelectedTopLevelCall::Value(Box::new(property.clone())),
+                        argument_types.clone(),
+                    ));
                 }
             }
             // A lexically nested classifier is a nearer type-scope rung than file imports. Use
@@ -2160,7 +2139,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         crate::fir::ResolvedTy::new(property.ty).map_err(|_| Self::failure())?
                     }
                 };
-                self.select_invoke(scope, origin, callee, &arguments, demand)
+                self.select_invoke(scope, origin, callee, arguments, demand)
             }
             SelectedTopLevelCall::ClassifierInvoke(classifier, value) => {
                 if let super::classifier_associated::AssociatedSignatureCall::Selected(result) =

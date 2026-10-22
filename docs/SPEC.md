@@ -3720,8 +3720,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_star_projection_contains_every_argument_whatever_bound_it_carries` in `src/assignable.rs`.
 - **An inferred return selects among overloads by each declaration's own argument mapping.**
   `fun n() = mk()` over `mk(id: String = "", source: Any? = null)` and `mk(source: Any? = null)`
-  has no argument mapping shared by the family, so signature inference maps and checks each
-  declaration separately. The applicable declarations are ranked as at any call: the most
+  has no argument mapping shared by the family, so each declaration carries its own mapping into
+  the one top-level overload selector (`src/symbol_resolver/top_level_selection.rs`), which applies
+  applicability, `@LowPriorityInOverloadResolution`, literal adaptation and specificity exactly as
+  for a shared mapping. Only the comparison coordinates differ: the most
   specific parameters the supplied arguments map to win, compared in argument order, and a
   parameter left to its default takes no part. Only declarations whose compared parameters are
   identical are separated by the defaults they omit, the fewest winning; kotlinc selects
@@ -3733,7 +3735,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the same rule in the shared selector: `lazy { mk() }` on an implicit `T : Comp` receiver over
   `T.mk(id: String = "", source: Any? = null, arch: Int? = null)` and `T.mk(source: Any? = null)`
   selects the one-default extension, as kotlinc does, where both used to tie (koin-core's
-  `createScope()`). Tests: `an_inferred_return_*` and `an_implicit_receiver_call_*` in
+  `createScope()`). A low-priority declaration still yields: `choose(value = "x")` over a
+  low-priority `choose(a: Int = 0, value: String): Int` and `choose(b: Boolean = false, c: Long =
+  0, value: Any): String` selects the `String` one in an inferred and a declared return. Tests:
+  `an_inferred_return_*`, `a_low_priority_overload_*` and `an_implicit_receiver_call_*` in
   `tests/overloaded_inferred_return_e2e.rs`.
 - **An `in` projection is an invariant argument when its capture meets the parameter's bounds.**
   kotlinc captures `A<in X>` as `C` with lower bound `X` and the parameter's declared upper bounds,

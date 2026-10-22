@@ -481,6 +481,37 @@ fn an_inferred_return_over_a_more_specific_overload_is_byte_identical_to_kotlinc
     assert_eq!(result, Ok(()));
 }
 
+/// A low-priority declaration leaves a family whose members map the arguments differently as it
+/// leaves any other: the ordinary declaration is selected in an inferred and a declared return,
+/// though the low-priority one's `String` parameter is more specific than its `Any`.
+const LOW_PRIORITY_UNDER_SEPARATE_MAPPINGS: &str = "@file:Suppress(\"INVISIBLE_REFERENCE\", \"INVISIBLE_MEMBER\")\n\
+@kotlin.internal.LowPriorityInOverloadResolution\n\
+fun choose(a: Int = 0, value: String): Int = 7\n\
+fun choose(b: Boolean = false, c: Long = 0, value: Any): String = \"normal\"\n\
+fun inferred() = choose(value = \"x\")\n\
+fun declared(): String = choose(value = \"x\")\n\
+fun box(): String = if (inferred() == \"normal\" && declared() == \"normal\") \"OK\" else \"fail\"\n";
+
+#[test]
+fn a_low_priority_overload_yields_under_separate_argument_mappings() {
+    common::expect_box_same_as_kotlinc(
+        LOW_PRIORITY_UNDER_SEPARATE_MAPPINGS,
+        "LowPriorityUnderSeparateMappings",
+    );
+}
+
+#[test]
+fn a_low_priority_overload_under_separate_mappings_is_byte_identical_to_kotlinc() {
+    let result = common::byte_diff_against_kotlinc_cp(
+        "LowPriorityUnderSeparateMappings",
+        LOW_PRIORITY_UNDER_SEPARATE_MAPPINGS,
+        "LowPriorityUnderSeparateMappingsKt",
+        &[common::stdlib_jar()],
+    )
+    .expect("kotlinc and the stdlib are provisioned");
+    assert_eq!(result, Ok(()));
+}
+
 /// An extension family called on an implicit receiver, with no argument: the overload omitting
 /// the fewest defaults wins in an inferred return, inside a lambda, and in a declared one.
 const IMPLICIT_RECEIVER_FEWEST_DEFAULTS: &str = "interface Comp\n\

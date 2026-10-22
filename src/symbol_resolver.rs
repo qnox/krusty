@@ -49,8 +49,10 @@ mod selected_call_instantiation;
 pub(crate) use selected_call_instantiation::selected_default_callable;
 pub(crate) mod selected_constructor;
 pub(crate) use selected_constructor::SelectedConstructorDeclaration;
+pub(crate) use top_level_selection::{CandidateCall, TopLevelArguments};
 mod source_view;
 mod statically_known_subtype;
+mod top_level_selection;
 #[cfg(test)]
 use argument_compatibility::arg_fits;
 use argument_compatibility::{arg_fits_platform, arg_fits_source, untyped_lambda_pertinent};
@@ -1950,41 +1952,17 @@ impl<'a> SymbolResolver<'a> {
         expected: Option<Ty>,
         include_invisible: bool,
     ) -> Option<(FunctionInfo, LibraryCallable)> {
-        let functions = FunctionSet {
-            overloads: candidates,
-        };
-        let (selected, callable) = self.pick_top_level_with_visibility(
+        match self.select_top_level_candidates(
             name,
-            &functions,
-            args,
+            candidates,
+            TopLevelArguments::Shared(args),
             type_args,
             expected,
             include_invisible,
-        )?;
-        if let Some(selected) = selected {
-            return Some((selected, callable));
+        ) {
+            CandidateSelection::Selected(selected) => Some(selected),
+            CandidateSelection::None | CandidateSelection::Ambiguous => None,
         }
-        // A default bridge is a provider-owned physical callable rather than one of the projected
-        // source candidates above: it carries its realization's coordinates (`HttpClient$default`
-        // and the bridge descriptor), so pair it back to the base declaration whose realization it
-        // is. An ordinary selection carries its exact candidate identity out of the overload
-        // engine and still matches by its own coordinates.
-        let selected = functions.top_level().find(|candidate| {
-            candidate.callable.owner == callable.owner
-                && candidate.callable.name == callable.name
-                && candidate.callable.descriptor == callable.descriptor
-                || (callable.default_call
-                    && candidate
-                        .callable
-                        .default_realization
-                        .as_deref()
-                        .is_some_and(|realization| {
-                            realization.owner == callable.owner
-                                && realization.name == callable.physical_name()
-                                && realization.descriptor == callable.descriptor
-                        }))
-        })?;
-        Some((selected.clone(), callable))
     }
 
     /// Normalize a Kotlin function type or SAM classifier to the callable shape used to check a
@@ -2281,270 +2259,17 @@ impl<'a> SymbolResolver<'a> {
         type_args: &[Ty],
         expected: Option<Ty>,
     ) -> Option<LibraryCallable> {
-        self.pick_top_level_with_visibility(name, fs, args, type_args, expected, false)
-            .map(|(_, callable)| callable)
-    }
-
-    fn pick_top_level_with_visibility(
-        &self,
-        name: &str,
-        fs: &FunctionSet,
-        args: &[CallArgKind],
-        type_args: &[Ty],
-        expected: Option<Ty>,
-        include_invisible: bool,
-    ) -> Option<(Option<FunctionInfo>, LibraryCallable)> {
-        // Exact/default probes see ordinary runtime types; `args` separately drives adaptation.
-        let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
-        let mut parsed: Vec<(&FunctionInfo, Vec<Ty>, Ty, GSigBinds)> = fs
-            .top_level()
-            .filter(|candidate| include_invisible || self.non_member_callable_accessible(candidate))
-            .filter(|o| top_level_exact_parameters_admit(o, args, type_args))
-            .filter_map(|o| {
-                let semantic = o.semantic_signature();
-                let mut bindings = seeded_gsig_binds(&semantic, type_args);
-                let value_count = semantic.params.len().saturating_sub(o.context_count);
-                let inferred = infer_generic_call_bindings_from_symbols(
-                    &self.src,
-                    &semantic,
-                    args.iter()
-                        .enumerate()
-                        .filter_map(|(argument_index, argument)| {
-                            if argument.is_omitted_default() {
-                                return None;
-                            }
-                            let value_parameter = match o.call_sig.vararg_index {
-                                Some(vararg)
-                                    if argument_index >= vararg.saturating_sub(o.context_count) =>
-                                {
-                                    vararg.saturating_sub(o.context_count)
-                                }
-                                _ if argument_index < value_count => argument_index,
-                                _ => return None,
-                            };
-                            let parameter = o.context_count + value_parameter;
-                            let declared = *semantic.params.get(parameter)?;
-                            let whole_array = argument.is_spread();
-                            let expected =
-                                if o.call_sig.vararg_index == Some(parameter) && !whole_array {
-                                    declared.array_read_elem().unwrap_or(declared)
-                                } else {
-                                    declared
-                                };
-                            Some((
-                                parameter,
-                                argument.inference_type(&self.src, expected),
-                                whole_array,
-                            ))
-                        }),
-                    o.call_sig.vararg_index,
-                );
-                for (formal, actual) in inferred {
-                    bindings.entry(formal).or_insert(actual);
-                }
-                if let Some(expected) = expected {
-                    if let Some(inferred_return) = infer_generic_return_bindings_from_symbols(
-                        &self.src,
-                        &semantic,
-                        expected,
-                        |actual, bound| resolution_subtype(&self.src, actual, bound),
-                    ) {
-                        for (formal, actual) in inferred_return {
-                            bindings.entry(formal).or_insert(actual);
-                        }
-                    }
-                }
-                if !generic_bindings_satisfy_bounds(&semantic, &bindings, |actual, bound| {
-                    resolution_subtype(&self.src, actual, bound)
-                }) {
-                    crate::trace_compiler!(
-                        "resolve",
-                        "reject top-level candidate {}: bindings={:?}, bounds={:?}",
-                        name,
-                        bindings,
-                        semantic.formal_bounds
-                    );
-                    return None;
-                }
-                let params = apply_platform_call_parameter_nullability(
-                    instantiate_signature_parameters(
-                        &self.src,
-                        &semantic,
-                        &bindings,
-                        UnboundSpecialization::Preserve,
-                    ),
-                    &o.call_sig.platform_nullable_params,
-                    &arg_tys,
-                    o.call_sig.vararg,
-                );
-                // Leading CONTEXT parameters are supplied implicitly by the caller, never
-                // positionally — matching and arity checks see only the value parameters.
-                let value_params = params[o.context_count.min(params.len())..].to_vec();
-                Some((o, value_params, o.callable.ret, bindings))
-            })
-            .collect();
-        let fits = |p: &Ty, a: &CallArgKind| a.fits_parameter(self.lib, &self.src, *p);
-        let adapts = |p: &Ty, a: &CallArgKind, _i: usize| a.adapts_integer_literal_to(*p);
-
-        // Kotlin removes low-priority declarations only when an ordinary declaration is actually
-        // applicable. Do that once, before specificity, so every exact/literal/default/vararg branch
-        // below sees one coherent candidate tier.
-        let applicable = |candidate: &(&FunctionInfo, Vec<Ty>, Ty, GSigBinds)| {
-            let (o, params, ..) = candidate;
-            fixed_parameter_shape(params, args, |_, parameter, argument| {
-                fits(parameter, argument)
-            })
-            .is_some()
-                || omitted_parameter_shape(params, args, |position, parameter, argument| {
-                    fits(parameter, argument) || adapts(parameter, argument, position)
-                })
-                .is_some()
-                || candidate_vararg_shape(o, params, args, |position, parameter, argument| {
-                    fits(parameter, argument) || adapts(parameter, argument, position)
-                })
-                .is_some()
-        };
-        if parsed.iter().any(|candidate| {
-            !candidate
-                .0
-                .callable
-                .annotations
-                .contains(&crate::types::type_name(
-                    "kotlin/internal/LowPriorityInOverloadResolution",
-                ))
-                && applicable(candidate)
-        }) {
-            parsed.retain(|candidate| {
-                !candidate
-                    .0
-                    .callable
-                    .annotations
-                    .contains(&crate::types::type_name(
-                        "kotlin/internal/LowPriorityInOverloadResolution",
-                    ))
-            });
+        match self.pick_top_level_with_visibility(
+            name,
+            fs,
+            TopLevelArguments::Shared(args),
+            type_args,
+            expected,
+            false,
+        ) {
+            CandidateSelection::Selected((_, callable)) => Some(callable),
+            CandidateSelection::None | CandidateSelection::Ambiguous => None,
         }
-
-        let pick = if let Some(exact) = parsed.iter().find(|(_, params, ..)| {
-            params.len() == args.len()
-                && params
-                    .iter()
-                    .zip(args)
-                    .all(|(parameter, argument)| *parameter == argument.type_for(*parameter))
-        }) {
-            Some(exact)
-        } else {
-            let literal_pick = match integer_literal_overload(
-                parsed
-                    .iter()
-                    .map(|entry @ (_, params, ..)| (params.clone(), entry)),
-                args,
-                |_, param, arg| fits(param, arg),
-                |_position, left, right, arg| {
-                    parameter_at_least_as_specific(&self.src, left, right, arg)
-                        || resolution_subtype(&self.src, left, right)
-                },
-                |_, _| false,
-            ) {
-                CandidateSelection::Selected(entry) => Some(entry),
-                CandidateSelection::Ambiguous => return None,
-                CandidateSelection::None => None,
-            };
-            match literal_pick {
-                Some(entry) => Some(entry),
-                None => match unique_most_specific(
-                    parsed.iter().filter_map(|entry @ (_, params, ..)| {
-                        fixed_parameter_shape(params, args, |_, param, arg| fits(param, arg))
-                            .map(|shape| (shape, entry))
-                    }),
-                    |_, left, right| resolution_subtype(&self.src, left, right),
-                ) {
-                    CandidateSelection::Selected(entry) => Some(entry),
-                    CandidateSelection::Ambiguous => return None,
-                    CandidateSelection::None => match unique_most_specific(
-                        parsed.iter().filter_map(|entry @ (o, params, ..)| {
-                            candidate_vararg_shape(o, params, args, |i, param, arg| {
-                                fits(param, arg) || adapts(param, arg, i)
-                            })
-                            .map(|shape| (shape, entry))
-                        }),
-                        |_, left, right| resolution_subtype(&self.src, left, right),
-                    ) {
-                        CandidateSelection::Selected(entry) => Some(entry),
-                        CandidateSelection::Ambiguous => return None,
-                        CandidateSelection::None => None,
-                    },
-                },
-            }
-        };
-
-        if pick.is_none() {
-            if let Some(c) =
-                self.select_top_level_default_callable(name, &arg_tys, type_args, expected)
-            {
-                crate::trace_compiler!(
-                    "resolve",
-                    "top-level {name} args={arg_tys:?} -> {}.{}{} default inline={:?}",
-                    c.owner.render(),
-                    c.name,
-                    c.descriptor,
-                    c.inline
-                );
-                return Some((None, c));
-            }
-        }
-
-        let (o, params, ret, bindings) = pick?;
-        let c = &o.callable;
-        let mut vararg_elem = None;
-        let ret_ty = o
-            .generic_sig
-            .as_ref()
-            .map(|gsig| {
-                vararg_elem = instantiate_vararg_element(&self.src, gsig, params, args, bindings);
-                instantiate_signature_result(
-                    &self.src,
-                    gsig,
-                    bindings,
-                    UnboundSpecialization::UseUpperBound,
-                )
-            })
-            .unwrap_or(*ret);
-        // The signature owns post-substitution behavior, so every provider and callable origin
-        // reaches the same realization path after ordinary inference. A suspend callable's physical
-        // `Object` result is not its source return; its generic metadata remains authoritative too.
-        let ret_ty = o.ret.apply(
-            o.generic_sig
-                .as_ref()
-                .map_or(ret_ty, |sig| sig.apply_return_policy(self.lib, ret_ty)),
-        );
-
-        crate::trace_compiler!(
-            "resolve",
-            "top-level {name} args={arg_tys:?} -> {}.{}{} inline={:?}",
-            c.owner.render(),
-            c.name,
-            c.descriptor,
-            c.inline
-        );
-        let callable = LibraryCallable {
-            // A function with leading CONTEXT parameters emits the FULL parameter list (context
-            // included) so the lowerer can prepend the implicit context sources; the matched
-            // `params` were value-only for arity purposes. Without context, the matched list is
-            // the full list (platform-nullability applied).
-            params: if o.context_count > 0 {
-                c.params.clone()
-            } else {
-                params.clone()
-            },
-            ret: ret_ty,
-            physical_ret: *ret,
-            default_call: false,
-            vararg_elem,
-            vararg_index: vararg_elem.and(o.call_sig.vararg_index),
-            ..c.clone()
-        };
-        Some((Some((*o).clone()), callable))
     }
 
     /// Shape a selected extension overload into a [`LibraryCallable`] for the call site. An EXACT call binds
