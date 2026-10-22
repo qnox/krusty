@@ -1312,6 +1312,51 @@ error: warnings found and -Werror specified\n";
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A project applying `kotlin("kapt")` with a real annotation processor. kapt's stub
+    /// generation is a KotlinJvmCompile that runs kotlinc with the kapt plugin, so it is left to
+    /// kotlinc, visibly; the main compile after annotation processing goes through krusty, and the
+    /// processor's output is produced from krusty's sources.
+    #[test]
+    #[ignore = "downloads Gradle and the Kotlin Gradle plugin"]
+    fn kapt_project_compiles_through_krusty() {
+        let fixture = IntegrationFixture::new("krusty-kapt", write_kapt_build);
+        let root = &fixture.root;
+        let output = fixture
+            .build()
+            .tasks([":classes"])
+            .run_output()
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        let reports = output
+            .lines()
+            .filter(|line| line.trim().starts_with("krusty: "))
+            .map(str::trim)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reports,
+            [
+                "krusty: task ':kaptGenerateStubsKotlin' is left to kotlinc: it generates kapt stubs",
+                "krusty: task ':kaptGenerateStubsTestKotlin' is left to kotlinc: it generates kapt stubs",
+            ],
+            "{output}"
+        );
+        let runs = invocations(&std::fs::read_to_string(&fixture.log).expect("invocation log"));
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert_eq!(source_names(&runs[0]), ["Job.kt"], "{runs:?}");
+        assert!(root
+            .join("build/classes/kotlin/main/app/Job.class")
+            .is_file());
+        assert_eq!(
+            std::fs::read_to_string(
+                root.join("build/tmp/kapt3/classes/main/META-INF/services/java.lang.Runnable")
+            )
+            .expect("the processor's service file"),
+            "app.Job\n",
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// `kotlin("plugin.serialization")` reaches krusty exactly as kotlinc receives it — the Kotlin
     /// Gradle plugin's compiler-plugin classpath as `-Xplugin` — whether the build applies it before
     /// krusty (`:model`) or after (`:app`). The generated serializers are then exercised at run time
@@ -2534,6 +2579,56 @@ tasks.register("greet") {
     }
 }
 "#,
+        );
+    }
+
+    fn write_kapt_build(root: &Path, plugin_version: &str, kgp_version: &str) {
+        let write = |rel: &str, body: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            let body = body
+                .replace("PLUGIN_VERSION", plugin_version)
+                .replace("KGP_VERSION", kgp_version);
+            std::fs::write(path, body).expect("write");
+        };
+        write(
+            "settings.gradle.kts",
+            r#"
+pluginManagement {
+    repositories {
+        providers.gradleProperty("krusty.plugin.repository").orNull?.let {
+            maven { url = uri(it) }
+        }
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "kapt-consumer"
+"#,
+        );
+        write(
+            "build.gradle.kts",
+            r#"
+plugins {
+    kotlin("jvm") version "KGP_VERSION"
+    kotlin("kapt") version "KGP_VERSION"
+    id("krusty") version "PLUGIN_VERSION"
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    kapt("com.google.auto.service:auto-service:1.1.1")
+    compileOnly("com.google.auto.service:auto-service-annotations:1.1.1")
+}
+"#,
+        );
+        write(
+            "src/main/kotlin/app/Job.kt",
+            "package app\n\nimport com.google.auto.service.AutoService\n\n@AutoService(Runnable::class)\nclass Job : Runnable {\n    override fun run() {}\n}\n",
         );
     }
 
