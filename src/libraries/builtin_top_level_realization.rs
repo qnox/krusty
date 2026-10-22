@@ -262,13 +262,17 @@ fn array_factory(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntri
     valid.then_some(CompilerIntrinsic::ArrayFactory(kind))
 }
 
-fn kotlin_function(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
+fn kotlin_function(
+    facts: &BuiltinFunctionDeclaration<'_>,
+    compiler_builtin_owner: bool,
+) -> Option<CompilerIntrinsic> {
     if !facts.package.matches("kotlin") || !plain(facts, facts.kind) {
         return None;
     }
     match (facts.name, facts.kind, facts.receiver, facts.params) {
         ("plus", FnKind::Extension, Some(receiver), [parameter])
-            if facts.type_parameter_count == 0
+            if compiler_builtin_owner
+                && facts.type_parameter_count == 0
                 && facts.vararg.is_none()
                 && facts.is_operator
                 && receiver == Ty::nullable(Ty::String)
@@ -716,7 +720,7 @@ fn function_realization_with_stdlib_owner(
     if let Some(intrinsic) = with_index(&facts) {
         Some(intrinsic)
     } else if facts.package.matches("kotlin") {
-        kotlin_function(&facts)
+        kotlin_function(&facts, compiler_builtin_owner)
     } else if facts.package.matches("kotlin/io") {
         console(&facts)
     } else if facts.package.matches("kotlin/collections") || facts.package.matches("kotlin/text") {
@@ -1196,6 +1200,10 @@ mod tests {
     #[test]
     fn same_spelling_needs_the_complete_declaration() {
         let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        assert_eq!(
+            function_realization_with_stdlib_owner(string_plus(&[any], Ty::String), false),
+            None
+        );
         assert_eq!(
             function_realization(string_plus(&[any], Ty::String)),
             Some(CompilerIntrinsic::StringPlus)
