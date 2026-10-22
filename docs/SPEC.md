@@ -3718,6 +3718,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `MutableList<Frame<*>>` argument. Tests: `tests/classpath_star_projection_bound_e2e.rs` (run
   against krusty- and kotlinc-built dependencies; classes byte-identical to kotlinc's) and
   `a_star_projection_contains_every_argument_whatever_bound_it_carries` in `src/assignable.rs`.
+- **An `in` projection is an invariant argument when its capture meets the parameter's bounds.**
+  kotlinc captures `A<in X>` as `C` with lower bound `X` and the parameter's declared upper bounds,
+  then compares `C` for equality with an invariant `A<Y>` argument: `Y <: X` and every bound
+  `<: Y`. A Java parameter's bound is the flexible `Any!`, so `Class<Any>.superclass`
+  (`Class<in Any!>!`) is a `Class<Any>`. A use-site projection also replaces the parameter's
+  declared variance when a member type is specialized: in `Class<? super T>` read from
+  `Class<in Any>`, `T` sits in a contravariant position and the captured `in Any` approximates to
+  `Any` (kotlinc renders `Class<in CapturedType(in Any)!>!`), never a nested `in in Any`. Both
+  together let `generateSequence(start) { it.superclass }` settle; before, every lambda recheck
+  nested one more `in` into `T` and the compiler never finished (moshi's `AdapterMethodsFactory`).
+  Tests: `a_java_superclass_chain_*` in `tests/use_site_variance_e2e.rs` (classes byte-identical
+  to kotlinc's).
 - **A platform-typed implicit receiver exposes its members.** In
   `KeyPairGenerator.getInstance("RSA").apply { initialize(1024) }` the `apply` receiver is the
   flexible `KeyPairGenerator!`. A bare `initialize` selects the member exactly as
