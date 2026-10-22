@@ -229,14 +229,34 @@ fn allowing_expect_actual_classes_compiles_as_kotlinc_does() {
         arguments
     };
     let (code, without) = kotlinc(&compile("without", false));
-    let beta_warnings = without
-        .lines()
-        .filter(|line| line.contains(": warning: 'expect'/'actual' classes"))
-        .count();
+    // kotlinc writes a source below the working directory relative to it; redact both spellings.
+    let cwd = std::env::current_dir().expect("working directory");
+    let redact = |stderr: String, file: &str, placeholder: &str| {
+        let source = path(file);
+        let written = source.strip_prefix(&cwd).unwrap_or(&source);
+        stderr
+            .replace(&text(&source), placeholder)
+            .replace(&text(written), placeholder)
+    };
+    let without = redact(
+        redact(without, "Common.kt", "<common>"),
+        "Platform.kt",
+        "<platform>",
+    );
+    const BETA: &str = "warning: 'expect'/'actual' classes (including interfaces, objects, \
+                        annotations, enums, and 'actual' typealiases) are in Beta. Consider using \
+                        the '-Xexpect-actual-classes' flag to suppress this warning. Also see: \
+                        https://youtrack.jetbrains.com/issue/KT-61573";
     assert_eq!(
-        (code, beta_warnings),
-        (0, 2),
-        "kotlinc without {ARGUMENT}: {without}"
+        (code, without),
+        (
+            0,
+            format!(
+                "<common>:2:1: {BETA}\nexpect class Box() {{\n^^^^^^\n\
+                 <platform>:2:1: {BETA}\nactual class Box actual constructor() {{\n^^^^^^\n"
+            )
+        ),
+        "kotlinc without {ARGUMENT}"
     );
     let (code_with, stderr) = kotlinc(&compile("kotlinc", true));
     assert_eq!((code_with, stderr.as_str()), (0, ""), "kotlinc {ARGUMENT}");
