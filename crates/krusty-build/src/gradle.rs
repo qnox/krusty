@@ -1568,7 +1568,7 @@ subprojects {
 plugins {
     kotlin("plugin.serialization") version "KGP_VERSION"
     kotlin("jvm")
-    id("krusty") version "PLUGIN_VERSION" apply false
+    id("dev.krustythecompiler") version "PLUGIN_VERSION" apply false
     kotlin("plugin.sam.with.receiver") version "KGP_VERSION"
     kotlin("plugin.assignment") version "KGP_VERSION" apply false
     `java-library`
@@ -1582,7 +1582,7 @@ samWithReceiver {
 if (providers.gradleProperty("krusty.negative").orNull == "compiler-plugin-before-krusty") {
     pluginManager.apply("org.jetbrains.kotlin.plugin.assignment")
 }
-pluginManager.apply("krusty")
+pluginManager.apply("dev.krustythecompiler")
 
 dependencies {
     api("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
@@ -1599,7 +1599,7 @@ dependencies {
             r#"
 plugins {
     kotlin("jvm")
-    id("krusty") version "PLUGIN_VERSION"
+    id("dev.krustythecompiler") version "PLUGIN_VERSION"
     kotlin("plugin.serialization") version "KGP_VERSION"
     application
 }
@@ -1842,7 +1842,7 @@ plugins {
     id("com.android.application") version "AGP_VERSION" apply false
     id("com.android.library") version "AGP_VERSION" apply false
     kotlin("android") version "KGP_VERSION" apply false
-    id("krusty") version "PLUGIN_VERSION" apply false
+    id("dev.krustythecompiler") version "PLUGIN_VERSION" apply false
 }
 "#,
         );
@@ -1851,7 +1851,7 @@ plugins {
             r#"
 plugins {
     id("com.android.library")
-    id("krusty")
+    id("dev.krustythecompiler")
 }
 
 android {
@@ -1882,7 +1882,7 @@ dependencies {
             r#"
 plugins {
     id("com.android.application")
-    id("krusty")
+    id("dev.krustythecompiler")
 }
 
 android {
@@ -2041,7 +2041,7 @@ class GreetProcessor(private val codeGenerator: CodeGenerator) : SymbolProcessor
 plugins {
     kotlin("jvm")
     id("com.google.devtools.ksp")
-    id("krusty") version "PLUGIN_VERSION"
+    id("dev.krustythecompiler") version "PLUGIN_VERSION"
     kotlin("plugin.assignment") version "KGP_VERSION" apply false
     application
 }
@@ -2348,11 +2348,13 @@ fun main() {
 
     /// The message `task` failed with, as Gradle reports it under "What went wrong", one entry
     /// per non-empty line. Gradle 9 names the plugin that registered the task in the header
-    /// (`Execution failed for task ':a' (registered by plugin 'krusty').`); Gradle 8 does not.
+    /// (`Execution failed for task ':a' (registered by plugin 'dev.krustythecompiler').`);
+    /// Gradle 8 does not.
     fn task_failure(rendered: &str, task: &str) -> Vec<String> {
         let header = format!("Execution failed for task '{task}'.");
-        let registered =
-            format!("Execution failed for task '{task}' (registered by plugin 'krusty').");
+        let registered = format!(
+            "Execution failed for task '{task}' (registered by plugin 'dev.krustythecompiler')."
+        );
         let lines = rendered.lines().collect::<Vec<_>>();
         let at = lines
             .iter()
@@ -2590,7 +2592,7 @@ pluginManagement {
             r#"
 plugins {
     kotlin("jvm") version "KGP_VERSION"
-    id("krusty") version "PLUGIN_VERSION"
+    id("dev.krustythecompiler") version "PLUGIN_VERSION"
     id("fixture.greeting")
 }
 
@@ -2611,7 +2613,7 @@ repositories {
             r#"
 plugins {
     `kotlin-dsl`
-    id("krusty") version "PLUGIN_VERSION"
+    id("dev.krustythecompiler") version "PLUGIN_VERSION"
 }
 
 repositories {
@@ -2670,7 +2672,7 @@ rootProject.name = "kapt-consumer"
 plugins {
     kotlin("jvm") version "KGP_VERSION"
     kotlin("kapt") version "KGP_VERSION"
-    id("krusty") version "PLUGIN_VERSION"
+    id("dev.krustythecompiler") version "PLUGIN_VERSION"
 }
 
 repositories {
@@ -2737,7 +2739,7 @@ import org.gradle.api.tasks.compile.JavaCompile
 
 plugins {
     kotlin("jvm") version "KGP_VERSION"
-    id("krusty") version "PLUGIN_VERSION"
+    id("dev.krustythecompiler") version "PLUGIN_VERSION"
     `java-library`
 }
 
@@ -2821,7 +2823,7 @@ import org.gradle.api.tasks.compile.JavaCompile
 
 plugins {
     kotlin("jvm") version "KGP_VERSION"
-    id("krusty") version "PLUGIN_VERSION"
+    id("dev.krustythecompiler") version "PLUGIN_VERSION"
     kotlin("plugin.assignment") version "KGP_VERSION" apply false
     `java-library`
 }
