@@ -79,7 +79,13 @@ impl BodyFirChecker<'_> {
             .collect::<Result<Vec<_>, _>>()?;
         let checked = match expression {
             Some(expression) => self
-                .call_arguments(expression, arguments, &target.params)?
+                .call_arguments_from(
+                    expression,
+                    arguments,
+                    &target.params,
+                    0,
+                    target.vararg_index,
+                )?
                 .into_vec(),
             None => {
                 if arguments.len() != target.params.len() {
