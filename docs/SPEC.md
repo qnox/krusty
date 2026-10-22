@@ -8252,6 +8252,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **A fully-qualified CONSTRUCTOR call via a package path `a.b.Ctx(x = 1, y = 2)`.** The prefix commits
   as a package and `Ctx` is one classifier edge. The checker records the selected constructor and
   result identity; lowering consumes those facts. Test: `tests/fq_ctor_call_e2e.rs`.
+- **A backticked qualifier segment containing dots names one package edge per part.** kotlinc
+  joins a qualifier's segments into one fully qualified name, so `` `a.b`.Holder.f() ``,
+  `` a.`b.c`.Leaf `` and `` `a.b`.top() `` reach the packages `a.b` and `a.b.c`. Protobuf's
+  generated Kotlin DSL writes its own package this way (`` `com.example`.FooKt.Dsl._create(…) ``).
+  A declaration name cannot contain a dot, so such a segment only ever walks package edges
+  (`qualifiers::subpackage`); when a part names no package, the whole written segment is the
+  unresolved reference (`` a.`b.x`.Holder `` reports `` unresolved reference 'b.x'. `` when `a.b`
+  exists but `a.b.x` does not). A type spelling already splits on its
+  dots. Test: `tests/backticked_dotted_package_qualifier_e2e.rs`.
 - **A construction of a module class records the selected constructor declaration.** Common IR
   maps each construction to the checked constructor declaration the checker selected, and copies
   one module record per such declaration, and per constructor the file itself declares: the

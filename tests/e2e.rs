@@ -6,6 +6,8 @@
 mod abstract_serializable_e2e;
 #[path = "annotation_documented_mirror_e2e.rs"]
 mod annotation_documented_mirror_e2e;
+#[path = "backticked_dotted_package_qualifier_e2e.rs"]
+mod backticked_dotted_package_qualifier_e2e;
 #[path = "bridge_result_cast_e2e.rs"]
 mod bridge_result_cast_e2e;
 #[path = "common/bytecode_comparison.rs"]
