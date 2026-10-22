@@ -5,10 +5,13 @@ import java.io.File
 import java.io.InputStream
 import java.net.URI
 import java.nio.channels.FileChannel
+import java.nio.channels.FileLock
+import java.nio.channels.OverlappingFileLockException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
 import java.util.zip.GZIPInputStream
 import java.util.zip.ZipInputStream
 
@@ -37,28 +40,49 @@ internal fun releasedCompiler(release: String, releases: String, gradleUserHome:
         )
     }
     directory.mkdirs()
-    FileChannel.open(File(directory, ".lock").toPath(), StandardOpenOption.CREATE, StandardOpenOption.WRITE)
-        .use { channel ->
-            channel.lock().use {
-                if (executable.isFile) return executable
-                val archive = "krusty-$release-$triple." + if (windows) "zip" else "tar.gz"
-                val expected = expectedSha256(releases, release, archive)
-                val bytes = download("$releases/v$release/$archive")
-                val actual = MessageDigest.getInstance("SHA-256").digest(bytes)
-                    .joinToString("") { "%02x".format(it) }
-                if (actual != expected) {
-                    throw GradleException("$archive from the krusty $release release has SHA-256 $actual, expected $expected")
+    // A file lock serializes processes, but within one JVM a second overlapping lock() throws
+    // instead of waiting. Projects configured in parallel take the JVM-local lock first; a plugin
+    // copy in another class loader of the same daemon is waited out by retrying the file lock.
+    synchronized(destinationLocks.computeIfAbsent(directory.canonicalPath) { Any() }) {
+        FileChannel.open(File(directory, ".lock").toPath(), StandardOpenOption.CREATE, StandardOpenOption.WRITE)
+            .use { channel ->
+                lockWaitingOutThisJvm(channel).use {
+                    if (!executable.isFile) publish(release, releases, triple, windows, directory, executable)
                 }
-                val staged = File(directory, executable.name + ".part")
-                staged.outputStream().use { out ->
-                    val entry = if (windows) zipEntry(bytes, executable.name) else tarEntry(bytes, executable.name)
-                    entry.use { it.copyTo(out) }
-                }
-                staged.setExecutable(true)
-                Files.move(staged.toPath(), executable.toPath(), StandardCopyOption.ATOMIC_MOVE)
             }
-        }
+    }
     return executable
+}
+
+private val destinationLocks = ConcurrentHashMap<String, Any>()
+
+private fun lockWaitingOutThisJvm(channel: FileChannel): FileLock {
+    while (true) {
+        try {
+            return channel.lock()
+        } catch (_: OverlappingFileLockException) {
+            Thread.sleep(100)
+        }
+    }
+}
+
+/** Downloads, verifies and extracts the archive, then moves the compiler into place atomically. */
+private fun publish(release: String, releases: String, triple: String, windows: Boolean, directory: File, executable: File) {
+    val archive = "krusty-$release-$triple." + if (windows) "zip" else "tar.gz"
+    val expected = expectedSha256(releases, release, archive)
+    val bytes = download("$releases/v$release/$archive")
+    val actual = MessageDigest.getInstance("SHA-256").digest(bytes)
+        .joinToString("") { "%02x".format(it) }
+    if (actual != expected) {
+        throw GradleException("$archive from the krusty $release release has SHA-256 $actual, expected $expected")
+    }
+    val staged = File(directory, executable.name + ".part")
+    staged.outputStream().use { out ->
+        val entry = if (windows) zipEntry(bytes, executable.name) else tarEntry(bytes, executable.name)
+        entry.use { it.copyTo(out) }
+    }
+    staged.setExecutable(true)
+    Files.move(staged.toPath(), executable.toPath(), StandardCopyOption.ATOMIC_MOVE)
 }
 
 internal fun hostTriple(): String {

@@ -4,6 +4,9 @@ import org.gradle.api.GradleException
 import java.io.File
 import java.nio.file.Files
 import java.security.MessageDigest
+import java.util.concurrent.Callable
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -84,5 +87,44 @@ class KrustyReleaseTest {
                 "and Gradle is offline; run once online or set -Pkrusty.binary=<path>",
             error.message,
         )
+    }
+
+    @Test
+    fun simultaneousFirstUsesInOneJvmAllGetTheCompiler() {
+        val releases = releases().toURI().toString().removeSuffix("/")
+        val home = createTempDirectory("gradle-home").toFile()
+        val callers = 8
+        val start = CountDownLatch(1)
+        val pool = Executors.newFixedThreadPool(callers)
+        try {
+            val results = (1..callers).map {
+                pool.submit(Callable { start.await(); releasedCompiler(release, releases, home, offline = false) })
+            }
+            start.countDown()
+
+            val compilers = results.map { it.get() }.toSet()
+
+            assertEquals(setOf(File(home, "caches/krusty/$release/$triple/$executableName")), compilers)
+            assertEquals("#!/bin/sh\necho krusty\n", compilers.single().readText())
+        } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun aLaterUseRecoversAfterAFailedDownload() {
+        val releases = releases { "f".repeat(64) }
+        val url = releases.toURI().toString().removeSuffix("/")
+        val home = createTempDirectory("gradle-home").toFile()
+        assertFailsWith<GradleException> { releasedCompiler(release, url, home, offline = false) }
+
+        val sums = File(releases, "v$release/krusty-$release-SHA256SUMS")
+        val sha = MessageDigest.getInstance("SHA-256")
+            .digest(File(releases, "v$release/$archiveName").readBytes())
+            .joinToString("") { "%02x".format(it) }
+        sums.writeText("$sha  $archiveName\n")
+        val compiler = releasedCompiler(release, url, home, offline = false)
+
+        assertEquals("#!/bin/sh\necho krusty\n", compiler.readText())
     }
 }
