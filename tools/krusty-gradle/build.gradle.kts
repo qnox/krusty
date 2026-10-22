@@ -19,6 +19,12 @@ dependencies {
     // Compile against the oldest supported public API. The consuming build supplies and applies
     // its selected Kotlin/JVM plugin; the release JAR does not bundle a Kotlin Gradle plugin.
     compileOnly("org.jetbrains.kotlin:kotlin-gradle-plugin-api:2.4.0")
+    testImplementation(kotlin("test-junit5"))
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+}
+
+tasks.test {
+    useJUnitPlatform()
 }
 
 // Package the compiler's vendored tables separately, with the manifest of supported versions. The

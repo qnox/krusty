@@ -23,7 +23,7 @@ trap 'rm -rf "$stage"' EXIT
 
 "$project/gradlew" --no-daemon -p "$project" \
   -PkrustyPluginVersion="$version" \
-  clean publishAllPublicationsToReleaseRepository
+  clean test publishAllPublicationsToReleaseRepository
 
 built_jar=$project/build/libs/krusty-gradle-plugin-$version.jar
 published_jar=$project/build/release-repository/me/qnox/krusty/krusty-gradle-plugin/$version/krusty-gradle-plugin-$version.jar
@@ -84,7 +84,8 @@ task and adds no compiler plugin to the compilation; krusty compiles the sources
 Projects applying Gradle's \`kotlin-dsl\` (such as \`buildSrc\`) and Kotlin
 compile tasks outside any source set stay with kotlinc; the plugin logs each task it leaves.
 
-Compile with \`./gradlew -Pkrusty.binary=/path/to/krusty krustyCompile\`.
+Compile with \`./gradlew krustyCompile\`. The plugin downloads the krusty $version compiler for the
+host from its GitHub release; \`-Pkrusty.binary=/path/to/krusty\` runs another binary instead.
 The Kotlin/JVM plugin is an explicit consumer dependency and is not bundled here. This local-repo
 distribution does not claim availability from the Gradle Plugin Portal. A Build Tools API
 \`compilerVersion\` override is rejected; use the compiler version supplied by the selected Kotlin
