@@ -205,3 +205,72 @@ fun box(): String = runBlocking {{\n\
     .expect("the operators compile and run");
     assert_eq!(output, "OK");
 }
+
+const SAM_LIB: &str = r#"
+package lib
+
+import java.util.function.Supplier
+
+interface Source<out T> {
+    suspend fun next(): T
+}
+
+fun describe(message: Supplier<String>): String = message.get()
+
+inline fun <T> labelled(text: String, crossinline produce: suspend () -> T): Source<String> =
+    object : Source<String> {
+        override suspend fun next(): String {
+            val label: () -> String = { text }
+            return produce().toString() + describe(label)
+        }
+    }
+"#;
+
+/// A regenerated suspend method that converts a function value to a Java interface constructs the
+/// library's SAM wrapper. kotlinc copies the wrapper into the calling class, shared by its inline
+/// calls and taking no number under the copy, while the lambda object beside it is regenerated as
+/// the copy's next object; the copy's own `InnerClasses` row still names the original wrapper.
+#[test]
+fn a_sam_wrapper_in_a_regenerated_method_is_copied_like_kotlinc() {
+    let classes = common::classes_against_kotlinc_lib(
+        "Wrapped",
+        &[("Lib.kt", SAM_LIB)],
+        "import lib.*\n\nfun answer() = labelled(\"!\") { 42 }\n\nfun again() = labelled(\"?\") { 7 }\n",
+    )
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(
+        classes.reference.keys().collect::<Vec<_>>(),
+        [
+            "WrappedKt",
+            "WrappedKt$again$$inlined$labelled$1",
+            "WrappedKt$again$$inlined$labelled$1$2",
+            "WrappedKt$answer$$inlined$labelled$1",
+            "WrappedKt$answer$$inlined$labelled$1$2",
+            "WrappedKt$inlined$sam$i$java_util_function_Supplier$0",
+        ]
+    );
+    let differences = classes.differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
+/// The copied wrapper runs: the regenerated method suspends, resumes, and reads the label through
+/// it.
+#[test]
+fn a_sam_wrapper_copied_into_a_regenerated_method_runs() {
+    const MAIN: &str = r#"
+import lib.*
+import kotlin.coroutines.*
+
+fun answer() = labelled("!") { 42 }
+
+fun box(): String {
+    var result: Any? = null
+    suspend { answer().next() }
+        .startCoroutine(Continuation(EmptyCoroutineContext) { result = it.getOrThrow() })
+    return if (result == "42!") "OK" else "FAIL $result"
+}
+"#;
+    let output = common::expect_box_run_against_ref("crossinline_suspend_sam", SAM_LIB, MAIN)
+        .expect("reference kotlinc is provisioned");
+    assert_eq!(output, "OK");
+}

@@ -71,6 +71,13 @@ impl NameGenerator {
     }
 }
 
+/// The name of the copy of the SAM wrapper `original` in `class`: `<class>$inlined$sam$…`, the
+/// original's name from its `$sam$` segment on.
+pub(crate) fn sam_wrapper_name(class: &str, original: &str) -> Option<String> {
+    let wrapper = &original[original.find(SAM_WRAPPER_SEGMENT)?..];
+    Some(format!("{class}$inlined{wrapper}"))
+}
+
 /// The generators of one class being written (`ClassCodegen.regeneratedObjectNameGenerators`).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ClassNameGenerators {
@@ -83,8 +90,7 @@ impl ClassNameGenerators {
     /// name from its `$sam$` segment on. Every inline call in the class shares the one copy, so
     /// the flag says whether this call is the first to name it and must write it.
     pub(crate) fn sam_wrapper(&mut self, class: &str, original: &str) -> Option<(String, bool)> {
-        let wrapper = &original[original.find(SAM_WRAPPER_SEGMENT)?..];
-        let name = format!("{class}$inlined{wrapper}");
+        let name = sam_wrapper_name(class, original)?;
         let first = self.sam_wrappers.insert(name.clone());
         Some((name, first))
     }

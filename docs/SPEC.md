@@ -6711,9 +6711,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   its continuation is rebuilt by the same transformer. A regenerated continuation drops the
   original's `@DebugMetadata` for the new one, keeps the spill fields the original already
   declares instead of declaring them twice, and writes `line 0` where kotlinc's transformer has no
-  call-site line. A multifile facade (kotlinx's `FlowKt`) only forwards to its parts, so an inline
-  body is read from the part that declares it (also for a plain inline function, which krusty used
-  to call through the facade). Tests: `tests/crossinline_suspend_object_e2e.rs`,
+  call-site line. A SAM wrapper such a method constructs is not regenerated but copied into the
+  calling class (`<caller>$inlined$sam$…`, shared by its inline calls), taking no number under the
+  copy; the copy's own `InnerClasses` row keeps the original wrapper's name, as kotlinc rewrites
+  only the `new`. A multifile facade (kotlinx's `FlowKt`) only forwards to its parts, so an inline
+  body is read from the part its forwarder names (also for a plain inline function, which krusty
+  used to call through the facade); another part's private function with the same JVM name and
+  descriptor is neither that body nor the facade function's metadata. Tests: `tests/crossinline_suspend_object_e2e.rs`,
   `tests/multifile_inline_part_splice_e2e.rs`.
 
 - **A lambda inlined into a classpath inline body runs on an empty operand stack.** kotlinc's

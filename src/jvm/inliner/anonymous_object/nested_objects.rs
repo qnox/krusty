@@ -6,10 +6,13 @@
 
 use crate::jvm::class_node::ClassNode;
 
-use super::super::name_generator::NameGenerator;
+use super::super::class_roles::RegeneratedClass;
+use super::super::name_generator::{sam_wrapper_name, NameGenerator};
 use super::super::object_regeneration::{AnonymousObjects, ObjectLambda, RegeneratedObject};
 use super::super::InlineError;
-use super::{regenerate, CallSite, Regeneration, RegenerationError};
+use super::{
+    copy_sam_wrapper, regenerate, CallSite, Regeneration, RegenerationError, SamWrapperCopy,
+};
 
 /// Where the objects one method of the copy constructs are regenerated.
 pub(super) struct NestedObjects<'r, 'a> {
@@ -23,6 +26,8 @@ pub(super) struct NestedObjects<'r, 'a> {
     pub renamed: Vec<(String, String)>,
     /// The nested copies, and the classes they regenerated in turn.
     pub classes: Vec<(String, Vec<u8>)>,
+    /// The SAM wrappers the method and the nested copies construct.
+    pub sam_wrappers: Vec<SamWrapperCopy>,
 }
 
 impl AnonymousObjects for NestedObjects<'_, '_> {
@@ -41,6 +46,25 @@ impl AnonymousObjects for NestedObjects<'_, '_> {
         ))?;
         let original = ClassNode::read(&bytes)
             .map_err(|_| unsupported("a nested object class that does not read"))?;
+        // A SAM wrapper is copied, not regenerated: kotlinc replays it under the calling class's
+        // name, which takes no number under the copy, and the calling class shares the copy.
+        if outer.classes.regenerated_class(class) == Some(RegeneratedClass::SamWrapper) {
+            let name = sam_wrapper_name(outer.calling_class, class)
+                .ok_or(unsupported("a SAM wrapper without its ABI name segment"))?;
+            let bytes = copy_sam_wrapper(&original, &name, outer.major)
+                .map_err(InlineError::Regeneration)?;
+            self.renamed.push((class.to_string(), name.clone()));
+            self.sam_wrappers.push(SamWrapperCopy {
+                original: class.to_string(),
+                name: name.clone(),
+                bytes,
+            });
+            return Ok(RegeneratedObject {
+                name,
+                constructor_desc: constructor_desc.to_string(),
+                reified_parameters_remain: false,
+            });
+        }
         let names = self.names.next_object();
         let new_class = names.class().to_string();
         let mut prior = outer.prior_classes.to_vec();
@@ -68,6 +92,7 @@ impl AnonymousObjects for NestedObjects<'_, '_> {
         .map_err(InlineError::Regeneration)?;
         self.renamed.push((class.to_string(), new_class.clone()));
         self.classes.extend(regenerated.nested);
+        self.sam_wrappers.extend(regenerated.sam_wrappers);
         self.classes.push((new_class.clone(), regenerated.bytes));
         Ok(RegeneratedObject {
             name: new_class,

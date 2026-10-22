@@ -110,6 +110,9 @@ pub(crate) struct Regeneration<'a> {
     /// The descriptor the inline body calls the original's constructor through.
     pub constructor_desc: &'a str,
     pub call_site: CallSite<'a>,
+    /// The class the inline call is written in, which owns the copies of the SAM wrappers the
+    /// copy's methods construct.
+    pub calling_class: &'a str,
     /// The inline function's type arguments at the call, each as `(parameter name, signature)`.
     pub type_arguments: &'a [(String, String)],
     /// Anonymous classes already regenerated earlier in the same inlined body. A later copy can
@@ -144,6 +147,19 @@ pub(crate) struct Regenerated {
     pub reified_parameters_remain: bool,
     /// The classes the copy regenerated in turn: the continuations of its suspend methods.
     pub nested: Vec<(String, Vec<u8>)>,
+    /// The SAM wrappers the copy's methods construct, copied into the calling class. The calling
+    /// class shares one copy of each among its inline calls, so the call site writes only the
+    /// first.
+    pub sam_wrappers: Vec<SamWrapperCopy>,
+}
+
+/// A SAM wrapper copied into the calling class.
+#[derive(Debug)]
+pub(crate) struct SamWrapperCopy {
+    /// The wrapper the inline body constructs.
+    pub original: String,
+    pub name: String,
+    pub bytes: Vec<u8>,
 }
 
 /// `isCapturedFieldName`: a field an object's constructor fills from a captured value.
@@ -336,6 +352,7 @@ pub(crate) fn regenerate(
     // The continuations of copies that need none, whose `InnerClasses` rows go with them.
     let mut dropped_continuations = Vec::new();
     let mut nested = Vec::new();
+    let mut sam_wrappers = Vec::new();
     for method in methods {
         if for_inline.skips(method) {
             continue;
@@ -383,6 +400,7 @@ pub(crate) fn regenerate(
                     descriptor: &method.desc,
                     renamed: Vec::new(),
                     classes: Vec::new(),
+                    sam_wrappers: Vec::new(),
                 };
                 let code = lambda_inlining::inline_into(
                     &code,
@@ -396,6 +414,7 @@ pub(crate) fn regenerate(
                     remapper.add_mapping(original, copy);
                 }
                 nested.extend(objects.classes);
+                sam_wrappers.extend(objects.sam_wrappers);
                 code
             } else {
                 if code.instructions().any(|insn| {
@@ -472,6 +491,7 @@ pub(crate) fn regenerate(
                 .unwrap_or_else(|| unreachable!("the continuation's name was taken")),
         )?;
         nested.extend(regenerated.nested);
+        sam_wrappers.extend(regenerated.sam_wrappers);
         nested.push((continuation, regenerated.bytes));
     }
 
@@ -483,8 +503,17 @@ pub(crate) fn regenerate(
         if dropped_continuations.contains(&inner.name) {
             continue;
         }
+        // The copy's code names a SAM wrapper's copy, but kotlinc rewrites only the `new` for it,
+        // so the class's own `InnerClasses` row still names the original wrapper.
+        let copied_wrapper = sam_wrappers
+            .iter()
+            .any(|wrapper: &SamWrapperCopy| wrapper.original == inner.name);
         let spec = InnerClassSpec {
-            inner: remapper.map_type(&inner.name)?,
+            inner: if copied_wrapper {
+                inner.name.clone()
+            } else {
+                remapper.map_type(&inner.name)?
+            },
             outer: inner
                 .outer_name
                 .as_deref()
@@ -534,6 +563,7 @@ pub(crate) fn regenerate(
         constructor_desc: plan.desc,
         reified_parameters_remain,
         nested,
+        sam_wrappers,
     })
 }
 
