@@ -152,6 +152,30 @@ fn two_function_types_at_once_decline() {
     );
 }
 
+/// Two named interfaces, each inheriting a function type of its own arity, put two `invoke`s on a
+/// class that names neither function type itself. The fixed function slot still holds one body, so
+/// this declines exactly as naming both function types directly does.
+#[test]
+fn two_function_types_through_named_interfaces_decline() {
+    let source = "interface Nullary : () -> String\n\
+         interface Unary : (Int) -> String\n\
+         class Both : Nullary, Unary {\n\
+         \x20   override fun invoke(): String = \"O\"\n\
+         \x20   override fun invoke(p1: Int): String = \"K\"\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val nullary: () -> String = Both()\n\
+         \x20   val unary: (Int) -> String = Both()\n\
+         \x20   return nullary() + unary(1)\n\
+         }\n";
+    expect_box_ok_with_stdlib(source, "TwoFunctionTypesThroughInterfaces");
+    expect_native_decline(
+        source,
+        "TwoFunctionTypesThroughInterfaces",
+        "function types at once",
+    );
+}
+
 /// A function type of more than 22 parameters has no `Function23` or wider to declare `invoke` on,
 /// so nothing records which method is the function's body, and a call through the type would reach
 /// an empty function slot. It declines rather than choosing a method by its name.

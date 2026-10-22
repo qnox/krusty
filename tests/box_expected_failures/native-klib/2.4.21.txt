@@ -113,7 +113,6 @@ callableReference/bound/array.kt
 callableReference/bound/arrayGetIntrinsic.kt
 callableReference/bound/companionObjectReceiverInheritsFromOuter.kt
 callableReference/bound/emptyLHS.kt
-callableReference/bound/genericBoundPropertyAsCrossinline.kt
 callableReference/bound/genericValOnLHS.kt
 callableReference/bound/kCallableNameIntrinsic.kt
 callableReference/bound/kt15446.kt

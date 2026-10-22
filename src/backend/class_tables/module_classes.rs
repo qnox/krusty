@@ -1,0 +1,283 @@
+//! The dispatch shape of every named class of the module, read from its declaration headers.
+//!
+//! A target that numbers vtable slots itself has to give a class the same numbers in every file
+//! that dispatches through it, and only the declaring file has the class's IR. So the numbering is
+//! computed from what every file can see alike: the stable headers of the module, frozen here
+//! before Pass 2 starts. Each class records its superclass, its instance members in source order
+//! with the carriers common lowering gives them ([`ResolvedModuleIndex::callable_carriers`]), and
+//! the override edges the frontend selected for them. Nothing here is a target decision.
+
+use crate::fx_hash::{HashMap, HashSet};
+
+use crate::fir::{
+    CallableId, DeclarationFlags, DeclarationId, DeclarationKind, PropertyId,
+    ResolvedFunctionOverrideTarget, ResolvedModuleIndex, ResolvedPropertyOverrideTarget,
+};
+use crate::types::{SemanticCallRole, Ty, TypeName};
+
+/// The named classes of one module, by identity.
+#[derive(Debug, Default)]
+pub struct ModuleClasses {
+    classes: HashMap<TypeName, ModuleClass>,
+}
+
+/// One named class: what its dispatch table is built from.
+#[derive(Debug)]
+pub(crate) struct ModuleClass {
+    /// The declared superclass, or `None` for `kotlin.Any`.
+    pub(crate) superclass: Option<TypeName>,
+    /// Function types among the declared supertypes, by arity.
+    pub(crate) function_type_arities: Box<[usize]>,
+    /// Instance members in source order.
+    pub(crate) members: Box<[ModuleMember]>,
+    pub(crate) function_overrides: Box<[ModuleFunctionOverride]>,
+    pub(crate) property_overrides: Box<[ModulePropertyOverride]>,
+}
+
+/// An instance member a table can hold.
+#[derive(Debug)]
+pub(crate) enum ModuleMember {
+    Function {
+        callable: CallableId,
+        parameters: Box<[Ty]>,
+        result: Ty,
+    },
+    Property {
+        property: PropertyId,
+        /// Whether the member is reached through its getter (and setter) rather than its field
+        /// alone: it is open, abstract or an override, an interface member is implemented by it,
+        /// or the declaration has an accessor body of its own.
+        getter: bool,
+        setter: bool,
+    },
+}
+
+/// A function override edge of a class's own member.
+#[derive(Debug)]
+pub(crate) struct ModuleFunctionOverride {
+    pub(crate) implementation: CallableId,
+    pub(crate) overridden_owner: TypeName,
+    pub(crate) overridden: ResolvedFunctionOverrideTarget,
+    pub(crate) overridden_is_interface: bool,
+    pub(crate) overridden_role: Option<SemanticCallRole>,
+}
+
+/// A property override edge of a class's own member.
+#[derive(Debug)]
+pub(crate) struct ModulePropertyOverride {
+    pub(crate) implementation: PropertyId,
+    pub(crate) overridden: ResolvedPropertyOverrideTarget,
+    pub(crate) overridden_is_interface: bool,
+    pub(crate) declared_type: Ty,
+    pub(crate) implementation_type: Ty,
+    pub(crate) depth: u32,
+}
+
+impl ModuleClass {
+    /// Every type a member of this class carries, as a target asks how it represents them.
+    pub(crate) fn carried_types(&self) -> impl Iterator<Item = Ty> + '_ {
+        self.members
+            .iter()
+            .flat_map(|member| match member {
+                ModuleMember::Function {
+                    parameters, result, ..
+                } => parameters
+                    .iter()
+                    .copied()
+                    .chain([*result])
+                    .collect::<Vec<_>>(),
+                ModuleMember::Property { .. } => Vec::new(),
+            })
+            .chain(
+                self.property_overrides
+                    .iter()
+                    .flat_map(|edge| [edge.declared_type, edge.implementation_type]),
+            )
+    }
+}
+
+impl ModuleClasses {
+    pub(crate) fn class(&self, classifier: TypeName) -> Option<&ModuleClass> {
+        self.classes.get(&classifier)
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (TypeName, &ModuleClass)> {
+        self.classes.iter().map(|(name, class)| (*name, class))
+    }
+
+    /// Every named, non-local class of `index` that has an instance table: not an interface, an
+    /// annotation or an `object` expression.
+    pub(crate) fn from_resolved_index(index: &ResolvedModuleIndex) -> Self {
+        let implements_an_interface = interface_implementations(index);
+        let mut classes = HashMap::default();
+        for raw in 0..index.declaration_count() {
+            let declaration = DeclarationId::from_raw(
+                u32::try_from(raw).expect("too many stable declarations for a packed id"),
+            );
+            let Some(classifier) = index.classifier_header(declaration) else {
+                continue;
+            };
+            let Some(header) = index.declaration_header(declaration) else {
+                continue;
+            };
+            let flags = header.flags;
+            if index.is_body_local_declaration(declaration)
+                || flags.has(DeclarationFlags::INTERFACE)
+                || flags.has(DeclarationFlags::ANNOTATION_CLASS)
+                || flags.has(DeclarationFlags::ANONYMOUS_OBJECT)
+                || flags.has(DeclarationFlags::LOCAL_CLASS)
+            {
+                continue;
+            }
+            let Some(members) = members(index, declaration, &implements_an_interface) else {
+                continue;
+            };
+            let function_overrides = index
+                .function_overrides(declaration)
+                .iter()
+                .filter_map(|edge| {
+                    let ResolvedFunctionOverrideTarget::Module(implementation) =
+                        edge.implementation
+                    else {
+                        return None;
+                    };
+                    Some(ModuleFunctionOverride {
+                        implementation,
+                        overridden_owner: edge.overridden_owner,
+                        overridden: edge.overridden,
+                        overridden_is_interface: edge.overridden_is_interface,
+                        overridden_role: edge.overridden_semantic_role,
+                    })
+                })
+                .collect();
+            let property_overrides = index
+                .property_overrides(declaration)
+                .iter()
+                .filter_map(|edge| {
+                    let ResolvedPropertyOverrideTarget::Module(implementation) =
+                        edge.implementation
+                    else {
+                        return None;
+                    };
+                    Some(ModulePropertyOverride {
+                        implementation,
+                        overridden: edge.overridden,
+                        overridden_is_interface: edge.overridden_is_interface,
+                        declared_type: edge.declared_type.get(),
+                        implementation_type: edge.implementation_type.get(),
+                        depth: edge.depth,
+                    })
+                })
+                .collect();
+            let function_type_arities = classifier
+                .declared_supertypes()
+                .filter_map(|supertype| match supertype.get().non_null().kind() {
+                    crate::types::TyKind::Fun(signature) => Some(signature.params.len()),
+                    _ => None,
+                })
+                .collect();
+            classes.insert(
+                classifier.classifier,
+                ModuleClass {
+                    superclass: classifier
+                        .superclass
+                        .and_then(|superclass| superclass.get().non_null().obj_internal())
+                        .filter(|&superclass| superclass != crate::types::wk::any()),
+                    function_type_arities,
+                    members,
+                    function_overrides,
+                    property_overrides,
+                },
+            );
+        }
+        Self { classes }
+    }
+}
+
+/// The instance members `class` declares, in source order, or `None` when one of them has no
+/// complete header (a module that recovered from a frontend error).
+fn members(
+    index: &ResolvedModuleIndex,
+    class: DeclarationId,
+    implements_an_interface: &HashSet<PropertyId>,
+) -> Option<Box<[ModuleMember]>> {
+    let mut owned = index
+        .owned_declarations(class)
+        .iter()
+        .copied()
+        .filter_map(|declaration| {
+            let header = index.declaration_header(declaration)?;
+            matches!(
+                header.kind,
+                DeclarationKind::Function | DeclarationKind::Property
+            )
+            .then_some((declaration, header.kind, header.flags))
+        })
+        .collect::<Vec<_>>();
+    owned.sort_by_key(|(declaration, ..)| index.source_order(*declaration));
+    let mut members = Vec::with_capacity(owned.len());
+    for (declaration, kind, flags) in owned {
+        // A `companion { … }` member is static, and a `const` has no instance storage.
+        if flags.has(DeclarationFlags::COMPANION) || flags.has(DeclarationFlags::CONST) {
+            continue;
+        }
+        match kind {
+            DeclarationKind::Function => {
+                if index.is_suppressed_generated_callable(declaration) {
+                    continue;
+                }
+                let callable = index.callable_for_declaration(declaration)?;
+                let (parameters, result) = index.callable_carriers(callable.id)?;
+                members.push(ModuleMember::Function {
+                    callable: callable.id,
+                    parameters: parameters.into_boxed_slice(),
+                    result,
+                });
+            }
+            DeclarationKind::Property => {
+                let property = index.property_for_declaration(declaration)?;
+                let shape = index.property(property)?;
+                let dispatched = flags.has(DeclarationFlags::OPEN)
+                    || flags.has(DeclarationFlags::ABSTRACT)
+                    || flags.has(DeclarationFlags::OVERRIDE)
+                    || implements_an_interface.contains(&property);
+                // Delegated and member-extension properties are always reached through accessor
+                // functions, as is a declaration that writes an accessor body.
+                let accessors =
+                    flags.has(DeclarationFlags::DELEGATED) || shape.extension_receiver.is_some();
+                let mutable = flags.has(DeclarationFlags::MUTABLE);
+                members.push(ModuleMember::Property {
+                    property,
+                    getter: dispatched || accessors || flags.has(DeclarationFlags::CUSTOM_GETTER),
+                    setter: mutable
+                        && (dispatched
+                            || accessors
+                            || flags.has(DeclarationFlags::SETTER_HAS_BODY)),
+                });
+            }
+            _ => unreachable!("filtered to functions and properties above"),
+        }
+    }
+    Some(members.into_boxed_slice())
+}
+
+/// Every module property some class of the module hands to an interface it implements: such a
+/// property is reached through the interface's number, so it dispatches even where its own
+/// declaration is neither open nor an override.
+fn interface_implementations(index: &ResolvedModuleIndex) -> HashSet<PropertyId> {
+    let mut properties = HashSet::default();
+    for raw in 0..index.declaration_count() {
+        let declaration = DeclarationId::from_raw(raw as u32);
+        if index.classifier_header(declaration).is_none() {
+            continue;
+        }
+        for edge in index.property_overrides(declaration) {
+            if let (true, ResolvedPropertyOverrideTarget::Module(property)) =
+                (edge.overridden_is_interface, edge.implementation)
+            {
+                properties.insert(property);
+            }
+        }
+    }
+    properties
+}

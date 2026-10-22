@@ -205,7 +205,11 @@ pub(super) fn declare(
     for class in &ir.classes {
         check_supported(ir, class)?;
     }
-    let tables = class_tables::build(&WasmRepresentation, ir)?;
+    let tables = class_tables::build(
+        &WasmRepresentation,
+        ir,
+        &class_tables::module_slots::ModuleSlotPlan::empty(),
+    )?;
     let width = (tables.region.base + tables.region.members) as usize;
     let mut slot_types = slot_types(ir, module, objects, &tables, width)?;
 

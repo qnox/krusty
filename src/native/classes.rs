@@ -22,6 +22,7 @@
 use super::value_classes::NativeValueClasses;
 use crate::fx_hash::HashMap;
 
+use crate::backend::class_tables::module_slots::ModuleSlotPlan;
 use crate::backend::class_tables::{self, ClassTable, Representation};
 use crate::ir::{ClassId, FunId, IrClass, IrFile};
 use crate::types::{Ty, TypeName};
@@ -344,6 +345,16 @@ fn any_member_symbol(root: &IrClass, member: AnyMember) -> &'static str {
     defaults[member.slot() as usize]
 }
 
+/// The dispatch numbering of the module's named classes, as every file of the module reads it.
+/// `values` must be the module-wide answer ([`NativeValueClasses::of_module_classes`]), so the
+/// numbering does not depend on which file asks.
+pub(super) fn module_plan(
+    classes: &crate::backend::class_tables::module_classes::ModuleClasses,
+    values: &NativeValueClasses,
+) -> ModuleSlotPlan {
+    ModuleSlotPlan::build(classes, &NativeRepresentation(values))
+}
+
 /// How Native carries values, as the shared tables ask it.
 struct NativeRepresentation<'v>(&'v NativeValueClasses);
 
@@ -419,11 +430,15 @@ pub(super) fn check_supported(class: &IrClass) -> Result<(), Unsupported> {
 const ANY_SLOTS: u32 = class_tables::ANY_SLOTS;
 
 /// Build the layout and vtable of every class in `ir`, superclasses first.
-pub(super) fn build(ir: &IrFile, values: &NativeValueClasses) -> Result<ClassModel, Unsupported> {
+pub(super) fn build(
+    ir: &IrFile,
+    values: &NativeValueClasses,
+    plan: &ModuleSlotPlan,
+) -> Result<ClassModel, Unsupported> {
     for class in &ir.classes {
         check_supported(class)?;
     }
-    let tables = class_tables::build(&NativeRepresentation(values), ir)?;
+    let tables = class_tables::build(&NativeRepresentation(values), ir, plan)?;
     let mut layouts: Vec<Option<ClassLayout>> = vec![None; ir.classes.len()];
     for &id in &tables.order {
         let table = tables.table(id);
@@ -588,7 +603,7 @@ mod tests {
     use crate::ir::IrProperty;
 
     fn build(ir: &IrFile) -> Result<ClassModel, Unsupported> {
-        super::build(ir, &NativeValueClasses::default())
+        super::build(ir, &NativeValueClasses::default(), &ModuleSlotPlan::empty())
     }
 
     #[test]
@@ -1015,7 +1030,12 @@ mod tests {
         );
         record_invoke(&mut ir, b, invoke, 0);
 
-        let model = super::build(&ir, &NativeValueClasses::default()).expect("layout");
+        let model = super::build(
+            &ir,
+            &NativeValueClasses::default(),
+            &ModuleSlotPlan::empty(),
+        )
+        .expect("layout");
         let foo_slot = model.slot(b, &SlotKey::Function(foo)).expect("foo's slot");
         assert_ne!(foo_slot, FUNCTION_SLOT);
         assert_eq!(
