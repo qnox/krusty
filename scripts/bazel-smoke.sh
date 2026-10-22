@@ -66,7 +66,7 @@ GENERATOR=$repo/site/scripts/bazel-registry.mjs DIST=$dist VERSION=$version REGI
     return { name, browser_download_url: `file://${join(DIST, name)}` };
   });
   const release = { tag_name: `v${VERSION}`, draft: false, assets };
-  const files = await registryFiles([release], async (url) => readFileSync(new URL(url), "utf8"));
+  const files = await registryFiles([release], async (url) => readFileSync(new URL(url)));
   for (const [path, contents] of files) {
     mkdirSync(dirname(join(REGISTRY, path)), { recursive: true });
     writeFileSync(join(REGISTRY, path), contents);

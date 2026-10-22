@@ -1,15 +1,19 @@
 // Writes the krusty Bazel registry (https://bazel.build/external/registry) into the built site,
 // from the GitHub releases that published a Bazel module. Each such release carries
-// krusty-bazel-<version>.tar.gz, its .sha256, and the stamped krusty-bazel-<version>.MODULE.bazel
-// (scripts/package-bazel-module.sh). The registry is rebuilt from the releases on every deploy,
-// so it holds exactly the published versions.
+// krusty-bazel-<version>.tar.gz and its .sha256, and releases since the registry also carry the
+// stamped krusty-bazel-<version>.MODULE.bazel (scripts/package-bazel-module.sh). For an earlier
+// release the registry's MODULE.bazel is the one inside its archive, read after the archive's
+// digest is checked against the .sha256. The registry is rebuilt from the releases on every
+// deploy, so it holds exactly the published versions.
 //
 //   node scripts/bazel-registry.mjs OUTPUT_DIRECTORY
 //
 // GITHUB_TOKEN authenticates the release listing; GITHUB_REPOSITORY (owner/name) defaults to
 // qnox/krusty.
+import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { gunzipSync } from "node:zlib";
 
 const MODULE = "krusty";
 
@@ -46,18 +50,41 @@ export function compareVersions(a, b) {
   return identifiers(left.prerelease, right.prerelease);
 }
 
-/** `sha256-<base64>` from a `sha256sum` line. */
-export function integrity(sha256sumLine) {
+/** The hex digest of a `sha256sum` line. */
+function digest(sha256sumLine) {
   const hex = sha256sumLine.trim().split(/\s+/)[0];
   if (!/^[0-9a-f]{64}$/.test(hex)) throw new Error(`not a sha256sum line: ${sha256sumLine}`);
-  return `sha256-${Buffer.from(hex, "hex").toString("base64")}`;
+  return hex;
+}
+
+/** `sha256-<base64>` from a `sha256sum` line. */
+export function integrity(sha256sumLine) {
+  return `sha256-${Buffer.from(digest(sha256sumLine), "hex").toString("base64")}`;
+}
+
+/** The contents of the regular file `name` at the root of a gzipped tar archive. */
+export function archivedFile(archive, name) {
+  const tar = gunzipSync(archive);
+  for (let offset = 0; offset + 512 <= tar.length; ) {
+    const header = tar.subarray(offset, offset + 512);
+    if (header.every((byte) => byte === 0)) break;
+    const field = (start, length) => header.subarray(start, start + length).toString("latin1").replace(/\0.*$/s, "");
+    const size = Number.parseInt(field(124, 12).trim(), 8);
+    const type = field(156, 1);
+    if (field(0, 100) === name && (type === "0" || type === "")) {
+      return tar.subarray(offset + 512, offset + 512 + size).toString("utf8");
+    }
+    offset += 512 + Math.ceil(size / 512) * 512;
+  }
+  throw new Error(`the archive has no ${name}`);
 }
 
 /**
  * The registry's files, as a map from path to contents, for `releases` (GitHub release objects).
- * `fetchText(url)` downloads one release asset.
+ * `fetchAsset(url)` downloads one release asset as a Buffer.
  */
-export async function registryFiles(releases, fetchText) {
+export async function registryFiles(releases, fetchAsset) {
+  const fetchText = async (url) => (await fetchAsset(url)).toString("utf8");
   const files = new Map();
   const versions = [];
   for (const release of releases) {
@@ -68,18 +95,24 @@ export async function registryFiles(releases, fetchText) {
     const checksum = asset(`krusty-bazel-${version}.tar.gz.sha256`);
     const module = asset(`krusty-bazel-${version}.MODULE.bazel`);
     if (!archive && !checksum && !module) continue;
-    if (!archive || !checksum || !module) {
+    if (!archive || !checksum) {
       throw new Error(`release ${release.tag_name} has only part of the Bazel module`);
     }
+    const sum = await fetchText(checksum.browser_download_url);
     const base = `modules/${MODULE}/${version}`;
-    files.set(`${base}/MODULE.bazel`, await fetchText(module.browser_download_url));
+    if (module) {
+      files.set(`${base}/MODULE.bazel`, await fetchText(module.browser_download_url));
+    } else {
+      // Released before the module was published on its own: read it from the verified archive.
+      const bytes = await fetchAsset(archive.browser_download_url);
+      if (createHash("sha256").update(bytes).digest("hex") !== digest(sum)) {
+        throw new Error(`release ${release.tag_name}: krusty-bazel-${version}.tar.gz does not match its .sha256`);
+      }
+      files.set(`${base}/MODULE.bazel`, archivedFile(bytes, "MODULE.bazel"));
+    }
     files.set(
       `${base}/source.json`,
-      `${JSON.stringify(
-        { url: archive.browser_download_url, integrity: integrity(await fetchText(checksum.browser_download_url)) },
-        null,
-        2,
-      )}\n`,
+      `${JSON.stringify({ url: archive.browser_download_url, integrity: integrity(sum) }, null, 2)}\n`,
     );
     versions.push(version);
   }
@@ -117,7 +150,9 @@ async function main(output) {
     releases.push(...batch);
     if (batch.length < 100) break;
   }
-  const files = await registryFiles(releases, async (url) => (await get(url, "application/octet-stream")).text());
+  const files = await registryFiles(releases, async (url) =>
+    Buffer.from(await (await get(url, "application/octet-stream")).arrayBuffer()),
+  );
   for (const [path, contents] of files) {
     mkdirSync(join(output, path, ".."), { recursive: true });
     writeFileSync(join(output, path), contents);
