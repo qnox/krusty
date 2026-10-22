@@ -19,7 +19,7 @@
 //!
 //! Every expectation is kotlinc's, taken by running the same program under it.
 
-use super::common::{expect_box_ok_with_stdlib, expect_native_box};
+use super::common::{expect_box_ok_with_stdlib, expect_native_box, native_decline};
 
 /// The result's representation differs, reached through the interface and through the class.
 #[test]
@@ -127,4 +127,28 @@ fn a_method_spelled_like_an_accessor_is_still_a_method() {
          }\n";
     expect_box_ok_with_stdlib(source, "AccessorNamedMethod");
     expect_native_box(source, "AccessorNamedMethod", "OK");
+}
+
+/// An interface default of a member extension property whose RECEIVER changes representation.
+///
+/// `A<T>.v` takes its receiver as a reference and `B`'s default takes an unboxed `Int`, while
+/// both values are `Int`. The receiver crosses the accessor like the value does, so `B`'s default
+/// stands at `A`'s number only through a bridge; kotlinc emits `getV(Object)` beside
+/// `getV(int)`. A bridge to an interface property default is not supported yet, and the backend
+/// says so rather than placing the unboxing body where the reference arrives.
+#[test]
+fn an_interface_property_default_with_a_bridged_receiver_declines() {
+    let source = "interface A<T> { val T.v: Int }\n\
+         interface B : A<Int> { override val Int.v: Int get() = this }\n\
+         class C : B\n\
+         fun <T> read(a: A<T>, x: T): Int = with(a) { x.v }\n\
+         fun box(): String = if (read(C(), 7) == 7) \"OK\" else \"FAIL\"\n";
+    expect_box_ok_with_stdlib(source, "BridgedReceiverDefault");
+    if let Some(said) = native_decline(&[("BridgedReceiverDefault", source)]) {
+        assert_eq!(
+            said,
+            "krusty: the native backend does not support an interface property default reached \
+             through a bridge (`B`) yet"
+        );
+    }
 }

@@ -8,6 +8,7 @@ mod c_calls;
 mod dependency_exports;
 
 use super::*;
+use crate::backend::class_tables::module_slots::PlanKey;
 
 /// Whether an authenticated source-module dependency export can realize this call directly.
 ///
@@ -203,6 +204,53 @@ impl BodyLowering<'_, '_, '_> {
         args: &[u32],
     ) -> Result<Option<Value>, Unsupported> {
         let qualified = || owner.render().replace('/', ".");
+        let numbered = self.file.slot_plan.interfaces();
+        let through = if let Some(interface) = numbered.interface(owner) {
+            // An interface of another file: its members are reached by their module-wide numbers,
+            // which every implementor's interface table agrees on.
+            if let Err(reason) = interface {
+                return Err(declined!(
+                    "a call through `{}`, which has no module-wide numbering: {reason}",
+                    qualified()
+                ));
+            }
+            match (
+                numbered.fixed_slot(target),
+                numbered.number(PlanKey::Callable(target)),
+            ) {
+                // A redeclared `kotlin.Any` member stands in its fixed class slot in every table.
+                (Some(slot), _) => model::Dispatch::Class(slot),
+                (None, Some(number)) => model::Dispatch::Interface(number),
+                (None, None) => {
+                    return Err(declined!(
+                        "a call to a member `{}` does not number",
+                        qualified()
+                    ))
+                }
+            }
+        } else {
+            model::Dispatch::Class(self.planned_class_slot(owner, target)?)
+        };
+        let record = &self.file.ir.referenced_module_callables[&target];
+        let params = record.parameters.to_vec();
+        let ret = record.result;
+        let Some(object) = self.receiver(receiver)? else {
+            return Ok(None);
+        };
+        let arguments = self.arguments(args, &params)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        self.dispatch_through(object, through, &params, ret, &arguments)
+    }
+
+    /// The slot the module plan gives `target` in the table of `owner`, a class of another file.
+    fn planned_class_slot(
+        &self,
+        owner: TypeName,
+        target: crate::fir::CallableId,
+    ) -> Result<u32, Unsupported> {
+        let qualified = || owner.render().replace('/', ".");
         let table = match self.file.slot_plan.table(owner) {
             Some(Ok(table)) => table,
             Some(Err(reason)) => {
@@ -218,26 +266,11 @@ impl BodyLowering<'_, '_, '_> {
                 ))
             }
         };
-        let Some(&slot) = table
+        table
             .slots
-            .get(&crate::backend::class_tables::module_slots::PlanKey::Callable(target))
-        else {
-            return Err(declined!(
-                "a virtual call to a member `{}` does not plan",
-                qualified()
-            ));
-        };
-        let record = &self.file.ir.referenced_module_callables[&target];
-        let params = record.parameters.to_vec();
-        let ret = record.result;
-        let Some(object) = self.receiver(receiver)? else {
-            return Ok(None);
-        };
-        let arguments = self.arguments(args, &params)?;
-        if self.terminated {
-            return Ok(None);
-        }
-        self.dispatch(object, slot, &params, ret, &arguments)
+            .get(&PlanKey::Callable(target))
+            .copied()
+            .ok_or_else(|| declined!("a virtual call to a member `{}` does not plan", qualified()))
     }
 
     /// Run the defining file's top-level initializers before using anything it exports.
