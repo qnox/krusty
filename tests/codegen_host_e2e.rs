@@ -1,4 +1,4 @@
-//! End-to-end proof of the **codegen-host mechanism** krusty's `plugins::ksp` models: a real
+//! End-to-end proof of the **codegen-host mechanism** krusty's KSP host also uses: a real
 //! annotation processor, packaged in a JAR, discovered via `META-INF/services` and run in a JVM over
 //! source, generating new source — with automatic multi-round re-processing of generated code.
 //!
