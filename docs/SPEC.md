@@ -18185,6 +18185,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   orphan expressions and inline-only templates do not. Transitive body-bearing declarations need
   exact provider metadata and agreeing raw headers. Closure failure is a compilation decline, not
   permission to try an algorithm adapter. Authenticated intrinsic support closes separately.
+  Freeze category ownership before lowering: an eligible intrinsic-support wrapper remains owned
+  by that category even if its body transaction declines. Never retry it under ordinary-body
+  obligations merely because it published no code. The Wasm unmodelled-wrapper regression pins
+  the exact target decline without relaxing ordinary closure validation.
   Native property accesses use the selected accessor's exact export and declaration-owned ABI,
   evaluating operands once. Instance-storage members retain their separate target capability;
   generic-property substitutions and `super` accesses are not invented. Defaults-only and
