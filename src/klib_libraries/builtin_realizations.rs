@@ -12,7 +12,7 @@ mod library_helpers;
 use crate::libraries::builtin_declaration::{semantic_call_role, BuiltinMemberDeclaration};
 use crate::libraries::builtin_member_realization as member_rules;
 use crate::libraries::builtin_top_level_realization as package_rules;
-use crate::libraries::{FunctionInfo, MemberRealization, PropertyInfo};
+use crate::libraries::{CompilerIntrinsic, FunctionInfo, MemberRealization, PropertyInfo};
 use crate::types::TypeName;
 
 mod throwables;
@@ -21,7 +21,11 @@ pub(super) use arrays::realize_array_constructor;
 pub(super) use throwables::{realize_constructor, realize_throwable_property};
 
 /// Attach the operation the member `function` of `owner` denotes, if it is a builtin one.
-pub(super) fn realize_member(owner: TypeName, function: &mut FunctionInfo) {
+pub(super) fn realize_member(
+    owner: TypeName,
+    compiler_builtin_owner: bool,
+    function: &mut FunctionInfo,
+) {
     let (params, ret) = match &function.generic_sig {
         Some(signature) => (signature.params.clone(), signature.ret),
         None => (function.semantic_params().to_vec(), function.callable.ret),
@@ -38,6 +42,9 @@ pub(super) fn realize_member(owner: TypeName, function: &mut FunctionInfo) {
         annotations: &annotations,
     };
     let realization = match member_rules::realization(facts()) {
+        MemberRealization::Intrinsic(CompilerIntrinsic::StringPlus) if !compiler_builtin_owner => {
+            None
+        }
         MemberRealization::Dispatch => member_rules::unsigned_range_construction(&facts())
             .or_else(|| {
                 member_rules::unsigned_bitwise_intrinsic(&facts()).map(MemberRealization::Intrinsic)
