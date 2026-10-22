@@ -6,6 +6,7 @@ use krusty_plugin_ir::{
     KspParameter, KspProperty, KspType, KspTypeArgument, KspTypeParameter, KspTypeSlot,
 };
 
+use super::annotations::Placement;
 use super::type_model::{class_type, TypeParameterScope};
 use super::{Owner, Source, Subject};
 use crate::ast::{
@@ -58,7 +59,7 @@ impl Source<'_> {
         for (index, parameter) in class.props.iter().enumerate() {
             if parameter.is_property {
                 declarations.push(KspDeclaration::Property(
-                    self.constructor_property(index, parameter, header),
+                    self.constructor_property(index, parameter, header)?,
                 ));
             }
         }
@@ -182,6 +183,29 @@ impl Source<'_> {
             })
         });
         let is_member = matches!(owner, Owner::Class { .. });
+        let declaration = signature.and_then(|signature| signature.stable_declaration);
+        let mut parameters = Vec::with_capacity(function.params.len());
+        for (index, parameter) in function.params.iter().enumerate().skip(function.context_count) {
+            let resolved = parameter_types.map(|types| types[index]);
+            let mut described = parameter_description(parameter, resolved, &scope);
+            // A member function's parameter also has the default a function it overrides
+            // declares.
+            if is_member && described.has_default == Some(false) {
+                if let Some(declaration) = declaration {
+                    described.has_default = self.member_parameter_default(declaration, index);
+                }
+            }
+            described.annotations = self.published_annotations(
+                subject,
+                &parameter.annotations,
+                declaration.map(|declaration| {
+                    self.analysis
+                        .parameter_annotations(declaration, index as u32)
+                }),
+                Placement::All,
+            )?;
+            parameters.push(described);
+        }
         Ok(KspFunction {
             name: function.name.clone(),
             kind: if is_member {
@@ -191,31 +215,16 @@ impl Source<'_> {
             },
             is_abstract: is_member && matches!(function.body, FunBody::None),
             line: Some(function.decl_line),
-            annotations: self.annotations(subject, &function.annotations)?,
+            annotations: self.published_annotations(
+                subject,
+                &function.annotations,
+                declaration.map(|declaration| self.analysis.declaration_annotations(declaration)),
+                Placement::All,
+            )?,
             modifiers: self.written_modifiers(function.declaration_span.lo),
             type_parameters,
             extension_receiver: receiver_slot(receiver, &scope),
-            parameters: function
-                .params
-                .iter()
-                .enumerate()
-                .skip(function.context_count)
-                .map(|(index, parameter)| {
-                    let resolved = parameter_types.map(|types| types[index]);
-                    let mut described = parameter_description(parameter, resolved, &scope);
-                    // A member function's parameter also has the default a function it overrides
-                    // declares.
-                    if is_member && described.has_default == Some(false) {
-                        if let Some(declaration) =
-                            signature.and_then(|signature| signature.stable_declaration)
-                        {
-                            described.has_default =
-                                self.member_parameter_default(declaration, index);
-                        }
-                    }
-                    described
-                })
-                .collect(),
+            parameters,
             return_type,
         })
     }
@@ -281,16 +290,47 @@ impl Source<'_> {
                     .and_then(|resolved| scope.ty(resolved.ty)),
             ),
         };
+        let declaration = match owner {
+            Owner::TopLevel { id, .. } => self
+                .file
+                .decls
+                .iter()
+                .position(|declared| declared == id)
+                .and_then(|position| {
+                    self.analysis
+                        .top_level_property_declaration(self.index, position as u32)
+                }),
+            Owner::Class { header, .. } => header
+                .class
+                .body_props
+                .iter()
+                .position(|declared| std::ptr::eq(declared, property))
+                .zip(header.signature.stable_declaration)
+                .and_then(|(position, class)| {
+                    self.analysis
+                        .member_property_declaration(class, position as u32, false)
+                }),
+        };
+        let modifiers = self.written_modifiers(property.declaration_span.lo);
+        let (getter, setter) =
+            self.written_accessors(subject, property, declaration, modifiers.as_deref())?;
         Ok(KspProperty {
             name: property.name.clone(),
             is_mutable: property.is_var,
             line: Some(property.decl_line),
-            annotations: self.annotations(subject, &property.annotations)?,
-            modifiers: self.written_modifiers(property.declaration_span.lo),
+            annotations: self.published_annotations(
+                subject,
+                &property.annotations,
+                declaration.map(|declaration| self.analysis.declaration_annotations(declaration)),
+                Placement::Property,
+            )?,
+            modifiers,
             // A generic property's type parameters are not described yet.
             type_parameters: property.type_params.is_empty().then(Vec::new),
             extension_receiver: receiver_slot(receiver, scope),
             ty,
+            getter,
+            setter,
         })
     }
 
@@ -300,26 +340,55 @@ impl Source<'_> {
         index: usize,
         parameter: &PropParam,
         header: &ClassHeader<'_>,
-    ) -> KspProperty {
-        KspProperty {
+    ) -> Result<KspProperty, String> {
+        let subject = Subject {
+            kind: "property",
+            name: &parameter.name,
+            line: parameter.decl_line,
+        };
+        let modifiers = self
+            .written_modifiers(parameter.declaration_span.lo)
+            .map(|modifiers| {
+                modifiers
+                    .into_iter()
+                    .filter(|modifier| *modifier != KspModifier::Vararg)
+                    .collect::<Vec<_>>()
+            });
+        let class = header.signature.stable_declaration;
+        let written = class
+            .and_then(|class| self.analysis.constructor_declaration(class, 0))
+            .map(|constructor| {
+                self.analysis
+                    .parameter_annotations(constructor, index as u32)
+            });
+        let declaration = class.and_then(|class| {
+            self.analysis
+                .member_property_declaration(class, index as u32, true)
+        });
+        let (getter, setter) = self.constructor_accessors(
+            subject,
+            parameter,
+            declaration,
+            written,
+            modifiers.as_deref(),
+        )?;
+        Ok(KspProperty {
             name: parameter.name.clone(),
             is_mutable: parameter.is_var,
             line: Some(parameter.decl_line),
-            // The parameter's annotations apply to the parameter unless a use-site target says
-            // otherwise, which the round does not describe yet.
-            annotations: Vec::new(),
-            modifiers: self
-                .written_modifiers(parameter.declaration_span.lo)
-                .map(|modifiers| {
-                    modifiers
-                        .into_iter()
-                        .filter(|modifier| *modifier != KspModifier::Vararg)
-                        .collect()
-                }),
+            annotations: self.published_annotations(
+                subject,
+                &parameter.annotations,
+                written,
+                Placement::Property,
+            )?,
+            modifiers,
             type_parameters: Some(Vec::new()),
             extension_receiver: KspTypeSlot::Absent,
             ty: header.constructor_parameter_type(index),
-        }
+            getter,
+            setter,
+        })
     }
 
     /// The primary constructor the resolved declaration has: the one written, or the implicit one
@@ -345,12 +414,19 @@ impl Source<'_> {
                 ),
             ));
         }
-        let parameters = signature
-            .ctor_param_names
-            .iter()
-            .zip(&class.props)
-            .enumerate()
-            .map(|(index, ((name, has_default), written))| KspParameter {
+        let subject = Subject {
+            kind: "constructor of",
+            name: &class.name,
+            line: class.primary_ctor_lines.decl_line,
+        };
+        let declaration = signature
+            .stable_declaration
+            .and_then(|class| self.analysis.constructor_declaration(class, 0));
+        let mut parameters = Vec::with_capacity(class.props.len());
+        for (index, ((name, has_default), written)) in
+            signature.ctor_param_names.iter().zip(&class.props).enumerate()
+        {
+            parameters.push(KspParameter {
                 name: name.clone(),
                 ty: header.constructor_parameter_type(index),
                 is_val: written.is_property && !written.is_var,
@@ -359,23 +435,27 @@ impl Source<'_> {
                 is_noinline: false,
                 is_crossinline: false,
                 has_default: Some(*has_default),
-            })
-            .collect();
+                annotations: self.published_annotations(
+                    subject,
+                    &written.annotations,
+                    declaration.map(|declaration| {
+                        self.analysis
+                            .parameter_annotations(declaration, index as u32)
+                    }),
+                    Placement::Parameter,
+                )?,
+            });
+        }
         let written = class.primary_ctor_lines.decl_line != 0;
         let visibility = class
             .primary_ctor_visibility_span
             .map(|_| class.primary_ctor_visibility);
-        let annotations = match &class.primary_ctor_annotations {
-            Some(annotations) => self.annotations(
-                Subject {
-                    kind: "constructor of",
-                    name: &class.name,
-                    line: class.primary_ctor_lines.decl_line,
-                },
-                annotations,
-            )?,
-            None => Vec::new(),
-        };
+        let annotations = self.published_annotations(
+            subject,
+            class.primary_ctor_annotations.iter().flatten(),
+            declaration.map(|declaration| self.analysis.declaration_annotations(declaration)),
+            Placement::All,
+        )?;
         Ok(Some(constructor(
             header,
             KspFunctionKind::PrimaryConstructor,
@@ -407,21 +487,37 @@ impl Source<'_> {
             .secondary_ctor_shapes
             .get(index)
             .filter(|types| types.len() == constructor_decl.params.len());
+        let declaration = header
+            .signature
+            .stable_declaration
+            .and_then(|class| self.analysis.constructor_declaration(class, index as u32 + 1));
+        let mut parameters = Vec::with_capacity(constructor_decl.params.len());
+        for (position, parameter) in constructor_decl.params.iter().enumerate() {
+            let resolved = resolved.map(|types| types[position]);
+            let mut described = parameter_description(parameter, resolved, header.scope);
+            described.annotations = self.published_annotations(
+                subject,
+                &parameter.annotations,
+                declaration.map(|declaration| {
+                    self.analysis
+                        .parameter_annotations(declaration, position as u32)
+                }),
+                Placement::All,
+            )?;
+            parameters.push(described);
+        }
         Ok(constructor(
             header,
             KspFunctionKind::SecondaryConstructor,
             Some(constructor_decl.decl_line),
-            self.annotations(subject, &constructor_decl.annotations)?,
+            self.published_annotations(
+                subject,
+                &constructor_decl.annotations,
+                declaration.map(|declaration| self.analysis.declaration_annotations(declaration)),
+                Placement::All,
+            )?,
             modifiers,
-            constructor_decl
-                .params
-                .iter()
-                .enumerate()
-                .map(|(position, parameter)| {
-                    let resolved = resolved.map(|types| types[position]);
-                    parameter_description(parameter, resolved, header.scope)
-                })
-                .collect(),
+            parameters,
         ))
     }
 
@@ -531,6 +627,7 @@ impl Source<'_> {
                     is_noinline: false,
                     is_crossinline: false,
                     has_default: Some(true),
+                    annotations: Vec::new(),
                 })
                 .collect(),
             Some(owner),
@@ -571,6 +668,7 @@ impl Source<'_> {
                     is_noinline: false,
                     is_crossinline: false,
                     has_default: Some(false),
+                    annotations: Vec::new(),
                 }],
                 Some(enum_type.clone()),
             )),
@@ -585,6 +683,8 @@ impl Source<'_> {
                 type_parameters: Some(Vec::new()),
                 extension_receiver: KspTypeSlot::Absent,
                 ty: Some(applied("kotlin.enums.EnumEntries")),
+                getter: super::accessors::compiler_getter(),
+                setter: None,
             }));
         }
         members
@@ -608,6 +708,7 @@ fn parameter_description(
         is_noinline: parameter.is_materialized_lambda,
         is_crossinline: parameter.is_crossinline,
         has_default: Some(parameter.default.is_some()),
+        annotations: Vec::new(),
     }
 }
 

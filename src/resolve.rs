@@ -46495,7 +46495,7 @@ impl<'a> Checker<'a> {
         let class_suppression_depth =
             self.push_declaration_policies(scope, &cl.annotations, &cl.annotation_args);
         if self.fragment.is_declaration_annotations() {
-            self.fold_classifier_declaration_annotations(scope, cl);
+            self.fold_classifier_declaration_annotations(scope, cl, current_owner);
             self.active_lexical_policies
                 .truncate(class_suppression_depth);
             return;
@@ -65038,7 +65038,7 @@ impl<'a> Checker<'a> {
         function: &FunDecl,
         declaration_target: &'static str,
     ) -> usize {
-        self.fold_function_annotation_applications(scope, function, true, declaration_target)
+        self.fold_function_annotation_applications(scope, function, declaration_target)
     }
 
     /// Materialize only declaration annotations for a class method whose checked body was retained
@@ -65049,7 +65049,7 @@ impl<'a> Checker<'a> {
         class_scope: &CheckerScope<'_>,
         function: &FunDecl,
     ) {
-        self.fold_method_annotations_in_temporary_scope(class_scope, function, true);
+        self.fold_method_annotations_in_temporary_scope(class_scope, function);
     }
 
     fn reject_package_private_classifier_call(

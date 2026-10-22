@@ -19,6 +19,7 @@ mod local_class_names;
 pub(crate) use local_class_names::{settle_generated_class_names, SettledGeneratedClassNames};
 mod local_function_names;
 mod no_expect_for_actual;
+mod published_declarations;
 mod retained_syntax;
 #[cfg(test)]
 pub(crate) use crate::resolve::collect_signatures;

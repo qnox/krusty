@@ -2158,6 +2158,21 @@ pub struct ResolvedAnnotation {
     pub annotation: TypeName,
     pub arguments: Vec<(String, AnnotationValue)>,
     pub facts: AnnotationSemanticFacts,
+    /// How a source application was written. `None` for an application read from a class file or
+    /// made by a compiler plugin, which has no written form.
+    pub written: Option<Box<WrittenAnnotation>>,
+}
+
+/// How a checked source application was written, beyond the values it folded to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WrittenAnnotation {
+    /// The use-site target written before the annotation's name (`@get:A`), if any.
+    pub use_site: Option<PropertyAnnotationSite>,
+    /// The arguments the application wrote, as indices into its declaration-ordered arguments, in
+    /// the order the source wrote them; a `vararg` element once, where its first value is. An
+    /// argument absent here was not written: an omitted Kotlin `vararg` element folds to an empty
+    /// array all the same.
+    pub order: Box<[u16]>,
 }
 
 impl ResolvedAnnotation {
@@ -2257,9 +2272,22 @@ pub struct AppliedAnnotation {
     pub internal: TypeName,
     pub values: Vec<(String, AnnotationValue)>,
     pub facts: AnnotationSemanticFacts,
+    pub written: Box<WrittenAnnotation>,
     pub retention: AnnotationRetention,
     /// The annotation's DECLARED `@Target` set (see [`AnnotationTargets`]).
     pub targets: AnnotationTargets,
+}
+
+impl AppliedAnnotation {
+    /// The application as published with its declaration, written form included.
+    pub fn resolved(&self) -> ResolvedAnnotation {
+        ResolvedAnnotation {
+            annotation: self.internal,
+            arguments: self.values.clone(),
+            facts: self.facts,
+            written: Some(self.written.clone()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

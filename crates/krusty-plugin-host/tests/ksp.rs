@@ -336,13 +336,20 @@ fn a_kept_sequence_reads_again_and_through_two_iterators_as_under_ksp2() {
 
 /// Runs the Members processor over `sources` and compares its log with `expected`.
 fn members_log_is_what_ksp2_reports(sources: &[PathBuf], scratch_name: &str, expected: &str) {
+    log_is_what_ksp2_reports("Members", "members.MembersProvider", sources, scratch_name, expected);
+}
+
+/// Runs the processor `stem` (provided by `provider`) over `sources` and compares its log with
+/// `expected`.
+fn log_is_what_ksp2_reports(
+    stem: &str,
+    provider: &str,
+    sources: &[PathBuf],
+    scratch_name: &str,
+    expected: &str,
+) {
     let (runtime, env) = runtime();
-    let processor = processor_in(
-        &runtime,
-        "Members",
-        "members.MembersProvider",
-        &format!("{scratch_name}-processor"),
-    );
+    let processor = processor_in(&runtime, stem, provider, &format!("{scratch_name}-processor"));
     let out = scratch(scratch_name);
     let outputs = KspOutputs {
         kotlin: out.join("kotlin"),
@@ -379,5 +386,17 @@ fn declarations_are_in_the_order_ksp2_lists_them() {
         &[fixtures().join("order/Order.kt")],
         "ksp-outputs-order",
         "order.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn annotation_arguments_and_accessors_are_what_ksp2_reports() {
+    log_is_what_ksp2_reports(
+        "Annotations",
+        "annotations.AnnotationsProvider",
+        &[fixtures().join("annotations/Annotations.kt")],
+        "ksp-outputs-annotations",
+        "annotations.expected",
     );
 }

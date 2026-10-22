@@ -70,6 +70,7 @@ pub(crate) fn publish_checked_type_use_annotations(
                         annotation: applied.internal,
                         arguments: applied.values.clone(),
                         facts: applied.facts,
+                        written: None,
                     }
                 });
             let occurrence = AnnotationOccurrence {

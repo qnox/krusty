@@ -5,16 +5,16 @@
 use std::io::{self, Read, Write};
 
 use krusty_plugin_ir::{
-    KspAnnotation, KspClass, KspClassKind, KspDeclaration, KspFunction, KspFunctionKind,
-    KspModifier, KspParameter, KspProperty, KspRound, KspType, KspTypeArgument, KspTypeDeclaration,
-    KspTypeParameter, KspTypeSlot, KspVariance,
+    KspAccessor, KspAnnotation, KspArgument, KspClass, KspClassKind, KspDeclaration, KspFunction,
+    KspFunctionKind, KspModifier, KspParameter, KspProperty, KspRound, KspType, KspTypeArgument,
+    KspTypeDeclaration, KspTypeParameter, KspTypeSlot, KspValue, KspVariance,
 };
 
 use crate::protocol::{malformed, put_list, put_str, read_frame, utf8, write_frame, Payload};
 
 use super::{GeneratedKind, KspGenerated, KspLoad, KspOutcome};
 
-pub(crate) const PROTOCOL: u32 = 3;
+pub(crate) const PROTOCOL: u32 = 4;
 
 const HELLO: u8 = 0;
 const LOAD: u8 = 1;
@@ -178,6 +178,20 @@ fn put_property(payload: &mut Vec<u8>, property: &KspProperty) {
     put_type_parameters(payload, &property.type_parameters);
     put_type_slot(payload, &property.extension_receiver);
     put_option(payload, &property.ty, put_type);
+    put_accessor(payload, &property.getter);
+    put_option(payload, &property.setter, put_accessor);
+}
+
+/// An accessor: whether the source wrote it, its modifiers and annotations, and a setter's
+/// parameter name and annotations.
+fn put_accessor(payload: &mut Vec<u8>, accessor: &KspAccessor) {
+    payload.push(u8::from(accessor.written));
+    put_modifiers(payload, &accessor.modifiers);
+    put_annotations(payload, &accessor.annotations);
+    put_option(payload, &accessor.parameter, |payload, (name, annotations)| {
+        put_str(payload, name);
+        put_annotations(payload, annotations);
+    });
 }
 
 /// A parameter: its name, its type and a flags byte (bit 0 `val`, 1 `var`, 2 vararg, 3 default,
@@ -194,13 +208,90 @@ fn put_parameter(payload: &mut Vec<u8>, parameter: &KspParameter) {
             | u8::from(parameter.is_crossinline) << 5
             | u8::from(parameter.has_default.is_none()) << 6,
     );
+    put_annotations(payload, &parameter.annotations);
 }
 
 fn put_annotations(payload: &mut Vec<u8>, annotations: &[KspAnnotation]) {
-    put_list(payload, annotations, |payload, annotation| {
-        put_str(payload, &annotation.short_name);
-        put_str(payload, &annotation.qualified_name);
+    put_list(payload, annotations, put_annotation);
+}
+
+/// An annotation: its short and qualified names, its use-site target's name (empty for none),
+/// whether it is synthetic, then its arguments and defaults when the round folded them.
+fn put_annotation(payload: &mut Vec<u8>, annotation: &KspAnnotation) {
+    put_str(payload, &annotation.short_name);
+    put_str(payload, &annotation.qualified_name);
+    put_str(payload, annotation.use_site.map_or("", |site| site.name()));
+    payload.push(u8::from(annotation.synthetic));
+    put_option(payload, &annotation.arguments, |payload, arguments| {
+        put_list(payload, &arguments.arguments, put_argument);
+        put_list(payload, &arguments.defaults, put_argument);
     });
+}
+
+fn put_argument(payload: &mut Vec<u8>, argument: &KspArgument) {
+    put_str(payload, &argument.name);
+    payload.push(u8::from(argument.written));
+    put_value(payload, &argument.value);
+}
+
+/// A value: a tag byte (0 boolean, 1 byte, 2 short, 3 int, 4 long, 5 char, 6 float bits,
+/// 7 double bits, 8 string, 9 enum entry, 10 type, 11 annotation, 12 array), then the value.
+fn put_value(payload: &mut Vec<u8>, value: &KspValue) {
+    match value {
+        KspValue::Boolean(value) => {
+            payload.push(0);
+            payload.push(u8::from(*value));
+        }
+        KspValue::Byte(value) => {
+            payload.push(1);
+            payload.extend_from_slice(&value.to_be_bytes());
+        }
+        KspValue::Short(value) => {
+            payload.push(2);
+            payload.extend_from_slice(&value.to_be_bytes());
+        }
+        KspValue::Int(value) => {
+            payload.push(3);
+            payload.extend_from_slice(&value.to_be_bytes());
+        }
+        KspValue::Long(value) => {
+            payload.push(4);
+            payload.extend_from_slice(&value.to_be_bytes());
+        }
+        KspValue::Char(value) => {
+            payload.push(5);
+            payload.extend_from_slice(&value.to_be_bytes());
+        }
+        KspValue::Float(bits) => {
+            payload.push(6);
+            payload.extend_from_slice(&bits.to_be_bytes());
+        }
+        KspValue::Double(bits) => {
+            payload.push(7);
+            payload.extend_from_slice(&bits.to_be_bytes());
+        }
+        KspValue::String(value) => {
+            payload.push(8);
+            put_str(payload, value);
+        }
+        KspValue::EnumEntry { class, entry } => {
+            payload.push(9);
+            put_str(payload, class);
+            put_str(payload, entry);
+        }
+        KspValue::Type(ty) => {
+            payload.push(10);
+            put_type(payload, ty);
+        }
+        KspValue::Annotation(annotation) => {
+            payload.push(11);
+            put_annotation(payload, annotation);
+        }
+        KspValue::Array(values) => {
+            payload.push(12);
+            put_list(payload, values, put_value);
+        }
+    }
 }
 
 fn put_modifiers(payload: &mut Vec<u8>, modifiers: &Option<Vec<KspModifier>>) {
@@ -371,6 +462,7 @@ mod tests {
                 is_noinline: false,
                 is_crossinline: false,
                 has_default: Some(true),
+                annotations: Vec::new(),
             }],
             return_type: None,
         };
@@ -386,6 +478,16 @@ mod tests {
                     annotations: vec![KspAnnotation {
                         short_name: "M".into(),
                         qualified_name: "p.M".into(),
+                        use_site: None,
+                        synthetic: false,
+                        arguments: Some(krusty_plugin_ir::KspAnnotationArguments {
+                            arguments: vec![KspArgument {
+                                name: "v".into(),
+                                value: KspValue::Int(5),
+                                written: true,
+                            }],
+                            defaults: Vec::new(),
+                        }),
                     }],
                     modifiers: Some(vec![KspModifier::Data]),
                     type_parameters: Some(vec![KspTypeParameter {
@@ -424,6 +526,9 @@ mod tests {
         expected.extend([4, 0, 0, 0, 3]);
         expected.extend([0, 0, 0, 1, 0, 0, 0, 1, b'M', 0, 0, 0, 3]);
         expected.extend(b"p.M");
+        // No use-site target, not synthetic, and the written argument `v = 5` with no defaults.
+        expected.extend([0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, b'v', 1, 3, 0, 0, 0, 5]);
+        expected.extend([0, 0, 0, 0]);
         // Written `data`.
         expected.extend([1, 0, 0, 0, 1, 0, 0, 0, 4]);
         expected.extend(b"DATA");
@@ -451,7 +556,8 @@ mod tests {
         expected.extend(b"FINAL");
         expected.extend([0, 0, 0, 0, 0, 1, 0, 0, 0, 1, b'x', 1]);
         expected.extend(&t);
-        expected.extend([0b1001, 0]);
+        // Its flags, no annotations, and no return type.
+        expected.extend([0b1001, 0, 0, 0, 0, 0]);
         let mut frame = (expected.len() as u32).to_be_bytes().to_vec();
         frame.extend(expected);
         assert_eq!(framed, frame);

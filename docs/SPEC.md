@@ -15554,6 +15554,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `declarations_are_in_the_order_ksp2_lists_them`; `ksp_round` unit tests
   `members_and_their_types_are_listed_in_ksps_order` and
   `declarations_are_in_ksps_order_with_the_members_the_language_contributes`.)
+- **KSP annotations carry their arguments as KSP2 reports them.** An annotation's `arguments` are
+  the arguments the source wrote, in written order (origin `KOTLIN`), then the default of each
+  element it did not write, in declaration order (origin `SYNTHETIC`); `defaultArguments` are
+  every element default. An omitted vararg element is not listed, an explicit empty spread is an
+  empty list, and a spread is flattened. Values are folded constants: boxed primitives, a string,
+  an enum entry as its `ENUM_ENTRY` class declaration, a class literal as the class applied to a
+  star for each type parameter, a nested annotation (`SYNTHETIC` when it is a default), and a list
+  for an array. A library annotation's defaults are those its class file records, so a vararg
+  element declared without one has an empty one. An unprefixed annotation on a constructor `val`
+  parameter is on both the property and the parameter; `@property:` and `@field:` only on the
+  property, `@param:` only on the parameter, `@get:`/`@set:` on the accessor, and `@setparam:` on
+  the setter's parameter with origin `SYNTHETIC`. Every property has a getter and a `var` a
+  setter; a compiler-made one is `SYNTHETIC` and `final public`, a written one `KOTLIN` with no
+  modifiers. An annotation whose arguments the frontend did not fold, an array class literal, a
+  library enum entry, and a non-public compiler-made accessor's modifiers are refused for that
+  query only.
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `annotation_arguments_and_accessors_are_what_ksp2_reports`;
+  frontend tests `pass_one_publishes_folded_annotation_element_defaults` and
+  `pass_one_publishes_value_parameter_annotations_as_written`.)
 
 ## 8. Success criteria for the PoC
 

@@ -1381,6 +1381,7 @@ fn read_resolved_annotation(
         annotation,
         arguments,
         facts,
+        written: None,
     })
 }
 
@@ -1963,6 +1964,7 @@ mod tests {
                     deprecated_error: true,
                     ..Default::default()
                 },
+                written: None,
             }],
             java_annotation: true,
             ..Default::default()
@@ -2213,6 +2215,7 @@ mod tests {
                     ),
                 ],
                 facts: Default::default(),
+                written: None,
             }]
         );
     }

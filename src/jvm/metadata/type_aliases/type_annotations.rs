@@ -29,6 +29,7 @@ pub(super) fn bind_type_annotation(
         annotation: type_name(&class),
         arguments,
         facts: crate::types::AnnotationSemanticFacts::default(),
+        written: None,
     })
 }
 
