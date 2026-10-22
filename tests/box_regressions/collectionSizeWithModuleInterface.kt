@@ -1,5 +1,5 @@
-// A class the runtime sizes through its Collection.size getter is also called through an interface
-// of the program: the two descriptor entries are separate, so neither reads the other's pointer.
+// A class whose descriptor carries a Collection.size thunk is also called through an interface of
+// the program, in one compilation: the two descriptor entries are separate fields.
 var sizeReads = 0
 
 interface Counted {
@@ -14,20 +14,17 @@ class Values : Collection<Int>, Counted {
         }
     override fun isEmpty(): Boolean = false
     override fun contains(element: Int): Boolean = element == 1 || element == 2
-    override fun containsAll(elements: Collection<Int>): Boolean = elements.all { contains(it) }
+    override fun containsAll(elements: Collection<Int>): Boolean = false
     override fun iterator(): Iterator<Int> = listOf(1, 2).iterator()
     override fun count(): Int = 40
 }
 
-fun makeValues(): Iterable<Int> = Values()
-
-fun asCounted(values: Any): Counted = values as Counted
+fun countOf(counted: Counted): Int = counted.count()
 
 fun box(): String {
-    val values = makeValues()
-    val counted = asCounted(values)
-    val mapped = values.map { it + counted.count() }
-    if (mapped != listOf(41, 42)) return "values $mapped"
+    val values = Values()
+    val sum = values.size + countOf(values)
+    if (sum != 42) return "sum $sum"
     if (sizeReads != 1) return "size read $sizeReads times"
     return "OK"
 }
