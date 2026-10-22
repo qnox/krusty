@@ -7,8 +7,22 @@ one the execution platform needs.
 
 ## Using a release
 
-Every krusty release publishes `krusty-bazel-<version>.tar.gz` (and its `.sha256`) beside the
-compiler archives. Until the module is in a registry, depend on it with an `archive_override`:
+Every krusty release is a version of the `krusty` module in the krusty Bazel registry,
+`https://krustythecompiler.dev/bazel-registry`. Add it before the central registry in `.bazelrc`:
+
+```
+common --registry=https://krustythecompiler.dev/bazel-registry
+common --registry=https://bcr.bazel.build
+```
+
+and depend on a release in `MODULE.bazel`:
+
+```python
+bazel_dep(name = "krusty", version = "<version>")
+```
+
+The registry is generated from the GitHub releases, each of which carries the module as
+`krusty-bazel-<version>.tar.gz`. Without the registry, depend on that archive directly:
 
 ```python
 bazel_dep(name = "krusty", version = "<version>")
@@ -18,6 +32,8 @@ archive_override(
     integrity = "sha256-<base64 of the digest in krusty-bazel-<version>.tar.gz.sha256>",
 )
 ```
+
+Then load the rule:
 
 ```python
 load("@krusty//:defs.bzl", "krusty_jvm_library")
@@ -61,6 +77,7 @@ The root module's tag replaces the module's own; hosts it leaves out get no tool
 This directory is the module root. A source checkout carries no release, so it registers no
 toolchain and builds need `--@krusty//:krusty_binary`. `smoke/` is the smallest workspace that
 builds against it, and `intellij.md` covers building intellij-community targets. The release job
-packages the module with `scripts/package-bazel-module.sh`; CI's `bazel` job runs
+packages the module with `scripts/package-bazel-module.sh`, and the pages workflow regenerates the
+registry with `site/scripts/bazel-registry.mjs`; CI's `bazel` job runs
 `scripts/bazel-smoke.sh`, which builds a consumer of that package with the toolchain and with an
 override, in action and worker mode, with automatic execution groups on and off.
