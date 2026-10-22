@@ -2,7 +2,8 @@
 //! `invoke`, or a construction together with the typealias that named the constructed classifier.
 
 pub(super) enum SelectedTopLevelCall {
-    Ambiguous,
+    /// The declarations left tied, in family order.
+    Ambiguous(Vec<crate::libraries::FunctionInfo>),
     Callable {
         callable: Box<crate::libraries::LibraryCallable>,
         source: Option<(u32, u32)>,
@@ -120,6 +121,64 @@ impl super::ProductionSignatureSemantics<'_> {
                 parameter_by_argument,
             ),
         ))
+    }
+}
+
+impl super::ProductionSignatureSemantics<'_> {
+    /// Each declaration's own mapping of the source arguments, with the argument types in its
+    /// parameter order, when the family has no single mapping: its declarations name or omit
+    /// different parameters. `None` when every declaration maps the arguments alike, or one cannot
+    /// map them at all.
+    pub(super) fn separately_mapped_candidates(
+        candidates: &[crate::libraries::FunctionInfo],
+        arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
+        trailing_lambda: bool,
+    ) -> Option<Vec<(crate::symbol_resolver::CandidateCall, Vec<crate::types::Ty>)>> {
+        let names = arguments
+            .iter()
+            .map(|argument| argument.name.map(str::to_owned))
+            .collect::<Vec<_>>();
+        let extra_admitted = |first: usize, extra: usize| {
+            Self::same_vararg_element(&arguments[first], &arguments[extra])
+        };
+        if candidates.len() < 2
+            || Self::mapped_call_slots(
+                candidates,
+                &names,
+                arguments.len(),
+                trailing_lambda,
+                &extra_admitted,
+            )
+            .is_some()
+        {
+            return None;
+        }
+        candidates
+            .iter()
+            .map(|candidate| {
+                let (args, types) = Self::mapped_call_arguments(
+                    std::slice::from_ref(candidate),
+                    arguments,
+                    trailing_lambda,
+                )?;
+                Self::candidate_call_slots(
+                    candidate,
+                    &names,
+                    arguments.len(),
+                    trailing_lambda,
+                    &extra_admitted,
+                )?;
+                let parameter_by_argument =
+                    Self::selected_argument_parameters(candidate, arguments, trailing_lambda);
+                Some((
+                    crate::symbol_resolver::CandidateCall {
+                        args,
+                        parameter_by_argument,
+                    },
+                    types,
+                ))
+            })
+            .collect()
     }
 }
 

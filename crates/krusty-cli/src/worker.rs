@@ -50,6 +50,42 @@ pub struct WorkUnit {
     pub resources: Vec<ResourceGroup>,
 }
 
+impl WorkUnit {
+    /// The krusty command line this unit compiles with. The classpath is joined with the separator
+    /// the CLI splits it on, so a Windows worker does not read several jars as one path.
+    pub fn compiler_arguments(&self) -> Vec<String> {
+        let mut argv: Vec<String> = vec!["-d".to_string(), self.output_jar.display().to_string()];
+        if let Some(module_name) = &self.module_name {
+            argv.push("-module-name".to_string());
+            argv.push(module_name.clone());
+        }
+        if !self.classpath.is_empty() {
+            argv.push("-classpath".to_string());
+            argv.push(
+                self.classpath
+                    .iter()
+                    .map(|entry| entry.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(&crate::cli::CLASSPATH_SEPARATOR.to_string()),
+            );
+        }
+        // kotlinc splits `-Xfriend-paths` on `,`, not on the path separator.
+        if !self.friend_paths.is_empty() {
+            argv.push(format!(
+                "-Xfriend-paths={}",
+                self.friend_paths
+                    .iter()
+                    .map(|entry| entry.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+        }
+        argv.extend(self.kotlinc_args.iter().cloned());
+        argv.extend(self.sources.iter().map(|path| path.display().to_string()));
+        argv
+    }
+}
+
 /// One `--resources` argument: files copied into the jar after their strip prefix is removed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResourceGroup {
@@ -792,6 +828,25 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn the_compiler_reads_every_classpath_entry_of_a_work_unit() {
+        let unit = translate(&args(&[
+            "--srcs",
+            "A.kt",
+            "--cp",
+            "lib/a.jar",
+            "lib/b.jar",
+            "--out",
+            "o.jar",
+        ]))
+        .expect("must translate");
+        let parsed = crate::cli::parse(unit.compiler_arguments());
+        assert_eq!(
+            parsed.classpath,
+            vec![PathBuf::from("lib/a.jar"), PathBuf::from("lib/b.jar")]
+        );
     }
 
     /// The argument list intellij-community's own rules produce for a Kotlin-only target.

@@ -24,6 +24,7 @@ mod fragments;
 mod language_features;
 mod warning_policy;
 
+pub use arguments::CLASSPATH_SEPARATOR;
 use arguments::{
     apply, collect_sources, finish_jvm_target, finish_language_settings, finish_warning_policy,
     take_reference_version, unsupported, ParsedSettings,

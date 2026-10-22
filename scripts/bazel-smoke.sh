@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# Build Kotlin with the krusty Bazel module the release job would publish, under real Bazel.
+#
+#   usage: bazel-smoke.sh KRUSTY_BINARY KOTLIN_STDLIB_JAR
+#
+# Packages tools/krusty-bazel with scripts/package-bazel-module.sh, KRUSTY_BINARY standing in for
+# this host's release archive, and depends on it from a fresh workspace the way a consumer does
+# (`bazel_dep` plus `archive_override`). Each target is compiled once as plain actions and once
+# through the persistent worker, with automatic execution groups on and off, both with the
+# toolchain's compiler and with a `--@krusty//:krusty_binary` override. `bazel` must be on PATH.
+set -euo pipefail
+
+if [[ $# -ne 2 ]]; then
+  echo "usage: $0 KRUSTY_BINARY KOTLIN_STDLIB_JAR" >&2
+  exit 2
+fi
+krusty=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
+stdlib=$(cd "$(dirname "$2")" && pwd)/$(basename "$2")
+if [[ ! -x $krusty ]]; then
+  echo "not an executable krusty binary: $krusty" >&2
+  exit 2
+fi
+repo=$(cd "$(dirname "$0")/.." && pwd)
+
+case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64) host=x86_64-unknown-linux-gnu ;;
+  Linux-aarch64) host=aarch64-unknown-linux-gnu ;;
+  Darwin-arm64) host=aarch64-apple-darwin ;;
+  Darwin-x86_64) host=x86_64-apple-darwin ;;
+  *) echo "no krusty release host for $(uname -s)-$(uname -m)" >&2; exit 2 ;;
+esac
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+version=0.0.0-smoke
+
+# The release's compiler archives: the real binary for this host, placeholders for the others,
+# which Bazel must never fetch.
+dist=$work/dist
+mkdir -p "$dist"
+for triple in $(sed -nE 's/^    "([^"]+)": \["@platforms.*/\1/p' "$repo/tools/krusty-bazel/extensions.bzl"); do
+  if [[ $triple == "$host" ]]; then
+    tar -C "$(dirname "$krusty")" -czf "$dist/krusty-$version-$triple.tar.gz" \
+      --transform "s#^$(basename "$krusty")\$#krusty#" "$(basename "$krusty")"
+  elif [[ $triple == *windows* ]]; then
+    echo "not fetched" > "$dist/krusty-$version-$triple.zip"
+  else
+    echo "not fetched" > "$dist/krusty-$version-$triple.tar.gz"
+  fi
+done
+module=$("$repo/scripts/package-bazel-module.sh" "$version" "$dist")
+integrity=sha256-$(openssl dgst -sha256 -binary "$module" | base64)
+
+consumer=$work/consumer
+mkdir -p "$consumer/src" "$consumer/lib" "$consumer/tools"
+cp "$repo/tools/krusty-bazel/smoke/src/Greet.kt" "$consumer/src/"
+cp "$stdlib" "$consumer/lib/kotlin-stdlib.jar"
+cp "$krusty" "$consumer/tools/krusty.bin"
+cat > "$consumer/MODULE.bazel" <<EOF
+module(name = "krusty_bazel_smoke")
+
+bazel_dep(name = "rules_java", version = "8.14.0")
+bazel_dep(name = "rules_shell", version = "0.6.1")
+bazel_dep(name = "krusty", version = "$version")
+archive_override(
+    module_name = "krusty",
+    urls = ["file://$module"],
+    integrity = "$integrity",
+)
+EOF
+cat > "$consumer/BUILD.bazel" <<'EOF'
+load("@krusty//:defs.bzl", "krusty_jvm_library")
+load("@rules_java//java:defs.bzl", "java_import")
+
+java_import(
+    name = "stdlib",
+    jars = ["lib/kotlin-stdlib.jar"],
+)
+
+[
+    krusty_jvm_library(
+        name = name,
+        srcs = ["src/Greet.kt"],
+        kotlinc_opts = ["-no-stdlib"],
+        module_name = "smoke",
+        use_worker = use_worker,
+        deps = [":stdlib"],
+    )
+    for name, use_worker in [("actions", False), ("worker", True)]
+]
+EOF
+cat > "$consumer/tools/BUILD.bazel" <<'EOF'
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+
+# The compiler binary itself, as the executable a `krusty_binary` override names.
+sh_binary(
+    name = "krusty",
+    srcs = ["krusty.bin"],
+    visibility = ["//visibility:public"],
+)
+EOF
+
+cd "$consumer"
+for exec_groups in --incompatible_auto_exec_groups --noincompatible_auto_exec_groups; do
+  for compiler in toolchain --@krusty//:krusty_binary=//tools:krusty; do
+    flags=("$exec_groups" "--distdir=$dist")
+    [[ $compiler == toolchain ]] || flags+=("$compiler")
+    echo "bazel build ${flags[*]}" >&2
+    bazel build "${flags[@]}" //:actions //:worker
+    for jar in actions worker; do
+      entries=$(unzip -Z1 "bazel-bin/$jar.jar" | LC_ALL=C sort | tr '\n' ' ')
+      if [[ $entries != "META-INF/MANIFEST.MF META-INF/smoke.kotlin_module smoke/Greeter.class " ]]; then
+        echo "bazel-bin/$jar.jar holds: $entries" >&2
+        exit 1
+      fi
+    done
+    bazel clean
+  done
+done
+bazel shutdown
+echo "krusty Bazel module builds with the toolchain and an override, in both modes"

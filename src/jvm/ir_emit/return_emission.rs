@@ -162,17 +162,24 @@ impl Emitter<'_> {
         if let Some(&result) = self.suspended_result_returns.get(&returned) {
             self.emit_suspended_result_return(result, code);
         }
-        let words = slot_words(ret);
-        if self.return_finalizers.is_empty() || words == 0 {
-            if self.emit_return_finalizers(code) {
-                if self.completes_unsigned_bitwise_value(value) {
-                    code.forget_line();
-                }
-                self.mark_return(returned, code);
-                emit_return(ret, code);
+        if self.emit_finalizers_before_return(code) {
+            if self.completes_unsigned_bitwise_value(value) {
+                code.forget_line();
             }
-            self.reopen_finally_segments(code);
-            return;
+            self.mark_return(returned, code);
+            emit_return(ret, code);
+        }
+        self.reopen_finally_segments(code);
+    }
+
+    /// Run every active `finally` ahead of a return of the function's value, which is on the stack;
+    /// returns whether the return survives them. The caller writes the return and then reopens
+    /// the protected regions ([`Self::reopen_finally_segments`]). A lambda's non-local return
+    /// inlined from a body's node takes the same path (kotlinc's `generateAndInsertFinallyBlocks`).
+    pub(super) fn emit_finalizers_before_return(&mut self, code: &mut CodeBuilder) -> bool {
+        let ret = self.ret;
+        if self.return_finalizers.is_empty() || slot_words(ret) == 0 {
+            return self.emit_return_finalizers(code);
         }
         // Kotlin evaluates the return expression before `finally`. Spill that value so arbitrary
         // branchy finalizers run on an empty operand stack, then reload it only if none overrides.
@@ -192,13 +199,6 @@ impl Emitter<'_> {
             load(ret, slot, code);
         }
         self.release_temporary(parked);
-        if survives {
-            if self.completes_unsigned_bitwise_value(value) {
-                code.forget_line();
-            }
-            self.mark_return(returned, code);
-            emit_return(ret, code);
-        }
-        self.reopen_finally_segments(code);
+        survives
     }
 }

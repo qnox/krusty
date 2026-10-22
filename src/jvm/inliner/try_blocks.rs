@@ -60,12 +60,12 @@ pub(super) fn move_try_starts_to_their_first_instruction(
     Ok(())
 }
 
-/// kotlinc's `InternalFinallyBlockInliner.processInlineFunFinallyBlocks` on the inlined body, whose
-/// first `lambda_blocks` try/catch blocks come from inlined lambdas: when the body's own blocks
-/// include a `finally` (a block catching any throwable), they are all rewritten through
-/// `substituteTryBlockNodes`, which orders them by handler, then start, then end position, and
-/// drops each one whose range holds no instruction. Only that rewrite is ported: the bodies this
-/// inliner accepts already carry their duplicated finally code (see `finally_markers`).
+/// The closing step of `InternalFinallyBlockInliner.processInlineFunFinallyBlocks` on an expanded
+/// lambda or regenerated method, whose first `lambda_blocks` try/catch blocks come from inlined
+/// lambdas: when the body's own blocks include a `finally` (a block catching any throwable), they
+/// are all rewritten through `substituteTryBlockNodes`, which orders them by handler, then start,
+/// then end position, and drops each one whose range holds no instruction. Such a body has no
+/// non-local return to copy a `finally` before; the root body goes through `finally_blocks`.
 pub(super) fn order_around_finally_blocks(node: &mut MethodNode, lambda_blocks: usize) {
     if !node.try_catch_blocks[lambda_blocks..]
         .iter()

@@ -311,9 +311,12 @@ fn updates_supersede_their_ref_without_cancelling_master_validation() {
     let acquire = position("release-publisher.sh acquire");
     let check = position("release-publisher.sh check");
     let publish = position("softprops/action-gh-release");
+    let portal = position("publishPlugins");
     let record = position("release-publisher.sh record");
     let drop = position("release-publisher.sh release");
-    assert!(acquire < check && check < publish && publish < record && record < drop);
+    assert!(
+        acquire < check && check < publish && publish < portal && portal < record && record < drop
+    );
     assert_eq!(drop, steps.len() - 1, "dropping the lock is the last step");
     assert!(
         steps[drop].contains("if: always() && steps.lock.outputs.lock != ''"),

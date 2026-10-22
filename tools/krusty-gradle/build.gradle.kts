@@ -5,9 +5,11 @@ import org.gradle.api.tasks.bundling.AbstractArchiveTask
 plugins {
     `kotlin-dsl`
     `maven-publish`
+    signing
+    id("com.gradle.plugin-publish") version "1.3.1"
 }
 
-group = "dev.krusty"
+group = "dev.krustythecompiler"
 version = providers.gradleProperty("krustyPluginVersion").orElse("0.0.1").get()
 
 repositories {
@@ -40,10 +42,16 @@ sourceSets.main {
 }
 
 gradlePlugin {
+    website = "https://krustythecompiler.dev"
+    vcsUrl = "https://github.com/qnox/krusty"
     plugins {
         create("krusty") {
-            id = "krusty"
+            id = "dev.krustythecompiler"
             implementationClass = "krusty.KrustyKotlinPlugin"
+            displayName = "krusty"
+            description = "Compiles Kotlin/JVM source sets with krusty, a Kotlin compiler written in Rust that " +
+                "emits kotlinc's bytecode; a compile it does not support stays with kotlinc."
+            tags = listOf("kotlin", "compiler", "kotlinc", "krusty", "build-performance")
         }
     }
 }
@@ -71,4 +79,19 @@ publishing {
             url = layout.buildDirectory.dir("release-repository").get().asFile.toURI()
         }
     }
+}
+
+// Releases are signed with the maintainer's krusty signing subkey, passed in memory by the release
+// job; a local or CI build without the key publishes unsigned.
+signing {
+    val key = providers.gradleProperty("signingInMemoryKey").orNull
+    if (key != null) {
+        useInMemoryPgpKeys(
+            providers.gradleProperty("signingInMemoryKeyId").orNull,
+            key,
+            providers.gradleProperty("signingInMemoryKeyPassword").orNull,
+        )
+    }
+    isRequired = key != null
+    sign(publishing.publications)
 }

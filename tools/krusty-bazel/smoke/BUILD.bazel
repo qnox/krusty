@@ -1,4 +1,4 @@
-load("@krusty//bazel:defs.bzl", "krusty_jvm_library")
+load("@krusty//:defs.bzl", "krusty_jvm_library")
 load("@rules_java//java:defs.bzl", "java_import")
 
 # The Kotlin stdlib as a plain jar dependency. Copy one in (see README.md) rather than depending on
@@ -20,12 +20,10 @@ krusty_jvm_library(
     kotlinc_opts = ["-no-stdlib"],
     module_name = "smoke",
     use_worker = True,
-    # `krusty_jvm_library` passes this env to the action explicitly, which OVERRIDES `--action_env`
-    # — so these cannot be supplied on the command line. Replace both paths for your machine.
-    #   JAVA_HOME:     without it krusty has no platform classpath, and every `java.*` is unresolved
-    #   KRUSTY_BINARY: the binary `cargo build --release` produced
+    # JAVA_HOME comes from the Java runtime toolchain. The rule's `env` REPLACES the action
+    # environment, so `--action_env` cannot supply KRUSTY_BINARY, the binary `cargo build --release`
+    # produced, that `tools/krusty/krusty.sh` runs. Replace the path for your machine.
     env = {
-        "JAVA_HOME": "/replace/with/your/jdk",
         "KRUSTY_BINARY": "/replace/with/krusty/target/release/krusty",
     },
     deps = [":stdlib"],
