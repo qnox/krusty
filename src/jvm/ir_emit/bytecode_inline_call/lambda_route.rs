@@ -22,8 +22,9 @@ pub(in crate::jvm::ir_emit) enum SpliceReason {
     /// A lambda suspends. The splice places its state-machine markers until the coroutine
     /// transformer runs on inlined bytecode.
     SuspendingLambda,
-    /// A lambda leaves by a `break` or `continue` of a loop outside it.
-    NonLocalJump,
+    /// A lambda returns from an inline expansion outside it, storing the expansion's result, a
+    /// value of the caller's frame.
+    FrameReturn,
     /// A lambda's parameter or result crosses `invoke` through a value-class adapter rather than a
     /// plain box.
     ValueClassAdapter,

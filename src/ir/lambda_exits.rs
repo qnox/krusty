@@ -22,8 +22,13 @@ pub(crate) enum LambdaExit {
     Local,
     /// By a non-local `return` and by no `break` or `continue` of an outer loop.
     Return,
-    /// By a `break` or `continue` of a loop outside it, whatever else it does.
+    /// By a `break` or `continue` of a loop outside it, and by no return of an enclosing inline
+    /// expansion.
     Jump,
+    /// By a return of an inline expansion outside it, which lowering made a `break` of the
+    /// expansion's return frame, whatever else it does. The return stores the frame's result, a
+    /// value of the code outside the lambda.
+    FrameReturn,
 }
 
 impl IrFile {
@@ -66,7 +71,7 @@ impl IrFile {
     /// no lambda that reaches a backend lacks. Lowering can rewrite a body after recording it: a
     /// labeled return of an enclosing lambda (`return@outer` in an inner lambda) becomes a `break`
     /// of that lambda's return frame. The body as it stands is walked again and the stronger exit
-    /// is kept, so such a body is a jump rather than the return it was recorded as.
+    /// is kept, so such a body is a frame return rather than the return it was recorded as.
     pub(crate) fn lambda_exit(&self, body: ExprId) -> Option<LambdaExit> {
         let recorded = self.lambda_exits.leaves.get(&body).copied()?;
         Some(recorded.max(lambda_exit(self, body, &mut Vec::new())))
@@ -92,14 +97,16 @@ fn lambda_exit(ir: &IrFile, expression: ExprId, loops: &mut Vec<String>) -> Lamb
             });
         }
         IrExpr::Break { label } | IrExpr::Continue { label } => {
-            let outer = match label {
-                None => loops.is_empty(),
-                Some(label) => !loops.contains(label),
-            };
-            return if outer {
-                LambdaExit::Jump
-            } else {
-                LambdaExit::Local
+            return match label {
+                None if loops.is_empty() => LambdaExit::Jump,
+                Some(label) if !loops.contains(label) => {
+                    if ir.inline_return_frames.values().any(|frame| frame == label) {
+                        LambdaExit::FrameReturn
+                    } else {
+                        LambdaExit::Jump
+                    }
+                }
+                _ => LambdaExit::Local,
             };
         }
         IrExpr::Lambda {
@@ -118,7 +125,7 @@ fn lambda_exit(ir: &IrFile, expression: ExprId, loops: &mut Vec<String>) -> Lamb
     loops.extend(label);
     let mut exit = LambdaExit::Local;
     super::for_each_child(&ir.exprs, expression, &mut |child| {
-        if exit != LambdaExit::Jump {
+        if exit != LambdaExit::FrameReturn {
             exit = exit.max(lambda_exit(ir, child, loops));
         }
     });
@@ -221,8 +228,11 @@ mod tests {
     }
 
     #[test]
-    fn a_return_rewritten_into_a_frame_break_after_recording_is_a_jump() {
+    fn a_return_rewritten_into_a_frame_break_after_recording_is_a_frame_return() {
         let mut ir = IrFile::default();
+        let result = ir.add_expr(IrExpr::UnitInstance);
+        ir.inline_return_frames
+            .insert(result, "$fir_inline_return_0".to_string());
         let exit = ir.add_expr(IrExpr::Return(None));
         let body = block(&mut ir, vec![exit]);
         assert!(ir.record_lambda_exit(body));
@@ -230,6 +240,6 @@ mod tests {
         ir.exprs[exit as usize] = IrExpr::Break {
             label: Some("$fir_inline_return_0".to_string()),
         };
-        assert_eq!(ir.lambda_exit(body), Some(LambdaExit::Jump));
+        assert_eq!(ir.lambda_exit(body), Some(LambdaExit::FrameReturn));
     }
 }

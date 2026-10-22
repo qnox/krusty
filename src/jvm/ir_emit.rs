@@ -129,6 +129,7 @@ mod method_defaults;
 mod method_entry;
 mod method_signatures;
 mod must_inline_lambdas;
+mod non_local_jumps;
 mod non_null_operands;
 mod nullable_sam;
 mod numeric_comparison;
@@ -5192,6 +5193,8 @@ struct Emitter<'a> {
     /// depth makes a `break`/`continue` run exactly the finalizers it leaves — those pushed inside
     /// the loop — and no outer one.
     loop_stack: Vec<(Label, Label, Option<String>, usize)>,
+    /// The loops outside an inline lambda's node, which a `break`/`continue` leaves it for.
+    non_local_jumps: non_local_jumps::NonLocalJumps,
     /// Operand-stack verification types sitting BELOW the expression currently being emitted (an
     /// arithmetic LHS held on the stack across a branchy RHS, e.g. a data-class `hashCode` accumulator
     /// `result*31 + <branchy nullable-field hash>`). Prepended to every recorded stack-map frame's stack
@@ -5330,6 +5333,7 @@ impl<'a> Emitter<'a> {
             machine: None,
             ret,
             loop_stack: Vec::new(),
+            non_local_jumps: Default::default(),
             open_locals: Vec::new(),
             next_inline_frame_identity: 0,
             inline_lambda_aliases: HashMap::default(),
