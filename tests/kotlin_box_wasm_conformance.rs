@@ -459,6 +459,7 @@ fun box(): String {
 
 #[test]
 fn wasm_declines_an_instruction_wrapper_whose_body_lowering_does_not_model() {
+    // PLATFORM-SPECIFIC: pin the Wasm intrinsic-support decline, including its category ownership.
     // `pow` reaches fdlibm's `__ieee754_pow`, whose locals have no initializer: the wrapper is not
     // support code, so its call declines instead of failing compilation.
     expect_wasm_decline(

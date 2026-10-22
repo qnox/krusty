@@ -30,6 +30,7 @@ mod plugin_release;
 mod program_order_metadata;
 mod property_default;
 mod runtime_abi;
+mod sealed_serializer;
 mod serial_elements;
 mod serialize_body;
 mod serializer_class;
@@ -1104,103 +1105,6 @@ impl SerializationPlugin {
         let enum_ser = enum_serializer::factory_call(ir, class_id, name, enums);
         cached_serializer::add_companion_cached_serializer(ir, class_id, class_name, enum_ser);
     }
-
-    /// `getOrCreateKotlinClass(<internal>.class)` — a `KClass` literal for an internal class name.
-    fn kclass_literal(ir: &mut IrFile, classifier: TypeName) -> ExprId {
-        let classlit = ir.class_const_name(Some(classifier));
-        ir.add_expr(IrExpr::Call {
-            callee: Box::new(Callee::Static {
-                owner: type_name("kotlin/jvm/internal/Reflection"),
-                name: "getOrCreateKotlinClass".to_string(),
-                descriptor: "(Ljava/lang/Class;)Lkotlin/reflect/KClass;".to_string(),
-                inline: InlineKind::None,
-            }),
-            dispatch_receiver: None,
-            args: vec![classlit],
-        })
-    }
-
-    /// Add `static serializer(): KSerializer<C>` for a `@Serializable sealed class`/`sealed interface`,
-    /// returning a runtime `SealedClassSerializer(serialName, C::class, [Sub::class…], [Sub.serializer()…])`
-    /// over its `@Serializable` direct subclasses — the way kotlinc compiles a sealed polymorphic base.
-    fn add_sealed_serializer_accessor(
-        ir: &mut IrFile,
-        ctx: &PluginContext,
-        class_id: u32,
-        class_name: TypeName,
-    ) {
-        // Direct `@Serializable` subclasses: a `class … : C(…)` (superclass == C) or `… : C` (C in its
-        // interface list), in declaration order — the order kotlinc registers them.
-        let subs: Vec<u32> = ctx
-            .classes_with(type_name(SERIALIZABLE_FQ))
-            .into_iter()
-            .filter(|&cid| cid != class_id)
-            .filter(|&cid| {
-                let c = &ir.classes[cid as usize];
-                c.superclass == class_name || c.interfaces.contains_name(class_name)
-            })
-            .collect();
-
-        let serial_name = ir.add_expr(IrExpr::Const(IrConst::String(
-            annotations::class_serial_name(ir, class_id),
-        )));
-        let base_kclass = Self::kclass_literal(ir, class_name);
-        let sub_kclasses: Vec<ExprId> = subs
-            .iter()
-            .map(|&cid| Self::kclass_literal(ir, ir.classes[cid as usize].fq_name_id()))
-            .collect();
-        let sub_serializers: Vec<ExprId> = subs
-            .iter()
-            .map(|&cid| {
-                let subtype = ir.classes[cid as usize].fq_name_id();
-                // An `object` case is serialized by an `ObjectSerializer` kotlinc constructs in
-                // place, as it does for any element of an object type.
-                if let Some(object) = cached_serializer::local_serializable_object(ir, ctx, subtype)
-                {
-                    let name = ir.add_expr(IrExpr::Const(IrConst::String(
-                        annotations::class_serial_name(ir, object),
-                    )));
-                    let serial_info_unsupported =
-                        annotations::class_has_serial_info(ctx, ir, object);
-                    return cached_serializer::object_serializer(
-                        ir,
-                        subtype,
-                        name,
-                        serial_info_unsupported,
-                    );
-                }
-                serializer_of_name(
-                    ir,
-                    subtype,
-                    vec![],
-                    kserializer_of(Ty::obj_name(subtype)),
-                    vec![],
-                )
-            })
-            .collect();
-        let kclass_arr = ir.add_expr(IrExpr::Vararg {
-            array_type: Ty::obj_args("kotlin/Array", &[class_ty("kotlin/reflect/KClass")]),
-            spreads: vec![false; sub_kclasses.len()],
-            elements: sub_kclasses,
-        });
-        let ser_arr = ir.add_expr(IrExpr::Vararg {
-            array_type: Ty::obj_args("kotlin/Array", &[kserializer_of(class_ty("kotlin/Any"))]),
-            spreads: vec![false; sub_serializers.len()],
-            elements: sub_serializers,
-        });
-        let inst = ir.new_external(
-            "kotlinx/serialization/SealedClassSerializer",
-            "(Ljava/lang/String;Lkotlin/reflect/KClass;[Lkotlin/reflect/KClass;[Lkotlinx/serialization/KSerializer;)V",
-            vec![serial_name, base_kclass, kclass_arr, ser_arr],
-        );
-        let ret = ir.add_expr(IrExpr::Return(Some(inst)));
-        let body = ir.add_expr(IrExpr::Block {
-            stmts: vec![ret],
-            value: None,
-        });
-        let owner = serializer_accessor_owner(ir, class_id);
-        complete_frontend_serializer_accessor(ir, owner, body);
-    }
 }
 
 impl IrPlugin for SerializationPlugin {
@@ -1412,11 +1316,11 @@ impl IrPlugin for SerializationPlugin {
                 ir.fn_source_order.remove(&accessor);
                 continue;
             }
-            if class.is_sealed {
-                continue;
-            }
             if cached_serializer::is_polymorphic_base(class) {
                 serializer_class::declare_polymorphic_base(ir, ctx, class_id);
+                continue;
+            }
+            if class.is_sealed {
                 continue;
             }
             serializer_class::declare(
@@ -1459,20 +1363,20 @@ impl IrPlugin for SerializationPlugin {
                 cached_serializer::add_object_serializer(ir, ctx, class_id, class_name);
                 continue;
             }
-            // A `@Serializable sealed class`/`sealed interface`: no generated `$serializer` —
-            // `serializer()` returns a runtime `SealedClassSerializer` over its `@Serializable` subclasses
-            // (polymorphic, `"type"` discriminator), the way kotlinc compiles a sealed base.
-            if ir.classes[class_id as usize].is_sealed {
-                Self::add_sealed_serializer_accessor(ir, ctx, class_id, class_name);
-                continue;
-            }
-            // An abstract class: `serializer()` returns a cached `PolymorphicSerializer`, and its
-            // subclasses still call its `write$Self` and deserialization constructor.
+            // An abstract or sealed class: `serializer()` returns a cached `PolymorphicSerializer`
+            // or `SealedClassSerializer`, and its subclasses still call its `write$Self` and
+            // deserialization constructor.
             if cached_serializer::is_polymorphic_base(&ir.classes[class_id as usize]) {
                 pending_caches.push(serializer_class::complete_polymorphic_base(
                     self, ir, ctx, class_id,
                 ));
                 polymorphic_bases.push((class_id, class_name));
+                continue;
+            }
+            // A sealed interface or generic sealed class: no generated `$serializer` — its
+            // `serializer()` returns a new `SealedClassSerializer` over its subclasses.
+            if ir.classes[class_id as usize].is_sealed {
+                sealed_serializer::add_sealed_serializer_accessor(ir, ctx, class_id);
                 continue;
             }
             pending_caches.extend(serializer_class::complete(self, ir, ctx, class_id));
@@ -1487,7 +1391,8 @@ impl IrPlugin for SerializationPlugin {
                     .insert(serialized, plan);
             }
         }
-        // kotlinc generates an abstract class's cached serializer after its child-serializer cache.
+        // kotlinc generates an abstract or sealed class's cached serializer after its child-serializer
+        // cache.
         for (class_id, class_name) in polymorphic_bases {
             cached_serializer::add_polymorphic_serializer(ir, ctx, class_id, class_name);
         }
@@ -1503,8 +1408,9 @@ impl IrPlugin for SerializationPlugin {
         for class_id in ctx.classes_with(type_name(SERIALIZABLE_FQ)) {
             // `@Serializable(with=X)` classes have no generated `$serializer` to fill (handled wholly in
             // `generate_declarations`).
+            let class = &ir.classes[class_id as usize];
             if custom_serializer_of(ctx, ir, class_id).is_some()
-                || ir.classes[class_id as usize].is_sealed
+                || (class.is_sealed && !cached_serializer::is_polymorphic_base(class))
                 || ir.classes[class_id as usize].is_enum
                 || ir.classes[class_id as usize].is_object
             {

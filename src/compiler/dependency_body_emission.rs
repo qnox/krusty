@@ -99,7 +99,7 @@ pub(super) fn emit_dependencies<B: Backend>(
         }
     }
     let target_realizes_intrinsic = |operation| backend.realizes_dependency_intrinsic(operation);
-    let ordinary = match emitted_roots::ordinary_roots(
+    let mut ordinary = match emitted_roots::ordinary_roots(
         source,
         bodies,
         intrinsics,
@@ -112,6 +112,20 @@ pub(super) fn emit_dependencies<B: Backend>(
             return Vec::new();
         }
     };
+    // Category ownership is a declaration capability, not an emission-success test. An intrinsic
+    // wrapper whose unsupported body transaction declines must not be retried as an ordinary body.
+    let intrinsic_roots: HashSet<_> = roots.iter().map(|root| root.identity()).collect();
+    ordinary.retain(|root| {
+        let intrinsic_owned = intrinsic_roots.contains(root.identity());
+        if intrinsic_owned {
+            crate::trace_compiler!(
+                "lower",
+                "intrinsic support owns dependency root: {:?}",
+                root.identity()
+            );
+        }
+        !intrinsic_owned
+    });
     let mut artifacts = Vec::new();
     for (requires_intrinsic_link, mut roots) in [(true, roots), (false, ordinary)] {
         // Intrinsic support may have emitted an ordinary root transitively in the preceding unit.

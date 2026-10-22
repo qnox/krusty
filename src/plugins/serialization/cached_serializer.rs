@@ -1,11 +1,12 @@
-//! A serializer a declaration builds for itself once and caches: an enum's, an object's and an
-//! abstract class's.
+//! A serializer a declaration builds for itself once and caches: an enum's, an object's, and an
+//! abstract or sealed class's.
 //!
 //! kotlinc gives such a declaration a `private static final Lazy $cachedSerializer$delegate`,
 //! initialized with `LazyKt.lazy(PUBLICATION) { … }` whose body is a private static
 //! `_init_$_anonymous_()`. An enum's body is its `EnumSerializer` factory; an object's is an
 //! `ObjectSerializer` over its own `INSTANCE`; an abstract class's is a `PolymorphicSerializer`
-//! over its own class. None has a generated `$serializer` class.
+//! over its own class; a sealed class's is a `SealedClassSerializer` over its subclasses. None has
+//! a generated `$serializer` class.
 
 use super::class_ty;
 use crate::ir::{Callee, ClassId, ExprId, FunId, IrConst, IrExpr, IrFile, IrFunction, IrTypeOp};
@@ -248,20 +249,20 @@ pub(super) fn add_companion_cached_serializer(
     [initializer, acc]
 }
 
-/// Whether kotlinc serializes `class` polymorphically by itself: an abstract class that is not
-/// sealed (a sealed class has its `SealedClassSerializer`). Its `Companion.serializer()` returns a
-/// cached `PolymorphicSerializer`, so it has no `$serializer`, but its subclasses still extend its
-/// `write$Self` and deserialization constructor. A generic abstract class is not read here.
+/// Whether kotlinc serializes `class` through a runtime serializer over its subclasses: an abstract
+/// class (a cached `PolymorphicSerializer`) or a sealed class (a cached `SealedClassSerializer`).
+/// It has no `$serializer`, but its subclasses still extend its `write$Self` and deserialization
+/// constructor. A generic one, and a sealed interface, are not read here.
 pub(super) fn is_polymorphic_base(class: &crate::ir::IrClass) -> bool {
-    class.is_abstract
-        && !class.is_sealed
+    (class.is_abstract || class.is_sealed)
+        && !class.is_interface
         && !class.is_enum
         && !class.is_object
         && class.type_params.is_empty()
 }
 
 /// [`is_polymorphic_base`] for the frontend's view of a source class, which decides whether a
-/// `$serializer` classifier is published at all.
+/// `$serializer` classifier is published at all. A sealed class publishes none either way.
 pub(super) fn frontend_is_polymorphic_base(ctx: &crate::plugins::FrontendClassContext<'_>) -> bool {
     ctx.is_abstract
         && !ctx.is_sealed
@@ -269,18 +270,13 @@ pub(super) fn frontend_is_polymorphic_base(ctx: &crate::plugins::FrontendClassCo
         && ctx.type_parameters.type_params.is_empty()
 }
 
-/// An abstract class's `Companion.serializer()`: the cached
-/// `new PolymorphicSerializer(<class>::class, <serial-info annotations>)`.
-pub(super) fn add_polymorphic_serializer(
-    ir: &mut IrFile,
-    ctx: &crate::plugins::PluginContext,
-    class_id: ClassId,
-    class_name: TypeName,
-) {
+/// `Reflection.getOrCreateKotlinClass(<classifier>.class)`: the `KClass` literal kotlinc passes to
+/// a runtime serializer.
+pub(super) fn kclass_literal(ir: &mut IrFile, classifier: TypeName) -> ExprId {
     let classlit = ir.add_expr(IrExpr::ClassConst {
-        internal: Some(class_name),
+        internal: Some(classifier),
     });
-    let kclass = ir.add_expr(IrExpr::Call {
+    ir.add_expr(IrExpr::Call {
         callee: Box::new(Callee::Static {
             owner: type_name("kotlin/jvm/internal/Reflection"),
             name: "getOrCreateKotlinClass".to_string(),
@@ -289,14 +285,39 @@ pub(super) fn add_polymorphic_serializer(
         }),
         dispatch_receiver: None,
         args: vec![classlit],
-    });
-    let serial_info_unsupported = super::annotations::class_has_serial_info(ctx, ir, class_id);
-    let annotations = serial_info_annotations(ir, class_name, serial_info_unsupported);
-    let serializer = ir.new_external(
+    })
+}
+
+/// `new PolymorphicSerializer(<classifier>::class, <annotations>)`.
+pub(super) fn polymorphic_serializer(
+    ir: &mut IrFile,
+    classifier: TypeName,
+    annotations: ExprId,
+) -> ExprId {
+    let kclass = kclass_literal(ir, classifier);
+    ir.new_external(
         "kotlinx/serialization/PolymorphicSerializer",
         "(Lkotlin/reflect/KClass;[Ljava/lang/annotation/Annotation;)V",
         vec![kclass, annotations],
-    );
+    )
+}
+
+/// A polymorphic base's `Companion.serializer()`: the cached
+/// `new PolymorphicSerializer(<class>::class, <serial-info annotations>)` of an abstract class, or
+/// the cached `SealedClassSerializer` of a sealed one.
+pub(super) fn add_polymorphic_serializer(
+    ir: &mut IrFile,
+    ctx: &crate::plugins::PluginContext,
+    class_id: ClassId,
+    class_name: TypeName,
+) {
+    let serializer = if ir.classes[class_id as usize].is_sealed {
+        super::sealed_serializer::sealed_class_serializer(ir, ctx, class_id)
+    } else {
+        let serial_info_unsupported = super::annotations::class_has_serial_info(ctx, ir, class_id);
+        let annotations = serial_info_annotations(ir, class_name, serial_info_unsupported);
+        polymorphic_serializer(ir, class_name, annotations)
+    };
     // kotlinc narrows the initializer's value to the `KSerializer` it returns.
     let serializer = ir.add_expr(IrExpr::TypeOp {
         op: IrTypeOp::Cast,
@@ -339,7 +360,7 @@ pub(super) fn object_serializer(
     )
 }
 
-fn serial_info_annotations(
+pub(super) fn serial_info_annotations(
     ir: &mut IrFile,
     owner: TypeName,
     serial_info_unsupported: bool,
@@ -389,6 +410,27 @@ pub(super) fn local_generic_serializable_class(
         .iter()
         .position(|class| {
             class.fq_name_id() == classifier && !class.is_object && !class.type_params.is_empty()
+        })
+        .is_some_and(|index| {
+            let class_id = index as ClassId;
+            ctx.has_annotation(class_id, type_name(super::SERIALIZABLE_FQ))
+                && super::custom_serializer_of(ctx, ir, class_id).is_none()
+        })
+}
+
+/// A `@Serializable` sealed class or interface, or abstract class, declared in this file: its
+/// `serializer()` returns a runtime `SealedClassSerializer` or `PolymorphicSerializer`.
+pub(super) fn local_polymorphic_serializable_class(
+    ir: &IrFile,
+    ctx: &crate::plugins::PluginContext,
+    classifier: TypeName,
+) -> bool {
+    ir.classes
+        .iter()
+        .position(|class| {
+            class.fq_name_id() == classifier
+                && (class.is_sealed || is_polymorphic_base(class))
+                && class.type_params.is_empty()
         })
         .is_some_and(|index| {
             let class_id = index as ClassId;

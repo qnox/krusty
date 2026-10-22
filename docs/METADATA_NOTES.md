@@ -4,6 +4,12 @@ Goal: emit `@kotlin.Metadata` so krusty output is consumable as a **Kotlin** lib
 need only the signatures, already matched in Phase 5a). This is the single largest remaining piece —
 effectively a re-implementation of `kotlinx-metadata-jvm`'s writer.
 
+## KLIB emission root categories
+
+KLIB dependency-root classification retains authenticated intrinsic-support ownership independently
+of successful code emission. A declined wrapper does not become an ordinary body; its metadata and
+declaration identity remain unchanged, and ordinary roots retain their strict closure contracts.
+
 ## Declared JVM vararg array types
 
 The generic signature reader decodes each `ValueParameter.type`/`type_id` independently of its

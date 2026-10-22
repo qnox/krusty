@@ -5,6 +5,10 @@ front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
 
+KLIB dependency-emission categories have disjoint declaration-owned roots before lowering begins.
+An authenticated intrinsic wrapper keeps that ownership when its body transaction declines; the
+ordinary-body category cannot retry it and turn the target decline into an ordinary-closure error.
+
 ## String operation authority publication
 
 The shared StringPlus operation requires the existing selected-stdlib authority for both member
