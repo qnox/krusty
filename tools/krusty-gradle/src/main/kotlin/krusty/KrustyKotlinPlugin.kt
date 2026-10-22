@@ -55,9 +55,9 @@ abstract class KrustyKotlinPlugin @Inject constructor(
     private val javaToolchains: JavaToolchainService,
 ) : Plugin<Project> {
     override fun apply(project: Project) {
-        if (!project.pluginManager.hasPlugin("org.jetbrains.kotlin.jvm")) {
+        if (KOTLIN_PLUGIN_IDS.none(project.pluginManager::hasPlugin)) {
             throw GradleException(
-                "the krusty plugin must be applied after org.jetbrains.kotlin.jvm",
+                "the krusty plugin must be applied after one of ${KOTLIN_PLUGIN_IDS.joinToString()}",
             )
         }
         val aggregate = aggregateTask(project.rootProject)
@@ -76,6 +76,15 @@ abstract class KrustyKotlinPlugin @Inject constructor(
 private const val AGGREGATE_TASK_PROPERTY = "krusty.aggregateTaskProvider"
 
 private const val KOTLIN_DSL_BASE_PLUGIN_ID = "org.gradle.kotlin.kotlin-dsl.base"
+
+/**
+ * The Android Gradle plugin's base plugin. From AGP 9 it compiles Kotlin itself (built-in Kotlin,
+ * through the Kotlin Gradle plugin's API), without `org.jetbrains.kotlin.android`.
+ */
+private const val ANDROID_BASE_PLUGIN_ID = "com.android.base"
+
+/** The plugins whose Kotlin/JVM compile tasks krusty replaces; one must be applied before krusty. */
+private val KOTLIN_PLUGIN_IDS = listOf("org.jetbrains.kotlin.jvm", "org.jetbrains.kotlin.android", ANDROID_BASE_PLUGIN_ID)
 
 private fun aggregateTask(root: Project): TaskProvider<Task> {
     val extra = root.extensions.extraProperties
@@ -102,6 +111,7 @@ private fun replaceKotlinJvmCompiles(
     // change call resolution, and its compiler settings add arguments krusty does not model. A
     // replacement would drop the scripts or reject the build, so kotlinc keeps those compiles.
     val kotlinDsl = project.pluginManager.hasPlugin(KOTLIN_DSL_BASE_PLUGIN_ID)
+    val android = project.pluginManager.hasPlugin(ANDROID_BASE_PLUGIN_ID)
     project.tasks.withType(KotlinJvmCompile::class.java).all {
         val kotlinTask = this
         // A KotlinJvmCompile outside every source-set compilation is not a krusty compile either:
@@ -201,6 +211,26 @@ private fun replaceKotlinJvmCompiles(
                         .map { it.majorVersion }
                         .orElse(selectedJavaVersion),
                 )
+            }
+            if (android) {
+                // An Android variant is no Java source set. kotlinc reads the Java sources the
+                // variant's javac task compiles, generated ones (BuildConfig, AIDL) included; that
+                // task is named after the variant.
+                val variant = requireNotNull(sourceSetName)
+                val javaCompileName = "compile${variant.replaceFirstChar(Char::uppercaseChar)}JavaWithJavac"
+                val javaCompile = project.provider {
+                    project.tasks.findByName(javaCompileName) as? JavaCompile
+                        ?: throw GradleException("${kotlinTask.path} has no Android Java compile task $javaCompileName")
+                }
+                replacement.configure {
+                    javaSourceFiles.from(javaCompile.map { it.source })
+                    javaTarget.set(
+                        javaCompile.flatMap { task ->
+                            task.options.release.map { it.toString() }
+                                .orElse(project.provider { task.targetCompatibility })
+                        },
+                    )
+                }
             }
             java.sourceSets.configureEach {
                 val sourceSet = this
@@ -471,7 +501,8 @@ private fun compilerArguments(task: KotlinJvmCompile, kotlinVersion: String): Li
     // form of that policy: the compiler fails the compilation when any warning is emitted.
     reject(options.verbose.getOrElse(false), "verbose")
     reject(task.multiPlatformEnabled.getOrElse(false), "multiPlatformEnabled")
-    reject(task.useModuleDetection.getOrElse(false), "useModuleDetection")
+    // `useModuleDetection` (set on every Android compile) only configures kotlinc's multi-module
+    // incremental compilation, never a compiler argument; a full krusty compile has nothing to detect.
 
     val structuredOptIns = validateStructuredOptIns(options.optIn.getOrElse(emptyList()))
     val freeArguments = options.freeCompilerArgs.getOrElse(emptyList())
