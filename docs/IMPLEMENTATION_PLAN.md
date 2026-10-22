@@ -5,6 +5,13 @@ front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
 
+## Constructor parameter annotation pool order
+
+The JVM constructor header seeder carries retained checked applications rather than descriptor-only
+projections. Encode their complete values at the existing retention-ordered visit boundary; keep
+source target selection and semantic annotation publication outside the writer. This is independent
+of the cross-file publication and configured default-target-mode follow-ups.
+
 ## String operation authority publication
 
 The shared StringPlus operation requires the existing selected-stdlib authority for both member

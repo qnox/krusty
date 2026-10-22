@@ -4,6 +4,13 @@ Goal: emit `@kotlin.Metadata` so krusty output is consumable as a **Kotlin** lib
 need only the signatures, already matched in Phase 5a). This is the single largest remaining piece —
 effectively a re-implementation of `kotlinx-metadata-jvm`'s writer.
 
+## Constructor parameter annotation pool order
+
+Constructor header reservation interns annotation element names and values, not just annotation
+descriptors. This changes only JVM constant-pool visit order; checked payloads, retention and Kotlin
+metadata remain unchanged. Strict whole-class comparisons cover both source input orders and mixed
+runtime/binary retention with nested annotations, arrays, class literals and nullable parameters.
+
 ## Declared JVM vararg array types
 
 The generic signature reader decodes each `ValueParameter.type`/`type_id` independently of its
