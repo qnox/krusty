@@ -164,7 +164,12 @@ impl InterfaceStubs {
                     };
                     fields.insert(offset, target);
                 }
-                for (record, words) in data.chunks_exact(RECORD_SIZE as usize).enumerate() {
+                for (record, words) in data
+                    .as_chunks::<{ RECORD_SIZE as usize }>()
+                    .0
+                    .iter()
+                    .enumerate()
+                {
                     let at = record as u64 * RECORD_SIZE;
                     let field = |offset: u64| {
                         fields
@@ -617,8 +622,11 @@ mod tests {
             object.local("type_c", data, 16),
         ];
         let mut contents = vec![0; records.len() * RECORD_SIZE as usize];
-        for (record, &(number, _, _)) in
-            contents.chunks_exact_mut(RECORD_SIZE as usize).zip(records)
+        for (record, &(number, _, _)) in contents
+            .as_chunks_mut::<{ RECORD_SIZE as usize }>()
+            .0
+            .iter_mut()
+            .zip(records)
         {
             record[..8].copy_from_slice(&number.to_le_bytes());
         }

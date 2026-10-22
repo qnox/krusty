@@ -33,7 +33,9 @@ impl FileLowering<'_> {
         let mut description = DataDescription::new();
         let mut contents = vec![0; implemented.len() * RECORD_SIZE as usize];
         for (record, &(number, _)) in contents
-            .chunks_exact_mut(RECORD_SIZE as usize)
+            .as_chunks_mut::<{ RECORD_SIZE as usize }>()
+            .0
+            .iter_mut()
             .zip(&implemented)
         {
             record[..8].copy_from_slice(&u64::from(number).to_le_bytes());
