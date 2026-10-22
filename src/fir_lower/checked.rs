@@ -399,7 +399,7 @@ impl BodyLowering<'_> {
                         let element_type = if *whole_array {
                             array_type
                         } else {
-                            array_type.array_elem().ok_or(
+                            array_type.array_read_elem().ok_or(
                                 FirLoweringFailure::UnsupportedCallableReference(callable.id),
                             )?
                         };
@@ -998,7 +998,7 @@ impl BodyLowering<'_> {
                         elements,
                         parameter,
                     } => {
-                        let element_type = array_type.array_elem().ok_or(
+                        let element_type = array_type.array_read_elem().ok_or(
                             FirLoweringFailure::MissingExternalParameter {
                                 parameter: *parameter,
                             },

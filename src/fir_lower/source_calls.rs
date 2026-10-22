@@ -2130,7 +2130,7 @@ impl BodyLowering<'_> {
                         array_type,
                         spread,
                     } => {
-                        let element_ty = array_type.array_elem()?;
+                        let element_ty = array_type.array_read_elem()?;
                         Some(if direct {
                             self.direct_call_operand(
                                 value,

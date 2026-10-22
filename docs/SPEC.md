@@ -3718,6 +3718,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `MutableList<Frame<*>>` argument. Tests: `tests/classpath_star_projection_bound_e2e.rs` (run
   against krusty- and kotlinc-built dependencies; classes byte-identical to kotlinc's) and
   `a_star_projection_contains_every_argument_whatever_bound_it_carries` in `src/assignable.rs`.
+- **An `in` projection is an invariant argument when its capture meets the parameter's bounds.**
+  kotlinc captures `A<in X>` as `C` with lower bound `X` and the parameter's declared upper bounds,
+  then compares `C` for equality with an invariant `A<Y>` argument: `Y <: X` and every bound
+  `<: Y`. A Java parameter's bound is the flexible `Any!`, so `Class<Any>.superclass`
+  (`Class<in Any!>!`) is a `Class<Any>`. A use-site projection also replaces the parameter's
+  declared variance when a member type is specialized: in `Class<? super T>` read from
+  `Class<in Any>`, `T` sits in a contravariant position and the captured `in Any` approximates to
+  `Any` (kotlinc renders `Class<in CapturedType(in Any)!>!`), never a nested `in in Any`. Both
+  together let `generateSequence(start) { it.superclass }` settle; before, every lambda recheck
+  nested one more `in` into `T` and the compiler never finished (moshi's `AdapterMethodsFactory`).
+  Tests: `a_java_superclass_chain_*` in `tests/use_site_variance_e2e.rs` (classes byte-identical
+  to kotlinc's).
 - **A platform-typed implicit receiver exposes its members.** In
   `KeyPairGenerator.getInstance("RSA").apply { initialize(1024) }` the `apply` receiver is the
   flexible `KeyPairGenerator!`. A bare `initialize` selects the member exactly as
@@ -13887,6 +13899,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `IndexedValue.hashCode` wraps like Kotlin's `Int`. A string iterator is linear in the string's
   length.
   Tests: `tests/native_runtime_e2e.rs` (drivers under `tests/native_runtime/`).
+- **List factory storage is a provider-authenticated declaration plan.** The selected platform
+  stdlib's exact `emptyList`, `listOf`, `mutableListOf` and `arrayListOf` declarations publish empty,
+  singleton or packed storage, with readonly and mutable forms distinct. The full generic contract
+  has one non-reified formal bounded by `Any?`, used unchanged in the declared result and operands;
+  a packed operand is the declaration's non-null `Array<out T>` vararg at slot zero. Nullable or
+  changed results, defaults, receivers, contexts and incompatible modifiers do not acquire a plan.
+  The JVM provider supplies the expanded `ArrayList` alias identity; core sees no Java class name.
+  Native consumes only this plan: a singleton array remains one list element, readonly packed
+  storage wraps its array and mutable storage copies it. Malformed operand counts reject rather
+  than retry by name or physical array shape. Other backends retain their ordinary selected call.
+  This storage fact alone does not widen dependency-body root admission. Tests:
+  `builtin_top_level_realization::tests::list_storage_construction_*`,
+  `provider_normalization_tests::list_storage_plans_use_the_selected_stdlib_and_its_array_list_alias`,
+  `klib_libraries::tests::builtin_operations::target_stdlib_list_factories_publish_their_exact_storage_plans`
+  and `tests/native_lists_e2e.rs`.
 - **A native list is Kotlin's collection interfaces, and equals any `List`.** The growable list is
   `kotlin.collections.ArrayList` and implements `MutableList`, `List`, `MutableCollection`,
   `Collection`, `MutableIterable`, `Iterable` and `RandomAccess`, each an interface descriptor an
@@ -18881,6 +18908,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/enum_secondary_constructor_e2e.rs` and the enum fixture in
   `tests/java_parameters_attribute_e2e.rs`.
 
+- **JVM metadata readers preserve a vararg's declared packed-array type.** A function's generic
+  signature decodes `ValueParameter.type` (or `type_id`) just as it does for an ordinary parameter.
+  `vararg_element_type` separately declares the vararg call shape; rebuilding an array from it
+  loses the declared `out` projection and must not manufacture a missing parameter type. Inline
+  and table-backed declarations retain the same contract, including primitive arrays. Listed
+  operands are values of the array's readable element type, not its projection wrapper; argument
+  conversion and evaluation-order spills preserve nullable/value-class boxing. A spread still
+  carries the complete declared array type. Tests: `tests/vararg_spread_shapes_e2e.rs` and
+  `jvm::metadata::vararg_signature_tests::function_vararg_signatures_keep_the_declared_packed_array`
+  and `…::selected_stdlib_vararg_signatures_preserve_metadata_projections`.
 - **Primary-ctor varargs and non-derivable member descriptors survive into class `@Metadata`.** A
   `vararg` primary-constructor parameter records `ValueParameter.vararg_element_type` (f4) — without
   it a consumer demands a literal array argument and rejects `Words()` ("no value passed for
@@ -19374,6 +19411,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   property, enum-entry, and facade records). One class-file gap remains: a VALUE-PARAMETER
   annotation reaches its metadata record, but no `RuntimeVisibleParameterAnnotations` attribute is
   emitted for it.
+- **A line break may stand on either side of the `.` that ends a declaration's receiver type.**
+  Kotlin's grammar is `(receiverType NL* '.' NL*)? simpleIdentifier` for functions and properties,
+  and code generators use it: protobuf's Kotlin DSL writes `public fun DslMap<K, V, P>` and puts
+  `.put(key, value)` on the next line. The receiver's `.` (after the type, its type arguments, its
+  `?`, or a qualifier segment) is read past plain line breaks, and so is the name after it; an
+  explicit `;` still ends the declaration. Tests: `tests/receiver_type_line_break_e2e.rs` (generic,
+  plain, nullable, name-on-next-line and extension-property receivers, byte-compared with kotlinc).
 - **A line break inside a property declaration is a continuation, an explicit `;` is not.** Kotlin's
   property grammar is `… (':' NL* type)? (NL* '=' NL* expression)?`, so a declaration whose type
   fills the line may put the type or the initializer on the next one — which is exactly what a

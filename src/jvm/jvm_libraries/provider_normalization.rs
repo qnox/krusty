@@ -9,6 +9,7 @@ use crate::libraries::FunctionInfo;
 use crate::symbol_source::SymbolNamespace;
 
 pub(super) fn normalize_tail(
+    classpath: &crate::jvm::classpath::Classpath,
     common: &CommonExpectationIndex,
     namespace: SymbolNamespace,
     name: &str,
@@ -21,7 +22,33 @@ pub(super) fn normalize_tail(
     let candidate = candidates
         .last_mut()
         .expect("a candidate was just appended");
-    attach_dependency_function_realization(package, name, compiler_builtin_owner, candidate);
+    // A stdlib typealias is declaration evidence, not a physical descriptor. Its expanded source
+    // classifier remains provider-owned; the common matcher must not learn Java implementation names.
+    let array_list =
+        (compiler_builtin_owner && package.matches("kotlin/collections") && name == "arrayListOf")
+            .then(|| {
+                classpath.paired_stdlib_type_alias_expansion(crate::types::type_name(
+                    "kotlin/collections/ArrayList",
+                ))
+            })
+            .flatten()
+            .and_then(|(target, formals, expansion, _)| {
+                let [formal] = formals.as_slice() else {
+                    return None;
+                };
+                let element = crate::types::Ty::ty_param(
+                    formal,
+                    crate::types::Ty::nullable(crate::types::Ty::obj("kotlin/Any")),
+                );
+                (expansion == crate::types::Ty::obj_args_name(target, &[element])).then_some(target)
+            });
+    attach_dependency_function_realization(
+        package,
+        name,
+        compiler_builtin_owner,
+        candidate,
+        array_list,
+    );
     common.attach(compiler_builtin_owner, namespace, name, candidate);
 }
 

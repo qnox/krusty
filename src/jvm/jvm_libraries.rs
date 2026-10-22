@@ -545,7 +545,14 @@ impl JvmLibraries {
             };
             self.publish_function_deprecation(Some(&mut function), meta.deprecation.as_deref());
             overloads.push(function);
-            normalize_tail(cm, namespace, name, c.paired_common, &mut overloads);
+            normalize_tail(
+                &self.cp,
+                cm,
+                namespace,
+                name,
+                c.paired_common,
+                &mut overloads,
+            );
         }
         for builtin in self.cp.builtin_package_functions(pkg, name) {
             if overloads.iter().any(|candidate| {
@@ -618,7 +625,7 @@ impl JvmLibraries {
             function.callable.annotations = builtin.annotations;
             let authority = builtin.compiler_builtin_owner;
             overloads.push(function);
-            normalize_tail(cm, namespace, name, authority, &mut overloads);
+            normalize_tail(&self.cp, cm, namespace, name, authority, &mut overloads);
         }
         overloads
     }
@@ -4160,7 +4167,7 @@ impl JvmLibraries {
                 });
                 self.publish_function_deprecation(overloads.last_mut(), mf.deprecation());
                 let common = &self.common_expectations;
-                normalize_tail(common, namespace, name, paired, &mut overloads);
+                normalize_tail(&self.cp, common, namespace, name, paired, &mut overloads);
             }
             // PROPERTIES declared by the facade — receiver-less TOP-LEVEL ones (`val plugin: Plugin`)
             // and EXTENSION ones (`arr.lastIndex`, `list.indices`). Both are the callable namespace's

@@ -27,8 +27,9 @@ fn read_i32(bytes: &[u8], offset: usize) -> Result<i32, PackageFragmentDecodeErr
         })
 }
 
-/// The `Module` message following the version header (and, from metadata 1.4, its flags word).
-fn module_message(bytes: &[u8]) -> Result<(&[u8], usize), PackageFragmentDecodeError> {
+/// The `Module` message following the version header (and, from metadata 1.4, its flags word),
+/// with its offset in `bytes`. A module written by a Kotlin release before 1.4 has no flags word.
+pub(crate) fn module_message(bytes: &[u8]) -> Result<(&[u8], usize), PackageFragmentDecodeError> {
     let length = read_i32(bytes, 0)?;
     let length = usize::try_from(length)
         .ok()
