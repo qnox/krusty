@@ -15,6 +15,7 @@ mod explicit_api;
 mod external_modifier_targets;
 mod header_validation;
 mod inline_preparation;
+mod library_classifiers;
 mod local_class_names;
 pub(crate) use local_class_names::{settle_generated_class_names, SettledGeneratedClassNames};
 mod local_function_names;

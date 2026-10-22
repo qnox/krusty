@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use krusty::jvm::classpath::Classpath;
+use krusty::ksp_round::KspLibraries;
 use krusty_plugin_host::{
     provision_ksp, Curl, Environment, GeneratedKind, HostError, KspHost, KspLoad, KspOutputs,
     KspRequest, KspRuntime, Pins,
@@ -137,7 +138,7 @@ fn run(
         generated: Vec::new(),
         log: Vec::new(),
     };
-    loop {
+    let analysis = loop {
         let texts: Vec<String> = sources
             .iter()
             .map(|path| std::fs::read_to_string(path).unwrap())
@@ -161,10 +162,10 @@ fn run(
             .collect();
         let round = krusty::ksp_round::ksp_round(&analysis, &paths)
             .unwrap_or_else(|refusal| panic!("{refusal}"));
-        let outcome = host.round(&round)?;
+        let outcome = host.round(&round, &KspLibraries::new(&analysis))?;
         run.log.extend(outcome.log);
         if outcome.generated.is_empty() {
-            break;
+            break analysis;
         }
         for generated in outcome.generated {
             run.generated
@@ -173,8 +174,8 @@ fn run(
                 sources.push(generated.path);
             }
         }
-    }
-    let outcome = host.finish()?;
+    };
+    let outcome = host.finish(&KspLibraries::new(&analysis))?;
     run.log.extend(outcome.log);
     for generated in outcome.generated {
         run.generated
@@ -412,5 +413,17 @@ fn annotation_arguments_and_accessors_are_what_ksp2_reports() {
         ],
         "ksp-outputs-annotations",
         "annotations.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn library_classes_are_what_ksp2_reports() {
+    log_is_what_ksp2_reports(
+        "Library",
+        "library.LibraryProvider",
+        &[fixtures().join("library/Library.kt")],
+        "ksp-outputs-library",
+        "library.expected",
     );
 }

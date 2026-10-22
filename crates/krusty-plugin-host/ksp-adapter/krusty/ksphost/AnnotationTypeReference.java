@@ -31,7 +31,7 @@ final class AnnotationTypeReference implements KSTypeReference {
 
     @Override
     public KSType resolve() {
-        return new ClassType(symbols.classNamed(qualifiedName));
+        return new ClassType(symbols.resolvedClass(qualifiedName));
     }
 
     @Override

@@ -15714,12 +15714,38 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   modifiers. An annotation on a classifier, function or constructor has the `shortName` the
   source wrote, an import alias's name when it used one; one on a property, parameter or
   accessor, and a nested one, has its class's simple name. An annotation whose arguments the
-  frontend did not fold, an array class literal, a
-  library enum entry, and a non-public compiler-made accessor's modifiers are refused for that
+  frontend did not fold, an array class literal, and a
+  non-public compiler-made accessor's modifiers are refused for that
   query only.
   (`crates/krusty-plugin-host/tests/ksp.rs`, `annotation_arguments_and_accessors_are_what_ksp2_reports`;
   frontend tests `pass_one_publishes_folded_annotation_element_defaults` and
   `pass_one_publishes_value_parameter_annotations_as_written`.)
+- **A KSP library class is the declaration KSP2 reads from the classpath.** A processor reaches a
+  classpath classifier by name (`getClassDeclarationByName`) or through a source supertype, and
+  the host asks krusty for its header when it first does. A class with Kotlin class metadata and
+  a Kotlin builtin (`String`, `List`, `Map.Entry`) are `KOTLIN_LIB`; a Java class is `JAVA_LIB`,
+  and so are its annotations. An interface is `abstract`, a Java interface Kotlin converts a
+  lambda to also `fun`; an enum class is `enum final`, an object and an annotation class `final`.
+  An unbounded Kotlin type parameter is bounded by `kotlin.Any?`, a Java one by `kotlin.Any`, and
+  a Java one is invariant. A Kotlin class's supertypes are its metadata's, each named as written,
+  so a typealias stays (`kotlin.Pair` reports `kotlin.io.Serializable`); a builtin realized as a
+  serializable JVM class adds `java.io.Serializable` (`String`, `Int`, `Enum`). A Java class's
+  supertypes leave out `java.lang.Object`, name a mapped class by its Kotlin classifier
+  (`kotlin.Cloneable`, `kotlin.Enum`) and list a mapped collection interface last, as its mutable
+  Kotlin form (`java.util.ArrayList` ends with `kotlin.collections.MutableList<E>`). A class with
+  no supertype but `kotlin.Any` reports `kotlin.Any`. The annotations are the declaration's own:
+  never `kotlin.Metadata`, not the Java meta-annotations the compiler mirrors onto a Kotlin
+  annotation class, and on a Java annotation class `Documented`, `Retention` and `Target` as
+  `MustBeDocumented`, `Retention(AnnotationRetention)` and `Target(AnnotationTarget)`. A typealias
+  name (`kotlin.io.Serializable`) and an unknown name find nothing, but a supertype written as one
+  resolves to that type alias. An annotation argument naming an entry of a library enum is that
+  entry: an `ENUM_ENTRY` declaration of the enum class with its name, qualified name, parent and
+  origin. A sealed, inner or value class,
+  a Java package-private class, and a supertype written as a typealias with arguments are refused
+  for that query only.
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `library_classes_are_what_ksp2_reports`;
+  `crates/krusty-plugin-host/tests/ksp_library_classes.rs`,
+  `library_classes_are_the_headers_ksp2_reports`.)
 
 ## 8. Success criteria for the PoC
 

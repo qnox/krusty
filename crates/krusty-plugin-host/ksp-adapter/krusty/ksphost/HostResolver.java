@@ -58,11 +58,7 @@ final class HostResolver implements Resolver {
 
     @Override
     public KSClassDeclaration getClassDeclarationByName(KSName name) {
-        KSClassDeclaration declaration = symbols.classNamed(name.asString());
-        if (declaration instanceof LibraryClass) {
-            throw Nodes.notImplemented("Resolver.getClassDeclarationByName of a library class");
-        }
-        return declaration;
+        return symbols.classNamed(name.asString());
     }
 
     @Override

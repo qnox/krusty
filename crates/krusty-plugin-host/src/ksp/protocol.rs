@@ -6,15 +6,16 @@ use std::io::{self, Read, Write};
 
 use krusty_plugin_ir::{
     KspAccessor, KspAnnotation, KspArgument, KspClass, KspClassKind, KspDeclaration, KspFunction,
-    KspFunctionKind, KspModifier, KspParameter, KspProperty, KspRound, KspType, KspTypeArgument,
-    KspTypeDeclaration, KspTypeParameter, KspTypeSlot, KspValue, KspVariance,
+    KspFunctionKind, KspLibraryClass, KspModifier, KspOrigin, KspParameter, KspProperty, KspRound,
+    KspType, KspTypeArgument, KspTypeDeclaration, KspTypeParameter, KspTypeSlot, KspValue,
+    KspVariance,
 };
 
 use crate::protocol::{malformed, put_list, put_str, read_frame, utf8, write_frame, Payload};
 
 use super::{GeneratedKind, KspGenerated, KspLoad, KspOutcome};
 
-pub(crate) const PROTOCOL: u32 = 4;
+pub(crate) const PROTOCOL: u32 = 5;
 
 const HELLO: u8 = 0;
 const LOAD: u8 = 1;
@@ -26,11 +27,16 @@ const ROUND_DONE: u8 = 6;
 const FINISH: u8 = 7;
 const FINISHED: u8 = 8;
 pub(crate) const SHUTDOWN: u8 = 9;
+const CLASS_QUERY: u8 = 10;
+const CLASS_ANSWER: u8 = 11;
 
 pub(crate) enum Request<'a> {
     Load(&'a KspLoad<'a>),
     Round(&'a KspRound),
     Finish,
+    /// The answer to a [`Reply::ClassQuery`]: the classifier, or `None` when the classpath has
+    /// none by that name.
+    ClassAnswer(Option<&'a KspLibraryClass>),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -39,6 +45,9 @@ pub(crate) enum Reply {
     Loaded(Vec<String>),
     RoundDone(KspOutcome),
     Finished(KspOutcome),
+    /// Not a reply but a question in the middle of a request: a processor reached the classpath
+    /// classifier with this qualified name. The host waits for its [`Request::ClassAnswer`].
+    ClassQuery(String),
     /// A processor reached an API member the host does not implement yet.
     Unsupported(String),
     /// The request failed in the host, with the stack trace that says why.
@@ -94,6 +103,12 @@ pub(crate) fn write_request(out: &mut impl Write, request: &Request) -> io::Resu
             });
         }
         Request::Finish => payload.push(FINISH),
+        Request::ClassAnswer(answer) => {
+            payload.push(CLASS_ANSWER);
+            put_option(&mut payload, answer, |payload, library| {
+                put_library_class(payload, library)
+            });
+        }
     }
     write_frame(out, &payload)
 }
@@ -141,6 +156,20 @@ fn put_class(payload: &mut Vec<u8>, class: &KspClass) {
     });
     payload.push(u8::from(class.declarations_complete));
     put_list(payload, &class.declarations, put_declaration);
+}
+
+/// A classpath classifier: its header as a class's, then its package, the qualified name of the
+/// classifier it is nested in if any, and its origin (0 Kotlin, 1 Java).
+fn put_library_class(payload: &mut Vec<u8>, library: &KspLibraryClass) {
+    put_class(payload, &library.class);
+    put_str(payload, &library.package_name);
+    put_option(payload, &library.parent, |payload, parent| {
+        put_str(payload, parent)
+    });
+    payload.push(match library.origin {
+        KspOrigin::KotlinLib => 0,
+        KspOrigin::JavaLib => 1,
+    });
 }
 
 /// A function: its name, kind (0 top-level, 1 member, 2 static, 3 primary constructor,
@@ -347,8 +376,8 @@ fn put_type_parameter(payload: &mut Vec<u8>, parameter: &KspTypeParameter) {
     put_list(payload, &parameter.bounds, put_type);
 }
 
-/// A type: its declaration (0 and a classifier's qualified name, or 1 and a type parameter's id,
-/// owner and name), whether it is nullable, then its arguments (0 for a star, else 1 invariant,
+/// A type: its declaration (0 and a classifier's qualified name, 1 and a type parameter's id,
+/// owner and name, or 2 and a type alias's qualified and package names), whether it is nullable, then its arguments (0 for a star, else 1 invariant,
 /// 2 `out` or 3 `in`, and the type).
 fn put_type(payload: &mut Vec<u8>, ty: &KspType) {
     match &ty.declaration {
@@ -361,6 +390,14 @@ fn put_type(payload: &mut Vec<u8>, ty: &KspType) {
             payload.extend_from_slice(&id.to_be_bytes());
             put_str(payload, owner);
             put_str(payload, name);
+        }
+        KspTypeDeclaration::TypeAlias {
+            qualified_name,
+            package_name,
+        } => {
+            payload.push(2);
+            put_str(payload, qualified_name);
+            put_str(payload, package_name);
         }
     }
     payload.push(u8::from(ty.nullable));
@@ -400,6 +437,7 @@ pub(crate) fn read_reply(input: &mut impl Read) -> io::Result<Reply> {
         LOADED => Ok(Reply::Loaded(payload.list(|payload| payload.string())?)),
         ROUND_DONE => Ok(Reply::RoundDone(outcome(&mut payload)?)),
         FINISHED => Ok(Reply::Finished(outcome(&mut payload)?)),
+        CLASS_QUERY => Ok(Reply::ClassQuery(payload.string()?)),
         UNSUPPORTED => Ok(Reply::Unsupported(payload.string()?)),
         FAILED => Ok(Reply::Failed(payload.string()?)),
         tag => Err(malformed(format!("unknown reply {tag}"))),
