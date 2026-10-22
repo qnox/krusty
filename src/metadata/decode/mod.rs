@@ -11,7 +11,7 @@ pub(crate) use klib::{
     decode_package_fragment, field, parse_module_header, require_wire, strip_builtins_header,
     ClassAnnotationProtocol, Cursor, DecodedPackageFragment, QName,
 };
-pub(crate) use module_mapping::decode_module_optional_annotations;
+pub(crate) use module_mapping::{decode_module_optional_annotations, module_message};
 pub(crate) use parameter_shape::{
     parse_type_param, parse_value_parameter, ParameterDecodeError, ParsedTypeParam,
     ParsedValueParam, ParsedVariance,
