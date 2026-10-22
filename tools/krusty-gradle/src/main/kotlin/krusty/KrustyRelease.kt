@@ -87,7 +87,11 @@ private fun expectedSha256(releases: String, release: String, archive: String): 
 
 private fun download(url: String): ByteArray =
     try {
-        URI(url).toURL().openStream().use { it.readBytes() }
+        // Bounded, so a stalled server fails this build instead of holding the cache lock forever.
+        val connection = URI(url).toURL().openConnection()
+        connection.connectTimeout = 30_000
+        connection.readTimeout = 60_000
+        connection.getInputStream().use { it.readBytes() }
     } catch (e: java.io.IOException) {
         throw GradleException("could not download $url; set -Pkrusty.binary=<path> to use a local compiler", e)
     }
