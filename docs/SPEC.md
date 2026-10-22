@@ -19378,6 +19378,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   property, enum-entry, and facade records). One class-file gap remains: a VALUE-PARAMETER
   annotation reaches its metadata record, but no `RuntimeVisibleParameterAnnotations` attribute is
   emitted for it.
+- **A line break may stand on either side of the `.` that ends a declaration's receiver type.**
+  Kotlin's grammar is `(receiverType NL* '.' NL*)? simpleIdentifier` for functions and properties,
+  and code generators use it: protobuf's Kotlin DSL writes `public fun DslMap<K, V, P>` and puts
+  `.put(key, value)` on the next line. The receiver's `.` (after the type, its type arguments, its
+  `?`, or a qualifier segment) is read past plain line breaks, and so is the name after it; an
+  explicit `;` still ends the declaration. Tests: `tests/receiver_type_line_break_e2e.rs` (generic,
+  plain, nullable, name-on-next-line and extension-property receivers, byte-compared with kotlinc).
 - **A line break inside a property declaration is a continuation, an explicit `;` is not.** Kotlin's
   property grammar is `… (':' NL* type)? (NL* '=' NL* expression)?`, so a declaration whose type
   fills the line may put the type or the initializer on the next one — which is exactly what a

@@ -4110,13 +4110,17 @@ impl<'a> Parser<'a> {
             let mut receiver = self.parse_type();
             let receiver_hi = self.t[self.i.saturating_sub(1)].span.hi;
             receiver.span = Span::new(receiver_start, receiver_hi);
-            self.expect(TokenKind::Dot, "'.'");
+            self.expect_receiver_dot();
             return (Some(receiver), self.ident_or_error(name_context));
         }
 
         let receiver_start = self.tok().span.lo;
         let first = self.ident_or_error(name_context);
-        if !self.at(TokenKind::Dot) && !self.at(TokenKind::Lt) && !self.at(TokenKind::Question) {
+        let dot_follows = self
+            .t
+            .get(self.after_plain_newlines(self.i))
+            .is_some_and(|token| token.kind == TokenKind::Dot);
+        if !dot_follows && !self.at(TokenKind::Lt) && !self.at(TokenKind::Question) {
             return (None, first);
         }
 
@@ -4127,7 +4131,7 @@ impl<'a> Parser<'a> {
         };
         let mut nullable = self.eat_type_nullable();
         let mut receiver_hi = self.t[self.i.saturating_sub(1)].span.hi;
-        self.expect(TokenKind::Dot, "'.'");
+        self.expect_receiver_dot();
         let mut receiver_name = first;
 
         let declaration_name = loop {
@@ -4149,8 +4153,8 @@ impl<'a> Parser<'a> {
                 applied.extend(receiver_targs);
                 receiver_targs = applied;
                 receiver_hi = self.t[self.i.saturating_sub(1)].span.hi;
-                self.expect(TokenKind::Dot, "'.'");
-            } else if self.eat(TokenKind::Dot) {
+                self.expect_receiver_dot();
+            } else if self.eat_receiver_dot() {
                 receiver_name.push('.');
                 receiver_name.push_str(&segment);
                 nullable = false;
@@ -4986,6 +4990,45 @@ mod tests {
                 .map(|argument| argument.name.as_str())
                 .collect::<Vec<_>>(),
             ["Any", "Any", "String", "Float", "Int", "Number"]
+        );
+    }
+
+    #[test]
+    fn a_receiver_split_across_lines_spans_only_its_type() {
+        let mut diagnostics = DiagSink::new();
+        let source = "fun String\n    .plain() {}\n\
+                      fun Map<String, Int>\n    .generic() {}\n\
+                      fun String?\n    .nullable() {}\n\
+                      fun kotlin.String\n    .qualified() {}\n\
+                      fun String.\n    nameOnNextLine() {}\n\
+                      val List<String>\n    .property: Int get() = 0\n";
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(
+            !diagnostics.has_errors(),
+            "unexpected: {}",
+            diagnostics.render("t", source)
+        );
+        let receivers: Vec<_> = file
+            .decls
+            .iter()
+            .filter_map(|&id| match file.decl(id) {
+                Decl::Fun(function) => function.receiver.as_ref(),
+                Decl::Property(property) => property.receiver.as_ref(),
+                Decl::Class(_) => None,
+            })
+            .map(|receiver| &source[receiver.span.lo as usize..receiver.span.hi as usize])
+            .collect();
+        assert_eq!(
+            receivers,
+            [
+                "String",
+                "Map<String, Int>",
+                "String?",
+                "kotlin.String",
+                "String",
+                "List<String>"
+            ]
         );
     }
 
