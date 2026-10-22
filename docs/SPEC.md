@@ -8513,6 +8513,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `byte`/`short`/`char` when it fits. A compound initializer (`1 << 3`, `A + 1`, a cast) is not
   evaluated yet and stays a field read. Test: `java_source_constant_e2e`.
 
+- **A comma inside a Java field initializer's type arguments does not end the declarator.** The
+  header stub skips each initializer up to the comma or semicolon that ends it (`int a, b = 1;`).
+  Explicit method type arguments (`Collections.<K, V>emptyMap()`, which protobuf's generated
+  map-entry holders use) and the type after `new` or `instanceof` are type positions, so their
+  `<...>` is skipped whole. A `<` anywhere else is a comparison, and a comma after it still starts
+  the next declarator. Test: `java_source_field_initializer_e2e`.
+
 - **Member overloads with different erased signatures (`listIterator()` / `listIterator(Int)`).**
   `ClassSig.methods` (and the lowerer's `ClassInfo.methods`) hold per-name overload LISTS in
   declaration order; call sites select by argument types (`method_matching` mirrors the top-level

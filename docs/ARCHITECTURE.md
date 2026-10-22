@@ -94,7 +94,13 @@ task whose `ExecOperations` and `FileSystemOperations` are injected by Gradle. T
 the krusty binary (`-Pkrusty.binary`, `KRUSTY_BIN`, or else the plugin release's own compiler,
 downloaded once into the Gradle user home and checked against the release's `SHA256SUMS`) with the task's complete `.kt` and same-module
 `.java` sources and normalized structured compiler options. kotlinc and the Kotlin compile daemon
-are not started. The replacement wiring runs at the end of project configuration: realizing a
+are not started. An Android project (`com.android.base`, with AGP 9's built-in Kotlin or with
+`org.jetbrains.kotlin.android`) is replaced the same way, per variant: an Android variant is no Java
+source set, so the replacement takes the Java sources (generated BuildConfig and AIDL included) and
+the Java target from the variant's `compile<Variant>JavaWithJavac` task, which are the Java sources
+KGP hands kotlinc; android.jar arrives first on the task's own classpath. `useModuleDetection`, which
+KGP sets on every Android compile, configures only kotlinc's multi-module incremental compilation
+and is not a compiler argument, so it is ignored. The replacement wiring runs at the end of project configuration: realizing a
 `KotlinJvmCompile` during plugin application reads and finalizes
 `KotlinTopLevelExtension.compilerVersion` before convention plugins set it, and Gradle forbids
 registering a task from inside a task configuration callback. The plugin does not invoke krusty-build, inspect task implementation classes, or
