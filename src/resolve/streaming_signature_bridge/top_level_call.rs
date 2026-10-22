@@ -2,7 +2,8 @@
 //! `invoke`, or a construction together with the typealias that named the constructed classifier.
 
 pub(super) enum SelectedTopLevelCall {
-    Ambiguous,
+    /// The declarations left tied, in family order.
+    Ambiguous(Vec<crate::libraries::FunctionInfo>),
     Callable {
         callable: Box<crate::libraries::LibraryCallable>,
         source: Option<(u32, u32)>,

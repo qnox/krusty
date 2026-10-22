@@ -3737,9 +3737,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   selects the one-default extension, as kotlinc does, where both used to tie (koin-core's
   `createScope()`). A low-priority declaration still yields: `choose(value = "x")` over a
   low-priority `choose(a: Int = 0, value: String): Int` and `choose(b: Boolean = false, c: Long =
-  0, value: Any): String` selects the `String` one in an inferred and a declared return. Tests:
-  `an_inferred_return_*`, `a_low_priority_overload_*` and `an_implicit_receiver_call_*` in
-  `tests/overloaded_inferred_return_e2e.rs`.
+  0, value: Any): String` selects the `String` one in an inferred and a declared return. Distinct
+  declarations whose separate mappings project onto one shape stay in conflict through both the
+  ordinary and the integer-literal comparison: `choose(value = "x")` over `choose(a: Int = 0,
+  value: String)` and `choose(value: String, b: Boolean = false)` is kotlinc's overload ambiguity
+  naming both, as is `choose(value = 1)` over the same pair taking `Long`. When the call sits in an
+  inferred signature, the signature pass reports the ambiguity with the same tied candidates the
+  body check names, so the compilation reports it once. Tests:
+  `an_inferred_return_*`, `a_low_priority_overload_*`, `an_implicit_receiver_call_*` and
+  `separately_mapped_*` in `tests/overloaded_inferred_return_e2e.rs`.
 - **An `in` projection is an invariant argument when its capture meets the parameter's bounds.**
   kotlinc captures `A<in X>` as `C` with lower bound `X` and the parameter's declared upper bounds,
   then compares `C` for equality with an invariant `A<Y>` argument: `Y <: X` and every bound

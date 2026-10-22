@@ -1921,10 +1921,10 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 "signature",
                 "projected top-level selection spelling={spelling} arguments={selected_arguments:?} separately_mapped={} type_arguments={resolved_type_arguments:?} selected={}",
                 calls.is_some(),
-                matches!(selection, crate::symbol_resolver::CandidateSelection::Selected(_)),
+                matches!(selection, crate::symbol_resolver::TopLevelSelection::Selected(_)),
             );
             match selection {
-                crate::symbol_resolver::CandidateSelection::Selected((selected, callable)) => {
+                crate::symbol_resolver::TopLevelSelection::Selected((selected, callable)) => {
                     // The selected declaration's own mapped argument types under separate mappings.
                     let selected_types = separate_types
                         .and_then(|separate| {
@@ -1954,13 +1954,13 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 // A bottom-typed argument is applicable to every parameter, so an inferred
                 // declaration such as `fun f() = overloaded(boom())` can fail specifically with
                 // overload ambiguity before Pass 2.
-                crate::symbol_resolver::CandidateSelection::Ambiguous => {
+                crate::symbol_resolver::TopLevelSelection::Ambiguous(tied) => {
                     return Some((
-                        SelectedTopLevelCall::Ambiguous,
+                        SelectedTopLevelCall::Ambiguous(tied),
                         selected_argument_types.clone(),
                     ));
                 }
-                crate::symbol_resolver::CandidateSelection::None => {}
+                crate::symbol_resolver::TopLevelSelection::None => {}
             }
             let symbol = resolver.select_symbol(
                 crate::symbol_resolver::SymRecv::TopLevel,
@@ -2052,11 +2052,17 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         })?;
         let (selected, selected_argument_types) = selected;
         match selected {
-            SelectedTopLevelCall::Ambiguous => Err(self.record_source_diagnostic(
-                scope.owner,
-                origin,
-                "overload resolution ambiguity".to_string(),
-            )),
+            // The same report the body checker makes, so recovery keeps one of the two.
+            SelectedTopLevelCall::Ambiguous(tied) => {
+                let mut message = "overload resolution ambiguity between candidates:".to_string();
+                for candidate in &tied {
+                    message.push('\n');
+                    message.push_str(&crate::resolve::Checker::callable_candidate_display(
+                        spelling, candidate,
+                    ));
+                }
+                Err(self.record_source_diagnostic(scope.owner, origin, message))
+            }
             SelectedTopLevelCall::Callable {
                 callable,
                 source,

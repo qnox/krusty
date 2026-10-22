@@ -41,6 +41,14 @@ struct Instantiated<'a> {
     bindings: GSigBinds,
 }
 
+/// A top-level family's selection. An ambiguous one keeps the tied declarations, in family order,
+/// so the ambiguity can name them.
+pub(crate) enum TopLevelSelection<T> {
+    None,
+    Selected(T),
+    Ambiguous(Vec<FunctionInfo>),
+}
+
 const LOW_PRIORITY: &str = "kotlin/internal/LowPriorityInOverloadResolution";
 
 impl SymbolResolver<'_> {
@@ -54,7 +62,7 @@ impl SymbolResolver<'_> {
         type_args: &[Ty],
         expected: Option<Ty>,
         include_invisible: bool,
-    ) -> CandidateSelection<(FunctionInfo, LibraryCallable)> {
+    ) -> TopLevelSelection<(FunctionInfo, LibraryCallable)> {
         let functions = FunctionSet {
             overloads: candidates,
         };
@@ -66,12 +74,12 @@ impl SymbolResolver<'_> {
             expected,
             include_invisible,
         ) {
-            CandidateSelection::Selected(selected) => selected,
-            CandidateSelection::None => return CandidateSelection::None,
-            CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
+            TopLevelSelection::Selected(selected) => selected,
+            TopLevelSelection::None => return TopLevelSelection::None,
+            TopLevelSelection::Ambiguous(tied) => return TopLevelSelection::Ambiguous(tied),
         };
         if let Some(selected) = selected {
-            return CandidateSelection::Selected((selected, callable));
+            return TopLevelSelection::Selected((selected, callable));
         }
         // A default bridge is a provider-owned physical callable rather than one of the projected
         // source candidates above: it carries its realization's coordinates (`HttpClient$default`
@@ -94,8 +102,8 @@ impl SymbolResolver<'_> {
                         }))
         });
         match selected {
-            Some(selected) => CandidateSelection::Selected((selected.clone(), callable)),
-            None => CandidateSelection::None,
+            Some(selected) => TopLevelSelection::Selected((selected.clone(), callable)),
+            None => TopLevelSelection::None,
         }
     }
 
@@ -107,7 +115,7 @@ impl SymbolResolver<'_> {
         type_args: &[Ty],
         expected: Option<Ty>,
         include_invisible: bool,
-    ) -> CandidateSelection<(Option<FunctionInfo>, LibraryCallable)> {
+    ) -> TopLevelSelection<(Option<FunctionInfo>, LibraryCallable)> {
         let candidates: Vec<(&FunctionInfo, &[CallArgKind], Option<&CandidateCall>)> =
             match &arguments {
                 TopLevelArguments::Shared(args) => {
@@ -174,9 +182,9 @@ impl SymbolResolver<'_> {
         let pick = match arguments {
             TopLevelArguments::Shared(args) => {
                 match self.pick_shared(&parsed, args, &fits, &adapts) {
-                    CandidateSelection::Selected(pick) => Some(pick),
-                    CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
-                    CandidateSelection::None => {
+                    CandidateSelectionWithTies::Selected(pick) => Some(pick),
+                    CandidateSelectionWithTies::Ambiguous(tied) => return tied_declarations(tied),
+                    CandidateSelectionWithTies::None => {
                         let arg_tys: Vec<Ty> = args.iter().map(CallArgKind::ty).collect();
                         if let Some(c) = self
                             .select_top_level_default_callable(name, &arg_tys, type_args, expected)
@@ -189,7 +197,7 @@ impl SymbolResolver<'_> {
                                 c.descriptor,
                                 c.inline
                             );
-                            return CandidateSelection::Selected((None, c));
+                            return TopLevelSelection::Selected((None, c));
                         }
                         None
                     }
@@ -197,9 +205,9 @@ impl SymbolResolver<'_> {
             }
             TopLevelArguments::PerCandidate { source, .. } => {
                 match self.pick_per_candidate(&parsed, source, &fits, &adapts) {
-                    CandidateSelection::Selected(pick) => Some(pick),
-                    CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
-                    CandidateSelection::None => None,
+                    CandidateSelectionWithTies::Selected(pick) => Some(pick),
+                    CandidateSelectionWithTies::Ambiguous(tied) => return tied_declarations(tied),
+                    CandidateSelectionWithTies::None => None,
                 }
             }
         };
@@ -212,7 +220,7 @@ impl SymbolResolver<'_> {
             ..
         }) = pick
         else {
-            return CandidateSelection::None;
+            return TopLevelSelection::None;
         };
         let c = &o.callable;
         let mut vararg_elem = None;
@@ -264,7 +272,7 @@ impl SymbolResolver<'_> {
             vararg_index: vararg_elem.and(o.call_sig.vararg_index),
             ..c.clone()
         };
-        CandidateSelection::Selected((Some((*o).clone()), callable))
+        TopLevelSelection::Selected((Some((*o).clone()), callable))
     }
 
     /// Infer one declaration's type arguments from its own arguments and instantiate its value
@@ -376,7 +384,7 @@ impl SymbolResolver<'_> {
         args: &[CallArgKind],
         fits: &dyn Fn(&Ty, &CallArgKind) -> bool,
         adapts: &dyn Fn(&Ty, &CallArgKind, usize) -> bool,
-    ) -> CandidateSelection<&'p Instantiated<'a>> {
+    ) -> CandidateSelectionWithTies<&'p Instantiated<'a>> {
         if let Some(exact) = parsed.iter().find(|candidate| {
             candidate.params.len() == args.len()
                 && candidate
@@ -385,9 +393,9 @@ impl SymbolResolver<'_> {
                     .zip(args)
                     .all(|(parameter, argument)| *parameter == argument.type_for(*parameter))
         }) {
-            return CandidateSelection::Selected(exact);
+            return CandidateSelectionWithTies::Selected(exact);
         }
-        match integer_literal_overload(
+        match integer_literal_overload_with_ties(
             parsed.iter().map(|entry| (entry.params.clone(), entry)),
             args,
             |_, param, arg| fits(param, arg),
@@ -397,20 +405,21 @@ impl SymbolResolver<'_> {
             },
             |_, _| false,
         ) {
-            CandidateSelection::None => {}
+            CandidateSelectionWithTies::None => {}
             selection => return selection,
         }
-        match unique_most_specific(
+        match unique_most_specific_with_conflicts_and_ties(
             parsed.iter().filter_map(|entry| {
                 fixed_parameter_shape(&entry.params, args, |_, param, arg| fits(param, arg))
                     .map(|shape| (shape, entry))
             }),
             |_, left, right| resolution_subtype(&self.src, left, right),
+            |_, _| false,
         ) {
-            CandidateSelection::None => {}
+            CandidateSelectionWithTies::None => {}
             selection => return selection,
         }
-        unique_most_specific(
+        unique_most_specific_with_conflicts_and_ties(
             parsed.iter().filter_map(|entry| {
                 candidate_vararg_shape(entry.function, &entry.params, args, |i, param, arg| {
                     fits(param, arg) || adapts(param, arg, i)
@@ -418,6 +427,7 @@ impl SymbolResolver<'_> {
                 .map(|shape| (shape, entry))
             }),
             |_, left, right| resolution_subtype(&self.src, left, right),
+            |_, _| false,
         )
     }
 
@@ -426,14 +436,14 @@ impl SymbolResolver<'_> {
     /// no part), and the declarations are compared there exactly as a shared family is: integer
     /// literal adaptation first, then specificity. Declarations whose compared parameters are
     /// identical are separated first by a vararg (the one without wins), then by the defaults
-    /// they leave out (the fewest win).
+    /// they leave out (the fewest win); distinct declarations still equal after that are ambiguous.
     fn pick_per_candidate<'p, 'a>(
         &self,
         parsed: &'p [Instantiated<'a>],
         source: &[CallArgKind],
         fits: &dyn Fn(&Ty, &CallArgKind) -> bool,
         adapts: &dyn Fn(&Ty, &CallArgKind, usize) -> bool,
-    ) -> CandidateSelection<&'p Instantiated<'a>> {
+    ) -> CandidateSelectionWithTies<&'p Instantiated<'a>> {
         let mut shaped = Vec::new();
         for entry in parsed {
             let args = entry.args;
@@ -458,7 +468,7 @@ impl SymbolResolver<'_> {
             // Every applicable declaration must be comparable; one whose shape cannot be read in
             // source order leaves the call without a defensible selection.
             let Some(projected) = source_order_shape(entry, &shape) else {
-                return CandidateSelection::Ambiguous;
+                return CandidateSelectionWithTies::Ambiguous(parsed.iter().collect());
             };
             let omitted = entry.params.len().saturating_sub(args.len())
                 + args.iter().filter(|arg| arg.is_omitted_default()).count();
@@ -475,7 +485,7 @@ impl SymbolResolver<'_> {
             })
             .map(|(shape, entry, _)| (shape.clone(), *entry))
             .collect::<Vec<_>>();
-        match integer_literal_overload(
+        match integer_literal_overload_with_ties(
             preferred.iter().cloned(),
             source,
             |_, param, arg| fits(param, arg),
@@ -483,17 +493,37 @@ impl SymbolResolver<'_> {
                 parameter_at_least_as_specific(&self.src, left, right, arg)
                     || resolution_subtype(&self.src, left, right)
             },
-            |_, _| false,
+            distinct_declarations,
         ) {
-            CandidateSelection::None => {}
+            CandidateSelectionWithTies::None => {}
             selection => return selection,
         }
-        unique_most_specific(preferred, |position, left, right| {
-            source.get(position).is_some_and(|argument| {
-                parameter_at_least_as_specific(&self.src, left, right, argument.clone())
-            })
-        })
+        unique_most_specific_with_conflicts_and_ties(
+            preferred,
+            |position, left, right| {
+                source.get(position).is_some_and(|argument| {
+                    parameter_at_least_as_specific(&self.src, left, right, argument.clone())
+                })
+            },
+            distinct_declarations,
+        )
     }
+}
+
+/// The declarations an ambiguous selection left tied.
+fn tied_declarations<T>(tied: Vec<&Instantiated<'_>>) -> TopLevelSelection<T> {
+    TopLevelSelection::Ambiguous(
+        tied.into_iter()
+            .map(|entry| entry.function.clone())
+            .collect(),
+    )
+}
+
+/// Two declarations left with equally specific shapes in source order conflict: separate mappings
+/// can project different declarations onto one shape, and kotlinc then reports the ambiguity
+/// between them rather than selecting either.
+fn distinct_declarations(left: &&Instantiated<'_>, right: &&Instantiated<'_>) -> bool {
+    !std::ptr::eq(left.function, right.function)
 }
 
 /// `shape`, a declaration's parameters parallel to its value-parameter-ordered arguments, read in

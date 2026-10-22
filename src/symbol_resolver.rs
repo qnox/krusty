@@ -49,7 +49,7 @@ mod selected_call_instantiation;
 pub(crate) use selected_call_instantiation::selected_default_callable;
 pub(crate) mod selected_constructor;
 pub(crate) use selected_constructor::SelectedConstructorDeclaration;
-pub(crate) use top_level_selection::{CandidateCall, TopLevelArguments};
+pub(crate) use top_level_selection::{CandidateCall, TopLevelArguments, TopLevelSelection};
 mod source_view;
 mod statically_known_subtype;
 mod top_level_selection;
@@ -108,10 +108,10 @@ pub(crate) use overload_selection::{
 };
 use overload_selection::{
     generic_bounds_admit, generic_bounds_admit_slots, indexed_call_shape, integer_literal_overload,
-    logical_call_params, logical_value_params, select_overload,
+    integer_literal_overload_with_ties, logical_call_params, logical_value_params, select_overload,
     select_overload_tracking_with_functions, select_receiver_overload_from_functions_tracking,
-    semantic_arg_assignable, unique_most_specific, unique_most_specific_with_conflicts, ExtCtx,
-    IndexedConvention, SelectionMode,
+    semantic_arg_assignable, unique_most_specific, unique_most_specific_with_conflicts,
+    unique_most_specific_with_conflicts_and_ties, ExtCtx, IndexedConvention, SelectionMode,
 };
 use property_candidates::{
     generic_property_more_specific, source_property_visible, specialize_property,
@@ -1960,8 +1960,8 @@ impl<'a> SymbolResolver<'a> {
             expected,
             include_invisible,
         ) {
-            CandidateSelection::Selected(selected) => Some(selected),
-            CandidateSelection::None | CandidateSelection::Ambiguous => None,
+            TopLevelSelection::Selected(selected) => Some(selected),
+            TopLevelSelection::None | TopLevelSelection::Ambiguous(_) => None,
         }
     }
 
@@ -2267,8 +2267,8 @@ impl<'a> SymbolResolver<'a> {
             expected,
             false,
         ) {
-            CandidateSelection::Selected((_, callable)) => Some(callable),
-            CandidateSelection::None | CandidateSelection::Ambiguous => None,
+            TopLevelSelection::Selected((_, callable)) => Some(callable),
+            TopLevelSelection::None | TopLevelSelection::Ambiguous(_) => None,
         }
     }
 

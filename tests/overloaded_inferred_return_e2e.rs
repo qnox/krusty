@@ -545,3 +545,22 @@ fn an_implicit_receiver_call_over_omitted_defaults_is_byte_identical_to_kotlinc(
     .expect("kotlinc and the stdlib are provisioned");
     assert_eq!(result, Ok(()));
 }
+
+/// Two declarations mapping a named argument to different positions, each omitting one default,
+/// project onto the same `[String]` shape: kotlinc reports the overload ambiguity between both.
+#[test]
+fn separately_mapped_overloads_with_one_shape_are_ambiguous() {
+    const SRC: &str = "fun choose(a: Int = 0, value: String): Int = 1\n\
+        fun choose(value: String, b: Boolean = false): Int = 2\n\
+        fun inferred() = choose(value = \"x\")\n";
+    common::assert_error_blocks_match_kotlinc(&[("SeparateMappingsAmbiguity.kt", SRC)], &[]);
+}
+
+/// The same ambiguity where the argument is an integer literal adapted to both declarations' `Long`.
+#[test]
+fn separately_mapped_integer_literal_overloads_with_one_shape_are_ambiguous() {
+    const SRC: &str = "fun choose(a: Int = 0, value: Long): Int = 1\n\
+        fun choose(value: Long, b: Boolean = false): Int = 2\n\
+        fun inferred() = choose(value = 1)\n";
+    common::assert_error_blocks_match_kotlinc(&[("SeparateMappingsLiteralAmbiguity.kt", SRC)], &[]);
+}
