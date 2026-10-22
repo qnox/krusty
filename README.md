@@ -103,7 +103,10 @@ adds no compiler plugin to the compilation, and krusty compiles the Kotlin and J
 processors generate (KSP's Gradle plugin needs Gradle 8 or newer). The
 validated Gradle versions are 7.6.3, 8.14.3, 9.5.0, and 9.7.0. Projects applying Gradle's
 `kotlin-dsl` (such as `buildSrc`) and Kotlin compile tasks outside any source set stay with kotlinc;
-the plugin logs each task it leaves. Point the plugin at the compiler binary with either form:
+the plugin logs each task it leaves. The plugin runs the compiler of its own release: on first use
+it downloads the archive for the host from that GitHub release into the Gradle user home and checks
+it against the release's `krusty-<version>-SHA256SUMS`. `-Pkrusty.releases=<url>` reads releases
+from a mirror with the same layout instead. To run another compiler binary, use either form:
 
 ```sh
 ./gradlew -Pkrusty.binary=/absolute/path/to/krusty krustyCompile

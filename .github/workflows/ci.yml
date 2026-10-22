@@ -993,6 +993,14 @@ jobs:
           ver=$(just version)
           echo "ver=$ver"  >> "$GITHUB_OUTPUT"
           echo "tag=v$ver" >> "$GITHUB_OUTPUT"
+      # The Gradle plugin downloads its release's compiler and checks it against this file.
+      - name: checksum the compiler archives
+        if: steps.tip.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          ver=${{ steps.v.outputs.ver }}
+          (cd dist && sha256sum krusty-"$ver"-*.tar.gz krusty-"$ver"-*.zip > "krusty-$ver-SHA256SUMS")
+          test "$(wc -l < "dist/krusty-$ver-SHA256SUMS")" -eq 6
       - name: package Zed extension
         if: steps.tip.outputs.publish == 'true'
         shell: bash
