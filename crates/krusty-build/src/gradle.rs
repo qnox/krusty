@@ -1466,7 +1466,7 @@ subprojects {
 plugins {
     kotlin("plugin.serialization") version "KGP_VERSION"
     kotlin("jvm")
-    id("krusty") version "PLUGIN_VERSION" apply false
+    id("me.qnox.krusty") version "PLUGIN_VERSION" apply false
     kotlin("plugin.sam.with.receiver") version "KGP_VERSION"
     kotlin("plugin.assignment") version "KGP_VERSION" apply false
     `java-library`
@@ -1480,7 +1480,7 @@ samWithReceiver {
 if (providers.gradleProperty("krusty.negative").orNull == "compiler-plugin-before-krusty") {
     pluginManager.apply("org.jetbrains.kotlin.plugin.assignment")
 }
-pluginManager.apply("krusty")
+pluginManager.apply("me.qnox.krusty")
 
 dependencies {
     api("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
@@ -1497,7 +1497,7 @@ dependencies {
             r#"
 plugins {
     kotlin("jvm")
-    id("krusty") version "PLUGIN_VERSION"
+    id("me.qnox.krusty") version "PLUGIN_VERSION"
     kotlin("plugin.serialization") version "KGP_VERSION"
     application
 }
@@ -1728,7 +1728,7 @@ class GreetProcessor(private val codeGenerator: CodeGenerator) : SymbolProcessor
 plugins {
     kotlin("jvm")
     id("com.google.devtools.ksp")
-    id("krusty") version "PLUGIN_VERSION"
+    id("me.qnox.krusty") version "PLUGIN_VERSION"
     kotlin("plugin.assignment") version "KGP_VERSION" apply false
     application
 }
@@ -2277,7 +2277,7 @@ pluginManagement {
             r#"
 plugins {
     kotlin("jvm") version "KGP_VERSION"
-    id("krusty") version "PLUGIN_VERSION"
+    id("me.qnox.krusty") version "PLUGIN_VERSION"
     id("fixture.greeting")
 }
 
@@ -2298,7 +2298,7 @@ repositories {
             r#"
 plugins {
     `kotlin-dsl`
-    id("krusty") version "PLUGIN_VERSION"
+    id("me.qnox.krusty") version "PLUGIN_VERSION"
 }
 
 repositories {
@@ -2374,7 +2374,7 @@ import org.gradle.api.tasks.compile.JavaCompile
 
 plugins {
     kotlin("jvm") version "KGP_VERSION"
-    id("krusty") version "PLUGIN_VERSION"
+    id("me.qnox.krusty") version "PLUGIN_VERSION"
     `java-library`
 }
 
@@ -2458,7 +2458,7 @@ import org.gradle.api.tasks.compile.JavaCompile
 
 plugins {
     kotlin("jvm") version "KGP_VERSION"
-    id("krusty") version "PLUGIN_VERSION"
+    id("me.qnox.krusty") version "PLUGIN_VERSION"
     kotlin("plugin.assignment") version "KGP_VERSION" apply false
     `java-library`
 }

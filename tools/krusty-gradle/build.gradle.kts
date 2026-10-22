@@ -5,9 +5,10 @@ import org.gradle.api.tasks.bundling.AbstractArchiveTask
 plugins {
     `kotlin-dsl`
     `maven-publish`
+    id("com.gradle.plugin-publish") version "1.3.1"
 }
 
-group = "dev.krusty"
+group = "me.qnox.krusty"
 version = providers.gradleProperty("krustyPluginVersion").orElse("0.0.1").get()
 
 repositories {
@@ -40,10 +41,16 @@ sourceSets.main {
 }
 
 gradlePlugin {
+    website = "https://krustythecompiler.dev"
+    vcsUrl = "https://github.com/qnox/krusty"
     plugins {
         create("krusty") {
-            id = "krusty"
+            id = "me.qnox.krusty"
             implementationClass = "krusty.KrustyKotlinPlugin"
+            displayName = "krusty"
+            description = "Compiles Kotlin/JVM source sets with krusty, a Kotlin compiler written in Rust that " +
+                "emits kotlinc's bytecode; a compile it does not support stays with kotlinc."
+            tags = listOf("kotlin", "compiler", "kotlinc", "krusty", "build-performance")
         }
     }
 }
