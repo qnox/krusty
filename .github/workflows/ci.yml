@@ -984,11 +984,20 @@ jobs:
         env:
           GRADLE_PUBLISH_KEY: ${{ secrets.GRADLE_PUBLISH_KEY }}
           GRADLE_PUBLISH_SECRET: ${{ secrets.GRADLE_PUBLISH_SECRET }}
+          # The maintainer's krusty signing subkey: `gpg --armor --export-secret-subkeys <id>!`,
+          # its 8-hex-digit short id, and its passphrase.
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyId: ${{ secrets.SIGNING_KEY_ID }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
         run: |
           set -euo pipefail
           if [[ -z "$GRADLE_PUBLISH_KEY" || -z "$GRADLE_PUBLISH_SECRET" ]]; then
             echo "GRADLE_PUBLISH_KEY/GRADLE_PUBLISH_SECRET are not set; skipping the Plugin Portal"
             exit 0
+          fi
+          if [[ -z "$ORG_GRADLE_PROJECT_signingInMemoryKey" ]]; then
+            echo "SIGNING_KEY is not set; refusing to publish an unsigned plugin" >&2
+            exit 1
           fi
           tools/krusty-gradle/gradlew --no-daemon -p tools/krusty-gradle \
             -PkrustyPluginVersion="${{ steps.v.outputs.ver }}" publishPlugins
