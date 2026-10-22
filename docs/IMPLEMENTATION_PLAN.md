@@ -5,6 +5,15 @@ front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
 
+## Constructor-property annotation publication
+
+Publish checked PROPERTY-targeted constructor-parameter applications by stable property identity,
+so plugin constructor selection sees the same folded payload as common IR. Keep parameter and
+accessor sites separate. Pure serialization runtime fixtures explicitly supply the compile-time
+JDK image, without putting that image on the runtime jar classpath or changing no-JDK tests.
+Constructor-plan discovery uses source declarations, not the optional spelling sidecar. Forward
+cross-file annotation target-policy publication remains a separate reverse-file-order follow-up.
+
 ## String operation authority publication
 
 The shared StringPlus operation requires the existing selected-stdlib authority for both member
