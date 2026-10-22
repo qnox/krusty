@@ -94,6 +94,7 @@ pub(super) fn realize_package_function(
         &name,
         compiler_builtin_owner,
         function,
+        Some(crate::types::type_name("kotlin/collections/ArrayList")),
     );
     let params = function.semantic_params();
     let generic = function.generic_sig.as_ref();

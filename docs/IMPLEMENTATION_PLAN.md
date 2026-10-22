@@ -2931,6 +2931,12 @@ bodies exist only as jar bytecode):
   this is the safe landing strip for phase 421 (flip `resolve_callable` to the `@Metadata` Kotlin types).
   Unit test `jvm_class_map::tests::collection_types_erase_to_jvm_at_emit`.
 
+### Declared JVM vararg array types
+
+- Decode the packed parameter from its declared metadata type, preserving projections and
+  primitive-array identity; do not reconstruct it from the separate vararg element field.
+- Cover inline/table-backed forms, missing declarations and the actual selected stdlib factories.
+
 ### Phase 419 — `@Metadata` function return-type decoding (read-only/mutable foundation)  ✅
 - ROOT CAUSE found (with the maintainer): krusty erases `List`/`MutableList` (and `Map`/`MutableMap`, …)
   to `java/util/List` in the FRONT END, so it can't distinguish a read-only collection from a mutable one
@@ -5639,6 +5645,15 @@ non-inline callers, still reads the field directly. Test:
 - Remaining: validate the declared-ABI path across the conformance gates, replace ordinary
   helper-algorithm adapters with serialized dependency bodies, and close their exact call graphs.
   Header support alone does not widen executable roots; Wasm generic representation is unfinished.
+
+## Declaration-owned list storage construction  🚧
+
+- Authenticate stdlib factory generic signatures at the provider boundary and freeze a typed
+  empty/singleton/packed storage plan. JVM alias expansion stays in the JVM provider.
+- Replace Native's factory spelling/physical-array matcher with consumption of that exact plan;
+  preserve singleton-array identity, readonly sharing and mutable copying through existing E2Es.
+- Validate actual JVM and all target-KLIB declarations plus malformed-contract negatives. The
+  inline-template branch still needs to use the same positive capability in its dependency graph.
 
 ## KLIB writer — krusty compiles a module to a Kotlin library  ◐
 

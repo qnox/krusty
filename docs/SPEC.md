@@ -13852,6 +13852,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `IndexedValue.hashCode` wraps like Kotlin's `Int`. A string iterator is linear in the string's
   length.
   Tests: `tests/native_runtime_e2e.rs` (drivers under `tests/native_runtime/`).
+- **List factory storage is a provider-authenticated declaration plan.** The selected platform
+  stdlib's exact `emptyList`, `listOf`, `mutableListOf` and `arrayListOf` declarations publish empty,
+  singleton or packed storage, with readonly and mutable forms distinct. The full generic contract
+  has one non-reified formal bounded by `Any?`, used unchanged in the declared result and operands;
+  a packed operand is the declaration's non-null `Array<out T>` vararg at slot zero. Nullable or
+  changed results, defaults, receivers, contexts and incompatible modifiers do not acquire a plan.
+  The JVM provider supplies the expanded `ArrayList` alias identity; core sees no Java class name.
+  Native consumes only this plan: a singleton array remains one list element, readonly packed
+  storage wraps its array and mutable storage copies it. Malformed operand counts reject rather
+  than retry by name or physical array shape. Other backends retain their ordinary selected call.
+  This storage fact alone does not widen dependency-body root admission. Tests:
+  `builtin_top_level_realization::tests::list_storage_construction_*`,
+  `provider_normalization_tests::list_storage_plans_use_the_selected_stdlib_and_its_array_list_alias`,
+  `klib_libraries::tests::builtin_operations::target_stdlib_list_factories_publish_their_exact_storage_plans`
+  and `tests/native_lists_e2e.rs`.
 - **A native list is Kotlin's collection interfaces, and equals any `List`.** The growable list is
   `kotlin.collections.ArrayList` and implements `MutableList`, `List`, `MutableCollection`,
   `Collection`, `MutableIterable`, `Iterable` and `RandomAccess`, each an interface descriptor an
@@ -19061,6 +19076,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/enum_secondary_constructor_e2e.rs` and the enum fixture in
   `tests/java_parameters_attribute_e2e.rs`.
 
+- **JVM metadata readers preserve a vararg's declared packed-array type.** A function's generic
+  signature decodes `ValueParameter.type` (or `type_id`) just as it does for an ordinary parameter.
+  `vararg_element_type` separately declares the vararg call shape; rebuilding an array from it
+  loses the declared `out` projection and must not manufacture a missing parameter type. Inline
+  and table-backed declarations retain the same contract, including primitive arrays. Tests:
+  `jvm::metadata::vararg_signature_tests::function_vararg_signatures_keep_the_declared_packed_array`
+  and `…::selected_stdlib_vararg_signatures_preserve_metadata_projections`.
 - **Primary-ctor varargs and non-derivable member descriptors survive into class `@Metadata`.** A
   `vararg` primary-constructor parameter records `ValueParameter.vararg_element_type` (f4) — without
   it a consumer demands a literal array argument and rejects `Words()` ("no value passed for

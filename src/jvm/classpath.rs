@@ -1645,6 +1645,20 @@ impl Classpath {
         self.entries.iter().position(|entry| entry.path() == stdlib)
     }
 
+    /// Declaration evidence from the selected stdlib itself, independent of ordinary alias lookup
+    /// priority. A shadowing dependency's same-named alias cannot change a compiler realization.
+    pub(super) fn paired_stdlib_type_alias_expansion(
+        &self,
+        identity: TypeName,
+    ) -> Option<(TypeName, Vec<String>, Ty, crate::spelling::Spelled)> {
+        let entry = self.paired_stdlib_entry()?;
+        let aliases = self.entry_package_types(entry, identity.namespace());
+        if self.class_load_error.borrow().is_some() {
+            return None;
+        }
+        aliases.alias_expansions.get(&identity).cloned()
+    }
+
     pub fn new(paths: Vec<PathBuf>) -> Classpath {
         Self::new_with_friend_paths(paths, Vec::new())
     }

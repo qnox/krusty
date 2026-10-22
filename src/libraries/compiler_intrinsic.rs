@@ -10,6 +10,17 @@ pub enum ResultFailureIntrinsic {
     CheckOfClass,
 }
 
+/// Storage supplied by a target for an authenticated stdlib collection factory. The selected
+/// declaration distinguishes one array element from a packed array of elements before substitution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListStorageConstruction {
+    ReadonlyEmpty,
+    ReadonlySingleton,
+    ReadonlyPacked,
+    MutableEmpty,
+    MutablePacked,
+}
+
 /// A source-declared callable whose implementation is supplied by the compiler after ordinary symbol
 /// and overload selection. Providers attach this to the exact declaration identity; lowering never
 /// grants intrinsic behavior from a coincidental source name.
@@ -43,6 +54,9 @@ pub enum CompilerIntrinsic {
     /// The kind distinguishes reference/primitive varargs and the other language array creators;
     /// selected call-site types remain ordinary semantic types and are recorded in checked FIR.
     ArrayFactory(crate::types::ArrayFactoryKind),
+    /// A target may supply its collection storage instead of calling the declaration's body.
+    /// This is not common lowering of a library algorithm; other targets keep the ordinary call.
+    ListStorageConstruction(ListStorageConstruction),
     /// An array classifier's own `operator fun get(index: Int)` (`IntArray.get`, `Array<T>.get`).
     /// The array classifiers have no platform class, so a target reads the element directly.
     ArrayGet,
