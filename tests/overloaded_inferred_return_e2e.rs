@@ -449,3 +449,34 @@ fn an_inferred_return_over_equally_many_omitted_defaults_is_ambiguous() {
     );
     common::expect_identical_rejection(&result, "equally_many_omitted_defaults");
 }
+
+/// Specificity of the parameters the supplied arguments map to outranks the defaults a declaration
+/// omits: `h(x = null)` binds `String?` over `Any?` even though that overload omits two defaults,
+/// both for an inferred return and in a body with a declared one.
+const SPECIFIC_OVER_FEWER_DEFAULTS: &str =
+    "fun f(a: Int = 0, b: Long = 0, x: String): String = \"O\"\n\
+fun f(c: Boolean = false, x: Any): String = \"f\"\n\
+fun g(a: Int = 0, x: String = \"\"): String = \"K\"\n\
+fun g(x: Any = 1): String = \"g\"\n\
+fun h(a: Int = 0, b: Int = 0, x: String?): String = \"\"\n\
+fun h(x: Any?): String = \"h\"\n\
+fun n() = f(x = \"\") + g(x = \"\") + h(x = null)\n\
+fun m(): String = h(x = null)\n\
+fun box(): String = n() + m()\n";
+
+#[test]
+fn an_inferred_return_prefers_the_more_specific_overload_to_fewer_omitted_defaults() {
+    common::expect_box_same_as_kotlinc(SPECIFIC_OVER_FEWER_DEFAULTS, "SpecificOverFewerDefaults");
+}
+
+#[test]
+fn an_inferred_return_over_a_more_specific_overload_is_byte_identical_to_kotlinc() {
+    let result = common::byte_diff_against_kotlinc_cp(
+        "SpecificOverFewerDefaults",
+        SPECIFIC_OVER_FEWER_DEFAULTS,
+        "SpecificOverFewerDefaultsKt",
+        &[common::stdlib_jar()],
+    )
+    .expect("kotlinc and the stdlib are provisioned");
+    assert_eq!(result, Ok(()));
+}

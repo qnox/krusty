@@ -3721,11 +3721,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **An inferred return selects among overloads by each declaration's own argument mapping.**
   `fun n() = mk()` over `mk(id: String = "", source: Any? = null)` and `mk(source: Any? = null)`
   has no argument mapping shared by the family, so signature inference maps and checks each
-  declaration separately. Of the applicable declarations, those omitting the fewest defaults win,
-  as in the body checker's candidate ranking; kotlinc selects `mk(source)`. Two or more left (each
-  omitting one default) are kotlinc's overload ambiguity. Before, Pass 1 found no candidate and
-  stopped with "module signatures were not finalized" (koin-core). Tests: `an_inferred_return_*`
-  in `tests/overloaded_inferred_return_e2e.rs`.
+  declaration separately. The applicable declarations are ranked as at any call: the most
+  specific parameters the supplied arguments map to win, compared in argument order, and a
+  parameter left to its default takes no part. Only declarations whose compared parameters are
+  identical are separated by the defaults they omit, the fewest winning; kotlinc selects
+  `mk(source)`. Two left (each omitting one default) are kotlinc's overload ambiguity. Before,
+  Pass 1 found no candidate and stopped with "module signatures were not finalized" (koin-core).
+  The body checker follows the same order: `h(x = null)` over `h(a: Int = 0, b: Int = 0, x:
+  String?)` and `h(x: Any?)` selects the `String?` overload, as kotlinc does, where it used to let
+  the fewer omitted defaults win first. Tests: `an_inferred_return_*` in
+  `tests/overloaded_inferred_return_e2e.rs`.
 - **A platform-typed implicit receiver exposes its members.** In
   `KeyPairGenerator.getInstance("RSA").apply { initialize(1024) }` the `apply` receiver is the
   flexible `KeyPairGenerator!`. A bare `initialize` selects the member exactly as

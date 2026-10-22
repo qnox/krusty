@@ -123,6 +123,95 @@ impl super::ProductionSignatureSemantics<'_> {
     }
 }
 
+/// A top-level declaration that overload selection accepted under its own argument mapping, when
+/// the family has no single mapping (its members name or omit different parameters).
+pub(super) struct IndividuallyApplicableCall {
+    pub(super) omitted_defaults: usize,
+    pub(super) declaration: crate::libraries::FunctionInfo,
+    pub(super) callable: crate::libraries::LibraryCallable,
+    pub(super) argument_types: Vec<crate::types::Ty>,
+}
+
+impl super::ProductionSignatureSemantics<'_> {
+    /// Kotlin ranks the individually applicable declarations as at any call: the most specific
+    /// parameters the supplied arguments map to, compared in argument order, win; a parameter left
+    /// to its default takes no part. Only declarations whose compared parameters are identical are
+    /// separated by the defaults they omit, the fewest winning. `None` is an ambiguity.
+    pub(super) fn most_specific_individual_call(
+        source: &dyn crate::symbol_source::SymbolSource,
+        arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
+        trailing_lambda: bool,
+        applicable: Vec<IndividuallyApplicableCall>,
+    ) -> Option<(IndividuallyApplicableCall, Box<[Option<u32>]>)> {
+        let mut ranked = applicable
+            .into_iter()
+            .map(|call| {
+                let parameter_by_argument = Self::selected_argument_parameters(
+                    &call.declaration,
+                    arguments,
+                    trailing_lambda,
+                );
+                let parameters = call.declaration.semantic_params();
+                let shape = arguments
+                    .iter()
+                    .zip(&parameter_by_argument)
+                    .map(|(argument, parameter)| {
+                        let index = parameter.and_then(|index| usize::try_from(index).ok())?;
+                        let parameter = *parameters.get(index)?;
+                        // A plain vararg element compares against the element type, a spread
+                        // against the array.
+                        Some(
+                            if call.declaration.call_sig.vararg_index == Some(index)
+                                && !argument.spread
+                            {
+                                parameter.array_read_elem().unwrap_or(parameter)
+                            } else {
+                                parameter
+                            },
+                        )
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .expect("a selected call maps every source argument to a parameter");
+                (call, parameter_by_argument, shape)
+            })
+            .collect::<Vec<_>>();
+        let fewer_defaults_same_shape = ranked
+            .iter()
+            .enumerate()
+            .filter(|(_, (call, _, shape))| {
+                ranked.iter().any(|(other, _, other_shape)| {
+                    other_shape == shape && other.omitted_defaults < call.omitted_defaults
+                })
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        for index in fewer_defaults_same_shape.into_iter().rev() {
+            ranked.remove(index);
+        }
+        let index = if ranked.len() == 1 {
+            0
+        } else {
+            let shapes = ranked
+                .iter()
+                .map(|(_, _, shape)| shape.clone())
+                .collect::<Vec<_>>();
+            let kinds = arguments
+                .iter()
+                .map(Self::call_argument_kind)
+                .collect::<Vec<_>>();
+            match crate::symbol_resolver::most_specific_parameter_shape_index(
+                source, &shapes, &kinds,
+            ) {
+                crate::symbol_resolver::CandidateSelection::Selected(index) => index,
+                crate::symbol_resolver::CandidateSelection::None
+                | crate::symbol_resolver::CandidateSelection::Ambiguous => return None,
+            }
+        };
+        let (call, parameter_by_argument, _) = ranked.swap_remove(index);
+        Some((call, parameter_by_argument))
+    }
+}
+
 /// Constructor arguments in the exact parameter order supplied to overload selection, together
 /// with the source-slot mapping that produced that order. Publication consumes this retained map;
 /// it never reruns argument mapping against the selected declaration.
