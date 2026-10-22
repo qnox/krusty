@@ -14,7 +14,10 @@ fn descriptor_offsets_match_the_c_declaration() {
     ];
     for (field, offset) in pinned {
         let assertion = format!("_Static_assert(offsetof(KType, {field}) == {offset},");
-        assert!(header.contains(&assertion), "krusty_rt.h lacks `{assertion}`");
+        assert!(
+            header.contains(&assertion),
+            "krusty_rt.h lacks `{assertion}`"
+        );
     }
     let size = format!("_Static_assert(sizeof(KType) == {},", ktype::SIZE);
     assert!(header.contains(&size), "krusty_rt.h lacks `{size}`");
