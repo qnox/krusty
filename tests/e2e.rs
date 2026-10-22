@@ -1623,6 +1623,8 @@ mod safe_call_null_line_e2e;
 mod sam_lambda_parameter_inference_e2e;
 #[path = "same_module_inline_frame_markers_e2e.rs"]
 mod same_module_inline_frame_markers_e2e;
+#[path = "sealed_serializable_e2e.rs"]
+mod sealed_serializable_e2e;
 #[path = "serialization_explicit_companion_e2e.rs"]
 mod serialization_explicit_companion_e2e;
 #[path = "setter_return_line_e2e.rs"]

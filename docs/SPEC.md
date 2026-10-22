@@ -11314,6 +11314,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   whole mask), and the class's `$childSerializers` has no `access$get$childSerializers$cp`, which
   only a `$serializer` reads. A subclass reads its own cache after the parent's `write$Self` runs.
   Test: `tests/abstract_serializable_e2e.rs`.
+- **A serializable sealed class caches a `SealedClassSerializer` over its concrete subclasses.**
+  A non-generic sealed `@Serializable` class gets no `$serializer`. Its `Companion.serializer()`
+  returns `new SealedClassSerializer(<serial name>, C::class, [Sub::class…], [<Sub serializer>…],
+  <serial-info annotations>)`, cached in a `$cachedSerializer$delegate` exactly like an abstract
+  class's. The class keeps `write$Self` and its deserialization constructor, and a subclass
+  serializes the sealed parent's elements first. The subclasses are the sealed class's direct
+  subclasses in metadata order (by simple name, then by path), with every sealed subclass
+  replaced, recursively, by its own subclasses. A subclass's serializer is its
+  `$serializer.INSTANCE`, an object's `ObjectSerializer`, or, for a generic subclass,
+  `new Sub$$serializer(PolymorphicSerializer(Any::class, []))` with one operand per type
+  parameter. The cache's `access$…$cp` accessor follows the private primary's marker accessor. A
+  sealed interface builds the same serializer in its companion's `serializer()`. An element typed
+  by a sealed class, a sealed interface or a non-generic abstract class reads that type's
+  `Companion.serializer()` through the child-serializer cache. Test:
+  `tests/sealed_serializable_e2e.rs`.
+- **A subclass reaches a private primary constructor's accessor on the delegation line.** The
+  `DefaultConstructorMarker` null that the call to a sealed or value-class primary's accessor
+  appends has no position. When the delegation's arguments sit on another line, the line entry
+  returns at the `invokespecial` itself, not at the marker. Test:
+  `tests/sealed_serializable_e2e.rs` (`Expr$Lit`).
+- **A sealed class's `PermittedSubclasses` attribute follows `BootstrapMethods`.** kotlinc's class
+  writer appends the bootstrap table before the permitted subclasses, so a sealed class with an
+  `invokedynamic` (such as a cached serializer's `lazy` initializer) writes them in that order.
+  Test: `tests/sealed_serializable_e2e.rs` (`Expr$Bin`).
 - **`write$Self` reads an overridable property through its getter.** It reads a final property's
   backing field, as kotlinc's JVM lowering does for a default getter, but an open or overriding
   property's getter can be overridden, so kotlinc calls it: `override val name` is read with

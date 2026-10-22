@@ -972,7 +972,7 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         // subtype relationships for every class, but kotlinc writes the field for sealed ones alone
         // (a plain interface with implementors carries none).
         sealed_subclasses: if c.is_sealed {
-            sorted_sealed_subclasses(c)
+            c.sorted_sealed_subclasses()
         } else {
             Vec::new()
         },
@@ -1556,17 +1556,6 @@ pub(crate) fn nested_classifiers(ir: &IrFile, c: &IrClass) -> Vec<String> {
         }
     }
     nested_names
-}
-
-/// A sealed classifier's direct subclasses in kotlinc's order: by simple name, then by path.
-pub(crate) fn sorted_sealed_subclasses(c: &IrClass) -> Vec<TypeName> {
-    let mut subclasses: Vec<TypeName> = c.sealed_subclasses.iter_ids().collect();
-    subclasses.sort_by(|a, b| {
-        a.nested_segment_ref()
-            .cmp(b.nested_segment_ref())
-            .then_with(|| a.path_cmp(*b))
-    });
-    subclasses
 }
 
 /// The annotations of a PROPERTY's own applications. The records name the same applications a
