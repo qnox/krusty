@@ -1059,7 +1059,13 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
             access: member.access,
             name: member.name,
             descriptor: member.descriptor,
-            const_value: member.attributes.const_value,
+            // A `ConstantValue` makes a compile-time constant only of a final field (JLS §4.12.4);
+            // the JVM still initializes a non-final static from it, as AGP's compile `R.jar` does
+            // for every resource id, but kotlinc reads such a field with `getstatic`.
+            const_value: member
+                .attributes
+                .const_value
+                .filter(|_| member.access & ACC_FINAL != 0),
             signature: member.attributes.signature,
             nullability: member.attributes.declaration_nullability,
             deprecation: member.attributes.deprecation.declared(kotlin_class),

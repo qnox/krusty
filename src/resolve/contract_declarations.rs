@@ -182,7 +182,9 @@ fn first_statement_owner(file: &File, statement: BlockElement) -> Option<BodyOwn
 }
 
 fn block_starts_with(file: &File, block: ExprId, statement: BlockElement) -> bool {
-    let Expr::Block { stmts, trailing } = file.expr(block) else {
+    // Pass-1 syntax compaction keeps only the bodies inline preparation needs; a dropped body is a
+    // non-arena sentinel. It cannot hold the checked statement and must never index the arena.
+    let Some(Expr::Block { stmts, trailing }) = file.expr_arena.get(block.0 as usize) else {
         return false;
     };
     match statement {

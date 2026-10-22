@@ -83,7 +83,7 @@ from the real `kotlin` command, and refuses by name whatever it does not impleme
 [KOTLIN_TOOLCHAIN.md](KOTLIN_TOOLCHAIN.md).
 
 Gradle projects are compiled by running that project's `./gradlew`, not by reimplementing the
-Kotlin plugin. `tools/krusty-gradle` is a Gradle plugin (`id("krusty")`, sources under
+Kotlin plugin. `tools/krusty-gradle` is a Gradle plugin (`id("dev.krustythecompiler")`, sources under
 `src/main/kotlin`). A build applies both its selected `org.jetbrains.kotlin.jvm` 2.4.x plugin and
 `krusty`; source sets, `kotlin {}`, compiler options, and `KotlinJvmCompile` stay. Source checkouts
 can use `--include-build`; releases include a portable local Maven repository with the implementation
@@ -93,7 +93,13 @@ and compile outputs. The public Kotlin task is disabled and depends on a typed, 
 task whose `ExecOperations` and `FileSystemOperations` are injected by Gradle. The replacement execs
 the krusty binary (`-Pkrusty.binary` or `KRUSTY_BIN`) with the task's complete `.kt` and same-module
 `.java` sources and normalized structured compiler options. kotlinc and the Kotlin compile daemon
-are not started. The replacement wiring runs at the end of project configuration: realizing a
+are not started. An Android project (`com.android.base`, with AGP 9's built-in Kotlin or with
+`org.jetbrains.kotlin.android`) is replaced the same way, per variant: an Android variant is no Java
+source set, so the replacement takes the Java sources (generated BuildConfig and AIDL included) and
+the Java target from the variant's `compile<Variant>JavaWithJavac` task, which are the Java sources
+KGP hands kotlinc; android.jar arrives first on the task's own classpath. `useModuleDetection`, which
+KGP sets on every Android compile, configures only kotlinc's multi-module incremental compilation
+and is not a compiler argument, so it is ignored. The replacement wiring runs at the end of project configuration: realizing a
 `KotlinJvmCompile` during plugin application reads and finalizes
 `KotlinTopLevelExtension.compilerVersion` before convention plugins set it, and Gradle forbids
 registering a task from inside a task configuration callback. The plugin does not invoke krusty-build, inspect task implementation classes, or
@@ -111,9 +117,12 @@ reject the build, so neither is replaced and neither joins `krustyCompile`.
 (`kotlin_dsl_build_src_compiles_through_krusty` in `crates/krusty-build/src/gradle.rs`.)
 
 The adapter derives Kotlin semantics from `KotlinBasePlugin.pluginVersion`. It reads the experimental
-Build Tools API `compilerVersion` property behind the two exact KGP/BTA opt-ins only to reject an
+Build Tools API `compilerVersion` property behind the two exact KGP/BTA opt-ins only to detect an
 override which would make those semantics diverge; it does not use the experimental compiler path.
-A pre-release, RC, or dev suffix is a different version and is rejected. `allWarningsAsErrors` is
+Such an override, a pre-release, RC, or dev suffix included, is a different compiler: the compile is
+reported and left to kotlinc, as is any request the adapter cannot derive krusty's arguments from
+(a free argument that reaches a plugin-owned one, an argument file, an unsupported structured
+option). `allWarningsAsErrors` is
 forwarded as `-Werror`; an explicit `-Werror` alongside it is the same idempotent policy and is
 forwarded exactly once.
 
@@ -125,13 +134,19 @@ coarse boundary keeps source additions and removals, multifile facades, generate
 Compiler plugins pass through the adapter as kotlinc receives them: each compile task's KGP
 `pluginClasspath` becomes `-Xplugin=<jars>` and its `pluginOptions` become
 `-P plugin:<id>:<key>=<value>`, and the compiler resolves each jar by the registrar it declares.
-Plugin CLI free arguments stay rejected in favour of that structured input. The applied public
-`KotlinCompilerPluginSupportPlugin` implementations, collected whether they were applied before or
-after krusty, gate the task before krusty runs: `org.jetbrains.kotlinx.serialization` runs as
-krusty's native pass, and `kotlin.scripting` — kotlinc's default scripting plugin, which KGP applies
-to every project and puts on every plugin classpath — acts only on script sources, which the adapter
-never passes. Any other applied support plugin fails the task, and a plugin jar added to the plugin
-classpath without one is refused by the compiler.
+Plugin CLI free arguments stay rejected in favour of that structured input. Before the replacement
+runs, a `<task>KrustyCheck` task passes the same compiler arguments and plugin request to
+`krusty refusals`, which prints every kotlinc argument krusty does not implement (such as AGP's
+`-Xuse-inline-scopes-numbers`) and every plugin the compiler's registry refuses (one it neither
+reimplements nor hosts, such as Compose, Parcelize, assignment, or kapt configured by options) and
+exits 1, or exits 0. kapt's stub task (`KaptGenerateStubs`) is a Kotlin compile that writes Java
+stubs, not classes, so it is never replaced; the compile after annotation processing carries only
+kapt's jar, which acts only once its options configure it, and stays with krusty.
+A refused request leaves that one compile to kotlinc: the check logs
+`krusty: task '…' is left to kotlinc: krusty does not implement everything it requests` with the
+refusals, the replacement is skipped, and the Kotlin task, which otherwise skips itself, runs. The
+`krustyCompile` aggregate depends on the Kotlin tasks, so it reaches whichever compiler runs.
+Every other compile of the build stays with krusty.
 
 Build correctness rests on these contracts:
 

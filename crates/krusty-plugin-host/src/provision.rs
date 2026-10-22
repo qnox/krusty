@@ -2,7 +2,7 @@
 //! and why.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::artifacts;
 use crate::download::Fetcher;
@@ -49,19 +49,28 @@ impl HostRuntime {
     /// configured log output off and sends warnings and errors to stderr instead. Java 8 has no
     /// such logging and no such option.
     pub(crate) fn java_command(&self) -> std::process::Command {
-        let mut command = std::process::Command::new(&self.java);
-        command.env("JAVA_HOME", &self.java_home);
-        if self.java_major >= 9 {
-            command.args(["-Xlog:disable", "-Xlog:all=warning:stderr"]);
-        }
-        command
+        java_command(&self.java, &self.java_home, self.java_major)
     }
+}
+
+fn java_command(java: &Path, java_home: &Path, java_major: u32) -> std::process::Command {
+    let mut command = std::process::Command::new(java);
+    command.env("JAVA_HOME", java_home);
+    if java_major >= 9 {
+        command.args(["-Xlog:disable", "-Xlog:all=warning:stderr"]);
+    }
+    command
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ProvisionError {
     /// No compiler classpath is pinned for this exact Kotlin version.
     UnpinnedKotlin {
+        version: String,
+        pinned: Vec<String>,
+    },
+    /// No API classpath is pinned for this exact KSP version.
+    UnpinnedKsp {
         version: String,
         pinned: Vec<String>,
     },
@@ -100,6 +109,12 @@ impl std::fmt::Display for ProvisionError {
                 f,
                 "krusty cannot host compiler plugins for Kotlin {version}: it has no pinned \
                  kotlin-compiler-embeddable classpath for that exact version (pinned: {})",
+                pinned.join(", ")
+            ),
+            ProvisionError::UnpinnedKsp { version, pinned } => write!(
+                f,
+                "krusty cannot host KSP {version} processors: it has no pinned \
+                 symbol-processing-api classpath for that exact version (pinned: {})",
                 pinned.join(", ")
             ),
             ProvisionError::NoJdk {
@@ -160,35 +175,18 @@ pub fn provision(
             version: request.kotlin_version.to_string(),
             pinned: pins.kotlin_versions(),
         })?;
-    let mut session = Session {
+    let preface = format!(
+        "{} runs on kotlinc's own compiler, kotlin-compiler-embeddable {}, which krusty keeps \
+         in its cache",
+        request.reason, request.kotlin_version
+    );
+    let wanted = Wanted {
         reason: request.reason,
         min_java: request.min_java,
-        env,
-        fetcher,
-        report,
-        missing: Vec::new(),
-        missing_java: None,
-        preface: Some(format!(
-            "{} runs on kotlinc's own compiler, kotlin-compiler-embeddable {}, which krusty keeps \
-             in its cache",
-            request.reason, request.kotlin_version
-        )),
-        changed: false,
+        preface,
+        classpath: classpath_pins,
     };
-    let jdk = session.jdk(pins.jdk())?;
-    let mut classpath = Vec::new();
-    for pin in classpath_pins {
-        classpath.extend(session.artifact(pin)?);
-    }
-    if !session.missing.is_empty() {
-        return Err(ProvisionError::Offline {
-            reason: request.reason.to_string(),
-            missing: session.missing,
-            java: session.missing_java,
-        });
-    }
-    session.note_saved();
-    let jdk = jdk.expect("a JDK, since nothing is missing");
+    let (jdk, classpath) = jdk_and_classpath(wanted, env, pins, fetcher, report)?;
     Ok(HostRuntime {
         kotlin_version: request.kotlin_version.to_string(),
         java: jdk.java,
@@ -197,6 +195,120 @@ pub fn provision(
         compiler_classpath: classpath,
         compiler_identity: ArtifactPin::identity(classpath_pins),
     })
+}
+
+/// What a KSP host is provisioned for.
+pub struct KspRequest<'a> {
+    /// The build's KSP version, exactly as configured.
+    pub ksp_version: &'a str,
+    /// What needs the host, as the user should read it, such as `the KSP processors of module app`.
+    pub reason: &'a str,
+    /// The oldest Java the processors can run on. Below [`COMPILER_MIN_JAVA`] it is raised to it.
+    pub min_java: u32,
+}
+
+/// What a KSP host process is started with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KspRuntime {
+    /// The KSP version the API classpath is, exactly as the build configured it.
+    pub ksp_version: String,
+    pub java: PathBuf,
+    pub java_home: PathBuf,
+    /// The feature release of [`Self::java`], as its home's `release` file names it.
+    pub java_major: u32,
+    /// KSP's `symbol-processing-api` first, then the standard library it runs on.
+    pub api_classpath: Vec<PathBuf>,
+    /// [`ArtifactPin::identity`] of the pins the API classpath was verified against.
+    pub api_identity: String,
+}
+
+impl KspRuntime {
+    /// A command that runs this runtime's `java`, as [`HostRuntime::java_command`] does.
+    pub(crate) fn java_command(&self) -> std::process::Command {
+        java_command(&self.java, &self.java_home, self.java_major)
+    }
+}
+
+/// Finds or fetches the JDK and KSP's API classpath for `request`, announcing what is fetched as
+/// [`provision`] does.
+pub fn provision_ksp(
+    request: &KspRequest,
+    env: &Environment,
+    pins: &Pins,
+    fetcher: &dyn Fetcher,
+    report: &mut dyn Write,
+) -> Result<KspRuntime, ProvisionError> {
+    let classpath_pins =
+        pins.ksp_classpath(request.ksp_version)
+            .ok_or_else(|| ProvisionError::UnpinnedKsp {
+                version: request.ksp_version.to_string(),
+                pinned: pins.ksp_versions(),
+            })?;
+    let preface = format!(
+        "{} runs on KSP's API, symbol-processing-api {}, which krusty keeps in its cache",
+        request.reason, request.ksp_version
+    );
+    let wanted = Wanted {
+        reason: request.reason,
+        min_java: request.min_java,
+        preface,
+        classpath: classpath_pins,
+    };
+    let (jdk, classpath) = jdk_and_classpath(wanted, env, pins, fetcher, report)?;
+    Ok(KspRuntime {
+        ksp_version: request.ksp_version.to_string(),
+        java: jdk.java,
+        java_home: jdk.home,
+        java_major: jdk.major,
+        api_classpath: classpath,
+        api_identity: ArtifactPin::identity(classpath_pins),
+    })
+}
+
+/// What one host runs on: a JDK and a pinned classpath.
+struct Wanted<'a> {
+    /// What needs them, as the user should read it.
+    reason: &'a str,
+    min_java: u32,
+    /// Said once, before the first jar is copied or downloaded.
+    preface: String,
+    classpath: &'a [ArtifactPin],
+}
+
+/// The JDK and the jars `wanted` names, found or fetched.
+fn jdk_and_classpath(
+    wanted: Wanted,
+    env: &Environment,
+    pins: &Pins,
+    fetcher: &dyn Fetcher,
+    report: &mut dyn Write,
+) -> Result<(Jdk, Vec<PathBuf>), ProvisionError> {
+    let reason = wanted.reason;
+    let mut session = Session {
+        reason,
+        min_java: wanted.min_java,
+        env,
+        fetcher,
+        report,
+        missing: Vec::new(),
+        missing_java: None,
+        preface: Some(wanted.preface),
+        changed: false,
+    };
+    let jdk = session.jdk(pins.jdk())?;
+    let mut classpath = Vec::new();
+    for pin in wanted.classpath {
+        classpath.extend(session.artifact(pin)?);
+    }
+    if !session.missing.is_empty() {
+        return Err(ProvisionError::Offline {
+            reason: reason.to_string(),
+            missing: session.missing,
+            java: session.missing_java,
+        });
+    }
+    session.note_saved();
+    Ok((jdk.expect("a JDK, since nothing is missing"), classpath))
 }
 
 /// Finds or fetches one pinned jar the way [`provision`] finds the compiler's: krusty's cache, else a

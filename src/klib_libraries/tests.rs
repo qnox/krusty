@@ -1,5 +1,7 @@
 use std::rc::Rc;
 
+mod accessor_modifiers;
+
 use super::*;
 use crate::fir::ResolvedParameterIdentity;
 use crate::libraries::{ExternalCallableKind, FnKind, FunctionInfo, KlibDeclarationSignature};
@@ -1313,7 +1315,15 @@ fn same_spelled_function_and_property_type_parameters_keep_distinct_identities()
         formals: vec![parameter(37)],
         visibility: Visibility::Public,
         modality: crate::metadata::semantic::KotlinModality::Final,
-        setter_visibility: Visibility::Public,
+        getter_modifiers: crate::metadata::semantic::KotlinAccessorModifiers::default_for(
+            Visibility::Public,
+            crate::metadata::semantic::KotlinModality::Final,
+        ),
+        setter_modifiers: crate::metadata::semantic::KotlinAccessorModifiers::default_for(
+            Visibility::Public,
+            crate::metadata::semantic::KotlinModality::Final,
+        ),
+        is_external: false,
         setter_parameter_name: None,
         is_var: false,
         is_const: false,

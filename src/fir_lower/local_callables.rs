@@ -685,7 +685,7 @@ impl BodyLowering<'_> {
                     let declared = if *whole_array {
                         array_type
                     } else {
-                        let Some(element) = array_type.array_elem() else {
+                        let Some(element) = array_type.array_read_elem() else {
                             return Ok(None);
                         };
                         element

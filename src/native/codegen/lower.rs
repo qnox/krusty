@@ -23,6 +23,7 @@ mod classifier_shapes;
 mod compiler_intrinsics;
 mod declared_capabilities;
 mod defaults;
+mod dispatch;
 mod entry;
 mod enums;
 mod exceptions;
@@ -219,6 +220,8 @@ pub struct FileInput<'a> {
     /// Which classifiers are value classes, and how this target carries each occurrence of one;
     /// see [`crate::native::value_classes`].
     pub value_classes: &'a super::super::value_classes::NativeValueClasses,
+    /// The dispatch numbering of the module's named classes, shared by every file.
+    pub slot_plan: &'a crate::backend::class_tables::module_slots::ModuleSlotPlan,
 }
 
 pub fn lower_file(
@@ -242,8 +245,9 @@ pub fn lower_file(
         dependency_exports,
         dependency_symbols,
         value_classes,
+        slot_plan,
     } = input;
-    let class_model = model::build(ir, value_classes)?;
+    let class_model = model::build(ir, value_classes, slot_plan)?;
 
     let isa = isa_for(target, verify)?;
     let builder = ObjectBuilder::new(
@@ -284,6 +288,7 @@ pub fn lower_file(
         callables,
         inert_singleton_bindings,
         values: value_classes,
+        slot_plan,
         module: &mut module,
         symbols: super::super::symbols::symbols(ir, module_name, runtime_symbols.clone()),
         model: class_model,
@@ -399,6 +404,8 @@ struct FileLowering<'a> {
     inert_singleton_bindings: crate::fx_hash::HashSet<crate::ir::ExprId>,
     /// Which classifiers are value classes, and which occurrences travel unboxed.
     values: &'a super::super::value_classes::NativeValueClasses,
+    /// The module's dispatch numbering, which a call through a class of another file reads.
+    slot_plan: &'a crate::backend::class_tables::module_slots::ModuleSlotPlan,
     module: &'a mut ObjectModule,
     /// Symbols of this file's classes and functions.
     symbols: Symbols,

@@ -20,6 +20,7 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         CompilerIntrinsic::PrimitiveShiftRight => FirBinaryOperation::ShiftRight,
         CompilerIntrinsic::PrimitiveUnsignedShiftRight => FirBinaryOperation::UnsignedShiftRight,
         CompilerIntrinsic::ArrayFactory(_)
+        | CompilerIntrinsic::ListStorageConstruction(_)
         | CompilerIntrinsic::ThrowableConstructor { .. }
         | CompilerIntrinsic::ThrowableMessage
         | CompilerIntrinsic::ReinterpretBits

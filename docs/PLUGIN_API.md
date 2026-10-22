@@ -506,16 +506,16 @@ Landed on `master`, each round reviewed (cavecrew-reviewer), TDD:
 | Reliable diagnostics (native-sub / hosted / **unsupported=error**) | done | `plugins/registry.rs` |
 | Serialization native plugin: `$serializer`+members, `serializer()`, per-field `childSerializers`, ABI-from-classpath | done (decl/shape) | `plugins/serialization.rs` |
 | Annotation capture from source → plugin activates end-to-end | done | `parser.rs`, `plugins/mod.rs`, `tests/plugins_e2e.rs` |
-| KSP/codegen host model + fixpoint + toolchain pinning | done (model) | `plugins/ksp.rs` |
+| KSP round view over the resolved declaration headers | done (classifiers, annotations) | `ksp_round.rs` |
+| KSP host: KSP's API in a JVM over krusty's round view, multi-round, refusal of unserved members | in progress | `crates/krusty-plugin-host/src/ksp/`, `crates/krusty-plugin-host/ksp-adapter/` |
 | Real annotation-processor-**from-jar** run (codegen-host mechanism) | done (APT) | `tests/codegen_host_e2e.rs` |
 | Toolchain **provisioning** (detect gradle/mvn/cs → fetch jars to folder) | done | `plugins/deps.rs`, `tests/ksp_provision_e2e.rs` |
-| **Real KSP2 run from a JAR**: provision → compile Kotlin processor → `KotlinSymbolProcessing.execute`; ServiceLoader from jar, annotation query, property inspection, **multi-round**, **generated code compiled** | done | `tests/ksp_real_e2e.rs`, `tests/fixtures/ksp/` |
 
-The **KSP** clause of the goal is met: `tests/ksp_real_e2e.rs` runs a real KSP processor loaded from
-a JAR via the actual KSP2 toolchain and verifies the full case matrix — from-jar discovery, annotation
-query, declaration/property inspection, multi-round re-processing of generated code, and that the
-generated code itself compiles. (Opt-in `KRUSTY_KSP_E2E=1`; runs under a JDK ≤ 23 since Kotlin
-2.0.21's compiler rejects JDK 25.)
+KSP processors run in krusty's own KSP host: a JVM process implementing KSP's `Resolver` and `KS*`
+nodes over the round view krusty builds from its declaration headers, with krusty driving the
+rounds. The host refuses a processor that reaches a member it does not serve yet, and a build driver
+then runs that module's KSP with KSP2. Real KSP2 is the oracle: the host's generated files and logs
+are compared with KSP2's for the same processor and sources.
 
 **Remaining distance to the stated bar — serialization conformance only:**
 

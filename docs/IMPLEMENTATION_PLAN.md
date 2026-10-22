@@ -5,6 +5,16 @@ front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
 
+## String operation authority publication
+
+The shared StringPlus operation requires the existing selected-stdlib authority for both member
+and nullable-extension declarations. Member normalization happens before callable identity
+publication, replacing the late source-only realization; the body view projects the existing
+normalized member operation rather than losing it. An actual-archive regression checks both
+forms through source, opaque identity and module-qualified dependency views, and repeats the same
+archive as an ordinary dependency. This provider correction is independent of KLIB inline-body
+expansion and adds no backend capabilities, outcome allowances or metadata fields.
+
 ## Phase 0 — Foundations  ✅
 - ✅ Cargo project (lib + bin), local `cargo test`/`cargo run`. Toolchain: rustc 1.96 + gcc linker.
 - ✅ `token.rs`: token kinds, `Span { lo:u32, hi:u32 }`, keyword table (types are idents, not kw).
@@ -2931,6 +2941,15 @@ bodies exist only as jar bytecode):
   this is the safe landing strip for phase 421 (flip `resolve_callable` to the `@Metadata` Kotlin types).
   Unit test `jvm_class_map::tests::collection_types_erase_to_jvm_at_emit`.
 
+### Declared JVM vararg array types
+
+- Decode the packed parameter from its declared metadata type, preserving projections and
+  primitive-array identity; do not reconstruct it from the separate vararg element field.
+- Cover inline/table-backed forms, missing declarations and the actual selected stdlib factories.
+- Keep projection wrappers out of listed-element value conversions and operand spills, including
+  adapted references and constructor calls. Nullable/value-class boxing and mixed spreads are
+  differential regressions; declared arrays and whole-array spread operands keep their projections.
+
 ### Phase 419 — `@Metadata` function return-type decoding (read-only/mutable foundation)  ✅
 - ROOT CAUSE found (with the maintainer): krusty erases `List`/`MutableList` (and `Map`/`MutableMap`, …)
   to `java/util/List` in the FRONT END, so it can't distinguish a read-only collection from a mutable one
@@ -5553,6 +5572,9 @@ non-inline callers, still reads the field directly. Test:
   181/181/182; Native's counts are unchanged by the shared tables.
 - Known gap: `x as? C` on a value smart-cast earlier in the body lowers to a `When` with no
   checked type, which Wasm declines rather than infer one.
+- Wasm consumes the published declaration-result provenance of a generic call beneath its
+  checked result coercion. This preserves separate declared and selected types without inventing
+  missing facts; it does not yet supply generic scalar boxing or a canonical dependency-call ABI.
 - Not yet selectable from the CLI: a user-facing wasm target waits on that klib platform.
 - Catch-only EH: a module-owned tag carries the same Throwable reference across calls/modules.
   The selected stdlib's exact `Throwable()` / `Throwable(String?)` and nullable `message` getter
@@ -5561,6 +5583,22 @@ non-inline callers, still reads the field directly. Test:
 - Next: the Throwable hierarchy and remaining constructor/accessor forms, typed catch dispatch,
   finally, enums and companions on the class tables, and further target-KLIB
   library bodies/intrinsics keyed by the selected declaration.
+
+## KLIB accessor metadata
+
+- Accessor metadata preserves independent getter/setter modifiers and annotation identities,
+  including exact absent-word defaults and explicit zero. Accessor inline obligations now survive
+  provider normalization. This producer change does not enable ordinary-body or inline-accessor
+  emission; those consumers remain separate work.
+
+## Declaration-owned list storage construction  🚧
+
+- Authenticate stdlib factory generic signatures at the provider boundary and freeze a typed
+  empty/singleton/packed storage plan. JVM alias expansion stays in the JVM provider.
+- Replace Native's factory spelling/physical-array matcher with consumption of that exact plan;
+  preserve singleton-array identity, readonly sharing and mutable copying through existing E2Es.
+- Validate actual JVM and all target-KLIB declarations plus malformed-contract negatives. The
+  inline-template branch still needs to use the same positive capability in its dependency graph.
 
 ## KLIB writer — krusty compiles a module to a Kotlin library  ◐
 

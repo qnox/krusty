@@ -4,11 +4,13 @@
 //! Only a field that is a property has a synthesized accessor. The value-class pass renames
 //! that call only through this binding, and retires the binding when it replaces the call.
 
-use crate::ir::{Callee, ClassId, ExprId, IrExpr, IrFile, SynthesizedAccessorCall};
+use crate::ir::{Callee, ClassId, ExprId, FunId, IrExpr, IrFile, SynthesizedAccessorCall};
 use crate::names::property_getter_name;
 use crate::types::TypeName;
 
-/// Emit a virtual property getter and bind it to the property that owns `field` when one exists.
+/// Emit a virtual property getter call. A source-declared getter is called as the checked property's
+/// getter, like a source read of it, so the JVM representation passes name it from that identity; a
+/// default getter is bound to the property that owns `field` instead.
 pub(super) fn getter(
     ir: &mut IrFile,
     receiver: ExprId,
@@ -16,21 +18,21 @@ pub(super) fn getter(
     property_name: &str,
     descriptor: String,
     property: (ClassId, u32),
+    declared_getter: Option<FunId>,
 ) -> ExprId {
+    let name = property_getter_name(property_name);
+    let callee = match declared_getter {
+        Some(getter) => ir.declared_getter_call(owner, name, getter),
+        None => Callee::realized_virtual(owner, name, format!("(){descriptor}"), None, false),
+    };
     let call = ir.add_expr(IrExpr::Call {
-        callee: Box::new(Callee::Virtual {
-            owner,
-            name: property_getter_name(property_name),
-            descriptor: format!("(){descriptor}"),
-            params: None,
-            interface: false,
-            module_target: None,
-            target: None,
-        }),
+        callee: Box::new(callee),
         dispatch_receiver: Some(receiver),
         args: vec![],
     });
-    bind_field_getter(ir, call, property.0, property.1);
+    if declared_getter.is_none() {
+        bind_field_getter(ir, call, property.0, property.1);
+    }
     call
 }
 

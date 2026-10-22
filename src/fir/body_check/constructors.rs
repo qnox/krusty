@@ -724,7 +724,7 @@ impl BodyFirChecker<'_> {
                 let expected = if self.file.is_spread_arg(*argument) {
                     parameter_ty
                 } else {
-                    parameter_ty.array_elem().ok_or_else(|| {
+                    parameter_ty.array_read_elem().ok_or_else(|| {
                         self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape)
                     })?
                 };

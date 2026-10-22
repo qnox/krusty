@@ -871,32 +871,13 @@ fn build_generic_sig(
         })
     };
     let decode_parameter = |vp: &ParsedValueParam| {
-        if let Some((elem, table_nullable)) = vararg_element_type(vp, type_table) {
-            decode_metadata_type(
-                elem,
-                type_table,
-                records,
-                d2,
-                &context.names,
-                &context.erasure_bounds,
-                table_nullable,
-                0,
-            )
-            .map(Ty::array)
-        } else {
-            value_parameter_type(vp, type_table).and_then(|(body, table_nullable)| {
-                decode_metadata_type(
-                    body,
-                    type_table,
-                    records,
-                    d2,
-                    &context.names,
-                    &context.erasure_bounds,
-                    table_nullable,
-                    0,
-                )
-            })
-        }
+        decode_metadata_type_ref(
+            value_parameter_type(vp, type_table),
+            type_table,
+            records,
+            d2,
+            Some(&context),
+        )
     };
     let context_params = if !pf.context_params.is_empty() {
         pf.context_params
@@ -2701,16 +2682,17 @@ pub(super) fn builtin_class_access(flags: u64) -> u16 {
 /// carriers are read: a file facade's `Package.function` (field 3, top-level `suspend fun`s) AND a
 /// `Class.function` (field 9, `suspend` members of a class/interface).
 /// Parse a `META-INF/*.kotlin_module` file → `(package fq-name /slashed/, [facade internal names])`.
-/// The counterpart of [`crate::metadata::module::build_kotlin_module`]: a 20-byte header (five
-/// big-endian `i32` words `[len, maj, min, patch, flags]`) then a `Module` protobuf whose field 1 is
+/// The counterpart of [`crate::metadata::module::build_kotlin_module`]: a length-prefixed
+/// big-endian `i32` version (`[len, maj, min, patch]`), a flags word from metadata 1.4 on, then a
+/// `Module` protobuf whose field 1 is
 /// repeated `PackageParts { package_fq_name = 1 (dotted), short_class_name = 2 (repeated) }`. The
 /// package name is returned slashed (`kotlin/collections`) and each facade as a full internal name
 /// (`kotlin/collections/CollectionsKt`) so the caller can resolve it directly.
 pub fn read_kotlin_module(bytes: &[u8]) -> Vec<(String, Vec<String>)> {
-    if bytes.len() < 20 {
+    let Ok((module, _)) = crate::metadata::decode::module_message(bytes) else {
         return Vec::new();
-    }
-    let mut pb = Pb::new(&bytes[20..]);
+    };
+    let mut pb = Pb::new(module);
     // Two carriers matter: the `PackageParts` messages (field 1) and the module-level `jvm_package_name`
     // table (field 3) — the `@JvmPackageName` relocation targets that a `PackageParts` references by
     // index. Collect both, then parse each `PackageParts` against the table.
@@ -2807,6 +2789,9 @@ fn parse_package_parts(body: &[u8], jvm_pkgs: &[String]) -> Option<(String, Vec<
 
 #[cfg(test)]
 mod builtin_class_access_tests;
+
+#[cfg(test)]
+mod vararg_signature_tests;
 
 #[cfg(test)]
 mod module_reader_tests {
@@ -3345,6 +3330,19 @@ mod module_reader_tests {
             "demo".to_string(),
             vec!["demo/Lib1Kt".to_string(), "demo/Lib2Kt".to_string()]
         )));
+    }
+
+    /// A module written before Kotlin 1.4 (okio 2.2.2's, metadata 1.1.11) has no flags word after
+    /// its version, so its `Module` message starts four bytes earlier.
+    #[test]
+    fn reads_package_facades_of_a_module_without_a_flags_word() {
+        let current = build_kotlin_module(&[("okio".into(), vec!["Okio".into()])], [1, 1, 11]);
+        let mut legacy = current[..16].to_vec();
+        legacy.extend_from_slice(&current[20..]);
+        assert_eq!(
+            read_kotlin_module(&legacy),
+            vec![("okio".to_string(), vec!["okio/Okio".to_string()])]
+        );
     }
 
     #[test]
