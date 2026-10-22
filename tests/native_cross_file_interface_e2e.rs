@@ -260,13 +260,51 @@ fn a_default_declared_in_another_file_answers_for_an_implementor() {
     ]);
 }
 
+/// An interface that redeclares `toString` leaves it in `kotlin.Any`'s fixed slot, so a call
+/// through the interface from another file reads that slot of the receiver's class table.
+#[test]
+fn a_redeclared_any_member_is_called_through_an_interface_of_another_file() {
+    expect_portable_sources(&[
+        (
+            "box",
+            r#"
+                package demo
+                fun render(label: Label): String = label.toString() + label.hashCode()
+                fun box(): String {
+                    val result = render(Tag("t"))
+                    return if (result == "tag t7") "OK" else result
+                }
+            "#,
+        ),
+        (
+            "label",
+            r#"
+                package demo
+                interface Label {
+                    override fun toString(): String
+                    override fun hashCode(): Int
+                }
+            "#,
+        ),
+        (
+            "tag",
+            r#"
+                package demo
+                class Tag(private val text: String) : Label {
+                    override fun toString(): String = "tag " + text
+                    override fun hashCode(): Int = 7
+                }
+            "#,
+        ),
+    ]);
+}
+
 #[test]
 fn a_default_reached_through_a_bridge_of_another_file_declines() {
-    expect_native_sources_decline(
-        &[
-            (
-                "box",
-                r#"
+    let sources: &[(&str, &str)] = &[
+        (
+            "box",
+            r#"
                     package demo
                     class Seven : IntSource
                     fun box(): String {
@@ -274,27 +312,30 @@ fn a_default_reached_through_a_bridge_of_another_file_declines() {
                         return if (source.next() == 7) "OK" else "FAIL"
                     }
                 "#,
-            ),
-            (
-                "source",
-                r#"
+        ),
+        (
+            "source",
+            r#"
                     package demo
                     interface Source<T> {
                         fun next(): T
                     }
                 "#,
-            ),
-            (
-                "ints",
-                r#"
+        ),
+        (
+            "ints",
+            r#"
                     package demo
                     interface IntSource : Source<Int> {
                         override fun next(): Int = 7
                     }
                 "#,
-            ),
-        ],
-        "an interface default reached through a bridge, declared in another file",
+        ),
+    ];
+    expect_native_sources_decline(
+        sources,
+        "krusty: the native backend does not support an interface default reached through a \
+         bridge, declared in another file (`demo.IntSource`) yet",
     );
 }
 

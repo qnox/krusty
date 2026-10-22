@@ -350,13 +350,20 @@ impl BodyLowering<'_, '_, '_> {
                     qualified()
                 ));
             }
-            let Some(number) = numbered.number(PlanKey::Callable(target)) else {
-                return Err(declined!(
-                    "a call to a member `{}` does not number",
-                    qualified()
-                ));
-            };
-            model::Dispatch::Interface(number)
+            match (
+                numbered.fixed_slot(target),
+                numbered.number(PlanKey::Callable(target)),
+            ) {
+                // A redeclared `kotlin.Any` member stands in its fixed class slot in every table.
+                (Some(slot), _) => model::Dispatch::Class(slot),
+                (None, Some(number)) => model::Dispatch::Interface(number),
+                (None, None) => {
+                    return Err(declined!(
+                        "a call to a member `{}` does not number",
+                        qualified()
+                    ))
+                }
+            }
         } else {
             model::Dispatch::Class(self.planned_class_slot(owner, target)?)
         };

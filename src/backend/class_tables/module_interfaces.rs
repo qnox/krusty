@@ -10,7 +10,7 @@
 
 use crate::fx_hash::{HashMap, HashSet};
 
-use crate::fir::{ResolvedFunctionOverrideTarget, ResolvedPropertyOverrideTarget};
+use crate::fir::{CallableId, ResolvedFunctionOverrideTarget, ResolvedPropertyOverrideTarget};
 use crate::types::{Ty, TypeName};
 
 use super::members::any_slot;
@@ -55,6 +55,9 @@ pub(crate) struct ModuleInterfaces {
     interfaces: HashMap<TypeName, Result<NumberedInterface, Unsupported>>,
     /// Each numbered member's carriers as its declaration states them.
     carriers: HashMap<PlanKey, Carriers>,
+    /// Interface members that redeclare one of `kotlin.Any`'s, by the fixed class slot they stand
+    /// in instead of a number.
+    fixed: HashMap<CallableId, u32>,
 }
 
 /// A member's parameters and result, or a property accessor's value type.
@@ -103,6 +106,13 @@ impl ModuleInterfaces {
         }
         let mut result = numbering.result;
         for (_, interface) in classes.interfaces() {
+            for edge in interface.function_overrides.iter() {
+                if let Some(slot) = any_slot(edge.overridden_role) {
+                    result.fixed.insert(edge.implementation, slot);
+                }
+            }
+        }
+        for (_, interface) in classes.interfaces() {
             for member in interface.members.iter() {
                 match member {
                     ModuleInterfaceMember::Function {
@@ -135,6 +145,12 @@ impl ModuleInterfaces {
     /// The number of one interface member spelling, the same in every file of the module.
     pub(crate) fn number(&self, key: PlanKey) -> Option<u32> {
         self.numbers.get(&key).copied()
+    }
+
+    /// The `kotlin.Any` slot an interface member redeclaring `equals`, `hashCode` or `toString`
+    /// stands in: every object's table holds it there, so it has no interface number.
+    pub(crate) fn fixed_slot(&self, callable: CallableId) -> Option<u32> {
+        self.fixed.get(&callable).copied()
     }
 
     pub(crate) fn member(&self, number: u32) -> &NumberedMember {

@@ -281,10 +281,13 @@ pub(crate) fn overridden_functions(
                             targets.push(overridden);
                         }
                     }
+                    // A redeclared `kotlin.Any` member has no number: the override takes the
+                    // fixed slot through its own edge to `kotlin.Any`.
                     None if edge.overridden_is_interface
-                        && numbered
+                        && (numbered
                             .number(super::module_slots::PlanKey::Callable(*callable))
-                            .is_some() => {}
+                            .is_some()
+                            || numbered.fixed_slot(*callable).is_some()) => {}
                     None => {
                         return Err(format!(
                             "an override of a method declared in another file (`{}.{}`)",
