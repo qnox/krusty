@@ -1445,7 +1445,6 @@ fn a_declaration_without_a_role_per_context_parameter_is_rejected() {
 mod analysis;
 mod builtin_operations;
 mod classes;
-mod constructor_contracts;
 mod implementation_coverage;
 mod implementation_inventory;
 mod properties;

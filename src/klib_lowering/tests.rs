@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 mod body_forms;
 mod callee_headers;
+mod constructor_contracts;
 mod control_forms;
 mod demo_package;
 mod inline_templates;

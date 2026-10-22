@@ -773,7 +773,7 @@ join requires the exact declaring module and complete constructor signature, inc
 Class-owned formals and bounds stay in that contract; they are not constructor-owned function
 parameters. The invocation result remains `Unit`, without a function generic signature, independently
 of source inference's constructed type. This header preservation does not enable serialized generic
-constructor lowering. Test: `klib_libraries::tests::constructor_contracts`.
+constructor lowering. Test: `klib_lowering::tests::constructor_contracts`.
 
 ## Declaration-owned KLIB vararg coordinates
 

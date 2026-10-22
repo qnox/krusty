@@ -1,6 +1,6 @@
 //! A constructor's class-owned parameters survive provider and checked-IR handoffs.
 
-use super::analysis::native_stdlib;
+use super::{distribution_root, stdlib};
 use crate::backend::CheckedBackendCallables;
 use crate::ir::{IrConst, IrExpr, IrFile};
 use crate::libraries::{ExternalCallableKind, KlibDeclarationSignature};
@@ -35,9 +35,10 @@ fn different_mask(signature: &KlibPublicIdSignature) -> KlibPublicIdSignature {
 
 #[test]
 fn klib_constructor_class_contract_survives_declared_and_frozen_views() {
-    let Some(libraries) = native_stdlib() else {
+    let Some(root) = distribution_root() else {
         return;
     };
+    let libraries = stdlib(&root);
     let owner = type_name("kotlin/Pair");
     let symbols = libraries.symbols(SymbolNamespace::Package(type_name("kotlin")), "Pair");
     let class = symbols.classifier.as_ref().expect("the stdlib Pair class");

@@ -18078,7 +18078,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   invocation result stays `Unit`, without a function generic signature, even when source inference
   constructs a parameterized class type. Retaining this header alone does not admit an unsupported
   serialized constructor body or establish a checked class substitution.
-  Test: `klib_libraries::tests::constructor_contracts`.
+  Test: `klib_lowering::tests::constructor_contracts`.
 
 - **A KLIB vararg retains one packed array parameter.** The declaration's vararg position is
   frozen independently of call-site specialization, in the same context/extension/value ordering
