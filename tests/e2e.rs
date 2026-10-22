@@ -22,6 +22,8 @@ mod cast_operand_reread_e2e;
 mod classfile_low_priority_annotation_e2e;
 #[path = "common/mod.rs"]
 mod common_core;
+#[path = "jvm_conformance_deadline_e2e.rs"]
+mod jvm_conformance_deadline_e2e;
 #[cfg(test)]
 pub(crate) use common_core::server_pool::Pool as ServerPool;
 #[path = "common/compiler_plugin_fixture.rs"]
