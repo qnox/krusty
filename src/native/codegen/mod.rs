@@ -174,7 +174,7 @@ impl Backend for CraneliftBackend {
         &self,
         operation: crate::backend::BackendCompilerIntrinsic,
     ) -> bool {
-        dependency_intrinsics::list_storage_plan(operation).is_some()
+        dependency_intrinsics::operation_plan(operation).is_some()
     }
 
     fn lower_ir_file(

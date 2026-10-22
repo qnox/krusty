@@ -178,9 +178,11 @@ pub(super) fn published_function(
         ),
         // Before the identity is assigned, so the realization every consumer of that identity
         // reads — a source call's and an expanded template's alike — carries the operation.
-        CallablePlacement::Member { owner, .. } => {
-            builtin_realizations::realize_member(owner, &mut function)
-        }
+        CallablePlacement::Member { owner, .. } => builtin_realizations::realize_member(
+            owner,
+            signed.compiler_builtin_owner,
+            &mut function,
+        ),
         CallablePlacement::Associated { .. } => {}
     }
     if let Some(intrinsic) = &signed.target_intrinsic {

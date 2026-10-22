@@ -11,6 +11,69 @@ use crate::symbol_source::SymbolNamespace;
 use crate::types::{type_name, ArrayFactoryKind, SemanticCallRole, Ty};
 
 #[test]
+fn klib_string_plus_requires_selected_stdlib_authority() {
+    use crate::symbol_source::SymbolSource;
+    let Some(trusted) = native_stdlib() else {
+        return;
+    };
+    let path =
+        crate::toolchain::kotlin_stdlib_klib(crate::compilation_target::CompilationTarget::Native)
+            .unwrap();
+    let untrusted =
+        super::super::KlibLibraries::open(&[super::super::KlibLibraryInput::dependency(path)])
+            .unwrap();
+    for (provider, trusted) in [(&trusted, true), (&untrusted, false)] {
+        let class = classifier_record(
+            &provider.inventory,
+            &provider.identities,
+            type_name("kotlin/String"),
+        )
+        .unwrap();
+        let package = declared_symbols(
+            &provider.inventory,
+            &provider.identities,
+            SymbolNamespace::Package(type_name("kotlin")),
+            "plus",
+        );
+        let member = &class.declared_callables["plus"];
+        let mut operations = Vec::new();
+        for function in member
+            .functions()
+            .iter()
+            .chain(package.callables.functions())
+            .filter(|function| {
+                function.callable.name == "plus"
+                    && function.semantic_params().as_ref() == [Ty::nullable(Ty::obj("kotlin/Any"))]
+                    && (function.kind == crate::libraries::FnKind::Member
+                        || function.semantic_receiver() == Some(Ty::nullable(Ty::String)))
+            })
+        {
+            let selected = provider
+                .external_callable(function.callable.external_identity.unwrap())
+                .unwrap();
+            let identity = selected.dependency_callable.as_ref().unwrap();
+            let (_, serialized) = provider.external_callable_by_dependency(identity).unwrap();
+            operations.push([
+                function
+                    .callable
+                    .compiler_intrinsic
+                    .or(function.callable.member_realization.compiler_intrinsic()),
+                selected.klib_body_callable().unwrap().compiler_intrinsic(),
+                serialized
+                    .klib_body_callable()
+                    .unwrap()
+                    .compiler_intrinsic(),
+            ]);
+        }
+        assert_eq!(
+            operations,
+            [[trusted.then_some(CompilerIntrinsic::StringPlus); 3]; 2],
+            "selected stdlib: {trusted}"
+        );
+    }
+}
+
+#[test]
 fn only_the_selected_native_stdlib_realizes_its_result_check_helpers() {
     let Some(libraries) = native_stdlib() else {
         return;
