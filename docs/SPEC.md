@@ -11344,8 +11344,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   subclasses in metadata order (by simple name, then by path), with every sealed subclass
   replaced, recursively, by its own subclasses. A subclass's serializer is its
   `$serializer.INSTANCE`, an object's `ObjectSerializer`, or, for a generic subclass,
-  `new Sub$$serializer(PolymorphicSerializer(Any::class, []))` with one operand per type
-  parameter. The cache's `access$…$cp` accessor follows the private primary's marker accessor. A
+  `new Sub$$serializer(PolymorphicSerializer(B::class, []), …)` with one operand per type
+  parameter. `B` is the parameter's representative upper bound, as kotlinc's
+  `getRepresentativeUpperBound` picks it: the first bound that is a class rather than an interface,
+  else the first bound, else `Any` (`Free<T>` uses `Any`, `Bounded<T : Bound>` uses `Bound`,
+  `Marked<T : Marker>` uses `Marker`, and `T : Marker, T : Bound` uses `Bound`). A bound that is
+  itself a type parameter is not supported yet: its serializer stays an unresolved plugin
+  placeholder, so krusty declines the file instead of giving it another serializer. The cache's `access$…$cp` accessor follows the private primary's marker accessor. A
   sealed interface builds the same serializer in its companion's `serializer()`. An element typed
   by a sealed class, a sealed interface or a non-generic abstract class reads that type's
   `Companion.serializer()` through the child-serializer cache. Test:

@@ -15,9 +15,9 @@ use super::element_serializer::{element_serializer_expr, unsupported_element_ser
 use super::{
     class_ty, complete_frontend_serializer_accessor, kserializer_of, serializer_accessor_owner,
 };
-use crate::ir::{ClassId, ExprId, IrConst, IrExpr, IrFile, IrTypeOp};
+use crate::ir::{ClassId, ExprId, IrConst, IrExpr, IrFile, IrTypeOp, IrTypeParameter};
 use crate::plugins::PluginContext;
-use crate::types::{type_name, Ty, TypeName};
+use crate::types::{Ty, TypeName};
 
 const SEALED_CLASS_SERIALIZER_FQ: &str = "kotlinx/serialization/SealedClassSerializer";
 
@@ -102,28 +102,61 @@ fn concrete_subclasses(ir: &IrFile, class_id: ClassId) -> Vec<TypeName> {
 
 /// A subclass's serializer, as kotlinc derives an element's: a non-generic class's
 /// `$serializer.INSTANCE` and an object's `ObjectSerializer`. A generic class's `$serializer` is
-/// constructed directly, over a `PolymorphicSerializer(Any::class)` for each type parameter.
+/// constructed directly, over a `PolymorphicSerializer` of each type parameter's representative
+/// upper bound.
 fn subclass_serializer(ir: &mut IrFile, ctx: &PluginContext, subclass: TypeName) -> ExprId {
     if local_generic_serializable_class(ir, ctx, subclass) {
-        let arity = local_class(ir, subclass).map_or(0, |class_id| {
-            ir.classes[class_id as usize].type_params.len()
-        });
-        let arguments: Vec<ExprId> = (0..arity)
-            .map(|_| {
-                let annotations = serial_info_annotations(ir, subclass, false);
-                let any = polymorphic_serializer(ir, type_name("kotlin/Any"), annotations);
-                ir.add_expr(IrExpr::TypeOp {
-                    op: IrTypeOp::Cast,
-                    arg: any,
-                    type_operand: class_ty(super::KSERIALIZER_FQ),
-                })
-            })
+        let bounds: Vec<Ty> =
+            ir.class_signature_name(subclass)
+                .map_or_else(Vec::new, |signature| {
+                    signature
+                        .type_params
+                        .iter()
+                        .map(representative_upper_bound)
+                        .collect()
+                });
+        let arguments: Vec<ExprId> = bounds
+            .iter()
+            .map(|&bound| type_parameter_serializer(ir, subclass, bound))
             .collect();
-        let descriptor = format!("({})V", "Lkotlinx/serialization/KSerializer;".repeat(arity));
+        let descriptor = format!(
+            "({})V",
+            "Lkotlinx/serialization/KSerializer;".repeat(arguments.len())
+        );
         return ir.new_external_name(subclass.nested_child("$serializer"), &descriptor, arguments);
     }
     let ty = Ty::obj_name(subclass);
     element_serializer_expr(ir, ctx, &ty).unwrap_or_else(|| unsupported_element_serializer(ir, ty))
+}
+
+/// kotlinc's representative upper bound of a type parameter: its first bound that is a class
+/// rather than an interface, else its first bound, else `Any?`.
+fn representative_upper_bound(parameter: &IrTypeParameter) -> Ty {
+    parameter
+        .bounds
+        .iter()
+        .find(|&&(bound, is_interface)| !is_interface && bound.non_null().ty_param_name().is_none())
+        .or_else(|| parameter.bounds.first())
+        .map_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")), |&(bound, _)| bound)
+}
+
+/// `PolymorphicSerializer(<bound>::class, <serial-info annotations>)` cast to `KSerializer`. A
+/// bound that is itself a type parameter is not supported yet: it stays a placeholder, which
+/// declines the file rather than giving the formal another serializer.
+fn type_parameter_serializer(ir: &mut IrFile, subclass: TypeName, bound: Ty) -> ExprId {
+    if bound.non_null().ty_param_name().is_some() {
+        return unsupported_element_serializer(ir, bound);
+    }
+    let Some(classifier) = bound.kotlin_class_internal() else {
+        return unsupported_element_serializer(ir, bound);
+    };
+    let annotations = serial_info_annotations(ir, subclass, false);
+    let polymorphic = polymorphic_serializer(ir, classifier, annotations);
+    ir.add_expr(IrExpr::TypeOp {
+        op: IrTypeOp::Cast,
+        arg: polymorphic,
+        type_operand: class_ty(super::KSERIALIZER_FQ),
+    })
 }
 
 fn local_class(ir: &IrFile, classifier: TypeName) -> Option<ClassId> {

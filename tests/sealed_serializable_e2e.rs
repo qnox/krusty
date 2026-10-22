@@ -38,7 +38,20 @@ const SRC: &str = "import kotlinx.serialization.SerialName\n\
                    @Serializable\n\
                    abstract class Plugin\n\
                    @Serializable\n\
-                   class Holder(val expr: Expr, val event: Event, val plugin: Plugin, val all: List<Expr>)\n";
+                   class Holder(val expr: Expr, val event: Event, val plugin: Plugin, val all: List<Expr>)\n\
+                   interface Marker\n\
+                   @Serializable\n\
+                   abstract class Bound\n\
+                   @Serializable\n\
+                   sealed class Box\n\
+                   @Serializable\n\
+                   class Free<T>(val value: T) : Box()\n\
+                   @Serializable\n\
+                   class Bounded<T : Bound>(val value: T) : Box()\n\
+                   @Serializable\n\
+                   class Marked<T : Marker>(val value: T) : Box()\n\
+                   @Serializable\n\
+                   class Both<T>(val value: T) : Box() where T : Marker, T : Bound\n";
 
 fn assert_byte_identical(class: &str) {
     let (plugin, cp) = plugin_and_runtime()
@@ -113,6 +126,24 @@ const ROUND_TRIP_SRC: &str = "import kotlinx.serialization.Serializable\n\
                               \x20   val back = Json.decodeFromString(Expr.serializer(), text)\n\
                               \x20   return if (back == tree && back.depth == 2) \"OK\" else \"bad\"\n\
                               }\n";
+
+#[test]
+fn a_generic_subclass_without_a_bound_gets_a_polymorphic_any_serializer() {
+    assert_byte_identical("Free");
+    assert_byte_identical("Free$$serializer");
+}
+
+/// `Box`'s cached initializer builds every subclass's serializer, `Both`'s included. `Both` itself
+/// is left out: its `where T : Marker, T : Bound` erases to `Marker` instead of kotlinc's `Bound`,
+/// a generic-signature gap outside serialization.
+#[test]
+fn a_generic_subclass_formal_uses_its_representative_upper_bound() {
+    assert_byte_identical("Box");
+    for class in ["Bounded", "Marked"] {
+        assert_byte_identical(class);
+        assert_byte_identical(&format!("{class}$$serializer"));
+    }
+}
 
 #[test]
 fn a_sealed_class_round_trips_with_its_inherited_elements() {
