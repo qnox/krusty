@@ -54,6 +54,9 @@ pub(crate) struct Lambda {
     /// lines are that class's (`SourceMapCopier(parent, classSMAP, callSite)`), and one that
     /// starts on the invoking line is separated from it as an `@InlineOnly` call's lambda is.
     pub default_class: Option<String>,
+    /// A suspend lambda (`isSuspend`): its body's suspension points pass a fake continuation,
+    /// which only a suspend method's `$$forInline` copy replaces.
+    pub suspend: bool,
 }
 
 impl Lambda {

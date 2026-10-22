@@ -40,6 +40,14 @@ pub(super) fn reads_lambda(method: &MethodNode, lambdas: &[FieldLambda<'_>]) -> 
     })
 }
 
+/// Whether `method` reads the field of one of `lambdas` that is a suspend lambda.
+pub(super) fn reads_suspend_lambda(method: &MethodNode, lambdas: &[FieldLambda<'_>]) -> bool {
+    method.instructions().any(|insn| {
+        matches!(insn, Insn::Field { op: GETFIELD, name, .. }
+            if lambdas.iter().any(|lambda| lambda.lambda.suspend && lambda.field == *name))
+    })
+}
+
 /// `method` of the copy `owner`, its types already renamed, with every `invoke` of one of `lambdas`
 /// replaced by the lambda's body. Its own lines are mapped through `lines`; the lambdas' lines are
 /// lines of the caller, resolved through `caller` and mapped into the copy's map.

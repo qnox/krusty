@@ -49,7 +49,7 @@ use crate::jvm::{
 };
 
 pub(crate) use anonymous_object::{
-    copy_sam_wrapper, regenerate, CallSite, Regeneration, RegenerationError,
+    copy_sam_wrapper, regenerate, CallSite, CallSiteSource, Regeneration, RegenerationError,
 };
 pub(crate) use callee_shape::{
     can_inline_arguments_in_place, constructs_regenerated_object,

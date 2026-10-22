@@ -18,6 +18,8 @@
 //! from its `$$forInline` copy, is taken as a point of this frame once the method inliner places
 //! the lambda. Other interface bodies, and other spliced inline bodies, keep the IR machine.
 
+mod spliced_lambdas;
+
 use crate::fx_hash::HashSet;
 
 use super::cps::{
@@ -128,6 +130,25 @@ pub(super) fn route(
         suspensions,
         lambda: None,
         fake_continuations: fake_continuations.clone(),
+    };
+    // A suspend lambda every inline call splices: the bodies the calls place suspend where they
+    // land, so their points join the machine. The lambda's own method is written only when a call
+    // keeps it as a value.
+    let mut suspensions = suspensions;
+    let mut placed_continuations = Vec::new();
+    if let Some(values) = crate::jvm::lambda_classes::spliced_values(ir, fid) {
+        let Some(placed) = spliced_lambdas::placed_suspensions(ir, fid, &values, &mut route) else {
+            return Routed::Failed;
+        };
+        suspensions.extend(placed.suspensions);
+        placed_continuations = placed.continuations;
+    }
+    let machine = |suspensions| {
+        let mut machine = machine(suspensions);
+        machine
+            .fake_continuations
+            .extend(placed_continuations.iter().copied());
+        machine
     };
     // A function only ever inlined is never called: no continuation class re-enters it.
     if crate::jvm::suspend_inline_functions::keeps_marked_body(ir, fid) {
