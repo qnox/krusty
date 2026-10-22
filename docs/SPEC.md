@@ -3718,6 +3718,34 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `MutableList<Frame<*>>` argument. Tests: `tests/classpath_star_projection_bound_e2e.rs` (run
   against krusty- and kotlinc-built dependencies; classes byte-identical to kotlinc's) and
   `a_star_projection_contains_every_argument_whatever_bound_it_carries` in `src/assignable.rs`.
+- **An inferred return selects among overloads by each declaration's own argument mapping.**
+  `fun n() = mk()` over `mk(id: String = "", source: Any? = null)` and `mk(source: Any? = null)`
+  has no argument mapping shared by the family, so each declaration carries its own mapping into
+  the one top-level overload selector (`src/symbol_resolver/top_level_selection.rs`), which applies
+  applicability, `@LowPriorityInOverloadResolution`, literal adaptation and specificity exactly as
+  for a shared mapping. Only the comparison coordinates differ: the most
+  specific parameters the supplied arguments map to win, compared in argument order, and a
+  parameter left to its default takes no part. Only declarations whose compared parameters are
+  identical are separated by the defaults they omit, the fewest winning; kotlinc selects
+  `mk(source)`. Two left (each omitting one default) are kotlinc's overload ambiguity. Before,
+  Pass 1 found no candidate and stopped with "module signatures were not finalized" (koin-core).
+  The body checker follows the same order: `h(x = null)` over `h(a: Int = 0, b: Int = 0, x:
+  String?)` and `h(x: Any?)` selects the `String?` overload, as kotlinc does, where it used to let
+  the fewer omitted defaults win first. A call written with fewer arguments than parameters gets
+  the same rule in the shared selector: `lazy { mk() }` on an implicit `T : Comp` receiver over
+  `T.mk(id: String = "", source: Any? = null, arch: Int? = null)` and `T.mk(source: Any? = null)`
+  selects the one-default extension, as kotlinc does, where both used to tie (koin-core's
+  `createScope()`). A low-priority declaration still yields: `choose(value = "x")` over a
+  low-priority `choose(a: Int = 0, value: String): Int` and `choose(b: Boolean = false, c: Long =
+  0, value: Any): String` selects the `String` one in an inferred and a declared return. Distinct
+  declarations whose separate mappings project onto one shape stay in conflict through both the
+  ordinary and the integer-literal comparison: `choose(value = "x")` over `choose(a: Int = 0,
+  value: String)` and `choose(value: String, b: Boolean = false)` is kotlinc's overload ambiguity
+  naming both, as is `choose(value = 1)` over the same pair taking `Long`. When the call sits in an
+  inferred signature, the signature pass reports the ambiguity with the same tied candidates the
+  body check names, so the compilation reports it once. Tests:
+  `an_inferred_return_*`, `a_low_priority_overload_*`, `an_implicit_receiver_call_*` and
+  `separately_mapped_*` in `tests/overloaded_inferred_return_e2e.rs`.
 - **An `in` projection is an invariant argument when its capture meets the parameter's bounds.**
   kotlinc captures `A<in X>` as `C` with lower bound `X` and the parameter's declared upper bounds,
   then compares `C` for equality with an invariant `A<Y>` argument: `Y <: X` and every bound
