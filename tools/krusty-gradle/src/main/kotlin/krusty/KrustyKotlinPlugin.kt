@@ -614,7 +614,6 @@ private fun kotlincRequest(task: KotlinJvmCompile, pluginVersion: String, compil
         // global form of that policy: the compiler fails the compilation when any warning is
         // emitted.
         "verbose" to options.verbose,
-        "multiPlatformEnabled" to task.multiPlatformEnabled,
         // `useModuleDetection` (set on every Android compile) only configures kotlinc's
         // multi-module incremental compilation, never a compiler argument; a full krusty compile
         // has nothing to detect.
