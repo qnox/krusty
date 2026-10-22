@@ -4,13 +4,16 @@
 
 use std::io::{self, Read, Write};
 
-use krusty_plugin_ir::{KspClass, KspClassKind, KspRound};
+use krusty_plugin_ir::{
+    KspClass, KspClassKind, KspRound, KspType, KspTypeArgument, KspTypeDeclaration,
+    KspTypeParameter, KspVariance,
+};
 
 use crate::protocol::{malformed, put_list, put_str, read_frame, utf8, write_frame, Payload};
 
 use super::{GeneratedKind, KspGenerated, KspLoad, KspOutcome};
 
-pub(crate) const PROTOCOL: u32 = 1;
+pub(crate) const PROTOCOL: u32 = 2;
 
 const HELLO: u8 = 0;
 const LOAD: u8 = 1;
@@ -110,9 +113,21 @@ fn put_class(payload: &mut Vec<u8>, class: &KspClass) {
         put_str(payload, &annotation.short_name);
         put_str(payload, &annotation.qualified_name);
     });
-    match &class.primary_constructor {
-        Some(parameters) => {
-            payload.push(1);
+    put_option(payload, &class.modifiers, |payload, modifiers| {
+        put_list(payload, modifiers, |payload, modifier| {
+            put_str(payload, modifier.name());
+        });
+    });
+    put_option(payload, &class.type_parameters, |payload, parameters| {
+        put_list(payload, parameters, put_type_parameter);
+    });
+    put_option(payload, &class.super_types, |payload, super_types| {
+        put_list(payload, super_types, put_type);
+    });
+    put_option(
+        payload,
+        &class.primary_constructor,
+        |payload, parameters| {
             put_list(payload, parameters, |payload, parameter| {
                 put_str(payload, &parameter.name);
                 payload.push(
@@ -122,11 +137,65 @@ fn put_class(payload: &mut Vec<u8>, class: &KspClass) {
                         | u8::from(parameter.has_default) << 3,
                 );
             });
+        },
+    );
+    payload.push(u8::from(class.declarations_complete));
+    put_list(payload, &class.classes, put_class);
+}
+
+/// A presence byte, then the value when there is one.
+fn put_option<T>(payload: &mut Vec<u8>, value: &Option<T>, put: impl FnOnce(&mut Vec<u8>, &T)) {
+    match value {
+        Some(value) => {
+            payload.push(1);
+            put(payload, value);
         }
         None => payload.push(0),
     }
-    payload.push(u8::from(class.declarations_complete));
-    put_list(payload, &class.classes, put_class);
+}
+
+fn put_type_parameter(payload: &mut Vec<u8>, parameter: &KspTypeParameter) {
+    put_str(payload, &parameter.name);
+    payload.push(match parameter.variance {
+        KspVariance::Invariant => 0,
+        KspVariance::Out => 1,
+        KspVariance::In => 2,
+    });
+    payload.push(u8::from(parameter.is_reified));
+    put_list(payload, &parameter.bounds, put_type);
+}
+
+/// A type: its declaration (0 and a classifier's qualified name, or 1 and a type parameter's
+/// owner and name), whether it is nullable, then its arguments (0 for a star, else 1 invariant,
+/// 2 `out` or 3 `in`, and the type).
+fn put_type(payload: &mut Vec<u8>, ty: &KspType) {
+    match &ty.declaration {
+        KspTypeDeclaration::Class(name) => {
+            payload.push(0);
+            put_str(payload, name);
+        }
+        KspTypeDeclaration::TypeParameter { owner, name } => {
+            payload.push(1);
+            put_str(payload, owner);
+            put_str(payload, name);
+        }
+    }
+    payload.push(u8::from(ty.nullable));
+    put_list(payload, &ty.arguments, |payload, argument| match argument {
+        KspTypeArgument::Star => payload.push(0),
+        KspTypeArgument::Invariant(ty) => {
+            payload.push(1);
+            put_type(payload, ty);
+        }
+        KspTypeArgument::Out(ty) => {
+            payload.push(2);
+            put_type(payload, ty);
+        }
+        KspTypeArgument::In(ty) => {
+            payload.push(3);
+            put_type(payload, ty);
+        }
+    });
 }
 
 /// The protocol version of the host's greeting.
@@ -180,7 +249,7 @@ fn outcome(payload: &mut Payload) -> io::Result<KspOutcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use krusty_plugin_ir::{KspAnnotation, KspFile, KspParameter};
+    use krusty_plugin_ir::{KspAnnotation, KspFile, KspModifier, KspParameter};
 
     #[test]
     fn a_round_frames_each_class_with_its_nested_classes_after_its_own_facts() {
@@ -197,6 +266,32 @@ mod tests {
                         short_name: "M".into(),
                         qualified_name: "p.M".into(),
                     }],
+                    modifiers: Some(vec![KspModifier::Data]),
+                    type_parameters: Some(vec![KspTypeParameter {
+                        name: "T".into(),
+                        variance: KspVariance::Out,
+                        is_reified: false,
+                        bounds: vec![KspType {
+                            declaration: KspTypeDeclaration::Class("k.Any".into()),
+                            nullable: true,
+                            arguments: Vec::new(),
+                        }],
+                    }]),
+                    super_types: Some(vec![KspType {
+                        declaration: KspTypeDeclaration::Class("k.C".into()),
+                        nullable: false,
+                        arguments: vec![
+                            KspTypeArgument::Star,
+                            KspTypeArgument::In(KspType {
+                                declaration: KspTypeDeclaration::TypeParameter {
+                                    owner: "p.A".into(),
+                                    name: "T".into(),
+                                },
+                                nullable: false,
+                                arguments: Vec::new(),
+                            }),
+                        ],
+                    }]),
                     primary_constructor: Some(vec![KspParameter {
                         name: "x".into(),
                         is_val: true,
@@ -223,6 +318,21 @@ mod tests {
         expected.extend([4, 0, 0, 0, 3]);
         expected.extend([0, 0, 0, 1, 0, 0, 0, 1, b'M', 0, 0, 0, 3]);
         expected.extend(b"p.M");
+        // Written `data`.
+        expected.extend([1, 0, 0, 0, 1, 0, 0, 0, 4]);
+        expected.extend(b"DATA");
+        // `out T : k.Any?`.
+        expected.extend([
+            1, 0, 0, 0, 1, 0, 0, 0, 1, b'T', 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 5,
+        ]);
+        expected.extend(b"k.Any");
+        expected.extend([1, 0, 0, 0, 0]);
+        // `k.C<*, in T>`.
+        expected.extend([1, 0, 0, 0, 1, 0, 0, 0, 0, 3]);
+        expected.extend(b"k.C");
+        expected.extend([0, 0, 0, 0, 2, 0, 3, 1, 0, 0, 0, 3]);
+        expected.extend(b"p.A");
+        expected.extend([0, 0, 0, 1, b'T', 0, 0, 0, 0, 0]);
         // A primary constructor with one `val x = …` parameter, then the complete declarations.
         expected.extend([1, 0, 0, 0, 1, 0, 0, 0, 1, b'x', 0b1001]);
         expected.extend([1, 0, 0, 0, 0]);
