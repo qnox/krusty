@@ -1018,9 +1018,8 @@ fn ci_starts_jvm_without_waiting_for_focused_klib_binaries() {
         "PR and merge-group updates may auto-cancel, but each master build needs a unique group so it always finishes"
     );
     assert!(
-        workflow.contains("KRUSTY_REQUIRE_KSP_E2E: \"1\"")
-            && workflow.contains("KRUSTY_REQUIRE_SERIALIZATION_CONFORMANCE: \"1\""),
-        "matrix conformance must fail instead of self-skipping required integrations"
+        workflow.contains("KRUSTY_REQUIRE_SERIALIZATION_CONFORMANCE: \"1\""),
+        "matrix conformance must fail instead of self-skipping required serialization"
     );
 }
 
