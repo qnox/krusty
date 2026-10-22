@@ -20484,3 +20484,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   source candidate and both frozen callable lookups carry the same authenticated operation;
   an ordinary dependency carries none. Test:
   `klib_libraries::tests::builtin_operations::klib_string_plus_requires_selected_stdlib_authority`.
+  On the JVM, a stdlib taken from a repository (`kotlin-stdlib-2.3.20.jar`, no Kotlin distribution
+  beside it) is the compilation's stdlib: as in kotlinc, the entry whose `kotlin` builtins win
+  classpath selection owns them, so `String?.plus` still concatenates instead of calling the
+  bodiless `kotlin.plus`. A distribution stdlib keeps its pairing with the common KLIB, and an
+  earlier copy of it gains nothing. Tests:
+  `jvm_libraries::provider_normalization_tests::a_repository_named_stdlib_owns_its_builtins`,
+  `nullable_receiver_operator_ext_e2e::nullable_string_plus_concatenates_against_a_repository_named_stdlib`.
