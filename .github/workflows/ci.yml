@@ -975,6 +975,31 @@ jobs:
           target_commitish: ${{ github.sha }}
           files: dist/**
           fail_on_unmatched_files: true
+      # The Gradle Plugin Portal gets every published release under the same version. A Portal
+      # version is immutable, and the release lock above already publishes each version once. It
+      # runs before the commit is recorded, so a failed upload leaves the release to a rerun.
+      - uses: actions/setup-java@v6.1.0
+        if: steps.tip.outputs.publish == 'true'
+        with:
+          distribution: zulu
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v6
+        if: steps.tip.outputs.publish == 'true'
+        with:
+          cache-provider: basic
+      - name: publish the Gradle plugin to the Gradle Plugin Portal
+        if: steps.tip.outputs.publish == 'true'
+        env:
+          GRADLE_PUBLISH_KEY: ${{ secrets.GRADLE_PUBLISH_KEY }}
+          GRADLE_PUBLISH_SECRET: ${{ secrets.GRADLE_PUBLISH_SECRET }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$GRADLE_PUBLISH_KEY" || -z "$GRADLE_PUBLISH_SECRET" ]]; then
+            echo "GRADLE_PUBLISH_KEY/GRADLE_PUBLISH_SECRET are not set; skipping the Plugin Portal"
+            exit 0
+          fi
+          tools/krusty-gradle/gradlew --no-daemon -p tools/krusty-gradle \
+            -PkrustyPluginVersion="${{ steps.v.outputs.ver }}" publishPlugins
       - name: record the published commit
         if: steps.tip.outputs.publish == 'true'
         run: scripts/release-publisher.sh record
@@ -1053,30 +1078,6 @@ jobs:
           label: Kotlin
           message: ${{ needs.build-tool-bins.outputs.max }}
           color: blue
-      # The Gradle Plugin Portal gets every published release under the same version. A Portal
-      # version is immutable, and the release lock above already publishes each version once.
-      - uses: actions/setup-java@v6.1.0
-        if: steps.tip.outputs.publish == 'true'
-        with:
-          distribution: zulu
-          java-version: '17'
-      - uses: gradle/actions/setup-gradle@v6
-        if: steps.tip.outputs.publish == 'true'
-        with:
-          cache-provider: basic
-      - name: publish the Gradle plugin to the Gradle Plugin Portal
-        if: steps.tip.outputs.publish == 'true'
-        env:
-          GRADLE_PUBLISH_KEY: ${{ secrets.GRADLE_PUBLISH_KEY }}
-          GRADLE_PUBLISH_SECRET: ${{ secrets.GRADLE_PUBLISH_SECRET }}
-        run: |
-          set -euo pipefail
-          if [[ -z "$GRADLE_PUBLISH_KEY" || -z "$GRADLE_PUBLISH_SECRET" ]]; then
-            echo "GRADLE_PUBLISH_KEY/GRADLE_PUBLISH_SECRET are not set; skipping the Plugin Portal"
-            exit 0
-          fi
-          tools/krusty-gradle/gradlew --no-daemon -p tools/krusty-gradle \
-            -PkrustyPluginVersion="${{ steps.v.outputs.ver }}" publishPlugins
       - name: drop the release lock
         if: always() && steps.lock.outputs.lock != ''
         run: scripts/release-publisher.sh release "${{ steps.lock.outputs.lock }}"
