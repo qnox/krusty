@@ -1016,6 +1016,20 @@ fn may_write_blessed_expectations(bless: bool, compiler_panics: usize) -> bool {
     bless && compiler_panics == 0
 }
 
+fn record_program_failure(
+    file: &Path,
+    reason: String,
+    expected: bool,
+    known_failures: &mut Vec<(PathBuf, String)>,
+    failed: &mut Vec<(PathBuf, String)>,
+) {
+    if expected {
+        known_failures.push((file.to_path_buf(), reason));
+    } else {
+        failed.push((file.to_path_buf(), reason));
+    }
+}
+
 /// Run the whole corpus through `lane` and hold it to the lane's committed ratchet.
 pub fn run(lane: &dyn Lane) {
     let env = |knob: &str| format!("KRUSTY_{}_{knob}", lane.env_infix());
@@ -1152,11 +1166,13 @@ pub fn run(lane: &dyn Lane) {
                 let expected = baseline
                     .as_ref()
                     .is_some_and(|baseline| baseline.failures.contains(&relative));
-                if expected || bless {
-                    known_failures.push((file.clone(), reason));
-                } else if !provisioned {
-                    failed.push((file.clone(), reason));
-                }
+                record_program_failure(
+                    file,
+                    reason,
+                    expected || bless,
+                    &mut known_failures,
+                    &mut failed,
+                );
             }
         }
     }
@@ -1317,6 +1333,23 @@ fn blessing_is_a_deliberate_local_full_corpus_operation() {
     assert!(validate_bless(true, false, true, false).is_err());
     assert!(validate_bless(true, true, false, false).is_err());
     assert!(validate_bless(true, true, true, true).is_err());
+}
+
+#[test]
+fn an_unexpected_program_failure_preserves_its_case_and_complete_reason() {
+    let file = Path::new("regressions/linkFailure.kt");
+    let reason = "link: symbol `declared_function` is defined twice\nfirst.o and second.o";
+    let mut known = Vec::new();
+    let mut failed = Vec::new();
+    record_program_failure(file, reason.to_string(), false, &mut known, &mut failed);
+    assert_eq!(known, Vec::new());
+    assert_eq!(failed, [(file.to_path_buf(), reason.to_string())]);
+
+    known.clear();
+    failed.clear();
+    record_program_failure(file, reason.to_string(), true, &mut known, &mut failed);
+    assert_eq!(known, [(file.to_path_buf(), reason.to_string())]);
+    assert_eq!(failed, Vec::new());
 }
 
 #[test]

@@ -221,6 +221,11 @@ compiler panics and target skips are fatal before any expectation write. The ord
 per-case applicability policy is unchanged. Full sweeps require the provisioned upstream corpus;
 the separate vendored smoke test does not replace missing setup.
 
+Unexpected program failures retain their exact case path and complete link/exit/verdict reason in
+the lane's failure report, alongside the inventory mismatch. Provisioning the full corpus must not
+discard those diagnostics. Expected program failures keep the same details in the known-failure
+report; neither reporting path changes the committed expectations.
+
 The owned oracle prepares raw source for JVM independently of the tested backend, including the
 portable value-class annotation placeholder. The JVM runner's already-prepared source uses a
 separate entry point, so support declarations are never injected twice. The compiler panic hook
