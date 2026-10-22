@@ -768,6 +768,13 @@ accessor/property membership and full function header before using that evidence
 publishes private implementation functions nor broadens ordinary instance-body emission. No wire
 format or Native runtime layout changes. Tests: `klib_lowering::tests::primitive_calls`.
 
+Constructors retain the same class contract through provider lookup and both frozen views. The
+join requires the exact declaring module and complete constructor signature, including its mask.
+Class-owned formals and bounds stay in that contract; they are not constructor-owned function
+parameters. The invocation result remains `Unit`, without a function generic signature, independently
+of source inference's constructed type. This header preservation does not enable serialized generic
+constructor lowering. Test: `klib_libraries::tests::constructor_contracts`.
+
 ## Declaration-owned KLIB vararg coordinates
 
 Metadata value-parameter vararg indices include context parameters but exclude an extension

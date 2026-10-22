@@ -18071,6 +18071,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   capability; optional provider enrichment cannot invent a primitive when no provider is present.
   Tests: `klib_lowering::tests::primitive_calls`, `box_regressions/floatingSign.kt`.
 
+- **KLIB constructors retain class generics separately from invocation types.** The exact declaring
+  module and full constructor signature select the class contract, including its formal identities,
+  full bounds, variance and own/captured count. Provider lookup and both frozen declaration views
+  retain that contract. Class formals are not function-owned constructor parameters: the callable
+  invocation result stays `Unit`, without a function generic signature, even when source inference
+  constructs a parameterized class type. Retaining this header alone does not admit an unsupported
+  serialized constructor body or establish a checked class substitution.
+  Test: `klib_libraries::tests::constructor_contracts`.
+
 - **A KLIB vararg retains one packed array parameter.** The declaration's vararg position is
   frozen independently of call-site specialization, in the same context/extension/value ordering
   as its declared parameter types. Raw and prepared headers authenticate a unique regular value

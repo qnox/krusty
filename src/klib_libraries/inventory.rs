@@ -604,10 +604,16 @@ impl PackageInventory {
                 return None;
             }
             let declares = match &identity.declaration {
-                crate::libraries::KlibDeclarationSignature::Public(signature) => class
-                    .functions
-                    .iter()
-                    .any(|function| &function.signature == signature),
+                crate::libraries::KlibDeclarationSignature::Public(signature) => {
+                    class
+                        .functions
+                        .iter()
+                        .any(|function| &function.signature == signature)
+                        || class
+                            .constructors
+                            .iter()
+                            .any(|constructor| &constructor.signature == signature)
+                }
                 crate::libraries::KlibDeclarationSignature::Accessor(accessor) => {
                     class.properties.iter().any(|property| {
                         &property.getter == accessor || property.setter.as_ref() == Some(accessor)

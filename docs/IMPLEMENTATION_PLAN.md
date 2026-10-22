@@ -5632,6 +5632,10 @@ non-inline callers, still reads the field directly. Test:
   walk stops; actual lowering consumes that same proof. Private array-length implementations are
   not made public or given helper-name exceptions. Ordinary instance bodies remain unsupported;
   target array representation and all existing-pass preservation gates still need validation.
+- Constructor provider lookup now preserves the exact declaring-class contract through both frozen
+  views, including class formals, full bounds and variance. Invocation types remain `Unit` and do not
+  gain function-owned generic parameters. General raw constructor authentication, checked class
+  substitution and serialized constructor emission remain required before this enables execution.
 - Declaration-owned vararg positions survive provider and frozen handoffs separately from
   call-site specialization. Raw/prepared headers authenticate the exact packed-array element and
   regular-value slot, including context/extension coordinates; dispatch markers are rejected.
