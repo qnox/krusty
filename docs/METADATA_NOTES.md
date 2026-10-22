@@ -10,7 +10,9 @@ The generic signature reader decodes each `ValueParameter.type`/`type_id` indepe
 vararg element field. The former carries the packed array and its projection; the latter supplies
 the vararg marker/element call facts. Reconstructing `Array<T>` from that element would discard
 `Array<out T>`, and an absent declared type must not be repaired from the element. Inline and
-type-table forms share the same decoding path; no metadata encoding changes.
+type-table forms share the same decoding path; no metadata encoding changes. Consumers retain the
+packed array projection but use the readable element value type for listed-argument conversions,
+adapted references and evaluation-order spills; whole-array spreads keep the array type.
 
 ## Reference (`fun f(a: Int): Int = a` in `M.kt` → class `MKt`)
 

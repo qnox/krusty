@@ -26,7 +26,7 @@ impl BodyFirChecker<'_> {
         );
         let element_type = array_type
             .get()
-            .array_elem()
+            .array_read_elem()
             .and_then(|element| ResolvedTy::new(element).ok())
             .ok_or_else(|| {
                 self.failure(
