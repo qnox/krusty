@@ -2217,11 +2217,11 @@ pub struct IrFile {
     /// dependency metadata's formal name. JVM anonymous-object regeneration specializes generic
     /// class signatures with this full map; runtime reified operations use the narrower map above.
     pub(crate) inline_call_type_arguments: crate::fx_hash::HashMap<u32, Vec<(String, Ty)>>,
-    /// Exact methods the serialization child cache generated: its factories and accessor.
+    /// Exact methods the serialization plugin generated for a class's caches: the child cache's
+    /// factories and accessor, and an abstract class's cached-serializer initializer and accessor.
     ///
     /// kotlinc's member order for a `@Serializable` class puts the deserialization `<init>`
-    /// directly after `write$Self`, and the child-serializer cache's factories and `…$cp` accessor
-    /// after it. They carry no source order or source-callable generic signature; this identity set
+    /// directly after `write$Self`, and those cache members after it. They carry no source order or source-callable generic signature; this identity set
     /// lets the JVM boundary realize both facts without treating every synthetic method alike.
     pub serialization_cache_methods: crate::fx_hash::HashSet<u32>,
 

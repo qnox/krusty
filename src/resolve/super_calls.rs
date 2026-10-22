@@ -10,6 +10,9 @@ pub struct ResolvedSuperCall {
     pub owner: TypeName,
     pub name: String,
     pub params: Vec<Ty>,
+    /// The `vararg` parameter's index in [`Self::params`]: each argument mapped to it is one
+    /// element (`super.clear(true, "a", "b")`).
+    pub vararg_index: Option<usize>,
     /// The selected declaration's own parameter types, before the call site's generic
     /// substitution. A `super` call dispatches to that declaration, so its physical signature, not
     /// the substituted one, names the method: `super.foo(r)` through `B : A<String>` calls
@@ -57,6 +60,7 @@ impl ResolvedSuperCall {
         let source_member = member.source_member;
         let external_property = member.external_property_identity;
         let suspend = member.suspend();
+        let vararg_index = member.call_sig.vararg_index;
         let physical_owner = member.owner?;
         let (owner, interface) = match realization {
             // `kotlin/Any` has no class file. Its provider-normalized members already carry the
@@ -89,6 +93,7 @@ impl ResolvedSuperCall {
             owner,
             name: member.physical_name.unwrap_or(member.name),
             params: member.params,
+            vararg_index,
             physical_params: member.physical_params,
             ret: member.ret,
             physical_ret: member.physical_ret,
@@ -131,6 +136,7 @@ impl ResolvedSuperCall {
             owner: physical_owner,
             name: physical_name,
             params: callable.params,
+            vararg_index: None,
             physical_params: callable.physical_params,
             ret: callable.ret,
             physical_ret: callable.physical_ret,

@@ -18,12 +18,15 @@
 //!     plugin's generated code;
 //!   - kotlinc's default scripting plugin (which the Kotlin Gradle plugin passes on every JVM
 //!     compile) → nothing: it acts only on script sources, which krusty does not compile;
+//!   - kapt's plugin without options (the Kotlin Gradle plugin passes its jar to every compile of a
+//!     kapt project) → nothing: it acts only once its options configure stubs or processing; with
+//!     options → ERROR, as below;
 //!   - an `-Xplugin` jar krusty neither reimplements nor can host (Compose, any third-party FIR/IR
 //!     plugin) → ERROR. Silently ignoring it would emit wrong bytecode, so a drop-in must fail loudly.
 
 use crate::plugins::allopen::AllOpenPlugin;
 use crate::plugins::cli::{
-    PluginConfig, PluginOption, ALLOPEN_PLUGIN_ID, KSP_PLUGIN_ID, NOARG_PLUGIN_ID,
+    PluginConfig, PluginOption, ALLOPEN_PLUGIN_ID, KAPT_PLUGIN_ID, KSP_PLUGIN_ID, NOARG_PLUGIN_ID,
     SAM_WITH_RECEIVER_PLUGIN_ID, SCRIPTING_PLUGIN_ID, SERIALIZATION_PLUGIN_ID,
 };
 use crate::plugins::noarg::NoArgPlugin;
@@ -56,6 +59,11 @@ pub enum ExtensionKind {
     /// The plugin acts only on Kotlin script sources, which krusty does not compile, so requesting
     /// it changes nothing for the `.kt` sources krusty does: kotlinc's default scripting plugin.
     ScriptsOnly,
+    /// The plugin acts only once its own `-P` options configure it, and krusty implements none of
+    /// that action. kapt's registrar adds stub generation and annotation processing only when its
+    /// options are set; the Kotlin Gradle plugin sets them on kapt's own tasks and never on the
+    /// compile after them, which only carries kapt's jar.
+    ConfiguredOnly,
 }
 
 /// One known extension: the kotlinc plugin id it answers to, the registrar class its jar declares,
@@ -407,6 +415,13 @@ impl PluginRegistry {
                 unimplemented_options: &[],
             });
         }
+        r.register(RegisteredExtension {
+            plugin_id: KAPT_PLUGIN_ID,
+            registrar: "org.jetbrains.kotlin.kapt.KaptCompilerPluginRegistrar",
+            kind: ExtensionKind::ConfiguredOnly,
+            option_keys: None,
+            unimplemented_options: &[],
+        });
         r
     }
 
@@ -438,7 +453,9 @@ impl PluginRegistry {
                         release: None,
                         options: Vec::new(),
                     }),
-                    ExtensionKind::CodegenHost | ExtensionKind::ScriptsOnly => None,
+                    ExtensionKind::CodegenHost
+                    | ExtensionKind::ScriptsOnly
+                    | ExtensionKind::ConfiguredOnly => None,
                 })
                 .collect(),
             ..NativePlugins::none()
@@ -527,6 +544,10 @@ impl PluginRegistry {
                     });
                 }
                 ExtensionKind::ScriptsOnly => {}
+                ExtensionKind::ConfiguredOnly if options.is_empty() => {}
+                ExtensionKind::ConfiguredOnly => diagnostics.push(PluginDiagnostic::Unsupported {
+                    plugin: jar.unwrap_or_else(|| format!("plugin id '{}'", ext.plugin_id)),
+                }),
             }
         }
 
@@ -1021,6 +1042,44 @@ mod tests {
         assert!(resolved.native.is_empty());
         assert!(!resolved.ksp_active);
         assert_eq!(resolved.diagnostics, Vec::new());
+    }
+
+    /// The Kotlin Gradle plugin passes kapt's jar to every compile of a kapt project, with options
+    /// only on kapt's own stub task. Without options kapt's registrar adds nothing kotlinc runs, so
+    /// the jar alone runs nothing and reports nothing; with them it would generate stubs or process
+    /// annotations, which krusty does not, so that request is unsupported.
+    #[test]
+    fn kapts_plugin_runs_only_once_its_options_configure_it() {
+        let jar = plugin_jar(
+            "kotlin-annotation-processing-gradle.jar",
+            &[registrar_of(KAPT_PLUGIN_ID)],
+        );
+        let c = cfg(&[&format!("-Xplugin={jar}")]);
+        let resolved = PluginRegistry::with_builtins().resolve(&activation(&c, &[]));
+        assert!(resolved.native.is_empty());
+        assert!(!resolved.ksp_active);
+        assert_eq!(resolved.diagnostics, Vec::new());
+
+        let c = cfg(&[
+            &format!("-Xplugin={jar}"),
+            "-P",
+            "plugin:org.jetbrains.kotlin.kapt3:aptMode=stubs",
+        ]);
+        let resolved = PluginRegistry::with_builtins().resolve(&activation(&c, &[]));
+        assert!(resolved.native.is_empty());
+        assert_eq!(
+            resolved.diagnostics,
+            vec![PluginDiagnostic::Unsupported { plugin: jar }]
+        );
+
+        let c = cfg(&["-P", "plugin:org.jetbrains.kotlin.kapt3:aptMode=stubs"]);
+        let resolved = PluginRegistry::with_builtins().resolve(&activation(&c, &[]));
+        assert_eq!(
+            resolved.diagnostics,
+            vec![PluginDiagnostic::Unsupported {
+                plugin: "plugin id 'org.jetbrains.kotlin.kapt3'".to_string()
+            }]
+        );
     }
 
     #[test]

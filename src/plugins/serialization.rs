@@ -68,6 +68,7 @@ pub use plugin_release::PluginRelease;
 pub use runtime_abi::SerializationAbi;
 use serial_elements::{SerialElements, SerializedProperties, WireElement};
 use serialize_body::SerializeBody;
+use serialize_body::SerializedClassElements;
 use std::sync::Mutex;
 pub(super) use type_argument_serializers::named_serializers;
 use type_parameter_serializers::TypeParameterSerializers;
@@ -188,6 +189,53 @@ impl SerializationPlugin {
     fn serializer_type_parameters_are_bounded(&self) -> bool {
         self.compiler_plugin
             .is_none_or(|release| release >= PluginRelease::V2_4_21)
+    }
+
+    /// Fill `class_id`'s `write$Self`, and `serialize`, its `$serializer`'s delegation to it, when
+    /// the class has a `$serializer`.
+    fn generate_write_self(
+        &self,
+        ir: &mut IrFile,
+        ctx: &PluginContext,
+        class_id: ClassId,
+        class: &SerializedClassElements<'_>,
+        serialize: Option<serialize_body::GeneratedSerialize>,
+    ) {
+        let SerializedClassElements {
+            properties,
+            elements,
+            type_parameter_serializers,
+        } = class;
+        SerializeBody {
+            serialize,
+            serialized_class: class_id,
+            fields: &properties.fields,
+            elements: elements.fields(),
+            inherited: elements
+                .parent()
+                .map(|parent| serialize_body::InheritedElements {
+                    count: elements.inherited_count(),
+                    write_self: ir
+                        .generated_function(
+                            ir.classes[parent as usize].fq_name_id(),
+                            crate::ir::IrGeneratedFunctionRole::SerializationWriteSelf,
+                        )
+                        .expect("a serializable superclass declares its write$Self"),
+                    owner: ir.classes[parent as usize].fq_name_id(),
+                }),
+            field_defaults: &properties.constant_defaults,
+            nested_serializers: &properties.nested_serializers,
+            type_parameter_serializers: *type_parameter_serializers,
+            write_self: ir
+                .generated_function(
+                    ir.classes[class_id as usize].fq_name_id(),
+                    crate::ir::IrGeneratedFunctionRole::SerializationWriteSelf,
+                )
+                .expect("a plain serializable class declares its write$Self"),
+            write_self_name: self.write_self_name(&ir.classes[class_id as usize]),
+            cache: self.child_serializer_cache(ir.classes[class_id as usize].fq_name_id()),
+        }
+        .generate(ir, ctx);
     }
 
     /// The per-class write-helper name for the target ABI. On core >= 1.6 a final class's helper is
@@ -1047,10 +1095,6 @@ impl SerializationPlugin {
     /// `public static final Lazy access$get$cachedSerializer$delegate$cp()` accessor. Matches kotlinc's
     /// member set (Companion class + `Companion` field + the accessor; no static `serializer()`).
     fn add_enum_serializer_companion(ir: &mut IrFile, class_id: u32, class_name: TypeName) {
-        // The ANNOTATED start line (the `@Serializable` line), not the `enum class` keyword's —
-        // kotlinc maps every generated member, and the delegate's `<clinit>` store, to where the
-        // declaration begins, annotations included.
-        let owner_line = ir.classes[class_id as usize].decl_start_line;
         // `$cachedSerializer$delegate = LazyKt.lazy(PUBLICATION) { EnumsKt
         //     .createSimpleEnumSerializer(<name>, E.values()) }`.
         let name = ir.add_expr(IrExpr::Const(IrConst::String(
@@ -1058,121 +1102,7 @@ impl SerializationPlugin {
         )));
         let enums = enum_serializer::enum_values_array(ir, class_name);
         let enum_ser = enum_serializer::factory_call(ir, class_id, name, enums);
-        cached_serializer::add_cached_serializer_delegate(ir, class_id, class_name, enum_ser);
-        // `public static final Lazy access$get$cachedSerializer$delegate$cp()` — reads the private field.
-        let read = ir.external_static_field_name(
-            class_name,
-            "$cachedSerializer$delegate",
-            "Lkotlin/Lazy;",
-        );
-        let acc_ret = ir.add_expr(IrExpr::Return(Some(read)));
-        let acc_body = ir.add_expr(IrExpr::Block {
-            stmts: vec![acc_ret],
-            value: None,
-        });
-        let acc = ir.add_fun(IrFunction {
-            name: "access$get$cachedSerializer$delegate$cp".to_string(),
-            params: vec![],
-            // RAW `Lazy` on purpose: the FIELD carries the generic `Signature`, the synthetic
-            // accessor does not — kotlinc gives this bridge neither a `Signature` nor nullability.
-            ret: class_ty("kotlin/Lazy"),
-            body: Some(acc_body),
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-        ir.synthetic_methods.insert(acc);
-        ir.classes[class_id as usize].methods.push(acc);
-        if owner_line != 0 {
-            ir.fn_decl_lines.insert(acc, owner_line);
-            ir.fn_sig_lines.insert(acc, owner_line);
-        }
-        // `Companion.serializer()` returns `(KSerializer) access$…$cp().getValue()` (the cached instance).
-        let acc_call = ir.add_expr(IrExpr::Call {
-            callee: Box::new(Callee::Static {
-                owner: class_name,
-                name: "access$get$cachedSerializer$delegate$cp".to_string(),
-                descriptor: "()Lkotlin/Lazy;".to_string(),
-                inline: InlineKind::None,
-            }),
-            dispatch_receiver: None,
-            args: vec![],
-        });
-        let get_value = ir.add_expr(IrExpr::Call {
-            callee: Box::new(Callee::realized_virtual(
-                type_name("kotlin/Lazy"),
-                "getValue".to_string(),
-                String::new(),
-                Some((vec![], class_ty("kotlin/Any"))),
-                true,
-            )),
-            dispatch_receiver: Some(acc_call),
-            args: vec![],
-        });
-        let cast = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::Cast,
-            arg: get_value,
-            type_operand: Ty::obj("kotlinx/serialization/KSerializer"),
-        });
-        let sret = ir.add_expr(IrExpr::Return(Some(cast)));
-        let cached_body = ir.add_expr(IrExpr::Block {
-            stmts: vec![sret],
-            value: None,
-        });
-        // kotlinc does NOT inline the cached lookup into `serializer()`: it puts that body in a
-        // private `get$cachedSerializer()` on the companion and has `serializer()` delegate to it.
-        // The helper's descriptor is the RAW `KSerializer` (no generic Signature); only the public
-        // `serializer()` carries the type argument.
-        let companion = serializer_accessor_owner(ir, class_id);
-        let cached = ir.add_fun(IrFunction {
-            name: "get$cachedSerializer".to_string(),
-            params: vec![],
-            ret: Ty::obj("kotlinx/serialization/KSerializer"),
-            body: Some(cached_body),
-            is_static: false,
-            dispatch_receiver: Some(companion),
-            param_checks: Vec::new(),
-        });
-        // `private` makes the emitter mark it ACC_PRIVATE and reach it with `invokespecial` — which
-        // is what the delegating call has to become. That dispatch decision reads a RESOLVED
-        // `IrExpr::MethodCall` (class + member index), so the delegation below cannot be a
-        // by-name `Callee::Virtual`: that form emits `invokevirtual` and never consults the set.
-        ir.set_method_visibility(cached, crate::types::Visibility::Private);
-        // kotlinc marks the helper ACC_SYNTHETIC, which also keeps it OUT of `@Metadata`: it is a
-        // compiler-invented member, not a declaration the reflection layer should see.
-        ir.synthetic_methods.insert(cached);
-        // The frontend declared `serializer()` on the companion ahead of this helper — kotlinc's
-        // member order is `<init>`, `serializer()`, `get$cachedSerializer()`, then the synthetic
-        // marker ctor the emitter appends. Its body is completed once the helper's member index
-        // is known.
-        let comp_id = ir
-            .class_id_by_name(companion)
-            .expect("a serializable enum's companion is a class of this file")
-            as usize;
-        let cached_index = ir.classes[comp_id].methods.len() as u32;
-        ir.classes[comp_id].methods.push(cached);
-        // The helper exists only here, in the backend, so the frontend's generated-declaration line
-        // transfer never sees it — and the emitter attaches neither debug table without a line.
-        // The companion itself already carries the annotated owner's line by this point, which is
-        // the line kotlinc maps every one of its generated members to.
-        let companion_line = ir.classes[comp_id].decl_line;
-        if companion_line != 0 {
-            ir.fn_decl_lines.insert(cached, companion_line);
-            ir.fn_sig_lines.insert(cached, companion_line);
-        }
-        let this = ir.add_expr(IrExpr::GetValue(0));
-        let delegate = ir.add_expr(IrExpr::MethodCall {
-            class: comp_id as u32,
-            index: cached_index,
-            receiver: this,
-            args: vec![],
-        });
-        let dret = ir.add_expr(IrExpr::Return(Some(delegate)));
-        let sbody = ir.add_expr(IrExpr::Block {
-            stmts: vec![dret],
-            value: None,
-        });
-        complete_frontend_serializer_accessor(ir, companion, sbody);
+        cached_serializer::add_companion_cached_serializer(ir, class_id, class_name, enum_ser);
     }
 
     /// `getOrCreateKotlinClass(<internal>.class)` — a `KClass` literal for an internal class name.
@@ -1485,6 +1415,10 @@ impl IrPlugin for SerializationPlugin {
             if class.is_sealed {
                 continue;
             }
+            if cached_serializer::is_polymorphic_base(class) {
+                serializer_class::declare_polymorphic_base(ir, ctx, class_id);
+                continue;
+            }
             serializer_class::declare(
                 ir,
                 ctx,
@@ -1504,6 +1438,7 @@ impl IrPlugin for SerializationPlugin {
             .expect("child serializer cache plans")
             .clear();
         let mut pending_caches: Vec<PendingChildSerializerCache> = Vec::new();
+        let mut polymorphic_bases = Vec::new();
         for class_id in ctx.classes_with(type_name(SERIALIZABLE_FQ)) {
             let class_name = ir.classes[class_id as usize].fq_name_id();
             // `@Serializable(with = X::class)`: no generated `$serializer` — `serializer()` returns an
@@ -1531,6 +1466,15 @@ impl IrPlugin for SerializationPlugin {
                 Self::add_sealed_serializer_accessor(ir, ctx, class_id, class_name);
                 continue;
             }
+            // An abstract class: `serializer()` returns a cached `PolymorphicSerializer`, and its
+            // subclasses still call its `write$Self` and deserialization constructor.
+            if cached_serializer::is_polymorphic_base(&ir.classes[class_id as usize]) {
+                pending_caches.push(serializer_class::complete_polymorphic_base(
+                    self, ir, ctx, class_id,
+                ));
+                polymorphic_bases.push((class_id, class_name));
+                continue;
+            }
             pending_caches.extend(serializer_class::complete(self, ir, ctx, class_id));
         }
         for (class_id, serialized, foo_fields) in pending_caches {
@@ -1542,6 +1486,10 @@ impl IrPlugin for SerializationPlugin {
                     .expect("child serializer cache plans")
                     .insert(serialized, plan);
             }
+        }
+        // kotlinc generates an abstract class's cached serializer after its child-serializer cache.
+        for (class_id, class_name) in polymorphic_bases {
+            cached_serializer::add_polymorphic_serializer(ir, ctx, class_id, class_name);
         }
     }
 
@@ -1564,6 +1512,15 @@ impl IrPlugin for SerializationPlugin {
             }
             let properties = SerializedProperties::of(ir, class_id);
             let elements = SerialElements::of(ctx, ir, class_id);
+            if cached_serializer::is_polymorphic_base(&ir.classes[class_id as usize]) {
+                let class = SerializedClassElements {
+                    properties: &properties,
+                    elements: &elements,
+                    type_parameter_serializers: TypeParameterSerializers::NONE,
+                };
+                self.generate_write_self(ir, ctx, class_id, &class, None);
+                continue;
+            }
             let wire = elements.wire(ir, class_id);
             let fields = &properties.fields;
             crate::trace_compiler!(
@@ -1644,40 +1601,21 @@ impl IrPlugin for SerializationPlugin {
                             body.deserialize(ir, ctx);
                         }
                     }
-                    crate::ir::IrGeneratedFunctionRole::SerializationSerialize => {
-                        SerializeBody {
-                            function: fid,
-                            serializer_class: ser_idx,
-                            serialized_class: foo_id,
-                            fields,
-                            elements: elements.fields(),
-                            inherited: elements.parent().map(|parent| {
-                                serialize_body::InheritedElements {
-                                    count: elements.inherited_count(),
-                                    write_self: ir
-                                        .generated_function(
-                                            ir.classes[parent as usize].fq_name_id(),
-                                            crate::ir::IrGeneratedFunctionRole::SerializationWriteSelf,
-                                        )
-                                        .expect("a serializable superclass declares its write$Self"),
-                                    owner: ir.classes[parent as usize].fq_name_id(),
-                                }
+                    crate::ir::IrGeneratedFunctionRole::SerializationSerialize => self
+                        .generate_write_self(
+                            ir,
+                            ctx,
+                            foo_id,
+                            &SerializedClassElements {
+                                properties: &properties,
+                                elements: &elements,
+                                type_parameter_serializers,
+                            },
+                            Some(serialize_body::GeneratedSerialize {
+                                function: fid,
+                                serializer_class: ser_idx,
                             }),
-                            field_defaults: &properties.constant_defaults,
-                            nested_serializers: &properties.nested_serializers,
-                            type_parameter_serializers,
-                            write_self: ir
-                                .generated_function(
-                                    ir.classes[foo_id as usize].fq_name_id(),
-                                    crate::ir::IrGeneratedFunctionRole::SerializationWriteSelf,
-                                )
-                                .expect("a plain serializable class declares its write$Self"),
-                            write_self_name: self.write_self_name(&ir.classes[foo_id as usize]),
-                            cache: self
-                                .child_serializer_cache(ir.classes[foo_id as usize].fq_name_id()),
-                        }
-                        .generate(ir, ctx);
-                    }
+                        ),
                     crate::ir::IrGeneratedFunctionRole::SerializationDeserialize => {
                         DeserializeBody {
                             function: fid,

@@ -820,9 +820,14 @@ jobs:
         run: |
           chmod +x krusty krusty-build-tests
           tests="kotlin_compiler_slice_compiles_through_krusty kotlin_dsl_build_src_compiles_through_krusty"
-          tests="$tests serialization_plugin_compiles_through_krusty"
+          tests="$tests serialization_plugin_compiles_through_krusty kapt_project_compiles_through_krusty"
           if [ "${{ matrix.ksp }}" = true ]; then
             tests="$tests ksp2_generated_sources_compile_through_krusty"
+          fi
+          # The fixture's Android Gradle plugin (9.4) needs Gradle 9.6 or newer; the runner image
+          # provides ANDROID_HOME.
+          if printf '9.6.0\n%s\n' "${{ matrix.gradle }}" | sort -V -C; then
+            tests="$tests android_variants_compile_through_krusty"
           fi
           KRUSTY_GRADLE_BIN=$(command -v gradle) \
             ./krusty-build-tests --ignored $tests

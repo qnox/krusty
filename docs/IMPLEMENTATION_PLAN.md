@@ -5,6 +5,16 @@ front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
 
+## String operation authority publication
+
+The shared StringPlus operation requires the existing selected-stdlib authority for both member
+and nullable-extension declarations. Member normalization happens before callable identity
+publication, replacing the late source-only realization; the body view projects the existing
+normalized member operation rather than losing it. An actual-archive regression checks both
+forms through source, opaque identity and module-qualified dependency views, and repeats the same
+archive as an ordinary dependency. This provider correction is independent of KLIB inline-body
+expansion and adds no backend capabilities, outcome allowances or metadata fields.
+
 ## Phase 0 — Foundations  ✅
 - ✅ Cargo project (lib + bin), local `cargo test`/`cargo run`. Toolchain: rustc 1.96 + gcc linker.
 - ✅ `token.rs`: token kinds, `Span { lo:u32, hi:u32 }`, keyword table (types are idents, not kw).

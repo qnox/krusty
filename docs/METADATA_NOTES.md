@@ -858,3 +858,15 @@ authority before constructor/accessor identities are published. The exact base `
 realizations; an ordinary dependency with identical metadata may not. This does not rewrite Kotlin
 metadata or change source overload selection. Wasm owns the GC fields and exception tag; common IR
 keeps the selected constructor/getter identities and typed `Try` / `Throw` nodes.
+
+## Authenticated String concatenation declarations
+
+The member `String.plus(Any?): String` and nullable extension `String?.plus(Any?): String`
+require the compilation-selected stdlib's existing archive authority before receiving the shared
+StringPlus operation. Loading identical archive bytes as an ordinary dependency does not grant it.
+Member function normalization now precedes callable identity publication. The target-free body
+view projects the normalized member operation just as it projects a package-function operation,
+so source candidates, opaque callable lookup and module-qualified serialized-declaration lookup
+retain the same operation.
+No Kotlin metadata encoding or declaration identity changes. The actual Native stdlib regression
+checks both declaration forms through all three views, with and without platform authority.

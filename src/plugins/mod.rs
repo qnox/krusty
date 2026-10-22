@@ -212,6 +212,7 @@ pub struct FrontendClassContext<'a> {
     pub companion: Option<TypeName>,
     pub kind: crate::libraries::TypeKind,
     pub is_sealed: bool,
+    pub is_abstract: bool,
     pub type_parameters: &'a crate::types::TypeParameters<Vec<Ty>>,
     pub annotations: &'a [TypeName],
     /// Resolved class-literal arguments grouped by the ordinal of the annotation occurrence.

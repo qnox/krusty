@@ -8286,6 +8286,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **A fully-qualified CONSTRUCTOR call via a package path `a.b.Ctx(x = 1, y = 2)`.** The prefix commits
   as a package and `Ctx` is one classifier edge. The checker records the selected constructor and
   result identity; lowering consumes those facts. Test: `tests/fq_ctor_call_e2e.rs`.
+- **A backticked qualifier segment containing dots names one package edge per part.** kotlinc
+  joins a qualifier's segments into one fully qualified name, so `` `a.b`.Holder.f() ``,
+  `` a.`b.c`.Leaf `` and `` `a.b`.top() `` reach the packages `a.b` and `a.b.c`. Protobuf's
+  generated Kotlin DSL writes its own package this way (`` `com.example`.FooKt.Dsl._create(…) ``).
+  A declaration name cannot contain a dot, so such a segment only ever walks package edges
+  (`qualifiers::subpackage`); when a part names no package, the whole written segment is the
+  unresolved reference (`` a.`b.x`.Holder `` reports `` unresolved reference 'b.x'. `` when `a.b`
+  exists but `a.b.x` does not). A type spelling already splits on its
+  dots. Test: `tests/backticked_dotted_package_qualifier_e2e.rs`.
 - **A construction of a module class records the selected constructor declaration.** Common IR
   maps each construction to the checked constructor declaration the checker selected, and copies
   one module record per such declaration, and per constructor the file itself declares: the
@@ -8537,6 +8546,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   type by assignment conversion (JLS §5.2): widening, plus narrowing an `int` constant to
   `byte`/`short`/`char` when it fits. A compound initializer (`1 << 3`, `A + 1`, a cast) is not
   evaluated yet and stays a field read. Test: `java_source_constant_e2e`.
+
+- **A comma inside a Java field initializer's type arguments does not end the declarator.** The
+  header stub skips each initializer up to the comma or semicolon that ends it (`int a, b = 1;`).
+  Explicit method type arguments (`Collections.<K, V>emptyMap()`, which protobuf's generated
+  map-entry holders use) and the type after `new` or `instanceof` are type positions, so their
+  `<...>` is skipped whole. A `<` anywhere else is a comparison, and a comma after it still starts
+  the next declarator. Test: `java_source_field_initializer_e2e`.
 
 - **Member overloads with different erased signatures (`listIterator()` / `listIterator(Int)`).**
   `ClassSig.methods` (and the lowerer's `ClassInfo.methods`) hold per-name overload LISTS in
@@ -10133,6 +10149,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   receiver of an unboxed value class now takes the `box-impl` box. Tests:
   `tests/value_class_super_call_e2e.rs`, box `inlineClasses/anySuperCall{,Generic}.kt`,
   `inlineClasses/interfaceMethodCalls/interfaceSuperCall{,Generic}.kt`.
+- **A `super` call passes each `vararg` argument as one element.** The selected super target
+  carries its declaration's `vararg` index, and checked FIR maps the call's arguments through it as
+  an ordinary call does: `super.performClear(true, "a", "b")` (the shape Room's generated
+  `clearAllTables` uses) packs both strings into the `String[]`, `super.count(1, 2, *values)`
+  builds an `IntSpreadBuilder`, and no element passes an empty array. Test:
+  `tests/super_call_vararg_e2e.rs`.
 - **A value class's `equals-impl`/`hashCode-impl` treat the sole property as a data class treats
   one.** kotlinc builds both with the generator it uses for data classes. The hash is the declared
   type's own (`String.hashCode()`, `Integer.hashCode(I)`, `Arrays.hashCode`, a nested value class's
@@ -11348,8 +11370,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   registers and writes them only when the target serializes the class's record: krusty's metadata
   writer asks each plugin in registration order, and the serialization plugin reads the field off
   the checked class then, so nothing is recorded for it beforehand. A `write$Self` without elements is a
-  bare `return` with no line. (A sealed class's `write$Self` and an abstract class's
-  `PolymorphicSerializer` companion are not generated yet.)
+  bare `return` with no line. (A sealed class's `write$Self` is not generated yet.)
   Test: `tests/open_serializable_write_self_e2e.rs`.
 - **A serializable subclass of a serializable class serializes the parent's elements first.** For a
   same-file, non-generic `@Serializable` superclass, kotlinc numbers the parent's elements ahead of
@@ -11360,6 +11381,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constructor before storing its own fields. (A superclass from another module or a generic one is
   not handled yet.)
   Test: `tests/serializable_inheritance_e2e.rs`.
+- **A serializable abstract class is serialized polymorphically.** kotlinc gives a non-generic,
+  non-sealed abstract `@Serializable` class no `$serializer`: `Companion.serializer()` returns
+  `new PolymorphicSerializer(C::class, new Annotation[0])`, cached in a `$cachedSerializer$delegate`
+  whose initializer and `access$…$cp` accessor follow the deserialization constructor and the
+  child-serializer cache, and whose `<clinit>` store returns on the class's last line. The class
+  keeps the `write$Self` and deserialization constructor its subclasses call. That constructor
+  checks no element (there is no descriptor to report against; the concrete subclass checked the
+  whole mask), and the class's `$childSerializers` has no `access$get$childSerializers$cp`, which
+  only a `$serializer` reads. A subclass reads its own cache after the parent's `write$Self` runs.
+  Test: `tests/abstract_serializable_e2e.rs`.
 - **`write$Self` reads an overridable property through its getter.** It reads a final property's
   backing field, as kotlinc's JVM lowering does for a default getter, but an open or overriding
   property's getter can be overridden, so kotlinc calls it: `override val name` is read with
@@ -19706,6 +19737,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   property, enum-entry, and facade records). One class-file gap remains: a VALUE-PARAMETER
   annotation reaches its metadata record, but no `RuntimeVisibleParameterAnnotations` attribute is
   emitted for it.
+- **A line break may stand on either side of the `.` that ends a declaration's receiver type.**
+  Kotlin's grammar is `(receiverType NL* '.' NL*)? simpleIdentifier` for functions and properties,
+  and code generators use it: protobuf's Kotlin DSL writes `public fun DslMap<K, V, P>` and puts
+  `.put(key, value)` on the next line. The receiver's `.` (after the type, its type arguments, its
+  `?`, or a qualifier segment) is read past plain line breaks, and so is the name after it; an
+  explicit `;` still ends the declaration. Tests: `tests/receiver_type_line_break_e2e.rs` (generic,
+  plain, nullable, name-on-next-line and extension-property receivers, byte-compared with kotlinc).
 - **A line break inside a property declaration is a continuation, an explicit `;` is not.** Kotlin's
   property grammar is `… (':' NL* type)? (NL* '=' NL* expression)?`, so a declaration whose type
   fills the line may put the type or the initializer on the next one — which is exactly what a
@@ -20637,3 +20675,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: shared `THROWABLE_TRANSPORT` and `TRY_NORMAL_COMPLETION` multimodule cases with the
   kotlinc/JVM oracle and Native/Wasm matrix, provider `throwables::tests`, Wasm encoder tests,
   and `wasm::codegen::tests::a_try_with_finally_still_declines_without_an_artifact`.
+
+- **Compiler String concatenation authenticates the selected stdlib declaration.** Both
+  `String.plus(Any?): String` and `String?.plus(Any?): String` require the selected platform
+  stdlib's archive authority, not just matching declarations or archive bytes. The published
+  source candidate and both frozen callable lookups carry the same authenticated operation;
+  an ordinary dependency carries none. Test:
+  `klib_libraries::tests::builtin_operations::klib_string_plus_requires_selected_stdlib_authority`.

@@ -132,6 +132,56 @@ fn descriptor_access(
     })
 }
 
+/// `if (required != (required and seen)) throwMissingFieldException(…)` over every seen mask,
+/// before the superclass constructor runs.
+fn missing_field_check(
+    ir: &mut IrFile,
+    serializer_id: ClassId,
+    cached_descriptor: Option<u32>,
+    required_masks: &[i32],
+) -> u32 {
+    if required_masks.len() == 1 {
+        let required_mask = required_masks[0];
+        // `if (required != (required and seen)) throwMissingFieldException(...)`, before `super()`.
+        let required = ir.add_expr(IrExpr::Const(IrConst::Int(required_mask)));
+        let and_lhs = ir.add_expr(IrExpr::Const(IrConst::Int(required_mask)));
+        let seen = ir.add_expr(IrExpr::GetValue(1));
+        let masked = ir.add_arithmetic(
+            crate::ir::IrBinOp::BitAnd,
+            and_lhs,
+            seen,
+            crate::types::Ty::Int,
+        );
+        let missing = ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: crate::ir::IrBinOp::Ne,
+            lhs: required,
+            rhs: masked,
+        });
+        let seen_arg = ir.add_expr(IrExpr::GetValue(1));
+        let required_arg = ir.add_expr(IrExpr::Const(IrConst::Int(required_mask)));
+        let descriptor = descriptor_access(ir, serializer_id, cached_descriptor);
+        let report = ir.add_expr(IrExpr::Call {
+            callee: Box::new(Callee::Static {
+                owner: type_name("kotlinx/serialization/internal/PluginExceptionsKt"),
+                name: "throwMissingFieldException".to_string(),
+                descriptor: "(IILkotlinx/serialization/descriptors/SerialDescriptor;)V".to_string(),
+                inline: InlineKind::None,
+            }),
+            dispatch_receiver: None,
+            args: vec![seen_arg, required_arg, descriptor],
+        });
+        let reported = ir.add_expr(IrExpr::Block {
+            stmts: vec![report],
+            value: None,
+        });
+        ir.add_expr(IrExpr::When {
+            branches: vec![(Some(missing), reported)],
+        })
+    } else {
+        multi_mask_check(ir, serializer_id, cached_descriptor, required_masks)
+    }
+}
+
 fn multi_mask_check(
     ir: &mut IrFile,
     serializer_id: ClassId,
@@ -322,7 +372,7 @@ pub(super) fn declare_deserialization_constructor(
 pub(super) fn complete_deserialization_constructor(
     ir: &mut IrFile,
     class_id: ClassId,
-    serializer_id: ClassId,
+    serializer_id: Option<ClassId>,
     named_fields: &[(String, Ty)],
     elements: &SerialElements,
     wire: &[WireElement],
@@ -353,45 +403,10 @@ pub(super) fn complete_deserialization_constructor(
     let owner = ir.classes[class_id as usize].fq_name_id();
 
     let mut delegate_prelude = Vec::new();
-    if mask_count == 1 {
-        let required_mask = required_masks[0];
-        // `if (required != (required and seen)) throwMissingFieldException(...)`, before `super()`.
-        let required = ir.add_expr(IrExpr::Const(IrConst::Int(required_mask)));
-        let and_lhs = ir.add_expr(IrExpr::Const(IrConst::Int(required_mask)));
-        let seen = ir.add_expr(IrExpr::GetValue(1));
-        let masked = ir.add_arithmetic(
-            crate::ir::IrBinOp::BitAnd,
-            and_lhs,
-            seen,
-            crate::types::Ty::Int,
-        );
-        let missing = ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: crate::ir::IrBinOp::Ne,
-            lhs: required,
-            rhs: masked,
-        });
-        let seen_arg = ir.add_expr(IrExpr::GetValue(1));
-        let required_arg = ir.add_expr(IrExpr::Const(IrConst::Int(required_mask)));
-        let descriptor = descriptor_access(ir, serializer_id, cached_descriptor);
-        let report = ir.add_expr(IrExpr::Call {
-            callee: Box::new(Callee::Static {
-                owner: type_name("kotlinx/serialization/internal/PluginExceptionsKt"),
-                name: "throwMissingFieldException".to_string(),
-                descriptor: "(IILkotlinx/serialization/descriptors/SerialDescriptor;)V".to_string(),
-                inline: InlineKind::None,
-            }),
-            dispatch_receiver: None,
-            args: vec![seen_arg, required_arg, descriptor],
-        });
-        let reported = ir.add_expr(IrExpr::Block {
-            stmts: vec![report],
-            value: None,
-        });
-        delegate_prelude.push(ir.add_expr(IrExpr::When {
-            branches: vec![(Some(missing), reported)],
-        }));
-    } else {
-        delegate_prelude.push(multi_mask_check(
+    // An abstract class has no `$serializer` whose descriptor could name a missing element, and
+    // kotlinc checks none there: its concrete subclass's constructor checked the whole mask first.
+    if let Some(serializer_id) = serializer_id {
+        delegate_prelude.push(missing_field_check(
             ir,
             serializer_id,
             cached_descriptor,
