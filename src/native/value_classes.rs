@@ -109,6 +109,42 @@ impl NativeValueClasses {
         pending.extend(ir.classes.iter().filter_map(|class| {
             (class.is_value && class.ctor_param_count == 1).then_some(class.fq_name)
         }));
+        Self::probe(
+            pending,
+            |classifier| ir.external_value_class_name(classifier).copied(),
+            |classifier| {
+                ir.classes.iter().any(|class| {
+                    class.fq_name == classifier && class.is_value && class.ctor_param_count == 1
+                })
+            },
+            facts,
+        )
+    }
+
+    /// The value classes among `classes` and every classifier the types in `carried` name, read
+    /// from the checked declarations alone: given the module's named classes and what their members
+    /// carry, one answer every file shares, which a dispatch numbering that spans files needs.
+    pub(super) fn of_module_classes(
+        classes: impl IntoIterator<Item = TypeName>,
+        carried: impl IntoIterator<Item = Ty>,
+        facts: &dyn ClassifierFactSource,
+    ) -> Result<Self, String> {
+        let mut pending: Vec<TypeName> = classes.into_iter().collect();
+        for ty in carried {
+            crate::ir::referenced_classifiers::collect_classifier_names(ty, &mut pending);
+        }
+        Self::probe(pending, |_| None, |_| false, facts)
+    }
+
+    /// The inventory of `pending` and every value class their declarations reach. `external` is a
+    /// declaration the file itself publishes beside `facts`, and `declared_here` says whether the
+    /// file lowers a value class of that name, which then must have a declaration.
+    fn probe(
+        mut pending: Vec<TypeName>,
+        external: impl Fn(TypeName) -> Option<Ty>,
+        declared_here: impl Fn(TypeName) -> bool,
+        facts: &dyn ClassifierFactSource,
+    ) -> Result<Self, String> {
         let mut inventory = Self::default();
         let mut probed = HashSet::default();
         while let Some(classifier) = pending.pop() {
@@ -117,7 +153,7 @@ impl NativeValueClasses {
             }
             let mut declared: Option<Ty> = None;
             for candidate in [
-                ir.external_value_class_name(classifier).copied(),
+                external(classifier),
                 facts.classifier_value_underlying(classifier),
             ]
             .into_iter()
@@ -135,9 +171,7 @@ impl NativeValueClasses {
                 }
             }
             let Some(underlying) = declared else {
-                if ir.classes.iter().any(|class| {
-                    class.fq_name == classifier && class.is_value && class.ctor_param_count == 1
-                }) {
+                if declared_here(classifier) {
                     return Err(format!(
                         "a value class with no checked declaration (`{}`)",
                         classifier.render().replace('/', ".")
