@@ -200,7 +200,12 @@ impl Source<'_> {
         let is_member = matches!(owner, Owner::Class { .. });
         let declaration = signature.and_then(|signature| signature.stable_declaration);
         let mut parameters = Vec::with_capacity(function.params.len());
-        for (index, parameter) in function.params.iter().enumerate().skip(function.context_count) {
+        for (index, parameter) in function
+            .params
+            .iter()
+            .enumerate()
+            .skip(function.context_count)
+        {
             let resolved = parameter_types.map(|types| types[index]);
             let mut described = parameter_description(parameter, resolved, &scope);
             // A member function's parameter also has the default a function it overrides
@@ -441,8 +446,11 @@ impl Source<'_> {
             .stable_declaration
             .and_then(|class| self.analysis.constructor_declaration(class, 0));
         let mut parameters = Vec::with_capacity(class.props.len());
-        for (index, ((name, has_default), written)) in
-            signature.ctor_param_names.iter().zip(&class.props).enumerate()
+        for (index, ((name, has_default), written)) in signature
+            .ctor_param_names
+            .iter()
+            .zip(&class.props)
+            .enumerate()
         {
             parameters.push(KspParameter {
                 name: name.clone(),
@@ -505,10 +513,10 @@ impl Source<'_> {
             .secondary_ctor_shapes
             .get(index)
             .filter(|types| types.len() == constructor_decl.params.len());
-        let declaration = header
-            .signature
-            .stable_declaration
-            .and_then(|class| self.analysis.constructor_declaration(class, index as u32 + 1));
+        let declaration = header.signature.stable_declaration.and_then(|class| {
+            self.analysis
+                .constructor_declaration(class, index as u32 + 1)
+        });
         let mut parameters = Vec::with_capacity(constructor_decl.params.len());
         for (position, parameter) in constructor_decl.params.iter().enumerate() {
             let resolved = resolved.map(|types| types[position]);

@@ -292,7 +292,12 @@ fn pass_one_publishes_value_parameter_annotations_as_written() {
         annotation: crate::types::type_name("Many"),
         arguments: vec![(
             "values".to_owned(),
-            AnnotationValue::Array(values.iter().map(|value| AnnotationValue::string(value)).collect()),
+            AnnotationValue::Array(
+                values
+                    .iter()
+                    .map(|value| AnnotationValue::string(value))
+                    .collect(),
+            ),
         )],
         facts: Default::default(),
         written,
@@ -305,7 +310,10 @@ fn pass_one_publishes_value_parameter_annotations_as_written() {
     assert_eq!(
         index.parameter_applied_annotations(primary, 1),
         [
-            many(&["p"], written(Some(PropertyAnnotationSite::ValueParameter), &[0])),
+            many(
+                &["p"],
+                written(Some(PropertyAnnotationSite::ValueParameter), &[0])
+            ),
             ResolvedAnnotation {
                 annotation: crate::types::type_name("Mark"),
                 arguments: Vec::new(),
@@ -333,9 +341,11 @@ fn pass_one_publishes_value_parameter_annotations_as_written() {
         .iter()
         .copied()
         .find(|declaration| {
-            index.declaration_anchor(*declaration).is_some_and(|anchor| {
-                anchor.owner.is_none() && anchor.kind == DeclarationKind::Function
-            })
+            index
+                .declaration_anchor(*declaration)
+                .is_some_and(|anchor| {
+                    anchor.owner.is_none() && anchor.kind == DeclarationKind::Function
+                })
         })
         .expect("stable top-level function");
     assert_eq!(

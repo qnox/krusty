@@ -12,7 +12,10 @@ impl SourceSetAnalysis {
 
     /// The checked applications written on the function, property, constructor or type alias
     /// `declaration`, in source order.
-    pub fn declaration_annotations(&self, declaration: FrontendDeclarationId) -> &[ResolvedAnnotation] {
+    pub fn declaration_annotations(
+        &self,
+        declaration: FrontendDeclarationId,
+    ) -> &[ResolvedAnnotation] {
         self.published_index()
             .map(|index| index.declaration_applied_annotations(declaration))
             .unwrap_or_default()
@@ -77,13 +80,23 @@ impl SourceSetAnalysis {
         constructor_parameter: bool,
     ) -> Option<FrontendDeclarationId> {
         let index = self.published_index()?;
-        index.owned_declarations(owner).iter().copied().find(|declaration| {
-            index.declaration_anchor(*declaration).is_some_and(|anchor| {
-                anchor.kind == DeclarationKind::Property && anchor.sibling == position
-            }) && index.declaration_header(*declaration).is_some_and(|header| {
-                header.flags.has(DeclarationFlags::PROPERTY_PARAMETER) == constructor_parameter
+        index
+            .owned_declarations(owner)
+            .iter()
+            .copied()
+            .find(|declaration| {
+                index
+                    .declaration_anchor(*declaration)
+                    .is_some_and(|anchor| {
+                        anchor.kind == DeclarationKind::Property && anchor.sibling == position
+                    })
+                    && index
+                        .declaration_header(*declaration)
+                        .is_some_and(|header| {
+                            header.flags.has(DeclarationFlags::PROPERTY_PARAMETER)
+                                == constructor_parameter
+                        })
             })
-        })
     }
 
     /// The top-level property of the source at `source` (its position in the analysis) that is
@@ -99,11 +112,13 @@ impl SourceSetAnalysis {
             .iter()
             .copied()
             .find(|declaration| {
-                index.declaration_anchor(*declaration).is_some_and(|anchor| {
-                    anchor.owner.is_none()
-                        && anchor.kind == DeclarationKind::Property
-                        && anchor.sibling == position
-                })
+                index
+                    .declaration_anchor(*declaration)
+                    .is_some_and(|anchor| {
+                        anchor.owner.is_none()
+                            && anchor.kind == DeclarationKind::Property
+                            && anchor.sibling == position
+                    })
             })
     }
 }

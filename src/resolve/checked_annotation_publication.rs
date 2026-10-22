@@ -349,7 +349,10 @@ fn publish_classifier_member_annotations(
     // still has value parameters whose annotations are published.
     let primary = std::iter::once((
         0,
-        class.primary_ctor_annotations.as_deref().unwrap_or_default(),
+        class
+            .primary_ctor_annotations
+            .as_deref()
+            .unwrap_or_default(),
         class
             .props
             .iter()
@@ -624,10 +627,19 @@ fn classifier_has_resolved_annotations(
             constructor
                 .annotations
                 .iter()
-                .chain(constructor.params.iter().flat_map(|parameter| &parameter.annotations))
+                .chain(
+                    constructor
+                        .params
+                        .iter()
+                        .flat_map(|parameter| &parameter.annotations),
+                )
                 .any(resolved)
         })
-        || class.is_annotation() && class.props.iter().any(|parameter| parameter.default.is_some())
+        || class.is_annotation()
+            && class
+                .props
+                .iter()
+                .any(|parameter| parameter.default.is_some())
 }
 
 impl Checker<'_> {

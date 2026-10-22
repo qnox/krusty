@@ -188,10 +188,14 @@ fn put_accessor(payload: &mut Vec<u8>, accessor: &KspAccessor) {
     payload.push(u8::from(accessor.written));
     put_modifiers(payload, &accessor.modifiers);
     put_annotations(payload, &accessor.annotations);
-    put_option(payload, &accessor.parameter, |payload, (name, annotations)| {
-        put_str(payload, name);
-        put_annotations(payload, annotations);
-    });
+    put_option(
+        payload,
+        &accessor.parameter,
+        |payload, (name, annotations)| {
+            put_str(payload, name);
+            put_annotations(payload, annotations);
+        },
+    );
 }
 
 /// A parameter: its name, its type and a flags byte (bit 0 `val`, 1 `var`, 2 vararg, 3 default,
@@ -527,7 +531,9 @@ mod tests {
         expected.extend([0, 0, 0, 1, 0, 0, 0, 1, b'M', 0, 0, 0, 3]);
         expected.extend(b"p.M");
         // No use-site target, not synthetic, and the written argument `v = 5` with no defaults.
-        expected.extend([0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, b'v', 1, 3, 0, 0, 0, 5]);
+        expected.extend([
+            0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, b'v', 1, 3, 0, 0, 0, 5,
+        ]);
         expected.extend([0, 0, 0, 0]);
         // Written `data`.
         expected.extend([1, 0, 0, 0, 1, 0, 0, 0, 4]);

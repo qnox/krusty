@@ -21,10 +21,11 @@ fn compiler_accessor(
     annotations: Vec<KspAnnotation>,
     parameter: Option<(String, Vec<KspAnnotation>)>,
 ) -> KspAccessor {
+    // `const` and a constructor parameter's `vararg` leave the accessors public and final.
     let described = property_modifiers.is_some_and(|modifiers| {
         modifiers
             .iter()
-            .all(|modifier| *modifier == KspModifier::Const)
+            .all(|modifier| matches!(modifier, KspModifier::Const | KspModifier::Vararg))
     });
     KspAccessor {
         written: false,
@@ -57,8 +58,12 @@ impl Source<'_> {
         let accessor_annotations = |setter: bool| {
             declaration.map(|declaration| self.analysis.accessor_annotations(declaration, setter))
         };
-        let getter_written = targeted(&property.annotations, PropertyAnnotationSite::Getter)
-            .chain(property.getter_annotations.iter().map(|entry| &entry.annotation));
+        let getter_written = targeted(&property.annotations, PropertyAnnotationSite::Getter).chain(
+            property
+                .getter_annotations
+                .iter()
+                .map(|entry| &entry.annotation),
+        );
         let getter_annotations = self.published_annotations(
             subject,
             getter_written,

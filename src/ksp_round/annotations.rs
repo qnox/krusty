@@ -2,9 +2,7 @@
 //! declaration, with their arguments in the order the source wrote them and the defaults of the
 //! elements they did not write.
 
-use krusty_plugin_ir::{
-    KspAnnotation, KspAnnotationArguments, KspArgument, KspUseSite, KspValue,
-};
+use krusty_plugin_ir::{KspAnnotation, KspAnnotationArguments, KspArgument, KspUseSite, KspValue};
 
 use super::type_model::{qualified_name, TypeParameterScope};
 use super::{Source, Subject};
@@ -58,7 +56,10 @@ impl Source<'_> {
             if written.is_empty() {
                 return Ok(Vec::new());
             }
-            return Err(self.refusal(subject, "has annotations on a declaration it cannot identify"));
+            return Err(self.refusal(
+                subject,
+                "has annotations on a declaration it cannot identify",
+            ));
         };
         if written.len() != published.len() {
             return Err(self.refusal(
@@ -117,7 +118,11 @@ impl Source<'_> {
         // A nested annotation records no written order: every value it has was written, in
         // declaration order.
         let order = match &annotation.written {
-            Some(form) => form.order.iter().map(|&position| usize::from(position)).collect(),
+            Some(form) => form
+                .order
+                .iter()
+                .map(|&position| usize::from(position))
+                .collect(),
             None => (0..annotation.arguments.len()).collect::<Vec<_>>(),
         };
         let mut arguments = order
@@ -134,7 +139,11 @@ impl Source<'_> {
         arguments.extend(
             defaults
                 .iter()
-                .filter(|default| arguments.iter().all(|argument| argument.name != default.name))
+                .filter(|default| {
+                    arguments
+                        .iter()
+                        .all(|argument| argument.name != default.name)
+                })
                 .cloned()
                 .collect::<Vec<_>>(),
         );
@@ -149,20 +158,39 @@ impl Source<'_> {
     /// one of them is not known.
     fn element_defaults(&self, class: TypeName) -> Option<Vec<(String, AnnotationValue)>> {
         if let Some(source) = self.symbols.classes.get(&class) {
+            // Pass 1 publishes the folded defaults of a class that declares any.
+            if !source
+                .ctor_param_names
+                .iter()
+                .any(|(_, has_default)| *has_default)
+            {
+                return Some(Vec::new());
+            }
             return self
                 .analysis
                 .annotation_element_defaults(source.stable_declaration?)
                 .map(<[_]>::to_vec);
         }
-        // A library class keeps each element default its class file records, which includes the
-        // empty array kotlinc writes for a vararg element declared without one.
+        // A library class has the element defaults its class file records. A Kotlin `vararg val`
+        // element declared without one materializes an omitted empty array, and KSP2 lists that
+        // array as its default.
         let library = self.symbols.libraries.classifier(class)?;
-        let parameters = library.annotation_application()?.parameters;
+        let application = library.annotation_application()?;
+        let parameters = &application.parameters;
         parameters
             .names
             .iter()
-            .filter_map(|name| Some((name, library.annotation_element_default(name)?)))
-            .map(|(name, default)| Some((name.clone(), default.value()?.clone())))
+            .enumerate()
+            .filter_map(
+                |(index, name)| match library.annotation_element_default(name) {
+                    Some(default) => {
+                        Some(default.value().map(|value| (name.clone(), value.clone())))
+                    }
+                    None => (application.policy.materialize_omitted_vararg
+                        && parameters.vararg == Some(index))
+                    .then(|| Some((name.clone(), AnnotationValue::Array(Vec::new())))),
+                },
+            )
             .collect()
     }
 
@@ -176,7 +204,12 @@ impl Source<'_> {
         }
         let arity = match self.symbols.classes.get(&class) {
             Some(source) => source.type_params().len(),
-            None => self.symbols.libraries.classifier(class)?.type_params().len(),
+            None => self
+                .symbols
+                .libraries
+                .classifier(class)?
+                .type_params()
+                .len(),
         };
         let mut described = TypeParameterScope::default().ty(ty)?;
         if described.arguments.is_empty() {
