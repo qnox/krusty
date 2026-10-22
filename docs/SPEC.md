@@ -6463,6 +6463,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Plain line breaks only; an explicit `;` still terminates the expression. Test:
   `nested_string_template_e2e::template_interpolation_allows_newlines_around_expression`.
 
+- **A cast continues across line breaks on either side of `as`/`as?`.** `asExpression:
+  prefixUnaryExpression (NL* asOperator NL* type)*` per the Kotlin grammar, so `value` then
+  `as? String` then `?: "none"` on separate lines is one expression, and `x as` may leave its type
+  on the next line. Plain line breaks only; an explicit `;` still ends the operand. `as` cannot
+  begin a statement, so looking past the line breaks never joins two statements. Test:
+  `cast_line_break_e2e`.
+
 - **A Java source class sees the member types it inherits.** A simple type name inside a Java class
   body denotes a member type declared in the class, else one inherited from its supertypes (JLS
   §8.5), before the enclosing class, imports, and package are consulted; two distinct inherited
