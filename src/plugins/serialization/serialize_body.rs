@@ -67,6 +67,14 @@ fn encode_serializable_element(
     call
 }
 
+/// The elements a class inherits from its serializable superclass, which the superclass's own
+/// `write$Self` writes before the class writes its own.
+pub(super) struct InheritedElements {
+    pub(super) count: usize,
+    pub(super) owner: crate::types::TypeName,
+    pub(super) write_self: u32,
+}
+
 pub(super) struct SerializeBody<'a> {
     pub(super) function: u32,
     pub(super) serializer_class: ClassId,
@@ -76,6 +84,8 @@ pub(super) struct SerializeBody<'a> {
     /// The backing field of each serial element, in element order. A `@Transient` property's
     /// field is not among them and is never written.
     pub(super) elements: &'a [usize],
+    /// What the class inherits from its serializable superclass, if it has one.
+    pub(super) inherited: Option<InheritedElements>,
     pub(super) field_defaults: &'a [Option<IrConst>],
     pub(super) nested_serializers: &'a [Option<ClassId>],
     /// The serializers of the class's type parameters, on the generic `$serializer`.
@@ -96,6 +106,7 @@ impl SerializeBody<'_> {
             serialized_class: foo_id,
             fields,
             elements,
+            inherited,
             field_defaults,
             nested_serializers: nested,
             type_parameter_serializers,
@@ -141,6 +152,8 @@ impl SerializeBody<'_> {
         // Every nullable value-class read owns one semantic temporary. Reserve the whole range up
         // front so a checked computed default, which remaps its own locals into this frame below,
         // starts after them instead of aliasing a value still used by the guarded encode call.
+        let offset = inherited.as_ref().map_or(0, |inherited| inherited.count);
+        let wire_len = offset + elements.len();
         let element_temporary_start = cache_local + 1;
         let after_element_temporaries = element_temporary_start
             + u32::try_from(elements.len()).expect("too many serialized elements");
@@ -154,7 +167,7 @@ impl SerializeBody<'_> {
                     plan.as_ref(),
                     Some(cache_local),
                     i,
-                    elements.len(),
+                    wire_len,
                     "kotlinx/serialization/SerializationStrategy",
                 ) {
                     return Some(cached);
@@ -209,8 +222,30 @@ impl SerializeBody<'_> {
             }
             read
         };
-        // Element `i` is written from backing field `field`; they differ after a transient property.
-        for (i, &field) in elements.iter().enumerate() {
+        // The superclass's `write$Self` writes the inherited elements first, from the same object
+        // viewed as the superclass.
+        if let Some(inherited) = &inherited {
+            let value = ir.add_expr(IrExpr::GetValue(value_slot));
+            let value = ir.add_expr(IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::Cast,
+                arg: value,
+                type_operand: Ty::obj_name(inherited.owner),
+            });
+            let output = ir.add_expr(IrExpr::GetValue(encoder_slot));
+            let descriptor = ir.add_expr(IrExpr::GetValue(2));
+            stmts.push(ir.add_expr(IrExpr::Call {
+                callee: Box::new(Callee::ClassStatic {
+                    owner: inherited.owner,
+                    function: inherited.write_self,
+                }),
+                dispatch_receiver: None,
+                args: vec![value, output, descriptor],
+            }));
+        }
+        // Own element `i` is written from backing field `field`; they differ after a transient
+        // property. It is element `offset + i` of the wire shape, after the inherited ones.
+        for (own, &field) in elements.iter().enumerate() {
+            let i = offset + own;
             let (pname, ty) = &fields[field];
             let n_before = stmts.len();
             let d = ir.add_expr(IrExpr::GetValue(2));
@@ -224,7 +259,7 @@ impl SerializeBody<'_> {
                     plan.as_ref(),
                     Some(cache_local),
                     i,
-                    elements.len(),
+                    wire_len,
                     "kotlinx/serialization/SerializationStrategy",
                 )
                 .or_else(|| contextual_serializer_for(ir, true, ty))
@@ -482,7 +517,8 @@ impl SerializeBody<'_> {
                     init: Some(read),
                     named: false,
                 });
-                stmts.insert(0, declaration);
+                // kotlinc reads the cache after the superclass's `write$Self` has run.
+                stmts.insert(usize::from(inherited.is_some()), declaration);
             }
             // Every statement of `write$Self` is one of the class's own declaration, so it carries
             // the class's start line: kotlinc opens the method on that line at its first
@@ -621,6 +657,7 @@ mod tests {
             serialized_class,
             fields: &fields,
             elements: &[0],
+            inherited: None,
             field_defaults: &[None],
             nested_serializers: &[None],
             type_parameter_serializers:

@@ -7,6 +7,67 @@ fn initialized_libraries(classpath: std::rc::Rc<super::Classpath>) -> JvmLibrari
 }
 
 #[test]
+fn list_storage_plans_use_the_selected_stdlib_and_its_array_list_alias() {
+    use crate::libraries::{CompilerIntrinsic, ListStorageConstruction};
+    let stdlib = crate::toolchain::stdlib_jar().expect("selected reference stdlib");
+    let libraries = initialized_libraries(std::rc::Rc::new(super::Classpath::new(vec![stdlib])));
+    for (name, expected) in [
+        ("emptyList", &[ListStorageConstruction::ReadonlyEmpty][..]),
+        (
+            "listOf",
+            &[
+                ListStorageConstruction::ReadonlyEmpty,
+                ListStorageConstruction::ReadonlySingleton,
+                ListStorageConstruction::ReadonlyPacked,
+            ][..],
+        ),
+        (
+            "mutableListOf",
+            &[
+                ListStorageConstruction::MutableEmpty,
+                ListStorageConstruction::MutablePacked,
+            ][..],
+        ),
+        (
+            "arrayListOf",
+            &[
+                ListStorageConstruction::MutableEmpty,
+                ListStorageConstruction::MutablePacked,
+            ][..],
+        ),
+    ] {
+        let symbols = libraries.symbols(
+            SymbolNamespace::Package(type_name("kotlin/collections")),
+            name,
+        );
+        let functions = symbols.callables.functions();
+        assert_eq!(functions.len(), expected.len(), "{name} overloads");
+        for &plan in expected {
+            assert_eq!(
+                functions
+                    .iter()
+                    .filter(|f| f.callable.compiler_intrinsic
+                        == Some(CompilerIntrinsic::ListStorageConstruction(plan)))
+                    .count(),
+                1,
+                "{name} {plan:?}: {:?}",
+                functions
+                    .iter()
+                    .map(|f| (
+                        &f.generic_sig,
+                        &f.call_sig,
+                        f.flags,
+                        f.kind,
+                        f.receiver,
+                        f.callable.compiler_intrinsic
+                    ))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+#[test]
 fn a_dependency_closed_range_lookalike_keeps_its_body() {
     let directory = std::env::temp_dir().join(format!(
         "krusty-provider-range-origin-{}-{}",
@@ -96,6 +157,90 @@ fn a_dependency_closed_range_lookalike_keeps_its_body() {
     drop(symbols);
     drop(libraries);
     std::fs::remove_dir_all(directory).expect("remove dependency facade");
+}
+
+#[test]
+fn a_foreign_alias_cannot_change_the_stdlib_list_storage_plan() {
+    use crate::libraries::{CompilerIntrinsic, ListStorageConstruction};
+    use crate::metadata::builder::{TypeAliasFormalMeta, TypeAliasMeta};
+    let directory = std::env::temp_dir().join(format!(
+        "krusty-storage-alias-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let foreign = type_name("fixture/ForeignList");
+    let alias = TypeAliasMeta {
+        name: "ArrayList".into(),
+        formals: vec![TypeAliasFormalMeta {
+            source_name: "E".into(),
+            semantic_name: "E".into(),
+        }],
+        expansion: Ty::obj_args_name(
+            foreign,
+            &[Ty::ty_param("E", Ty::nullable(Ty::obj("kotlin/Any")))],
+        ),
+        visibility: crate::types::Visibility::Public,
+        expansion_spelling: Default::default(),
+        decl_order: 0,
+    };
+    let (d1, d2) = crate::metadata::builder::build_package(&[], &[], &[alias], (None, &[]), true);
+    let internal = "kotlin/collections/ForeignAliasesKt";
+    let mut writer = crate::jvm::classfile::ClassWriter::new(internal, "java/lang/Object");
+    writer.set_kotlin_metadata(
+        2,
+        crate::jvm::classfile::MetadataStamp {
+            version: [2, 2, 0],
+            pre_release: false,
+        },
+        48,
+        &crate::metadata::encoding::bytes_to_strings(&d1),
+        &d2,
+    );
+    let path = directory.join(format!("{internal}.class"));
+    std::fs::create_dir_all(path.parent().expect("package")).expect("create foreign alias package");
+    std::fs::write(&path, writer.finish()).expect("write foreign alias");
+    let identity = type_name("kotlin/collections/ArrayList");
+    let foreign_only = super::Classpath::new(vec![directory.clone()]);
+    assert!(foreign_only
+        .paired_stdlib_type_alias_expansion(identity)
+        .is_none());
+    let stdlib = crate::toolchain::stdlib_jar().expect("selected reference stdlib");
+    let classpath = std::rc::Rc::new(super::Classpath::new(vec![directory.clone(), stdlib]));
+    assert_eq!(
+        classpath
+            .type_alias_expansion(identity)
+            .expect("ordinary alias lookup")
+            .0,
+        foreign
+    );
+    let libraries = initialized_libraries(classpath);
+    let symbols = libraries.symbols(
+        SymbolNamespace::Package(type_name("kotlin/collections")),
+        "arrayListOf",
+    );
+    let functions = symbols.callables.functions();
+    assert_eq!(functions.len(), 2);
+    for plan in [
+        ListStorageConstruction::MutableEmpty,
+        ListStorageConstruction::MutablePacked,
+    ] {
+        assert_eq!(
+            functions
+                .iter()
+                .filter(|f| f.callable.compiler_intrinsic
+                    == Some(CompilerIntrinsic::ListStorageConstruction(plan)))
+                .count(),
+            1,
+            "{plan:?}"
+        );
+    }
+    drop(symbols);
+    drop(libraries);
+    drop(foreign_only);
+    std::fs::remove_dir_all(directory).expect("remove owned foreign alias fixture");
 }
 
 fn required_closed_range_contains_roles(

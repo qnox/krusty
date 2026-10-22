@@ -79,6 +79,69 @@ fn a_kcallable_name_property_is_the_callable_reference_name() {
 }
 
 #[test]
+fn target_stdlib_list_factories_publish_their_exact_storage_plans() {
+    use crate::libraries::ListStorageConstruction;
+    for target in [
+        crate::compilation_target::CompilationTarget::Native,
+        crate::compilation_target::CompilationTarget::WasmJs,
+        crate::compilation_target::CompilationTarget::WasmWasi,
+    ] {
+        let Some(libraries) = target_stdlib(target) else {
+            continue;
+        };
+        for (name, expected) in [
+            ("emptyList", &[ListStorageConstruction::ReadonlyEmpty][..]),
+            (
+                "listOf",
+                &[
+                    ListStorageConstruction::ReadonlyEmpty,
+                    ListStorageConstruction::ReadonlySingleton,
+                    ListStorageConstruction::ReadonlyPacked,
+                ][..],
+            ),
+            (
+                "mutableListOf",
+                &[
+                    ListStorageConstruction::MutableEmpty,
+                    ListStorageConstruction::MutablePacked,
+                ][..],
+            ),
+            (
+                "arrayListOf",
+                &[
+                    ListStorageConstruction::MutableEmpty,
+                    ListStorageConstruction::MutablePacked,
+                ][..],
+            ),
+        ] {
+            let symbols = declared_symbols(
+                &libraries.inventory,
+                &libraries.identities,
+                SymbolNamespace::Package(type_name("kotlin/collections")),
+                name,
+            );
+            let functions = symbols.callables.functions();
+            assert_eq!(
+                functions.len(),
+                expected.len(),
+                "{target:?} {name} overloads"
+            );
+            for &plan in expected {
+                assert_eq!(
+                    functions
+                        .iter()
+                        .filter(|function| function.callable.compiler_intrinsic
+                            == Some(CompilerIntrinsic::ListStorageConstruction(plan)))
+                        .count(),
+                    1,
+                    "{target:?} {name} {plan:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn target_klibs_attach_unsigned_bitwise_operations_to_the_exact_members() {
     for target in [
         crate::compilation_target::CompilationTarget::Native,

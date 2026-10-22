@@ -3735,6 +3735,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   selects the one-default extension, as kotlinc does, where both used to tie (koin-core's
   `createScope()`). Tests: `an_inferred_return_*` and `an_implicit_receiver_call_*` in
   `tests/overloaded_inferred_return_e2e.rs`.
+- **An `in` projection is an invariant argument when its capture meets the parameter's bounds.**
+  kotlinc captures `A<in X>` as `C` with lower bound `X` and the parameter's declared upper bounds,
+  then compares `C` for equality with an invariant `A<Y>` argument: `Y <: X` and every bound
+  `<: Y`. A Java parameter's bound is the flexible `Any!`, so `Class<Any>.superclass`
+  (`Class<in Any!>!`) is a `Class<Any>`. A use-site projection also replaces the parameter's
+  declared variance when a member type is specialized: in `Class<? super T>` read from
+  `Class<in Any>`, `T` sits in a contravariant position and the captured `in Any` approximates to
+  `Any` (kotlinc renders `Class<in CapturedType(in Any)!>!`), never a nested `in in Any`. Both
+  together let `generateSequence(start) { it.superclass }` settle; before, every lambda recheck
+  nested one more `in` into `T` and the compiler never finished (moshi's `AdapterMethodsFactory`).
+  Tests: `a_java_superclass_chain_*` in `tests/use_site_variance_e2e.rs` (classes byte-identical
+  to kotlinc's).
 - **A platform-typed implicit receiver exposes its members.** In
   `KeyPairGenerator.getInstance("RSA").apply { initialize(1024) }` the `apply` receiver is the
   flexible `KeyPairGenerator!`. A bare `initialize` selects the member exactly as
@@ -8500,6 +8512,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   module names + classpath probe) — an unresolvable type aborts stub generation (skip, never guess).
   Tests: `jvm::java_stub::tests` (unit), `java_source_interop_e2e::java_extends_kotlin_via_stub_pipeline`.
 
+- **A Java-source `static final` field initialized by one literal is a constant, as for javac's
+  class.** JLS §4.12.4 makes such a field a constant variable, and kotlinc inlines a Kotlin read of
+  it (`BuildConfig.DEBUG` compiles to `iconst_0`, not `getstatic`), whether the Java arrives as source
+  or as a class. The header stub evaluates a `boolean`, character, string, or optionally signed
+  numeric literal (every radix, `_` separators, `L`/`f`/`d` suffixes) and converts it to the field's
+  type by assignment conversion (JLS §5.2): widening, plus narrowing an `int` constant to
+  `byte`/`short`/`char` when it fits. A compound initializer (`1 << 3`, `A + 1`, a cast) is not
+  evaluated yet and stays a field read. Test: `java_source_constant_e2e`.
+
 - **Member overloads with different erased signatures (`listIterator()` / `listIterator(Int)`).**
   `ClassSig.methods` (and the lowerer's `ClassInfo.methods`) hold per-name overload LISTS in
   declaration order; call sites select by argument types (`method_matching` mirrors the top-level
@@ -11313,6 +11334,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   bare `return` with no line. (A sealed class's `write$Self` and an abstract class's
   `PolymorphicSerializer` companion are not generated yet.)
   Test: `tests/open_serializable_write_self_e2e.rs`.
+- **A serializable subclass of a serializable class serializes the parent's elements first.** For a
+  same-file, non-generic `@Serializable` superclass, kotlinc numbers the parent's elements ahead of
+  the subclass's own: the descriptor, `childSerializers` and `deserialize` cover all of them, the
+  subclass's `write$Self` calls the parent's public `write$Self` before encoding its own elements
+  at their shifted indices, and its deserialization constructor checks the full required mask, then
+  delegates the masks, the inherited elements and the marker to the parent's deserialization
+  constructor before storing its own fields. (A superclass from another module or a generic one is
+  not handled yet.)
+  Test: `tests/serializable_inheritance_e2e.rs`.
 - **`write$Self` reads an overridable property through its getter.** It reads a final property's
   backing field, as kotlinc's JVM lowering does for a default getter, but an open or overriding
   property's getter can be overridden, so kotlinc calls it: `override val name` is read with
@@ -13853,6 +13883,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `IndexedValue.hashCode` wraps like Kotlin's `Int`. A string iterator is linear in the string's
   length.
   Tests: `tests/native_runtime_e2e.rs` (drivers under `tests/native_runtime/`).
+- **List factory storage is a provider-authenticated declaration plan.** The selected platform
+  stdlib's exact `emptyList`, `listOf`, `mutableListOf` and `arrayListOf` declarations publish empty,
+  singleton or packed storage, with readonly and mutable forms distinct. The full generic contract
+  has one non-reified formal bounded by `Any?`, used unchanged in the declared result and operands;
+  a packed operand is the declaration's non-null `Array<out T>` vararg at slot zero. Nullable or
+  changed results, defaults, receivers, contexts and incompatible modifiers do not acquire a plan.
+  The JVM provider supplies the expanded `ArrayList` alias identity; core sees no Java class name.
+  Native consumes only this plan: a singleton array remains one list element, readonly packed
+  storage wraps its array and mutable storage copies it. Malformed operand counts reject rather
+  than retry by name or physical array shape. Other backends retain their ordinary selected call.
+  This storage fact alone does not widen dependency-body root admission. Tests:
+  `builtin_top_level_realization::tests::list_storage_construction_*`,
+  `provider_normalization_tests::list_storage_plans_use_the_selected_stdlib_and_its_array_list_alias`,
+  `klib_libraries::tests::builtin_operations::target_stdlib_list_factories_publish_their_exact_storage_plans`
+  and `tests/native_lists_e2e.rs`.
 - **A native list is Kotlin's collection interfaces, and equals any `List`.** The growable list is
   `kotlin.collections.ArrayList` and implements `MutableList`, `List`, `MutableCollection`,
   `Collection`, `MutableIterable`, `Iterable` and `RandomAccess`, each an interface descriptor an
@@ -18847,6 +18892,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/enum_secondary_constructor_e2e.rs` and the enum fixture in
   `tests/java_parameters_attribute_e2e.rs`.
 
+- **JVM metadata readers preserve a vararg's declared packed-array type.** A function's generic
+  signature decodes `ValueParameter.type` (or `type_id`) just as it does for an ordinary parameter.
+  `vararg_element_type` separately declares the vararg call shape; rebuilding an array from it
+  loses the declared `out` projection and must not manufacture a missing parameter type. Inline
+  and table-backed declarations retain the same contract, including primitive arrays. Listed
+  operands are values of the array's readable element type, not its projection wrapper; argument
+  conversion and evaluation-order spills preserve nullable/value-class boxing. A spread still
+  carries the complete declared array type. Tests: `tests/vararg_spread_shapes_e2e.rs` and
+  `jvm::metadata::vararg_signature_tests::function_vararg_signatures_keep_the_declared_packed_array`
+  and `…::selected_stdlib_vararg_signatures_preserve_metadata_projections`.
 - **Primary-ctor varargs and non-derivable member descriptors survive into class `@Metadata`.** A
   `vararg` primary-constructor parameter records `ValueParameter.vararg_element_type` (f4) — without
   it a consumer demands a literal array argument and rejects `Words()` ("no value passed for
