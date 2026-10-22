@@ -1377,9 +1377,21 @@ impl<'a> Body<'a> {
                 }
             }
             IrExpr::NotNullAssert { operand, .. } => {
-                // A failed assertion traps: there are no exceptions to throw yet.
+                let operand_carrier = self.carrier_of(operand)?;
+                if matches!(operand_carrier, Some(ValType::Ref { .. }))
+                    && matches!(
+                        self.carrier_of(id)?,
+                        Some(ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64)
+                    )
+                {
+                    return Err(
+                        "a not-null assertion requiring a scalar reference conversion".into(),
+                    );
+                }
+                // A reference assertion alone supplies neither scalar unboxing nor a typed null
+                // failure. Keep the existing reference path without claiming either capability.
                 self.expression(operand)?;
-                if matches!(self.carrier_of(operand)?, Some(ValType::Ref { .. })) {
+                if matches!(operand_carrier, Some(ValType::Ref { .. })) {
                     self.code.ref_as_non_null();
                 }
             }

@@ -20415,6 +20415,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `wasm::codegen::tests`, and the `wasm-js`/`wasm-wasi` box lanes
   (`tests/kotlin_box_wasm_conformance.rs`).
 
+- **Wasm nullable scalar assertions require an unboxing contract.** `ref.as_non_null` retains a
+  reference; it cannot produce the checked i32, i64, f32 or f64 result of a nullable scalar's `!!`.
+  Such an assertion declines with `a not-null assertion requiring a scalar reference conversion`,
+  before an invalid module is emitted. Reference-to-reference assertions retain their existing
+  path. This does not claim scalar unboxing or typed null-exception support. Tests:
+  `wasm_nullable_scalar_assertions_decline_without_an_unboxing_contract` and
+  `wasm_nullable_reference_assertions_keep_their_existing_carrier`, both using the JVM oracle.
+
 - **Wasm classes are WasmGC struct subtypes dispatched through shared class tables.** A class's
   instance is a struct whose first field is its dispatch table, followed by its superclasses'
   fields root first and then its own; it is declared a subtype of its superclass's struct, so
