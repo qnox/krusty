@@ -866,6 +866,9 @@ between existing worktrees sharing one target directory therefore rebuilds their
 even when the newly selected sources have older timestamps; unchanged inputs still reuse them.
 Cargo invoked outside the checkout with only `--manifest-path` does not discover that checkout's
 configuration and is not covered by this workflow. No per-worktree dependency cache is required.
+The standalone shared-runtime cache fixture clears inherited Rust instrumentation flags and wrappers
+for its nested Cargo workspace. Compiler/toolchain selection and the recorded C compiler remain
+unchanged; parent nightly coverage settings must not contaminate this C-object cache contract.
 
 ## Environment Overrides
 

@@ -67,8 +67,42 @@ fn embedded_runtime_has_the_current_checkout_marker() {
     .unwrap();
 }
 
+fn runtime_cargo() -> Command {
+    let mut command = Command::new("cargo");
+    // This standalone fixture tests generated C objects, not the enclosing Rust coverage run.
+    // A parent selected with `cargo +nightly` may export nightly-only flags without changing
+    // the toolchain selected by the fixture's Cargo invocation. Preserve compiler selection,
+    // but never inherit its instrumentation flags or wrappers into this independent workspace.
+    for variable in [
+        "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "RUSTC_WRAPPER",
+        "RUSTC_WORKSPACE_WRAPPER",
+    ] {
+        command.env_remove(variable);
+    }
+    command
+}
+
+#[test]
+fn runtime_cargo_does_not_inherit_parent_instrumentation() {
+    let command = runtime_cargo();
+    let environment = command
+        .get_envs()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(
+        environment,
+        std::collections::BTreeMap::from([
+            (std::ffi::OsStr::new("CARGO_ENCODED_RUSTFLAGS"), None),
+            (std::ffi::OsStr::new("RUSTC_WORKSPACE_WRAPPER"), None),
+            (std::ffi::OsStr::new("RUSTC_WRAPPER"), None),
+            (std::ffi::OsStr::new("RUSTFLAGS"), None),
+        ])
+    );
+}
+
 fn build_runtime_checkout(root: &Path, target: &Path, marker: &str) {
-    let output = Command::new("cargo")
+    let output = runtime_cargo()
         .args(["test", "--offline", "--lib", "--target-dir"])
         .arg(target)
         .args(["--", "--test-threads=1"])
