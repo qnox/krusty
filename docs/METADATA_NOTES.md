@@ -4,6 +4,14 @@ Goal: emit `@kotlin.Metadata` so krusty output is consumable as a **Kotlin** lib
 need only the signatures, already matched in Phase 5a). This is the single largest remaining piece —
 effectively a re-implementation of `kotlinx-metadata-jvm`'s writer.
 
+## Applied generic argument completeness
+
+The common subtype relation consumes the complete applied supertype supplied by declaration
+evidence. An explicitly applied target must have exactly the same argument count before checking
+variance or projections; an empty target remains the existing owner-reachability query. This does
+not change metadata encoding or recover missing arguments. The unit hierarchy oracle must preserve
+its collection supertype arguments rather than supplying raw declarations for applied queries.
+
 ## Declared JVM vararg array types
 
 The generic signature reader decodes each `ValueParameter.type`/`type_id` independently of its

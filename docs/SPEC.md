@@ -272,6 +272,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
 ## 7. Edge cases tracked (grow as implemented)
 
+- **Applied generic subtyping compares complete argument lists.** After projecting a source onto
+  the target classifier, an explicitly applied target requires the same argument count before
+  variance/projection containment is checked. Matching only a zipped prefix is not proof. A bare
+  target retains the existing owner-reachability query. The common relation's unit regression
+  covers direct and inherited applications; the hierarchy test oracle preserves applied arguments.
+
 - **`suspend fun` (coroutines), slice 1 — the calling convention.** A `suspend fun` lowers to
   kotlinc's continuation-passing-style (CPS) JVM ABI: an extra `kotlin.coroutines.Continuation`
   parameter is appended and the return type erases to `java.lang.Object` (the resume value, *boxed* —

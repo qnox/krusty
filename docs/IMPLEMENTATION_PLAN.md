@@ -5,6 +5,13 @@ front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
 
+## Applied generic argument completeness
+
+- ✅ The common subtype relation rejects mismatched explicit argument counts after supertype
+  projection, while preserving bare-owner reachability. Direct and inherited regression cases
+  cover the previous zipped-prefix acceptance. This prerequisite is separate from dependency-body
+  type evidence and adds no backend capability or outcome allowance.
+
 ## String operation authority publication
 
 The shared StringPlus operation requires the existing selected-stdlib authority for both member
