@@ -241,19 +241,23 @@ pub(super) fn complete(
     ctx: &PluginContext,
     class_id: ClassId,
 ) -> Option<PendingChildSerializerCache> {
+    let serialized = SerializedClass::of(ctx, ir, class_id);
     let SerializedClass {
         serializer_name,
-        serializer_type_parameters,
         type_params,
         serialized_ty,
         type_serializers,
         owner_start_line,
         owner_end_line,
-        foo_fields,
-        elements,
         wire,
         ..
-    } = SerializedClass::of(ctx, ir, class_id);
+    } = &serialized;
+    let (serializer_name, serialized_ty, owner_start_line, owner_end_line) = (
+        *serializer_name,
+        *serialized_ty,
+        *owner_start_line,
+        *owner_end_line,
+    );
     let ser_id = ir
         .generated_class(
             ir.classes[class_id as usize].fq_name_id(),
@@ -483,7 +487,7 @@ pub(super) fn complete(
         let new_ser = ir.add_expr(IrExpr::New {
             internal: ser_internal,
             args,
-            ctor_params: Some(type_serializers),
+            ctor_params: Some(type_serializers.clone()),
             ctor_desc: None,
             external_target: None,
             defaults: Box::new([]),
@@ -521,6 +525,69 @@ pub(super) fn complete(
     let owner = super::serializer_accessor_owner(ir, class_id);
     super::complete_frontend_serializer_accessor(ir, owner, acc_body);
 
+    complete_class_members(plugin, ir, ctx, class_id, &serialized, Some(ser_id));
+
+    // The `$childSerializers` cache is built in a SECOND pass — see
+    // `add_child_serializer_cache`, which explains why it cannot be built here. A value class
+    // caches its underlying element too; only its own `serialize`/`deserialize` build it afresh.
+    (!ir.classes[class_id as usize].is_object).then(|| {
+        (
+            class_id,
+            ir.classes[class_id as usize].fq_name_id(),
+            serialized.wire,
+        )
+    })
+}
+
+/// Declare an abstract class's members: it has no `$serializer`, but its subclasses delegate to
+/// its deserialization constructor.
+pub(super) fn declare_polymorphic_base(ir: &mut IrFile, ctx: &PluginContext, class_id: ClassId) {
+    let wire = SerialElements::of(ctx, ir, class_id).wire(ir, class_id);
+    declare_deserialization_constructor(ir, class_id, &wire);
+}
+
+/// Complete the `write$Self` and deserialization constructor an abstract class's subclasses call.
+/// Returns its pending `$childSerializers` cache, which `write$Self` reads. Its cached
+/// `PolymorphicSerializer` follows that cache.
+pub(super) fn complete_polymorphic_base(
+    plugin: &SerializationPlugin,
+    ir: &mut IrFile,
+    ctx: &PluginContext,
+    class_id: ClassId,
+) -> PendingChildSerializerCache {
+    let serialized = SerializedClass::of(ctx, ir, class_id);
+    complete_class_members(plugin, ir, ctx, class_id, &serialized, None);
+    (class_id, serialized.class_name, serialized.wire)
+}
+
+/// The members the plugin adds to the serialized class itself: `write$Self`, the
+/// `<getter>$annotations()` markers and the deserialization constructor. The constructor checks
+/// the required elements against `serializer`'s descriptor; an abstract class, which has no
+/// `$serializer`, checks none.
+fn complete_class_members(
+    plugin: &SerializationPlugin,
+    ir: &mut IrFile,
+    ctx: &PluginContext,
+    class_id: ClassId,
+    serialized: &SerializedClass,
+    serializer: Option<ClassId>,
+) {
+    let SerializedClass {
+        serializer_type_parameters,
+        owner_start_line,
+        foo_fields,
+        elements,
+        wire,
+        ..
+    } = serialized;
+    let owner_start_line = *owner_start_line;
+    let is_generic = !serialized.type_params.is_empty();
+    let foo_optional: Vec<bool> = wire
+        .iter()
+        .map(|element| {
+            property_default::checked_default(ir, element.class, element.field).is_some()
+        })
+        .collect();
     if plain_data_class(ir, class_id) {
         // Its statements carry the class's line. One that neither calls its superclass's
         // `write$Self` nor writes an element of its own is a bare `return`, which kotlinc gives no
@@ -534,7 +601,7 @@ pub(super) fn complete(
             plugin,
             ir,
             class_id,
-            &serializer_type_parameters,
+            serializer_type_parameters,
             write_self_line,
         );
     }
@@ -544,7 +611,7 @@ pub(super) fn complete(
     // serializer. The marker's stem is the property's JVM getter name, so a Boolean `isFoo` yields
     // `isFoo$annotations` (JavaBeans `is`-prefix rule).
     let class_identity = ir.classes[class_id as usize].fq_name_id();
-    for (prop, _) in &foo_fields {
+    for (prop, _) in foo_fields {
         if serial_name_of(ctx, ir, class_id, prop).is_none()
             && field_serializer_of(ctx, ir, class_id, prop).is_none()
         {
@@ -618,19 +685,13 @@ pub(super) fn complete(
         complete_deserialization_constructor(
             ir,
             class_id,
-            ser_id,
-            &foo_fields,
-            &elements,
-            &wire,
+            serializer,
+            foo_fields,
+            elements,
+            wire,
             cached_descriptor,
         );
     }
-
-    // The `$childSerializers` cache is built in a SECOND pass — see
-    // `add_child_serializer_cache`, which explains why it cannot be built here. A value class
-    // caches its underlying element too; only its own `serialize`/`deserialize` build it afresh.
-    (!ir.classes[class_id as usize].is_object)
-        .then(|| (class_id, ir.classes[class_id as usize].fq_name_id(), wire))
 }
 
 /// Add `class_id`'s `write$Self`. kotlinc generates it in its IR extension, not its FIR one: a

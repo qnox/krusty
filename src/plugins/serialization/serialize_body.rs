@@ -75,9 +75,24 @@ pub(super) struct InheritedElements {
     pub(super) write_self: u32,
 }
 
-pub(super) struct SerializeBody<'a> {
+/// What `write$Self` writes: the serialized class's fields, its elements and its type-parameter
+/// serializers.
+pub(super) struct SerializedClassElements<'a> {
+    pub(super) properties: &'a super::SerializedProperties,
+    pub(super) elements: &'a super::SerialElements,
+    pub(super) type_parameter_serializers:
+        super::type_parameter_serializers::TypeParameterSerializers<'a>,
+}
+
+/// The `$serializer`'s `serialize`, which opens the structure and delegates to `write$Self`.
+pub(super) struct GeneratedSerialize {
     pub(super) function: u32,
     pub(super) serializer_class: ClassId,
+}
+
+pub(super) struct SerializeBody<'a> {
+    /// `None` for an abstract class, which has `write$Self` but no `$serializer`.
+    pub(super) serialize: Option<GeneratedSerialize>,
     pub(super) serialized_class: ClassId,
     /// Every backing field's name and type, by field index.
     pub(super) fields: &'a [(String, Ty)],
@@ -101,8 +116,7 @@ pub(super) struct SerializeBody<'a> {
 impl SerializeBody<'_> {
     pub(super) fn generate(self, ir: &mut IrFile, ctx: &PluginContext) {
         let Self {
-            function: fid,
-            serializer_class,
+            serialize,
             serialized_class: foo_id,
             fields,
             elements,
@@ -114,7 +128,6 @@ impl SerializeBody<'_> {
             write_self_name,
             cache: plan,
         } = self;
-        let ser_idx = serializer_class as usize;
         let class_id = foo_id;
         let serialized_name = ir.classes[foo_id as usize].fq_name_id();
         let class_internal = ir.classes[foo_id as usize].fq_name();
@@ -126,15 +139,6 @@ impl SerializeBody<'_> {
         //   val output = encoder.beginStructure(descriptor)       [local 4]
         //   Foo.write$Self$main(value, output, descriptor, this.typeSerial0, …)
         //   output.endStructure(descriptor)
-        let ser_cid = ser_idx as u32;
-        let this_desc = |ir: &mut IrFile| -> ExprId {
-            let r = ir.add_expr(IrExpr::GetValue(0));
-            ir.add_expr(IrExpr::GetField {
-                receiver: r,
-                class: ser_cid,
-                index: 0,
-            })
-        };
         // The element writes, in `write$Self`'s own frame: value = 0, output = 1,
         // descriptor = 2, then a generic class's type-parameter serializers, which `serialize`
         // passes from its `typeSerial<k>` fields.
@@ -505,7 +509,10 @@ impl SerializeBody<'_> {
                 stmts: vec![unsupported],
                 value: None,
             });
-            super::complete_generated_body(ir, fid, body);
+            match serialize {
+                Some(serialize) => super::complete_generated_body(ir, serialize.function, body),
+                None => ir.functions[write_self as usize].body = Some(body),
+            }
         } else {
             if let Some(plan) = plan.as_ref() {
                 // `write$Self` is a static member of the class that OWNS the cache, so it reads the
@@ -537,7 +544,19 @@ impl SerializeBody<'_> {
             ir.functions[write_self as usize].body = Some(ws_body);
 
             // `serialize` itself: descriptor local, open, delegate, close.
-            let descriptor_init = this_desc(ir);
+            let Some(GeneratedSerialize {
+                function: fid,
+                serializer_class,
+            }) = serialize
+            else {
+                return;
+            };
+            let receiver = ir.add_expr(IrExpr::GetValue(0));
+            let descriptor_init = ir.add_expr(IrExpr::GetField {
+                receiver,
+                class: serializer_class,
+                index: 0,
+            });
             let dvar = ir.add_expr(IrExpr::Variable {
                 index: 3,
                 ty: class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
@@ -652,8 +671,10 @@ mod tests {
         let fields = [("value".to_owned(), unsupported)];
 
         SerializeBody {
-            function: serialize,
-            serializer_class,
+            serialize: Some(GeneratedSerialize {
+                function: serialize,
+                serializer_class,
+            }),
             serialized_class,
             fields: &fields,
             elements: &[0],
