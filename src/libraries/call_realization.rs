@@ -265,7 +265,9 @@ impl ExternalCallableRealization {
             self.callable.ret,
             &self.parameter_identities,
             self.callable.context_count,
-            self.callable.compiler_intrinsic,
+            self.callable
+                .compiler_intrinsic
+                .or(self.callable.member_realization.compiler_intrinsic()),
             singleton.map(SingletonDispatch::ty),
             singleton.map(|dispatch| dispatch.classifier),
             self.klib_body_companion_receiver.as_ref(),
