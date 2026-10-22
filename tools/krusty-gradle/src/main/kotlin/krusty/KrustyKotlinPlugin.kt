@@ -410,10 +410,12 @@ abstract class KrustySupportCheckTask @Inject constructor(
         }
         val executable = binary.get().asFile.absolutePath
         val output = ByteArrayOutputStream()
+        val errors = ByteArrayOutputStream()
         val result = execOperations.exec {
             this.executable = executable
             args(arguments)
             standardOutput = output
+            errorOutput = errors
             isIgnoreExitValue = true
         }
         val refused = output.toString(Charsets.UTF_8).lines().filter(String::isNotBlank)
@@ -427,6 +429,9 @@ abstract class KrustySupportCheckTask @Inject constructor(
                 )
                 refusals.get().asFile.writeText(refused.joinToString("\n", postfix = "\n"))
             }
+            // A command line kotlinc itself rejects is no refusal: the build fails with the
+            // errors the compilation would report, and neither compiler runs.
+            2 -> throw GradleException(errors.toString(Charsets.UTF_8).trimEnd())
             else -> throw GradleException("$executable exited with ${result.exitValue} for $path")
         }
     }

@@ -947,14 +947,27 @@ mod tests {
             );
 
             // Free arguments reach krusty verbatim: the plugin keeps no copy of kotlinc's argument
-            // table. A malformed value and an argument krusty does not implement are refused by
-            // the same parser as a direct CLI or Bazel-worker invocation: krusty exits 2 with its
-            // one error line and writes nothing to the task's emptied destination.
-            let refused = |argument: &str| {
-                format!(
-                    "krusty: error: krusty does not implement the kotlinc argument '{argument}'"
-                )
-            };
+            // table. An argument krusty does not implement leaves the compile to kotlinc, reported.
+            let _ = std::fs::remove_file(&log);
+            let output = build()
+                .property("krusty.negative", "jspecify-free-argument")
+                .tasks([":compiler:util:compileKotlin"])
+                .run_output()
+                .unwrap_or_else(|error| panic!("jspecify-free-argument: {error}"));
+            assert_left_to_kotlinc(
+                &output,
+                ":compiler:util:compileKotlin",
+                &["krusty does not implement the kotlinc argument '-Xjspecify-annotations=strict'"
+                    .to_string()],
+            );
+            assert!(
+                !log.exists(),
+                "kotlinc, not krusty, compiles a refused argument"
+            );
+
+            // A malformed value is no refusal: the support check rejects it with the same parser
+            // and the same one error line as a direct CLI or Bazel-worker invocation, so neither
+            // compiler runs and the task's destination is left untouched.
             for (case, argument, expected) in [
                 (
                     "explicit-api-bad-mode",
@@ -962,11 +975,6 @@ mod tests {
                     "krusty: error: unknown value for parameter -Xexplicit-api: 'sideways'. \
                      Value should be one of {disable, strict, warning}"
                         .to_owned(),
-                ),
-                (
-                    "jspecify-free-argument",
-                    "-Xjspecify-annotations=strict",
-                    refused("-Xjspecify-annotations=strict"),
                 ),
                 (
                     "jdk-release-free-argument",
@@ -992,6 +1000,8 @@ mod tests {
                 ),
             ] {
                 let _ = std::fs::remove_file(&log);
+                let _ = std::fs::remove_file(&fixture.probes);
+                let _ = std::fs::remove_dir_all(&kotlin_classes);
                 let rendered = match build()
                     .property("krusty.negative", case)
                     .tasks([":compiler:util:compileKotlin"])
@@ -1000,20 +1010,19 @@ mod tests {
                     Ok(()) => panic!("negative case {case} succeeded"),
                     Err(error) => error.to_string(),
                 };
-                assert!(log.exists(), "{case} never reached krusty: {rendered}");
-                let invocation = single_invocation(&log);
+                let check = single_invocation(&fixture.probes);
                 assert_eq!(
-                    invocation
+                    check
                         .iter()
                         .filter(|actual| actual.as_str() == argument)
                         .count(),
                     1,
-                    "{case}: {invocation:?}",
+                    "{case}: {check:?}",
                 );
                 assert_eq!(
                     rendered
                         .lines()
-                        .filter(|line| line.trim() == expected)
+                        .filter(|line| line.trim() == format!("> {expected}"))
                         .count(),
                     1,
                     "{case}: {rendered}",
@@ -1021,15 +1030,20 @@ mod tests {
                 assert_eq!(
                     rendered
                         .lines()
-                        .filter(|line| line.contains("exited with 2 for :compiler:util:"))
+                        .filter(|line| {
+                            line.trim()
+                                == "Execution failed for task ':compiler:util:compileKotlinKrustyCheck'."
+                        })
                         .count(),
                     1,
                     "{case}: {rendered}",
                 );
-                let written = std::fs::read_dir(&kotlin_classes)
-                    .map(|entries| entries.count())
-                    .unwrap_or(0);
-                assert_eq!(written, 0, "{case} wrote to {}", kotlin_classes.display());
+                assert!(!log.exists(), "{case} must fail before compiling");
+                assert!(
+                    !kotlin_classes.exists(),
+                    "{case} wrote to {}",
+                    kotlin_classes.display()
+                );
             }
 
             // Gradle forwards standard version values without duplicating kotlinc's
@@ -1041,12 +1055,14 @@ mod tests {
                 ("old-api-version", "-api-version"),
             ] {
                 let _ = std::fs::remove_file(&log);
+                let _ = std::fs::remove_file(&fixture.probes);
                 let result = build()
                     .property("krusty.negative", case)
                     .tasks([":compiler:util:compileKotlin"])
                     .run();
                 assert!(result.is_err(), "negative case {case} succeeded");
-                let invocation = single_invocation(&log);
+                assert!(!log.exists(), "{case} must fail before compiling");
+                let invocation = single_invocation(&fixture.probes);
                 assert_eq!(
                     invocation
                         .windows(2)

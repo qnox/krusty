@@ -126,9 +126,10 @@ fn run_cinterop(arguments: &[String]) {
 
 /// Print each part of the command line krusty refuses, one per line, and exit 1 when there is one;
 /// exit 0 when krusty compiles the whole request. These are the refusals a compilation with the
-/// same arguments reports as errors before it reads a source: a kotlinc argument krusty does not
-/// implement, or a compiler plugin it neither reimplements nor hosts. A command line kotlinc itself
-/// could not read exits 2.
+/// same arguments reports as errors before it reads a source: a kotlinc argument, output shape or
+/// language feature krusty does not implement, or a compiler plugin it neither reimplements nor
+/// hosts. A command line kotlinc itself rejects is no refusal: it exits 2 with the errors the
+/// compilation would report, so that neither compiler runs.
 fn run_refusals(argv: Vec<String>) {
     let opts = cli::parse(argv);
     if !opts.argument_errors.is_empty() {
@@ -137,8 +138,19 @@ fn run_refusals(argv: Vec<String>) {
         }
         std::process::exit(2);
     }
-    let refused = opts
+    let invalid = opts
         .errors
+        .iter()
+        .filter(|error| !opts.refusals.contains(error))
+        .collect::<Vec<_>>();
+    if !invalid.is_empty() {
+        for error in invalid {
+            eprintln!("krusty: error: {error}");
+        }
+        std::process::exit(2);
+    }
+    let refused = opts
+        .refusals
         .iter()
         .cloned()
         .chain(opts.resolve_plugins(&[]).errors)

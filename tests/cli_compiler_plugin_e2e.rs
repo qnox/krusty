@@ -428,4 +428,28 @@ fn refusals_lists_the_arguments_and_plugins_krusty_refuses() {
             String::new()
         )
     );
+    // An output shape krusty does not emit is refused like an argument it does not implement.
+    assert_eq!(
+        check(&["-Xassertions=jvm".to_string()]),
+        (
+            Some(1),
+            "-Xassertions=jvm selects an output shape krusty does not emit\n".to_string(),
+            String::new()
+        )
+    );
+    // A value kotlinc itself rejects is not a refusal: the check fails with the compilation's
+    // error, so neither compiler runs.
+    assert_eq!(
+        check(&[
+            "-Xexplicit-api=sideways".to_string(),
+            "-Xuse-inline-scopes-numbers".to_string(),
+        ]),
+        (
+            Some(2),
+            String::new(),
+            "krusty: error: unknown value for parameter -Xexplicit-api: 'sideways'. Value should be one \
+             of {disable, strict, warning}\n"
+                .to_string()
+        )
+    );
 }
