@@ -29,6 +29,10 @@ annotation class Plain
 
 annotation class Many(vararg val values: String)
 
+annotation class Both(val a: Int, val b: Int)
+
+annotation class Nest(val both: Both, val many: Many)
+
 const val PREFIX = "pre"
 
 @Everything("class", number = 1 + 2, level = Level.HIGH, kind = List::class, inner = Inner("x"), names = ["$PREFIX-fix"])
@@ -69,3 +73,15 @@ class Holder @Plain constructor(@Plain val p: Int, @Plain plain: Int) {
 
     constructor(@Plain s: String) : this(0, 0)
 }
+
+@Nest(many = Many(), both = Both(b = 2, a = 1))
+fun nestedNamed() {}
+
+@Nest(Both(1, 2), Many(*[]))
+fun nestedEmptySpread() {}
+
+@Nest(Both(a = 1, b = 2), Many(*["x", "y"]))
+fun nestedSpread() {}
+
+@Nest(Both(3, b = 4), Many("z"))
+fun nestedPositional() {}

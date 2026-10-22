@@ -406,7 +406,10 @@ fn annotation_arguments_and_accessors_are_what_ksp2_reports() {
     log_is_what_ksp2_reports(
         "Annotations",
         "annotations.AnnotationsProvider",
-        &[fixtures().join("annotations/Annotations.kt")],
+        &[
+            fixtures().join("annotations/Aliased.kt"),
+            fixtures().join("annotations/Annotations.kt"),
+        ],
         "ksp-outputs-annotations",
         "annotations.expected",
     );

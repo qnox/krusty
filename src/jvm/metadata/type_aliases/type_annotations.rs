@@ -82,6 +82,7 @@ fn bind_value(
             AnnotationValue::Annotation {
                 internal: nested.annotation,
                 values: nested.arguments,
+                written: None,
             }
         }
         12 => AnnotationValue::Array(

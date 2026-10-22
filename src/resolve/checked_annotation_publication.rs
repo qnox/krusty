@@ -1066,12 +1066,14 @@ impl Checker<'_> {
         )
     }
 
-    /// Fold one application written with `use_site` (`@get:A`, or `None` when unprefixed).
+    /// Fold one application written with `use_site` (`@get:A`, or `None` when unprefixed) and
+    /// naming its class `short_name`.
     pub(super) fn fold_annotation_application(
         &mut self,
         internal: TypeName,
         arguments: &[ExprId],
         use_site: Option<crate::types::PropertyAnnotationSite>,
+        short_name: &str,
     ) -> Option<crate::types::AppliedAnnotation> {
         let FoldedAnnotationValues {
             values,
@@ -1088,7 +1090,11 @@ impl Checker<'_> {
             internal,
             values,
             facts,
-            written: Box::new(crate::types::WrittenAnnotation { use_site, order }),
+            written: Box::new(crate::types::WrittenAnnotation {
+                short_name: short_name.into(),
+                use_site,
+                order,
+            }),
             retention,
             targets,
         })
@@ -1175,7 +1181,7 @@ impl Checker<'_> {
             } if name == "class" => {
                 AnnotationValue::Class(Ty::obj_name(self.class_literal_targets.get(&e).copied()?))
             }
-            Expr::Call { args, .. } => match self.expr_lowers.get(&e) {
+            Expr::Call { callee, args } => match self.expr_lowers.get(&e) {
                 Some(ExprLowering::CompilerSynthetic(
                     SyntheticKind::PrimitiveVararg(_)
                     | SyntheticKind::ReferenceVararg
@@ -1198,8 +1204,21 @@ impl Checker<'_> {
                         return Some(value);
                     }
                     let internal = self.expr_types[e.0 as usize].kotlin_class_internal()?;
-                    let values = self.fold_annotation_values(internal, args, Some(e))?.values;
-                    AnnotationValue::Annotation { internal, values }
+                    let short_name = match self.file.expr(*callee) {
+                        Expr::Name(name) | Expr::Member { name, .. } => name.as_str().into(),
+                        _ => return None,
+                    };
+                    let FoldedAnnotationValues { values, order, .. } =
+                        self.fold_annotation_values(internal, args, Some(e))?;
+                    AnnotationValue::Annotation {
+                        internal,
+                        values,
+                        written: Some(Box::new(crate::types::WrittenAnnotation {
+                            short_name,
+                            use_site: None,
+                            order,
+                        })),
+                    }
                 }
             },
             _ => self.folded_library_constant(e, expected)?,

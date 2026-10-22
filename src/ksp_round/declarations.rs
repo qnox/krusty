@@ -248,7 +248,7 @@ impl Source<'_> {
                 subject,
                 &function.annotations,
                 declaration.map(|declaration| self.analysis.declaration_annotations(declaration)),
-                Placement::All,
+                Placement::Declaration,
             )?,
             modifiers: self.written_modifiers(function.declaration_span.lo),
             type_parameters,
@@ -480,7 +480,7 @@ impl Source<'_> {
             subject,
             class.primary_ctor_annotations.iter().flatten(),
             declaration.map(|declaration| self.analysis.declaration_annotations(declaration)),
-            Placement::All,
+            Placement::Declaration,
         )?;
         Ok(Some(constructor(
             header,
@@ -540,7 +540,7 @@ impl Source<'_> {
                 subject,
                 &constructor_decl.annotations,
                 declaration.map(|declaration| self.analysis.declaration_annotations(declaration)),
-                Placement::All,
+                Placement::Declaration,
             )?,
             modifiers,
             parameters,

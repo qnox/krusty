@@ -213,7 +213,8 @@ pub enum KspClassKind {
 /// One annotation applied to a declaration, as resolved.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KspAnnotation {
-    /// The name the annotation was written with (`KSAnnotation.shortName`).
+    /// `KSAnnotation.shortName`: on a classifier, function or constructor the name the source
+    /// wrote the annotation with, an import alias's name included; elsewhere its class's name.
     pub short_name: String,
     /// The annotation class it resolved to.
     pub qualified_name: String,

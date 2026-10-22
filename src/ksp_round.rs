@@ -268,7 +268,7 @@ impl Source<'_> {
             subject,
             &class.annotations,
             Some(&signature.applied_annotations),
-            annotations::Placement::All,
+            annotations::Placement::Declaration,
         )?;
         let type_parameters = type_parameters(class, signature, &scope);
         let header = declarations::ClassHeader {

@@ -14,7 +14,10 @@ use crate::types::{AnnotationValue, PropertyAnnotationSite, ResolvedAnnotation, 
 /// without a use-site target is on both.
 #[derive(Clone, Copy)]
 pub(super) enum Placement {
-    /// Every application.
+    /// Every application on a classifier, function or constructor, which KSP names as the source
+    /// wrote it: by an import alias's name when the source used one.
+    Declaration,
+    /// Every application on an accessor or a parameter, which KSP names by its class's name.
     All,
     /// A property: the unprefixed ones and those targeting the property or its field.
     Property,
@@ -29,7 +32,7 @@ impl Placement {
     fn shows(self, use_site: Option<PropertyAnnotationSite>) -> bool {
         use PropertyAnnotationSite as Site;
         match self {
-            Placement::All => true,
+            Placement::Declaration | Placement::All => true,
             Placement::Property => matches!(use_site, None | Some(Site::Property | Site::Field)),
             Placement::Parameter => matches!(use_site, None | Some(Site::ValueParameter)),
             Placement::SetterParameter => use_site == Some(Site::SetterParameter),
@@ -75,21 +78,28 @@ impl Source<'_> {
                     annotation,
                     matches!(placement, Placement::SetterParameter),
                     true,
+                    matches!(placement, Placement::Declaration),
                 )
             })
             .collect())
     }
 
     /// `annotation` as KSP shows it. `written` says whether the source wrote it or it is a
-    /// default; a default's arguments are all defaults too.
+    /// default; a default's arguments are all defaults too. `as_written` names it as the source
+    /// wrote it rather than by its class's name.
     fn ksp_annotation(
         &self,
         annotation: &ResolvedAnnotation,
         synthetic: bool,
         written: bool,
+        as_written: bool,
     ) -> KspAnnotation {
+        let short_name = match &annotation.written {
+            Some(form) if as_written => form.short_name.to_string(),
+            _ => short_name(annotation.annotation),
+        };
         KspAnnotation {
-            short_name: short_name(annotation.annotation),
+            short_name,
             qualified_name: qualified_name(annotation.annotation),
             use_site: use_site(annotation).map(ksp_use_site),
             synthetic,
@@ -115,8 +125,8 @@ impl Source<'_> {
                 })
             })
             .collect::<Option<Vec<_>>>()?;
-        // A nested annotation records no written order: every value it has was written, in
-        // declaration order.
+        // An annotation read from a class file records no written order: every value it has is
+        // listed, in declaration order.
         let order = match &annotation.written {
             Some(form) => form
                 .order
@@ -237,14 +247,20 @@ impl Source<'_> {
                 entry: entry.clone(),
             },
             AnnotationValue::Class(ty) => KspValue::Type(self.class_literal(*ty)?),
-            AnnotationValue::Annotation { internal, values } => {
+            AnnotationValue::Annotation {
+                internal,
+                values,
+                written: form,
+            } => {
                 let nested = ResolvedAnnotation {
                     annotation: *internal,
                     arguments: values.clone(),
                     facts: Default::default(),
-                    written: None,
+                    written: form.clone(),
                 };
-                KspValue::Annotation(Box::new(self.ksp_annotation(&nested, !written, written)))
+                KspValue::Annotation(Box::new(
+                    self.ksp_annotation(&nested, !written, written, false),
+                ))
             }
             AnnotationValue::Array(values) => KspValue::Array(
                 values

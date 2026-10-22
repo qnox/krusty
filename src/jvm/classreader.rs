@@ -1476,6 +1476,7 @@ fn read_annotation_value(
             Ok(AnnotationValue::Annotation {
                 internal: nested.annotation,
                 values: nested.arguments,
+                written: None,
             })
         }
         '[' => {

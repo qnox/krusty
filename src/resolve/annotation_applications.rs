@@ -477,6 +477,7 @@ impl Checker<'_> {
                     internal,
                     arguments,
                     annotation.property_site,
+                    written_short_name(&annotation.name),
                 ) {
                     Some(applied) => Some(applied),
                     None => {
@@ -737,4 +738,9 @@ pub(super) fn annotation_retention(
             Some(_) => return None,
         })
     })
+}
+
+/// The last segment of an annotation's written class reference, which names it in rendering.
+fn written_short_name(spelling: &str) -> &str {
+    spelling.rsplit('.').next().unwrap_or(spelling)
 }

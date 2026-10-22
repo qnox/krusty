@@ -37,6 +37,7 @@ fn pass_one_retains_checked_classifier_annotation_values_by_stable_identity() {
             ],
             facts: Default::default(),
             written: Some(Box::new(crate::types::WrittenAnnotation {
+                short_name: "Mark".into(),
                 use_site: None,
                 order: [1, 2, 0].into(),
             })),
@@ -189,10 +190,12 @@ fn jvm_analysis(source: &str, stem: &str) -> SourceSetAnalysis {
 }
 
 fn written(
+    short_name: &str,
     use_site: Option<crate::types::PropertyAnnotationSite>,
     order: &[u16],
 ) -> Option<Box<crate::types::WrittenAnnotation>> {
     Some(Box::new(crate::types::WrittenAnnotation {
+        short_name: short_name.into(),
         use_site,
         order: order.into(),
     }))
@@ -243,6 +246,7 @@ fn pass_one_publishes_folded_annotation_element_defaults() {
                     AnnotationValue::Annotation {
                         internal: crate::types::type_name("Inner"),
                         values: Vec::new(),
+                        written: written("Inner", None, &[]),
                     },
                 ),
                 (
@@ -305,35 +309,35 @@ fn pass_one_publishes_value_parameter_annotations_as_written() {
     let primary = owned(DeclarationKind::Constructor, 0);
     assert_eq!(
         index.parameter_applied_annotations(primary, 0),
-        [mark("id", written(None, &[0]))]
+        [mark("id", written("Mark", None, &[0]))]
     );
     assert_eq!(
         index.parameter_applied_annotations(primary, 1),
         [
             many(
                 &["p"],
-                written(Some(PropertyAnnotationSite::ValueParameter), &[0])
+                written("Many", Some(PropertyAnnotationSite::ValueParameter), &[0])
             ),
             ResolvedAnnotation {
                 annotation: crate::types::type_name("Mark"),
                 arguments: Vec::new(),
                 facts: Default::default(),
-                written: written(Some(PropertyAnnotationSite::Property), &[]),
+                written: written("Mark", Some(PropertyAnnotationSite::Property), &[]),
             },
         ]
     );
     let secondary = owned(DeclarationKind::Constructor, 1);
     assert_eq!(
         index.parameter_applied_annotations(secondary, 0),
-        [many(&[], written(None, &[]))]
+        [many(&[], written("Many", None, &[]))]
     );
     let act = owned(DeclarationKind::Function, 0);
     assert!(index.parameter_applied_annotations(act, 0).is_empty());
     assert_eq!(
         index.parameter_applied_annotations(act, 1),
         [
-            mark("x", written(None, &[0])),
-            many(&["a", "b"], written(None, &[0])),
+            mark("x", written("Mark", None, &[0])),
+            many(&["a", "b"], written("Many", None, &[0])),
         ]
     );
     let top = index
@@ -354,7 +358,7 @@ fn pass_one_publishes_value_parameter_annotations_as_written() {
             annotation: crate::types::type_name("Mark"),
             arguments: Vec::new(),
             facts: Default::default(),
-            written: written(None, &[]),
+            written: written("Mark", None, &[]),
         }]
     );
 }

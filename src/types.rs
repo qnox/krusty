@@ -2075,9 +2075,12 @@ pub enum AnnotationValue {
     /// their component type; collapsing `Array<String>::class` to the `kotlin/Array` classifier
     /// loses the class-file descriptor before lowering can encode it.
     Class(Ty),
+    /// A nested annotation. `written` is how the source wrote it, `None` for one read from a
+    /// class file or made by a compiler plugin.
     Annotation {
         internal: TypeName,
         values: Vec<(String, AnnotationValue)>,
+        written: Option<Box<WrittenAnnotation>>,
     },
     Array(Vec<AnnotationValue>),
 }
@@ -2102,10 +2105,15 @@ impl std::fmt::Debug for AnnotationValue {
             Self::String(value) => f.debug_tuple("String").field(value).finish(),
             Self::Enum(class, entry) => f.debug_tuple("Enum").field(class).field(entry).finish(),
             Self::Class(ty) => f.debug_tuple("Class").field(ty).finish(),
-            Self::Annotation { internal, values } => f
+            Self::Annotation {
+                internal,
+                values,
+                written,
+            } => f
                 .debug_struct("Annotation")
                 .field("internal", internal)
                 .field("values", values)
+                .field("written", written)
                 .finish(),
             Self::Array(values) => f.debug_tuple("Array").field(values).finish(),
         }
@@ -2166,7 +2174,11 @@ pub struct ResolvedAnnotation {
 /// How a checked source application was written, beyond the values it folded to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WrittenAnnotation {
-    /// The use-site target written before the annotation's name (`@get:A`), if any.
+    /// The annotation class's name as the source wrote it: its last segment, an import alias's
+    /// name when the source used one. For rendering only; the application's identity is resolved.
+    pub short_name: Box<str>,
+    /// The use-site target written before the annotation's name (`@get:A`), if any. A nested
+    /// annotation has none.
     pub use_site: Option<PropertyAnnotationSite>,
     /// The arguments the application wrote, as indices into its declaration-ordered arguments, in
     /// the order the source wrote them; a `vararg` element once, where its first value is. An

@@ -1,5 +1,23 @@
 # What KSP2 2.3.12 (KSPJvmMain) logs with Annotations.kt over annotations/: every annotation with
 # its arguments, defaults and use-site target, and every property's accessors.
+w: [ksp] annotations.aliasedFunction @Several=annotations.Many target=null origin=KOTLIN (values=["v":String]:List KOTLIN) defaults()
+w: [ksp] annotations.aliasedFunction(q) @Plain=annotations.Plain target=null origin=KOTLIN () defaults()
+w: [ksp] annotations.aliasedNested @Nest=annotations.Nest target=null origin=KOTLIN (both=@Both=annotations.Both target=null origin=KOTLIN (a=1:Integer KOTLIN, b=2:Integer KOTLIN) defaults() KOTLIN, many=@Many=annotations.Many target=null origin=KOTLIN (values=["n":String]:List KOTLIN) defaults() KOTLIN) defaults()
+w: [ksp] annotations.Aliased @Bare=annotations.Plain target=null origin=KOTLIN () defaults()
+w: [ksp] annotations.Aliased.x @Plain=annotations.Plain target=null origin=KOTLIN () defaults()
+w: [ksp] annotations.Aliased.x accessors get=SYNTHETIC/FINAL,PUBLIC set=null
+w: [ksp] annotations.Aliased.y @Plain=annotations.Plain target=null origin=KOTLIN () defaults()
+w: [ksp] annotations.Aliased.y accessors get=SYNTHETIC/FINAL,PUBLIC set=null
+w: [ksp] annotations.Aliased.member @Several=annotations.Many target=null origin=KOTLIN (values=["m":String]:List KOTLIN) defaults()
+w: [ksp] annotations.Aliased.member(p) @Plain=annotations.Plain target=null origin=KOTLIN () defaults()
+w: [ksp] annotations.Aliased.z accessors get=SYNTHETIC/FINAL,PUBLIC set=SYNTHETIC/FINAL,PUBLIC
+w: [ksp] annotations.Aliased.z.get @Plain=annotations.Plain target=GET origin=KOTLIN () defaults()
+w: [ksp] annotations.Aliased.z.set(value) @Plain=annotations.Plain target=SETPARAM origin=SYNTHETIC () defaults()
+w: [ksp] <init> @Bare=annotations.Plain target=null origin=KOTLIN () defaults()
+w: [ksp] <init>(x) @Plain=annotations.Plain target=null origin=KOTLIN () defaults()
+w: [ksp] <init>(plain) @Plain=annotations.Plain target=null origin=KOTLIN () defaults()
+w: [ksp] <init> @Bare=annotations.Plain target=null origin=KOTLIN () defaults()
+w: [ksp] <init>(s) @Plain=annotations.Plain target=null origin=KOTLIN () defaults()
 w: [ksp] annotations.PREFIX accessors get=SYNTHETIC/FINAL,PUBLIC set=null
 w: [ksp] annotations.topLevel @Many=annotations.Many target=null origin=KOTLIN (values=["spread":String, "it":String]:List KOTLIN) defaults()
 w: [ksp] annotations.reordered @Everything=annotations.Everything target=null origin=KOTLIN (level=entry ENUM_ENTRY annotations.Level.HIGH KOTLIN, text="swapped":String KOTLIN, number=5:Integer KOTLIN, big=1099511627776:Long SYNTHETIC, small=3:Byte SYNTHETIC, short=4:Short SYNTHETIC, ratio=0.5:Float SYNTHETIC, exact=2.5:Double SYNTHETIC, letter=k:Character SYNTHETIC, flag=true:Boolean SYNTHETIC, kind=type kotlin.String SYNTHETIC, inner=@Inner=annotations.Inner target=null origin=SYNTHETIC (name="inner":String SYNTHETIC) defaults(name="inner":String) SYNTHETIC, names=["a":String, "b":String]:List SYNTHETIC, numbers=[1:Integer, 2:Integer]:List SYNTHETIC, levels=[]:List SYNTHETIC, kinds=[type kotlin.Int]:List SYNTHETIC) defaults(number=7:Integer, big=1099511627776:Long, small=3:Byte, short=4:Short, ratio=0.5:Float, exact=2.5:Double, letter=k:Character, flag=true:Boolean, level=entry ENUM_ENTRY annotations.Level.LOW, kind=type kotlin.String, inner=@Inner=annotations.Inner target=null origin=SYNTHETIC (name="inner":String SYNTHETIC) defaults(name="inner":String), names=["a":String, "b":String]:List, numbers=[1:Integer, 2:Integer]:List, levels=[]:List, kinds=[type kotlin.Int]:List)
@@ -7,6 +25,10 @@ w: [ksp] annotations.reordered @Many=annotations.Many target=null origin=KOTLIN 
 w: [ksp] annotations.library @Suppress=kotlin.Suppress target=null origin=KOTLIN (names=["UNUSED":String]:List KOTLIN) defaults(names=[]:List)
 w: [ksp] annotations.library @JvmName=kotlin.jvm.JvmName target=null origin=KOTLIN (name="named":String KOTLIN) defaults()
 w: [ksp] annotations.library(value) @Plain=annotations.Plain target=null origin=KOTLIN () defaults()
+w: [ksp] annotations.nestedNamed @Nest=annotations.Nest target=null origin=KOTLIN (many=@Many=annotations.Many target=null origin=KOTLIN () defaults() KOTLIN, both=@Both=annotations.Both target=null origin=KOTLIN (b=2:Integer KOTLIN, a=1:Integer KOTLIN) defaults() KOTLIN) defaults()
+w: [ksp] annotations.nestedEmptySpread @Nest=annotations.Nest target=null origin=KOTLIN (both=@Both=annotations.Both target=null origin=KOTLIN (a=1:Integer KOTLIN, b=2:Integer KOTLIN) defaults() KOTLIN, many=@Many=annotations.Many target=null origin=KOTLIN (values=[]:List KOTLIN) defaults() KOTLIN) defaults()
+w: [ksp] annotations.nestedSpread @Nest=annotations.Nest target=null origin=KOTLIN (both=@Both=annotations.Both target=null origin=KOTLIN (a=1:Integer KOTLIN, b=2:Integer KOTLIN) defaults() KOTLIN, many=@Many=annotations.Many target=null origin=KOTLIN (values=["x":String, "y":String]:List KOTLIN) defaults() KOTLIN) defaults()
+w: [ksp] annotations.nestedPositional @Nest=annotations.Nest target=null origin=KOTLIN (both=@Both=annotations.Both target=null origin=KOTLIN (a=3:Integer KOTLIN, b=4:Integer KOTLIN) defaults() KOTLIN, many=@Many=annotations.Many target=null origin=KOTLIN (values=["z":String]:List KOTLIN) defaults() KOTLIN) defaults()
 w: [ksp] annotations.Level.entries accessors get=SYNTHETIC/FINAL,PUBLIC set=null
 w: [ksp] annotations.Inner.name accessors get=SYNTHETIC/FINAL,PUBLIC set=null
 w: [ksp] annotations.Everything.text accessors get=SYNTHETIC/FINAL,PUBLIC set=null
@@ -26,6 +48,10 @@ w: [ksp] annotations.Everything.numbers accessors get=SYNTHETIC/FINAL,PUBLIC set
 w: [ksp] annotations.Everything.levels accessors get=SYNTHETIC/FINAL,PUBLIC set=null
 w: [ksp] annotations.Everything.kinds accessors get=SYNTHETIC/FINAL,PUBLIC set=null
 w: [ksp] annotations.Many.values accessors get=SYNTHETIC/FINAL,PUBLIC set=null
+w: [ksp] annotations.Both.a accessors get=SYNTHETIC/FINAL,PUBLIC set=null
+w: [ksp] annotations.Both.b accessors get=SYNTHETIC/FINAL,PUBLIC set=null
+w: [ksp] annotations.Nest.both accessors get=SYNTHETIC/FINAL,PUBLIC set=null
+w: [ksp] annotations.Nest.many accessors get=SYNTHETIC/FINAL,PUBLIC set=null
 w: [ksp] annotations.Subject @Everything=annotations.Everything target=null origin=KOTLIN (text="class":String KOTLIN, number=3:Integer KOTLIN, level=entry ENUM_ENTRY annotations.Level.HIGH KOTLIN, kind=type kotlin.collections.List<STAR *> KOTLIN, inner=@Inner=annotations.Inner target=null origin=KOTLIN (name="x":String KOTLIN) defaults(name="inner":String) KOTLIN, names=["pre-fix":String]:List KOTLIN, big=1099511627776:Long SYNTHETIC, small=3:Byte SYNTHETIC, short=4:Short SYNTHETIC, ratio=0.5:Float SYNTHETIC, exact=2.5:Double SYNTHETIC, letter=k:Character SYNTHETIC, flag=true:Boolean SYNTHETIC, numbers=[1:Integer, 2:Integer]:List SYNTHETIC, levels=[]:List SYNTHETIC, kinds=[type kotlin.Int]:List SYNTHETIC) defaults(number=7:Integer, big=1099511627776:Long, small=3:Byte, short=4:Short, ratio=0.5:Float, exact=2.5:Double, letter=k:Character, flag=true:Boolean, level=entry ENUM_ENTRY annotations.Level.LOW, kind=type kotlin.String, inner=@Inner=annotations.Inner target=null origin=SYNTHETIC (name="inner":String SYNTHETIC) defaults(name="inner":String), names=["a":String, "b":String]:List, numbers=[1:Integer, 2:Integer]:List, levels=[]:List, kinds=[type kotlin.Int]:List)
 w: [ksp] annotations.Subject @Plain=annotations.Plain target=null origin=KOTLIN () defaults()
 w: [ksp] annotations.Subject.id @Plain=annotations.Plain target=null origin=KOTLIN () defaults()
