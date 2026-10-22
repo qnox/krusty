@@ -217,8 +217,7 @@ fn an_object_element_constructs_its_object_serializer_in_place() {
 }
 
 /// A sealed hierarchy's `object` case is registered with an `ObjectSerializer` constructed in place,
-/// not through a serializer class. (Where the sealed serializer itself lives differs: kotlinc caches
-/// it on the base class, krusty builds it in the companion's `serializer()`; this compares the case.)
+/// not through a serializer class, in the sealed serializer both compilers cache on the base class.
 #[test]
 fn a_sealed_object_case_constructs_its_object_serializer_in_place() {
     let Some((plugin, cp)) = plugin_and_runtime() else {
@@ -252,7 +251,7 @@ fn a_sealed_object_case_constructs_its_object_serializer_in_place() {
         eprintln!("skipping: reference kotlinc or javap unavailable");
         return;
     };
-    let Some(got) = build("Signal$Companion", "serializer()", false) else {
+    let Some(got) = build("Signal", "_init_$_anonymous_()", false) else {
         eprintln!("skipping: reference kotlinc or javap unavailable");
         return;
     };

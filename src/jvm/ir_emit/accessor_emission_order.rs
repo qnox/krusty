@@ -3,8 +3,9 @@
 //! A companion's synthetic marker constructor splits its ordinary property/static accessors from
 //! companion-instance accessors. Other classes emit all static accessors together, while a hidden
 //! value-class primary can still place its marker constructor after them. kotlinc's accessor
-//! lowering adds a serializable class's `access$get$childSerializers$cp` after that primary
-//! marker and before a secondary constructor's.
+//! lowering adds a serializable class's `access$get$childSerializers$cp` (a sealed class's
+//! `access$get$cachedSerializer$delegate$cp`) after that primary marker and before a secondary
+//! constructor's.
 
 use super::{
     class_ctor_jvm_tys, constructor_accessors, constructor_defaults, emit_method,
@@ -14,10 +15,12 @@ use super::{
 use crate::ir::{FunId, IrClass, IrFile};
 use crate::types::Visibility;
 
-/// The child-serializer cache's public `…$cp` accessor when it follows the hidden value-class
-/// primary's marker accessor instead of the cache's factories.
+/// A serializable cache's public `…$cp` accessor when it follows a primary's marker accessor
+/// instead of the cache's factories: a hidden value-class primary's, or a sealed class's private
+/// primary's.
 pub(super) fn deferred_cache_accessor(ir: &IrFile, class: &IrClass) -> Option<FunId> {
-    if class.is_companion || !hidden_primary_marker(ir, class) {
+    let sealed_primary_marker = class.is_sealed && class.has_primary_ctor;
+    if class.is_companion || !(hidden_primary_marker(ir, class) || sealed_primary_marker) {
         return None;
     }
     class.methods.iter().copied().find(|&function| {

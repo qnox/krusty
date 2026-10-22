@@ -290,14 +290,23 @@ fn specialize_member_type_with_unbound(
                     .iter()
                     .enumerate()
                     .map(|(index, argument)| {
+                        // A use-site projection replaces the parameter's declared variance:
+                        // `Class<in T>` read from a member puts `T` in a contravariant position,
+                        // so a captured `in Any` approximates to its lower bound `Any` there.
+                        let argument_position = match argument.kind() {
+                            TyKind::InProjection(_)
+                            | TyKind::OutProjection(_)
+                            | TyKind::StarProjection(_) => position,
+                            _ => compose_position(
+                                position,
+                                variances.get(index).copied().unwrap_or_default(),
+                            ),
+                        };
                         specialize_member_type_with_unbound(
                             source,
                             *argument,
                             bindings,
-                            compose_position(
-                                position,
-                                variances.get(index).copied().unwrap_or_default(),
-                            ),
+                            argument_position,
                             unbound,
                         )
                     })

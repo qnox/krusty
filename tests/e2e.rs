@@ -2,8 +2,12 @@
 //! crate, so product e2e modules live behind one target to keep link time and target size bounded.
 //! External corpus/reference-toolchain suites live in `conformance.rs`.
 
+#[path = "abstract_serializable_e2e.rs"]
+mod abstract_serializable_e2e;
 #[path = "annotation_documented_mirror_e2e.rs"]
 mod annotation_documented_mirror_e2e;
+#[path = "backticked_dotted_package_qualifier_e2e.rs"]
+mod backticked_dotted_package_qualifier_e2e;
 #[path = "bridge_result_cast_e2e.rs"]
 mod bridge_result_cast_e2e;
 #[path = "common/bytecode_comparison.rs"]
@@ -12,6 +16,8 @@ mod bytecode_comparison_support;
 mod captured_field_storage_e2e;
 #[path = "captured_receiver_names_e2e.rs"]
 mod captured_receiver_names_e2e;
+#[path = "cast_line_break_e2e.rs"]
+mod cast_line_break_e2e;
 #[path = "cast_operand_reread_e2e.rs"]
 mod cast_operand_reread_e2e;
 #[path = "classfile_low_priority_annotation_e2e.rs"]
@@ -34,6 +40,8 @@ mod reference_compiler_support;
 mod reference_recording_support;
 #[path = "common/reference_targets.rs"]
 mod reference_targets_support;
+#[path = "super_call_vararg_e2e.rs"]
+mod super_call_vararg_e2e;
 #[path = "common/target_diagnostics.rs"]
 mod target_diagnostics_support;
 
@@ -1155,6 +1163,8 @@ mod inherited_reference_owner_e2e;
 mod init_block_lines_e2e;
 #[path = "e2e/inline.rs"]
 mod inline;
+#[path = "inline_member_super_arguments_e2e.rs"]
+mod inline_member_super_arguments_e2e;
 #[path = "inlined_code_inner_classes_e2e.rs"]
 mod inlined_code_inner_classes_e2e;
 #[path = "inlined_lambda_stack_spill_e2e.rs"]
@@ -1279,6 +1289,10 @@ mod java_not_null_null_argument_e2e;
 mod java_parameters_attribute_e2e;
 #[path = "java_platform_type_publication_e2e.rs"]
 mod java_platform_type_publication_e2e;
+#[path = "java_source_constant_e2e.rs"]
+mod java_source_constant_e2e;
+#[path = "java_source_field_initializer_e2e.rs"]
+mod java_source_field_initializer_e2e;
 #[path = "java_source_interop_e2e.rs"]
 mod java_source_interop_e2e;
 mod java_static_modules;
@@ -1607,6 +1621,8 @@ mod primitive_explicit_equals_e2e;
 mod primitive_hash_code_e2e;
 #[path = "public_inline_property_access_e2e.rs"]
 mod public_inline_property_access_e2e;
+#[path = "receiver_type_line_break_e2e.rs"]
+mod receiver_type_line_break_e2e;
 #[path = "reference_carrier_cast_e2e.rs"]
 mod reference_carrier_cast_e2e;
 #[path = "reified_type_arguments_e2e.rs"]
@@ -1619,6 +1635,8 @@ mod safe_call_null_line_e2e;
 mod sam_lambda_parameter_inference_e2e;
 #[path = "same_module_inline_frame_markers_e2e.rs"]
 mod same_module_inline_frame_markers_e2e;
+#[path = "sealed_serializable_e2e.rs"]
+mod sealed_serializable_e2e;
 #[path = "serialization_explicit_companion_e2e.rs"]
 mod serialization_explicit_companion_e2e;
 #[path = "setter_return_line_e2e.rs"]
@@ -1834,6 +1852,8 @@ mod native_concurrency_e2e;
 mod native_const_reference_e2e;
 #[path = "native_context_parameter_sam_e2e.rs"]
 mod native_context_parameter_sam_e2e;
+#[path = "native_cross_file_dispatch_e2e.rs"]
+mod native_cross_file_dispatch_e2e;
 #[path = "native_cross_file_e2e.rs"]
 mod native_cross_file_e2e;
 #[path = "native_data_class_array_rendering_e2e.rs"]
@@ -1924,6 +1944,8 @@ mod native_receiver_property_e2e;
 mod native_reflection_type_checks_e2e;
 #[path = "native_reified_declarations_e2e.rs"]
 mod native_reified_declarations_e2e;
+#[path = "native_runtime_cache_e2e.rs"]
+mod native_runtime_cache_e2e;
 #[path = "native_runtime_e2e.rs"]
 mod native_runtime_e2e;
 #[path = "native_sam_e2e.rs"]
@@ -2461,6 +2483,8 @@ mod secondary_ctor_noprimary_e2e;
 mod secondary_ctor_this_sibling_e2e;
 #[path = "self_call_type_variables_e2e.rs"]
 mod self_call_type_variables_e2e;
+#[path = "serializable_inheritance_e2e.rs"]
+mod serializable_inheritance_e2e;
 #[path = "serializable_noarg_constructor_order_e2e.rs"]
 mod serializable_noarg_constructor_order_e2e;
 #[path = "serializable_value_class_cache_accessor_order_e2e.rs"]

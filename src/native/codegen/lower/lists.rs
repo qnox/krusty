@@ -283,51 +283,25 @@ struct RuntimeEntry<'c> {
 }
 
 impl BodyLowering<'_, '_, '_> {
-    /// `listOf(…)` / `emptyList()`, or `None` when the declaration is something else.
-    ///
-    /// A vararg call arrives with its elements already packed into an `Array<T>`, so the list is
-    /// that array with a header — there is nothing to copy and nothing to count here.
-    pub(super) fn list_construction(
+    /// Realize the selected provider's storage plan, never a callable spelling or substituted
+    /// physical parameter. Packed mutable storage copies the array; readonly storage wraps it.
+    pub(super) fn list_storage_construction(
         &mut self,
-        signature: super::super::super::intrinsics::FunctionSignature<'_>,
-        packs_a_vararg: bool,
+        plan: crate::libraries::ListStorageConstruction,
         args: &[u32],
-    ) -> Option<Result<Option<Value>, Unsupported>> {
-        if !super::super::super::intrinsics::is_collections_facade(signature.owner)
-            || !signature.ret.is_reference()
-        {
-            return None;
-        }
-        match (signature.name, signature.params, args) {
-            ("emptyList", [], []) => Some(self.runtime_call("kt_list_empty", &[], any(), &[])),
-            ("listOf", [], []) => Some(self.runtime_call("kt_list_empty", &[], any(), &[])),
-            ("listOf", [_], []) if packs_a_vararg => {
-                Some(self.runtime_call("kt_list_empty", &[], any(), &[]))
+    ) -> Result<Option<Value>, Unsupported> {
+        use crate::libraries::ListStorageConstruction;
+        match (plan, args) {
+            (ListStorageConstruction::ReadonlyEmpty, []) => {
+                self.runtime_call("kt_list_empty", &[], any(), &[])
             }
-            // A growable list, empty or holding what the vararg call already packed. `mutableListOf`
-            // and `arrayListOf` are the same list under two names; neither may SHARE the vararg
-            // array the way `listOf` does, because a write through the list would reach it.
-            ("mutableListOf" | "arrayListOf", [_], []) if packs_a_vararg => {
-                Some(self.runtime_call("kt_mutable_list_new", &[], any(), &[]))
+            (ListStorageConstruction::MutableEmpty, []) => {
+                self.runtime_call("kt_mutable_list_new", &[], any(), &[])
             }
-            ("mutableListOf" | "arrayListOf", [], []) => {
-                Some(self.runtime_call("kt_mutable_list_new", &[], any(), &[]))
-            }
-            ("mutableListOf" | "arrayListOf", [_], [argument]) if packs_a_vararg => {
-                Some(self.mutable_list_of(*argument))
-            }
-            // Kotlin declares `listOf` twice, and which one this is decides whether the argument
-            // IS the list's elements or is one OF them. Only the selected declaration's PHYSICAL
-            // parameter can say, because a vararg one is an array however its element type was
-            // substituted. The semantic parameter cannot: the single-element overload's is `T`, and
-            // `T` may itself be an array — `listOf(anArray)` takes that overload and answers a list
-            // of one array. Nor can the argument's node shape: `arrayOf(1, 2, 3)` lowers to the
-            // very vararg node a packed call would have, so the two arrive looking identical.
-            ("listOf", [_], [argument]) if packs_a_vararg => Some(self.list_of(*argument)),
-            ("listOf", [element], [value]) if element.is_reference() => {
-                Some(self.list_single(*value))
-            }
-            _ => None,
+            (ListStorageConstruction::ReadonlySingleton, [element]) => self.list_single(*element),
+            (ListStorageConstruction::ReadonlyPacked, [elements]) => self.list_of(*elements),
+            (ListStorageConstruction::MutablePacked, [elements]) => self.mutable_list_of(*elements),
+            _ => Err("a list storage construction with malformed operands".into()),
         }
     }
 
