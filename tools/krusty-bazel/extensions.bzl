@@ -89,9 +89,14 @@ def _krusty_impl(module_ctx):
 krusty_toolchain(
     name = "toolchain",
     compiler = "{executable}",
+    classpath_separator = "{separator}",
     visibility = ["//visibility:public"],
 )
-""".format(toolchain_bzl = str(Label("//:toolchain.bzl")), executable = executable),
+""".format(
+                    toolchain_bzl = str(Label("//:toolchain.bzl")),
+                    executable = executable,
+                    separator = ";" if "windows" in triple else ":",
+                ),
             )
             hosts.append(triple)
     _toolchains_hub(name = "krusty_toolchains", hosts = hosts)

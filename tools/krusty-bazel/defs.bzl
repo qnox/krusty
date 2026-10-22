@@ -109,7 +109,8 @@ def _krusty_jvm_library_impl(ctx):
 
     # `-classpath` takes ONE argument, so the entries are joined here rather than added one by one.
     # `omit_if_empty` keeps a target with no dependencies from passing an empty `-classpath`.
-    args.add_joined("-classpath", compile_jars, join_with = ":", omit_if_empty = True)
+    # The separator is the one the compiler's own platform splits on: `;` on Windows.
+    args.add_joined("-classpath", compile_jars, join_with = compiler.classpath_separator, omit_if_empty = True)
 
     # The project's own kotlinc flags, verbatim.
     args.add_all(ctx.attr.kotlinc_opts)
@@ -122,7 +123,7 @@ def _krusty_jvm_library_impl(ctx):
         ctx.actions.run(
             mnemonic = "KrustyCompile",
             progress_message = "Compiling %%{label} with krusty worker (%d source(s))" % len(ctx.files.srcs),
-            executable = compiler,
+            executable = compiler.executable,
             arguments = [_worker_arguments(ctx, output_jar, compile_jars)],
             inputs = depset(ctx.files.srcs, transitive = [compile_jars, java_runtime.files]),
             outputs = outputs,
@@ -137,7 +138,7 @@ def _krusty_jvm_library_impl(ctx):
         ctx.actions.run(
             mnemonic = "KrustyCompile",
             progress_message = "Compiling %%{label} with krusty (%d source(s))" % len(ctx.files.srcs),
-            executable = compiler,
+            executable = compiler.executable,
             arguments = [args],
             inputs = depset(ctx.files.srcs, transitive = [compile_jars, java_runtime.files]),
             outputs = outputs,

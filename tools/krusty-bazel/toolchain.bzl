@@ -11,7 +11,10 @@ KrustyCompilerFromToolchainInfo = provider(
 )
 
 def _krusty_toolchain_impl(ctx):
-    return [platform_common.ToolchainInfo(compiler = ctx.attr.compiler[DefaultInfo].files_to_run)]
+    return [platform_common.ToolchainInfo(
+        compiler = ctx.attr.compiler[DefaultInfo].files_to_run,
+        classpath_separator = ctx.attr.classpath_separator,
+    )]
 
 krusty_toolchain = rule(
     doc = "One prebuilt krusty compiler, offered to rules through `@krusty//:toolchain_type`.",
@@ -23,6 +26,11 @@ krusty_toolchain = rule(
             allow_single_file = True,
             executable = True,
             cfg = "exec",
+        ),
+        "classpath_separator": attr.string(
+            doc = "What the compiler splits `-classpath` on: `;` on Windows, `:` elsewhere.",
+            default = ":",
+            values = [":", ";"],
         ),
     },
 )
@@ -43,17 +51,19 @@ def krusty_compiler(ctx):
         `@krusty//:toolchain_type` as an optional toolchain.
 
     Returns:
-      The compiler's `FilesToRunProvider`.
+      A struct of the compiler's `FilesToRunProvider` (`executable`) and the separator it splits
+      `-classpath` on (`classpath_separator`). A flag's binary is taken to run on the host Bazel
+      runs on, so it gets the host's separator.
     """
     flag = ctx.attr._krusty
     if KrustyCompilerFromToolchainInfo not in flag:
         compiler = flag[DefaultInfo].files_to_run
         if compiler.executable == None:
             fail("--@krusty//:krusty_binary must name an executable target, not %s" % flag.label)
-        return compiler
+        return struct(executable = compiler, classpath_separator = ctx.configuration.host_path_separator)
     toolchain = ctx.toolchains[Label("//:toolchain_type")]
     if toolchain == None:
         fail("no krusty compiler for this execution platform: this @krusty module has no release " +
              "for it (a source checkout has none at all); set --@krusty//:krusty_binary to a " +
              "krusty executable target")
-    return toolchain.compiler
+    return struct(executable = toolchain.compiler, classpath_separator = toolchain.classpath_separator)
