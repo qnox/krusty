@@ -23,18 +23,18 @@ trap 'rm -rf "$stage"' EXIT
 
 "$project/gradlew" --no-daemon -p "$project" \
   -PkrustyPluginVersion="$version" \
-  clean publishAllPublicationsToReleaseRepository
+  clean test publishAllPublicationsToReleaseRepository
 
 built_jar=$project/build/libs/krusty-gradle-plugin-$version.jar
-published_jar=$project/build/release-repository/dev/krusty/krusty-gradle-plugin/$version/krusty-gradle-plugin-$version.jar
-marker=$project/build/release-repository/krusty/krusty.gradle.plugin/$version/krusty.gradle.plugin-$version.pom
+published_jar=$project/build/release-repository/dev/krustythecompiler/krusty-gradle-plugin/$version/krusty-gradle-plugin-$version.jar
+marker=$project/build/release-repository/dev/krustythecompiler/dev.krustythecompiler.gradle.plugin/$version/dev.krustythecompiler.gradle.plugin-$version.pom
 test -f "$built_jar"
 test -f "$published_jar"
 test -f "$marker"
 cmp "$built_jar" "$published_jar"
-unzip -p "$built_jar" META-INF/gradle-plugins/krusty.properties \
+unzip -p "$built_jar" META-INF/gradle-plugins/dev.krustythecompiler.properties \
   | grep -qx 'implementation-class=krusty.KrustyKotlinPlugin'
-grep -q '<groupId>dev.krusty</groupId>' "$marker"
+grep -q '<groupId>dev.krustythecompiler</groupId>' "$marker"
 grep -q '<artifactId>krusty-gradle-plugin</artifactId>' "$marker"
 grep -q "<version>$version</version>" "$marker"
 
@@ -69,7 +69,7 @@ pluginManagement {
 // build.gradle.kts
 plugins {
     kotlin("jvm") version "$newest_kotlin" // supported: $supported_kotlin
-    id("krusty") version "$version"
+    id("dev.krustythecompiler") version "$version"
 }
 \`\`\`
 
@@ -84,19 +84,20 @@ task and adds no compiler plugin to the compilation; krusty compiles the sources
 Projects applying Gradle's \`kotlin-dsl\` (such as \`buildSrc\`) and Kotlin
 compile tasks outside any source set stay with kotlinc; the plugin logs each task it leaves.
 
-Compile with \`./gradlew -Pkrusty.binary=/path/to/krusty krustyCompile\`.
+Compile with \`./gradlew krustyCompile\`. The plugin downloads the krusty $version compiler for the
+host from its GitHub release; \`-Pkrusty.binary=/path/to/krusty\` runs another binary instead.
 The Kotlin/JVM plugin is an explicit consumer dependency and is not bundled here. This local-repo
 distribution does not claim availability from the Gradle Plugin Portal. A Build Tools API
-\`compilerVersion\` override is rejected; use the compiler version supplied by the selected Kotlin
-Gradle plugin.
+\`compilerVersion\` override, like any request krusty does not implement, leaves that compile task
+to kotlinc.
 Validated Gradle boundaries: 7.6.3, 8.14.3, 9.5.0, and 9.7.0.
 EOF
 
 cat > "$root/manifest.txt" <<EOF
-plugin-id=krusty
+plugin-id=dev.krustythecompiler
 plugin-version=$version
-implementation=dev.krusty:krusty-gradle-plugin:$version
-marker=krusty:krusty.gradle.plugin:$version
+implementation=dev.krustythecompiler:krusty-gradle-plugin:$version
+marker=dev.krustythecompiler:dev.krustythecompiler.gradle.plugin:$version
 kotlin-gradle-plugin=$(paste -sd, <<<"$kotlin_versions")
 gradle=7.6.3,8.14.3,9.5.0,9.7.0
 EOF

@@ -1279,6 +1279,46 @@ where
     })
 }
 
+/// Kotlin compares only the parameters the supplied arguments map to; a parameter left to its
+/// default takes no part. Of two applicable declarations whose compared parameters are identical,
+/// the one omitting fewer defaults wins (`mk()` binds `mk(source = null)` over
+/// `mk(id = "", source = null)`). Declarations with different compared parameters are left to
+/// specificity.
+fn fewest_omitted_defaults_per_supplied_shape<'a>(
+    applicable: Vec<(Vec<Ty>, &'a FunctionInfo)>,
+    args: &[CallArgKind],
+) -> Vec<(Vec<Ty>, &'a FunctionInfo)> {
+    let compared = |params: &[Ty]| {
+        params
+            .iter()
+            .zip(args)
+            .filter(|(_, argument)| !argument.is_omitted_default())
+            .map(|(parameter, _)| *parameter)
+            .collect::<Vec<_>>()
+    };
+    let omitted = |params: &[Ty]| {
+        params.len().saturating_sub(args.len())
+            + args
+                .iter()
+                .filter(|argument| argument.is_omitted_default())
+                .count()
+    };
+    let keys = applicable
+        .iter()
+        .map(|(params, _)| (compared(params), omitted(params)))
+        .collect::<Vec<_>>();
+    applicable
+        .into_iter()
+        .zip(&keys)
+        .filter(|(_, (shape, count))| {
+            !keys
+                .iter()
+                .any(|(other_shape, other_count)| other_shape == shape && other_count < count)
+        })
+        .map(|(candidate, _)| candidate)
+        .collect()
+}
+
 fn declaration_specificity_params(candidate: &FunctionInfo) -> Vec<Ty> {
     let signature = candidate.semantic_signature();
     let mut params = signature
@@ -1428,19 +1468,23 @@ fn best_by_args_at_priority_with_ties<'a>(
         CandidateSelectionWithTies::None => {}
     }
 
-    match source_aware_most_specific_with_ties(
-        cands.iter().filter_map(|(candidate, params)| {
-            (candidate.call_sig.required == 0 || candidate.call_sig.required <= args.len())
-                .then(|| {
-                    omitted_parameter_shape(params, args, |position, param, arg| {
-                        fits(position, param, arg) || adapts(param, arg, position)
+    let omitted_applicable = fewest_omitted_defaults_per_supplied_shape(
+        cands
+            .iter()
+            .filter_map(|(candidate, params)| {
+                (candidate.call_sig.required == 0 || candidate.call_sig.required <= args.len())
+                    .then(|| {
+                        omitted_parameter_shape(params, args, |position, param, arg| {
+                            fits(position, param, arg) || adapts(param, arg, position)
+                        })
+                        .map(|shape| (shape, *candidate))
                     })
-                    .map(|shape| (shape, *candidate))
-                })
-                .flatten()
-        }),
-        specificity,
-    ) {
+                    .flatten()
+            })
+            .collect(),
+        args,
+    );
+    match source_aware_most_specific_with_ties(omitted_applicable.into_iter(), specificity) {
         CandidateSelectionWithTies::Selected(candidate) => {
             return CandidateSelectionWithTies::Selected(candidate);
         }

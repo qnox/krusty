@@ -33,7 +33,9 @@ pub use binary_reference_tokens::BinaryReferenceTokens;
 pub(crate) use call_shape::explicit_call_receiver;
 pub use call_shape::{first_lambda_param_or_it, lambda_params_or_implicit};
 pub use constructors::{CtorDelegation, CtorDelegationCall, PrimaryCtorLines, SecondaryCtor};
-pub use declaration_prefixes::{DeclarationPrefix, DeclarationPrefixes};
+pub use declaration_prefixes::{
+    DeclarationPrefix, DeclarationPrefixes, ModifierKeyword, WrittenModifiers,
+};
 pub use destructuring::{DestructureProperty, DestructuringSyntax};
 pub use external_modifier_targets::{ExternalModifierTarget, ExternalModifierUse};
 pub use import_path::ImportPath;

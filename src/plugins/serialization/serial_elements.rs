@@ -17,9 +17,10 @@
 //! it, so the class's own generators address only their own fields, offset by the inherited count;
 //! the wire-shape generators address every element ([`SerialElements::wire`]).
 
+use crate::fx_hash::HashMap;
 use crate::ir::{ClassId, IrConst, IrFile};
 use crate::plugins::PluginContext;
-use crate::types::{type_name, Ty};
+use crate::types::{ty_subst_keep_unbound, type_name, Ty};
 
 use super::{custom_serializer_of, serializer_name, SERIALIZABLE_FQ, TRANSIENT_FQ};
 
@@ -27,6 +28,12 @@ use super::{custom_serializer_of, serializer_name, SERIALIZABLE_FQ, TRANSIENT_FQ
 /// backing field of each of its own, in element (declaration) order.
 pub(super) struct SerialElements {
     parent: Option<ClassId>,
+    /// The type arguments the class gives its serializable superclass, in the superclass's
+    /// type-parameter order. Empty for a non-generic superclass.
+    parent_type_arguments: Vec<Ty>,
+    /// Every ancestor's type parameter, by semantic identity, as the class sees it: an inherited
+    /// element declared `T` in a generic superclass has the class's type argument for `T`.
+    inherited_bindings: HashMap<String, Ty>,
     inherited: Vec<ElementSource>,
     fields: Vec<usize>,
 }
@@ -62,8 +69,20 @@ impl SerialElements {
     pub(super) fn of(ctx: &PluginContext, ir: &IrFile, class_id: ClassId) -> Self {
         let fields = own_fields(ir, class_id);
         let parent = serializable_superclass(ctx, ir, class_id);
+        let mut parent_type_arguments = Vec::new();
+        let mut inherited_bindings = HashMap::default();
         let inherited = parent.map_or_else(Vec::new, |parent| {
             let parent_elements = SerialElements::of(ctx, ir, parent);
+            parent_type_arguments = superclass_type_arguments(ir, class_id, parent);
+            let formals = type_parameter_identities(ir, parent);
+            let own: HashMap<String, Ty> = formals
+                .into_iter()
+                .zip(parent_type_arguments.iter().copied())
+                .collect();
+            for (identity, ty) in &parent_elements.inherited_bindings {
+                inherited_bindings.insert(identity.clone(), ty_subst_keep_unbound(*ty, &own));
+            }
+            inherited_bindings.extend(own);
             parent_elements.sources_of(parent).collect()
         });
         crate::trace_compiler!(
@@ -73,9 +92,16 @@ impl SerialElements {
         );
         SerialElements {
             parent,
+            parent_type_arguments,
+            inherited_bindings,
             inherited,
             fields,
         }
+    }
+
+    /// The type arguments the class gives its serializable superclass.
+    pub(super) fn parent_type_arguments(&self) -> &[Ty] {
+        &self.parent_type_arguments
     }
 
     /// The serializable superclass whose elements precede the class's own.
@@ -111,12 +137,19 @@ impl SerialElements {
             };
             let class_properties = &properties[index].1;
             let (name, ty) = class_properties.fields[source.field].clone();
+            let mut serializer_ty = class_properties.serializer_types[source.field];
+            let ty = if source.class == class_id {
+                ty
+            } else {
+                serializer_ty = ty_subst_keep_unbound(serializer_ty, &self.inherited_bindings);
+                ty_subst_keep_unbound(ty, &self.inherited_bindings)
+            };
             wire.push(WireElement {
                 class: source.class,
                 field: source.field,
                 name,
                 ty,
-                serializer_ty: class_properties.serializer_types[source.field],
+                serializer_ty,
             });
         }
         wire
@@ -165,11 +198,30 @@ fn serializable_superclass(ctx: &PluginContext, ir: &IrFile, class_id: ClassId) 
         && custom_serializer_of(ctx, ir, parent).is_none()
         && !class.is_enum
         && !class.is_object
-        && !class.is_value
-        && ir
-            .class_signature_name(superclass)
-            .is_none_or(|signature| signature.type_params.is_empty());
+        && !class.is_value;
     generated.then_some(parent)
+}
+
+/// The type arguments `class_id`'s supertype gives `parent`.
+fn superclass_type_arguments(ir: &IrFile, class_id: ClassId, parent: ClassId) -> Vec<Ty> {
+    let parent_name = ir.classes[parent as usize].fq_name_id();
+    ir.classes[class_id as usize]
+        .supertypes
+        .iter()
+        .find(|supertype| supertype.kotlin_class_internal() == Some(parent_name))
+        .map_or_else(Vec::new, |supertype| supertype.type_args().to_vec())
+}
+
+/// The semantic identity of each of `class_id`'s own type parameters, in declaration order.
+pub(super) fn type_parameter_identities(ir: &IrFile, class_id: ClassId) -> Vec<String> {
+    ir.class_signature_name(ir.classes[class_id as usize].fq_name_id())
+        .map_or_else(Vec::new, |signature| {
+            signature
+                .type_params
+                .iter()
+                .map(|parameter| parameter.semantic_name.clone())
+                .collect()
+        })
 }
 
 /// Per-FIELD facts about a serializable class's properties, as the body generators consume them.
