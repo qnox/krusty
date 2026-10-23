@@ -128,7 +128,6 @@ internal fun registerVerifyCompile(
 /** krusty's compile of one compilation kotlinc compiled too, recorded by `krusty verify-compile`. */
 abstract class KrustyVerifyCompileTask @Inject constructor(
     private val execOperations: ExecOperations,
-    private val fileSystemOperations: FileSystemOperations,
 ) : KrustyCompilation() {
     @get:Input
     abstract val compilationPath: Property<String>
@@ -161,9 +160,9 @@ abstract class KrustyVerifyCompileTask @Inject constructor(
 
     @TaskAction
     fun verify() {
+        // verify-compile empties its destination itself, once it has proven it apart from
+        // kotlinc's output; nothing is deleted here first.
         val destination = krustyClasses.get().asFile
-        fileSystemOperations.delete { delete(destination) }
-        destination.mkdirs()
         val arguments = mutableListOf(
             "verify-compile",
             "--reference", reference.get().asFile.absolutePath,
@@ -175,13 +174,18 @@ abstract class KrustyVerifyCompileTask @Inject constructor(
         taskTimings.get().millis(compilationPath.get())?.let {
             arguments.addAll(listOf("--kotlinc-millis", it.toString()))
         }
-        refusals.asFile.orNull?.takeIf { it.length() > 0 }?.let {
-            arguments.addAll(listOf("--unsupported-from", it.absolutePath))
+        val refused = refusals.asFile.orNull?.takeIf { it.length() > 0 }
+        // Always the compilation's sources, so a compilation without Kotlin sources is recorded as
+        // such and an earlier run's record never stands in for this one. A refused request is not
+        // translated (its translation is what krusty refuses): its sources and destination are
+        // enough for an unsupported record.
+        if (refused != null) {
+            arguments.addAll(listOf("--unsupported-from", refused.absolutePath, "--", "-d", destination.absolutePath))
+            arguments.addAll(sourceFiles.asFileTree.files.map(File::getAbsolutePath).sorted())
+        } else {
+            arguments.add("--")
+            arguments.addAll(krustyArguments(sources(), destination))
         }
-        // Always the full request: without Kotlin sources the record says so, and an earlier run's
-        // record never stands in for this one.
-        arguments.add("--")
-        arguments.addAll(krustyArguments(sources(), destination))
         val output = ByteArrayOutputStream()
         val result = execOperations.exec {
             executable = binary.get().asFile.absolutePath

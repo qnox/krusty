@@ -131,10 +131,11 @@ and krusty's peak memory. kotlinc compiles every source again for the comparison
 full compile's too.
 
 Please submit the report: its button opens a prefilled GitHub issue, or paste
-`krusty-verify-issue.md`. It is anonymized: totals, difference kinds, unsupported requests with paths
-masked, and the shape of krusty's errors without their locations or the identifiers they quote; no
-compilation, class or member name. `-Pkrusty.verify.shareNames=true` names them, for an issue you
-are free to share in full.
+`krusty-verify-issue.md`. It holds totals, difference kinds and unsupported requests with paths
+masked, and no compilation, class or member name. krusty's errors are masked by rule (their wording
+up to the first colon, with quoted text and identifier-like words replaced), which cannot promise
+to catch every name, so review the issue before you submit it. `-Pkrusty.verify.shareNames=true`
+names compilations and keeps errors whole, for an issue you are free to share in full.
 
 ## Features
 

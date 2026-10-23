@@ -170,12 +170,8 @@ fn verify_task_reports_only_the_current_invocation() {
             ),
         ]
     );
-    assert_eq!(
-        std::fs::read_dir(records.join("compileKotlin/classes"))
-            .expect("krusty's classes")
-            .count(),
-        0
-    );
+    // verify-compile cleared the earlier invocation's classes and compiled nothing.
+    assert!(!records.join("compileKotlin/classes").exists());
 
     let report_dir = root.join("build/reports/krusty-verify");
     let mut written = std::fs::read_dir(&report_dir)
@@ -207,6 +203,78 @@ fn verify_task_reports_only_the_current_invocation() {
     assert!(!issue.contains("peak memory"), "{issue}");
 
     let _ = std::fs::remove_dir_all(root);
+}
+
+/// A Kotlin Gradle plugin release krusty does not support (exactly, not by its nearest release),
+/// from the packaged plugin: kotlinc compiles both compilations and ships them, and each gets a
+/// fresh unsupported record although its request is never translated for krusty.
+#[test]
+#[ignore = "downloads Gradle and the Kotlin Gradle plugin"]
+fn verify_task_reports_an_unsupported_kotlin_gradle_plugin() {
+    let fixture = IntegrationFixture::new("krusty-verify-kgp", write_unsupported_kgp_build);
+    let root = &fixture.root;
+    let output = fixture
+        .build()
+        .tasks(["krustyVerify"])
+        .run_output()
+        .unwrap_or_else(|error| panic!("{error}"));
+    let supported = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../kotlin-versions"),
+    )
+    .expect("the kotlin-versions manifest")
+    .lines()
+    .filter_map(|line| line.split_whitespace().next())
+    .filter(|version| !version.starts_with('#'))
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+    let (last, earlier) = supported.split_last().expect("a supported release");
+    let reason = format!(
+        "unsupported Kotlin Gradle plugin {UNSUPPORTED_KGP}; expected {}, or {last}",
+        earlier.join(", ")
+    );
+    let reports = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("krusty verify: "))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reports,
+        [
+            format!("krusty verify: :compileKotlin: unsupported, left to kotlinc: {reason}"),
+            format!("krusty verify: :compileTestKotlin: unsupported, left to kotlinc: {reason}"),
+            "krusty verify: 0/2 compilations compiled (0 byte-identical), 0 failed, 2 unsupported; n/a of classes byte-identical".to_string(),
+        ],
+        "{output}"
+    );
+    assert!(root
+        .join("build/classes/kotlin/main/app/Point.class")
+        .is_file());
+    assert!(root
+        .join("build/classes/kotlin/test/app/PointTest.class")
+        .is_file());
+    let issue =
+        std::fs::read_to_string(root.join("build/reports/krusty-verify/krusty-verify-issue.md"))
+            .expect("issue");
+    assert!(issue.contains(&format!("| {reason} | 2 |\n")), "{issue}");
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A Kotlin Gradle plugin release that exists and that the kotlin-versions manifest does not list.
+const UNSUPPORTED_KGP: &str = "2.3.20";
+
+fn write_unsupported_kgp_build(root: &Path, plugin_version: &str, _kgp_version: &str) {
+    write_verify_build(root, plugin_version, UNSUPPORTED_KGP);
+    // The extra-warnings switch is beside the point here; the plugin release alone is refused.
+    let build = root.join("build.gradle.kts");
+    let script = std::fs::read_to_string(&build).expect("build script");
+    let plain = script
+        .split("// krusty leaves a compile asking for extra warnings")
+        .next()
+        .expect("the build before the warning switch")
+        .to_string();
+    std::fs::write(&build, plain).expect("build script");
 }
 
 /// A report line without the time and memory it measured: `… (0.4 s, 94 MB peak)`.
