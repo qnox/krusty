@@ -20059,6 +20059,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   that lambda's result. Lambdas whose inputs never become known keep source order. The same semantic
   substitution applies to ordinary, local, sibling-source, and dependency classifiers, including
   value-class type arguments; their physical representation remains a backend decision.
+  A checked constructor that replaces a provisional declaration exposes the same generic template
+  before contextual checking. Named argument reordering and a same-spelled enclosing function
+  formal do not change which classifier-owned parameter the sibling argument binds.
   Tests: `tests/generic_ctor_lambda_targs_e2e.rs`.
 
 - **A property's constructed type is inferred from any declaration origin, but only where the

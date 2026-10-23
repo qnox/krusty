@@ -5,6 +5,14 @@ front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
 
+## Checked constructor signature normalization
+
+Normalize the merged constructor inventory through the existing declaration-to-generic-signature
+operation before contextual argument shaping. A checked declaration that replaces a provisional
+constructor retains its stable identity and exposes the same classifier-owned formal template to
+lambda expectations, eager analysis and selection. Reordered named arguments and same-spelled
+caller/classifier formals use the ordinary mapper and substitution path.
+
 KLIB dependency-emission categories have disjoint declaration-owned roots before lowering begins.
 An authenticated intrinsic wrapper keeps that ownership when its body transaction declines; the
 ordinary-body category cannot retry it and turn the target decline into an ordinary-closure error.

@@ -1,5 +1,10 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+The checked constructor overlay retains stable declaration identities while its merged inventory
+normalizes generic signatures from the classifier's formal layout. Semantic lambda parameter
+templates remain available before argument checking; physical constructor parameters and serialized
+metadata layouts are unchanged.
+
 Wasm's erased-reference binary equality realization uses the already checked operator and the
 runtime GC representation. It changes no metadata, callable identity, or provider authorization;
 explicit dependency `Any.equals` realization remains a separate authenticated-callable contract.
