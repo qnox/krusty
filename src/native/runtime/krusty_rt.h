@@ -117,6 +117,9 @@ typedef struct KType {
     const char *simple_name;
     uint32_t simple_name_length;
     uint32_t class_names;
+    /* Exact Collection.size getter of a program class, through a typed virtual thunk. This is
+       independent of the Iterable walk: a plain Iterable must never be sized by iteration. */
+    kt_int (*collection_size)(struct KObject *self);
 } KType;
 
 /* What a descriptor publishes about its class's names, in `KType.class_names`.
@@ -393,6 +396,7 @@ kt_int kt_list_size(KRef list);
 kt_boolean kt_list_is_empty(KRef list);
 /* `Collection.size`: a list's, a set's or a map view's, decided by the descriptor. */
 kt_int kt_collection_size(KRef collection);
+kt_int kt_collection_size_or_default(KRef iterable, kt_int fallback);
 kt_boolean kt_collection_is_empty(KRef collection);
 kt_boolean kt_collection_contains_all(KRef self, KRef elements);
 /* `MutableCollection`'s members over a growable list or a set (or a map view, which removes and
@@ -1009,6 +1013,20 @@ KRef kt_throwable_new(const KType *type, KRef message);
 KRef kt_throwable_new_with_cause(const KType *type, KRef message, KRef cause);
 KRef kt_throwable_new_from_cause(const KType *type, KRef cause);
 
+/* A construction that leaves every parameter to its declared default. Only `NotImplementedError`
+   declares one among the runtime's throwables -- its message -- and the runtime, which is that
+   class's implementation here, owns the value; any other type gets Kotlin's `null` message. */
+KRef kt_throwable_new_defaulted(const KType *type);
+
+/* `kotlin.Result`'s failed state, and kotlin-test's `checkResultIsFailure` over one. */
+extern const KType kt_type_result_failure;
+KRef kt_result_failure_new(KRef exception);
+KRef kt_check_result_is_failure(KRef expected, KRef message, KRef result);
+/* A `Result` held where its class is not known statically, and the value back out of one. */
+extern const KType kt_type_result;
+KRef kt_result_box(KRef value);
+KRef kt_result_unbox(KRef box);
+
 /* `cause?.toString()`, for a subclass of `Throwable` the generator lays out itself: it writes the
    two fields in place and needs the same rendering `kt_throwable_new_from_cause` performs. */
 KRef kt_throwable_message_of_cause(KRef cause);
@@ -1084,6 +1102,8 @@ kt_int kt_reference_hash_code(KRef self);
    canonical instances has to exist. The descriptor itself lives in static storage, so the object
    holds a pointer the collector neither traces nor needs to. */
 extern const KType kt_type_kclass;
+/* The type a `KClass` stands for. */
+const KType *kt_class_type(KRef literal);
 KRef kt_class_of(KRef value);
 /* Named for the FORM rather than for what it takes: `kt_class_for` is the collector's own
    size-class helper, and a freestanding program links one namespace. */

@@ -2775,13 +2775,18 @@ pub struct SymbolTable {
 /// reparsed.
 pub(crate) struct PassTwoSymbols {
     compilation_id: u64,
-    libraries: Box<dyn SemanticPlatform>,
+    libraries: std::rc::Rc<dyn SemanticPlatform>,
     native_plugins: crate::plugins::registry::NativePlugins,
 }
 
 impl PassTwoSymbols {
     pub(crate) fn semantic_platform(&self) -> &dyn SemanticPlatform {
         &*self.libraries
+    }
+
+    /// A shared handle on the platform, for a consumer that outlives one borrow of these symbols.
+    pub(crate) fn shared_semantic_platform(&self) -> std::rc::Rc<dyn SemanticPlatform> {
+        std::rc::Rc::clone(&self.libraries)
     }
 
     pub(crate) fn native_plugins(&self) -> &crate::plugins::registry::NativePlugins {
@@ -2793,7 +2798,7 @@ impl SymbolTable {
     pub(crate) fn into_pass_two_symbols(self) -> PassTwoSymbols {
         PassTwoSymbols {
             compilation_id: self.compilation_id,
-            libraries: self.libraries,
+            libraries: std::rc::Rc::from(self.libraries),
             native_plugins: self.native_plugins,
         }
     }
@@ -65126,6 +65131,9 @@ impl<'a> Checker<'a> {
             flags: SigFlags::default()
                 .with_is_operator(member.is_operator())
                 .with_is_suspend(member.suspend())
+                .with_is_inline(member.inline.can_inline())
+                .with_requires_splice(member.inline.must_inline())
+                .with_has_reified_type_params(member.reified)
                 .with_is_final(true)
                 .with_vararg(vararg_index.is_some()),
             annotations: member.annotations.clone(),

@@ -161,7 +161,7 @@ conformance-all-plain:
     just wasm-conformance-run wasm-js "$(just conformance-bin)" "$(just max-version)"
     just wasm-conformance-run wasm-wasi "$(just conformance-bin)" "$(just max-version)"
     just wasm-conformance-regressions "$(just conformance-bin)" "$(just max-version)"
-    KRUSTY_MULTIMODULE_CONFORMANCE_RUNNER=jvm ./run-tests.sh --test conformance -- --skip kotlin_codegen_box_conformance --skip kotlin_box_native_conformance:: --skip kotlin_box_wasm_conformance:: --test-threads=$(n=$(nproc 2>/dev/null || sysctl -n hw.ncpu); [ "$n" -gt 4 ] && n=4; echo $n)
+    ./run-tests.sh --test conformance -- --skip kotlin_codegen_box_conformance --skip kotlin_box_native_conformance:: --skip kotlin_box_wasm_conformance:: --test-threads=$(n=$(nproc 2>/dev/null || sysctl -n hw.ncpu); [ "$n" -gt 4 ] && n=4; echo $n)
 
 # Run all conformance tests for one runtime-selected Kotlin version. The shared Cargo target avoids
 # per-version rebuilds; the reference compiler and corpus are provisioned on demand.
@@ -188,7 +188,7 @@ conformance-one VERSION:
     export KRUSTY_DEPS_CACHE="${KRUSTY_DEPS_CACHE:-$PWD/target/cache/krusty-deps}"
     bash scripts/target-conformance-regressions.sh wasm "$bin" "$v"
     conf_threads="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"; [ "$conf_threads" -gt 4 ] && conf_threads=4
-    KRUSTY_MULTIMODULE_CONFORMANCE_RUNNER=jvm ./run-tests.sh --test conformance -- --skip kotlin_codegen_box_conformance --skip kotlin_box_native_conformance:: --skip kotlin_box_wasm_conformance:: --test-threads="$conf_threads"
+    ./run-tests.sh --test conformance -- --skip kotlin_codegen_box_conformance --skip kotlin_box_native_conformance:: --skip kotlin_box_wasm_conformance:: --test-threads="$conf_threads"
 
 # Measure test coverage — regions, functions, lines and BRANCHES — via LLVM source-based coverage
 # (nightly, `-Zcoverage-options=branch`). Runs an instrumented build + the own suite in parallel and

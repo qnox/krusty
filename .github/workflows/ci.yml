@@ -495,6 +495,10 @@ jobs:
         if: matrix.target == 'native'
         id: native_box
         continue-on-error: true
+        # Complete migration runs exceeded the former 600-second corpus budget. Keep ordinary
+        # and focused deadlines unchanged; a corpus timeout still fails this row.
+        env:
+          KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS: "1800"
         run: |
           chmod +x conformance-bin
           just native-conformance-run "$PWD/conformance-bin" "${{ matrix.version }}" native-pct.txt
