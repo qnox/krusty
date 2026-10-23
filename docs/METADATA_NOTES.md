@@ -4,6 +4,12 @@ Goal: emit `@kotlin.Metadata` so krusty output is consumable as a **Kotlin** lib
 need only the signatures, already matched in Phase 5a). This is the single largest remaining piece —
 effectively a re-implementation of `kotlinx-metadata-jvm`'s writer.
 
+## Shared-target compiler/plugin model artifacts
+
+The Rust compiler/plugin model tracks checkout identity as a Cargo input, so a shared target cannot
+reuse another checkout's incompatible declaration structure. No serialized plugin fields, protocol
+versions, classfile metadata or annotation payloads change.
+
 ## KLIB emission root categories
 
 KLIB dependency-root classification retains authenticated intrinsic-support ownership independently

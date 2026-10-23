@@ -9,6 +9,14 @@ KLIB dependency-emission categories have disjoint declaration-owned roots before
 An authenticated intrinsic wrapper keeps that ownership when its body transaction declines; the
 ordinary-body category cannot retry it and turn the target decline into an ordinary-closure error.
 
+## Shared-target plugin model identity
+
+The compiler/plugin IR crate records the existing checkout build input in Rust dep-info. Switching
+checkouts rebuilds that checkout's typed model and its consumers without cleaning shared storage;
+repeating a build in the same checkout retains cached artifacts. A two-checkout Cargo regression
+copies the real crate, changes its model API, and checks A → B → B → A → A outputs and cache reuse.
+This changes no plugin wire format or Kotlin semantics.
+
 ## Constructor parameter annotation pool order
 
 The JVM constructor header seeder carries retained checked applications rather than descriptor-only
