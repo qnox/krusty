@@ -29,6 +29,12 @@ runtime/binary retention with nested annotations, arrays, class literals and nul
 
 ## Constructor-property annotation publication order
 
+Generic annotation owner syntax and its selected alias identity survive to the checking scope.
+Element substitution and nested constant folding consume the checked applied owner/constructor
+types, never an erased parameter list or a fresh lookup by annotation spelling. This changes no
+annotation wire format. JVM generic class/member `Signature` attributes use the same formatter as
+ordinary declarations, with the existing physical `KClass`-to-`Class` annotation representation.
+
 The stable property index receives checked applied-annotation payloads only after every source
 annotation class has published its target policy. Per-file checking releases its TypeInfo while
 retaining just folded values, explicit use sites and the property identity until that partition.

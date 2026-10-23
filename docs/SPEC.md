@@ -19847,6 +19847,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   application consumes them—never as fabricated names and never at inert property, field,
   parameter, or local positions. Tests: `tests/annotation_emission_e2e.rs`.
 
+- **Generic annotation applications retain their selected types.** A nested annotation value is
+  an ordinary constructor call: explicit and inferred classifier arguments participate in selection
+  and survive constant folding. An annotation owner's written arguments, including a selected
+  typealias expansion, specialize its semantic element template before checking values. Resolving
+  another alias to the same classifier does not authorize using its template. Direct array slots
+  and fixed constructor declaration parameters supply literal element context; a constructor's
+  symbolic array parameter keeps its own inference evidence rather than taking the enclosing
+  result's expected type. JVM annotation interfaces retain generic class and element signatures.
+  Whole output inventories and complete negative diagnostics are compared in
+  `tests/generic_annotation_construction_e2e.rs`. Written inner applications check own bounds with
+  their enclosing arguments retained; `tests/where_bound_arguments_e2e.rs` covers construction.
+
 - **A vararg constructor property is an array; a body property at the same index is not.**
   `class Bag(vararg val values: Int)` stores `values` as `IntArray`. Constructor parameters and
   body properties are each numbered from zero, so the first body property is not that parameter.

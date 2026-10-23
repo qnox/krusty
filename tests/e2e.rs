@@ -1066,6 +1066,7 @@ mod function_type_supertype_e2e;
 mod function_typed_property_e2e;
 #[path = "function_value_conversion_e2e.rs"]
 mod function_value_conversion_e2e;
+mod generic_annotation_construction_e2e;
 #[path = "generic_argument_wildcards_e2e.rs"]
 mod generic_argument_wildcards_e2e;
 #[path = "generic_arity_overload_e2e.rs"]

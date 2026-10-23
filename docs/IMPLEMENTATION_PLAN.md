@@ -32,6 +32,13 @@ of the cross-file publication and configured default-target-mode follow-ups.
 
 ## Constructor-property annotation publication
 
+Generic annotation construction uses the ordinary constructor selector and records the applied
+result. The parser retains complete annotation-owner type syntax until checking; the bound
+classifier/alias facet owns later metadata publication. Provider parameter lists keep symbolic
+constructor templates, while erased callable parameters remain physical ABI facts. Fixed array
+parameter context comes from the agreed constructor declaration, independently of result inference.
+JVM annotation signatures use the existing classifier writer and signature formatter.
+
 Publish checked PROPERTY-targeted constructor-parameter applications by stable property identity,
 so plugin constructor selection sees the same folded payload as common IR. Keep parameter and
 accessor sites separate. Pure serialization runtime fixtures explicitly supply the compile-time
