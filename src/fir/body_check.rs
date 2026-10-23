@@ -183,6 +183,16 @@ pub enum CheckedBodyParameterNameBinding {
     /// The physical source parameter remains part of the body contract, but this body's lexical
     /// name resolves to another semantic declaration (a primary-constructor property).
     PhysicalOnly,
+    /// The script implicit receiver with this ordinal, which has no source name. A script
+    /// statement reads it as the implicit receiver, see [`script_receiver_binding`].
+    ScriptReceiver(u32),
+}
+
+/// The lexical binding of a script statement's implicit receiver `ordinal`. The spelling cannot be
+/// written as a Kotlin name, so only the receiver's materialization finds it, and a lambda or local
+/// function in the statement captures it like any other value.
+fn script_receiver_binding(ordinal: u32) -> String {
+    format!("<script receiver {ordinal}>")
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -468,17 +478,26 @@ fn bind_parameters_and_check_defaults(
         {
             continue;
         }
-        let value = if parameter.name == "_"
-            || parameter.name_binding == CheckedBodyParameterNameBinding::PhysicalOnly
-        {
-            checker.allocate_local()
-        } else {
-            checker.bind_local(parameter.name, parameter.ty)
+        let value = match parameter.name_binding {
+            CheckedBodyParameterNameBinding::PhysicalOnly => checker.allocate_local(),
+            CheckedBodyParameterNameBinding::ScriptReceiver(ordinal) => {
+                checker.bind_local(&script_receiver_binding(ordinal), parameter.ty)
+            }
+            CheckedBodyParameterNameBinding::Lexical if parameter.name == "_" => {
+                checker.allocate_local()
+            }
+            CheckedBodyParameterNameBinding::Lexical => {
+                checker.bind_local(parameter.name, parameter.ty)
+            }
         };
         let origin = checker.origins.source(checker.source, parameter.span);
-        checker
-            .body
-            .add_parameter(FirValueParameter::bound(origin, value, parameter.ty));
+        let parameter_record = match parameter.name_binding {
+            CheckedBodyParameterNameBinding::ScriptReceiver(ordinal) => {
+                FirValueParameter::script_receiver(origin, value, parameter.ty, ordinal)
+            }
+            _ => FirValueParameter::bound(origin, value, parameter.ty),
+        };
+        checker.body.add_parameter(parameter_record);
         if parameter.inline_expansion_mode() == crate::types::InlineExpansionMode::Splice {
             checker.body.add_spliced_inline_parameter(value);
         }
@@ -848,6 +867,12 @@ impl BodyFirChecker<'_> {
                 )
             })
             .and(enclosing_classifier)
+            // A script's implicit receivers follow its template's constructor parameters instead.
+            .filter(|classifier| {
+                !index
+                    .declaration_header(classifier.declaration)
+                    .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::SCRIPT))
+            })
             .and_then(|classifier| index.classifier_header(classifier.declaration))
             .map(|classifier| {
                 u32::try_from(classifier.context_parameters.len())

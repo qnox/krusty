@@ -2569,6 +2569,7 @@ reified/multipleTypeParameters.kt
 reified/noValueParameters.kt
 reified/parameterSwap.kt
 reified/reifiedIntersectionType.kt
+reified/reifiedIntersectionTypeArgument.kt
 reified/reifiedIntersectionTypeArgumentCrossModule.kt
 reified/safecast.kt
 reified/spreads.kt
