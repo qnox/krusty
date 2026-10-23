@@ -938,8 +938,7 @@ pub fn actualization(
                 | DeclarationKind::TypeAlias
                 | DeclarationKind::Accessor
                 | DeclarationKind::Initializer
-                | DeclarationKind::EnumEntry
-                | DeclarationKind::Script => true,
+                | DeclarationKind::EnumEntry => true,
             })
             .collect::<Vec<_>>();
         (matching.len() == 1).then(|| matching[0])
@@ -1030,7 +1029,6 @@ pub fn actualization(
             | (DeclarationKind::Accessor, _)
             | (DeclarationKind::Initializer, _)
             | (DeclarationKind::EnumEntry, _)
-            | (DeclarationKind::Script, _)
             | (DeclarationKind::Function, _)
             | (DeclarationKind::Property, _)
             | (DeclarationKind::Classifier, _)

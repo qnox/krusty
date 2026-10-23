@@ -363,6 +363,15 @@ impl SymbolSource for DependencyPlatform {
             .or_else(|| self.platform.generated_serializer_singleton(classifier))
     }
 
+    fn serializable_class_elements(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::types::SerializableClassElements> {
+        self.source()
+            .serializable_class_elements(classifier)
+            .or_else(|| self.platform.serializable_class_elements(classifier))
+    }
+
     fn sam_with_receiver_annotations(&self) -> &[TypeName] {
         &self.symbols.sam_with_receiver_annotations
     }

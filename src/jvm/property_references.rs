@@ -292,7 +292,8 @@ pub(super) fn realize(
                 return Err(PropertyReferenceRealizationTarget::Invalid);
             }
             FirCallableReferenceBinding::Static
-                if receiver.is_some() || semantic_receiver.is_some() =>
+                if receiver.is_some()
+                    || semantic_receiver.is_some_and(|owner| !is_script_class(ir, owner)) =>
             {
                 return Err(PropertyReferenceRealizationTarget::Invalid);
             }
@@ -340,6 +341,14 @@ pub(super) fn realize(
     Ok(realizations)
 }
 
+/// Whether `owner` is a script's class, whose properties kotlinc reflects without a dispatch
+/// receiver.
+fn is_script_class(ir: &IrFile, owner: TypeName) -> bool {
+    ir.classes
+        .iter()
+        .any(|class| class.is_script && class.fq_name == owner)
+}
+
 /// Choose each class's `$$delegatedProperties` for the delegated operands [`realize`] found, once
 /// dependency calls and companion storage are realized: an operand an inline operator never reads
 /// is `null` instead and takes no slot. Waiting for companion storage makes the owner's complete
@@ -371,8 +380,14 @@ fn synthesize_delegated(
     if !declaration.context_parameters.is_empty() {
         return Err(failure);
     }
+    // A script's property is reflected without the script instance holding it.
     let receiver_arity = if declaration.companion_associated {
         0
+    } else if declaration
+        .owner
+        .is_some_and(|owner| is_script_class(ir, owner))
+    {
+        usize::from(declaration.extension_receiver.is_some())
     } else {
         usize::from(declaration.owner.is_some())
             + usize::from(declaration.extension_receiver.is_some())

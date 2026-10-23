@@ -1664,6 +1664,8 @@ KRef kt_class_literal(const KType *type) {
     return (KRef)literal;
 }
 
+const KType *kt_class_type(KRef literal) { return ((const KClass *)literal)->described; }
+
 KRef kt_class_of(KRef value) {
     if (value == NULL) {
         kt_null_receiver();

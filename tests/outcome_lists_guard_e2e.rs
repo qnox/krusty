@@ -106,6 +106,241 @@ const NOT_APPLICABLE: &str = "tests/box_expected_not_applicable/jvm/2.4.20.txt";
 const CLI_FAILURES: &str = "tests/cli_expected_failures/jvm/2.4.20.txt";
 const CLI_NOT_APPLICABLE: &str = "tests/cli_expected_not_applicable/jvm/2.4.20.txt";
 const KLIB_UNCOVERED: &str = "tests/klib_uncovered_implementations/native/2.4.20.txt";
+const MIGRATIONS: &str = "scripts/outcome-list-migrations.tsv";
+
+fn migration_row(repo: &Repo, base: &str) -> String {
+    let old = repo.git(&["rev-parse", &format!("{base}:{FAILURES}")]);
+    let new = repo.git(&["hash-object", FAILURES]);
+    format!("tests/box_expected_failures/native-klib\t2.4.20\t{old}\t{new}\t2459\n")
+}
+
+fn added_failure_diagnostic(paths: &[&str]) -> String {
+    let mut message = format!("outcome-lists: {FAILURES} gains {} entries:\n", paths.len());
+    if paths.len() == 1 {
+        message = format!("outcome-lists: {FAILURES} gains 1 entry:\n");
+    }
+    for path in paths {
+        message.push_str(&format!("    {path}\n"));
+    }
+    message.push_str("outcome-lists: platform/version expectations only shrink; fix the files above instead of listing them\n");
+    message
+}
+
+#[test]
+fn the_approved_migration_accepts_only_its_exact_new_blob_transition() {
+    let repo = Repo::new("approved-migration");
+    repo.write(FAILURES, "a/one.kt\n");
+    let base = repo.commit();
+    repo.write(FAILURES, "a/one.kt\nb/two.kt\n");
+    repo.write(MIGRATIONS, &migration_row(&repo, &base));
+    let head = repo.commit();
+    let output = repo.check(&base, &head);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        format!("outcome-lists: authorized #2459 migration for {FAILURES}: 1 added entry\n")
+    );
+
+    repo.write(FAILURES, "a/one.kt\nb/two.kt\nc/three.kt\n");
+    let extra = repo.commit();
+    let output = repo.check(&base, &extra);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        added_failure_diagnostic(&["b/two.kt", "c/three.kt"])
+    );
+}
+
+#[test]
+fn migration_scope_and_both_blob_identities_must_match() {
+    for (name, column, replacement) in [
+        ("lane", 0, "tests/box_expected_failures/wasm-js-klib"),
+        ("release", 1, "2.4.21"),
+        ("old-blob", 2, "0000000000000000000000000000000000000000"),
+        ("new-blob", 3, "0000000000000000000000000000000000000000"),
+        ("approval", 4, "9999"),
+    ] {
+        let repo = Repo::new(&format!("migration-{name}"));
+        repo.write(FAILURES, "a/one.kt\n");
+        let base = repo.commit();
+        repo.write(FAILURES, "a/one.kt\nb/two.kt\n");
+        let row = migration_row(&repo, &base);
+        let mut fields = row.trim_end().split('\t').collect::<Vec<_>>();
+        fields[column] = replacement;
+        repo.write(MIGRATIONS, &format!("{}\n", fields.join("\t")));
+        let head = repo.commit();
+        let output = repo.check(&base, &head);
+        assert_eq!(output.status.code(), Some(1), "{name}: {output:?}");
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            added_failure_diagnostic(&["b/two.kt"])
+        );
+    }
+}
+
+#[test]
+fn a_historical_migration_cannot_authorize_replaying_a_regression() {
+    let repo = Repo::new("migration-replay");
+    repo.write(FAILURES, "a/one.kt\n");
+    let original = repo.commit();
+    repo.write(FAILURES, "a/one.kt\nb/two.kt\n");
+    repo.write(MIGRATIONS, &migration_row(&repo, &original));
+    repo.write(FAILURES, "a/one.kt\n");
+    let base = repo.commit();
+    repo.write(FAILURES, "a/one.kt\nb/two.kt\n");
+    let head = repo.commit();
+    let output = repo.check(&base, &head);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        added_failure_diagnostic(&["b/two.kt"])
+    );
+}
+
+#[test]
+fn a_spent_approval_cannot_authorize_a_different_blob_transition() {
+    let repo = Repo::new("migration-spent-approval");
+    repo.write(FAILURES, "a/one.kt\n");
+    let original = repo.commit();
+    repo.write(FAILURES, "a/one.kt\nb/two.kt\n");
+    let first_row = migration_row(&repo, &original);
+    repo.write(MIGRATIONS, &first_row);
+    let base = repo.commit();
+
+    repo.write(FAILURES, "a/one.kt\nb/two.kt\nc/three.kt\n");
+    let second_row = migration_row(&repo, &base);
+    assert_ne!(first_row, second_row);
+    repo.write(MIGRATIONS, &format!("{first_row}{second_row}"));
+    let head = repo.commit();
+    let output = repo.check(&base, &head);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        added_failure_diagnostic(&["c/three.kt"])
+    );
+}
+
+#[test]
+fn a_target_approval_cannot_be_reused_by_a_branch_forked_before_it() {
+    let repo = Repo::new("migration-stale-target-approval");
+    repo.write(FAILURES, "a/one.kt\n");
+    let original = repo.commit();
+    repo.write(FAILURES, "a/one.kt\nb/two.kt\n");
+    let first_row = migration_row(&repo, &original);
+    repo.write(MIGRATIONS, &first_row);
+    let target = repo.commit();
+
+    repo.git(&["checkout", "-q", &original]);
+    repo.write(FAILURES, "a/one.kt\nc/three.kt\n");
+    let second_row = migration_row(&repo, &original);
+    assert_ne!(first_row, second_row);
+    repo.write(MIGRATIONS, &format!("{first_row}{second_row}"));
+    let head = repo.commit();
+    let output = repo.check(&target, &head);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        added_failure_diagnostic(&["c/three.kt"])
+    );
+}
+
+#[test]
+fn historical_migration_rows_cannot_be_removed_or_edited() {
+    let repo = Repo::new("migration-history");
+    repo.write(FAILURES, "a/one.kt\n");
+    let original = repo.commit();
+    repo.write(FAILURES, "a/one.kt\nb/two.kt\n");
+    let row = migration_row(&repo, &original);
+    repo.write(MIGRATIONS, &row);
+    let base = repo.commit();
+    for text in [String::new(), row.replace("\t2459\n", "\t9999\n")] {
+        repo.write(MIGRATIONS, &text);
+        let head = repo.commit();
+        let output = repo.check(&base, &head);
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert_eq!(String::from_utf8(output.stderr).unwrap(),
+            format!("outcome-lists: approved migration records are append-only; removed rows:\n    {row}"));
+    }
+}
+
+#[test]
+fn an_unreadable_historical_migration_cannot_renew_the_exception() {
+    for (kind, path) in [("blob", MIGRATIONS), ("tree", "scripts")] {
+        let repo = Repo::new(&format!("migration-unreadable-{kind}"));
+        repo.write(FAILURES, "a/one.kt\n");
+        let original = repo.commit();
+        repo.write(FAILURES, "a/one.kt\nb/two.kt\n");
+        let row = migration_row(&repo, &original);
+        repo.write(MIGRATIONS, &row);
+        repo.write(FAILURES, "a/one.kt\n");
+        let base = repo.commit();
+        let blob = repo.git(&["rev-parse", &format!("{base}:{path}")]);
+        repo.write(MIGRATIONS, &format!("# Preserved record\n{row}"));
+        repo.write(FAILURES, "a/one.kt\nb/two.kt\n");
+        let head = repo.commit();
+        fs::remove_file(
+            repo.dir
+                .join(".git/objects")
+                .join(&blob[..2])
+                .join(&blob[2..]),
+        )
+        .expect("remove the historical blob only in this isolated test repository");
+        let output = repo.check(&base, &head);
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            format!(
+                "outcome-lists: cannot read committed migration records at {base}:{MIGRATIONS}\n"
+            )
+        );
+    }
+}
+
+#[test]
+fn a_migration_must_cover_each_effective_inherited_release() {
+    let repo = Repo::new("migration-inheritance");
+    repo.write("kotlin-versions", "2.4.20 a\n2.4.21 b\n");
+    repo.write(FAILURES, "a/one.kt\n");
+    let base = repo.commit();
+    repo.write(FAILURES, "a/one.kt\nb/two.kt\n");
+    let row = migration_row(&repo, &base);
+    repo.write(MIGRATIONS, &row);
+    let head = repo.commit();
+    let output = repo.check(&base, &head);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(String::from_utf8(output.stderr).unwrap(),
+        format!("outcome-lists: authorized #2459 migration for {FAILURES}: 1 added entry\n\
+        outcome-lists: tests/box_expected_failures/native-klib/2.4.21.txt (reads {FAILURES}) gains 1 entry:\n    b/two.kt\n\
+        outcome-lists: platform/version expectations only shrink; fix the files above instead of listing them\n"));
+
+    repo.write(
+        MIGRATIONS,
+        &format!("{row}{}", row.replace("\t2.4.20\t", "\t2.4.21\t")),
+    );
+    let head = repo.commit();
+    let output = repo.check(&base, &head);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(String::from_utf8(output.stderr).unwrap(),
+        format!("outcome-lists: authorized #2459 migration for {FAILURES}: 1 added entry\n\
+        outcome-lists: authorized #2459 migration for tests/box_expected_failures/native-klib/2.4.21.txt (reads {FAILURES}): 1 added entry\n"));
+}
+
+#[test]
+fn an_uncommitted_migration_does_not_authorize_growth() {
+    let repo = Repo::new("migration-uncommitted");
+    repo.write(FAILURES, "a/one.kt\n");
+    let base = repo.commit();
+    repo.write(FAILURES, "a/one.kt\nb/two.kt\n");
+    let row = migration_row(&repo, &base);
+    let head = repo.commit();
+    repo.write(MIGRATIONS, &row);
+    let output = repo.check(&base, &head);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        added_failure_diagnostic(&["b/two.kt"])
+    );
+}
 
 #[test]
 fn removing_entries_passes() {

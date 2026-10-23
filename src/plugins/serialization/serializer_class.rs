@@ -294,12 +294,7 @@ pub(super) fn complete(
     // or a body property's initializer. Optionality is independent of whether that
     // expression is a constant; the constant payload is used separately during body
     // generation for equality/fill operations that can represent it directly.
-    let foo_optional: Vec<bool> = wire
-        .iter()
-        .map(|element| {
-            property_default::checked_default(ir, element.class, element.field).is_some()
-        })
-        .collect();
+    let foo_optional: Vec<bool> = wire.iter().map(|element| element.optional).collect();
     // Erased generic bridges the `KSerializer<Foo>` interface requires: the JVM sees
     // `serialize(Encoder, Object)` / `deserialize(Decoder): Object`; each adapts args/return
     // and delegates to the concrete `Foo`-typed override.
@@ -418,8 +413,7 @@ pub(super) fn complete(
     let mut init_stmts = vec![dvar];
     for (i, element) in wire.iter().enumerate() {
         let d = ir.add_expr(IrExpr::GetValue(desc_local));
-        let element_name = serial_name_of(ctx, ir, element.class, &element.name)
-            .unwrap_or_else(|| KtString::from(element.name.clone()));
+        let element_name = element.serial_name(ctx, ir);
         let nm = ir.add_expr(IrExpr::Const(IrConst::String(element_name)));
         let is_optional = foo_optional.get(i).copied().unwrap_or(false);
         let opt = ir.add_expr(IrExpr::Const(IrConst::Boolean(is_optional)));
@@ -582,12 +576,7 @@ fn complete_class_members(
     } = serialized;
     let owner_start_line = *owner_start_line;
     let is_generic = !serialized.type_params.is_empty();
-    let foo_optional: Vec<bool> = wire
-        .iter()
-        .map(|element| {
-            property_default::checked_default(ir, element.class, element.field).is_some()
-        })
-        .collect();
+    let foo_optional: Vec<bool> = wire.iter().map(|element| element.optional).collect();
     if plain_data_class(ir, class_id) {
         // Its statements carry the class's line. One that neither calls its superclass's
         // `write$Self` nor writes an element of its own is a bare `return`, which kotlinc gives no
@@ -657,13 +646,7 @@ fn complete_class_members(
             let descriptor_elements = wire
                 .iter()
                 .enumerate()
-                .map(|(index, element)| {
-                    (
-                        serial_name_of(ctx, ir, element.class, &element.name)
-                            .unwrap_or_else(|| KtString::from(element.name.clone())),
-                        foo_optional[index],
-                    )
-                })
+                .map(|(index, element)| (element.serial_name(ctx, ir), foo_optional[index]))
                 .collect::<Vec<_>>();
             let descriptor_name = annotations::class_serial_name(ir, class_id);
             let descriptor_owner = ir.classes[class_id as usize].fq_name_id();

@@ -15,14 +15,17 @@ mod classifier_kind;
 mod classifier_role;
 mod compiler_intrinsic;
 mod core_builtins;
+mod declaration_header;
 mod default_value;
 mod dependency_access_policy;
 mod dependency_body_contract;
+mod dependency_body_modifiers;
 mod enhanced_nullability;
 pub(crate) mod function_classifiers;
 mod generic_signature;
 mod inline_body;
 mod inline_kind;
+mod klib_body_class;
 mod member_flags;
 mod member_records;
 mod metadata_normalization;
@@ -40,25 +43,29 @@ pub use annotation_application::{
     AnnotationPositionalPolicy,
 };
 pub use call_arg_mapping_failure::{CallArgMappingError, CallArgMappingFailure};
-pub(crate) use call_realization::KlibBodyCompanionReceiver;
 pub use call_realization::{
     DefaultCallRealization, DirectCFunction, ExternalCallableKind, ExternalCallableRealization,
     ExternalPropertyRealization, KlibBodyCallable, KlibDeclarationSignature,
     KlibDependencyCallable, NonvirtualCallRealization, OverriddenCallKind,
     OverriddenCallRealization,
 };
+pub(crate) use call_realization::{KlibBodyCallableShape, KlibBodyCompanionReceiver};
 pub use callable_scope_rung::CallableScopeRung;
 pub(crate) use classifier_callables::constructor_generic_signature;
 pub use classifier_callables::BoundInnerConstructor;
 pub(crate) use classifier_declaration::type_alias_target_classifier;
 pub use classifier_declaration::{AliasExpansion, ClassifierDeclaration};
 pub use classifier_kind::TypeKind;
+pub use declaration_header::{
+    DeclarationHeader, DeclarationLanguage, HeaderSignature, HeaderSupertype, HeaderTypeParameter,
+};
 pub use default_value::DefaultValue;
 pub use dependency_access_policy::DependencyAccessPolicy;
 pub use dependency_body_contract::DependencyBodyFacts;
 pub(crate) use dependency_body_contract::{
     DependencyBodyProviderRole, DependencyBodyProviderSnapshot, DependencyBodySnapshot,
 };
+pub(crate) use dependency_body_modifiers::KlibBodyDeclarationModifiers;
 pub use enhanced_nullability::{enhance_from_overridden, EnhancedResult, TypeEnhancement};
 pub use inline_kind::InlineKind;
 pub use param_flags::ParamFlags;
@@ -77,7 +84,7 @@ use crate::types::InlineParameterModifier;
 pub use crate::types::Visibility;
 use crate::types::{SemanticCallRole, SemanticCallableOwner, Ty, TyKind, TypeName, TypeNameList};
 pub(crate) use array_factories::kotlin_array_factory_kind;
-pub use compiler_intrinsic::{CompilerIntrinsic, ListStorageConstruction};
+pub use compiler_intrinsic::{CompilerIntrinsic, ListStorageConstruction, ResultFailureIntrinsic};
 pub(crate) use core_builtins::add_core_builtin_declarations;
 pub use generic_signature::{GenericReturnPolicy, GenericSig};
 pub use inline_body::{
@@ -86,17 +93,18 @@ pub use inline_body::{
     InlineCollectionCapacity, InlineCollectionLocalNames, InlineIterationIndex,
     InlineIterationTraversal,
 };
+pub(crate) use klib_body_class::{KlibBodyClassContract, KlibBodyClassParameters};
 pub use member_flags::LmFlags;
 pub(crate) use metadata_normalization::{
     associated_function_parameter_identities, associated_property_parameter_identities,
     classifier_shape, constructor_parameter_identities, constructor_parameter_list,
-    declared_constructor, declared_function, declared_nested_type_alias, declared_property,
-    declared_retention, declared_targets, declared_type_alias, enum_entries_getter, enum_value_of,
-    enum_values, function_generic_sig, function_parameter_identities, member_record,
-    only_input_type_formals, property_parameter_identities, reified_type_parameter_ordinals,
-    settle_no_arg_construction, CallablePlacement, ClassTypeParameters, EnclosingBounds,
-    FunctionParameterIdentities, PropertyAccessorNames, PropertyParameterIdentities,
-    TypeParameterIdentities,
+    declared_constructor, declared_formal_types, declared_function, declared_nested_type_alias,
+    declared_property, declared_retention, declared_targets, declared_type_alias,
+    enum_entries_getter, enum_value_of, enum_values, function_generic_sig,
+    function_parameter_identities, member_record, only_input_type_formals,
+    property_parameter_identities, reified_type_parameter_ordinals, settle_no_arg_construction,
+    CallablePlacement, ClassTypeParameters, EnclosingBounds, FunctionParameterIdentities,
+    PropertyAccessorNames, PropertyParameterIdentities, TypeParameterIdentities,
 };
 pub use scalar_instruction::{ScalarClass, ScalarComparison, ScalarInstruction};
 use std::borrow::Cow;
@@ -425,6 +433,12 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
             }),
             None => Ok(()),
         }
+    }
+
+    /// The declaration of a library classifier as its source language states it, for a consumer
+    /// that shows declarations. `None` for a classifier this provider does not declare.
+    fn declaration_header(&self, _classifier: TypeName) -> Option<DeclarationHeader> {
+        None
     }
 
     /// Whether this classifier is an `expect annotation class` with no declaration on the current

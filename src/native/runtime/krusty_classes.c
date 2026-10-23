@@ -405,8 +405,15 @@ KRef kt_not_null(KRef value) {
 /* A literal Kotlin message. */
 #define KT_MESSAGE(text) kt_string_utf8(text, (kt_int)(sizeof(text) - 1))
 
+KRef kt_throwable_new_defaulted(const KType *type) {
+    KRef message = type == &kt_type_not_implemented_error
+                       ? KT_MESSAGE("An operation is not implemented.")
+                       : NULL;
+    return kt_throwable_new(type, message);
+}
+
 void kt_not_implemented(void) {
-    KT_THROW(kt_type_not_implemented_error, KT_MESSAGE("An operation is not implemented."));
+    kt_throw(kt_throwable_new_defaulted(&kt_type_not_implemented_error));
 }
 
 /* A message whose `toString` THROWS raises that exception instead of the thrower's own, as

@@ -129,6 +129,7 @@ mod method_defaults;
 mod method_entry;
 mod method_signatures;
 mod must_inline_lambdas;
+mod non_local_jumps;
 mod non_null_operands;
 mod nullable_sam;
 mod numeric_comparison;
@@ -146,6 +147,7 @@ mod return_emission;
 mod safe_calls;
 mod sam_wrapper_class;
 mod scalar_coercion;
+mod script_main;
 mod shared_cell_declaration;
 mod signature_formatter;
 mod singleton_instance;
@@ -830,7 +832,8 @@ fn attach_synth_nullability(
         .map(|parameter| nullability_annotation(parameter.nullability))
         .collect();
     let ctor_desc = primary_ctor_descriptor(ir, c);
-    if ctor_params.iter().any(|p| p.is_some()) {
+    // kotlinc annotates none of a script's constructor parameters.
+    if !c.is_script && ctor_params.iter().any(|p| p.is_some()) {
         cw.set_method_nullability("<init>", &ctor_desc, None, &ctor_params);
     }
     // HOISTED companion properties: the delegating accessors annotate like ordinary accessors
@@ -1180,7 +1183,10 @@ fn new_classifier_writer(
     if let Some(signature) = &signature {
         cw.set_signature(signature);
     }
-    cw.set_nullability_annotations(!crate::metadata::local_classifiers::is_local(ir, c));
+    // kotlinc publishes no nullability in a script's classes either.
+    cw.set_nullability_annotations(
+        !crate::metadata::local_classifiers::is_local(ir, c) && !ir.is_script(),
+    );
     cw
 }
 
@@ -2679,7 +2685,8 @@ fn emit_class(
         // would be dead code after `athrow` (which the verifier rejects without a frame).
         if !init_diverges {
             // The trailing `return` goes back on the class-declaration line, closing the ctor's table.
-            if !ctor_lines.is_empty() {
+            // A script has no declaration line: its `return` follows the last statement's.
+            if !ctor_lines.is_empty() && !c.is_script {
                 // A closing `init` line still pending owns a `nop` before the return's line.
                 let line = primary_constructor_line(ir, c);
                 ctor.mark_line(line);
@@ -2779,8 +2786,25 @@ fn emit_class(
         }
     } // end `if c.has_primary_ctor`
 
+    // kotlinc adds a script's `main` with the script's own members, so it precedes every member
+    // a later lowering adds: the lifted local functions and lambdas, bridges, and accessors.
+    // A script that declares a function named `main` gets no generated one, whatever its shape.
+    let mut script_main = c.is_script
+        && !c.methods.iter().any(|&function| {
+            !ir.lifted_functions.contains_key(&function)
+                && ir.functions[function as usize].name == "main"
+        });
     for member in after_primary {
+        if script_main
+            && matches!(member, SourceOrderedMember::Function(function) if ir.lifted_functions.contains_key(&function))
+        {
+            script_main::emit(&fq_name, opts.param_assertions, &mut cw);
+            script_main = false;
+        }
         emit_scheduled_member(&member_emission, member, &mut cw);
+    }
+    if script_main {
+        script_main::emit(&fq_name, opts.param_assertions, &mut cw);
     }
     // The exact serialization-plugin deserialization constructor emits after every declared member
     // (`write$Self$main` included) and before `<clinit>`, which is kotlinc's member order for it.
@@ -5097,6 +5121,8 @@ struct Emitter<'a> {
     static_owner: Option<StaticOwner>,
     /// Source or backend-generated function whose body is currently being emitted.
     function: Option<u32>,
+    /// Declaration scope of a scratch inline-lambda body, without changing emission ownership.
+    type_parameter_function: Option<u32>,
     export_private_calls: bool,
     method_exports_private_access: bool,
     /// This method is `inline`, so each copy of a `finally` is bracketed by
@@ -5109,7 +5135,7 @@ struct Emitter<'a> {
     self_companion: Option<TypeName>,
     /// Checked classifier declarations: which kind of classifier an operand's type names.
     classifiers: &'a dyn BackendClassifierSource,
-    /// Complete classifier facts used only for physical virtual-call owner selection.
+    /// One checked inventory for physical call owners and semantic array-cast leaf proofs.
     dispatch_classifiers: std::rc::Rc<crate::jvm::member_dispatch::CheckedDispatchClassifiers<'a>>,
     owner: String,
     facade: String,
@@ -5192,6 +5218,8 @@ struct Emitter<'a> {
     /// depth makes a `break`/`continue` run exactly the finalizers it leaves — those pushed inside
     /// the loop — and no outer one.
     loop_stack: Vec<(Label, Label, Option<String>, usize)>,
+    /// The loops outside an inline lambda's node, which a `break`/`continue` leaves it for.
+    non_local_jumps: non_local_jumps::NonLocalJumps,
     /// Operand-stack verification types sitting BELOW the expression currently being emitted (an
     /// arithmetic LHS held on the stack across a branchy RHS, e.g. a data-class `hashCode` accumulator
     /// `result*31 + <branchy nullable-field hash>`). Prepended to every recorded stack-map frame's stack
@@ -5294,6 +5322,7 @@ impl<'a> Emitter<'a> {
             intrinsic_probe_continuations: env.intrinsic_probe_continuations,
             static_owner,
             function: None,
+            type_parameter_function: None,
             export_private_calls: false,
             method_exports_private_access: false,
             finally_markers: false,
@@ -5330,6 +5359,7 @@ impl<'a> Emitter<'a> {
             machine: None,
             ret,
             loop_stack: Vec::new(),
+            non_local_jumps: Default::default(),
             open_locals: Vec::new(),
             next_inline_frame_identity: 0,
             inline_lambda_aliases: HashMap::default(),

@@ -56,8 +56,10 @@ mod default_arguments;
 pub(crate) use default_arguments::module_override_callable;
 mod enum_switch_whens;
 pub(crate) use enum_switch_whens::EnumSwitchWhen;
+mod emitted_body_roots;
 mod enums;
 mod expression_provenance;
+pub(crate) use emitted_body_roots::emitted_body_roots;
 mod field_flags;
 mod fields;
 mod function_scope;
@@ -881,6 +883,9 @@ pub struct IrClass {
     /// `data class` — carried so the metadata emitter can reproduce kotlinc's `IS_DATA` class flag and
     /// its synthesized `componentN`/`copy`/`equals`/`hashCode`/`toString` function metadata.
     pub is_data: bool,
+    /// The class a Kotlin script compiles to. Its constructor parameters are stored in fields of
+    /// their own, it records its last expression's value, and it has a `main` that runs it.
+    pub is_script: bool,
     /// 1-based source line of the class declaration (0 = unknown). The emitter maps the
     /// `LineNumberTable` of synthesized members (ctor/accessors) to this line, as kotlinc does.
     pub decl_line: u32,
@@ -1473,9 +1478,14 @@ pub struct IrFile {
     /// Class initialization blocks in source order. Member-property initializers remain attached to
     /// their declarations so a backend can merge both without consulting syntax.
     pub checked_class_initializers: Vec<IrCheckedClassInitializer>,
+    /// For a class without a primary constructor, the values its initializers' locals are numbered
+    /// above once they are composed into its secondary constructors: `this` is value 0, the
+    /// constructor prefix and every constructor's parameters lie at or below this bound. A property
+    /// initializer re-evaluated elsewhere (a generated member applying the default) reads its locals
+    /// from here.
+    pub secondary_initializer_value_bases: crate::fx_hash::HashMap<ClassId, u32>,
     pub checked_enum_entry_bodies:
         crate::fx_hash::HashMap<crate::fir::DeclarationId, IrCheckedEnumEntryBody>,
-    pub checked_script_body: Option<ExprId>,
     /// Lifted function parameter that carries a mutable capture's shared holder, keyed by
     /// `(function, parameter)`. `Ty` is the logical captured element type; each backend chooses its
     /// holder representation. Keeping this sparse semantic edge separate prevents JVM `Ref` classes
@@ -2442,6 +2452,11 @@ pub struct IrAppliedClassifier {
 }
 
 impl IrFile {
+    /// Whether this file is a Kotlin script, which compiles to its script class.
+    pub fn is_script(&self) -> bool {
+        self.classes.iter().any(|class| class.is_script)
+    }
+
     /// The checked FIR origin of an expression lowering recorded one for; `None` for a node a
     /// later pass built.
     pub fn node_origin(&self, expression: ExprId) -> Option<crate::fir::OriginId> {

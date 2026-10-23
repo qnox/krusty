@@ -14,9 +14,11 @@ use crate::fx_hash::HashMap;
 use crate::ir::IrBinOp;
 use crate::metadata::id_signature::{
     callable_signature, CallableShape, ClassScope, DeclarationContainer, KlibPublicIdSignature,
-    Placement,
+    Placement, TypeParameterShape,
 };
-use crate::metadata::semantic::{semantic_ty, KotlinFunctionTypeShape, KotlinType};
+use crate::metadata::semantic::{
+    semantic_ty, KotlinFunctionTypeShape, KotlinType, KotlinTypeParameterId,
+};
 use crate::types::Ty;
 
 /// The package of the compiler built-in declarations.
@@ -74,6 +76,8 @@ pub(super) enum BuiltinOperator {
     },
     /// `kotlin.Boolean.not(): Boolean`, Kotlin's `!`.
     Not,
+    /// `CHECK_NOT_NULL(arg0: T0?): T0` for `T0 : Any`, Kotlin's `!!`.
+    CheckNotNull,
     /// A numeric class's conversion member, such as `kotlin.Long.toInt(): Int`, from the
     /// dispatch receiver's `from` to `to`.
     NumericConversion {
@@ -85,6 +89,14 @@ pub(super) enum BuiltinOperator {
 /// The built-in operators lowering realizes, by exact signature.
 pub(super) struct IrBuiltinOperators {
     operators: HashMap<KlibPublicIdSignature, BuiltinOperator>,
+}
+
+/// Whether this exact call emits a declaration edge or an existing common-IR operation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum BuiltinCallDisposition {
+    Common(BuiltinOperator),
+    RetainedDeclaration,
+    Dependency,
 }
 
 impl IrBuiltinOperators {
@@ -208,12 +220,52 @@ impl IrBuiltinOperators {
                 },
             );
         }
+        let any = KotlinType::class("kotlin/Any");
+        let operand = KotlinType::Param {
+            name: "T0".to_owned(),
+            id: KotlinTypeParameterId(0),
+            nullable: true,
+        };
+        let shape = CallableShape {
+            name: "CHECK_NOT_NULL",
+            contexts: Vec::new(),
+            receiver: None,
+            params: vec![&operand],
+            vararg: None,
+            type_parameters: vec![TypeParameterShape {
+                id: KotlinTypeParameterId(0),
+                bounds: vec![&any],
+            }],
+            expect: false,
+            placement: Placement::Ordinary,
+        };
+        let signature = callable_signature(builtins, &shape)
+            .expect("`CHECK_NOT_NULL` names its own type parameter");
+        operators.insert(signature, BuiltinOperator::CheckNotNull);
         Self { operators }
     }
 
     /// The operator declared under exactly `signature`, if it is one of this table's.
     pub(super) fn operator(&self, signature: &KlibPublicIdSignature) -> Option<BuiltinOperator> {
         self.operators.get(signature).copied()
+    }
+
+    /// Source selections, retained exports and ambiguity matter even for compiler operations.
+    /// Callers resolve the producer origin before supplying this selection; operand validation
+    /// remains with actual body lowering, not dependency-graph preparation.
+    pub(super) fn call_disposition<E>(
+        &self,
+        signature: &KlibPublicIdSignature,
+        requires_declaration: impl FnOnce() -> Result<bool, E>,
+    ) -> Result<BuiltinCallDisposition, E> {
+        let Some(operator) = self.operator(signature) else {
+            return Ok(BuiltinCallDisposition::Dependency);
+        };
+        Ok(if requires_declaration()? {
+            BuiltinCallDisposition::RetainedDeclaration
+        } else {
+            BuiltinCallDisposition::Common(operator)
+        })
     }
 }
 
@@ -230,6 +282,31 @@ fn nullable(internal: &str) -> KotlinType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn common_call_disposition_preserves_selected_and_ambiguous_obligations() {
+        let builtins = IrBuiltinOperators::new();
+        for (signature, operator) in &builtins.operators {
+            assert_eq!(
+                builtins.call_disposition(signature, || Ok::<_, ()>(false)),
+                Ok(BuiltinCallDisposition::Common(*operator))
+            );
+            assert_eq!(
+                builtins.call_disposition(signature, || Ok::<_, ()>(true)),
+                Ok(BuiltinCallDisposition::RetainedDeclaration)
+            );
+            assert_eq!(
+                builtins.call_disposition(signature, || Err("ambiguous")),
+                Err("ambiguous")
+            );
+            let foreign =
+                KlibPublicIdSignature::classifier(crate::types::type_name("kotlin/Boolean"));
+            assert_eq!(
+                builtins.call_disposition(&foreign, || panic!("not a common operation")),
+                Ok::<_, ()>(BuiltinCallDisposition::Dependency)
+            );
+        }
+    }
 
     /// The member ids the Kotlin/Native 2.4.20 stdlib KLIB serializes for its calls to these
     /// operators.
@@ -275,11 +352,11 @@ mod tests {
         assert_eq!(signed.len(), RELATIONS.len() * OPERANDS.len());
     }
 
-    /// The equality and negation operators, with the member ids the Kotlin/Native 2.4.20 stdlib
+    /// The equality, negation and not-null assertion operators, with the member ids the Kotlin/Native 2.4.20 stdlib
     /// KLIB serializes for its calls to them. Which `ieee754equals` id belongs to which operand
     /// type is checked against the stdlib's own calls (`stdlib_built_in_calls_have_the_signed_operands`).
     #[test]
-    fn equalities_and_negation_are_signed_as_the_stdlib_calls_them() {
+    fn equalities_negation_and_assertion_are_signed_as_the_stdlib_calls_them() {
         let builtins = IrBuiltinOperators::new();
         let mut signed = builtins
             .operators
@@ -312,6 +389,12 @@ mod tests {
                     "Boolean.not".to_owned(),
                     8_206_408_119_829_444_045,
                     BuiltinOperator::Not
+                ),
+                (
+                    "kotlin.internal.ir".to_owned(),
+                    "CHECK_NOT_NULL".to_owned(),
+                    18_418_390_109_718_388_438,
+                    BuiltinOperator::CheckNotNull
                 ),
                 (
                     "kotlin.internal.ir".to_owned(),

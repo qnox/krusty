@@ -71,7 +71,6 @@ enum ActiveDeclarationRef {
         class: DeclId,
         index: u32,
     },
-    Script,
     TypeAlias,
     Generated,
 }
@@ -1042,7 +1041,6 @@ impl ActiveSourceDeclarations {
                 ClassInit::Block(expression) => Some(*expression),
                 ClassInit::PropInit(_) => None,
             },
-            ActiveDeclarationRef::Script => file.script_body,
             _ => None,
         }
     }
@@ -1076,8 +1074,9 @@ impl ActiveSourceDeclarations {
                     .or(Some(property.span))
             }
             ActiveDeclarationRef::ClassInitializer { .. }
-            | ActiveDeclarationRef::EnumEntryInitializer { .. }
-            | ActiveDeclarationRef::Script => file.expr_span(self.expression(file, declaration)?),
+            | ActiveDeclarationRef::EnumEntryInitializer { .. } => {
+                file.expr_span(self.expression(file, declaration)?)
+            }
             ActiveDeclarationRef::EnumEntry { class, index } => Some(
                 class_decl(file, class)?
                     .enum_entries
@@ -1468,7 +1467,6 @@ fn active_binding(
             })
         }
         (DeclarationKind::TypeAlias, _) => Some(ActiveDeclarationRef::TypeAlias),
-        (DeclarationKind::Script, None) => Some(ActiveDeclarationRef::Script),
         _ => None,
     }
 }
