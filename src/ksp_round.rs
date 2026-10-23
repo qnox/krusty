@@ -11,8 +11,13 @@
 //! describe, it says so (`declarations_complete`), and the host refuses a processor that asks for
 //! the rest rather than answer with a part of it.
 
+mod accessors;
+mod annotations;
 mod declarations;
+mod library;
 mod type_model;
+
+pub use library::KspLibraries;
 
 use krusty_plugin_ir::{
     KspAnnotation, KspClass, KspClassKind, KspDeclaration, KspFile, KspRound, KspType,
@@ -262,7 +267,12 @@ impl Source<'_> {
                 .zip(class.type_parameters.type_params())
                 .map(|(identity, name)| (identity.as_str(), name.as_str())),
         );
-        let annotations = self.annotations(subject, &class.annotations)?;
+        let annotations = self.published_annotations(
+            subject,
+            &class.annotations,
+            Some(&signature.applied_annotations),
+            annotations::Placement::Declaration,
+        )?;
         let type_parameters = type_parameters(class, signature, &scope);
         let header = declarations::ClassHeader {
             id,
@@ -321,16 +331,13 @@ impl Source<'_> {
                 ),
             ));
         };
-        // KSP's short name is the name as written, without a qualifier.
-        let short_name = annotation
-            .name
-            .rsplit('.')
-            .next()
-            .unwrap_or(&annotation.name)
-            .to_string();
         Ok(KspAnnotation {
-            short_name,
+            short_name: annotations::short_name(resolved),
             qualified_name: qualified_name(resolved),
+            use_site: None,
+            synthetic: false,
+            // An enum entry's applications are not published with their arguments yet.
+            arguments: None,
         })
     }
 
@@ -458,6 +465,7 @@ mod tests {
     fn render(ty: &KspType) -> String {
         let mut out = match &ty.declaration {
             KspTypeDeclaration::Class(name) => name.clone(),
+            KspTypeDeclaration::TypeAlias { qualified_name, .. } => qualified_name.clone(),
             KspTypeDeclaration::TypeParameter { owner, name, .. } => format!("{owner}.{name}"),
         };
         if !ty.arguments.is_empty() {

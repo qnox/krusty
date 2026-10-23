@@ -1,8 +1,18 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+Wasm's erased-reference binary equality realization uses the already checked operator and the
+runtime GC representation. It changes no metadata, callable identity, or provider authorization;
+explicit dependency `Any.equals` realization remains a separate authenticated-callable contract.
+
 Goal: emit `@kotlin.Metadata` so krusty output is consumable as a **Kotlin** library (Java consumers
 need only the signatures, already matched in Phase 5a). This is the single largest remaining piece —
 effectively a re-implementation of `kotlinx-metadata-jvm`'s writer.
+
+## Shared-target compiler/plugin model artifacts
+
+The Rust compiler/plugin model tracks checkout identity as a Cargo input, so a shared target cannot
+reuse another checkout's incompatible declaration structure. No serialized plugin fields, protocol
+versions, classfile metadata or annotation payloads change.
 
 ## KLIB emission root categories
 
@@ -187,6 +197,17 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   `Property.flags` (8710 → 8711) — and because kotlinc derives an accessor's DEFAULT flags word from
   the property's (that bit included), an annotated property with plain accessors also writes
   `getter_flags`/`setter_flags` = 6 explicitly.
+- Constructor-property defaulting is a frontend selection, independent of metadata format gates.
+  The configured param-property mode can retain one checked payload at both constructor parameter
+  and property (or an available field when the policy does not admit PROPERTY). Explicit use-site
+  applications remain single-site and older first-only mode remains distinct. Common metadata
+  consumes recorded site membership; stable plugin-visible property publication uses the same
+  selection operation over final annotation target policies.
+  The KLIB class-surface fixture retains the same property annotation in current language mode.
+  A live official Native oracle compiles that unchanged fixture in both older first-only and
+  current param-property modes, decodes the complete annotation lists and checks a plain-property
+  positive control and an unannotated-property negative control. The full surface assertion is
+  preserved; output stamps do not select frontend semantics.
 - An annotation written on an accessor (`@A get`, `@A set`) sets `hasAnnotations` (bit 0) in that
   accessor's flags word (`getter_flags` f7, `setter_flags` f8), which therefore differs from the
   default word and is written. Its records go to `Property.getter_annotation` (f15) and
@@ -904,3 +925,10 @@ so source candidates, opaque callable lookup and module-qualified serialized-dec
 retain the same operation.
 No Kotlin metadata encoding or declaration identity changes. The actual Native stdlib regression
 checks both declaration forms through all three views, with and without platform authority.
+
+## Reference-array cast bound evidence
+
+Compatible JVM array casts read the existing IR generic signatures and exact recorded non-local
+and lambda bound declarations. They introduce no Kotlin metadata encoding or provider lookup.
+Expected components use declaration-primary erasure; actual components retain the complete
+intersection of declared bounds. Backend wrapper names do not replace Kotlin classifier identity.

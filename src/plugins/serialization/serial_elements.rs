@@ -16,18 +16,27 @@
 //! them. The superclass's `write$Self` writes its part and its deserialization constructor stores
 //! it, so the class's own generators address only their own fields, offset by the inherited count;
 //! the wire-shape generators address every element ([`SerialElements::wire`]).
+//!
+//! A superclass compiled apart from this file contributes its elements the same way, as its
+//! provider described them ([`super::external_parent`]). Such an element has no property here, so
+//! nothing about it is read off this file's IR.
 
 use crate::fx_hash::HashMap;
 use crate::ir::{ClassId, IrConst, IrFile};
+use crate::kt_string::KtString;
 use crate::plugins::PluginContext;
-use crate::types::{ty_subst_keep_unbound, type_name, Ty};
+use crate::types::{ty_subst_keep_unbound, type_name, SerializableElement, Ty, TypeName};
 
 use super::{custom_serializer_of, serializer_name, SERIALIZABLE_FQ, TRANSIENT_FQ};
 
 /// The class's serial elements: the ones it inherits from a serializable superclass, then the
 /// backing field of each of its own, in element (declaration) order.
 pub(super) struct SerialElements {
-    parent: Option<ClassId>,
+    parent: Option<SerialParent>,
+    /// A serializable superclass, at any depth, whose elements are not known here: its provider
+    /// did not describe it, or it is generic. The class's generated members would call members of
+    /// that superclass the plugin cannot name, so it declines.
+    undescribed_parent: Option<TypeName>,
     /// The type arguments the class gives its serializable superclass, in the superclass's
     /// type-parameter order. Empty for a non-generic superclass.
     parent_type_arguments: Vec<Ty>,
@@ -38,26 +47,68 @@ pub(super) struct SerialElements {
     fields: Vec<usize>,
 }
 
-/// Where an element is stored: the class whose property declares it, and that property's backing
-/// field in the class.
-#[derive(Clone, Copy, Debug)]
-struct ElementSource {
-    class: ClassId,
-    field: usize,
+/// The serializable superclass whose generated members write and store the inherited elements.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SerialParent {
+    /// A class this file declares.
+    Local(ClassId),
+    /// A class compiled apart from this file, which its provider described.
+    External(TypeName),
+}
+
+/// Where an element is declared.
+#[derive(Clone, Debug)]
+enum ElementSource {
+    /// A property of a class in this file, by its backing field.
+    Field { class: ClassId, field: usize },
+    /// An element of a superclass compiled apart from this file.
+    External(SerializableElement),
 }
 
 /// One element of the wire shape, as the descriptor, `childSerializers` and `deserialize` see it.
 #[derive(Clone, Debug)]
 pub(super) struct WireElement {
-    /// The class whose property declares the element, for the per-property annotation questions.
-    pub(super) class: ClassId,
-    /// The property's backing field in [`Self::class`].
-    pub(super) field: usize,
+    /// The class in this file whose property declares the element, for the per-property
+    /// annotation questions. `None` for an element of a superclass compiled apart from this file,
+    /// which carries no annotations.
+    pub(super) declared: Option<ClassId>,
     pub(super) name: String,
     /// The backing field's type.
     pub(super) ty: Ty,
     /// The type as the SERIALIZER sees it, which is not always the field's own type.
     pub(super) serializer_ty: Ty,
+    /// The input may omit the element: its property declares a default.
+    pub(super) optional: bool,
+}
+
+impl WireElement {
+    /// The serializer the element's property names with `@Serializable(with = …)`.
+    pub(super) fn declared_serializer(&self, ctx: &PluginContext, ir: &IrFile) -> Option<TypeName> {
+        super::declared_serializer_of(ctx, ir, self.declared?, &self.name)
+    }
+
+    /// Whether the element's property is `@Contextual`.
+    pub(super) fn is_contextual(&self, ctx: &PluginContext, ir: &IrFile) -> bool {
+        self.declared
+            .is_some_and(|class| super::property_is_contextual(ctx, ir, class, &self.name))
+    }
+
+    /// The element's declared type as its property spells it, type-use annotations included.
+    pub(super) fn type_spelling(&self, ctx: &PluginContext, ir: &IrFile) -> crate::ir::Spelled {
+        self.declared.map_or_else(
+            || crate::ir::Spelled::NONE.clone(),
+            |class| {
+                super::type_argument_serializers::declared_type_spelling(ctx, ir, class, &self.name)
+            },
+        )
+    }
+
+    /// The element's name on the wire.
+    pub(super) fn serial_name(&self, ctx: &PluginContext, ir: &IrFile) -> KtString {
+        self.declared
+            .and_then(|class| super::serial_name_of(ctx, ir, class, &self.name))
+            .unwrap_or_else(|| KtString::from(self.name.clone()))
+    }
 }
 
 impl SerialElements {
@@ -68,12 +119,14 @@ impl SerialElements {
     /// annotation class that is also called `Transient` does not.
     pub(super) fn of(ctx: &PluginContext, ir: &IrFile, class_id: ClassId) -> Self {
         let fields = own_fields(ir, class_id);
-        let parent = serializable_superclass(ctx, ir, class_id);
+        let superclass = ir.classes[class_id as usize].superclass;
         let mut parent_type_arguments = Vec::new();
         let mut inherited_bindings = HashMap::default();
-        let inherited = parent.map_or_else(Vec::new, |parent| {
+        let mut undescribed_parent = None;
+        let mut inherited = Vec::new();
+        let parent = if let Some(parent) = serializable_superclass(ctx, ir, class_id) {
             let parent_elements = SerialElements::of(ctx, ir, parent);
-            parent_type_arguments = superclass_type_arguments(ir, class_id, parent);
+            parent_type_arguments = superclass_type_arguments(ir, class_id, superclass);
             let formals = type_parameter_identities(ir, parent);
             let own: HashMap<String, Ty> = formals
                 .into_iter()
@@ -83,15 +136,31 @@ impl SerialElements {
                 inherited_bindings.insert(identity.clone(), ty_subst_keep_unbound(*ty, &own));
             }
             inherited_bindings.extend(own);
-            parent_elements.sources_of(parent).collect()
-        });
+            undescribed_parent = parent_elements.undescribed_parent;
+            inherited = parent_elements.sources_of(parent).collect();
+            Some(SerialParent::Local(parent))
+        } else if ctx.external_serializable_parent(superclass).is_some() {
+            parent_type_arguments = superclass_type_arguments(ir, class_id, superclass);
+            if parent_type_arguments.is_empty() {
+                match external_elements(ctx, superclass) {
+                    Ok(elements) => inherited = elements,
+                    Err(undescribed) => undescribed_parent = Some(undescribed),
+                }
+            } else {
+                undescribed_parent = Some(superclass);
+            }
+            Some(SerialParent::External(superclass))
+        } else {
+            None
+        };
         crate::trace_compiler!(
             "lower",
-            "serialization elements class_id={class_id} parent={parent:?} inherited={} fields={fields:?}",
+            "serialization elements class_id={class_id} parent={parent:?} inherited={} fields={fields:?} undescribed={undescribed_parent:?}",
             inherited.len()
         );
         SerialElements {
             parent,
+            undescribed_parent,
             parent_type_arguments,
             inherited_bindings,
             inherited,
@@ -105,8 +174,14 @@ impl SerialElements {
     }
 
     /// The serializable superclass whose elements precede the class's own.
-    pub(super) fn parent(&self) -> Option<ClassId> {
+    pub(super) fn parent(&self) -> Option<SerialParent> {
         self.parent
+    }
+
+    /// A serializable superclass whose elements are not known here, which the class's generated
+    /// members cannot inherit from.
+    pub(super) fn undescribed_parent(&self) -> Option<TypeName> {
+        self.undescribed_parent
     }
 
     /// How many elements the class inherits; its own element `i` is wire element
@@ -125,57 +200,123 @@ impl SerialElements {
         let mut properties: Vec<(ClassId, SerializedProperties)> = Vec::new();
         let mut wire = Vec::with_capacity(self.inherited.len() + self.fields.len());
         for source in self.sources_of(class_id) {
+            let (class, field) = match source {
+                ElementSource::Field { class, field } => (class, field),
+                ElementSource::External(element) => {
+                    wire.push(WireElement {
+                        declared: None,
+                        name: element.name.to_string(),
+                        ty: element.ty,
+                        serializer_ty: element.ty,
+                        optional: element.optional,
+                    });
+                    continue;
+                }
+            };
             let index = match properties
                 .iter()
-                .position(|(class, _)| *class == source.class)
+                .position(|(declaring, _)| *declaring == class)
             {
                 Some(index) => index,
                 None => {
-                    properties.push((source.class, SerializedProperties::of(ir, source.class)));
+                    properties.push((class, SerializedProperties::of(ir, class)));
                     properties.len() - 1
                 }
             };
             let class_properties = &properties[index].1;
-            let (name, ty) = class_properties.fields[source.field].clone();
-            let mut serializer_ty = class_properties.serializer_types[source.field];
-            let ty = if source.class == class_id {
+            let (name, ty) = class_properties.fields[field].clone();
+            let mut serializer_ty = class_properties.serializer_types[field];
+            let ty = if class == class_id {
                 ty
             } else {
                 serializer_ty = ty_subst_keep_unbound(serializer_ty, &self.inherited_bindings);
                 ty_subst_keep_unbound(ty, &self.inherited_bindings)
             };
             wire.push(WireElement {
-                class: source.class,
-                field: source.field,
+                declared: Some(class),
                 name,
                 ty,
                 serializer_ty,
+                optional: super::property_default::checked_default(ir, class, field).is_some(),
             });
         }
         wire
     }
 
-    fn sources(&self) -> impl Iterator<Item = ElementSource> + '_ {
-        self.inherited.iter().copied()
-    }
-
     fn sources_of(&self, class_id: ClassId) -> impl Iterator<Item = ElementSource> + '_ {
-        self.sources()
-            .chain(self.fields.iter().map(move |&field| ElementSource {
+        self.inherited
+            .iter()
+            .cloned()
+            .chain(self.fields.iter().map(move |&field| ElementSource::Field {
                 class: class_id,
                 field,
             }))
     }
 }
 
+/// The elements `parent`, a serializable superclass compiled apart from this file, writes with
+/// its superclasses': theirs first. `Err` names the first superclass in the chain whose elements
+/// are not known here.
+fn external_elements(
+    ctx: &PluginContext,
+    parent: TypeName,
+) -> Result<Vec<ElementSource>, TypeName> {
+    let mut chain = Vec::new();
+    let mut current = Some(parent);
+    while let Some(classifier) = current {
+        let Some(published) = ctx.external_serializable_parent(classifier) else {
+            break;
+        };
+        let record = published.ok_or(classifier)?;
+        current = match record.superclass {
+            Some(superclass) if !superclass.type_args().is_empty() => {
+                return Err(superclass.kotlin_class_internal().unwrap_or(classifier));
+            }
+            Some(superclass) => superclass.kotlin_class_internal(),
+            None => None,
+        };
+        chain.push(record);
+    }
+    Ok(chain
+        .into_iter()
+        .rev()
+        .flat_map(|record| record.elements.iter().cloned().map(ElementSource::External))
+        .collect())
+}
+
+/// What decides whether the plugin generates a class's `write$Self` and deserialization
+/// constructor, which a subclass's generated members call: lowering asks it of a superclass in its
+/// own file, and the record a class publishes for subclasses in other files
+/// ([`super::declared_elements`]) asks it of the class's checked declaration.
+pub(super) struct MemberGeneration {
+    pub(super) kind: crate::libraries::TypeKind,
+    pub(super) is_value: bool,
+    pub(super) serializable: bool,
+    /// `@Serializable(with = …)`: the named serializer replaces the generated one.
+    pub(super) custom_serializer: bool,
+}
+
+impl MemberGeneration {
+    pub(super) fn generates_members(&self) -> bool {
+        self.serializable
+            && !self.custom_serializer
+            && self.kind == crate::libraries::TypeKind::Class
+            && !self.is_value
+    }
+}
+
+/// Whether a stored property with these resolved annotations is NOT a serial element.
+pub(super) fn is_transient(annotations: &[TypeName]) -> bool {
+    annotations.contains(&type_name(TRANSIENT_FQ))
+}
+
 /// `class_id`'s own elements: every backing field but a `@Transient` property's.
 fn own_fields(ir: &IrFile, class_id: ClassId) -> Vec<usize> {
     let class = &ir.classes[class_id as usize];
-    let transient_identity = type_name(TRANSIENT_FQ);
     let transient = class
         .properties
         .iter()
-        .filter(|property| property.annotations.contains(&transient_identity))
+        .filter(|property| is_transient(&property.annotations))
         .filter_map(|property| property.backing_field)
         .map(|field| field as usize)
         .collect::<Vec<_>>();
@@ -185,8 +326,8 @@ fn own_fields(ir: &IrFile, class_id: ClassId) -> Vec<usize> {
 }
 
 /// The superclass of `class_id` declared in this file whose serializer the plugin generates, which
-/// `class_id`'s generated members extend. A superclass from another module, or a generic one, is
-/// not read here.
+/// `class_id`'s generated members extend. One compiled apart from this file is described by its
+/// provider instead ([`super::external_parent`]).
 fn serializable_superclass(ctx: &PluginContext, ir: &IrFile, class_id: ClassId) -> Option<ClassId> {
     let superclass = ir.classes[class_id as usize].superclass;
     let parent = ir
@@ -194,17 +335,29 @@ fn serializable_superclass(ctx: &PluginContext, ir: &IrFile, class_id: ClassId) 
         .iter()
         .position(|class| class.fq_name_id() == superclass)? as ClassId;
     let class = &ir.classes[parent as usize];
-    let generated = ctx.has_annotation(parent, type_name(SERIALIZABLE_FQ))
-        && custom_serializer_of(ctx, ir, parent).is_none()
-        && !class.is_enum
-        && !class.is_object
-        && !class.is_value;
-    generated.then_some(parent)
+    let kind = if class.is_annotation {
+        crate::libraries::TypeKind::Annotation
+    } else if class.is_interface {
+        crate::libraries::TypeKind::Interface
+    } else if class.is_enum {
+        crate::libraries::TypeKind::Enum
+    } else if class.is_object {
+        crate::libraries::TypeKind::Object
+    } else {
+        crate::libraries::TypeKind::Class
+    };
+    MemberGeneration {
+        kind,
+        is_value: class.is_value,
+        serializable: ctx.has_annotation(parent, type_name(SERIALIZABLE_FQ)),
+        custom_serializer: custom_serializer_of(ctx, ir, parent).is_some(),
+    }
+    .generates_members()
+    .then_some(parent)
 }
 
-/// The type arguments `class_id`'s supertype gives `parent`.
-fn superclass_type_arguments(ir: &IrFile, class_id: ClassId, parent: ClassId) -> Vec<Ty> {
-    let parent_name = ir.classes[parent as usize].fq_name_id();
+/// The type arguments `class_id`'s supertype gives `parent_name`.
+fn superclass_type_arguments(ir: &IrFile, class_id: ClassId, parent_name: TypeName) -> Vec<Ty> {
     ir.classes[class_id as usize]
         .supertypes
         .iter()

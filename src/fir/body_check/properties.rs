@@ -623,6 +623,14 @@ impl BodyFirChecker<'_> {
         let selected_ty = ResolvedTy::new(selected.ty)
             .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))?;
         if let Some((owner, field)) = self.class_context_storage(selected) {
+            if let Some(receiver) = self.script_statement_receiver(cause, field) {
+                return Ok(Some(receiver));
+            }
+            if let Some(receiver) =
+                self.captured_class_context_read(origin, span, selected, owner, field)?
+            {
+                return Ok(Some(receiver));
+            }
             let value = self.body.add_expr(FirExpr {
                 origin,
                 ty: selected_ty,
@@ -671,30 +679,7 @@ impl BodyFirChecker<'_> {
             let (enclosing_depth, binding) = self
                 .binding_source_at_shadow_depth(name, *shadow_depth)
                 .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnknownLocal))?;
-            let kind = if let Some(enclosing_depth) = enclosing_depth {
-                self.body.add_capture(FirCapture {
-                    origin,
-                    enclosing_depth,
-                    source: FirCaptureSource::Value(binding.value),
-                    ty: binding.ty,
-                    shared_cell: false,
-                });
-                FirExprKind::CapturedValueRead {
-                    enclosing_depth,
-                    source: binding.value,
-                }
-            } else {
-                FirExprKind::ValueRead(binding.value)
-            };
-            let value = self.body.add_expr(FirExpr {
-                origin,
-                ty: binding.ty,
-                kind,
-            });
-            return Ok(Some(FirReceiver {
-                value,
-                conversion: None,
-            }));
+            return Ok(Some(self.bound_receiver(origin, enclosing_depth, binding)));
         }
         if let Some(singleton) = selected.singleton.as_ref() {
             let ty = ResolvedTy::new(selected.ty).map_err(|error| {
@@ -844,6 +829,124 @@ impl BodyFirChecker<'_> {
             value,
             conversion: None,
         }))
+    }
+
+    /// A script statement, and a lambda or local function within one, reads the implicit receiver
+    /// `ordinal` from the constructor parameter that initializes its field, as kotlinc does.
+    /// Elsewhere the script reads the field.
+    fn script_statement_receiver(&mut self, cause: OriginId, ordinal: u32) -> Option<FirReceiver> {
+        let (enclosing_depth, binding) =
+            self.binding_source_at_shadow_depth(&super::script_receiver_binding(ordinal), 0)?;
+        let origin = self
+            .origins
+            .synthetic(cause, SyntheticOriginKind::ScriptReceiver);
+        Some(self.bound_receiver(origin, enclosing_depth, binding))
+    }
+
+    /// A class context read in a lambda or local function that does not own the class instance
+    /// reads the field through the instance it captures.
+    fn captured_class_context_read(
+        &mut self,
+        origin: OriginId,
+        span: Option<Span>,
+        selected: &crate::resolve::ImplicitReceiverSelection,
+        owner: DeclarationId,
+        field: u32,
+    ) -> Result<Option<FirReceiver>, BodyCheckFailure> {
+        if self.body.local_callable().is_none()
+            || selected.receiver_depth < self.owned_receiver_count as usize
+        {
+            return Ok(None);
+        }
+        let contexts = self
+            .index
+            .classifier_header(owner)
+            .map_or(0, |classifier| classifier.context_parameters.len());
+        // The class instance is the receiver just outside its contexts.
+        let instance_depth = contexts
+            .checked_sub(field as usize)
+            .and_then(|outside| selected.receiver_depth.checked_sub(outside))
+            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?;
+        let (enclosing_depth, captured_depth, path, captured) = self
+            .enclosing_receiver_capture(instance_depth)
+            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?;
+        let instance_ty = ResolvedTy::new(Ty::obj_name(
+            self.index
+                .classifier_header(owner)
+                .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))?
+                .classifier,
+        ))
+        .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))?;
+        self.body
+            .add_implicit_receiver_capture(FirImplicitReceiverCapture {
+                origin,
+                enclosing_depth,
+                current: captured_depth == 0,
+                depth: captured_depth,
+                path: path.clone(),
+                ty: instance_ty,
+                receiver: captured,
+            });
+        let receiver = self.body.add_expr(FirExpr {
+            origin,
+            ty: instance_ty,
+            kind: FirExprKind::CapturedImplicitReceiver {
+                enclosing_depth,
+                current: captured_depth == 0,
+                depth: captured_depth,
+                path,
+            },
+        });
+        let selected_ty = ResolvedTy::new(selected.ty)
+            .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))?;
+        let value = self.body.add_expr(FirExpr {
+            origin,
+            ty: selected_ty,
+            kind: FirExprKind::CapturedClassStorageRead {
+                owner,
+                receiver,
+                path: Box::new([]),
+                field,
+                shared_cell: false,
+            },
+        });
+        Ok(Some(FirReceiver {
+            value,
+            conversion: None,
+        }))
+    }
+
+    /// A receiver held in a lexical binding, captured when it belongs to an enclosing body.
+    fn bound_receiver(
+        &mut self,
+        origin: OriginId,
+        enclosing_depth: Option<u32>,
+        binding: LocalBinding,
+    ) -> FirReceiver {
+        let kind = if let Some(enclosing_depth) = enclosing_depth {
+            self.body.add_capture(FirCapture {
+                origin,
+                enclosing_depth,
+                source: FirCaptureSource::Value(binding.value),
+                ty: binding.ty,
+                shared_cell: false,
+            });
+            FirExprKind::CapturedValueRead {
+                enclosing_depth,
+                source: binding.value,
+            }
+        } else {
+            FirExprKind::ValueRead(binding.value)
+        };
+        let value = self.body.add_expr(FirExpr {
+            origin,
+            ty: binding.ty,
+            kind,
+        });
+        FirReceiver {
+            value,
+            conversion: None,
+        }
     }
 
     fn class_context_storage(
@@ -1505,7 +1608,7 @@ impl BodyFirChecker<'_> {
                     parameter: parameter.into(),
                     reified,
                     value,
-                    reified_runtime: self.reified_substitution_runtime(reified, value, &[]),
+                    reified_runtime: self.reified_substitution_runtime(reified, value, None),
                     additional_bounds: Box::new([]),
                 })
             })

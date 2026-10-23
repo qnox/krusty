@@ -307,11 +307,7 @@ impl BodyFirChecker<'_> {
                     parameter,
                     reified,
                     value,
-                    reified_runtime: self.reified_substitution_runtime(
-                        reified,
-                        value,
-                        &additional_bounds,
-                    ),
+                    reified_runtime: self.reified_substitution_runtime(reified, value, None),
                     additional_bounds,
                 })
             })

@@ -30,7 +30,7 @@ use crate::jvm::method_node::{
 use crate::jvm::source_map::SourceMap;
 pub(super) use compiled_module_callee::{compile_inline_callees, CompiledInlineCallees};
 use default_bridge::CalleeNodes;
-pub(super) use lambda_route::{LambdaCallRoute, SpliceReason};
+pub(super) use lambda_route::LambdaCallRoute;
 pub(super) use regenerated_objects::{RegeneratedObjectNames, RegenerationSite};
 
 const ACC_STATIC: u16 = 0x0008;
@@ -398,7 +398,7 @@ impl Emitter<'_> {
             }
         };
         crate::trace_compiler!("splice", "literal-lambda call spliced: {reason:?}");
-        self.splice_selected_literals(inline_call, &positions, reason, base, code)
+        self.splice_selected_literals(inline_call, &positions, base, code)
     }
 
     /// A call whose literal lambdas the callee's body uses only as values: each is passed to the
@@ -1514,6 +1514,8 @@ impl Emitter<'_> {
         let mut brackets: Vec<bool> = Vec::new();
         // A marked return is being written: the protected regions reopen after it.
         let mut returning = false;
+        // A marked return that leaves a loop was written as the jump to it: the return goes.
+        let mut jumped = false;
         let under = |brackets: &[bool]| {
             if brackets.contains(&true) {
                 0
@@ -1555,14 +1557,27 @@ impl Emitter<'_> {
                 // kotlinc's `generateAndInsertFinallyBlocks` lays the copies out above every
                 // local of the inlined code (`frameMap.skipTo(intoNode.maxLocals)`), and marks
                 // their lines afresh: the code around them ran under the inlined lines.
+                // A marked return that names a loop is a `break` or `continue` of it, behind the
+                // `finally` blocks between here and the loop.
                 Node::Insn(_) if inliner::is_non_local_return_marker(node) => {
                     code.forget_line();
                     let mark = self.frame.mark();
                     self.frame.reserve_through(inlined.locals_top());
-                    self.emit_finalizers_before_return(code);
+                    let leaves =
+                        inliner::non_local_return_name(node).and_then(Self::inlined_loop_jump);
+                    match leaves {
+                        Some((position, brk)) => {
+                            self.emit_inlined_loop_jump(position, brk, code);
+                            jumped = true;
+                        }
+                        None => {
+                            self.emit_finalizers_before_return(code);
+                            returning = true;
+                        }
+                    }
                     self.frame.rewind_to(mark);
-                    returning = true;
                 }
+                Node::Insn(_) if std::mem::take(&mut jumped) => {}
                 Node::Insn(_) if is_after_inline_marker(node) => {
                     if brackets.pop().unwrap_or(false) {
                         code.inline_call_marker(false);

@@ -58,6 +58,7 @@ pub(crate) fn publish_file_annotations(
                     annotation: applied.internal,
                     arguments: applied.values.clone(),
                     facts: applied.facts,
+                    written: None,
                 })
             })
             .collect();
