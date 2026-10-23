@@ -1,0 +1,117 @@
+//! `typeOf<T>()` through krusty's own code generator and runtime.
+//!
+//! Every site names one fixed type, so each is a static object the generator emits and the
+//! runtime reads: `equals` is structural, `toString` prints what Kotlin/Native's `KTypeImpl`
+//! prints, and `classifier`/`isMarkedNullable` are read off the object. Each program is first run
+//! on the JVM; the one whose text differs there says what each backend prints.
+
+use super::common::{
+    expect_box_ok_with_stdlib, expect_box_run_with_stdlib_diverging, expect_native_box,
+};
+
+fn both(source: &str, stem: &str) {
+    expect_box_ok_with_stdlib(source, stem);
+    expect_native_box(source, stem, "OK");
+}
+
+#[test]
+fn a_type_prints_what_kotlin_native_prints() {
+    // The native text is kotlinc-native's for the same program. The JVM's, without kotlin-reflect,
+    // is the stdlib `TypeReference`'s, which spells Java classes and says reflection is missing.
+    let source = "import kotlin.reflect.typeOf\n\
+         class G<T>\n\
+         class C\n\
+         fun box(): String = listOf(\n\
+         \x20   typeOf<List<String>>(),\n\
+         \x20   typeOf<Map<in Number, out String?>?>(),\n\
+         \x20   typeOf<Array<*>>(),\n\
+         \x20   typeOf<IntArray>(),\n\
+         \x20   typeOf<Int?>(),\n\
+         \x20   typeOf<Any>(),\n\
+         \x20   typeOf<Unit>(),\n\
+         \x20   typeOf<G<C>>(),\n\
+         \x20   typeOf<() -> Unit>(),\n\
+         ).joinToString(\"|\")\n";
+    let jvm = expect_box_run_with_stdlib_diverging(
+        source,
+        "TypeOfToString",
+        "kotlin.collections.List<kotlin.String>|\
+         kotlin.collections.Map<in kotlin.Number, out kotlin.String?>?|\
+         kotlin.Array<*>|kotlin.IntArray|kotlin.Int?|kotlin.Any|kotlin.Unit|G<C>|\
+         kotlin.Function0<kotlin.Unit>",
+    );
+    assert_eq!(
+        jvm,
+        "java.util.List<java.lang.String> (Kotlin reflection is not available)|\
+         java.util.Map<in java.lang.Number, out java.lang.String?>? (Kotlin reflection is not available)|\
+         kotlin.Array<*> (Kotlin reflection is not available)|\
+         kotlin.IntArray (Kotlin reflection is not available)|\
+         java.lang.Integer? (Kotlin reflection is not available)|\
+         java.lang.Object (Kotlin reflection is not available)|\
+         kotlin.Unit (Kotlin reflection is not available)|\
+         G<C> (Kotlin reflection is not available)|\
+         kotlin.jvm.functions.Function0<kotlin.Unit> (Kotlin reflection is not available)",
+        "TypeOfToString on the JVM"
+    );
+}
+
+#[test]
+fn two_sites_naming_one_type_are_equal_and_hash_alike() {
+    both(
+        "import kotlin.reflect.KType\n\
+         import kotlin.reflect.typeOf\n\
+         class C\n\
+         inline fun <reified T> reified(): KType = typeOf<T>()\n\
+         fun box(): String {\n\
+         \x20   val a = typeOf<List<C>>()\n\
+         \x20   val b = reified<List<C>>()\n\
+         \x20   if (a != b || b != a) return \"fail equal: $a $b\"\n\
+         \x20   if (a.hashCode() != b.hashCode()) return \"fail hash\"\n\
+         \x20   if (a == typeOf<List<C?>>()) return \"fail argument nullability\"\n\
+         \x20   if (a == typeOf<List<C>?>()) return \"fail nullability\"\n\
+         \x20   if (typeOf<Map<in Number, Int>>() == typeOf<Map<out Number, Int>>()) return \"fail variance\"\n\
+         \x20   if (typeOf<Array<IntArray>>() == typeOf<Array<Array<Int>>>()) return \"fail argument\"\n\
+         \x20   val any: Any = a\n\
+         \x20   if (any !is KType) return \"fail is\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "TypeOfEquality",
+    );
+}
+
+#[test]
+fn classifier_and_nullability_are_read_off_the_type() {
+    both(
+        "import kotlin.reflect.typeOf\n\
+         class C\n\
+         fun box(): String {\n\
+         \x20   val t = typeOf<List<C>?>()\n\
+         \x20   if (t.classifier != List::class) return \"fail classifier: ${t.classifier}\"\n\
+         \x20   if (!t.isMarkedNullable) return \"fail nullable\"\n\
+         \x20   if (typeOf<C>().classifier != C::class) return \"fail class\"\n\
+         \x20   if (typeOf<C>().isMarkedNullable) return \"fail not nullable\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "TypeOfMembers",
+    );
+}
+
+#[test]
+fn a_reified_intersection_describes_its_common_supertype() {
+    // kotlinc reifies `A & B` to their common supertype, `Any`, on both backends.
+    both(
+        "// LANGUAGE: -ProhibitIntersectionReifiedTypeParameter\n\
+         import kotlin.reflect.KType\n\
+         import kotlin.reflect.typeOf\n\
+         interface A\n\
+         interface B\n\
+         class C : A, B\n\
+         inline fun <reified K> select(x: K): KType where K : A, K : B = typeOf<K>()\n\
+         fun test(a: Any): KType? = if (a is A && a is B) select(a) else null\n\
+         fun box(): String {\n\
+         \x20   val described = test(C())\n\
+         \x20   return if (described == typeOf<Any>()) \"OK\" else \"fail: $described\"\n\
+         }\n",
+        "TypeOfIntersection",
+    );
+}

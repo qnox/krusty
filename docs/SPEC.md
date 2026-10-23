@@ -12428,6 +12428,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Not yet: a reified member inline function (it is called rather than inlined, `typeOf` or not), a
   reified parameter inside a lambda class regenerated per call site, and a use-site projection
   written in a typealias (`typealias T<Y> = MutableMap<in Y, …>` loses its `in`).
+- **On Native, `typeOf<T>()` is a static `KType` object the generator emits.** The target stdlib's
+  body only throws, so the call is never made. Inline specialization has already substituted a
+  reified parameter, and the frontend has already approximated an intersection to its common
+  supertype (`K : A, K : B` reified from `a is A && a is B` describes `kotlin.Any`, as both
+  kotlinc backends print). Each distinct type in a file is one static object wearing the
+  runtime's `kotlin.reflect.KTypeImpl` descriptor, which implements the `KType` marker. It holds
+  the classifier's descriptor, the nullability, and one projection per argument in
+  Kotlin/Native's variance encoding (`-1` star, `0` invariant, `1` `in`, `2` `out`), each pointing
+  at the argument's own object. The runtime answers from that layout:
+  - `equals` is structural, so two sites or two files naming one type are equal; `hashCode`
+    follows `KTypeImpl`'s `(classifier * 31 + arguments) * 31 + isMarkedNullable` shape.
+  - `toString` prints what Kotlin/Native's `KTypeImpl` prints: the qualified name (the simple
+    name of a local class, `???` for an anonymous one), then `<…>` with `*`, `in ` and `out `
+    projections, then `?`. A function type is its `kotlin.FunctionN` class with the parameters
+    and result as invariant arguments (`kotlin.Function0<kotlin.Unit>`, where the JVM prints
+    `() -> kotlin.Unit`).
+  - `classifier` is the class literal of the type's class; a mapped collection interface is the
+    runtime's marker for it. `isMarkedNullable` is the stored nullability.
+  - Declined: a type naming a type parameter (its classifier is a `KTypeParameter`), a `suspend`
+    function type, a classifier without a runtime descriptor, and `KType.arguments`, whose
+    `KTypeProjection` objects this target does not build.
+  Tests: `tests/native_type_of_e2e.rs`; the corpus's `reified/reifiedIntersectionTypeArgument`.
 - **An invariant instantiation joins at a captured out-projection of the arguments' common supertype.**
   `sel(Inv(A), Inv(B))`, with `A : X, Y` and `B : X, Y`, has type `Inv<out (X & Y)>` rather than a
   raw `Inv` or `Any`. Reading `v` produces that captured upper bound, so the value has the members
@@ -12436,9 +12458,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   operation does not reify the intersection: the frontend records its single common supertype on
   the substitution (`Any` when the components share none, that shared classifier when they do,
   and the class itself when the captured bound is one class), and `typeOf` encodes that recorded
-  classifier. Corpus: `reflection/typeOf/intersectionType.kt`
-  (`-ProhibitIntersectionReifiedTypeParameter`).
-  Test: `tests/intersection_reified_type_of_e2e.rs`.
+  classifier. A FLOW intersection is the same type: `select(a)` after `a is A && a is B` infers
+  `K` as `A & B`, which the substitution carries as its primary constituent `A` plus the
+  additional bound `B`, and the reified operation records their common supertype `Any`, as both
+  kotlinc backends do (`typeOf<K>()` prints `kotlin.Any` and `y is K` is `true` for every `y`).
+  Corpus: `reflection/typeOf/intersectionType.kt` and
+  `reified/reifiedIntersectionTypeArgument.kt` (`-ProhibitIntersectionReifiedTypeParameter`).
+  Tests: `tests/intersection_reified_type_of_e2e.rs` and `tests/native_type_of_e2e.rs`.
 - **A Java member's flexible return keeps the caller's type arguments.** A Java generic class
   applied to the enclosing declaration's own type parameters (`Shelf<X, Y>` inside `fun <X, Y>`,
   or `LinkedHashMap(map)` over a `Map<K, V>`, which infers `LinkedHashMap<K, V>` from the

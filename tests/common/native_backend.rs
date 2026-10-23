@@ -312,7 +312,12 @@ pub fn native_image(
     {
         return Err(NativeBox::Declined(decline.msg.clone()));
     }
-    if let Some(refusal) = diags.diags.first() {
+    // A warning, such as kotlinc's on a reified intersection, refuses nothing.
+    if let Some(refusal) = diags
+        .diags
+        .iter()
+        .find(|diagnostic| diagnostic.severity == krusty::diag::Severity::Error)
+    {
         return Err(NativeBox::Declined(refusal.msg.clone()));
     }
     if artifacts.is_empty() {

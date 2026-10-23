@@ -1639,10 +1639,12 @@ pub(super) fn boxed_step(owner: DeclarationOwner, name: &str, params: &[Ty]) -> 
 ///
 /// A property reference is an object of a type of its own — the generator emits one per property —
 /// so the type written at the site is never the object's, exactly as for a function value. These
-/// markers are what the two have in common.
+/// markers are what the two have in common. A `typeOf` object wears the runtime's one `KTypeImpl`
+/// descriptor, which names the `KType` marker.
 pub(super) fn reflection_type_descriptor(owner: crate::types::TypeName) -> Option<&'static str> {
     [
         ("kotlin/reflect/KCallable", "kt_type_kcallable"),
+        ("kotlin/reflect/KType", "kt_type_ktype"),
         ("kotlin/reflect/KProperty", "kt_type_kproperty"),
         ("kotlin/reflect/KProperty0", "kt_type_kproperty0"),
         ("kotlin/reflect/KProperty1", "kt_type_kproperty1"),
