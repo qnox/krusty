@@ -35,12 +35,14 @@ pub(crate) fn attach_dependency_function_realization(
     name: &str,
     compiler_builtin_owner: bool,
     function: &mut FunctionInfo,
+    array_list_classifier: Option<TypeName>,
 ) {
     function.callable.compiler_intrinsic = normalized_function_realization_with_stdlib_owner(
         package,
         name,
         function,
         compiler_builtin_owner,
+        array_list_classifier,
     );
     let semantic_role = normalized_function_semantic_role(package, name, function);
     function.callable.semantic_role = match semantic_role {
@@ -260,13 +262,17 @@ fn array_factory(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntri
     valid.then_some(CompilerIntrinsic::ArrayFactory(kind))
 }
 
-fn kotlin_function(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
+fn kotlin_function(
+    facts: &BuiltinFunctionDeclaration<'_>,
+    compiler_builtin_owner: bool,
+) -> Option<CompilerIntrinsic> {
     if !facts.package.matches("kotlin") || !plain(facts, facts.kind) {
         return None;
     }
     match (facts.name, facts.kind, facts.receiver, facts.params) {
         ("plus", FnKind::Extension, Some(receiver), [parameter])
-            if facts.type_parameter_count == 0
+            if compiler_builtin_owner
+                && facts.type_parameter_count == 0
                 && facts.vararg.is_none()
                 && facts.is_operator
                 && receiver == Ty::nullable(Ty::String)
@@ -623,6 +629,9 @@ fn closed_range_contains(facts: &BuiltinFunctionDeclaration<'_>) -> Option<Compi
     if facts.kind != FnKind::Extension
         || facts.name != "contains"
         || !facts.is_operator
+        || facts.is_suspend
+        || facts.is_infix
+        || facts.ret != Ty::Boolean
         || facts.params.len() != 1
         || facts.context_count != 0
         || facts.vararg.is_some()
@@ -714,7 +723,7 @@ fn function_realization_with_stdlib_owner(
     if let Some(intrinsic) = with_index(&facts) {
         Some(intrinsic)
     } else if facts.package.matches("kotlin") {
-        kotlin_function(&facts)
+        kotlin_function(&facts, compiler_builtin_owner)
     } else if facts.package.matches("kotlin/io") {
         console(&facts)
     } else if facts.package.matches("kotlin/collections") || facts.package.matches("kotlin/text") {
@@ -753,7 +762,13 @@ pub(crate) fn normalized_function_realization(
     name: &str,
     function: &FunctionInfo,
 ) -> Option<CompilerIntrinsic> {
-    normalized_function_realization_with_stdlib_owner(package, name, function, true)
+    normalized_function_realization_with_stdlib_owner(
+        package,
+        name,
+        function,
+        true,
+        Some(crate::types::type_name("kotlin/collections/ArrayList")),
+    )
 }
 
 fn normalized_function_realization_with_stdlib_owner(
@@ -761,6 +776,7 @@ fn normalized_function_realization_with_stdlib_owner(
     name: &str,
     function: &FunctionInfo,
     compiler_builtin_owner: bool,
+    array_list_classifier: Option<TypeName>,
 ) -> Option<CompilerIntrinsic> {
     let params = function.semantic_params();
     let generic = function.generic_sig.as_ref();
@@ -778,7 +794,74 @@ fn normalized_function_realization_with_stdlib_owner(
         is_operator: function.flags.operator,
         is_infix: function.flags.infix,
     };
+    if compiler_builtin_owner {
+        if let Some(plan) = list_storage_construction(&facts, function, array_list_classifier) {
+            return Some(CompilerIntrinsic::ListStorageConstruction(plan));
+        }
+    }
     function_realization_with_stdlib_owner(facts, compiler_builtin_owner)
+}
+
+/// Authenticate the complete generic declaration while the provider still owns it. In particular,
+/// an array substituted for a singleton's T must not acquire the packed-elements representation.
+fn list_storage_construction(
+    facts: &BuiltinFunctionDeclaration<'_>,
+    function: &FunctionInfo,
+    array_list_classifier: Option<TypeName>,
+) -> Option<crate::libraries::ListStorageConstruction> {
+    use crate::libraries::{GenericReturnPolicy, ListStorageConstruction};
+
+    if !facts.package.matches("kotlin/collections")
+        || !plain(facts, FnKind::TopLevel)
+        || facts.receiver.is_some()
+        || facts.is_operator
+        || function.flags.reified
+        || function.flags.is_abstract
+        || !function.call_sig.reified_type_parameter_ordinals.is_empty()
+        || function.call_sig.vararg != facts.vararg.is_some()
+        || function
+            .call_sig
+            .param_defaults
+            .iter()
+            .any(|default| *default)
+    {
+        return None;
+    }
+    let signature = function.generic_sig.as_ref()?;
+    let [formal] = signature.formals.as_slice() else {
+        return None;
+    };
+    let [bounds] = signature.formal_bounds.as_slice() else {
+        return None;
+    };
+    let implicit_bound = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
+    if !(bounds.is_empty() || bounds.as_slice() == [implicit_bound])
+        || signature.return_policy != GenericReturnPolicy::Exact
+        || signature.receiver.is_some()
+    {
+        return None;
+    }
+    let element = Ty::ty_param(formal, implicit_bound);
+    let readonly = facts.ret == Ty::obj_args("kotlin/collections/List", &[element]);
+    let mutable = facts.ret == Ty::obj_args("kotlin/collections/MutableList", &[element]);
+    let array_list = array_list_classifier
+        .is_some_and(|classifier| facts.ret == Ty::obj_args_name(classifier, &[element]));
+    let empty = facts.params.is_empty() && facts.vararg.is_none();
+    let packed = facts.params == [Ty::obj_args("kotlin/Array", &[Ty::out_projection(element)])]
+        && facts.vararg == Some(0);
+    match facts.name {
+        "emptyList" if readonly && empty => Some(ListStorageConstruction::ReadonlyEmpty),
+        "listOf" if readonly && empty => Some(ListStorageConstruction::ReadonlyEmpty),
+        "listOf" if readonly && facts.params == [element] && facts.vararg.is_none() => {
+            Some(ListStorageConstruction::ReadonlySingleton)
+        }
+        "listOf" if readonly && packed => Some(ListStorageConstruction::ReadonlyPacked),
+        "mutableListOf" if mutable && empty => Some(ListStorageConstruction::MutableEmpty),
+        "mutableListOf" if mutable && packed => Some(ListStorageConstruction::MutablePacked),
+        "arrayListOf" if array_list && empty => Some(ListStorageConstruction::MutableEmpty),
+        "arrayListOf" if array_list && packed => Some(ListStorageConstruction::MutablePacked),
+        _ => None,
+    }
 }
 
 /// Attach a semantic language role to an already-normalized provider callable. Unlike a compiler
@@ -862,6 +945,244 @@ mod tests {
     use crate::libraries::builtin_declaration::BuiltinFunctionDeclaration;
     use crate::types::type_name;
 
+    fn normalized_function_realization_with_stdlib_owner(
+        package: TypeName,
+        name: &str,
+        function: &FunctionInfo,
+        compiler_builtin_owner: bool,
+    ) -> Option<CompilerIntrinsic> {
+        super::normalized_function_realization_with_stdlib_owner(
+            package,
+            name,
+            function,
+            compiler_builtin_owner,
+            Some(type_name("kotlin/collections/ArrayList")),
+        )
+    }
+
+    fn storage_factory(name: &str, container: &str, packed: bool, singleton: bool) -> FunctionInfo {
+        use crate::libraries::{CallSig, GenericSig, LibraryCallable};
+        let formal = Ty::ty_param("storage-element", Ty::nullable(Ty::obj("kotlin/Any")));
+        let params = if packed {
+            vec![Ty::obj_args("kotlin/Array", &[Ty::out_projection(formal)])]
+        } else if singleton {
+            vec![formal]
+        } else {
+            vec![]
+        };
+        let ret = Ty::obj_args(container, &[formal]);
+        let generic = GenericSig {
+            formals: vec!["storage-element".into()],
+            formal_bounds: vec![vec![]],
+            receiver: None,
+            params: params.clone(),
+            ret,
+            return_policy: Default::default(),
+        };
+        let mut callable =
+            LibraryCallable::library("kotlin/collections", name, params.clone(), ret, ret, "");
+        callable.generic_sig = Some(Box::new(generic.clone()));
+        let mut function = FunctionInfo::plain(FnKind::TopLevel, None, callable);
+        function.generic_sig = Some(generic);
+        function.call_sig = CallSig::metadata_member(
+            params.len(),
+            vec!["elements".into(); params.len()],
+            vec![false; params.len()],
+            packed.then_some(0),
+        );
+        function
+    }
+
+    #[test]
+    fn list_storage_construction_is_a_declaration_owned_plan() {
+        for (name, container, packed, singleton, expected) in [
+            (
+                "emptyList",
+                "kotlin/collections/List",
+                false,
+                false,
+                "ReadonlyEmpty",
+            ),
+            (
+                "listOf",
+                "kotlin/collections/List",
+                false,
+                false,
+                "ReadonlyEmpty",
+            ),
+            (
+                "listOf",
+                "kotlin/collections/List",
+                false,
+                true,
+                "ReadonlySingleton",
+            ),
+            (
+                "listOf",
+                "kotlin/collections/List",
+                true,
+                false,
+                "ReadonlyPacked",
+            ),
+            (
+                "mutableListOf",
+                "kotlin/collections/MutableList",
+                false,
+                false,
+                "MutableEmpty",
+            ),
+            (
+                "mutableListOf",
+                "kotlin/collections/MutableList",
+                true,
+                false,
+                "MutablePacked",
+            ),
+            (
+                "arrayListOf",
+                "kotlin/collections/ArrayList",
+                false,
+                false,
+                "MutableEmpty",
+            ),
+            (
+                "arrayListOf",
+                "kotlin/collections/ArrayList",
+                true,
+                false,
+                "MutablePacked",
+            ),
+        ] {
+            let function = storage_factory(name, container, packed, singleton);
+            let package = type_name("kotlin/collections");
+            let actual =
+                normalized_function_realization_with_stdlib_owner(package, name, &function, true);
+            assert_eq!(
+                actual.map(|operation| format!("{operation:?}")),
+                Some(format!("ListStorageConstruction({expected})")),
+                "{name} packed={packed} singleton={singleton}",
+            );
+            assert_eq!(
+                normalized_function_realization_with_stdlib_owner(package, name, &function, false),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn list_storage_construction_rejects_incomplete_or_changed_generic_contracts() {
+        type ContractChange = fn(&mut FunctionInfo);
+        let cases: &[(&str, ContractChange)] = &[
+            ("missing generic declaration", |f| f.generic_sig = None),
+            ("additional formal", |f| {
+                f.generic_sig.as_mut().unwrap().formals.push("other".into())
+            }),
+            ("missing full bounds", |f| {
+                f.generic_sig.as_mut().unwrap().formal_bounds.clear()
+            }),
+            ("non-default bound", |f| {
+                f.generic_sig.as_mut().unwrap().formal_bounds[0] = vec![Ty::obj("kotlin/Number")]
+            }),
+            ("extra bound", |f| {
+                f.generic_sig.as_mut().unwrap().formal_bounds[0] = vec![
+                    Ty::nullable(Ty::obj("kotlin/Any")),
+                    Ty::obj("kotlin/Number"),
+                ]
+            }),
+            ("different result formal", |f| {
+                f.generic_sig.as_mut().unwrap().ret = Ty::obj_args(
+                    "kotlin/collections/List",
+                    &[Ty::ty_param("other", Ty::nullable(Ty::obj("kotlin/Any")))],
+                )
+            }),
+            ("nullable result", |f| {
+                let g = f.generic_sig.as_mut().unwrap();
+                g.ret = Ty::nullable(g.ret);
+            }),
+            ("different collection", |f| {
+                f.generic_sig.as_mut().unwrap().ret = Ty::obj("kotlin/collections/Set")
+            }),
+            ("flexible return policy", |f| {
+                f.generic_sig.as_mut().unwrap().return_policy =
+                    crate::libraries::GenericReturnPolicy::FlexibleReference
+            }),
+            ("nullable packed array", |f| {
+                let g = f.generic_sig.as_mut().unwrap();
+                g.params[0] = Ty::nullable(g.params[0]);
+            }),
+            ("invariant packed array", |f| {
+                let g = f.generic_sig.as_mut().unwrap();
+                let element = g.ret.type_args()[0];
+                g.params[0] = Ty::obj_args("kotlin/Array", &[element]);
+            }),
+            ("different packed element", |f| {
+                f.generic_sig.as_mut().unwrap().params[0] =
+                    Ty::obj_args("kotlin/Array", &[Ty::out_projection(Ty::String)])
+            }),
+            ("additional value parameter", |f| {
+                f.generic_sig.as_mut().unwrap().params.push(Ty::Int)
+            }),
+            ("missing vararg marker", |f| {
+                f.call_sig.vararg = false;
+                f.call_sig.vararg_index = None;
+            }),
+            ("wrong vararg position", |f| {
+                f.call_sig.vararg_index = Some(1)
+            }),
+            ("inconsistent vararg marker", |f| f.call_sig.vararg = false),
+            ("defaulted parameter", |f| {
+                f.call_sig.param_defaults = vec![true].into()
+            }),
+            ("receiver", |f| f.receiver = Some(Ty::String)),
+            ("generic receiver", |f| {
+                f.generic_sig.as_mut().unwrap().receiver = Some(Ty::String)
+            }),
+            ("member", |f| f.kind = FnKind::Member),
+            ("context", |f| f.context_count = 1),
+            ("suspend", |f| f.flags.suspend = true),
+            ("operator", |f| f.flags.operator = true),
+            ("infix", |f| f.flags.infix = true),
+            ("abstract", |f| f.flags.is_abstract = true),
+            ("reified flag", |f| f.flags.reified = true),
+            ("reified formal", |f| {
+                f.call_sig.reified_type_parameter_ordinals.push(0)
+            }),
+        ];
+        for &(label, change) in cases {
+            let mut function = storage_factory("listOf", "kotlin/collections/List", true, false);
+            change(&mut function);
+            assert_eq!(
+                normalized_function_realization_with_stdlib_owner(
+                    type_name("kotlin/collections"),
+                    "listOf",
+                    &function,
+                    true
+                ),
+                None,
+                "{label}"
+            );
+        }
+        let function = storage_factory("listOf", "kotlin/collections/List", true, false);
+        assert_eq!(
+            normalized_function_realization_with_stdlib_owner(
+                type_name("other/collections"),
+                "listOf",
+                &function,
+                true
+            ),
+            None
+        );
+        assert_eq!(
+            normalized_function_realization_with_stdlib_owner(
+                type_name("kotlin/collections"),
+                "otherFactory",
+                &function,
+                true
+            ),
+            None
+        );
+    }
+
     fn string_plus<'a>(params: &'a [Ty], ret: Ty) -> BuiltinFunctionDeclaration<'a> {
         BuiltinFunctionDeclaration {
             package: type_name("kotlin"),
@@ -883,6 +1204,10 @@ mod tests {
     fn same_spelling_needs_the_complete_declaration() {
         let any = Ty::nullable(Ty::obj("kotlin/Any"));
         assert_eq!(
+            function_realization_with_stdlib_owner(string_plus(&[any], Ty::String), false),
+            None
+        );
+        assert_eq!(
             function_realization(string_plus(&[any], Ty::String)),
             Some(CompilerIntrinsic::StringPlus)
         );
@@ -895,6 +1220,39 @@ mod tests {
         let mut non_operator = string_plus(&non_operator_params, Ty::String);
         non_operator.is_operator = false;
         assert_eq!(function_realization(non_operator), None);
+    }
+
+    #[test]
+    fn range_membership_requires_a_boolean_stdlib_operator() {
+        let declaration = |ret| BuiltinFunctionDeclaration {
+            package: crate::types::wk::kotlin_ranges_package(),
+            name: "contains",
+            kind: FnKind::Extension,
+            receiver: Some(Ty::obj("kotlin/ranges/IntRange")),
+            params: &[Ty::Byte],
+            ret,
+            context_count: 0,
+            type_parameter_count: 0,
+            vararg: None,
+            is_suspend: false,
+            is_operator: true,
+            is_infix: false,
+        };
+        assert_eq!(
+            function_realization_with_stdlib_owner(declaration(Ty::Boolean), true),
+            Some(CompilerIntrinsic::ClosedRangeContains)
+        );
+        assert_eq!(
+            function_realization_with_stdlib_owner(declaration(Ty::Boolean), false),
+            None
+        );
+        assert_eq!(
+            function_realization_with_stdlib_owner(declaration(Ty::Int), true),
+            None
+        );
+        let mut suspend = declaration(Ty::Boolean);
+        suspend.is_suspend = true;
+        assert_eq!(function_realization(suspend), None);
     }
 
     #[test]

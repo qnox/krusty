@@ -20,6 +20,7 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         CompilerIntrinsic::PrimitiveShiftRight => FirBinaryOperation::ShiftRight,
         CompilerIntrinsic::PrimitiveUnsignedShiftRight => FirBinaryOperation::UnsignedShiftRight,
         CompilerIntrinsic::ArrayFactory(_)
+        | CompilerIntrinsic::ListStorageConstruction(_)
         | CompilerIntrinsic::ThrowableConstructor { .. }
         | CompilerIntrinsic::ThrowableMessage
         | CompilerIntrinsic::ReinterpretBits
@@ -59,6 +60,8 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::Count
         | CompilerIntrinsic::TrimIndent
         | CompilerIntrinsic::TrimMargin
+        | CompilerIntrinsic::TextTrim
+        | CompilerIntrinsic::CollectionSizeOrDefault
         | CompilerIntrinsic::FloatingRangeMembership
         | CompilerIntrinsic::ClosedRangeContains
         | CompilerIntrinsic::ComparableRangeTo
@@ -68,6 +71,9 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::ProgressionReversed
         | CompilerIntrinsic::WithIndex
         | CompilerIntrinsic::UnsignedCompare { .. }
+        | CompilerIntrinsic::UnsignedDivide { .. }
+        | CompilerIntrinsic::UnsignedRemainder { .. }
+        | CompilerIntrinsic::ResultFailure(_)
         | CompilerIntrinsic::PrimitiveIteratorNext => return None,
     })
 }

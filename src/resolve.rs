@@ -109,6 +109,7 @@ mod context_sensitive_resolution;
 mod control_flow_join;
 pub(crate) mod declaration_index;
 pub(crate) mod delegated_properties;
+mod script_receivers;
 pub(crate) use delegated_properties::DelegateGetValueTarget;
 mod contract_declarations;
 mod contract_effects;
@@ -2775,13 +2776,18 @@ pub struct SymbolTable {
 /// reparsed.
 pub(crate) struct PassTwoSymbols {
     compilation_id: u64,
-    libraries: Box<dyn SemanticPlatform>,
+    libraries: std::rc::Rc<dyn SemanticPlatform>,
     native_plugins: crate::plugins::registry::NativePlugins,
 }
 
 impl PassTwoSymbols {
     pub(crate) fn semantic_platform(&self) -> &dyn SemanticPlatform {
         &*self.libraries
+    }
+
+    /// A shared handle on the platform, for a consumer that outlives one borrow of these symbols.
+    pub(crate) fn shared_semantic_platform(&self) -> std::rc::Rc<dyn SemanticPlatform> {
+        std::rc::Rc::clone(&self.libraries)
     }
 
     pub(crate) fn native_plugins(&self) -> &crate::plugins::registry::NativePlugins {
@@ -2793,7 +2799,7 @@ impl SymbolTable {
     pub(crate) fn into_pass_two_symbols(self) -> PassTwoSymbols {
         PassTwoSymbols {
             compilation_id: self.compilation_id,
-            libraries: self.libraries,
+            libraries: std::rc::Rc::from(self.libraries),
             native_plugins: self.native_plugins,
         }
     }
@@ -10493,7 +10499,10 @@ fn member_extension_function_shapes_in(
             );
             for (member, function) in functions {
                 let generic = function.signature.generic_sig.as_ref();
-                let declared_receiver = crate::symbol_resolver::ty_subst(
+                // The method's own type parameters stay open: they are inferred from this very
+                // receiver, so `Key<in List<T>>` accepts `Key<List<String>>` with `T = String`
+                // rather than demanding `List<Any>`.
+                let declared_receiver = crate::symbol_resolver::ty_subst_keep_unbound(
                     generic
                         .and_then(|signature| signature.receiver)
                         .unwrap_or(function.receiver_ty),
@@ -21236,9 +21245,6 @@ impl<'a> Checker<'a> {
                         Err(()) => return Ty::Error,
                     }
                 }
-                if self.script_host_may_declare_call(scope, &fname) {
-                    return Ty::Error;
-                }
                 if let Some((internal, classifier, requires_outer)) =
                     low_priority_provider_constructor
                 {
@@ -23408,7 +23414,7 @@ mod tests {
     use crate::features::LangFeatures;
     use crate::frontend::{PlatformLibraries, PlatformProvider};
     use crate::lexer::lex;
-    use crate::parser::{parse, parse_script_with_features};
+    use crate::parser::parse;
 
     mod annotation_identity;
     mod explicit_backing_fields;
@@ -24067,23 +24073,6 @@ fun after(): Int = 2
                 "delegated",
             ]
         );
-    }
-
-    #[test]
-    fn capture_discovery_selects_script_body() {
-        let mut diagnostics = DiagSink::new();
-        let source = r#"
-val captured = "OK"
-val result = object { fun value(): String = captured }
-"#;
-        let tokens = lex(source, &mut diagnostics);
-        let file =
-            parse_script_with_features(source, &tokens, &mut diagnostics, &LangFeatures::default());
-        assert!(diagnostics.diags.is_empty());
-
-        let scope = capture_discovery_scope(&file);
-        assert!(scope.declarations.is_empty());
-        assert!(scope.script_body);
     }
 
     struct ClassifierImportSource;
@@ -32293,7 +32282,6 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         local_function_receivers: crate::fx_hash::HashSet::default(),
         field_ty: None,
         field_receiver_identity: None,
-        in_script_body: false,
         expr_lowers: HashMap::default(),
         resolved_sam_conversions: HashMap::default(),
         inferred_fun_rets: HashMap::default(),
@@ -32334,6 +32322,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         selected_numeric_conversions: HashMap::default(),
         selected_function_value_conversions: HashMap::default(),
         narrowed_this_member: HashMap::default(),
+        script_receiver_members: HashSet::default(),
         resolved_calls: HashMap::default(),
         unbound_value_lambda_call_formals: HashMap::default(),
         open_lambda_result_call_formals: HashMap::default(),
@@ -32845,7 +32834,6 @@ impl ClassCapturePlan {
 
 struct CaptureDiscoveryScope {
     declarations: crate::fx_hash::HashSet<DeclId>,
-    script_body: bool,
     class_plans: crate::fx_hash::HashMap<DeclId, ClassCapturePlan>,
 }
 
@@ -32983,9 +32971,6 @@ fn capture_discovery_scope(file: &File) -> CaptureDiscoveryScope {
                 .unwrap_or(declaration)
         })
         .collect::<crate::fx_hash::HashSet<_>>();
-    let script_body = file
-        .script_body
-        .is_some_and(|body| record_expression_targets(file, &targets, [body], &mut discovered));
     // Keep capture analysis conservative as the AST evolves. If a parser change retains an
     // anonymous construction outside the generic declaration-root inventory, retain the old
     // full-file semantic pass rather than silently treating that construction as capture-free.
@@ -32996,7 +32981,6 @@ fn capture_discovery_scope(file: &File) -> CaptureDiscoveryScope {
         } else {
             file.decls.iter().copied().collect()
         },
-        script_body: script_body || !complete,
         // An unknown expression-bearing parser field invalidates not only declaration selection but
         // every narrower class plan. An empty map makes callers preserve the full semantic walk.
         class_plans: if complete {
@@ -33720,22 +33704,6 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
             }
         }
     }
-    if let Some(body) = file.script_body.filter(|_| {
-        !fragment.publishes_annotation_metadata()
-            && !c.signature_defaults_only
-            && (!capture_discovery
-                || c.capture_scope
-                    .as_ref()
-                    .is_some_and(|scope| scope.script_body))
-    }) {
-        c.reset_body_mutations(Some(body));
-        c.in_script_body = true;
-        c.with_ret_allowed(Ty::Unit, false, |c| {
-            c.expr_statement(scope, body);
-            c.finish_executable_root(body);
-        });
-        c.in_script_body = false;
-    }
     if !capture_discovery && !fragment.publishes_annotation_metadata() {
         for reference in &file.detached_type_refs {
             if c.resolved_type_tys
@@ -33782,6 +33750,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         );
     }
     c.narrow_value_class_receivers();
+    c.narrow_script_template_receivers();
     let enhanced_values = c.enhanced_value_heads();
     let Checker {
         expr_types,
@@ -34971,8 +34940,6 @@ struct Checker<'a> {
     /// nearer receiver rungs, so neither a saved depth nor a type search can identify the
     /// accessor's dispatch instance reliably.
     field_receiver_identity: Option<(usize, usize)>,
-    /// Whether executable Kotlin-script statements are being checked.
-    in_script_body: bool,
     /// Accumulated output maps (moved into TypeInfo at the end of `check_file`).
     expr_lowers: HashMap<ExprId, ExprLowering>,
     resolved_sam_conversions: HashMap<ExprId, ResolvedSamConversion>,
@@ -35076,6 +35043,10 @@ struct Checker<'a> {
     selected_numeric_conversions: HashMap<ExprId, Ty>,
     selected_function_value_conversions: HashMap<ExprId, (Ty, Ty)>,
     narrowed_this_member: HashMap<ExprId, TypeName>,
+    /// Bare member reads and calls whose implicit receiver is a script's own instance. Once their
+    /// targets are settled, those not declared by the script are template members (see
+    /// `script_receivers`).
+    script_receiver_members: HashSet<ExprId>,
     /// Calls resolved during checking, keyed by the `Expr::Call` `ExprId` (moved into
     /// [`TypeInfo::resolved_calls`] so the lowerer reads them instead of re-resolving). See
     /// [`ResolvedCall`] for the variants.
@@ -39252,12 +39223,12 @@ impl<'a> Checker<'a> {
         let best = applicable
             .iter()
             .filter(|(_, _, _, missing_context, _, _, _, _)| !has_context || !*missing_context)
-            .map(|(rank, ..)| (rank.0, rank.1))
+            .map(|(rank, ..)| rank.0)
             .max()?;
         let nearest_receiver = applicable
             .iter()
             .filter(|(rank, _, _, missing_context, _, _, _, _)| {
-                (rank.0, rank.1) == best && (!has_context || !missing_context)
+                rank.0 == best && (!has_context || !missing_context)
             })
             .map(|(_, _, _, _, _, candidate, _, _)| candidate.receiver_rank)
             .min()?;
@@ -39267,7 +39238,7 @@ impl<'a> Checker<'a> {
         let mut maximal = applicable
             .into_iter()
             .filter(|(rank, _, _, missing_context, _, candidate, _, _)| {
-                (rank.0, rank.1) == best
+                rank.0 == best
                     && (!has_context || !missing_context)
                     && candidate.receiver_rank == nearest_receiver
             })
@@ -40210,6 +40181,9 @@ impl<'a> Checker<'a> {
             if let Some(owner) = receiver.ty.non_null().obj_internal() {
                 self.narrowed_this_member.insert(expression, owner);
             }
+        }
+        if self.is_script_receiver(receiver.declared_ty) {
+            self.script_receiver_members.insert(expression);
         }
         let selection = self.implicit_receiver_selection(receiver);
         let current = selection.current;
@@ -43111,19 +43085,6 @@ impl<'a> Checker<'a> {
             || self
                 .lookup_lexical_callable_overloads(scope, name)
                 .is_some_and(|overloads| !overloads.is_empty())
-    }
-    fn script_host_may_declare_call(&self, scope: &CheckerScope<'_>, name: &str) -> bool {
-        self.in_script_body
-            && !self.lexical_value_declares(scope, name)
-            && !self
-                .file
-                .decls
-                .iter()
-                .any(|declaration| match self.file.decl(*declaration) {
-                    Decl::Fun(function) => function.name == name,
-                    Decl::Class(class) => class.name == name,
-                    Decl::Property(property) => property.name == name,
-                })
     }
     /// Declare a local function in the CURRENT scope, appending to its overload set.
     fn register_local_fun(
@@ -48597,7 +48558,7 @@ impl<'a> Checker<'a> {
                     }
                     for step in &entry.init_order {
                         if let ClassInit::Block(body) = step {
-                            self.check_executable_body(&entry_init_scope, *body);
+                            self.check_initializer_block(&entry_init_scope, *body);
                         }
                     }
                     self.this_labels.truncate(label_depth);
@@ -49857,23 +49818,28 @@ impl<'a> Checker<'a> {
                                     .get(&(bp.span.lo, bp.span.hi))
                                     .copied()
                             });
-                        let it = match (prechecked_storage, declared) {
-                            (Some(storage), _) => storage,
-                            (None, Some(expected)) => {
-                                // The declared type is the initializer's committed expected type:
-                                // an `Int` constant expression adapts to a declared `Long` exactly
-                                // as it does for a top-level property or a local.
-                                let nominal =
-                                    self.expr_declared(&initializer_scope, init, expected);
-                                self.recorded_expression_type_for_expected(
-                                    &initializer_scope,
-                                    init,
-                                    nominal,
-                                    expected,
-                                )
+                        // An initializer has no function to return from: `return` in it is
+                        // prohibited.
+                        let it = self.with_ret_allowed(Ty::Unit, false, |c| {
+                            match (prechecked_storage, declared) {
+                                (Some(storage), _) => storage,
+                                (None, Some(expected)) => {
+                                    // The declared type is the initializer's committed expected
+                                    // type: an `Int` constant expression adapts to a declared
+                                    // `Long` exactly as it does for a top-level property or a
+                                    // local.
+                                    let nominal =
+                                        c.expr_declared(&initializer_scope, init, expected);
+                                    c.recorded_expression_type_for_expected(
+                                        &initializer_scope,
+                                        init,
+                                        nominal,
+                                        expected,
+                                    )
+                                }
+                                (None, None) => c.expr(&initializer_scope, init),
                             }
-                            (None, None) => self.expr(&initializer_scope, init),
-                        };
+                        });
                         if declared.is_none() && it != Ty::Error {
                             let inferred = self
                                 .inferred_declaration_value_ty(init, inferred_declaration_ty(it));
@@ -49912,14 +49878,17 @@ impl<'a> Checker<'a> {
                     // A delegated member property's delegate expression (`by Del()`) — type-check it so
                     // its (and its sub-expressions') types are recorded for the `x$delegate` field lowering.
                     if let Some(de) = bp.delegate.filter(|_| check_ordinary_property_body) {
-                        let owner_ref = Ty::obj_name(
+                        let owner = Ty::obj_name(
                             current_owner.expect("a checked member property has an owning class"),
                         );
+                        // kotlinc gives a script's properties no dispatch receiver: their delegates
+                        // see `null` and a reference without the script, like a top-level property.
+                        let dispatch = (!self.is_script_receiver(owner)).then_some(owner);
+                        let owner_ref = dispatch.unwrap_or(Ty::Null);
                         let this_ref = extension_receiver.unwrap_or(owner_ref);
                         let expected_property = checked_declared_property
                             .filter(|ty| !ty.mentions_error() && !ty.mentions_pending());
-                        let mut site =
-                            DelegateConventionSite::of(bp, Some(owner_ref), extension_receiver);
+                        let mut site = DelegateConventionSite::of(bp, dispatch, extension_receiver);
                         site.dispatch_diagnostic_name = Some(if is_anonymous_object {
                             delegated_properties::DelegateDispatchDiagnosticName::Anonymous
                         } else {
@@ -50144,8 +50113,10 @@ impl<'a> Checker<'a> {
                                         .expr_span(*b)
                                         .is_some_and(|span| selected.contains(&span))
                                 });
-                        if selected {
-                            self.check_executable_body(scope, *b);
+                        if selected && self.file.script_class == Some(d) {
+                            self.check_script_statement(scope, *b);
+                        } else if selected {
+                            self.check_initializer_block(scope, *b);
                         }
                     }
                 }
@@ -52661,7 +52632,8 @@ impl<'a> Checker<'a> {
     }
 
     fn expr(&mut self, scope: &CheckerScope<'_>, e: ExprId) -> Ty {
-        self.expr_with_context(scope, e, true)
+        // A script's trailing statement is its `$$result` initializer, but still a statement.
+        self.expr_with_context(scope, e, self.file.script_result != Some(e))
     }
 
     fn expr_statement(&mut self, scope: &CheckerScope<'_>, e: ExprId) -> Ty {
@@ -65175,6 +65147,9 @@ impl<'a> Checker<'a> {
             flags: SigFlags::default()
                 .with_is_operator(member.is_operator())
                 .with_is_suspend(member.suspend())
+                .with_is_inline(member.inline.can_inline())
+                .with_requires_splice(member.inline.must_inline())
+                .with_has_reified_type_params(member.reified)
                 .with_is_final(true)
                 .with_vararg(vararg_index.is_some()),
             annotations: member.annotations.clone(),

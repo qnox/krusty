@@ -1100,8 +1100,7 @@ impl SignatureSolver {
                 match stub.kind {
                     DeclarationKind::Accessor
                     | DeclarationKind::EnumEntry
-                    | DeclarationKind::Initializer
-                    | DeclarationKind::Script => continue,
+                    | DeclarationKind::Initializer => continue,
                     DeclarationKind::Function
                     | DeclarationKind::Property
                     | DeclarationKind::Classifier
@@ -1134,8 +1133,7 @@ impl SignatureSolver {
                 (
                     DeclarationKind::Accessor
                     | DeclarationKind::EnumEntry
-                    | DeclarationKind::Initializer
-                    | DeclarationKind::Script,
+                    | DeclarationKind::Initializer,
                     _,
                 )
                 | (

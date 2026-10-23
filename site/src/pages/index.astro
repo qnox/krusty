@@ -2,6 +2,8 @@
 import { SEO } from "astro-seo";
 
 const repo = "https://github.com/qnox/krusty";
+const news = "https://x.com/qnox";
+const xHandle = "@qnox";
 const title = "krusty: a Kotlin compiler written in Rust";
 const description =
   "krusty is a Kotlin compiler written in Rust. Built as a drop-in replacement for kotlinc on the JVM: for the supported Kotlin subset, kotlinc-compatible flags and .class files that aim to be byte-for-byte identical to kotlinc's.";
@@ -21,6 +23,8 @@ const jsonLd = {
   url: Astro.site?.href,
   codeRepository: repo,
   downloadUrl: `${repo}/releases/latest`,
+  // Google picks a result thumbnail from structured data before guessing from the page.
+  image: card,
 };
 ---
 <!doctype html>
@@ -37,7 +41,7 @@ const jsonLd = {
         optional: { description, siteName: "krusty" },
         image: { type: "image/png", width: 1200, height: 630, alt: cardAlt },
       }}
-      twitter={{ card: "summary_large_image", title, description, image: card, imageAlt: cardAlt }}
+      twitter={{ card: "summary_large_image", site: xHandle, creator: xHandle, title, description, image: card, imageAlt: cardAlt }}
       extend={{
         link: [
           { rel: "icon", href: "/favicon.ico", sizes: "16x16 32x32 48x48" },
@@ -83,23 +87,50 @@ krusty -cp deps.jar:classes/ App.kt -d out/  # with a classpath</code></pre>
         <li><strong>kotlinc-compatible command line</strong> for the supported subset, output to a class directory or a jar.</li>
         <li><strong>Byte-level fidelity.</strong> Every change is diffed against the real <code>kotlinc</code>, and every build runs JetBrains' <code>codegen/box</code> suite.</li>
         <li><strong>Low memory.</strong> On our multi-module benchmark, about a third of the peak memory of the GraalVM-native <code>kotlinc</code>.</li>
-        <li><strong>kotlinx.serialization and KSP.</strong></li>
-        <li><strong>Bazel</strong> persistent worker support.</li>
+        <li><strong>Build systems and compiler plugins</strong> listed below: Gradle, the Kotlin Toolchain, the Kotlin Build Tools API and Bazel; kotlinx.serialization, all-open, no-arg, sam-with-receiver and KSP.</li>
         <li><strong>Editor support.</strong> <code>krusty-lsp</code> language server, with a <a href={`${repo}/blob/master/editors/zed/README.md`}>Zed extension</a>.</li>
       </ul>
 
+      <h2 id="support">Supported build systems and compiler plugins</h2>
+      <p>
+        krusty targets every Kotlin release listed in <a href={`${repo}/blob/master/kotlin-versions`}><code>kotlin-versions</code></a>; the badge above shows the newest. On the command line, anything not listed here fails the build with an error instead of being skipped; the Gradle plugin reports it and leaves that compile task to kotlinc.
+      </p>
+      <h3>Build systems</h3>
+      <table>
+        <thead><tr><th>Build system</th><th>Support</th></tr></thead>
+        <tbody>
+          <tr><td>Command line</td><td>kotlinc-compatible flags for the supported subset; output to a class directory or a jar. Compiler plugins come in through <code>-Xplugin</code>/<code>-P</code>/<code>-Xcompiler-plugin</code> as for kotlinc.</td></tr>
+          <tr><td>Gradle</td><td><code>id("dev.krustythecompiler")</code> plugin, shipped as <code>krusty-gradle-plugin-&lt;version&gt;.zip</code> in each <a href={`${repo}/releases/latest`}>release</a>. Replaces Kotlin/JVM compile tasks of source sets and of Android variants (AGP 9's built-in Kotlin or <code>kotlin("android")</code>, with android.jar, Java sources and generated <code>R</code>/<code>BuildConfig</code> taken from the variant); validated with Gradle 7.6.3, 8.14.3, 9.5.0 and 9.7.0. <code>kotlin-dsl</code> builds such as <code>buildSrc</code> and compile tasks outside a source set stay with kotlinc, logged per task.</td></tr>
+          <tr><td>Kotlin Toolchain (<code>project.yaml</code>/<code>module.yaml</code>)</td><td><code>krusty-toolchain</code>, built from source, as a drop-in for JetBrains' <code>kotlin</code> command: <code>show modules</code>, <code>show settings</code>, <code>show dependencies</code> and <code>task :&lt;module&gt;:compileJvm</code>. JVM modules only; a module with Java sources, a compiler setting it does not pass yet or an artifact to download is refused by name. See <a href={`${repo}/blob/master/docs/KOTLIN_TOOLCHAIN.md`}>docs/KOTLIN_TOOLCHAIN.md</a>.</td></tr>
+          <tr><td>Kotlin Build Tools API</td><td><code>krusty-build-tools-&lt;version&gt;-kotlin-&lt;kotlin&gt;.jar</code> in each release, one per supported Kotlin version, stands in for <code>kotlin-build-tools-impl</code> in a build tool that loads the API from a classpath (JetBrains' Kotlin Toolchain among them). JVM toolchain and in-process execution only. See <a href={`${repo}/blob/master/tools/krusty-build-tools/README.md`}>tools/krusty-build-tools</a>.</td></tr>
+          <tr><td>Bazel</td><td><code>krusty_jvm_library</code> rule from the <code>krusty</code> Bazel module each release publishes, which brings the release's compiler as a toolchain per host, and a <code>--persistent_worker</code> speaking intellij-community's <code>jvm-inc-builder</code> vocabulary. The worker accepts no compiler plugins. See <a href={`${repo}/blob/master/tools/krusty-bazel/README.md`}>tools/krusty-bazel/README.md</a>.</td></tr>
+          <tr><td>Maven</td><td>Not supported.</td></tr>
+        </tbody>
+      </table>
+      <h3>Compiler plugins</h3>
+      <p>
+        krusty cannot run kotlinc's FIR/IR plugin jars. It reimplements the plugins below natively and selects them from the same jar and options kotlinc receives, so a build switches compilers without changing its plugin configuration.
+      </p>
+      <table>
+        <thead><tr><th>Plugin</th><th>Support</th></tr></thead>
+        <tbody>
+          <tr><td>kotlinx.serialization</td><td>Supported. Conformance is measured against the plugin's own box-test corpus.</td></tr>
+          <tr><td>all-open (<code>plugin.allopen</code>, <code>plugin.spring</code>, <code>plugin.jpa</code>)</td><td>Supported, with the <code>spring</code> and <code>jpa</code> presets.</td></tr>
+          <tr><td>no-arg (<code>plugin.noarg</code>, <code>plugin.jpa</code>)</td><td>Supported, with the <code>jpa</code> preset; <code>invokeInitializers=true</code> is not implemented.</td></tr>
+          <tr><td>sam-with-receiver</td><td>Supported.</td></tr>
+          <tr><td>KSP (KSP2)</td><td>Supported through a build system: under Gradle, KSP's own <code>kspKotlin</code> task runs the processors and krusty compiles what they generate (KSP's Gradle plugin needs Gradle 8 or newer); under the Kotlin Toolchain, processors from Maven artifacts run before the module compiles, but only their generated classes and resources are picked up; a processor that generates Kotlin or Java sources fails the module for now. The plain command line has no codegen host and rejects the KSP plugin.</td></tr>
+          <tr><td>kapt</td><td>Supported under Gradle: kapt's own tasks generate stubs and run the annotation processors with kotlinc, and krusty compiles the module after them. kapt's jar alone, which the Kotlin Gradle plugin passes to every compile of a kapt project, changes nothing; kapt options on the command line fail with an error.</td></tr>
+          <tr><td>Compose, Parcelize, assignment and every other FIR/IR plugin</td><td>Not supported. The command line fails with an error. The Gradle plugin reports the unsupported plugin and leaves that compile task to kotlinc, so the build still succeeds.</td></tr>
+          <tr><td>Kotlin scripts (<code>.kts</code>)</td><td>Not supported.</td></tr>
+        </tbody>
+      </table>
+
       <h2>Status</h2>
-      <p>krusty compiles plain Kotlin/JVM code today. Not supported yet:</p>
-      <ul>
-        <li>Gradle and Maven integration (use the command line or Bazel)</li>
-        <li>Compose, kapt and compiler plugins other than kotlinx.serialization</li>
-        <li>Kotlin scripts (<code>.kts</code>)</li>
-      </ul>
+      <p>krusty compiles plain Kotlin/JVM code today, through the build systems and with the compiler plugins listed above.</p>
 
       <h2>Roadmap</h2>
       <ul>
         <li>100% JVM conformance with kotlinc</li>
-        <li>Gradle integration</li>
         <li>Kotlin/Native</li>
         <li>Kotlin/Wasm</li>
         <li>Compose</li>
@@ -111,7 +142,7 @@ krusty -cp deps.jar:classes/ App.kt -d out/  # with a classpath</code></pre>
       </p>
     </main>
     <footer>
-      Apache-2.0 · <a href={repo}>github.com/qnox/krusty</a> · Kotlin is a trademark of JetBrains; krusty is an independent project.
+      Apache-2.0 · <a href={repo}>github.com/qnox/krusty</a> · News: <a href={news}>{xHandle} on X</a> · Kotlin is a trademark of JetBrains; krusty is an independent project.
     </footer>
   </body>
 </html>
@@ -132,4 +163,8 @@ krusty -cp deps.jar:classes/ App.kt -d out/  # with a classpath</code></pre>
   pre { background: var(--code); padding: 14px 16px; border-radius: 8px; overflow-x: auto; }
   .badges img { margin-right: 6px; vertical-align: middle; }
   footer { margin-top: 48px; font-size: 14px; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; font-size: 15px; }
+  th, td { text-align: left; vertical-align: top; padding: 6px 8px; border-bottom: 1px solid var(--code); }
+  td:first-child { min-width: 8em; }
+  h3 { margin-top: 24px; font-size: 18px; }
 </style>

@@ -1,6 +1,7 @@
 //! Realization of stable same-file callable identities as ordinary common-IR calls.
 
 pub(super) mod argument_boundaries;
+mod dependency_inline;
 mod inline_route;
 mod reordered_operands;
 
@@ -109,7 +110,7 @@ pub(super) struct ExternalCallRequest<'a> {
     pub(super) semantic_role: Option<crate::types::SemanticCallRole>,
     pub(super) overridden_declarations: &'a [crate::types::OverriddenDeclaration],
     pub(super) suspend: bool,
-    pub(super) can_inline: bool,
+    pub(super) inline: crate::fir::InlineKind,
     pub(super) inline_plan: Option<&'a crate::fir::FirInlineBodyPlan>,
     pub(super) substitutions: &'a [crate::fir::FirTypeSubstitution],
     pub(super) extension_receiver_parameter: Option<u32>,
@@ -370,7 +371,7 @@ impl BodyLowering<'_> {
             semantic_role,
             overridden_declarations,
             suspend,
-            can_inline,
+            inline,
             inline_plan,
             substitutions,
             extension_receiver_parameter,
@@ -411,6 +412,36 @@ impl BodyLowering<'_> {
             self.ir.inline_regions.insert(expanded);
             return Some(expanded);
         }
+        if inline.can_inline()
+            && self.ir.same_module_inlining() == crate::ir::SameModuleInlining::ExpandInIr
+        {
+            match self.dependency_templates.template(self.ir, target).cloned() {
+                Some(template) => {
+                    // A selected template is an obligation: a call it cannot expand fails the
+                    // file, never retried as a call of the dependency function.
+                    return self.dependency_inline_call(dependency_inline::DependencyInlineCall {
+                        target,
+                        template,
+                        parameter_types: &parameter_types,
+                        dispatch_receiver,
+                        extension_receiver,
+                        extension_receiver_parameter,
+                        arguments,
+                        substitutions,
+                    });
+                }
+                // A declaration without a legal call has no fallback when its body cannot be
+                // expanded: the call is unsupported rather than an ordinary dependency call.
+                None if inline.must_inline() && self.dependency_templates.provides_templates() => {
+                    crate::trace_compiler!(
+                        "lower",
+                        "the must-inline dependency function {target:?} has no template"
+                    );
+                    return None;
+                }
+                None => {}
+            }
+        }
         let (statements, receiver, args, mut defaults) =
             self.selected_semantic_operands(SelectedOperandRequest {
                 receiver_ty,
@@ -419,7 +450,7 @@ impl BodyLowering<'_> {
                 extension_receiver,
                 arguments,
                 defaults: SelectedDefaultMode::Omit,
-                preserve_inline_lambdas: can_inline,
+                preserve_inline_lambdas: inline.can_inline(),
                 extension_receiver_parameter,
                 mode: SelectedOperandMode::DirectWhenOrdered,
             })?;
@@ -479,7 +510,7 @@ impl BodyLowering<'_> {
         if let Some(result) = declared_result {
             self.ir.call_declared_ret.insert(call, result.get());
         }
-        if can_inline {
+        if inline.can_inline() {
             self.ir.inline_call_sites.insert(call);
         }
         if suspend {
@@ -500,7 +531,7 @@ impl BodyLowering<'_> {
             );
         }
         let region = self.wrap_call_statements(statements, call);
-        if can_inline {
+        if inline.can_inline() {
             self.ir.inline_regions.insert(region);
         }
         Some(region)
@@ -1535,6 +1566,52 @@ impl BodyLowering<'_> {
         Some(self.wrap_call_statements(statements, construction))
     }
 
+    /// A receiver operand (dispatch or extension) of an inline call whose declaration takes it as
+    /// `declared`, selected as `specialized`: passed in place or held in a temporary, and coerced
+    /// to a reference where the declaration takes a scalar receiver as one.
+    pub(super) fn inline_receiver_operand(
+        &mut self,
+        receiver: ExprId,
+        declared: Ty,
+        specialized: Ty,
+        direct: bool,
+        statements: &mut Vec<ExprId>,
+    ) -> ExprId {
+        let receiver = if direct {
+            // Passed in place, a scalar receiver the declaration takes as a reference
+            // (`Int?.inc()` on an `Int` value) is boxed here, where a materialized one
+            // was boxed by its reference-typed temporary.
+            let operand = self
+                .ir
+                .physical_types
+                .get(&receiver)
+                .or_else(|| self.ir.logical_types.get(&receiver))
+                .copied();
+            let receiver = self.direct_call_operand(receiver, specialized);
+            if operand.is_some_and(|operand| !operand.is_reference()) && specialized.is_reference()
+            {
+                self.ir.add_expr(IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    arg: receiver,
+                    type_operand: specialized,
+                })
+            } else {
+                receiver
+            }
+        } else {
+            self.spill_call_operand(receiver, specialized, statements)
+        };
+        if !specialized.is_reference() && declared.is_reference() {
+            self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: receiver,
+                type_operand: declared,
+            })
+        } else {
+            receiver
+        }
+    }
+
     /// Normalize source-order checked arguments into physical parameter order. An already ordered
     /// operand stream stays direct; a reordered stream is first moved to body-local temporaries so
     /// named arguments cannot reorder user effects. Default and vararg decisions are consumed here
@@ -1611,42 +1688,15 @@ impl BodyLowering<'_> {
         };
         let extension_receiver = match extension_receiver {
             Some(receiver) => {
-                let ty = declared_extension_receiver?;
-                let specialized = crate::types::ty_subst_keep_unbound(ty.get(), &bindings);
-                let receiver = if direct {
-                    // Passed in place, a scalar receiver the declaration takes as a reference
-                    // (`Int?.inc()` on an `Int` value) is boxed here, where a materialized one
-                    // was boxed by its reference-typed temporary.
-                    let operand = self
-                        .ir
-                        .physical_types
-                        .get(&receiver)
-                        .or_else(|| self.ir.logical_types.get(&receiver))
-                        .copied();
-                    let receiver = self.direct_call_operand(receiver, specialized);
-                    if operand.is_some_and(|operand| !operand.is_reference())
-                        && specialized.is_reference()
-                    {
-                        self.ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::ImplicitCoercion,
-                            arg: receiver,
-                            type_operand: specialized,
-                        })
-                    } else {
-                        receiver
-                    }
-                } else {
-                    self.spill_call_operand(receiver, specialized, &mut statements)
-                };
-                Some(if !specialized.is_reference() && ty.get().is_reference() {
-                    self.ir.add_expr(IrExpr::TypeOp {
-                        op: IrTypeOp::ImplicitCoercion,
-                        arg: receiver,
-                        type_operand: ty.get(),
-                    })
-                } else {
-                    receiver
-                })
+                let ty = declared_extension_receiver?.get();
+                let specialized = crate::types::ty_subst_keep_unbound(ty, &bindings);
+                Some(self.inline_receiver_operand(
+                    receiver,
+                    ty,
+                    specialized,
+                    direct,
+                    &mut statements,
+                ))
             }
             None => None,
         };
@@ -1773,7 +1823,7 @@ impl BodyLowering<'_> {
             let first_generated = self.ir.exprs.len();
             let mut malformed_anonymous = None;
             let Some(inlined) = self.inline_same_file_call(
-                target,
+                &super::inlining::InlineCallee::Module(target),
                 function,
                 &operands,
                 &inlined_lambda_operands,
@@ -2130,7 +2180,7 @@ impl BodyLowering<'_> {
                         array_type,
                         spread,
                     } => {
-                        let element_ty = array_type.array_elem()?;
+                        let element_ty = array_type.array_read_elem()?;
                         Some(if direct {
                             self.direct_call_operand(
                                 value,

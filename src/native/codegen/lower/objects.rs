@@ -1,4 +1,4 @@
-//! Classes through the code generator: type descriptors, vtables, constructors, dispatch, field
+//! Classes through the code generator: type descriptors, vtables, constructors, field
 //! access, `object` singletons and the `is`/`as` family.
 //!
 //! The model — where each field lives, which vtable slot each member has — comes from
@@ -15,9 +15,12 @@ use super::type_checks::{is_runtime_constructed, ThrowableOperands};
 use super::*;
 use crate::types::TypeName;
 
+mod walking;
+pub(super) use walking::WalkMembers;
+
 /// The `KType` struct of `krusty_rt.h`, as byte offsets. Every supported target is LP64 with
 /// natural alignment, so one layout serves all three.
-mod ktype {
+pub(super) mod ktype {
     pub const NAME: u32 = 0;
     pub const NAME_LENGTH: u32 = 8;
     pub const INSTANCE_SIZE: u32 = 12;
@@ -46,7 +49,8 @@ mod ktype {
     pub const SIMPLE_NAME: u32 = 136;
     pub const SIMPLE_NAME_LENGTH: u32 = 144;
     pub const CLASS_NAMES: u32 = 148;
-    pub const SIZE: usize = 152;
+    pub const COLLECTION_SIZE: u32 = 152;
+    pub const SIZE: usize = 160;
 }
 
 const CLASS_NAMES_MEMBER: u32 = 1;
@@ -54,43 +58,7 @@ const CLASS_NAMES_LOCAL: u32 = 2;
 const CLASS_NAMES_ANONYMOUS: u32 = 3;
 
 /// Where an object keeps its type: the header is one pointer.
-const TYPE_OFFSET: i32 = 0;
-
-/// The thunks through which the runtime WALKS an object of a class of this file: its own
-/// `iterator`, `hasNext` and `next`, each behind a fixed signature this side can call.
-///
-/// See the note on `KType::walk_iterator` for why a thunk rather than a vtable slot: an emitted
-/// method has the signature its DECLARATION states, and neither `hasNext`'s machine `Boolean` nor
-/// an `Iterator<Int>`'s unboxed element is something the runtime could read from a slot number.
-#[derive(Clone, Copy, Default)]
-pub(super) struct WalkMembers {
-    pub(super) iterator: Option<FuncId>,
-    pub(super) has_next: Option<FuncId>,
-    pub(super) next: Option<FuncId>,
-    /// For a class implementing `kotlin.CharSequence`, which is walked by its LENGTH and its
-    /// indexed read: Kotlin's `CharSequence` declares no iterator at all.
-    pub(super) length: Option<FuncId>,
-    pub(super) char_at: Option<FuncId>,
-}
-
-/// The same, as the SLOTS the declaration pass reads out of the override edges, before the thunks
-/// that dispatch to them are emitted.
-#[derive(Clone, Copy, Default)]
-pub(super) struct WalkSlots {
-    /// Each PLUS ONE, so that 0 says the class declares none — slot 0 is `kotlin.Any.equals`.
-    pub(super) iterator: u32,
-    pub(super) has_next: u32,
-    pub(super) next: u32,
-    pub(super) length: u32,
-    pub(super) char_at: u32,
-}
-
-impl WalkSlots {
-    /// Whether the class declares any of the three, so a subclass knows whether to inherit.
-    fn is_empty(self) -> bool {
-        self.iterator == 0 && self.has_next == 0 && self.next == 0 && self.length == 0
-    }
-}
+pub(super) const TYPE_OFFSET: i32 = 0;
 
 /// The emitted items of one class.
 pub(super) struct ClassItems {
@@ -106,7 +74,7 @@ pub(super) struct ClassItems {
 }
 
 /// `kotlin.Any`'s three members, by runtime symbol, with their signatures.
-fn any_member(symbol: &str) -> Option<(Vec<Ty>, Ty)> {
+pub(super) fn any_member(symbol: &str) -> Option<(Vec<Ty>, Ty)> {
     Some(match symbol {
         "kt_any_equals" => (vec![any(), any()], Ty::Boolean),
         "kt_any_hash_code" => (vec![any()], Ty::Int),
@@ -570,6 +538,7 @@ impl<'a> FileLowering<'a> {
             (ktype::WALK_NEXT, walk.next),
             (ktype::WALK_LENGTH, walk.length),
             (ktype::WALK_CHAR_AT, walk.char_at),
+            (ktype::COLLECTION_SIZE, walk.collection_size),
         ] {
             let Some(thunk) = thunk else {
                 continue;
@@ -785,286 +754,6 @@ impl<'a> FileLowering<'a> {
         let slot = self.model.slot(class, &key)?;
         let function = &ir.functions[fid as usize];
         Some((slot, function.params.clone(), function.ret))
-    }
-
-    /// The three thunks through which the runtime walks an object of this class, emitted here; see
-    /// [`WalkMembers`].
-    ///
-    /// Each dispatches VIRTUALLY on the slot [`Self::walk_slots`] found, so one thunk serves the
-    /// whole subtree below the class that declares the member — a subclass overriding it is
-    /// reached through the same thunk, which is also why a subclass inherits the pointer rather
-    /// than needing one of its own.
-    fn define_walk_members(
-        &mut self,
-        class: ClassId,
-        base: &str,
-    ) -> Result<WalkMembers, Unsupported> {
-        let slots = self.walk_slots(class);
-        let mut members = WalkMembers::default();
-        for (biased, name, answers) in [
-            (slots.iterator, "iterator", any()),
-            (slots.has_next, "hasNext", Ty::Boolean),
-            (slots.next, "next", any()),
-            (slots.length, "length", Ty::Int),
-        ] {
-            if biased == 0 {
-                continue;
-            }
-            let slot = biased - 1;
-            // What the SLOT answers, which is not what the thunk does: `next` on an
-            // `Iterator<Int>` answers an unboxed machine integer and the runtime reads a
-            // reference, so the conversion is the ordinary boundary one. Read from the slot
-            // rather than from the member's declaration, because the slot is what the dispatch
-            // lands on and the two need not agree — an entry standing in for a base whose
-            // signature has another representation wears the BASE's.
-            let declared = self.walk_slot_result(class, slot)?;
-            let thunk =
-                self.declare_local_function(&format!("{base}_walk_{name}"), &[any()], answers)?;
-            let signature = self.signature_of(&[any()], answers)?;
-            let label = format!("{base}_walk_{name}");
-            self.emit_function(thunk, signature, answers, &label, &mut |body, params| {
-                let Some(produced) = body.dispatch(params[0], slot, &[], declared, &[])? else {
-                    return Err(declined!("a `Unit` answer from `{label}`"));
-                };
-                let Some(value) = body.convert(produced, Some(declared), answers)? else {
-                    return Err(declined!("a `Unit` answer from `{label}`"));
-                };
-                body.builder.ins().return_(&[value]);
-                body.terminate();
-                Ok(())
-            })?;
-            match name {
-                "iterator" => members.iterator = Some(thunk),
-                "hasNext" => members.has_next = Some(thunk),
-                "length" => members.length = Some(thunk),
-                _ => members.next = Some(thunk),
-            }
-        }
-        // The indexed read takes an ARGUMENT, which is the whole of what separates it from the
-        // four above: the index crosses unboxed, at the width the declaration states.
-        if slots.char_at != 0 {
-            let slot = slots.char_at - 1;
-            let declared = self.walk_slot_result(class, slot)?;
-            let name = format!("{base}_walk_get");
-            let thunk = self.declare_local_function(&name, &[any(), Ty::Int], Ty::Char)?;
-            let signature = self.signature_of(&[any(), Ty::Int], Ty::Char)?;
-            let parameter = self.walk_slot_parameter(class, slot)?;
-            self.emit_function(thunk, signature, Ty::Char, &name, &mut |body, params| {
-                let Some(index) = body.convert(params[1], Some(Ty::Int), parameter)? else {
-                    return Err(declined!("a `Unit` index in `{name}`"));
-                };
-                let Some(produced) =
-                    body.dispatch(params[0], slot, &[parameter], declared, &[index])?
-                else {
-                    return Err(declined!("a `Unit` answer from `{name}`"));
-                };
-                let Some(value) = body.convert(produced, Some(declared), Ty::Char)? else {
-                    return Err(declined!("a `Unit` answer from `{name}`"));
-                };
-                body.builder.ins().return_(&[value]);
-                body.terminate();
-                Ok(())
-            })?;
-            members.char_at = Some(thunk);
-        }
-        Ok(members)
-    }
-
-    /// The type the entry in `slot` takes as its ONE parameter, for the thunk that dispatches
-    /// through it to convert the operand to.
-    fn walk_slot_parameter(&self, class: ClassId, slot: u32) -> Result<Ty, Unsupported> {
-        let entry = self
-            .model
-            .layout(class)
-            .vtable
-            .get(slot as usize)
-            .cloned()
-            .ok_or_else(|| format!("a walk through slot {slot}, which no table has"))?;
-        let fid = match entry {
-            // A value class's own member wears its own signature behind the bridge that unboxes
-            // the receiver.
-            Slot::Function(fid) | Slot::ValueBridge { function: fid, .. } => fid,
-            Slot::Bridge { declared, .. } => declared,
-            other => return Err(declined!("a walk through the vtable entry {other:?}")),
-        };
-        match self.ir.functions[fid as usize].params.as_slice() {
-            [parameter] => Ok(*parameter),
-            _ => Err(declined!(
-                "a walk through `{}`, which takes no one operand",
-                self.ir.functions[fid as usize].name
-            )),
-        }
-    }
-
-    /// What the entry in `slot` of this class's table ANSWERS, for the thunk that dispatches
-    /// through it to convert from.
-    fn walk_slot_result(&self, class: ClassId, slot: u32) -> Result<Ty, Unsupported> {
-        let entry = self
-            .model
-            .layout(class)
-            .vtable
-            .get(slot as usize)
-            .cloned()
-            .ok_or_else(|| format!("a walk through slot {slot}, which no table has"))?;
-        match entry {
-            Slot::Function(fid) | Slot::ValueBridge { function: fid, .. } => {
-                Ok(self.ir.functions[fid as usize].ret)
-            }
-            // A stand-in for a base whose signature has another representation wears that base's,
-            // which is what a caller reading the slot gets.
-            Slot::Bridge { declared, .. } => Ok(self.ir.functions[declared as usize].ret),
-            other => Err(declined!("a walk through the vtable entry {other:?}")),
-        }
-    }
-
-    /// Where a class of this file keeps its own `iterator`, `hasNext` and `next`, for the runtime
-    /// to walk an object of it; see [`WalkMembers`].
-    ///
-    /// Read from the OVERRIDE edges, the same source [`implemented_collections`] reads: what makes
-    /// a class walkable is that a member of it ANSWERS for `kotlin.collections.Iterable` or
-    /// `Iterator`, which is exactly what an edge to one of their declarations records — and it
-    /// holds for a class reaching the type through another dependency type its supertype list does
-    /// not name.
-    ///
-    /// A class declaring none of the three inherits its superclass's, because a slot number
-    /// assigned at the declaring class is valid for every subclass and a subclass is walked
-    /// through the same member. Inherited as a WHOLE rather than per member: a class that declares
-    /// one of them declares the shape's answer, and mixing its number with a parent's for the
-    /// other two would describe neither.
-    pub(super) fn walk_slots(&self, class: ClassId) -> WalkSlots {
-        use super::super::super::intrinsics::CollectionShape;
-        let ir = self.ir;
-        let declaration = &ir.classes[class as usize];
-        // Which ROLE the class answers for, read from the edges; WHICH members to look up then
-        // follows from the role rather than from the edges. An override whose result is the
-        // interface's own type parameter records no edge of its own — `Iterator<T>.next(): T` is
-        // exactly that shape — so a class answering `hasNext` would have been half-recorded, and
-        // half a pair is no walk.
-        let mut iterable = false;
-        let mut iterator = false;
-        let mut text = false;
-        for edge in ir
-            .function_overrides
-            .get(&declaration.fq_name)
-            .into_iter()
-            .flatten()
-        {
-            if !matches!(
-                edge.overridden,
-                crate::fir::ResolvedFunctionOverrideTarget::External(_)
-            ) {
-                continue;
-            }
-            match (
-                self.collection_shape(edge.overridden_owner),
-                edge.name.as_str(),
-            ) {
-                (Some(CollectionShape::Iterable), "iterator") => iterable = true,
-                // A sequence is walked exactly as an iterable is: its one representation member
-                // is `iterator`, and the descriptor thunk dispatches to it the same way.
-                (Some(CollectionShape::Sequence), "iterator") => iterable = true,
-                (Some(CollectionShape::Iterator), "hasNext" | "next") => iterator = true,
-                (Some(CollectionShape::Text), "get" | "subSequence") => text = true,
-                _ => {}
-            }
-        }
-        // `length` is a PROPERTY, so it reaches the class through a property-override edge rather
-        // than a function one — and a `CharSequence` implementor that overrode nothing else would
-        // be missed without it.
-        for edge in ir
-            .property_overrides
-            .get(&declaration.fq_name)
-            .into_iter()
-            .flatten()
-        {
-            if matches!(
-                edge.overridden,
-                crate::fir::ResolvedPropertyOverrideTarget::External(_)
-            ) && matches!(
-                self.collection_shape(edge.overridden_owner),
-                Some(CollectionShape::Text)
-            ) {
-                text = true;
-            }
-        }
-        let mut slots = WalkSlots::default();
-        if iterable {
-            slots.iterator = self.walk_slot(class, "iterator");
-        }
-        if iterator {
-            slots.has_next = self.walk_slot(class, "hasNext");
-            slots.next = self.walk_slot(class, "next");
-            // Both or neither: a walk asks an iterator for `hasNext` AND `next`, and half a pair
-            // would leave the other read as something this class is not.
-            if slots.has_next == 0 || slots.next == 0 {
-                slots.has_next = 0;
-                slots.next = 0;
-            }
-        }
-        if text {
-            slots.length = self.walk_accessor_slot(class, "length");
-            slots.char_at = self.walk_slot_of(class, "get", 1);
-            // Both or neither, for the reason the iterator's pair is: text is walked by its
-            // length AND its indexed read, and half of that is no walk.
-            if slots.length == 0 || slots.char_at == 0 {
-                slots.length = 0;
-                slots.char_at = 0;
-            }
-        }
-        if slots.is_empty() {
-            if let Some(parent) = self.model.layout(class).superclass {
-                return self.walk_slots(parent);
-            }
-        }
-        slots
-    }
-
-    /// The slot of a class's own `name` PROPERTY GETTER, PLUS ONE so that 0 says it has none.
-    ///
-    /// The runtime walk contract selects the source property role here; once found, dispatch uses
-    /// the declaration's stable identity. A base's accessor need not be a method at all because a
-    /// field-backed property's accessors are synthesized.
-    fn walk_accessor_slot(&self, class: ClassId, name: &str) -> u32 {
-        let mut at = Some(class);
-        while let Some(id) = at {
-            if let Some((index, _)) = self.ir.classes[id as usize]
-                .properties
-                .iter()
-                .enumerate()
-                .find(|(_, property)| property.name == name)
-            {
-                if let Some(target) =
-                    super::super::super::classes::local_property_target(self.ir, id, index)
-                {
-                    let key = super::super::super::classes::SlotKey::Getter(target);
-                    return self.model.slot(class, &key).map_or(0, |slot| slot + 1);
-                }
-            }
-            at = self.model.layout(id).superclass;
-        }
-        0
-    }
-
-    /// The slot of a class's own nullary `name`, PLUS ONE so that 0 says it has none; see
-    /// [`WalkSlots`].
-    ///
-    /// Searched up the super chain, because a class answering for the role may inherit the member
-    /// from a base of this file rather than declare it — and a slot number assigned at the
-    /// declaring class is valid for every subclass.
-    fn walk_slot(&self, class: ClassId, name: &str) -> u32 {
-        self.walk_slot_of(class, name, 0)
-    }
-
-    /// The same for a member of the given ARITY.
-    fn walk_slot_of(&self, class: ClassId, name: &str, arity: usize) -> u32 {
-        let mut current = Some(class);
-        while let Some(id) = current {
-            if let Some((slot, _, _)) = self.member_slot(id, name, arity) {
-                return slot + 1;
-            }
-            current = self.model.layout(id).superclass;
-        }
-        0
     }
 
     /// A `constructor(…)` other than the primary: delegate, then run this constructor's body.
@@ -1978,14 +1667,6 @@ impl<'a> FileLowering<'a> {
     }
 }
 
-/// The declaration a `super` call names: its class, its member, and how the frontend selected it.
-pub(super) struct SuperTarget<'c> {
-    pub(super) owner: TypeName,
-    pub(super) name: &'c str,
-    pub(super) kind: crate::ir::IrSuperCallKind,
-    pub(super) declaration: Option<crate::fir::ResolvedFunctionOverrideTarget>,
-}
-
 impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// A fresh, zeroed instance of the class `descriptor` describes.
     pub(super) fn allocate(&mut self, descriptor: DataId, size: u32) -> Result<Value, Unsupported> {
@@ -1998,47 +1679,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             &[descriptor, size],
         )?;
         Ok(object.expect("`kt_gc_allocate` returns the object"))
-    }
-
-    /// A call through the receiver's vtable: `receiver.type.vtable[slot](receiver, args…)`.
-    pub(super) fn dispatch(
-        &mut self,
-        receiver: Value,
-        slot: u32,
-        params: &[Ty],
-        ret: Ty,
-        arguments: &[Value],
-    ) -> Result<Option<Value>, Unsupported> {
-        self.null_check(receiver)?;
-        let flags = trusted();
-        let ty = self
-            .builder
-            .ins()
-            .load(types::I64, flags, receiver, TYPE_OFFSET);
-        let vtable = self
-            .builder
-            .ins()
-            .load(types::I64, flags, ty, ktype::VTABLE as i32);
-        let function = self
-            .builder
-            .ins()
-            .load(types::I64, flags, vtable, (slot * 8) as i32);
-        let mut all_params = vec![any()];
-        all_params.extend_from_slice(params);
-        let signature = self.file.signature_of(&all_params, ret)?;
-        let signature = self.builder.import_signature(signature);
-        let mut all_arguments = vec![receiver];
-        all_arguments.extend_from_slice(arguments);
-        let call = self
-            .builder
-            .ins()
-            .call_indirect(signature, function, &all_arguments);
-        // A dispatched call is as able to throw as a direct one, and MORE able to be forgotten:
-        // it is the one call this backend emits that does not go through `emit_call`. A `try`
-        // whose body invokes a lambda is the common shape, and the exception walked straight out
-        // of the `try` until this check existed.
-        self.check_pending()?;
-        Ok(self.builder.inst_results(call).first().copied())
     }
 
     pub(super) fn field_read(
@@ -2272,6 +1912,20 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
         let name = internal.render();
         if let Some(omitted) = defaulted {
+            // A runtime throwable's declared defaults are the runtime's: it implements the class.
+            if let Some(descriptor) =
+                super::super::super::intrinsics::throwable_descriptor(internal)
+                    .filter(|_| args.is_empty())
+            {
+                let descriptor = self.file.import_data(descriptor)?;
+                let descriptor = self.data_address(descriptor);
+                return self.runtime_call(
+                    "kt_throwable_new_defaulted",
+                    &[any()],
+                    any(),
+                    &[descriptor],
+                );
+            }
             return self.defaulted_construction(internal, args, selected, omitted);
         }
         // `Any()` is declared in no file and needs none: the root has no state and no constructor,
@@ -2284,6 +1938,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
         if is_runtime_constructed(self.file, internal) {
             return self.runtime_construction(internal, args, selected);
+        }
+        if let Some(constructed) = self.value_construction(internal, args) {
+            return constructed;
+        }
+        if let Some(constructed) = self.range_class_construction(internal, args) {
+            return constructed;
         }
         let class = self.file.class_of(internal, "construction of")?;
         let declaration = &self.file.ir.classes[class as usize];
@@ -2749,242 +2409,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let func_ref = self.func_ref(getter);
         let call = self.emit_call(func_ref, &[])?;
         Ok(Some(self.builder.inst_results(call)[0]))
-    }
-
-    /// A call dispatched on the receiver's own type, named by the STATIC type it is made through:
-    /// `Callee::Virtual`. The class or interface that declares the member fixes the slot number —
-    /// `place_interface_slots` gives an interface member one number that means the same thing in
-    /// every implementation — so the slot is looked up on the DECLARING classifier and the vtable
-    /// it indexes is the receiver's. That is what makes `class C(a: I) : I by a` work: the
-    /// forwarder synthesized on `C` knows only `I`.
-    pub(super) fn virtual_call(
-        &mut self,
-        owner: TypeName,
-        name: &str,
-        params: Option<&(Vec<Ty>, Ty)>,
-        receiver: u32,
-        args: &[u32],
-    ) -> Result<Option<Value>, Unsupported> {
-        let class = self.file.class_of(owner, "a virtual call to a member of")?;
-        let ir = self.file.ir;
-        let declared = params.map(|(params, _)| params.as_slice());
-        let fid = ir.classes[class as usize]
-            .methods
-            .iter()
-            .copied()
-            .find(|&fid| {
-                let function = &ir.functions[fid as usize];
-                function.name == name && declared.is_none_or(|params| function.params == params)
-            })
-            .ok_or_else(|| {
-                format!(
-                    "a virtual call to an unknown member (`{}.{name}`)",
-                    owner.render().replace('/', ".")
-                )
-            })?;
-        let function = &ir.functions[fid as usize];
-        if function.dispatch_receiver.is_none() {
-            return Err(declined!("a virtual call to the static member `{name}`"));
-        }
-        let key = model::function_key(ir, class, fid);
-        let Some(slot) = self.file.model.slot(class, &key) else {
-            return Err(declined!("a virtual call with no dispatch slot (`{name}`)"));
-        };
-        // The ABI is the DECLARATION's, not the call site's: every override fills this slot with a
-        // body compiled to the declaration's carriers, so an argument whose checked type is narrower
-        // still crosses as what the slot expects.
-        let carried = super::super::super::captures::carried_parameters(ir, fid);
-        let ret = function.ret;
-        let Some(object) = self.receiver(receiver)? else {
-            return Ok(None);
-        };
-        let arguments = self.arguments(args, &carried)?;
-        if self.terminated {
-            return Ok(None);
-        }
-        self.dispatch(object, slot, &carried, ret, &arguments)
-    }
-
-    /// `super.p` and `super.p = v` — the named class's own realization of a PROPERTY.
-    ///
-    /// Returns `None` when the class declares no such property, so the caller keeps its decline.
-    ///
-    /// Nothing here may dispatch. `super.p` is written inside the override of `p`, and reaching the
-    /// slot would reach that override — which is the accessor doing the asking. So a source-written
-    /// accessor of the named class is called directly, and a default one is the field that class
-    /// contributes: a distinct field from the override's, because an overriding `var` declares
-    /// storage of its own and `super.b` is the reason a program can tell.
-    fn direct_property(
-        &mut self,
-        class: ClassId,
-        target: crate::fir::PropertyId,
-        setter: bool,
-        receiver: u32,
-        args: &[u32],
-    ) -> Result<Option<Value>, Unsupported> {
-        let CheckedProperty::Member(property_class, index) = self.checked_property(&target)? else {
-            return Err("a `super` access to a top-level property".into());
-        };
-        if property_class != class {
-            return Err("a `super` property target owned by another class".into());
-        }
-        let name = self.file.ir.classes[class as usize].properties[index]
-            .name
-            .clone();
-        match (setter, args) {
-            (false, []) => self.direct_property_read(class, index, receiver),
-            (true, [value]) => self
-                .direct_property_write(class, index, receiver, *value)
-                .map(|()| None),
-            _ => Err(declined!(
-                "a `super` access to `{name}` with {} operands",
-                args.len()
-            )),
-        }
-    }
-
-    fn direct_property_read(
-        &mut self,
-        class: ClassId,
-        index: usize,
-        receiver: u32,
-    ) -> Result<Option<Value>, Unsupported> {
-        let property = self.file.ir.classes[class as usize].properties[index].clone();
-        let Some(object) = self.receiver(receiver)? else {
-            return Ok(None);
-        };
-        if let Some(getter) = property.getter {
-            let Some(id) = self.file.functions[getter as usize] else {
-                return Err(declined!(
-                    "a `super` read of the abstract `{}`",
-                    property.name
-                ));
-            };
-            let func_ref = self.func_ref(id);
-            let call = self.emit_call(func_ref, &[object])?;
-            return Ok(self.builder.inst_results(call).first().copied());
-        }
-        let Some(field) = property.backing_field else {
-            return Err(declined!(
-                "a `super` read of `{}`, which has neither storage nor a getter",
-                property.name
-            ));
-        };
-        let ty = self.file.ir.classes[class as usize].fields[field as usize].ty;
-        self.load_field(object, class, field, ty).map(Some)
-    }
-
-    fn direct_property_write(
-        &mut self,
-        class: ClassId,
-        index: usize,
-        receiver: u32,
-        value: u32,
-    ) -> Result<(), Unsupported> {
-        let property = self.file.ir.classes[class as usize].properties[index].clone();
-        // The setter takes the property's own type; a direct store takes the FIELD's, which is the
-        // same rule `written_property_ty` states for an ordinary write.
-        let target = match (property.setter, property.backing_field) {
-            (Some(_), _) => property.ty,
-            (None, Some(field)) => self.file.ir.classes[class as usize].fields[field as usize].ty,
-            (None, None) => {
-                return Err(declined!(
-                    "a `super` write of `{}`, which has neither storage nor a setter",
-                    property.name
-                ));
-            }
-        };
-        let Some(object) = self.receiver(receiver)? else {
-            return Ok(());
-        };
-        let value = self.coerce(value, target)?;
-        if self.terminated {
-            return Ok(());
-        }
-        let Some(value) = value else {
-            return Err(declined!("a `Unit` value assigned to `{}`", property.name));
-        };
-        if let Some(setter) = property.setter {
-            let Some(id) = self.file.functions[setter as usize] else {
-                return Err(declined!(
-                    "a `super` write of the abstract `{}`",
-                    property.name
-                ));
-            };
-            let func_ref = self.func_ref(id);
-            self.emit_call(func_ref, &[object, value])?;
-            return Ok(());
-        }
-        let field = property.backing_field.expect("checked above");
-        let offset = self.file.model.layout(class).fields[field as usize].offset as i32;
-        self.builder.ins().store(trusted(), value, object, offset);
-        Ok(())
-    }
-
-    /// A non-virtual call to the named class's own implementation: `super.f()`.
-    pub(super) fn direct_call(
-        &mut self,
-        target: SuperTarget<'_>,
-        receiver: u32,
-        args: &[u32],
-    ) -> Result<Option<Value>, Unsupported> {
-        let SuperTarget {
-            owner,
-            name,
-            kind,
-            declaration,
-        } = target;
-        if super::super::super::intrinsics::is_any(owner) {
-            let symbol = match (name, args.len()) {
-                ("toString", 0) => "kt_any_to_string",
-                ("hashCode", 0) => "kt_any_hash_code",
-                ("equals", 1) => "kt_any_equals",
-                _ => return Err(declined!("a `super` call to `Any.{name}`")),
-            };
-            let (params, ret) = any_member(symbol).expect("a kotlin.Any member");
-            let mut arguments = vec![self.reference(receiver)?];
-            for argument in args {
-                arguments.push(self.reference(*argument)?);
-            }
-            if self.terminated {
-                return Ok(None);
-            }
-            return self.runtime_call(symbol, &params, ret, &arguments);
-        }
-        let class = self.file.class_of(owner, "a `super` call to a method of")?;
-        match kind {
-            crate::ir::IrSuperCallKind::PropertyGetter(property) => {
-                return self.direct_property(class, property, false, receiver, args);
-            }
-            crate::ir::IrSuperCallKind::PropertySetter(property) => {
-                return self.direct_property(class, property, true, receiver, args);
-            }
-            crate::ir::IrSuperCallKind::Function => {}
-        }
-        let ir = self.file.ir;
-        let Some(crate::fir::ResolvedFunctionOverrideTarget::Module(source)) = declaration else {
-            return Err(declined!(
-                "a `super` call without a source declaration (`{name}`)"
-            ));
-        };
-        let Some(&fid) = ir.checked_callable_functions.get(&source) else {
-            return Err(declined!("a `super` call to an unknown method (`{name}`)"));
-        };
-        let Some(id) = self.file.functions[fid as usize] else {
-            return Err(declined!("a `super` call to the abstract method `{name}`"));
-        };
-        let params = super::super::super::captures::carried_parameters(ir, fid);
-        let Some(object) = self.receiver(receiver)? else {
-            return Ok(None);
-        };
-        let mut arguments = vec![object];
-        arguments.extend(self.arguments(args, &params)?);
-        if self.terminated {
-            return Ok(None);
-        }
-        let func_ref = self.func_ref(id);
-        let call = self.emit_call(func_ref, &arguments)?;
-        Ok(self.builder.inst_results(call).first().copied())
     }
 }
 

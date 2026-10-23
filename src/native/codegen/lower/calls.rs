@@ -5,6 +5,7 @@
 //! it. Name-based runtime tables remain explicit migration debt inside `native::intrinsics`.
 
 mod c_calls;
+mod dependency_exports;
 
 use super::*;
 
@@ -29,39 +30,9 @@ fn direct_dependency_export<'a>(
     Ok(Some(export))
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DependencyExportCall {
-    TopLevel,
-    /// An ordinary instance member whose exported ABI keeps its dispatch receiver first.
-    Member,
-    /// A member extension whose ABI keeps the class dispatch receiver first and the source
-    /// extension receiver at its declared parameter coordinate.
-    MemberExtension,
-    /// A singleton member body emitted as a receiver-erased support export. The call still
-    /// evaluates its checked receiver expression before invoking that export.
-    SingletonMember,
-    SourceExtension {
-        receiver: Ty,
-        receiver_position: usize,
-    },
-    SourceSingletonExtension {
-        receiver: Ty,
-        receiver_position: usize,
-    },
-    ClassifierAssociated {
-        receiver: Ty,
-        receiver_position: usize,
-    },
-    SerializedClassifierAssociated {
-        receiver: Ty,
-    },
-    SerializedExtension,
-}
+use crate::backend::{DependencyCallShape, DependencyExportCall};
 
-/// Validate how one checked dependency call supplies the ABI of its already-emitted KLIB body.
-/// Source extension calls keep the receiver separate; calls inside serialized dependency bodies
-/// keep it at the provider-recorded context coordinate. Nothing here infers an extension from its
-/// spelling or from coincidentally matching types.
+#[cfg(test)]
 fn dependency_export_call(
     is_top_level_function: bool,
     is_extension: bool,
@@ -76,129 +47,22 @@ fn dependency_export_call(
     member_receiver: Option<Ty>,
     receiver_is_exact_singleton: bool,
 ) -> Result<DependencyExportCall, Unsupported> {
-    match (unread_receiver, companion_receiver_position) {
-        (Some(receiver), Some(receiver_position)) => {
-            if !is_top_level_function
-                || is_extension
-                || has_dispatch_receiver
-                || receiver_position != context_count
-            {
-                return Err(declined!(
-                    "a classifier-associated dependency receiver whose declaration disagrees"
-                ));
-            }
-            return match extension_receiver_parameter {
-                None if receiver_position <= call_params.len() && emitted_params == call_params => {
-                    Ok(DependencyExportCall::ClassifierAssociated {
-                        receiver,
-                        receiver_position,
-                    })
-                }
-                Some(serialized_position)
-                    if usize::try_from(serialized_position).ok() == Some(receiver_position)
-                        && receiver_position < call_params.len()
-                        && call_params[receiver_position] == receiver
-                        && call_params.len() == emitted_params.len() + 1
-                        && call_params[..receiver_position]
-                            == emitted_params[..receiver_position]
-                        && call_params[receiver_position + 1..]
-                            == emitted_params[receiver_position..] =>
-                {
-                    Ok(DependencyExportCall::SerializedClassifierAssociated { receiver })
-                }
-                _ => Err(declined!(
-                    "a classifier-associated dependency receiver whose declaration disagrees"
-                )),
-            };
-        }
-        (Some(_), None) if !is_extension => {
-            return Err(declined!(
-                "a classifier-associated dependency receiver without matching body authority"
-            ));
-        }
-        (None, Some(_)) => {
-            return Err(declined!(
-                "a classifier-associated dependency receiver without matching body authority"
-            ));
-        }
-        (Some(_), None) | (None, None) => {}
-    }
-    match (
+    DependencyCallShape {
         is_top_level_function,
         is_extension,
+        source_receiver,
+        context_count,
+        emitted_params,
+        call_params,
         extension_receiver_parameter,
         has_dispatch_receiver,
-    ) {
-        (true, false, None, false) => Ok(DependencyExportCall::TopLevel),
-        (false, false, None, true) => match (member_receiver, receiver_is_exact_singleton) {
-            (None, true) => Ok(DependencyExportCall::SingletonMember),
-            (Some(_), false) => Ok(DependencyExportCall::Member),
-            _ => Err(declined!(
-                "an emitted dependency callable whose checked receiver shape changed"
-            )),
-        },
-        (false, false, Some(receiver_position), true) => {
-            let receiver_position = usize::try_from(receiver_position).map_err(|_| {
-                declined!("a dependency member extension with an invalid receiver coordinate")
-            })?;
-            if member_receiver.is_none()
-                || receiver_position != context_count
-                || emitted_params != call_params
-                || source_receiver.is_none()
-                || emitted_params.get(receiver_position) != source_receiver.as_ref()
-            {
-                return Err(declined!(
-                    "a dependency member extension whose receiver contract disagrees with its call"
-                ));
-            }
-            Ok(DependencyExportCall::MemberExtension)
-        }
-        (false, true, None, true) => {
-            let receiver = source_receiver.ok_or_else(|| {
-                declined!("a dependency extension without its recorded receiver type")
-            })?;
-            let receiver_position = context_count;
-            if receiver_position > call_params.len()
-                || emitted_params.len() != call_params.len() + 1
-                || emitted_params[..receiver_position] != call_params[..receiver_position]
-                || emitted_params[receiver_position] != receiver
-                || emitted_params[receiver_position + 1..] != call_params[receiver_position..]
-            {
-                return Err(declined!(
-                    "a dependency extension whose receiver coordinate disagrees with its call"
-                ));
-            }
-            if receiver_is_exact_singleton && unread_receiver == Some(receiver) {
-                Ok(DependencyExportCall::SourceSingletonExtension {
-                    receiver,
-                    receiver_position,
-                })
-            } else {
-                Ok(DependencyExportCall::SourceExtension {
-                    receiver,
-                    receiver_position,
-                })
-            }
-        }
-        (false, true, Some(receiver_position), false) => {
-            let receiver_position = usize::try_from(receiver_position).map_err(|_| {
-                declined!("a dependency extension with an invalid receiver coordinate")
-            })?;
-            if receiver_position != context_count
-                || emitted_params != call_params
-                || source_receiver.is_none()
-                || emitted_params.get(receiver_position) != source_receiver.as_ref()
-            {
-                return Err(declined!(
-                    "a serialized dependency extension whose receiver coordinate disagrees with its declaration"
-                ));
-            }
-            Ok(DependencyExportCall::SerializedExtension)
-        }
-        _ => Err(declined!(
-            "an emitted dependency callable whose checked receiver shape changed"
-        )),
+        unread_receiver,
+        companion_receiver_position,
+        member_receiver,
+        receiver_is_exact_singleton,
     }
+    .authenticate()
+    .map_err(Unsupported::from)
 }
 
 /// Unit-test entry for shapes that have no retained ordinary member receiver. Keeping that frozen
@@ -281,12 +145,10 @@ impl BodyLowering<'_, '_, '_> {
                 owner.render()
             ));
         };
-        let name = &*record.name;
         if record.owner != Some(owner) {
-            return Err(declined!(
-                "an inherited member of `{}` declared in another file (`{name}`)",
-                owner.render()
-            ));
+            // An inherited member sits at the number the plan gave its declaration, which every
+            // table below the declaring class keeps.
+            return self.planned_member_call(owner, target, receiver, args);
         }
         use crate::fir::DeclarationFlags as Flags;
         let overridable = record.flags.has(Flags::OPEN)
@@ -301,10 +163,7 @@ impl BodyLowering<'_, '_, '_> {
             _ => false,
         };
         if !single_body {
-            return Err(declined!(
-                "a virtual call to a member of `{}`, which is not declared in this file",
-                owner.render()
-            ));
+            return self.planned_member_call(owner, target, receiver, args);
         }
         // The receiver crosses as the declaring file's member takes it: a value class's member
         // takes the value, every other member the object.
@@ -330,6 +189,55 @@ impl BodyLowering<'_, '_, '_> {
         let func_ref = self.func_ref(id);
         let call = self.emit_call(func_ref, &arguments)?;
         Ok(self.builder.inst_results(call).first().copied())
+    }
+
+    /// A call dispatched through the table of `owner`, a class another file of the module
+    /// declares: the slot is the one the module plan gave `target`, which the declaring file
+    /// fills, and the call crosses with the declaration's carriers as every override's body takes
+    /// them.
+    fn planned_member_call(
+        &mut self,
+        owner: TypeName,
+        target: crate::fir::CallableId,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<Option<Value>, Unsupported> {
+        let qualified = || owner.render().replace('/', ".");
+        let table = match self.file.slot_plan.table(owner) {
+            Some(Ok(table)) => table,
+            Some(Err(reason)) => {
+                return Err(declined!(
+                    "a virtual call through `{}`, which has no module-wide layout: {reason}",
+                    qualified()
+                ))
+            }
+            None => {
+                return Err(declined!(
+                    "a virtual call to a member of `{}`, which is not declared in this file",
+                    qualified()
+                ))
+            }
+        };
+        let Some(&slot) = table
+            .slots
+            .get(&crate::backend::class_tables::module_slots::PlanKey::Callable(target))
+        else {
+            return Err(declined!(
+                "a virtual call to a member `{}` does not plan",
+                qualified()
+            ));
+        };
+        let record = &self.file.ir.referenced_module_callables[&target];
+        let params = record.parameters.to_vec();
+        let ret = record.result;
+        let Some(object) = self.receiver(receiver)? else {
+            return Ok(None);
+        };
+        let arguments = self.arguments(args, &params)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        self.dispatch(object, slot, &params, ret, &arguments)
     }
 
     /// Run the defining file's top-level initializers before using anything it exports.
@@ -420,7 +328,7 @@ impl BodyLowering<'_, '_, '_> {
                 let Some(receiver) = dispatch_receiver else {
                     return Err(declined!("a `super` call without a receiver (`{name}`)"));
                 };
-                let target = objects::SuperTarget {
+                let target = dispatch::SuperTarget {
                     owner: *owner,
                     name,
                     kind: *kind,
@@ -433,6 +341,7 @@ impl BodyLowering<'_, '_, '_> {
                 name,
                 params,
                 module_target,
+                target,
                 ..
             } => {
                 let Some(receiver) = dispatch_receiver else {
@@ -443,7 +352,7 @@ impl BodyLowering<'_, '_, '_> {
                 {
                     return self.module_member_call(*owner, target, receiver, args);
                 }
-                self.virtual_call(*owner, name, params.as_ref(), receiver, args)
+                self.virtual_call(*owner, name, params.as_ref(), *target, receiver, args)
             }
             Callee::Special {
                 owner,
@@ -456,7 +365,7 @@ impl BodyLowering<'_, '_, '_> {
                 };
                 // A diamond `super.f()` to a superinterface's DEFAULT METHOD. `Callee::Special`
                 // carries no accessor kind because it never names one.
-                let target = objects::SuperTarget {
+                let target = dispatch::SuperTarget {
                     owner: *owner,
                     name,
                     kind: crate::ir::IrSuperCallKind::Function,
@@ -483,189 +392,14 @@ impl BodyLowering<'_, '_, '_> {
                     .as_ref()
                     .and_then(|identity| self.file.dependency_symbols.get(identity));
                 if let Some(export) = direct_dependency_export(export, defaults)? {
-                    let unread_receiver = export
-                        .singleton_extension_receiver
-                        .map(|receiver| receiver.semantic_type());
-                    let selected_singleton = self.file.callables.singleton_dispatch(site);
-                    let receiver_is_exact_singleton = dispatch_receiver.is_some_and(|receiver| {
-                        if realization.is_member_function() {
-                            selected_singleton
-                                .zip(export.singleton_member_receiver)
-                                .is_some_and(|(selected, effect)| {
-                                    selected.classifier == effect.classifier()
-                                })
-                        } else {
-                            unread_receiver.is_some_and(|expected| {
-                                crate::backend::authenticated_singleton_receiver(
-                                    Some(receiver),
-                                    selected_singleton.map(|dispatch| dispatch.classifier),
-                                    expected,
-                                )
-                            })
-                        }
-                    });
-                    let call = dependency_export_call(
-                        realization.is_top_level_function(),
-                        realization.is_extension(),
-                        realization.source_receiver,
-                        realization.context_count,
-                        &realization.params,
-                        params,
-                        *extension_receiver_parameter,
-                        dispatch_receiver.is_some(),
-                        unread_receiver,
-                        realization.klib_body_companion_receiver_position(),
-                        export
-                            .member_receiver
-                            .map(|receiver| receiver.semantic_type()),
-                        receiver_is_exact_singleton && export.singleton_member_receiver.is_some(),
-                    )?;
-                    let mut companion_abi_params = Vec::new();
-                    let mut member_abi_params = Vec::new();
-                    let (abi_params, arguments) = match call {
-                        DependencyExportCall::TopLevel
-                        | DependencyExportCall::SerializedExtension => {
-                            (params.as_ref(), self.arguments(args, params)?)
-                        }
-                        DependencyExportCall::SingletonMember => {
-                            let Some(receiver) = dispatch_receiver else {
-                                unreachable!("validated singleton member has a receiver")
-                            };
-                            let effect = export.singleton_member_receiver.ok_or_else(|| {
-                                declined!(
-                                    "a receiver-erased dependency member without its singleton effect"
-                                )
-                            })?;
-                            if effect.evaluate_source() {
-                                self.statement(receiver)?;
-                                if self.terminated {
-                                    return Ok(None);
-                                }
-                            }
-                            (params.as_ref(), self.arguments(args, params)?)
-                        }
-                        DependencyExportCall::Member | DependencyExportCall::MemberExtension => {
-                            let Some(dispatch_receiver) = dispatch_receiver else {
-                                unreachable!("validated dependency member has a receiver")
-                            };
-                            let receiver_ty = export.member_receiver.ok_or_else(|| {
-                                declined!(
-                                    "an ordinary dependency member without its exported receiver type"
-                                )
-                            })?.semantic_type();
-                            let receiver = self
-                                .coerce(dispatch_receiver, receiver_ty)?
-                                .ok_or_else(|| declined!("a `Unit` dependency member receiver"))?;
-                            let mut arguments = vec![receiver];
-                            arguments.extend(self.arguments(args, params)?);
-                            member_abi_params.push(receiver_ty);
-                            member_abi_params.extend(params.iter().copied());
-                            (member_abi_params.as_slice(), arguments)
-                        }
-                        DependencyExportCall::SerializedClassifierAssociated { receiver } => {
-                            if self.carrier(receiver) != Carrier::Ref {
-                                return Err(declined!(
-                                    "a classifier-associated extension receiver without a reference carrier"
-                                ));
-                            }
-                            (params.as_ref(), self.arguments(args, params)?)
-                        }
-                        DependencyExportCall::SourceExtension {
-                            receiver,
-                            receiver_position,
-                        } => {
-                            let Some(dispatch_receiver) = dispatch_receiver else {
-                                unreachable!("validated source extension has a receiver")
-                            };
-                            let mut arguments = self.arguments(
-                                &args[..receiver_position],
-                                &params[..receiver_position],
-                            )?;
-                            if self.terminated {
-                                return Ok(None);
-                            }
-                            let receiver = self
-                                .coerce(dispatch_receiver, receiver)?
-                                .ok_or_else(|| declined!("a `Unit` dependency receiver"))?;
-                            arguments.push(receiver);
-                            arguments.extend(self.arguments(
-                                &args[receiver_position..],
-                                &params[receiver_position..],
-                            )?);
-                            (realization.params.as_slice(), arguments)
-                        }
-                        DependencyExportCall::SourceSingletonExtension {
-                            receiver,
-                            receiver_position,
-                        } => {
-                            if self.carrier(receiver) != Carrier::Ref {
-                                return Err(declined!(
-                                    "an unread singleton extension receiver without a reference carrier"
-                                ));
-                            }
-                            let mut arguments = self.arguments(
-                                &args[..receiver_position],
-                                &params[..receiver_position],
-                            )?;
-                            if self.terminated {
-                                return Ok(None);
-                            }
-                            if export
-                                .singleton_extension_receiver
-                                .is_none_or(|effect| effect.evaluate_source())
-                            {
-                                let Some(dispatch_receiver) = dispatch_receiver else {
-                                    unreachable!("validated singleton extension has a receiver")
-                                };
-                                // The unread-slot effect alone does not make a source singleton
-                                // inert: first access can initialize an object. Only a separate
-                                // provider proof over the exact platform object may omit this.
-                                let _ = self.coerce(dispatch_receiver, receiver)?;
-                                if self.terminated {
-                                    return Ok(None);
-                                }
-                            }
-                            arguments.push(self.builder.ins().iconst(types::I64, 0));
-                            arguments.extend(self.arguments(
-                                &args[receiver_position..],
-                                &params[receiver_position..],
-                            )?);
-                            (realization.params.as_slice(), arguments)
-                        }
-                        DependencyExportCall::ClassifierAssociated {
-                            receiver,
-                            receiver_position,
-                        } => {
-                            if self.carrier(receiver) != Carrier::Ref {
-                                return Err(declined!(
-                                    "a classifier-associated extension receiver without a reference carrier"
-                                ));
-                            }
-                            let mut arguments = self.arguments(
-                                &args[..receiver_position],
-                                &params[..receiver_position],
-                            )?;
-                            if self.terminated {
-                                return Ok(None);
-                            }
-                            arguments.push(self.builder.ins().iconst(types::I64, 0));
-                            arguments.extend(self.arguments(
-                                &args[receiver_position..],
-                                &params[receiver_position..],
-                            )?);
-                            companion_abi_params.extend_from_slice(&params[..receiver_position]);
-                            companion_abi_params.push(receiver);
-                            companion_abi_params.extend_from_slice(&params[receiver_position..]);
-                            (companion_abi_params.as_slice(), arguments)
-                        }
-                    };
-                    if self.terminated {
-                        return Ok(None);
-                    }
-                    let id = self.file.import(&export.symbol, abi_params, *ret)?;
-                    let func_ref = self.func_ref(id);
-                    let call = self.emit_call(func_ref, &arguments)?;
-                    return Ok(self.builder.inst_results(call).first().copied());
+                    return self.emitted_dependency_call(
+                        site,
+                        export,
+                        realization,
+                        callee,
+                        dispatch_receiver,
+                        args,
+                    );
                 }
                 if let Some(function) = &realization.direct_c_function {
                     return self.direct_c_call(
@@ -679,8 +413,13 @@ impl BodyLowering<'_, '_, '_> {
                 }
                 // A callable reference reaches this ordinary dependency-call path, while retaining
                 // the exact compiler intrinsic the source-form operation uses.
+                // A member's operation travels as its realization; a package function's as its
+                // intrinsic. Either is the same exact provider fact.
                 if let Some(realized) = self.compiler_intrinsic_call(
-                    realization.compiler_intrinsic,
+                    site,
+                    realization
+                        .compiler_intrinsic
+                        .or(realization.member_realization.compiler_intrinsic()),
                     dispatch_receiver,
                     args,
                     *extension_receiver_parameter,
@@ -1102,11 +841,6 @@ impl BodyLowering<'_, '_, '_> {
                             .first()
                             .is_some_and(|ty| ty.non_null().is_reference_array());
                         if let Some(realized) =
-                            self.list_construction(signature, packs_a_vararg, args)
-                        {
-                            return realized;
-                        }
-                        if let Some(realized) =
                             self.map_construction(signature, packs_a_vararg, args)
                         {
                             return realized;
@@ -1216,9 +950,50 @@ mod tests {
     use crate::types::Ty;
 
     #[test]
+    fn an_instantiated_dependency_call_cannot_change_its_parameter_types() {
+        for (top_level, member, dispatch) in [
+            (true, None, false),
+            (false, Some(Ty::obj("sample/Owner")), true),
+        ] {
+            assert_eq!(
+                dependency_export_call_with_member(
+                    top_level,
+                    false,
+                    None,
+                    0,
+                    &[Ty::String],
+                    &[Ty::Int],
+                    None,
+                    dispatch,
+                    None,
+                    None,
+                    member,
+                    false
+                )
+                .expect_err("checked instantiation fixes every operand, not just its carrier")
+                .construct(),
+                "an emitted dependency callable whose checked parameter types changed"
+            );
+        }
+    }
+
+    #[test]
     fn an_exact_dependency_export_never_receives_too_few_arguments() {
         let export = DependencyExport {
             symbol: "kt_klib_export_0".to_string(),
+            signature: {
+                let mut ir = crate::ir::IrFile::default();
+                let function = ir.add_fun(crate::ir::IrFunction {
+                    name: "sample".to_owned(),
+                    params: vec![Ty::Int],
+                    ret: Ty::Int,
+                    param_checks: vec![None],
+                    body: None,
+                    is_static: true,
+                    dispatch_receiver: None,
+                });
+                crate::backend::DependencyFunctionSignature::from_ir(&ir, function, None).unwrap()
+            },
             member_receiver: None,
             singleton_member_receiver: None,
             singleton_extension_receiver: None,

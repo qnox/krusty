@@ -323,7 +323,69 @@ impl BodyLowering<'_, '_, '_> {
         )
     }
 
-    /// A member of a range object, or `a until b` on the facade that declares it.
+    /// The existing provider role of an integral range extension, independent of whether common
+    /// IR carries its extension receiver separately or among the serialized parameters.
+    pub(super) fn intrinsic_range_builder(
+        &mut self,
+        intrinsic: crate::backend::BackendCompilerIntrinsic,
+        start: u32,
+        end: u32,
+        result: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let suffix = match intrinsic {
+            crate::backend::BackendCompilerIntrinsic::RangeUntil => "until",
+            crate::backend::BackendCompilerIntrinsic::RangeDownTo => "down_to",
+            _ => return Err("an operation that is not an exact range builder".into()),
+        };
+        let Some((kind, element)) = range_type(result) else {
+            return Err("an exact range builder with an unsupported result type".into());
+        };
+        self.range_of(
+            &format!("kt_{kind}_range_{suffix}"),
+            element,
+            result,
+            start,
+            end,
+        )
+    }
+
+    /// `IntRange(start, endInclusive)` and its siblings constructed directly, as an expanded
+    /// `rangeTo` body does: the runtime's closed range over the two bounds. `None` for any class
+    /// that is not one of the runtime's integral ranges.
+    pub(super) fn range_class_construction(
+        &mut self,
+        internal: TypeName,
+        args: &[u32],
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        let result = Ty::obj_name(internal);
+        let (kind, element) = range_type(result)?;
+        let &[start, end] = args else {
+            return Some(Err(declined!(
+                "construction of `{}` from {} arguments",
+                internal.render(),
+                args.len()
+            )));
+        };
+        Some((|| {
+            let Some(first) = self.coerce(start, element)? else {
+                return Ok(None);
+            };
+            let Some(last) = self.coerce(end, element)? else {
+                return Ok(None);
+            };
+            if self.terminated {
+                return Ok(None);
+            }
+            self.runtime_call(
+                &format!("kt_{kind}_range"),
+                &[element, element],
+                result,
+                &[first, last],
+            )
+        })())
+    }
+
+    /// A member of a range object, or an ordinary progression adapter on its declaring facade.
     ///
     /// Returns `None` when this is neither, so the caller falls through to the ordinary
     /// dependency-member path. `contains` is the reason this is not simply a `runtime_member` entry:
@@ -372,46 +434,6 @@ impl BodyLowering<'_, '_, '_> {
         if comparable_range_element(self.checked_type(receiver)?).is_some() {
             let (symbol, answer) = comparable_range_symbol(signature)?;
             return Some(self.comparable_range_call(symbol, answer, receiver, args, ret));
-        }
-        // The provider marks the exact selected `until` declaration from its complete signature;
-        // the type it RETURNS says which range representation to build.
-        if intrinsic == Some(crate::backend::BackendCompilerIntrinsic::RangeUntil)
-            && matches!(signature.params, [_])
-            && signature.ret.is_reference()
-        {
-            let [end] = args else {
-                return Some(Err(
-                    "an `until` call with an unexpected argument shape".into()
-                ));
-            };
-            let (kind, element) = range_type(ret)?;
-            return Some(self.range_of(
-                &format!("kt_{kind}_range_until"),
-                element,
-                ret,
-                receiver,
-                *end,
-            ));
-        }
-        // `downTo` is the descending counterpart. Its exact provider fact selects the operation;
-        // the type it RETURNS says which range representation to build.
-        if intrinsic == Some(crate::backend::BackendCompilerIntrinsic::RangeDownTo)
-            && matches!(signature.params, [_])
-            && signature.ret.is_reference()
-        {
-            let [end] = args else {
-                return Some(Err(
-                    "a `downTo` call with an unexpected argument shape".into()
-                ));
-            };
-            let (kind, element) = range_type(ret)?;
-            return Some(self.range_of(
-                &format!("kt_{kind}_range_down_to"),
-                element,
-                ret,
-                receiver,
-                *end,
-            ));
         }
         // `range step n` and `progression.reversed()`. Both answer a PROGRESSION, which this
         // runtime represents as the range it already had with a step beside it — so the receiver
@@ -734,7 +756,7 @@ impl BodyLowering<'_, '_, '_> {
     ///
     /// Declines a receiver that is not a range: the facade also declares `contains` over
     /// collections and strings, which this does not answer.
-    fn facade_range_contains(
+    pub(super) fn facade_range_contains(
         &mut self,
         receiver: u32,
         argument: u32,
@@ -745,7 +767,13 @@ impl BodyLowering<'_, '_, '_> {
         let Some(internal) = receiver_ty.obj_internal() else {
             return Err(declined!("`contains` on a `{receiver_ty:?}`"));
         };
-        if range_element(internal).is_none() {
+        // A range held under its stdlib interface is the runtime's too, as long as this file
+        // puts no class of its own behind that interface; see [`closed_range_element`].
+        let floating_element = floating_range(receiver_ty).map(|(_, element)| element);
+        let held_under_interface = (closed_range_element(receiver_ty).is_some()
+            || floating_element.is_some())
+            && !self.file.implements_dependency(internal);
+        if range_element(internal).is_none() && !held_under_interface {
             return Err(declined!("`contains` on a `{receiver_ty:?}`"));
         }
         let Some(argument_ty) = self.checked_type(argument) else {
@@ -763,6 +791,16 @@ impl BodyLowering<'_, '_, '_> {
         // through the guard.
         if !argument_ty.is_jvm_scalar() {
             return Err(declined!("`contains` of a `{argument_ty:?}`"));
+        }
+        if let Some(element) = floating_element {
+            return self.floating_range_call(
+                "kt_floating_range_contains",
+                Ty::Boolean,
+                element,
+                receiver,
+                &[argument],
+                Ty::Boolean,
+            );
         }
         let object = self.reference(receiver)?;
         let Some(value) = self.coerce(argument, argument_ty)? else {

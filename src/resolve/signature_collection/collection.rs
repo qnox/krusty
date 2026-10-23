@@ -153,16 +153,6 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     diags,
                 );
             }
-            if let Some(script_body) = file.script_body {
-                resolve_local_type_parameter_annotation_inventory(
-                    file,
-                    [script_body],
-                    names,
-                    &mut table.resolved_annotations,
-                    &mut annotation_resolution,
-                    diags,
-                );
-            }
         }
     }
     // A target-less optional expectation belongs to the common source set only. Its provider record
@@ -3073,6 +3063,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         companion: direct_companion,
                         kind: frontend_class_kind(classifier_flags, classifier_is_enum),
                         is_sealed: classifier_flags.has(ClassFlags::SEALED),
+                        is_abstract: classifier_flags.has(ClassFlags::ABSTRACT),
                         type_parameters: &class_type_parameters,
                         annotations: &resolved_annotations,
                         annotation_class_arguments: &resolved_annotation_class_arguments,

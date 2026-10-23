@@ -24,6 +24,7 @@ mod local_class_capture;
 mod local_class_names;
 mod local_delegated_properties;
 mod lookup_scope;
+mod member_carriers;
 mod module_symbols;
 mod overrides;
 mod parameters;

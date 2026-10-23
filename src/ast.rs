@@ -33,7 +33,9 @@ pub use binary_reference_tokens::BinaryReferenceTokens;
 pub(crate) use call_shape::explicit_call_receiver;
 pub use call_shape::{first_lambda_param_or_it, lambda_params_or_implicit};
 pub use constructors::{CtorDelegation, CtorDelegationCall, PrimaryCtorLines, SecondaryCtor};
-pub use declaration_prefixes::{DeclarationPrefix, DeclarationPrefixes};
+pub use declaration_prefixes::{
+    DeclarationPrefix, DeclarationPrefixes, ModifierKeyword, WrittenModifiers,
+};
 pub use destructuring::{DestructureProperty, DestructuringSyntax};
 pub use external_modifier_targets::{ExternalModifierTarget, ExternalModifierUse};
 pub use import_path::ImportPath;
@@ -860,6 +862,9 @@ pub struct PropParam {
     /// `true` for a `val`/`var` parameter (a property → backing field + accessor); `false` for a
     /// plain constructor parameter (in scope for `init`/body-property initializers, but not a field).
     pub is_property: bool,
+    /// A script's constructor parameter. It only reaches the template's constructor: the script's
+    /// statements are not in its scope, and see the template's member of the same name instead.
+    pub is_script_parameter: bool,
     /// `true` for a primary-constructor property that wrote `actual`. A constructor property is a
     /// declaration of its own, so it actualizes — or fails to actualize — independently of the
     /// classifier whose header declares it.
@@ -1554,8 +1559,15 @@ pub struct File {
     /// Number of source lines, including a final empty line after a trailing newline.
     pub source_line_count: u32,
     pub decls: Vec<DeclId>,
-    /// Kotlin script statements in source order.
-    pub script_body: Option<ExprId>,
+    /// The class a Kotlin script compiles to: its declarations are the class's members and its
+    /// statements are the class's initializers.
+    pub script_class: Option<DeclId>,
+    /// The initializer of the script class's `$$result` property: the expression the script ends
+    /// with. It is checked as the statement it is written as, so an `if` without `else` is `Unit`.
+    pub script_result: Option<ExprId>,
+    /// The statement a Kotlin script ends with, when no declaration follows it. kotlinc reads it as
+    /// the script's result position, where a `return` is prohibited.
+    pub script_last_statement: Option<StmtId>,
     /// Top-level declarations carrying the `expect` modifier (multiplatform headers), each paired
     /// with the span of the KEYWORD that introduced it. Stable compact-header actualization
     /// excludes a matched declaration subtree before signature collection; an unmatched `expect`
@@ -2007,7 +2019,6 @@ impl File {
             }
         }
         self.retained_expr_spans = retained_expr_spans;
-        self.script_body = None;
         self.expr_arena = Vec::new();
         self.stmt_arena = Vec::new();
         self.expr_spans = Vec::new();

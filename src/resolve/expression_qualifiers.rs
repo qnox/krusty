@@ -10,6 +10,7 @@
 //! through it, read that record instead of walking the chain again.
 
 use super::classifier_binding::SelectedTypeAlias;
+use super::qualifiers::subpackage;
 use super::*;
 use crate::symbol_source::SymbolNamespace;
 
@@ -288,16 +289,13 @@ impl Checker<'_> {
                         alias: Some(alias),
                     });
                 }
-                if self.segment_cannot_name_a_package(expression)
-                    || !self.fed_source().package_exists(TypeName::ROOT, name)
-                {
+                if self.segment_cannot_name_a_package(expression) {
                     return Err(unresolved());
                 }
+                let package =
+                    subpackage(&self.fed_source(), TypeName::ROOT, name).ok_or_else(unresolved)?;
                 Ok(QualifierStep {
-                    resolved: ResolvedQualifier::Package(crate::types::type_name_child(
-                        TypeName::ROOT,
-                        name,
-                    )),
+                    resolved: ResolvedQualifier::Package(package),
                     alias: None,
                 })
             }
@@ -362,13 +360,12 @@ impl Checker<'_> {
                         .selected_provider_alias(internal, record.classifier_declaration.as_ref())
                         .map_err(|()| unresolved())?;
                     Ok(classifier(internal, alias))
-                } else if !self.segment_cannot_name_a_package(expression)
-                    && source.package_exists(package, name)
+                } else if let Some(child) = (!self.segment_cannot_name_a_package(expression))
+                    .then(|| subpackage(&source, package, name))
+                    .flatten()
                 {
                     Ok(QualifierStep {
-                        resolved: ResolvedQualifier::Package(crate::types::type_name_child(
-                            package, name,
-                        )),
+                        resolved: ResolvedQualifier::Package(child),
                         alias: None,
                     })
                 } else {
@@ -465,7 +462,7 @@ impl Checker<'_> {
 
     pub(super) fn names_root_package(&self, expression: ExprId, name: &str) -> bool {
         !self.segment_cannot_name_a_package(Some(expression))
-            && self.fed_source().package_exists(TypeName::ROOT, name)
+            && subpackage(&self.fed_source(), TypeName::ROOT, name).is_some()
     }
 
     fn segment_cannot_name_a_package(&self, expression: Option<ExprId>) -> bool {

@@ -1,0 +1,3 @@
+[env]
+# Build-script outputs in a shared target directory belong to this checkout's runtime sources.
+KRUSTY_BUILD_CHECKOUT = { value = ".", relative = true, force = true }

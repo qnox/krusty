@@ -21,6 +21,141 @@ pub struct DeclarationPrefix {
     pub declaration_start: u32,
     /// A classifier's `class`, `object` or `interface` keyword, when the declaration has one.
     pub classifier_keyword: Option<Span>,
+    /// Every modifier keyword the list wrote, a classifier's kind words (`data`, `enum`,
+    /// `annotation`, `companion`, `fun`) included.
+    pub modifiers: WrittenModifiers,
+}
+
+/// A keyword a declaration's modifier list can write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModifierKeyword {
+    Public,
+    Private,
+    Internal,
+    Protected,
+    Open,
+    Final,
+    Abstract,
+    Sealed,
+    Inline,
+    Noinline,
+    Crossinline,
+    Operator,
+    Override,
+    Suspend,
+    Tailrec,
+    Lateinit,
+    Infix,
+    Reified,
+    Vararg,
+    Const,
+    Actual,
+    Expect,
+    Value,
+    Inner,
+    External,
+    Data,
+    Enum,
+    Annotation,
+    Companion,
+    Fun,
+}
+
+impl ModifierKeyword {
+    pub const ALL: [ModifierKeyword; 30] = [
+        ModifierKeyword::Public,
+        ModifierKeyword::Private,
+        ModifierKeyword::Internal,
+        ModifierKeyword::Protected,
+        ModifierKeyword::Open,
+        ModifierKeyword::Final,
+        ModifierKeyword::Abstract,
+        ModifierKeyword::Sealed,
+        ModifierKeyword::Inline,
+        ModifierKeyword::Noinline,
+        ModifierKeyword::Crossinline,
+        ModifierKeyword::Operator,
+        ModifierKeyword::Override,
+        ModifierKeyword::Suspend,
+        ModifierKeyword::Tailrec,
+        ModifierKeyword::Lateinit,
+        ModifierKeyword::Infix,
+        ModifierKeyword::Reified,
+        ModifierKeyword::Vararg,
+        ModifierKeyword::Const,
+        ModifierKeyword::Actual,
+        ModifierKeyword::Expect,
+        ModifierKeyword::Value,
+        ModifierKeyword::Inner,
+        ModifierKeyword::External,
+        ModifierKeyword::Data,
+        ModifierKeyword::Enum,
+        ModifierKeyword::Annotation,
+        ModifierKeyword::Companion,
+        ModifierKeyword::Fun,
+    ];
+
+    /// The modifier `keyword` spells, if it spells one.
+    pub fn from_keyword(keyword: &str) -> Option<ModifierKeyword> {
+        ModifierKeyword::ALL
+            .into_iter()
+            .find(|modifier| modifier.keyword() == keyword)
+    }
+
+    pub fn keyword(self) -> &'static str {
+        match self {
+            ModifierKeyword::Public => "public",
+            ModifierKeyword::Private => "private",
+            ModifierKeyword::Internal => "internal",
+            ModifierKeyword::Protected => "protected",
+            ModifierKeyword::Open => "open",
+            ModifierKeyword::Final => "final",
+            ModifierKeyword::Abstract => "abstract",
+            ModifierKeyword::Sealed => "sealed",
+            ModifierKeyword::Inline => "inline",
+            ModifierKeyword::Noinline => "noinline",
+            ModifierKeyword::Crossinline => "crossinline",
+            ModifierKeyword::Operator => "operator",
+            ModifierKeyword::Override => "override",
+            ModifierKeyword::Suspend => "suspend",
+            ModifierKeyword::Tailrec => "tailrec",
+            ModifierKeyword::Lateinit => "lateinit",
+            ModifierKeyword::Infix => "infix",
+            ModifierKeyword::Reified => "reified",
+            ModifierKeyword::Vararg => "vararg",
+            ModifierKeyword::Const => "const",
+            ModifierKeyword::Actual => "actual",
+            ModifierKeyword::Expect => "expect",
+            ModifierKeyword::Value => "value",
+            ModifierKeyword::Inner => "inner",
+            ModifierKeyword::External => "external",
+            ModifierKeyword::Data => "data",
+            ModifierKeyword::Enum => "enum",
+            ModifierKeyword::Annotation => "annotation",
+            ModifierKeyword::Companion => "companion",
+            ModifierKeyword::Fun => "fun",
+        }
+    }
+}
+
+/// A set of modifier keywords, in [`ModifierKeyword::ALL`] order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WrittenModifiers(u32);
+
+impl WrittenModifiers {
+    pub(crate) fn insert(&mut self, modifier: ModifierKeyword) {
+        self.0 |= 1 << modifier as u32;
+    }
+
+    pub fn contains(self, modifier: ModifierKeyword) -> bool {
+        self.0 & (1 << modifier as u32) != 0
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = ModifierKeyword> {
+        ModifierKeyword::ALL
+            .into_iter()
+            .filter(move |modifier| self.contains(*modifier))
+    }
 }
 
 /// Declaration prefixes keyed by the offsets of the tokens that identify their declaration: the

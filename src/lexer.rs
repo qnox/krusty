@@ -613,7 +613,8 @@ impl<'a> Lexer<'a> {
                     self.i += 1;
                     self.retain(RetainedKind::Whitespace, start, self.i);
                 }
-                b'#' if self.formatting.is_some() && self.i == 0 && self.peek2() == b'!' => {
+                // Kotlin's grammar starts a file with an optional shebang line.
+                b'#' if self.i == 0 && self.peek2() == b'!' => {
                     self.i += 2;
                     while self.i < self.b.len() && !matches!(self.b[self.i], b'\r' | b'\n') {
                         self.i += 1;
@@ -633,27 +634,28 @@ impl<'a> Lexer<'a> {
                     self.retain_line_suffix(RetainedKind::LineComment, start, self.i);
                 }
                 b'/' if self.peek2() == b'*' => {
+                    // Block comments nest in Kotlin: `/** see `/* */` */` is one comment.
                     self.i += 2;
-                    if self.formatting.is_some() {
-                        let mut depth = 1usize;
-                        while self.i < self.b.len() && depth > 0 {
-                            if self.peek() == b'/' && self.peek2() == b'*' {
-                                depth = depth.saturating_add(1);
-                                self.i += 2;
-                            } else if self.peek() == b'*' && self.peek2() == b'/' {
-                                depth -= 1;
-                                self.i += 2;
-                            } else {
-                                self.i += 1;
-                            }
-                        }
-                    } else {
-                        while self.i < self.b.len()
-                            && !(self.peek() == b'*' && self.peek2() == b'/')
-                        {
+                    let mut depth = 1usize;
+                    while self.i < self.b.len() && depth > 0 {
+                        if self.peek() == b'/' && self.peek2() == b'*' {
+                            depth = depth.saturating_add(1);
+                            self.i += 2;
+                        } else if self.peek() == b'*' && self.peek2() == b'/' {
+                            depth -= 1;
+                            self.i += 2;
+                        } else {
                             self.i += 1;
                         }
-                        self.i = (self.i + 2).min(self.b.len());
+                    }
+                    // An unclosed comment runs to the end of the file, where kotlinc reports it.
+                    // The formatter keeps the comment text as written.
+                    if depth > 0 && self.formatting.is_none() {
+                        let end = self.b.len() as u32;
+                        self.diags.error(
+                            Span::new(end, end),
+                            "syntax error: Unclosed comment.".to_string(),
+                        );
                     }
                     self.retain(RetainedKind::BlockComment, start, self.i);
                 }
@@ -1463,7 +1465,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_lexer_keeps_shebang_and_nested_comment_behavior() {
+    fn ordinary_lexer_skips_a_leading_shebang_and_nests_block_comments() {
         let source = "#!/bin\n/* outer /* inner */ tail */ val value = 1";
         let mut diagnostics = DiagSink::new();
         let tokens = lex(source, &mut diagnostics);
@@ -1475,14 +1477,7 @@ mod tests {
         assert_eq!(
             token_text,
             vec![
-                (TokenKind::Unknown, "#"),
-                (TokenKind::Not, "!"),
-                (TokenKind::Slash, "/"),
-                (TokenKind::Ident, "bin"),
                 (TokenKind::Newline, "\n"),
-                (TokenKind::Ident, "tail"),
-                (TokenKind::Star, "*"),
-                (TokenKind::Slash, "/"),
                 (TokenKind::KwVal, "val"),
                 (TokenKind::Ident, "value"),
                 (TokenKind::Eq, "="),
@@ -1497,13 +1492,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                (NameTokenKind::Operator, "!"),
-                (NameTokenKind::Operator, "/"),
-                (NameTokenKind::Ident, "bin"),
                 (NameTokenKind::Newline, "\n"),
-                (NameTokenKind::Ident, "tail"),
-                (NameTokenKind::Operator, "*"),
-                (NameTokenKind::Operator, "/"),
                 (NameTokenKind::Ident, "value"),
             ]
         );

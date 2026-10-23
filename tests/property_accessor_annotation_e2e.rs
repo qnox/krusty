@@ -16,6 +16,54 @@ fn assert_module_matches_kotlinc(sources: &[(&str, &str)]) {
     );
 }
 
+#[test]
+fn constructor_property_annotations_match_kotlinc_in_both_source_orders() {
+    const POLICY: &str = r#"
+import kotlin.reflect.KClass
+@Target(AnnotationTarget.PROPERTY)
+annotation class PropertyMark(val type: KClass<*>)
+@Target(AnnotationTarget.PROPERTY, AnnotationTarget.VALUE_PARAMETER, AnnotationTarget.PROPERTY_GETTER)
+annotation class Other(val text: String)
+@Target(AnnotationTarget.VALUE_PARAMETER)
+annotation class ParamOnly(val text: String)
+class Token
+"#;
+    const USE: &str = r#"
+class Subject(
+    @PropertyMark(Token::class) @param:Other("parameter") @get:Other("getter") val first: Int,
+    @ParamOnly("default parameter") val second: Int,
+    @property:Other("property") val third: Int
+)
+"#;
+    for sources in [
+        [("Subject.kt", USE), ("Marks.kt", POLICY)],
+        [("Marks.kt", POLICY), ("Subject.kt", USE)],
+    ] {
+        assert_module_matches_kotlinc(&sources);
+    }
+}
+
+#[test]
+fn constructor_parameter_annotation_values_are_seeded_by_retention_before_the_body() {
+    assert_module_matches_kotlinc(&[(
+        "ConstructorAnnotations.kt",
+        r#"
+import kotlin.reflect.KClass
+annotation class Nested(val text: String)
+@Target(AnnotationTarget.VALUE_PARAMETER)
+annotation class Visible(val text: String, val nested: Nested, val types: Array<KClass<*>>)
+@Target(AnnotationTarget.VALUE_PARAMETER)
+@Retention(AnnotationRetention.BINARY)
+annotation class Invisible(val values: IntArray, val type: KClass<*>)
+class Token
+class Subject(
+    @Invisible([3, 5], Token::class) @Visible("first", Nested("nested"), [Token::class]) val first: String,
+    @Visible("second", Nested("other"), [String::class]) @Invisible([7], String::class) val second: String?
+)
+"#,
+    )]);
+}
+
 const ANNOTATIONS: &str = "package accessors\n\
     \n\
     @Retention(AnnotationRetention.RUNTIME)\n\

@@ -356,3 +356,148 @@ fn without_the_serialization_plugin_nothing_is_synthesized() {
     );
     assert_eq!(compiled.classes, reference);
 }
+
+/// `krusty refusals <arguments>` answers, before any source is read, whether krusty compiles the
+/// request itself: a build tool hands a refused request to kotlinc. Each refusal is the error a
+/// compile with the same switches reports, one per line on stdout, and the exit code is 1; a request
+/// krusty implements prints nothing and exits 0.
+#[test]
+fn refusals_lists_the_arguments_and_plugins_krusty_refuses() {
+    let probe = Probe::new("plugin-check", "fun main() {}\n");
+    let widget = widget_plugin_jar(&probe.dir);
+    let serialization = reference_plugin_jar("kotlinx-serialization-compiler-plugin.jar");
+    let scripting = reference_plugin_jar("kotlin-scripting-compiler.jar");
+    let check = |switches: &[String]| {
+        let output = Command::new(common::krusty_binary())
+            .arg("refusals")
+            .args(switches)
+            .output()
+            .expect("run krusty refusals");
+        (
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let refused = |plugin: &str| {
+        format!(
+            "{}\n",
+            PluginDiagnostic::Unsupported {
+                plugin: plugin.to_string()
+            }
+            .message()
+        )
+    };
+
+    assert_eq!(
+        check(&[format!(
+            "-Xplugin={},{}",
+            serialization.display(),
+            scripting.display()
+        )]),
+        (Some(0), String::new(), String::new())
+    );
+    assert_eq!(check(&[]), (Some(0), String::new(), String::new()));
+    assert_eq!(
+        check(&[
+            format!("-Xplugin={},{}", serialization.display(), widget.display()),
+            "-P".to_string(),
+            "plugin:org.example.widget:annotation=probe.Open".to_string(),
+        ]),
+        (
+            Some(1),
+            format!(
+                "{}{}",
+                refused(&widget.display().to_string()),
+                refused("plugin id 'org.example.widget'")
+            ),
+            String::new()
+        )
+    );
+    assert_eq!(
+        check(&[
+            "-Xuse-inline-scopes-numbers".to_string(),
+            format!("-Xplugin={}", widget.display()),
+        ]),
+        (
+            Some(1),
+            format!(
+                "krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'\n{}",
+                refused(&widget.display().to_string())
+            ),
+            String::new()
+        )
+    );
+    // An output shape krusty does not emit is refused like an argument it does not implement.
+    assert_eq!(
+        check(&["-Xassertions=jvm".to_string()]),
+        (
+            Some(1),
+            "-Xassertions=jvm selects an output shape krusty does not emit\n".to_string(),
+            String::new()
+        )
+    );
+    // A value kotlinc itself rejects is not a refusal: the check fails with the errors the
+    // compilation reports, in its order, so neither compiler runs.
+    assert_eq!(
+        check(&[
+            "-Xexplicit-api=sideways".to_string(),
+            "-Xuse-inline-scopes-numbers".to_string(),
+        ]),
+        (
+            Some(2),
+            String::new(),
+            "krusty: error: unknown value for parameter -Xexplicit-api: 'sideways'. Value should be one \
+             of {disable, strict, warning}\n\
+             krusty: error: krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'\n"
+                .to_string()
+        )
+    );
+    for argument in ["-Xlambdas", "-Xsam-conversions"] {
+        assert_eq!(
+            check(&[format!("{argument}=nonesuch")]),
+            (
+                Some(2),
+                String::new(),
+                format!(
+                    "krusty: error: {argument}=nonesuch selects an output shape krusty does not emit\n"
+                )
+            ),
+            "{argument}"
+        );
+    }
+    // A configuration error fails the check with the report the compilation fails with.
+    assert_eq!(
+        check(&[
+            "-Xfragments=main".to_string(),
+            "-Xfragment-sources=broken".to_string(),
+        ]),
+        (
+            Some(2),
+            String::new(),
+            "error: incorrect syntax for -Xfragment-sources argument. `<module name>:<source file>` \
+             expected but got `broken`\n"
+                .to_string()
+        )
+    );
+    assert_eq!(
+        check(&["-XXLanguage:-TrailingCommas".to_string()]),
+        (
+            Some(2),
+            String::new(),
+            "warning: ATTENTION!\n\
+             This build uses unsafe internal compiler arguments:\n\
+             \n\
+             -XXLanguage:-TrailingCommas\n\
+             \n\
+             This mode is not recommended for production use,\n\
+             as no stability/compatibility guarantees are given on\n\
+             compiler or generated code. Use it at your own risk!\n\
+             \n\
+             error: the following features cannot be disabled manually, because the version they \
+             first appeared in is no longer supported:\n\
+             TrailingCommas\n"
+                .to_string()
+        )
+    );
+}

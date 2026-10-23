@@ -26,7 +26,7 @@ use super::{
         predeclare_properties,
     },
     tailrec::{finish_tailrec_body, Frame as TailrecFrame},
-    FirLoweringFailure, LocalCallableLoweringContext,
+    FileLoweringContext, FirLoweringFailure,
 };
 
 #[cfg(test)]
@@ -169,7 +169,7 @@ pub struct CommonIrBodySink<'a> {
     source: SourceFileId,
     ir: &'a mut IrFile,
     failure: Option<FirFileLoweringFailure>,
-    local_callables: LocalCallableLoweringContext,
+    lowering_context: FileLoweringContext,
     inline_payload_declarations: crate::fx_hash::HashSet<DeclarationId>,
     materialized_inline_callables: crate::fx_hash::HashSet<CallableId>,
 }
@@ -184,7 +184,7 @@ impl<'a> CommonIrBodySink<'a> {
             source,
             ir,
             failure: None,
-            local_callables: LocalCallableLoweringContext::default(),
+            lowering_context: FileLoweringContext::default(),
             inline_payload_declarations: crate::fx_hash::HashSet::default(),
             materialized_inline_callables: crate::fx_hash::HashSet::default(),
         };
@@ -281,6 +281,17 @@ impl<'a> CommonIrBodySink<'a> {
 
     pub(crate) fn ir_mut(&mut self) -> &mut IrFile {
         self.ir
+    }
+
+    /// Supply the templates a checked call of an inline dependency function expands from. Without
+    /// a source, such a call stays a call of the dependency function.
+    pub fn provide_dependency_templates(
+        &mut self,
+        templates: std::rc::Rc<dyn super::DependencyInlineTemplates>,
+    ) {
+        self.lowering_context
+            .dependency_templates
+            .provide(templates);
     }
 
     /// Add body-local callables/properties whose pending-free signatures were published by the
@@ -1275,26 +1286,15 @@ impl<'a> CommonIrBodySink<'a> {
                 }
                 return Err(FirFileLoweringFailure::MissingCallable(declaration));
             };
-            let compiler_generated = declaration_header
-                .flags
-                .has(crate::fir::DeclarationFlags::COMPILER_GENERATED);
             // A companion-block declaration is represented during lookup as an extension on the
             // associated classifier, but the checked FIR deliberately carries no value receiver.
             // The association is a name-resolution coordinate, not a common-IR parameter.
             let companion_associated = declaration_header
                 .flags
                 .has(crate::fir::DeclarationFlags::COMPANION);
-            let mut params = signature
-                .parameters
-                .iter()
-                .map(|parameter| {
-                    if compiler_generated {
-                        crate::types::stored_value_ty(parameter.get())
-                    } else {
-                        parameter.get()
-                    }
-                })
-                .collect::<Vec<_>>();
+            let (params, ret) = index
+                .callable_carriers(callable.id)
+                .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
             let mut identities = (0..index.callable_parameter_name_count(callable.id))
                 .map(|ordinal| {
                     super::callable_parameter_identity(
@@ -1306,18 +1306,15 @@ impl<'a> CommonIrBodySink<'a> {
                     .expect("published parameter-name count must address every identity")
                 })
                 .collect::<Vec<_>>();
-            if !companion_associated {
-                if let Some(receiver) = callable.shape.extension_receiver {
-                    let position = callable.shape.context_parameter_count as usize;
-                    if position > params.len() || position > identities.len() {
-                        return Err(FirFileLoweringFailure::MissingCallable(declaration));
-                    }
-                    params.insert(position, receiver.get());
-                    identities.insert(
-                        position,
-                        crate::ir::IrParameterIdentity::extension_receiver(),
-                    );
+            if !companion_associated && callable.shape.extension_receiver.is_some() {
+                let position = callable.shape.context_parameter_count as usize;
+                if position > identities.len() {
+                    return Err(FirFileLoweringFailure::MissingCallable(declaration));
                 }
+                identities.insert(
+                    position,
+                    crate::ir::IrParameterIdentity::extension_receiver(),
+                );
             }
             let entry_class = anchor
                 .owner
@@ -1359,11 +1356,7 @@ impl<'a> CommonIrBodySink<'a> {
                 name: source_name.clone(),
                 param_checks: vec![None; params.len()],
                 params,
-                ret: if compiler_generated {
-                    crate::types::stored_value_ty(signature.result.get())
-                } else {
-                    signature.result.get()
-                },
+                ret,
                 body: None,
                 is_static: class.is_none(),
                 dispatch_receiver: class.map(|class| self.ir.classes[class as usize].fq_name_id()),
@@ -1507,7 +1500,7 @@ impl<'a> CommonIrBodySink<'a> {
                 body,
                 index,
                 self.ir,
-                &mut self.local_callables,
+                &mut self.lowering_context,
             );
         }
         if anchor.kind == DeclarationKind::Accessor {
@@ -1526,7 +1519,7 @@ impl<'a> CommonIrBodySink<'a> {
                     body,
                     index,
                     self.ir,
-                    &mut self.local_callables,
+                    &mut self.lowering_context,
                     function,
                 );
             }
@@ -1535,7 +1528,7 @@ impl<'a> CommonIrBodySink<'a> {
                 body,
                 index,
                 self.ir,
-                &mut self.local_callables,
+                &mut self.lowering_context,
             );
         }
         if anchor.kind == DeclarationKind::Property {
@@ -1544,19 +1537,19 @@ impl<'a> CommonIrBodySink<'a> {
                 body,
                 index,
                 self.ir,
-                &mut self.local_callables,
+                &mut self.lowering_context,
             );
         }
         if matches!(
             anchor.kind,
-            DeclarationKind::Initializer | DeclarationKind::EnumEntry | DeclarationKind::Script
+            DeclarationKind::Initializer | DeclarationKind::EnumEntry
         ) {
             return accept_non_callable_body(
                 declaration,
                 body,
                 index,
                 self.ir,
-                &mut self.local_callables,
+                &mut self.lowering_context,
             );
         }
         let default_fragment = body.is_default_fragment();
@@ -1604,7 +1597,7 @@ impl<'a> CommonIrBodySink<'a> {
             .and_then(|root| body.statement(*root))
             .map_or(OriginId::from_raw(0), |statement| statement.origin);
         let expected_result = self.ir.functions[function as usize].ret;
-        let lowered = lower_body_with_context(body, index, self.ir, &mut self.local_callables)
+        let lowered = lower_body_with_context(body, index, self.ir, &mut self.lowering_context)
             .map_err(FirFileLoweringFailure::Body)?;
         let result = lowered
             .result_type

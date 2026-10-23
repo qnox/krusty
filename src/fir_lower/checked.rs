@@ -399,7 +399,7 @@ impl BodyLowering<'_> {
                         let element_type = if *whole_array {
                             array_type
                         } else {
-                            array_type.array_elem().ok_or(
+                            array_type.array_read_elem().ok_or(
                                 FirLoweringFailure::UnsupportedCallableReference(callable.id),
                             )?
                         };
@@ -655,7 +655,7 @@ impl BodyLowering<'_> {
                 semantic_role,
                 overridden_declarations,
                 suspend,
-                can_inline,
+                inline,
                 inline_plan,
                 extension_receiver_parameter,
             } => {
@@ -673,7 +673,7 @@ impl BodyLowering<'_> {
                     semantic_role: *semantic_role,
                     overridden_declarations,
                     suspend: *suspend,
-                    can_inline: *can_inline,
+                    inline: *inline,
                     inline_plan: inline_plan.as_deref(),
                     substitutions: &call.substitutions,
                     extension_receiver_parameter: *extension_receiver_parameter,
@@ -998,7 +998,7 @@ impl BodyLowering<'_> {
                         elements,
                         parameter,
                     } => {
-                        let element_type = array_type.array_elem().ok_or(
+                        let element_type = array_type.array_read_elem().ok_or(
                             FirLoweringFailure::MissingExternalParameter {
                                 parameter: *parameter,
                             },
