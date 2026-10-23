@@ -10,6 +10,11 @@ while IFS= read -r variable; do
   unset "$variable"
 done < <(git rev-parse --local-env-vars)
 
+export GIT_AUTHOR_NAME='Anton Efimchuk'
+export GIT_AUTHOR_EMAIL='anton.efimchuk@gmail.com'
+export GIT_COMMITTER_NAME='Anton Efimchuk'
+export GIT_COMMITTER_EMAIL='anton.efimchuk@gmail.com'
+
 repo=$(cd "$(dirname "$0")/.." && pwd)
 fixture=$(mktemp -d)
 trap 'rm -rf "$fixture"' EXIT
@@ -46,8 +51,9 @@ GRADLEW
 
 # curl logs each call, answers the published check for artifact NAME from $fixture/published-NAME,
 # each upload with the next deployment id (recording the bundle's entries), and each status call
-# with the next line of $fixture/states-ID, repeating the last one. $fixture/curl-fails makes every
-# call fail as a request deadline does.
+# with the next line of $fixture/states-ID, repeating the last one. A status call takes the seconds
+# in $fixture/status-seconds (none by default) on the fake clock, and one longer than its --max-time
+# times out after that limit, as curl does. $fixture/curl-fails makes every call time out.
 cat > "$fixture/bin/curl" <<CURL
 #!/usr/bin/env bash
 set -euo pipefail
@@ -69,6 +75,14 @@ for arg in "\$@"; do
       printf "dep-\$n"
       exit 0 ;;
     */status\?id=*)
+      limit=\$(sed -n 's/.*--max-time \([0-9]*\).*/\1/p' <<<"\$*")
+      seconds=\$(cat "$fixture/status-seconds" 2>/dev/null || echo 0)
+      if [[ \$seconds -gt \$limit ]]; then
+        echo \$((\$(cat "$fixture/clock") + limit)) > "$fixture/clock"
+        echo "curl: (28) Operation timed out after \${limit}000 milliseconds" >&2
+        exit 28
+      fi
+      echo \$((\$(cat "$fixture/clock") + seconds)) > "$fixture/clock"
       states="$fixture/states-\${arg#*id=}"
       state=\$(head -n 1 "\$states")
       [[ \$(wc -l < "\$states") -le 1 ]] || sed -i 1d "\$states"
@@ -117,7 +131,8 @@ recorded() {
 }
 # A new release: nothing published, no recorded deployment, a fresh clock and call log.
 reset() {
-  rm -f "$fixture"/{builds,bundle,unsigned,curl-fails,curl.log,states-*}
+  rm -f "$fixture"/{builds,bundle,unsigned,curl-fails,curl.log,states-*,status-seconds}
+  git -C "$tree" remote set-url origin "$fixture/remote.git"
   git -C "$fixture/remote.git" update-ref -d "$ref" 2>/dev/null || true
   echo false > "$fixture/published-krusty-gradle-plugin"
   echo false > "$fixture/published-dev.krustythecompiler.gradle.plugin"
@@ -150,6 +165,8 @@ printf 'VALIDATING\nPUBLISHING\n' > "$fixture/states-dep-1"
 run_case accepted 0 $'uploaded deployment dep-1\ndeployment dep-1 is PUBLISHING' 'Gradle output'
 check 'accepted: builds' "$(cat "$fixture/builds")" "$gradle_tasks"
 check 'accepted: recorded' "$(recorded)" 'central deployment dep-1 of krusty-gradle-plugin 1.2.3'
+check 'accepted: record identity' "$(git -C "$fixture/remote.git" log -1 --format='%an <%ae> / %cn <%ce>' "$ref")" \
+  'Anton Efimchuk <anton.efimchuk@gmail.com> / Anton Efimchuk <anton.efimchuk@gmail.com>'
 check 'accepted: clock' "$(cat "$fixture/clock")" 1010
 check 'accepted: upload' "$(grep -c -- '--max-time 120 .* -F bundle=@.*/upload?name=krusty-gradle-plugin-1.2.3&publishingType=AUTOMATIC$' "$fixture/curl.log")" 1
 check 'accepted: every request has a deadline' "$(grep -vc -- '--connect-timeout 10 --max-time ' "$fixture/curl.log")" 0
@@ -191,7 +208,54 @@ echo 0 > "$fixture/uploads"
 echo VALIDATING > "$fixture/states-dep-1"
 run_case 'still validating' 1 'uploaded deployment dep-1' $'Gradle output\ndeployment dep-1 is still VALIDATING after 300s'
 check 'still validating: clock' "$(cat "$fixture/clock")" 1300
-check 'still validating: status calls' "$(grep -c 'status?id=dep-1' "$fixture/curl.log")" 31
+check 'still validating: status calls' "$(grep -c 'status?id=dep-1' "$fixture/curl.log")" 30
+
+# Request time counts against the five minutes: 5 s requests and 10 s pauses make 20 status
+# calls, the last at 1285, and the deadline is met exactly, with no request started at 1300.
+reset
+echo 0 > "$fixture/uploads"
+echo VALIDATING > "$fixture/states-dep-1"
+echo 5 > "$fixture/status-seconds"
+run_case 'slow requests' 1 'uploaded deployment dep-1' $'Gradle output\ndeployment dep-1 is still VALIDATING after 300s'
+check 'slow requests: clock' "$(cat "$fixture/clock")" 1300
+check 'slow requests: status calls' "$(grep -c 'status?id=dep-1' "$fixture/curl.log")" 20
+
+# A status request near the deadline gets only the time that remains: with 25 s requests the
+# eighth starts at 1245 with 55 s left, and the ninth starts at 1280 with a 20 s limit and times
+# out at 1300.
+reset
+echo 0 > "$fixture/uploads"
+echo VALIDATING > "$fixture/states-dep-1"
+echo 25 > "$fixture/status-seconds"
+run_case 'request outlasting the deadline' 28 'uploaded deployment dep-1' $'Gradle output\ncurl: (28) Operation timed out after 20000 milliseconds'
+check 'request outlasting the deadline: clock' "$(cat "$fixture/clock")" 1300
+check 'request outlasting the deadline: limits' "$(grep 'status?id=dep-1' "$fixture/curl.log" | sed 's/.*--max-time \([0-9]*\).*/\1/' | paste -sd' ')" '60 60 60 60 60 60 60 55 20'
+
+# A recorded deployment that cannot be looked up is not absence: with a pending deployment on
+# record and the remote unreachable, nothing is built, uploaded, or recorded.
+reset
+echo 0 > "$fixture/uploads"
+echo PUBLISHING > "$fixture/states-dep-1"
+run_case 'record before outage' 0 $'uploaded deployment dep-1\ndeployment dep-1 is PUBLISHING' 'Gradle output'
+rerun
+git -C "$tree" remote set-url origin "$fixture/unreachable.git"
+# Git's own report of the unreachable remote comes first, in this Git's wording.
+unreachable=$(git -C "$tree" ls-remote origin 2>&1 || true)
+run_case 'unreadable record' 1 '' "$unreachable
+cannot read $ref from origin (git ls-remote exited 128)"
+check 'unreadable record: builds' "$(count "$fixture/builds")" 0
+check 'unreadable record: uploads' "$(cat "$fixture/uploads")" 1
+check 'unreadable record: recorded' "$(recorded)" 'central deployment dep-1 of krusty-gradle-plugin 1.2.3'
+
+# A record that names no deployment does not authorize an upload either.
+reset
+echo 0 > "$fixture/uploads"
+malformed=$(git -C "$tree" commit-tree "$(git -C "$tree" hash-object -t tree /dev/null)" -m 'central deployment of something else')
+git -C "$tree" push -q origin "$malformed:$ref"
+run_case 'malformed record' 1 '' "$ref at $malformed names no deployment: central deployment of something else"
+check 'malformed record: builds' "$(count "$fixture/builds")" 0
+check 'malformed record: uploads' "$(cat "$fixture/uploads")" 0
+check 'malformed record: recorded' "$(recorded)" 'central deployment of something else' 
 
 # A request that hits its deadline fails the step.
 reset
@@ -210,4 +274,4 @@ if [[ $failures -ne 0 ]]; then
   echo "$failures Maven Central publishing check(s) failed" >&2
   exit 1
 fi
-echo "Maven Central publishing: 10 cases passed"
+echo "Maven Central publishing: 15 cases passed"

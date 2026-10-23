@@ -9,9 +9,11 @@
 # upload again: each upload's id is recorded in the remote ref refs/krusty/central/<version>, and a
 # rerun follows the recorded deployment, uploading again only when it FAILED. A version whose
 # implementation and marker are both published is skipped; one with only one of them published
-# cannot be repaired by an upload and fails.
+# cannot be repaired by an upload and fails. Missing evidence never authorizes an upload: a ref
+# that cannot be read, or a record that does not name a deployment, stops the step.
 #
-# Every request has a deadline, and following a deployment gives up after five minutes.
+# Every request has a deadline, and following a deployment ends five minutes after it starts:
+# each status request and each pause between them fits in the time that remains.
 #
 #   MAVEN_CENTRAL_USERNAME=... MAVEN_CENTRAL_PASSWORD=... \
 #   ORG_GRADLE_PROJECT_signingInMemoryKey=... ORG_GRADLE_PROJECT_signingInMemoryKeyId=... \
@@ -34,30 +36,63 @@ repo=$(cd "$(dirname "$0")/.." && pwd)
 project=$repo/tools/krusty-gradle
 remote=${RELEASE_REMOTE:-origin}
 deployment_ref=refs/krusty/central/$version
+request_limit=60
+upload_limit=120
 wait_limit=300
 poll=10
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 
+# request SECONDS CURL-ARGS...
 request() {
-  curl -fsS --connect-timeout 10 --max-time 60 -H "$auth" "$@"
+  local limit=$1
+  shift
+  curl -fsS --connect-timeout "$((limit < 10 ? limit : 10))" --max-time "$limit" -H "$auth" "$@"
 }
 
 published() {
-  request "$api/published?namespace=dev.krustythecompiler&name=$1&version=$version" | jq -r '.published'
+  request "$request_limit" "$api/published?namespace=dev.krustythecompiler&name=$1&version=$version" |
+    jq -r '.published'
+}
+
+# status ID [SECONDS]
+status() {
+  request "${2:-$request_limit}" -X POST "$api/status?id=$1"
+}
+
+# The commit and deployment id recorded for this version, both empty when the ref is absent. An
+# unreadable ref or a record that names no deployment stops the step.
+read_record() {
+  local listed=0
+  git -C "$repo" ls-remote --exit-code "$remote" "$deployment_ref" > /dev/null || listed=$?
+  case $listed in
+    0) ;;
+    2) return ;;
+    *)
+      echo "cannot read $deployment_ref from $remote (git ls-remote exited $listed)" >&2
+      exit 1
+      ;;
+  esac
+  if ! git -C "$repo" fetch --quiet --no-tags "$remote" "+$deployment_ref:refs/central-publisher/fetched"; then
+    echo "cannot fetch $deployment_ref from $remote" >&2
+    exit 1
+  fi
+  recorded=$(git -C "$repo" rev-parse refs/central-publisher/fetched)
+  deployment=$(git -C "$repo" log -1 --format=%s "$recorded" |
+    sed -n "s/^central deployment \([^ ]\{1,\}\) of krusty-gradle-plugin $version\$/\1/p")
+  if [[ -z $deployment ]]; then
+    echo "$deployment_ref at $recorded names no deployment: $(git -C "$repo" log -1 --format=%s "$recorded")" >&2
+    exit 1
+  fi
 }
 
 record_deployment() {
   local commit
-  commit=$(GIT_AUTHOR_NAME=github-actions GIT_AUTHOR_EMAIL=github-actions@users.noreply.github.com \
-    GIT_COMMITTER_NAME=github-actions GIT_COMMITTER_EMAIL=github-actions@users.noreply.github.com \
+  commit=$(GIT_AUTHOR_NAME='Anton Efimchuk' GIT_AUTHOR_EMAIL=anton.efimchuk@gmail.com \
+    GIT_COMMITTER_NAME='Anton Efimchuk' GIT_COMMITTER_EMAIL=anton.efimchuk@gmail.com \
     git -C "$repo" commit-tree "$(git -C "$repo" hash-object -t tree /dev/null)" \
     -m "central deployment $1 of krusty-gradle-plugin $version")
   git -C "$repo" push --quiet --force-with-lease="$deployment_ref:$recorded" "$remote" "$commit:$deployment_ref"
-}
-
-status() {
-  request -X POST "$api/status?id=$1"
 }
 
 upload() {
@@ -76,7 +111,7 @@ upload() {
     fi
     zip -X -q "$stage/bundle.zip" -@ < "$stage/files"
   )
-  curl -fsS --connect-timeout 10 --max-time 120 -H "$auth" -F "bundle=@$stage/bundle.zip" \
+  request "$upload_limit" -F "bundle=@$stage/bundle.zip" \
     "$api/upload?name=krusty-gradle-plugin-$version&publishingType=AUTOMATIC"
 }
 
@@ -91,14 +126,9 @@ if [[ $implementation == true || $marker == true ]]; then
   exit 1
 fi
 
-# The deployment recorded for this version, if any: its ref's commit and its id.
 recorded=
 deployment=
-if git -C "$repo" fetch --quiet --no-tags "$remote" "+$deployment_ref:refs/central-publisher/fetched" 2>/dev/null; then
-  recorded=$(git -C "$repo" rev-parse refs/central-publisher/fetched)
-  deployment=$(git -C "$repo" log -1 --format=%s "$recorded" | sed -n 's/^central deployment \([^ ]*\) .*/\1/p')
-fi
-
+read_record
 if [[ -n $deployment ]]; then
   if [[ $(status "$deployment" | jq -r '.deploymentState') == FAILED ]]; then
     echo "recorded deployment $deployment failed; uploading again"
@@ -116,8 +146,14 @@ fi
 # Validation takes a minute or two; propagation to the repository after PUBLISHING takes longer
 # and needs no watching.
 deadline=$(($(date +%s) + wait_limit))
+state=unreported
 while :; do
-  result=$(status "$deployment")
+  remaining=$((deadline - $(date +%s)))
+  if [[ $remaining -le 0 ]]; then
+    echo "deployment $deployment is still $state after ${wait_limit}s" >&2
+    exit 1
+  fi
+  result=$(status "$deployment" "$((remaining < request_limit ? remaining : request_limit))")
   state=$(jq -r '.deploymentState' <<<"$result")
   case $state in
     PUBLISHING | PUBLISHED)
@@ -130,9 +166,8 @@ while :; do
       exit 1
       ;;
   esac
-  if [[ $(date +%s) -ge $deadline ]]; then
-    echo "deployment $deployment is still $state after ${wait_limit}s" >&2
-    exit 1
+  remaining=$((deadline - $(date +%s)))
+  if [[ $remaining -gt 0 ]]; then
+    sleep "$((remaining < poll ? remaining : poll))"
   fi
-  sleep "$poll"
 done
