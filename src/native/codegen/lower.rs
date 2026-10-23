@@ -223,6 +223,8 @@ pub struct FileInput<'a> {
     pub value_classes: &'a super::super::value_classes::NativeValueClasses,
     /// The dispatch numbering of the module's named classes, shared by every file.
     pub slot_plan: &'a crate::backend::class_tables::module_slots::ModuleSlotPlan,
+    /// The module's classifier facts, which every file reads alike.
+    pub module_facts: &'a crate::backend::BackendModuleFacts,
 }
 
 pub fn lower_file(
@@ -247,6 +249,7 @@ pub fn lower_file(
         dependency_symbols,
         value_classes,
         slot_plan,
+        module_facts,
     } = input;
     let class_model = model::build(ir, value_classes, slot_plan)?;
 
@@ -290,6 +293,7 @@ pub fn lower_file(
         inert_singleton_bindings,
         values: value_classes,
         slot_plan,
+        module_facts,
         module: &mut module,
         symbols: super::super::symbols::symbols(ir, module_name, runtime_symbols.clone()),
         model: class_model,
@@ -423,6 +427,8 @@ struct FileLowering<'a> {
     values: &'a super::super::value_classes::NativeValueClasses,
     /// The module's dispatch numbering, which a call through a class of another file reads.
     slot_plan: &'a crate::backend::class_tables::module_slots::ModuleSlotPlan,
+    /// The module's classifier facts, which say what every file, not only this one, declares.
+    module_facts: &'a crate::backend::BackendModuleFacts,
     module: &'a mut ObjectModule,
     /// Symbols of this file's classes and functions.
     symbols: Symbols,

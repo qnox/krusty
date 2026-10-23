@@ -95,7 +95,13 @@ pub fn expect_native_box(src: &str, stem: &str, expected: &str) {
 /// point is that emitting the program would be WRONG, that difference is the whole test.
 #[allow(dead_code)]
 pub fn expect_native_decline(src: &str, stem: &str, reason: &str) {
-    if let Some(said) = native_decline(&[(stem, src)]) {
+    expect_native_sources_decline(&[(stem, src)], reason);
+}
+
+/// [`expect_native_decline`] for a program of several files (`(stem, text)`).
+pub fn expect_native_sources_decline(sources: &[(&str, &str)], reason: &str) {
+    let stem = sources.first().map(|(stem, _)| *stem).unwrap_or("module");
+    if let Some(said) = native_decline(sources) {
         assert!(
             said.contains(reason),
             "{stem}: declined for {said:?}, which does not name {reason:?}"

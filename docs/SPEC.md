@@ -12513,6 +12513,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     program's own implementation first: each class of the file implementing `KType` is matched
     by descriptor and called through its override, and only the rest reaches the runtime, which
     checks the receiver is a `KTypeImpl` and fails loudly otherwise instead of reading it as one.
+    Which classes of the module can be a `KType`, body-local ones included, is a module fact, so
+    a read in a file is declined when another file declares one (that file's override is not one
+    this file can name), and when a class of this file is one only through a supertype.
   - Declined: a type naming a type parameter (its classifier is a `KTypeParameter`), a `suspend`
     function type, a classifier without a runtime descriptor, and `KType.arguments`, whose
     `KTypeProjection` objects this target does not build.
