@@ -284,8 +284,8 @@ fn maven_verify_goal_reports_krusty_against_kotlinc() {
     let root = &sample.root;
     let output = sample.succeed(&["test-compile", "VERIFY"]);
     let mut expected = vec![
-        "krusty verify: sample:sample:compile: 2 of 2 classes byte-identical, output identical".to_string(),
-        "krusty verify: sample:sample:test-compile: unsupported, left to kotlinc: krusty does not implement the kotlinc argument '-Wextra'".to_string(),
+        "krusty verify: sample:sample:1.0:compile: 2 of 2 classes byte-identical, output identical".to_string(),
+        "krusty verify: sample:sample:1.0:test-compile: unsupported, left to kotlinc: krusty does not implement the kotlinc argument '-Wextra'".to_string(),
     ];
     expected.extend(sample.report_tail(
         "krusty verify: 1/2 compilations compiled (1 byte-identical), 0 failed, 1 unsupported; 100.0% of classes byte-identical",
@@ -310,8 +310,8 @@ fn maven_verify_goal_reports_krusty_against_kotlinc() {
     // Both compilations carry kotlinc's time: that of the build's own compile.
     let records = root.join("target/krusty-verify/records");
     for file in [
-        "sample%3Asample%3Acompile.json",
-        "sample%3Asample%3Atest-compile.json",
+        "sample%3Asample%3A1.0%3Acompile.json",
+        "sample%3Asample%3A1.0%3Atest-compile.json",
     ] {
         let record = std::fs::read_to_string(records.join(file)).expect("record");
         assert!(
@@ -332,8 +332,8 @@ fn maven_verify_goal_reports_krusty_against_kotlinc() {
     std::fs::write(records.join("removed_compile.json"), "{}").expect("an unrelated record");
     let output = sample.succeed(&["test-compile", "VERIFY"]);
     let mut expected = vec![
-        "krusty verify: sample:sample:compile: no Kotlin sources".to_string(),
-        "krusty verify: sample:sample:test-compile: no Kotlin sources".to_string(),
+        "krusty verify: sample:sample:1.0:compile: no Kotlin sources".to_string(),
+        "krusty verify: sample:sample:1.0:test-compile: no Kotlin sources".to_string(),
     ];
     expected.extend(sample.report_tail(
         "krusty verify: 0/0 compilations compiled (0 byte-identical), 0 failed, 0 unsupported, 2 without Kotlin sources; n/a of classes byte-identical",
@@ -342,13 +342,13 @@ fn maven_verify_goal_reports_krusty_against_kotlinc() {
     let kotlin = kotlin();
     let no_sources = |goal: &str, source_set: &str| {
         format!(
-            "{{\n  \"compilation\": \"sample:sample:{goal}\",\n  \"source_set\": \"{source_set}\",\n  \"kotlin_version\": \"{kotlin}\",\n  \"outcome\": {{\n    \"status\": \"no-sources\"\n  }}\n}}\n"
+            "{{\n  \"compilation\": \"sample:sample:1.0:{goal}\",\n  \"source_set\": \"{source_set}\",\n  \"kotlin_version\": \"{kotlin}\",\n  \"outcome\": {{\n    \"status\": \"no-sources\"\n  }}\n}}\n"
         )
     };
     for (file, goal, source_set) in [
-        ("sample%3Asample%3Acompile.json", "compile", "main"),
+        ("sample%3Asample%3A1.0%3Acompile.json", "compile", "main"),
         (
-            "sample%3Asample%3Atest-compile.json",
+            "sample%3Asample%3A1.0%3Atest-compile.json",
             "test-compile",
             "test",
         ),
@@ -491,9 +491,9 @@ fn maven_verify_goal_reports_executions_sharing_an_output_as_unsupported() {
     let output = sample.succeed(&["test-compile", "VERIFY"]);
     let reason = "krusty: kotlin-maven-plugin runs 2 executions of 'compile' into one output directory, so kotlinc's output of each cannot be told apart";
     let mut expected = vec![
-        format!("krusty verify: sample:sample:compile@compile: unsupported, left to kotlinc: {reason}"),
-        format!("krusty verify: sample:sample:compile@extra: unsupported, left to kotlinc: {reason}"),
-        "krusty verify: sample:sample:test-compile: 1 of 1 classes byte-identical, output identical"
+        format!("krusty verify: sample:sample:1.0:compile@compile: unsupported, left to kotlinc: {reason}"),
+        format!("krusty verify: sample:sample:1.0:compile@extra: unsupported, left to kotlinc: {reason}"),
+        "krusty verify: sample:sample:1.0:test-compile: 1 of 1 classes byte-identical, output identical"
             .to_string(),
     ];
     expected.extend(sample.report_tail(
@@ -503,8 +503,9 @@ fn maven_verify_goal_reports_executions_sharing_an_output_as_unsupported() {
     assert!(sample.root.join("target/classes/app/Extra.class").is_file());
 }
 
-/// Two reactor modules may share an artifactId under different groupIds: each compilation is named
-/// and recorded by its full reactor identity, so a parallel build reports both modules' compilations.
+/// Reactor modules may share an artifactId under different groupIds, or a groupId and artifactId
+/// under different versions: each compilation is named and recorded by its full reactor identity,
+/// so a parallel build reports every module's compilations.
 #[test]
 #[ignore = "downloads Maven plugins and the Kotlin compiler"]
 fn maven_verify_goal_names_compilations_by_their_full_reactor_identity() {
@@ -531,7 +532,7 @@ fn maven_verify_goal_names_compilations_by_their_full_reactor_identity() {
   <artifactId>parent</artifactId>
   <version>1.0</version>
   <packaging>pom</packaging>
-  <modules><module>one</module><module>two</module></modules>
+  <modules><module>one</module><module>two</module><module>three</module></modules>
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
   </properties>
@@ -563,7 +564,11 @@ fn maven_verify_goal_names_compilations_by_their_full_reactor_identity() {
 "#
         ),
     );
-    for (module, group) in [("one", "first.group"), ("two", "second.group")] {
+    for (module, group, version) in [
+        ("one", "first.group", "1.0"),
+        ("two", "second.group", "1.0"),
+        ("three", "first.group", "2.0"),
+    ] {
         sample.write(
             &format!("{module}/pom.xml"),
             &format!(
@@ -573,6 +578,7 @@ fn maven_verify_goal_names_compilations_by_their_full_reactor_identity() {
   <parent><groupId>sample</groupId><artifactId>parent</artifactId><version>1.0</version></parent>
   <groupId>{group}</groupId>
   <artifactId>lib</artifactId>
+  <version>{version}</version>
   <build>
     <sourceDirectory>src/main/kotlin</sourceDirectory>
     <plugins>
@@ -596,16 +602,18 @@ fn maven_verify_goal_names_compilations_by_their_full_reactor_identity() {
     lines.sort();
     lines.extend(tail);
     let mut expected = vec![
-        "krusty verify: first.group:lib:compile: 1 of 1 classes byte-identical, output identical",
-        "krusty verify: first.group:lib:test-compile: no Kotlin sources",
-        "krusty verify: second.group:lib:compile: 1 of 1 classes byte-identical, output identical",
-        "krusty verify: second.group:lib:test-compile: no Kotlin sources",
+        "krusty verify: first.group:lib:1.0:compile: 1 of 1 classes byte-identical, output identical",
+        "krusty verify: first.group:lib:1.0:test-compile: no Kotlin sources",
+        "krusty verify: first.group:lib:2.0:compile: 1 of 1 classes byte-identical, output identical",
+        "krusty verify: first.group:lib:2.0:test-compile: no Kotlin sources",
+        "krusty verify: second.group:lib:1.0:compile: 1 of 1 classes byte-identical, output identical",
+        "krusty verify: second.group:lib:1.0:test-compile: no Kotlin sources",
     ]
     .into_iter()
     .map(str::to_string)
     .collect::<Vec<_>>();
     expected.extend(sample.report_tail(
-        "krusty verify: 2/2 compilations compiled (2 byte-identical), 0 failed, 0 unsupported, 2 without Kotlin sources; 100.0% of classes byte-identical",
+        "krusty verify: 3/3 compilations compiled (3 byte-identical), 0 failed, 0 unsupported, 3 without Kotlin sources; 100.0% of classes byte-identical",
     ));
     assert_eq!(lines, expected, "{output}");
     let mut records = std::fs::read_dir(sample.root.join("target/krusty-verify/records"))
@@ -622,10 +630,12 @@ fn maven_verify_goal_names_compilations_by_their_full_reactor_identity() {
     assert_eq!(
         records,
         [
-            "first.group%3Alib%3Acompile.json",
-            "first.group%3Alib%3Atest-compile.json",
-            "second.group%3Alib%3Acompile.json",
-            "second.group%3Alib%3Atest-compile.json",
+            "first.group%3Alib%3A1.0%3Acompile.json",
+            "first.group%3Alib%3A1.0%3Atest-compile.json",
+            "first.group%3Alib%3A2.0%3Acompile.json",
+            "first.group%3Alib%3A2.0%3Atest-compile.json",
+            "second.group%3Alib%3A1.0%3Acompile.json",
+            "second.group%3Alib%3A1.0%3Atest-compile.json",
         ]
     );
 }

@@ -158,8 +158,9 @@ final class KotlinCompilation {
         arguments.add("-no-stdlib");
         arguments.add("-no-reflect");
         String sourceSet = test ? "test" : "main";
-        // The full reactor identity: two modules may share an artifactId under different groupIds.
-        String name = project.getGroupId() + ":" + project.getArtifactId() + ":" + goal
+        // The full reactor identity: a reactor may hold two modules that share an artifactId under
+        // different groupIds, or a groupId and artifactId under different versions.
+        String name = project.getGroupId() + ":" + project.getArtifactId() + ":" + project.getVersion() + ":" + goal
                 + (sharing > 0 ? "@" + execution.getId() : "");
         String outputName = sharing > 0 ? sourceSet + "-" + execution.getId() : sourceSet;
         return new KotlinCompilation(name, goal, execution.getId(), sourceSet, kotlin.getVersion(), outputName, output,
