@@ -68,7 +68,13 @@ impl Layout {
             .arg(&self.reference)
             .arg("--record")
             .arg(record)
-            .args(["--compilation", ":compileKotlin", "--"])
+            .args([
+                "--compilation",
+                ":compileKotlin",
+                "--kotlinc-millis",
+                "30",
+                "--",
+            ])
             .args(kotlinc)
             .output()
             .expect("run krusty verify-compile");
