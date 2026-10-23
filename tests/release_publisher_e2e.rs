@@ -351,8 +351,10 @@ fn updates_supersede_their_ref_without_cancelling_master_validation() {
     );
 }
 
+// This guards only the injection paths the release job itself adds. Gradle, Kotlin and the
+// publishing plugin remain trusted third-party build dependencies that see the credentials.
 #[test]
-fn release_secrets_reach_only_first_party_build_code() {
+fn release_job_adds_no_injection_path_to_secret_bearing_steps() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workflow = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci.yml");
     let job = release_job(&workflow);
