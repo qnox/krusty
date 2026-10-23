@@ -88,6 +88,9 @@ pub fn render_html(
         summary.unsupported.to_string(),
         "unsupported, left to kotlinc",
     );
+    if summary.no_sources > 0 {
+        card(summary.no_sources.to_string(), "without Kotlin sources");
+    }
     if summary.krusty_millis > 0 {
         card(
             format!(
@@ -144,7 +147,11 @@ pub fn render_html(
 
     let detailed = records
         .iter()
-        .filter(|record| !matches!(&record.outcome, Outcome::Compiled { comparison } if comparison.is_identical()))
+        .filter(|record| match &record.outcome {
+            Outcome::Compiled { comparison } => !comparison.is_identical(),
+            Outcome::NoSources => false,
+            Outcome::Unsupported { .. } | Outcome::Failed { .. } => true,
+        })
         .collect::<Vec<_>>();
     if !detailed.is_empty() {
         page.push_str("<h2>Details</h2>\n");
@@ -202,6 +209,7 @@ pub fn render_html(
                 }
                 page.push_str("</ul>");
             }
+            Outcome::NoSources => {}
         }
         page.push_str("</details>\n");
     }
@@ -213,6 +221,7 @@ fn outcome_cells(outcome: &Outcome) -> (&'static str, String) {
     match outcome {
         Outcome::Unsupported { .. } => ("unsupported", String::new()),
         Outcome::Failed { .. } => ("failed", String::new()),
+        Outcome::NoSources => ("no-sources", String::new()),
         Outcome::Compiled { comparison } => (
             if comparison.is_identical() {
                 "identical"
