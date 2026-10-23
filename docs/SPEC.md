@@ -2710,6 +2710,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   against its own type parameters, not their erasure; only the descriptor erases them. An
   anonymous function is signed the same way, while a lambda literal's method carries no
   `Signature` (`tests/local_function_signature_e2e.rs`).
+- **Local-call applied parameters.** Checked local calls retain every selected value parameter in
+  declaration order, including context slots but excluding extension receivers and lifted captures.
+  Generic vararg packing uses that applied array type, not the local declaration's erased array;
+  `T = Int` packs a reference `Array<Int>`, while the declaration's own parameter and generic
+  signature stay unchanged. Physical capture/default mapping and declaration-boundary coercions
+  remain separate. A mismatched checked/declaration value arity is rejected, not reconstructed.
+  Tests: `local_function_signature_e2e::local_generic_vararg_arrays_keep_the_selected_element_at_runtime`
+  and the companion strict whole-class comparison, plus checked-FIR parameter/arity units.
 - **Lifted captured value order (kotlinc's `ClosureAnnotator`).** The captured values lead a lifted
   local function's parameters in the order its closure first sees them, never by name: first the
   values its defaults and body read, in source order, then the closures of the local functions it
@@ -15896,8 +15904,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   without the script runtime, or an editor module that lacks it), the script class extends nothing:
   its constructor takes no arguments, has no line entry for the script's start, and a template
   member such as `args` is an unresolved reference. Not yet supported: a class that uses the script
-  instance (kotlinc makes it implicitly inner), top-level destructuring, type aliases declared in a
-  script, and a template-typed implicit receiver for extension calls such as `run { }`. Verified
+  instance (kotlinc makes it implicitly inner), top-level destructuring, and type aliases declared
+  in a script. Verified
   against kotlinc 2.4.21 and kotlinc's own script test corpus. (`tests/kotlin_script_e2e.rs`.)
 - **A script's constructor parameters keep the definition's types.** The standard definition
   names `kotlin.Array<kotlin.String>` by qualified identity, so a script importing its own
@@ -15960,6 +15968,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `declarations_are_in_the_order_ksp2_lists_them`; `ksp_round` unit tests
   `members_and_their_types_are_listed_in_ksps_order` and
   `declarations_are_in_ksps_order_with_the_members_the_language_contributes`.)
+- **A script definition's implicit receivers and default imports apply like kotlinc's.** A
+  definition (`ScriptDefinition`) names its template, the template's constructor parameters, its
+  implicit receivers and its default imports. Default imports are seen as if written before the
+  script's own imports. Each implicit receiver is a receiver of the whole script below the
+  script's own members and the template's: a name the script or template declares wins over the
+  receiver's member. The constructor takes the template's parameters, then one parameter per
+  receiver (`$script_receiver_1` onward, null-checked under that name), and stores each receiver
+  in a private final field named after its classifier (`$$implicitReceiver_Host`), which leads the
+  field table. A statement, and an inline or non-inline lambda or local function within it, reads
+  the constructor parameter (captured when a lambda escapes). Members, property initializers and
+  the lambdas within them read the field. Verified against kotlinc 2.4.21 with a custom
+  `@KotlinScript` template. (`tests/kotlin_script_e2e.rs`.)
 - **KSP annotations carry their arguments as KSP2 reports them.** An annotation's `arguments` are
   the arguments the source wrote, in written order (origin `KOTLIN`), then the default of each
   element it did not write, in declaration order (origin `SYNTHETIC`); `defaultArguments` are
@@ -21084,3 +21104,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a required erased-array `checkcast` remains. This does not establish a general non-null call
   result fact. Primitive-array and incompatible component casts keep ordinary cast behavior.
   Regression: `call_result_non_null_cast_e2e` compares complete classfiles and real JVM results.
+
+## JVM signature construction boundary
+
+Generic-signature syntax retains each written class segment's physical identity and whether its
+arguments were omitted or explicitly supplied. A declaration-owned application builder receives the
+complete outer-to-inner segment sequence before any captured-formal flattening. The same builder
+handles nested arguments, arrays, bounds, method positions and class supertypes; refusal is terminal.
+Field descriptor authentication uses physical syntax independently of the constructed semantic type.
+
+The standalone reader keeps its existing innermost-only interpretation and refuses fields whose
+outer arguments it discards. This boundary supplies lossless evidence for the raw/captured application
+follow-ups; it does not itself publish new raw or captured application semantics.

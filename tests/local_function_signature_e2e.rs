@@ -117,6 +117,29 @@ fn source_ordered_local_function_captures_are_byte_identical_to_kotlinc() {
     );
 }
 
+const GENERIC_VARARG_ARRAYS: &str = "fun box(): String {\n\
+    fun <T> pack(vararg values: T): Array<out T> = values\n\
+    val ints = pack(20, 22) as Array<Int>\n\
+    val strings = pack(\"O\", \"K\") as Array<String>\n\
+    return if (ints[0] + ints[1] == 42) strings[0] + strings[1] else \"FAIL\"\n\
+}\n";
+
+// PLATFORM: JVM array component carriers and classfile output; not a new backend conformance set.
+#[test]
+fn local_generic_vararg_arrays_keep_the_selected_element_at_runtime() {
+    assert_eq!(common::kotlinc_box_result(GENERIC_VARARG_ARRAYS), "OK");
+    common::expect_box_ok_with_stdlib(GENERIC_VARARG_ARRAYS, "LocalGenericVarargArrays");
+}
+
+#[test]
+fn local_generic_vararg_arrays_are_byte_identical_to_kotlinc() {
+    let classes = common::classes_against_kotlinc_module(&[(
+        "LocalGenericVarargArrays.kt",
+        GENERIC_VARARG_ARRAYS,
+    )]);
+    assert_eq!(classes.differences(), Vec::<String>::new());
+}
+
 /// Compare the methods of each of `classes` that krusty and kotlinc compile `source` to.
 fn signs_as_kotlinc(source: &str, stem: &str, classes: &[&str]) {
     let krusty = common::expect_classes_with_stdlib(source, stem);

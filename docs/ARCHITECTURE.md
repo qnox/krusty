@@ -107,6 +107,26 @@ and is not a compiler argument, so it is ignored. The replacement wiring runs at
 registering a task from inside a task configuration callback. The plugin does not invoke krusty-build, inspect task implementation classes, or
 mutate private action lists. `.kts` files are not compilation inputs.
 
+The plugin's own build resolves only what it has committed. When `tools/krusty-gradle` is the build
+being run, as for packaging and every release upload, Gradle locks each configuration, the plugins'
+classpath included (`gradle.lockfile`, `buildscript-gradle.lockfile`), and checks every resolved
+file against `gradle/verification-metadata.xml`: a SHA-256 for each artifact, and a signature by a
+key in `gradle/verification-keyring.keys` trusted for that group wherever upstream signs. A
+checkout that includes the plugin with `--include-build` runs its own Gradle, whose embedded
+`kotlin-dsl` resolves other versions, so that build is not locked, and Gradle reads only the root
+build's verification metadata. After changing a dependency, refresh all three from a cold Gradle
+user home and review the new keys and checksums:
+
+```text
+cd tools/krusty-gradle
+./gradlew dependencies buildEnvironment --write-locks
+./gradlew --write-verification-metadata sha256 -PkrustyPluginVersion=0.0.1 clean test publishAllPublicationsToReleaseRepository dependencies buildEnvironment
+./gradlew --write-verification-metadata pgp,sha256 --export-keys -PkrustyPluginVersion=0.0.1 clean test publishAllPublicationsToReleaseRepository dependencies buildEnvironment
+```
+
+The `lint` job checks every committed `gradle-wrapper.jar` against the checksum Gradle publishes
+for its wrapper's version (`scripts/check-gradle-wrappers.sh`).
+
 Two kinds of `KotlinJvmCompile` stay with kotlinc, and the plugin logs each one at configuration
 (`krusty: task '…' is left to kotlinc: …`). A task with no `sourceSetName` belongs to no source-set
 compilation: from Gradle 8, `kotlin-dsl` registers `compilePluginsBlocks` as one; it compiles the `plugins {}`
