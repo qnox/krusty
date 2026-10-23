@@ -501,7 +501,22 @@ impl Checker<'_> {
             return Some(internal);
         }
         if contract_valid {
-            if let Some(applied) = applied {
+            if let Some(mut applied) = applied {
+                if let AnnotationApplicationHost::Property {
+                    constructor_parameter,
+                    has_backing_field,
+                    ..
+                } = host
+                {
+                    applied.property_sites = Some(applied.targets.property_declaration_sites(
+                        crate::types::PropertyAnnotationHost {
+                            constructor_parameter,
+                            has_backing_field,
+                        },
+                        self.file.property_annotation_default_target_mode,
+                        annotation.property_site,
+                    ));
+                }
                 let key = (annotation.span.lo, annotation.span.hi);
                 self.applied_annotations.record(key, applied);
             }

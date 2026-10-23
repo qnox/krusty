@@ -42,7 +42,22 @@ Constructor-plan discovery uses source declarations, not the optional spelling s
 constructor-property values and explicit sites remain in a private pending record until every
 file has published its annotation policies; no syntax or full TypeInfo is retained across files.
 Forward and reverse input orders must publish the same property payload and class bytes.
-The configured param-property default-target mode is a separate semantic follow-up (#2542).
+The configured param-property default-target mode is a separate semantic layer (#2542), described
+below; it does not change cross-file target-policy publication ownership.
+
+## Configured property-parameter annotation defaults
+
+Project `PropertyParamAnnotationDefaultTargetMode` through the shared parser feature boundary.
+The checker records selected property annotation sites from the declaration's parameter/storage
+facts and resolved target policy; common metadata only partitions those recorded sites. Modern
+defaulting selects an applicable parameter plus PROPERTY, or FIELD when PROPERTY is inapplicable
+and backing storage exists. Explicit sites stay singleton and older language modes retain first-only
+selection. Stable constructor-property publication uses the same frontend selection operation.
+Preserve the existing cross-file policy-publication barrier. Keep the separate
+`-Xannotation-default-target` option unsupported until its own follow-up.
+Keep the complete KLIB surface comparison and verify its changed property annotation against the
+official Native compiler in both language modes, using the unchanged source fixture. Each written
+library owns a unique scratch directory so concurrent mode and surface checks cannot replace it.
 
 ## String operation authority publication
 
@@ -5324,17 +5339,26 @@ regress.
     hosts. A literal-lambda call's route is planned before it is emitted
     (`bytecode_inline_call::lambda_route`): the port, or the splice for a named shape it does not
     own yet, never one after the other. Still on the splice: lambdas that suspend (until the
-    coroutine transformer runs on inlined bytecode), value-class adapters other than an unboxed non-null value class, non-local
-    `break`/`continue`, materialized lambdas and callee shapes of later stages; callable references
+    coroutine transformer runs on inlined bytecode), value-class adapters other than an unboxed non-null value class,
+    materialized lambdas and callee shapes of later stages; callable references
     are not ported.
   - ✓ 3c. Non-local returns are marked (`$$$$$NON_LOCAL_RETURN$$$$$`) and stay returns of the
     caller, with the inlined function's `finally` bodies copied in front of each one
     (`inliner::finally_blocks`, `InternalFinallyBlockInliner`) and the caller's own `finally`
     blocks run in front of it where the inlined code is written (`generateAndInsertFinallyBlocks`).
     Open: kotlinc keeps a `line N: 0` entry for dead code after an unconditional non-local return,
-    which krusty's code builder does not represent; non-local `break`/`continue` through a
-    `finally` still go through the splice, which skips the `finally` (a lock held by `withLock`
-    stays held).
+    which krusty's code builder does not represent.
+  - ✓ 3d. A non-local `break`/`continue` is a marked return naming its loop (kotlinc's
+    `nonLocalReturnLabel`), so the inlined function's `finally` bodies are copied in front of it,
+    and is written into the caller as the jump to the loop behind the caller's `finally` blocks it
+    leaves (`ir_emit::non_local_jumps`). A lock held by `withLock` is released on `break`. A
+    return of an enclosing inline expansion is the frame's `break` carrying its result
+    (`result$N`). Open: kotlinc parks a value returned through a library `finally` inside a
+    same-module inline lambda below the callee's catch local (it compiles that lambda as a method
+    first), krusty above it, so such code differs from kotlinc in slot order only (also for a
+    plain non-local `return`); a jump out of a library lambda nested in a same-module inline
+    lambda whose result is discarded fails to emit (`ownRun { x.let { break } }`, also before
+    this port).
 - ◐ 4. `AnonymousObjectTransformer`: anonymous objects and crossinline lambdas in an inlined body
   are regenerated as `$$inlined$` classes.
   - ◐ 4a. Anonymous objects of a classpath inline body with no lambda arguments, inlined into a
@@ -5627,6 +5651,12 @@ non-inline callers, still reads the field directly. Test:
 - Wasm consumes the published declaration-result provenance of a generic call beneath its
   checked result coercion. This preserves separate declared and selected types without inventing
   missing facts; it does not yet supply generic scalar boxing or a canonical dependency-call ABI.
+- Erased-reference `==` / `!=` uses runtime GC String classification and the existing virtual
+  equality slot without requiring a file-local static class. The shared portable regression
+  establishes its result with kotlinc before exercising both Wasm hosts. Explicit dependency
+  `Any.equals` capability publication, default hash/rendering, arrays and numeric boxing remain
+  separate follow-ups. Five fake-override bridge cases and `fieldRename/genericPropertyWithItself.kt`
+  now pass on both Wasm hosts and leave their expected-failure inventories.
 - Not yet selectable from the CLI: a user-facing wasm target waits on that klib platform.
 - Catch-only EH: a module-owned tag carries the same Throwable reference across calls/modules.
   The selected stdlib's exact `Throwable()` / `Throwable(String?)` and nullable `message` getter

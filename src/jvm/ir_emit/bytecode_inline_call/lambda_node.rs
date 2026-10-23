@@ -5,7 +5,6 @@
 
 use super::lambda_route::SpliceReason;
 use super::*;
-use crate::ir::lambda_exits::LambdaExit;
 use crate::jvm::classreader::{ExcEntry, MethodLocal};
 use crate::jvm::method_node::{CodeAttribute, LabelId};
 use crate::types::TyKind;
@@ -246,14 +245,9 @@ impl Emitter<'_> {
         if self.suspends_within(lambda.inline_body) || lambda.parameter_types.len() != arity {
             return Ok(Some(SpliceReason::SuspendingLambda));
         }
-        match self
-            .ir
+        self.ir
             .lambda_exit(lambda.inline_body)
-            .ok_or("an inline lambda reached emission without its recorded non-local exit")?
-        {
-            LambdaExit::Jump => return Ok(Some(SpliceReason::NonLocalJump)),
-            LambdaExit::Return | LambdaExit::Local => {}
-        }
+            .ok_or("an inline lambda reached emission without its recorded non-local exit")?;
         if lambda
             .parameter_coercions
             .iter()
@@ -277,6 +271,17 @@ impl Emitter<'_> {
             return Ok(Some(SpliceReason::ValueClassAdapter));
         }
         Ok(None)
+    }
+
+    /// Whether the literal lambda `argument` leaves by a `break` or `continue` of a loop outside
+    /// it or by a return of an inline expansion outside it, which no real call of its function
+    /// could carry out.
+    pub(in crate::jvm::ir_emit) fn literal_jumps_out(&self, argument: u32) -> bool {
+        self.literal_lambda(argument).is_ok_and(|(lambda, _)| {
+            self.ir
+                .lambda_exit(lambda.inline_body)
+                .is_some_and(|exit| exit.jumps || exit.frame_returns)
+        })
     }
 
     /// What a lambda's inline body carries its parameter of Kotlin type `semantic` as, which the
@@ -612,6 +617,8 @@ impl Emitter<'_> {
         // the caller's protected regions are ranges of the caller's code, not of this node.
         let caller_finalizers = std::mem::take(&mut self.return_finalizers);
         let caller_regions = std::mem::take(&mut self.protected_regions);
+        // A `break` or `continue` of the caller's loop leaves the body by a marked return.
+        let caller_loops = self.enter_lambda_loops();
         // The scratch lambda is a separate method with its own inline-frame identity space.
         let caller_next_inline_frame_identity =
             std::mem::replace(&mut self.next_inline_frame_identity, 0);
@@ -634,6 +641,7 @@ impl Emitter<'_> {
         self.type_parameter_function = caller_type_parameters;
         self.return_finalizers = caller_finalizers;
         self.protected_regions = caller_regions;
+        let jumps = self.leave_lambda_loops(caller_loops);
         self.frame = caller_frame;
         self.block_depth = caller_depth;
         let body_locals = std::mem::replace(&mut self.open_locals, caller_locals);
@@ -762,7 +770,7 @@ impl Emitter<'_> {
         let mut node = self
             .read_scratch(&scratch, &descriptor)
             .ok_or("an inline lambda's code cannot be read back as a method node")?;
-        mark_non_local_returns(&mut node, &scratch.bytes, own_return)?;
+        mark_non_local_returns(&mut node, &scratch.bytes, own_return, &jumps)?;
         let return_type = return_unit_as_void(&mut node, return_type);
         Ok(LambdaArgument {
             lambda: inliner::Lambda {
@@ -893,11 +901,13 @@ impl Emitter<'_> {
 
 /// Mark each return of the lambda's `node`, read from `code`, except its own return at `own_return`:
 /// the body lowers a local return to its value, so every other return leaves the function the
-/// lambda is written in (kotlinc's `generateGlobalReturnFlag`).
+/// lambda is written in (kotlinc's `generateGlobalReturnFlag`), or the loop `jumps` names for the
+/// return at its offset.
 fn mark_non_local_returns(
     node: &mut MethodNode,
     code: &[u8],
     own_return: usize,
+    jumps: &[(usize, String)],
 ) -> Result<(), &'static str> {
     let mut offsets = Vec::new();
     let mut pc = 0;
@@ -914,7 +924,12 @@ fn mark_non_local_returns(
                 .next()
                 .ok_or("an inline lambda's node has more instructions than its code")?;
             if matches!(insn, Insn::Op(IRETURN..=RETURN)) && offset != own_return {
-                node.nodes.insert(at, inliner::non_local_return_marker());
+                let name = jumps
+                    .iter()
+                    .find(|(jump, _)| *jump == offset)
+                    .map_or_else(String::new, |(_, name)| name.clone());
+                node.nodes
+                    .insert(at, inliner::non_local_return_marker(name));
                 at += 1;
             }
         }

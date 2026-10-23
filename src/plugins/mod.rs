@@ -315,6 +315,9 @@ pub struct PluginContext {
     external_serializer_objects: crate::fx_hash::HashMap<TypeName, bool>,
     /// What each generated `$serializer` member inherits from the runtime declaration it overrides.
     generated_serializer_statuses: Option<crate::types::SerializationGeneratedMemberStatuses>,
+    /// Serializable superclasses this compilation does NOT declare, with the element record their
+    /// provider published (`None` when it could not describe them).
+    external_serializable_parents: serialization::ExternalSerializableParents,
 }
 
 impl Default for PluginContext {
@@ -327,6 +330,7 @@ impl Default for PluginContext {
             runtime_serializers: crate::fx_hash::HashSet::default(),
             external_serializer_objects: crate::fx_hash::HashMap::default(),
             generated_serializer_statuses: None,
+            external_serializable_parents: Default::default(),
         }
     }
 }
@@ -341,6 +345,7 @@ impl Clone for PluginContext {
             runtime_serializers: self.runtime_serializers.clone(),
             external_serializer_objects: self.external_serializer_objects.clone(),
             generated_serializer_statuses: self.generated_serializer_statuses,
+            external_serializable_parents: self.external_serializable_parents.clone(),
         }
     }
 }
@@ -407,6 +412,26 @@ impl PluginContext {
         &self,
     ) -> Option<crate::types::SerializationGeneratedMemberStatuses> {
         self.generated_serializer_statuses
+    }
+
+    /// Record the serializable superclasses this compilation extends without declaring them.
+    pub(crate) fn with_external_serializable_parents(
+        mut self,
+        parents: serialization::ExternalSerializableParents,
+    ) -> Self {
+        self.external_serializable_parents = parents;
+        self
+    }
+
+    /// The element record of `classifier`, a serializable superclass this compilation does not
+    /// declare: `None` when it is not one, `Some(None)` when its provider could not describe it.
+    pub(crate) fn external_serializable_parent(
+        &self,
+        classifier: TypeName,
+    ) -> Option<Option<&crate::types::SerializableClassElements>> {
+        self.external_serializable_parents
+            .get(&classifier)
+            .map(Option::as_ref)
     }
 
     /// Whether external serializer class `serializer` is an `object`; `None` when the provider did
@@ -753,6 +778,7 @@ pub fn declare_enabled(
     plugins: &registry::NativePlugins,
     module_name: &str,
     generated_serializer_statuses: Option<crate::types::SerializationGeneratedMemberStatuses>,
+    classifiers: &dyn crate::types::ClassifierFactSource,
 ) {
     let mut ctx = PluginContext::from_ir(ir);
     if !triggered(ir, plugins, &ctx) {
@@ -761,6 +787,12 @@ pub fn declare_enabled(
     if let Some(statuses) = generated_serializer_statuses {
         ctx = ctx.with_generated_serializer_statuses(statuses);
     }
+    // A class's generated members are declared over every element it inherits, those of a
+    // superclass compiled apart from this file included.
+    let ctx = ctx.with_external_serializable_parents(serialization::external_serializable_parents(
+        ir,
+        classifiers,
+    ));
     plugins.host(module_name).declare(ir, &ctx);
 }
 
@@ -778,12 +810,18 @@ pub fn complete_enabled(
         return;
     }
     record_external_value_classes(ir, classifiers);
-    let external = external_serializers(ir, classifiers);
+    let parents = serialization::external_serializable_parents(ir, classifiers);
+    let external = external_serializers(
+        ir,
+        classifiers,
+        serialization::inherited_element_types(&parents),
+    );
     let ctx = ctx
         .with_serial_info_annotations(serial_info_annotations(ir, classifiers))
         .with_external_serializers(external)
         .with_runtime_serializers(runtime_serializers(classifiers))
-        .with_external_serializer_objects(declared_serializer_objects(ir, classifiers));
+        .with_external_serializer_objects(declared_serializer_objects(ir, classifiers))
+        .with_external_serializable_parents(parents);
     plugins.host(module_name).complete(ir, &ctx);
 }
 
@@ -969,12 +1007,16 @@ fn runtime_serializers(
         .collect()
 }
 
+/// The serializer of every classifier this file's generated serializers name without declaring
+/// it: its fields' types, and `inherited` — the elements its classes inherit from superclasses
+/// compiled apart from it.
 fn external_serializers(
     ir: &IrFile,
     classifiers: &dyn crate::types::ClassifierFactSource,
+    inherited: Vec<Ty>,
 ) -> crate::fx_hash::HashMap<TypeName, serialization::ExternalSerializer> {
     let serializable = crate::types::type_name(serialization::SERIALIZABLE_FQ);
-    external_classifier_candidates(ir)
+    external_classifier_candidates_with(ir, inherited)
         .filter_map(|classifier| {
             let annotations = classifiers.classifier_annotations(classifier)?;
             let application = annotations
@@ -1067,14 +1109,22 @@ fn external_serializers(
         .collect()
 }
 
+#[cfg(test)]
 fn external_classifier_candidates(ir: &IrFile) -> impl Iterator<Item = TypeName> + '_ {
+    external_classifier_candidates_with(ir, Vec::new())
+}
+
+fn external_classifier_candidates_with(
+    ir: &IrFile,
+    mut candidates: Vec<Ty>,
+) -> impl Iterator<Item = TypeName> + '_ {
     let declared: crate::fx_hash::HashSet<TypeName> =
         ir.classes.iter().map(|class| class.fq_name_id()).collect();
-    let mut candidates: Vec<Ty> = ir
-        .classes
-        .iter()
-        .flat_map(|class| class.fields.iter().map(|field| field.ty))
-        .collect();
+    candidates.extend(
+        ir.classes
+            .iter()
+            .flat_map(|class| class.fields.iter().map(|field| field.ty)),
+    );
     // A reified type argument names a classifier the plugin may have to build a serializer for
     // without it appearing as any field's type — `element<JsonElement>("v")` inside a hand-written
     // `KSerializer` is exactly that, and its serializer is the `@Serializable(with = …)` one the
@@ -1566,7 +1616,7 @@ mod tests {
             ..FakeClassifierFacts::default()
         };
 
-        let resolved = external_serializers(&ir, &annotations);
+        let resolved = external_serializers(&ir, &annotations, Vec::new());
 
         assert_eq!(
             resolved,
@@ -1644,7 +1694,7 @@ mod tests {
         };
 
         assert_eq!(
-            external_serializers(&ir, &facts).get(&object),
+            external_serializers(&ir, &facts, Vec::new()).get(&object),
             Some(&serialization::ExternalSerializer::Object {
                 serial_name: crate::kt_string::KtString::from("fixtures.Singleton"),
                 serial_info_unsupported: true,
@@ -1700,7 +1750,7 @@ mod tests {
         };
 
         assert_eq!(
-            external_serializers(&ir, &facts).get(&object),
+            external_serializers(&ir, &facts, Vec::new()).get(&object),
             Some(&serialization::ExternalSerializer::Object {
                 serial_name: crate::kt_string::KtString::from("fixtures.Singleton"),
                 serial_info_unsupported: true,

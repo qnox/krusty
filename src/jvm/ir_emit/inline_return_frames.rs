@@ -60,6 +60,11 @@ impl Emitter<'_> {
         self.emit_value(value, code);
         // Coerced to the result's type as a store in the frame's own body is.
         self.adapt_physical_operand_for(value, self.value_ty(value), ty, code);
+        // A frame outside the lambda node being compiled receives the result from the node's
+        // marked return.
+        if !self.diverges(value) && self.leave_lambda_node_with_result(frame, code) {
+            return;
+        }
         let slot = self.activate_inline_return_frame_result(result, ty);
         store(ty, slot, code);
         self.unassigned_values.remove(&result);

@@ -150,6 +150,16 @@ impl SymbolSource for ResolverSource<'_> {
         }
     }
 
+    fn serializable_class_elements(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::types::SerializableClassElements> {
+        match self {
+            Self::Direct(source) => source.serializable_class_elements(classifier),
+            Self::Memoized(source) => source.serializable_class_elements(classifier),
+        }
+    }
+
     fn sam_with_receiver_annotations(&self) -> &[TypeName] {
         match self {
             Self::Direct(source) => source.sam_with_receiver_annotations(),

@@ -27,6 +27,11 @@ whole-module architecture or plugin contract to fight.
 
 ## 2. Scope (what the PoC compiles)
 
+The configured constructor-property annotation default sites apply to Native KLIB metadata as well
+as JVM attributes. The unchanged class-surface fixture's annotated constructor property carries its
+property annotation in current mode and not in older first-only mode. Both are compared with live
+official Native output in `tests/klib_class_surface_e2e.rs`; the full class-surface assertion remains.
+
 ### v0 supported Kotlin subset
 - A single package; multiple `.kt` files compiled together.
 - **Top-level functions**: `fun name(p: T, ...): R = expr` and block bodies `{ ... }`.
@@ -1679,10 +1684,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   NOT diagnosed (`diags.truncate` around the loop) — because krusty's folder is narrower than
   kotlinc's and these applications were never checked before, so a diagnostic here would reject
   sources kotlinc accepts. Placement follows Kotlin's use-site defaulting rather than a guess: a
-  constructor `val`/`var` parameter's annotation reaches the PARAMETER only when
-  `AnnotationTargets::property_declaration_site` resolves to `ValueParameter`, leaving the property-
-  and field-targeted ones to the marker method and the backing field; a plain function parameter has
-  no such choice. Pass 1 also publishes a constructor property's checked PROPERTY applications,
+  constructor `val`/`var` parameter's annotation uses the configured
+  `PropertyParamAnnotationDefaultTargetMode`. First-only mode chooses the first applicable of
+  PARAMETER, PROPERTY and FIELD. Param-property mode selects an applicable PARAMETER and separately
+  PROPERTY (or FIELD when PROPERTY is inapplicable and backing storage exists). Explicit use-site
+  applications select only that site; getters and setters are never implicit destinations. The
+  checker records the selected site set and metadata consumes membership without reselecting targets.
+  A plain parameter has no property/field destinations. Pass 1 also publishes a constructor
+  property's checked PROPERTY applications,
   including folded class literals, under its stable property identity before plugin constructor
   selection. Parameter- and accessor-targeted applications must not enter that property payload.
   Partition constructor-property applications only after annotation policies from every source
@@ -1695,6 +1704,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `constructor_property_payloads_do_not_depend_on_annotation_policy_file_order` checks stable
   payloads in both input orders, with strict whole-class kotlinc coverage in
   `property_accessor_annotation_e2e::constructor_property_annotations_match_kotlinc_in_both_source_orders`.
+  `constructor_parameter_property_default_targets_match_kotlinc` compares all output classes in
+  both source orders; `configured_default_targets_in_older_and_current_language_match_kotlinc`
+  compares explicit older/current language settings with the same real reference compiler.
+  `fieldless_annotation_properties_do_not_gain_a_default_field_application` covers annotation-class
+  storage absence. This feature does not implement the separate `-Xannotation-default-target` option.
   Retention stays SEMANTIC through lowering (one ordered list per parameter) and is
   split into the two JVM attributes at emission via `split_declaration_annotations`, so the two
   halves cannot diverge. GAP: an annotation WITH ARGUMENTS is left out of
@@ -5609,6 +5623,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/inline_non_local_return_finally_e2e.rs` (a run of every shape, including returns
   through the caller's own `finally` and through `ReentrantReadWriteLock.write`, and kotlinc's bytes
   for the conditional ones) and `ir::lambda_exits::tests`.
+
+- **A lambda's non-local `break`/`continue` runs every `finally` it leaves, as kotlinc copies
+  them.** kotlinc's `visitBreakContinue` ends the lambda's method with a marked return naming the
+  loop (`nonLocalReturnLabel`) when the loop is outside it, so a library inline function's own
+  `finally` (`withLock`'s `unlock`, `synchronized`'s `monitorexit`) is copied in front of the jump
+  as in front of a return. Where the inlined code is written into the code that holds the loop, the
+  marked return becomes the jump to the loop behind that code's `finally` blocks between the call
+  and the loop; written into an enclosing lambda's node instead, it stays a marked return of that
+  node. A loop is named by its position among the loops open where the outermost lambda is
+  written, then those each nested lambda opens. A return of an enclosing inline expansion
+  (`return@outer` inside `withLock`, in `ownRun outer@ { ... }`), which lowering makes a `break` of
+  the expansion's return frame carrying its result, is the same jump: the node returns the result
+  behind a marker naming the frame (`result$N`), the inlined function's `finally` is copied around
+  it as around a returned value, and the code that holds the frame stores it as the frame's result
+  before the jump. One literal can leave by a return, a jump and a frame return at once; each is
+  recorded separately (`ir::lambda_exits::LambdaExit`) and none reroutes the others. Tests:
+  `tests/inline_non_local_jump_finally_e2e.rs` (`break`, `continue`, labeled outer loops, nested
+  `withLock`/`synchronized`, the caller's and the lambda's own `finally`, against kotlinc's run and
+  bytes; one `withLock` literal with `return@outer` beside a `break` and beside a `continue`,
+  against kotlinc's run, unlock log and hold count) and `ir::lambda_exits::tests`.
 
 - **A same-module inline call with function arguments is inlined from the compiled body too.**
   A literal lambda or callable reference passed to an inline parameter (one that is function-typed
@@ -11471,9 +11505,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constructor before storing its own fields. A generic superclass's elements are typed by the
   subclass's type arguments, and the subclass hands the parent's `write$Self` one serializer per
   type argument after the descriptor (`StringSerializer.INSTANCE` for `Envelope<String>`, the
-  subclass's own `typeSerial0` for `Outcome<T>`). (A superclass from another module is not handled
-  yet.)
+  subclass's own `typeSerial0` for `Outcome<T>`).
   Test: `tests/serializable_inheritance_e2e.rs`.
+- **A serializable superclass from a dependency contributes the elements its metadata publishes.**
+  kotlinc reads them from the superclass's class metadata: its `propertiesNamesInProgramOrder` list
+  orders them (the property records themselves are not in declaration order), each property's
+  metadata types it, and the element is required exactly when it is a primary-constructor parameter
+  without a default (a body property, `lateinit` included, is optional). The list names every
+  element in wire order, the inherited ones first, so krusty writes it that way too. The prefix a
+  class inherits is its own serializable superclass's complete wire, derived the same way up the
+  chain, and must match the list; the names after it must each be a property the class itself
+  stores (its metadata names a backing field the classfile has). kotlinc reads a library class's
+  own elements by name, so a class that redeclares an inherited element (a getter-only `override
+  val x`) names it twice, and kotlinc rejects every subclass with "duplicate serial name"; krusty
+  declines such a subclass. The subclass calls the superclass's public `write$Self` and delegates
+  to its deserialization constructor, whose parameters are the inherited elements. krusty reads the
+  same list (field 18000) and constructor flags, and trusts the annotation only when the classfile
+  has the generated members with their exact descriptors: a public static `write$Self(self,
+  output, descriptor)` and a public constructor taking the `seen` masks, each element's
+  deserialization parameter type in wire order, and the marker. A dependency superclass compiled
+  without the plugin, whose element or element type
+  carries annotations (`List<@Serializable(with = S::class) Item>` serializes with `S`), that
+  publishes no order for its stored properties, or that is generic, declines the file rather than
+  guess. (A superclass in another file of the same module is not handled yet and declines too.)
+  Test: `tests/serializable_parent_dependency_e2e.rs`.
 - **A serializable abstract class is serialized polymorphically.** kotlinc gives a non-generic,
   non-sealed abstract `@Serializable` class no `$serializer`: `Companion.serializer()` returns
   `new PolymorphicSerializer(C::class, new Annotation[0])`, cached in a `$cachedSerializer$delegate`
@@ -20925,7 +20980,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   interface member has the same number in every implementing class. Class, interface and `Any`
   values are carried as `(ref null eq)`, so an override never needs a signature of its own; an
   override carried differently from the member it overrides (a bridge) declines. `==` on a class
-  value calls its `equals` slot null-safely, whose default is identity. `kotlin.Any`'s own
+  value calls its `equals` slot null-safely, whose default is identity. Erasing a reference to
+  `Any?` preserves structural `==` and `!=`: runtime Strings compare UTF-16 contents, class
+  instances dispatch their actual `equals` slot, and other GC references use identity. Both
+  operands evaluate once, left before right, including a null left operand; a non-null receiver's
+  override may accept null or reject itself. `===` remains reference identity. This operator
+  realization does not authorize explicit dependency calls to `Any.equals`, add Kotlin-array
+  carriers, or implement boxing. The shared `erasedReferenceEquality.kt` regression compares
+  kotlinc/JVM, krusty/JVM and both Wasm hosts. `kotlin.Any`'s own
   `hashCode` and `toString` have no body in the module yet: their slots trap, and a call or
   template that could reach one on a class that does not override it declines the compilation by
   name rather than print something kotlinc would not. An `object` is built on first use and

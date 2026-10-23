@@ -64,6 +64,82 @@ class Subject(
     )]);
 }
 
+#[test]
+fn constructor_parameter_property_default_targets_match_kotlinc() {
+    let policy = (
+        "DefaultTargetPolicies.kt",
+        r#"package defaults
+@Target(AnnotationTarget.VALUE_PARAMETER, AnnotationTarget.PROPERTY, AnnotationTarget.FIELD,
+        AnnotationTarget.PROPERTY_GETTER)
+annotation class PropertyMark(val text: String)
+@Target(AnnotationTarget.VALUE_PARAMETER, AnnotationTarget.FIELD)
+annotation class FieldMark(val text: String)
+@Target(AnnotationTarget.VALUE_PARAMETER)
+annotation class ParameterMark(val text: String)
+"#,
+    );
+    let usage = (
+        "DefaultTargetSubject.kt",
+        r#"package defaults
+class Subject(
+    @PropertyMark("both") val both: Int,
+    @FieldMark("parameter and field") val parameterAndField: Int,
+    @ParameterMark("parameter only") val parameterOnly: Int,
+    @param:PropertyMark("explicit parameter") val explicitParameter: Int,
+    @property:PropertyMark("explicit property") val explicitProperty: Int,
+    @field:PropertyMark("explicit field") val explicitField: Int,
+    @get:PropertyMark("explicit getter") val explicitGetter: Int,
+    @PropertyMark("plain parameter") plain: Int
+)
+"#,
+    );
+    assert_module_matches_kotlinc(&[policy, usage]);
+    assert_module_matches_kotlinc(&[usage, policy]);
+}
+
+#[test]
+fn configured_default_targets_in_older_and_current_language_match_kotlinc() {
+    let policies = r#"package configured
+@Target(AnnotationTarget.VALUE_PARAMETER, AnnotationTarget.PROPERTY, AnnotationTarget.FIELD)
+annotation class Mark(val text: String)
+"#;
+    let source = r#"package configured
+class Subject(
+    @Mark("default") val defaulted: Int,
+    @param:Mark("parameter") val parameterOnly: Int,
+    @property:Mark("property") val propertyOnly: Int,
+    @field:Mark("field") val fieldOnly: Int
+)
+"#;
+    for language in [
+        krusty::language_version::LanguageVersion::V2_3,
+        krusty::language_version::LanguageVersion::V2_4,
+    ] {
+        let settings = krusty::language_settings::LanguageSettings::new(language, None, &[])
+            .expect("valid language settings");
+        let classes = common::classes_against_kotlinc_lib_language_settings(
+            "ConfiguredDefaultTargets",
+            &[("Policies.kt", policies)],
+            source,
+            &settings,
+        )
+        .expect("reference compiler is provisioned");
+        assert_eq!(classes.differences(), Vec::<String>::new(), "{language:?}");
+    }
+}
+
+#[test]
+fn fieldless_annotation_properties_do_not_gain_a_default_field_application() {
+    assert_module_matches_kotlinc(&[(
+        "FieldlessDefaultTargets.kt",
+        r#"package fieldless
+@Target(AnnotationTarget.VALUE_PARAMETER, AnnotationTarget.FIELD)
+annotation class Mark(val text: String)
+annotation class Subject(@Mark("parameter only") val value: Int)
+"#,
+    )]);
+}
+
 const ANNOTATIONS: &str = "package accessors\n\
     \n\
     @Retention(AnnotationRetention.RUNTIME)\n\
