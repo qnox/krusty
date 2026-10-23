@@ -75,7 +75,9 @@ pub(super) struct InheritedElements {
     /// serializer for each.
     pub(super) type_arguments: Vec<Ty>,
     pub(super) owner: crate::types::TypeName,
-    pub(super) write_self: u32,
+    /// The superclass's `write$Self` in this file; `None` for a superclass compiled apart from
+    /// it, whose public `write$Self` takes the same arguments.
+    pub(super) write_self: Option<u32>,
 }
 
 /// What `write$Self` writes: the serialized class's fields, its elements and its type-parameter
@@ -258,11 +260,27 @@ impl SerializeBody<'_> {
                     type_operand: super::class_ty(super::KSERIALIZER_FQ),
                 }));
             }
-            stmts.push(ir.add_expr(IrExpr::Call {
-                callee: Box::new(Callee::ClassStatic {
+            let callee = match inherited.write_self {
+                Some(function) => Callee::ClassStatic {
                     owner: inherited.owner,
-                    function: inherited.write_self,
-                }),
+                    function,
+                },
+                None => {
+                    let owner = inherited.owner.render();
+                    let type_serializers = "Lkotlinx/serialization/KSerializer;"
+                        .repeat(inherited.type_arguments.len());
+                    Callee::Static {
+                        owner: inherited.owner,
+                        name: "write$Self".to_string(),
+                        descriptor: format!(
+                            "(L{owner};Lkotlinx/serialization/encoding/CompositeEncoder;Lkotlinx/serialization/descriptors/SerialDescriptor;{type_serializers})V"
+                        ),
+                        inline: InlineKind::None,
+                    }
+                }
+            };
+            stmts.push(ir.add_expr(IrExpr::Call {
+                callee: Box::new(callee),
                 dispatch_receiver: None,
                 args,
             }));
