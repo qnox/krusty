@@ -16012,11 +16012,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `mapJavaNameToKotlin` answer what kotlinc's `JavaToKotlinClassMap` does for the classifier the
   name resolves to on the module's classpath. A mapped builtin, a read-only or mutable collection
   and a primitive map to their JVM class (`kotlin.Int` to `java.lang.Integer`,
-  `kotlin.collections.MutableMap.MutableEntry` to `java.util.Map.Entry`), and a number type's,
+  `kotlin.collections.MutableMap.MutableEntry` to `java.util.Map.Entry`), and a primitive type's,
   `String`'s or `Enum`'s companion to its `kotlin.jvm.internal` companion class. `kotlin.Nothing`
-  maps to `java.lang.Void`, but not back. A function classifier maps to its numbered
-  `kotlin.jvm.functions` interface, or to `FunctionN` beyond arity 22, and a `KFunctionN` to
-  `kotlin.reflect.KFunction`; the reverse reads only a numbered interface. The other way, a JVM
+  maps to `java.lang.Void`, but not back, and so does each `kotlin.concurrent.atomics` class to
+  its `java.util.concurrent.atomic` class. A function classifier maps to its numbered
+  `kotlin.jvm.functions` interface, or to `FunctionN` beyond arity 22 (a suspend function's
+  continuation counting, so from `SuspendFunction22`), and a `KFunctionN` or `KSuspendFunctionN`
+  to `kotlin.reflect.KFunction`; the reverse reads only a numbered interface. The other way, a JVM
   class maps to the read-only collection. `Unit`, an array, a typealias, a source class, an
   unmapped class and an unknown name map to nothing.
   (`crates/krusty-plugin-host/tests/ksp.rs`, `mapped_names_are_what_ksp2_reports`;
