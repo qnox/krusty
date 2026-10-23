@@ -650,7 +650,7 @@ jobs:
   # which fails this aggregate too.
   ci-and-conformance:
     name: ci-and-conformance
-    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, bazel]
+    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, maven, build-tools, bazel]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -662,6 +662,7 @@ jobs:
           KLIB_CONFORMANCE_RESULT: ${{ needs.conformance-klib.result }}
           GRADLE_PLUGIN_RESULT: ${{ needs.build-gradle-plugin.result }}
           GRADLE_RESULT: ${{ needs.gradle.result }}
+          MAVEN_RESULT: ${{ needs.maven.result }}
           BUILD_TOOLS_RESULT: ${{ needs.build-tools.result }}
           BAZEL_RESULT: ${{ needs.bazel.result }}
         run: |
@@ -671,6 +672,7 @@ jobs:
           echo "KLIB conformance: $KLIB_CONFORMANCE_RESULT"
           echo "build-gradle-plugin: $GRADLE_PLUGIN_RESULT"
           echo "gradle: $GRADLE_RESULT"
+          echo "maven: $MAVEN_RESULT"
           echo "build-tools: $BUILD_TOOLS_RESULT"
           echo "bazel: $BAZEL_RESULT"
           if [ "$CI_RESULT" != success ] \
@@ -679,9 +681,10 @@ jobs:
             || [ "$KLIB_CONFORMANCE_RESULT" != success ] \
             || [ "$GRADLE_PLUGIN_RESULT" != success ] \
             || [ "$GRADLE_RESULT" != success ] \
+            || [ "$MAVEN_RESULT" != success ] \
             || [ "$BUILD_TOOLS_RESULT" != success ] \
             || [ "$BAZEL_RESULT" != success ]; then
-            echo "lint, coverage, conformance (including KLIB semantics), every Gradle gate, every build-tools lane, and every Bazel lane must succeed" >&2
+            echo "lint, coverage, conformance (including KLIB semantics), every Gradle gate, the Maven goal, every build-tools lane, and every Bazel lane must succeed" >&2
             exit 1
           fi
 
@@ -835,6 +838,29 @@ jobs:
           fi
           KRUSTY_GRADLE_BIN=$(command -v gradle) \
             ./krusty-build-tests --ignored $tests
+
+  # Run the Maven plugin's verify goal, built from tools/krusty-maven, against a kotlin-maven-plugin
+  # build, with the shared krusty binary.
+  maven:
+    needs: [build-tool-bins]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6.1.0
+        with:
+          distribution: zulu
+          java-version: '17'
+          cache: maven
+          cache-dependency-path: tools/krusty-maven/pom.xml
+      - uses: actions/download-artifact@v8
+        with:
+          name: tool-bins
+      - name: run the Maven verify goal
+        env:
+          KRUSTY_MAVEN_TEST_BIN: ${{ github.workspace }}/krusty
+        run: |
+          chmod +x krusty krusty-build-tests
+          ./krusty-build-tests --ignored maven_verify_goal_reports_krusty_against_kotlinc
 
   # Build Kotlin with the Bazel module the release would publish, as a consumer depends on it,
   # with the toolchain's compiler and an override, in action and worker mode.

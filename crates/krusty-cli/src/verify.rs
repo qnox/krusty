@@ -15,7 +15,7 @@ mod summary;
 pub use anonymized::{issue_body, issue_url, NEW_ISSUE_URL};
 pub use html::render_html;
 pub use markdown::render_markdown;
-pub use outputs::{compare_outputs, FileDifference, OutputComparison};
+pub use outputs::{compare_outputs, FileDifference, OutputComparison, ReferenceOutputs};
 pub use peak_memory::peak_rss_bytes;
 pub use record::{
     CompilationRecord, Outcome, VerifyCompileArguments, VerifyReportArguments,
