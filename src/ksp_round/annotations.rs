@@ -7,6 +7,7 @@ use krusty_plugin_ir::{KspAnnotation, KspAnnotationArguments, KspArgument, KspUs
 use super::type_model::{qualified_name, TypeParameterScope};
 use super::{Source, Subject};
 use crate::ast::AnnotationRef;
+use crate::frontend::{FrontendSymbols, SourceSetAnalysis};
 use crate::types::{AnnotationValue, PropertyAnnotationSite, ResolvedAnnotation, TypeName};
 
 /// Which of the applications written on a declaration KSP shows on one of the nodes it makes of
@@ -74,7 +75,7 @@ impl Source<'_> {
             .iter()
             .filter(|annotation| placement.shows(use_site(annotation)))
             .map(|annotation| {
-                self.ksp_annotation(
+                Annotations::new(self.analysis).ksp_annotation(
                     annotation,
                     matches!(placement, Placement::SetterParameter),
                     true,
@@ -83,11 +84,27 @@ impl Source<'_> {
             })
             .collect())
     }
+}
+
+/// What KSP shows of resolved annotation applications, from the analysis they were resolved in:
+/// their classes' element defaults and the classifiers their values name.
+pub(super) struct Annotations<'a> {
+    analysis: &'a SourceSetAnalysis,
+    symbols: &'a FrontendSymbols,
+}
+
+impl<'a> Annotations<'a> {
+    pub(super) fn new(analysis: &'a SourceSetAnalysis) -> Self {
+        Annotations {
+            analysis,
+            symbols: &analysis.symbols,
+        }
+    }
 
     /// `annotation` as KSP shows it. `written` says whether the source wrote it or it is a
     /// default; a default's arguments are all defaults too. `as_written` names it as the source
     /// wrote it rather than by its class's name.
-    fn ksp_annotation(
+    pub(super) fn ksp_annotation(
         &self,
         annotation: &ResolvedAnnotation,
         synthetic: bool,

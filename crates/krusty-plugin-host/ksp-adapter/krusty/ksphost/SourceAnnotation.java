@@ -70,7 +70,18 @@ final class SourceAnnotation implements KSAnnotation {
 
     @Override
     public Origin getOrigin() {
-        return synthetic ? Origin.SYNTHETIC : Origin.KOTLIN;
+        // An annotation a library declaration states shares the declaration's origin; a default
+        // nested in one is the compiler's.
+        if (synthetic) {
+            return Origin.SYNTHETIC;
+        }
+        if (parent instanceof LibraryClass || parent instanceof SourceAnnotation) {
+            Origin origin = parent.getOrigin();
+            if (origin == Origin.KOTLIN_LIB || origin == Origin.JAVA_LIB) {
+                return origin;
+            }
+        }
+        return Origin.KOTLIN;
     }
 
     @Override
