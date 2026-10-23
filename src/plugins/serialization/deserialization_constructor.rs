@@ -760,7 +760,36 @@ pub(crate) fn deserialization_parameter_ty(ty: Ty) -> Ty {
 
 #[cfg(test)]
 mod tests {
-    use super::required_masks;
+    use super::{initializer_statements, required_masks};
+    use crate::ir::{IrConst, IrExpr, IrFile};
+
+    /// A copied `init` body gives the constructor the init block's own statements and its value,
+    /// and a block nested in it (a scope, an inline call's region) as that block, identity intact.
+    #[test]
+    fn only_the_init_block_itself_is_spliced() {
+        let mut ir = IrFile::default();
+        let first = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+        let nested_statement = ir.add_expr(IrExpr::Const(IrConst::Int(2)));
+        let nested = ir.add_expr(IrExpr::Block {
+            stmts: vec![nested_statement],
+            value: None,
+        });
+        let last = ir.add_expr(IrExpr::Const(IrConst::Int(3)));
+        let init = ir.add_expr(IrExpr::Block {
+            stmts: vec![first, nested],
+            value: Some(last),
+        });
+        ir.initializer_blocks.insert(init);
+        let body = ir.add_expr(IrExpr::Block {
+            stmts: vec![init],
+            value: None,
+        });
+        let (copy, cloned) = crate::ir::clone_expression_dag(&mut ir, body);
+        assert_eq!(
+            initializer_statements(&ir, body, copy),
+            [cloned[&first], cloned[&nested], cloned[&last]]
+        );
+    }
 
     #[test]
     fn required_masks_cover_exact_word_boundaries() {
