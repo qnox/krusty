@@ -287,12 +287,8 @@ pub(super) fn eligible_points(
         ),
         (
             &|| match subject {
-                Subject::NamedFunction => {
-                    reads_continuation_outside_fake_reads(ir, body, true, suspend_set)
-                }
-                Subject::SuspendLambda => {
-                    reads_continuation_outside_fake_reads(ir, body, false, suspend_set)
-                }
+                Subject::NamedFunction => reads_continuation_outside_fake_reads(ir, body, true),
+                Subject::SuspendLambda => reads_continuation_outside_fake_reads(ir, body, false),
             },
             "reads its own continuation",
         ),
@@ -379,22 +375,17 @@ fn binds_inline_continuation_operand(ir: &IrFile, declaration: ExprId) -> bool {
 /// Whether the body reads its own continuation where kotlinc has no fake one in its place: outside
 /// a `suspendCoroutineUninterceptedOrReturn` block and an inline suspend lambda's operands. The
 /// body of a suspend lambda an inline call places in an object is that object's method's.
-fn reads_continuation_outside_fake_reads(
-    ir: &IrFile,
-    expression: ExprId,
-    blocks: bool,
-    suspend_set: &HashSet<u32>,
-) -> bool {
+fn reads_continuation_outside_fake_reads(ir: &IrFile, expression: ExprId, blocks: bool) -> bool {
     if blocks && ir.is_unintercepted_suspension(expression)
         || binds_inline_continuation_operand(ir, expression)
     {
         return false;
     }
     if let IrExpr::Lambda { captures, .. } = &ir.exprs[expression as usize] {
-        if spliced_lambdas::placed_in_an_object(ir, expression, suspend_set) {
-            return captures.iter().any(|&capture| {
-                reads_continuation_outside_fake_reads(ir, capture, blocks, suspend_set)
-            });
+        if spliced_lambdas::placed_in_an_object(ir, expression) {
+            return captures
+                .iter()
+                .any(|&capture| reads_continuation_outside_fake_reads(ir, capture, blocks));
         }
     }
     if let IrExpr::CurrentContinuation = ir.exprs[expression as usize] {
@@ -402,7 +393,7 @@ fn reads_continuation_outside_fake_reads(
     }
     let mut found = false;
     for_each_child(&ir.exprs, expression, &mut |child| {
-        found = found || reads_continuation_outside_fake_reads(ir, child, blocks, suspend_set);
+        found = found || reads_continuation_outside_fake_reads(ir, child, blocks);
     });
     found
 }

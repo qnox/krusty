@@ -7,6 +7,7 @@
 //! lambda around are deleted. So is every instruction no path reaches.
 
 use crate::fx_hash::HashSet;
+use crate::ir::InlineLambdaPlacement;
 use crate::jvm::bytecode_passes::analysis::{
     analyze_with, AnalyzerError, AnalyzerOptions, At, BasicInterpreter, BasicValue, FrameView,
     Interpreter, PlainFrames, Value,
@@ -265,18 +266,6 @@ pub(super) fn mark_places(
     Ok(invokes)
 }
 
-/// Where a compiled inline body places one of its inline lambdas.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum LambdaPlacement {
-    /// The body never uses it, so no frame runs its body.
-    Unused,
-    /// The body invokes it: each `invoke` becomes the lambda's body, in the frame of the call.
-    Invoked,
-    /// The body passes it to the constructor of an anonymous object the call regenerates, whose
-    /// methods run its body.
-    Retained,
-}
-
 /// Where `node`, a compiled inline body with the call's lambdas bound in `parameters`, places each
 /// of its `lambdas` lambdas: the uses `markPlacesForInlineAndRemoveInlinable` and
 /// `AnonymousObjectTransformer` give it. A lambda is invoked when a `FunctionN.invoke` is called on
@@ -287,7 +276,7 @@ pub(crate) fn lambda_placements(
     parameters: &Parameters,
     lambdas: usize,
     classes: &dyn ClassRoles,
-) -> Result<Vec<LambdaPlacement>, String> {
+) -> Result<Vec<InlineLambdaPlacement>, String> {
     let mut interpreter = FunctionalArgumentInterpreter {
         parameters,
         basic: BasicInterpreter,
@@ -299,21 +288,21 @@ pub(crate) fn lambda_placements(
     };
     analyze_with(node, "fake", &mut interpreter, &mut PlainFrames, options)
         .map_err(|error| error.message)?;
-    let mut placements = vec![LambdaPlacement::Unused; lambdas];
+    let mut placements = vec![InlineLambdaPlacement::Unused; lambdas];
     for &(lambda, at, operand) in &interpreter.consumers {
         let Node::Insn(insn) = &node.nodes[at] else {
             unreachable!("only an instruction takes operands");
         };
         let placement = match insn {
             Insn::Method { owner, .. } if owner == "kotlin/jvm/internal/Intrinsics" => continue,
-            _ if is_invoke_on_lambda(insn) && operand == 0 => LambdaPlacement::Invoked,
+            _ if is_invoke_on_lambda(insn) && operand == 0 => InlineLambdaPlacement::Invoked,
             Insn::Method {
                 op: INVOKESPECIAL,
                 owner,
                 name,
                 ..
             } if name == "<init>" && operand > 0 && classes.is_regenerated(owner) => {
-                LambdaPlacement::Retained
+                InlineLambdaPlacement::Retained
             }
             _ => {
                 return Err(format!(
@@ -325,7 +314,7 @@ pub(crate) fn lambda_placements(
             .get_mut(lambda)
             .ok_or_else(|| format!("inline lambda {lambda} is not one of the call's"))?;
         match *slot {
-            LambdaPlacement::Unused => *slot = placement,
+            InlineLambdaPlacement::Unused => *slot = placement,
             current if current == placement => {}
             _ => {
                 return Err(format!(

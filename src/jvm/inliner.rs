@@ -63,7 +63,7 @@ pub(in crate::jvm) use default_lambda::load as load_default_lambda;
 pub(crate) use default_masks::{
     expand as expand_default_masks, DefaultMasks, ExtractedDefaultLambda,
 };
-pub(crate) use functional_arguments::{lambda_placements, LambdaPlacement};
+pub(crate) use functional_arguments::lambda_placements;
 pub(crate) use lambda_expansion::{Lambda, SourceLines};
 pub(crate) use name_generator::ClassNameGenerators;
 pub(crate) use object_regeneration::{AnonymousObjects, ObjectLambda, RegeneratedObject};

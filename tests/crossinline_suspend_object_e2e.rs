@@ -230,3 +230,40 @@ fn a_lambda_both_invoked_and_retained_is_refused_with_its_placement() {
         ])
     );
 }
+
+/// A `suspend inline` function whose body never uses its lambda runs the lambda nowhere: the
+/// lambda's suspension is no state of the caller's machine, and the lambda is written nowhere.
+const IGNORING_LIB: &str = r#"
+package lib
+
+interface Source<out T> {
+    suspend fun next(): T
+}
+
+suspend inline fun <T> ignored(crossinline produce: suspend () -> T): Int = 7
+"#;
+
+const IGNORING_MAIN: &str = r#"
+import lib.*
+
+suspend fun count(s: Source<Int>) = ignored { s.next() + 1 }
+
+suspend fun twice(s: Source<Int>): Int {
+    val a = ignored { s.next() }
+    s.next()
+    return a
+}
+"#;
+
+#[test]
+fn an_unused_suspend_lambda_suspends_in_no_frame_like_kotlinc() {
+    let classes =
+        common::classes_against_kotlinc_lib("Ignoring", &[("Lib.kt", IGNORING_LIB)], IGNORING_MAIN)
+            .expect("reference kotlinc is provisioned");
+    assert_eq!(
+        classes.reference.keys().collect::<Vec<_>>(),
+        ["IgnoringKt", "IgnoringKt$twice$1"]
+    );
+    let differences = classes.differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
