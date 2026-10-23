@@ -198,6 +198,14 @@ fn run_verify_compile(argv: &[String]) {
     }
     // A record left by an earlier invocation never stands in for this one, even if this one fails.
     let _ = std::fs::remove_file(&arguments.record);
+    // The destination is verify's own, proven apart from kotlinc's output: an earlier run's classes
+    // must not appear as krusty's.
+    if opts.dest.is_dir() {
+        if let Err(error) = std::fs::remove_dir_all(&opts.dest) {
+            eprintln!("error: cannot clear {}: {error}", opts.dest.display());
+            std::process::exit(2);
+        }
+    }
     // A request without kotlinc arguments is one the build tool already knows krusty does not
     // support; one with arguments but no Kotlin source compiles nothing.
     if !arguments.kotlinc_arguments.is_empty()

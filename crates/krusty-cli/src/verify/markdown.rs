@@ -17,8 +17,10 @@ pub fn render_markdown(
     report.push_str("\n### Submit this report\n\n");
     report.push_str(&format!(
         "Help prioritize krusty's work by [opening an issue with the anonymized report]({issue_url}). \
-         It holds totals, difference kinds and the shape of krusty's errors, without compilation, \
-         class or member names; `krusty-verify-issue.md` beside this file is the same text.\n"
+         It holds totals, difference kinds and unsupported requests, without compilation, class or \
+         member names or paths. krusty's errors are masked by rule, which cannot promise to catch \
+         every name, so review it before you submit; `krusty-verify-issue.md` beside this file is \
+         the same text.\n"
     ));
     for record in records {
         let details = match &record.outcome {
