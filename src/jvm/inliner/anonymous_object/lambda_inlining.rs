@@ -72,38 +72,23 @@ pub(super) fn inline_into(
         lambda: HashMap::default(),
         failed: None,
     };
-    let node =
-        lambda_expansion::expand(&node, &context, invokes, &mut method_lines).map_err(inlining)?;
+    let lambda_expansion::Expanded {
+        mut node,
+        lambda_blocks,
+    } = lambda_expansion::expand(&node, &context, invokes, &mut method_lines).map_err(inlining)?;
+    super::super::try_blocks::order_around_finally_blocks(&mut node, lambda_blocks);
     if let Some(error) = method_lines.failed {
         return Err(error);
     }
     let mut node = parameters.remap(&node, 0).map_err(inlining)?;
     // The captured values were parameters only while the lambdas were placed.
     node.desc = method.desc.clone();
-    node.max_locals = max_locals(&node, parameters.real_size());
+    node.max_locals = node.locals_top().max(parameters.real_size());
     // The class writer's FixStack: the stack each lambda was inlined over is saved around it, in
     // locals above every one the method uses.
     let mut editable = EditableMethod::new(node);
     fix_stack(&mut editable, owner).map_err(RegenerationError::FixStack)?;
     Ok(editable.finish())
-}
-
-/// `MaxLocalsCalculator`: the slots the parameters and every local instruction take.
-fn max_locals(node: &MethodNode, parameters: u16) -> u16 {
-    node.instructions()
-        .filter_map(|insn| match insn {
-            Insn::Var { op, slot } => {
-                let words = if matches!(op, 0x16 | 0x18 | 0x37 | 0x39) {
-                    2
-                } else {
-                    1
-                };
-                Some(slot + words)
-            }
-            Insn::Iinc { slot, .. } => Some(slot + 1),
-            _ => None,
-        })
-        .fold(parameters, u16::max)
 }
 
 /// The method's own parameters (`this` first), which stay where they are, then one slot per lambda

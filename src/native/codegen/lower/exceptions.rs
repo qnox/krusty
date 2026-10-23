@@ -349,6 +349,45 @@ impl BodyLowering<'_, '_, '_> {
         self.run_finallys_above(depth)
     }
 
+    /// A `Result` operation reached below an expanded `runCatching` or `assertFailsWith`. A
+    /// successful `Result` is its value and a failed one the runtime's `Result.Failure`, so each
+    /// operation is the runtime's.
+    pub(super) fn result_operation(
+        &mut self,
+        operation: crate::libraries::ResultFailureIntrinsic,
+        args: &[u32],
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        use crate::libraries::ResultFailureIntrinsic;
+
+        let (symbol, operands) = match (operation, args) {
+            (ResultFailureIntrinsic::Create, [exception]) => {
+                ("kt_result_failure_new", vec![self.reference(*exception)?])
+            }
+            (ResultFailureIntrinsic::CheckOfClass, [class, message, result]) => {
+                let class = self.reference(*class)?;
+                let message = self.reference(*message)?;
+                let result = self.reference(*result)?;
+                ("kt_check_result_is_failure", vec![class, message, result])
+            }
+            (ResultFailureIntrinsic::Check, [message, result]) => {
+                let class = self.builder.ins().iconst(types::I64, 0);
+                let message = self.reference(*message)?;
+                let result = self.reference(*result)?;
+                ("kt_check_result_is_failure", vec![class, message, result])
+            }
+            _ => return Err(declined!("a malformed `{operation:?}`")),
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        let signature = vec![any(); operands.len()];
+        let Some(produced) = self.runtime_call(symbol, &signature, any(), &operands)? else {
+            return Ok(None);
+        };
+        self.convert(produced, Some(any()), ret)
+    }
+
     /// `assertFailsWith<T> { … }` — run the block, and answer the exception it had to throw.
     ///
     /// The reified `T` never reaches here as a type argument: kotlinc resolves it into the call's

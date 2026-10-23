@@ -216,6 +216,7 @@ impl SerializationPlugin {
                 .parent()
                 .map(|parent| serialize_body::InheritedElements {
                     count: elements.inherited_count(),
+                    type_arguments: elements.parent_type_arguments().to_vec(),
                     write_self: ir
                         .generated_function(
                             ir.classes[parent as usize].fq_name_id(),
@@ -1370,7 +1371,14 @@ impl IrPlugin for SerializationPlugin {
                 pending_caches.push(serializer_class::complete_polymorphic_base(
                     self, ir, ctx, class_id,
                 ));
-                polymorphic_bases.push((class_id, class_name));
+                // A generic one builds its serializer on every `serializer(typeSerial…)` call.
+                if ir.classes[class_id as usize].type_params.is_empty() {
+                    polymorphic_bases.push((class_id, class_name));
+                } else {
+                    cached_serializer::add_generic_polymorphic_serializer_accessor(
+                        ir, ctx, class_id, class_name,
+                    );
+                }
                 continue;
             }
             // A sealed interface or generic sealed class: no generated `$serializer` — its
@@ -1419,10 +1427,15 @@ impl IrPlugin for SerializationPlugin {
             let properties = SerializedProperties::of(ir, class_id);
             let elements = SerialElements::of(ctx, ir, class_id);
             if cached_serializer::is_polymorphic_base(&ir.classes[class_id as usize]) {
+                let type_parameter_identities =
+                    type_parameter_serializers::identities(ir, class_id);
                 let class = SerializedClassElements {
                     properties: &properties,
                     elements: &elements,
-                    type_parameter_serializers: TypeParameterSerializers::NONE,
+                    type_parameter_serializers: TypeParameterSerializers::parameters(
+                        0,
+                        &type_parameter_identities,
+                    ),
                 };
                 self.generate_write_self(ir, ctx, class_id, &class, None);
                 continue;

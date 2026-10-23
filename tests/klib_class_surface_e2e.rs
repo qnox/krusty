@@ -334,7 +334,7 @@ fn krusty_consumes_a_kotlinc_native_reified_inline_body() {
         &mut diags,
     );
 
-    struct ExpansionProbe(std::rc::Rc<std::cell::Cell<bool>>);
+    struct ExpansionProbe(std::rc::Rc<std::cell::Cell<usize>>);
 
     impl krusty::compiler::Backend for ExpansionProbe {
         type State = ();
@@ -349,9 +349,11 @@ fn krusty_consumes_a_kotlinc_native_reified_inline_body() {
             _state: &mut Self::State,
             _diags: &mut DiagSink,
         ) -> Vec<krusty::compiler::Artifact> {
-            if !file.ir.external_inline_expansions.is_empty() {
-                self.0.set(true);
+            for expansion in &file.ir.external_inline_expansions {
+                assert!(file.ir.inline_regions.contains(expansion));
             }
+            self.0
+                .set(self.0.get() + file.ir.external_inline_expansions.len());
             Vec::new()
         }
 
@@ -364,7 +366,7 @@ fn krusty_consumes_a_kotlinc_native_reified_inline_body() {
         }
     }
 
-    let expanded = std::rc::Rc::new(std::cell::Cell::new(false));
+    let expanded = std::rc::Rc::new(std::cell::Cell::new(0));
     let stems = ["Consumer".to_owned()];
     let artifacts = krusty::compiler::emit_analyzed(
         analysis,
@@ -382,7 +384,11 @@ fn krusty_consumes_a_kotlinc_native_reified_inline_body() {
             .collect::<Vec<_>>(),
         Vec::<&str>::new()
     );
-    assert!(expanded.get(), "official prepared IR was not specialized");
+    assert_eq!(
+        expanded.get(),
+        2,
+        "both official prepared IR calls must retain external-inline provenance"
+    );
     std::fs::remove_dir_all(work).expect("remove the official producer directory");
 }
 

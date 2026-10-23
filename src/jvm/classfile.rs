@@ -92,12 +92,12 @@ pub struct SeedCtorParameter {
     /// 0 = primitive (no annotation), 1 = non-null reference (`@NotNull`), 2 = nullable reference
     /// (`@Nullable`).
     pub ann_kind: u8,
-    /// USER annotation type descriptors on this constructor parameter (`class C(@Mark val x: Int)`),
-    /// split by the attribute each retention selects. kotlinc writes the whole
+    /// Checked USER applications on this constructor parameter, split by retention. kotlinc writes
     /// `RuntimeVisibleParameterAnnotations` before `RuntimeInvisible…`, so every parameter's `visible`
-    /// entries intern before any `invisible` one — and both before the synthesized `@NotNull`.
-    pub visible_ann_types: Vec<String>,
-    pub invisible_ann_types: Vec<String>,
+    /// entries intern before any `invisible` one; each parameter's invisible applications precede
+    /// its synthesized nullability annotation.
+    pub visible_annotations: Vec<crate::ir::AppliedAnnotation>,
+    pub invisible_annotations: Vec<crate::ir::AppliedAnnotation>,
 }
 
 /// Primary-constructor JVM generic `Signature`, passed to

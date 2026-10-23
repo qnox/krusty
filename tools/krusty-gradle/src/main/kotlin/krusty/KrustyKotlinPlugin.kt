@@ -115,6 +115,16 @@ private fun replaceKotlinJvmCompiles(
     // replacement would drop the scripts or reject the build, so kotlinc keeps those compiles.
     val kotlinDsl = project.pluginManager.hasPlugin(KOTLIN_DSL_BASE_PLUGIN_ID)
     val android = project.pluginManager.hasPlugin(ANDROID_BASE_PLUGIN_ID)
+    // Without an explicit binary, the compiler of the release this plugin was published with.
+    val gradleUserHome = project.gradle.gradleUserHomeDir
+    val offline = project.gradle.startParameter.isOffline
+    val releases = project.providers.gradleProperty("krusty.releases").orElse(GITHUB_RELEASES)
+    val releasedBinary = releases.map { releases ->
+        val release = pluginRelease ?: throw GradleException(
+            "this krusty plugin build has no release version; set -Pkrusty.binary=<path> or KRUSTY_BIN",
+        )
+        releasedCompiler(release, releases, gradleUserHome, offline).absolutePath
+    }
     project.tasks.withType(KotlinJvmCompile::class.java).all {
         val kotlinTask = this
         // A KotlinJvmCompile outside every source-set compilation is not a krusty compile either:
@@ -144,6 +154,7 @@ private fun replaceKotlinJvmCompiles(
         }
         val binaryPath = project.providers.gradleProperty("krusty.binary")
             .orElse(project.providers.environmentVariable("KRUSTY_BIN"))
+            .orElse(releasedBinary)
         val compilerPluginArguments = kotlinTask.pluginOptions.map(::pluginOptionArguments)
         val compilerVersion = project.extensions.getByType(KotlinTopLevelExtension::class.java)
             .compilerVersion.orElse(pluginVersion)

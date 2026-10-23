@@ -49,6 +49,10 @@ pub(super) fn from_property(
         )
         .with(DeclarationFlags::HAS_INITIALIZER, property.init.is_some())
         .with(
+            DeclarationFlags::SCRIPT_RESULT,
+            property.init.is_some() && property.init == file.script_result,
+        )
+        .with(
             DeclarationFlags::LITERAL_INITIALIZER,
             file.literal_initializer(property),
         )
