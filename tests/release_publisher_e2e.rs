@@ -350,3 +350,30 @@ fn updates_supersede_their_ref_without_cancelling_master_validation() {
         "a lock is taken over only after its job's timeout has killed it"
     );
 }
+
+#[test]
+fn release_secrets_reach_only_first_party_build_code() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workflow = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci.yml");
+    let job = release_job(&workflow);
+    assert!(
+        !job.contains("gradle/actions/setup-gradle"),
+        "setup-gradle injects an init script into the Gradle builds that hold the signing key"
+    );
+    assert!(
+        !job.contains("<<<"),
+        "a here-string can put a secret in a temporary file"
+    );
+    let wrapper = fs::read_to_string(
+        root.join("tools/krusty-gradle/gradle/wrapper/gradle-wrapper.properties"),
+    )
+    .expect("read gradle-wrapper.properties");
+    let checksum = wrapper
+        .lines()
+        .find_map(|line| line.strip_prefix("distributionSha256Sum="))
+        .expect("the plugin's wrapper pins its Gradle distribution");
+    assert!(
+        checksum.len() == 64 && checksum.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "a SHA-256 checksum: {checksum}"
+    );
+}
