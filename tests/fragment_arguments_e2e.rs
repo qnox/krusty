@@ -451,3 +451,154 @@ fn a_common_supertype_actualized_by_a_platform_alias_compiles_as_kotlinc_does() 
         (compiled.kotlinc.0, "", &compiled.kotlinc.2)
     );
 }
+
+const ALIASED_LOCK: &str =
+    "package p\nactual typealias Lock = java.util.concurrent.locks.ReentrantLock\n";
+
+#[test]
+fn a_common_call_of_an_alias_target_member_is_kotlincs_unresolved_reference() {
+    rejected_in_common(
+        "package p\nexpect open class Lock()\nfun c(lock: Lock) { lock.lock() }\nfun d(lock: Lock) = lock.newCondition()\n",
+        ALIASED_LOCK,
+    );
+}
+
+#[test]
+fn a_common_alias_actualized_class_is_not_its_target_as_kotlinc_says() {
+    rejected_in_common(
+        "package p\nexpect open class Lock()\nfun c(lock: Lock): java.util.concurrent.locks.ReentrantLock = lock\n",
+        ALIASED_LOCK,
+    );
+}
+
+#[test]
+fn a_common_call_of_the_alias_target_itself_compiles_as_kotlinc_does() {
+    let compiled = compile_sources(
+        "package p\nexpect open class Lock()\nfun c() = java.util.concurrent.locks.ReentrantLock().isLocked\n",
+        ALIASED_LOCK,
+        common_and_jvm,
+    );
+    assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
+    assert_eq!(
+        (compiled.krusty.0, &compiled.krusty.2),
+        (compiled.kotlinc.0, &compiled.kotlinc.2)
+    );
+}
+
+#[test]
+fn a_common_call_of_an_alias_actualized_expect_member_binds_the_target_as_kotlinc_does() {
+    let compiled = compile_sources(
+        "package p\nexpect open class Lock() {\n    fun lock()\n}\nfun c(lock: Lock): Lock { lock.lock(); return lock }\nclass Guarded(val l: Lock)\n",
+        "package p\nactual typealias Lock = java.util.concurrent.locks.ReentrantLock\nfun j() = c(java.util.concurrent.locks.ReentrantLock()).isLocked && Guarded(Lock()).l.isLocked\n",
+        common_and_jvm,
+    );
+    assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
+    assert_eq!(
+        (compiled.krusty.0, &compiled.krusty.2),
+        (compiled.kotlinc.0, &compiled.kotlinc.2)
+    );
+}
+
+#[test]
+fn every_declared_use_of_an_alias_actualized_expect_class_matches_kotlinc() {
+    let compiled = compile_sources(
+        "package p\nexpect open class Lock()\nclass Holder(val a: Lock?) {\n    constructor(x: Int) : this(null)\n    var b: Lock? = null\n    fun m(l: Lock): Lock? = l\n    fun Lock.ext(): Int = 1\n}\nfun Lock.top(): Map<String, Lock> = mapOf()\nval shared: Lock? = null\nfun d(lock: Lock) = lock\nopen class Sub : Lock()\n",
+        "package p\nactual typealias Lock = java.util.concurrent.locks.ReentrantLock\nfun j(l: Lock): Lock = l\nclass JHolder(val l: Lock)\n",
+        common_and_jvm,
+    );
+    assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
+    assert_eq!(
+        (compiled.krusty.0, &compiled.krusty.2),
+        (compiled.kotlinc.0, &compiled.kotlinc.2)
+    );
+}
+
+#[test]
+fn a_common_subclass_of_an_expect_class_actualized_as_any_matches_kotlinc() {
+    let compiled = compile_sources(
+        "package p\nexpect open class Lockable()\nexpect open class ThreadLocal<T>() {\n    fun get(): T?\n}\nabstract class Factory<T>(val name: String) : Lockable() {\n    val local: ThreadLocal<T> = ThreadLocal()\n    fun read(): T? = local.get()\n}\nclass Scope : Lockable()\n",
+        "package p\nactual typealias Lockable = Any\nactual typealias ThreadLocal<T> = java.lang.ThreadLocal<T>\n",
+        common_and_jvm,
+    );
+    assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
+    assert_eq!(
+        (compiled.krusty.0, &compiled.krusty.2),
+        (compiled.kotlinc.0, &compiled.kotlinc.2)
+    );
+}
+
+#[test]
+fn a_common_alias_of_an_alias_actualized_expect_class_stays_the_expect_class_as_kotlinc_says() {
+    rejected_in_common(
+        "package p\nexpect open class Lock()\ntypealias Local = Lock\nfun h(l: Local) = l.isLocked\n",
+        ALIASED_LOCK,
+    );
+}
+
+#[test]
+fn a_platform_call_of_a_common_extension_of_an_alias_actualized_expect_class_matches_kotlinc() {
+    let compiled = compile_sources(
+        "package p\nexpect open class Lock()\nfun Lock.q(): Int = 1\nval Lock.p: Int get() = 2\n",
+        concat!(
+            "package p\nactual typealias Lock = java.util.concurrent.locks.ReentrantLock\n",
+            "fun use(l: Lock) = l.q() + l.p\n",
+            "fun target(l: java.util.concurrent.locks.ReentrantLock) = l.q()\n",
+        ),
+        common_and_jvm,
+    );
+    assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
+    assert_eq!(
+        (compiled.krusty.0, &compiled.krusty.2),
+        (compiled.kotlinc.0, &compiled.kotlinc.2)
+    );
+}
+
+#[test]
+fn a_platform_call_of_a_common_generic_extension_of_an_alias_actualized_expect_class_matches_kotlinc(
+) {
+    let compiled = compile_sources(
+        concat!(
+            "package p\nexpect open class Ref<V>()\n",
+            "fun <T> Ref<T>.peekOrNull(): T? = null\nfun Ref<String>.joined(): String = \"\"\n",
+        ),
+        concat!(
+            "package p\nactual typealias Ref<V> = java.util.concurrent.atomic.AtomicReference<V>\n",
+            "fun use(s: Ref<String>): String? = s.peekOrNull() ?: s.joined()\n",
+            "fun target(s: java.util.concurrent.atomic.AtomicReference<Int>): Int? = s.peekOrNull()\n",
+        ),
+        common_and_jvm,
+    );
+    assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
+    assert_eq!(
+        (compiled.krusty.0, &compiled.krusty.2),
+        (compiled.kotlinc.0, &compiled.kotlinc.2)
+    );
+}
+
+#[test]
+fn a_classifier_nested_in_an_alias_actualized_expect_class_is_the_targets_nested_class() {
+    let compiled = compile_sources(
+        "package p\nexpect class Outer() {\n    class Nested()\n}\nfun n(x: Outer.Nested): Outer.Nested = x\n",
+        "package p\nclass OuterImpl { class Nested }\nactual typealias Outer = OuterImpl\n",
+        common_and_jvm,
+    );
+    assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
+    assert_eq!(compiled.krusty.0, 0, "krusty: {}", compiled.krusty.1);
+    // Every class and every method is kotlinc's. The facade's metadata still names the target's
+    // nested class where kotlinc keeps the expect's own `Outer.Nested`, so it is compared by name.
+    let without_facade = |output: &[(String, Vec<u8>)]| {
+        output
+            .iter()
+            .map(|(path, bytes)| {
+                (
+                    path.clone(),
+                    (!path.ends_with("FirstKt.class")).then_some(bytes.clone()),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        without_facade(&compiled.krusty.2),
+        without_facade(&compiled.kotlinc.2)
+    );
+}

@@ -78,8 +78,6 @@ impl SourceFragment {
 /// A top-level `actual` that stands for an `expect` declared in another source.
 pub(crate) struct ExpectStandIn {
     pub(crate) actual: crate::fir::DeclarationId,
-    /// The identity of an `actual typealias`, which is found by identity, not declaration.
-    pub(crate) alias: Option<crate::types::TypeName>,
     /// The source declaring the `expect`.
     pub(crate) expect_source: u32,
 }
@@ -91,6 +89,8 @@ pub struct SourceFragments {
     fragments: Vec<Option<SourceFragment>>,
     expect_sources: crate::fx_hash::HashMap<crate::fir::DeclarationId, u32>,
     alias_sources: crate::fx_hash::HashMap<crate::types::TypeName, u32>,
+    /// The identities an `expect` classifier shares with the `actual typealias` actualizing it.
+    aliased_expects: crate::fx_hash::HashSet<crate::types::TypeName>,
 }
 
 impl SourceFragments {
@@ -99,28 +99,26 @@ impl SourceFragments {
             fragments: fragments.into_iter().collect(),
             expect_sources: Default::default(),
             alias_sources: Default::default(),
+            aliased_expects: Default::default(),
         }
     }
 
-    /// Record the source of the `expect` each `actual` declaration actualizes.
-    /// An `actual typealias` also carries its identity, which replaces the alias's own source.
+    /// Record the source of the `expect` each `actual` declaration actualizes. An
+    /// `actual typealias` stands for no `expect`: a common source types the `expect` classifier
+    /// as its own, and only the platform fragments see the alias.
     pub(crate) fn publish_expect_sources(
         &mut self,
         expect_sources: impl IntoIterator<Item = ExpectStandIn>,
+        aliased_expects: impl IntoIterator<Item = crate::types::TypeName>,
     ) {
-        if !self.fragments.iter().any(Option::is_some) {
-            return;
-        }
-        for ExpectStandIn {
-            actual,
-            alias,
-            expect_source,
-        } in expect_sources
-        {
-            self.expect_sources.insert(actual, expect_source);
-            if let Some(alias) = alias {
-                self.alias_sources.insert(alias, expect_source);
-            }
+        self.aliased_expects.extend(aliased_expects);
+        if self.fragments.iter().any(Option::is_some) {
+            self.expect_sources.extend(expect_sources.into_iter().map(
+                |ExpectStandIn {
+                     actual,
+                     expect_source,
+                 }| (actual, expect_source),
+            ));
         }
     }
 
@@ -132,6 +130,24 @@ impl SourceFragments {
         if self.fragments.iter().any(Option::is_some) {
             self.alias_sources.extend(alias_sources);
         }
+    }
+
+    /// Whether source `from` sees `identity`, an `expect` classifier, as the `actual typealias`
+    /// actualizing it: a platform source does, and types the classifier as the alias's target.
+    /// A common source types it as its own classifier.
+    /// Whether an `actual typealias` actualizes the `expect` classifier `identity`.
+    pub(crate) fn is_aliased_expect(&self, identity: crate::types::TypeName) -> bool {
+        self.aliased_expects.contains(&identity)
+    }
+
+    pub(crate) fn actualizes_expect(
+        &self,
+        from: Option<u32>,
+        identity: crate::types::TypeName,
+    ) -> bool {
+        !self.aliased_expects.is_empty()
+            && self.aliased_expects.contains(&identity)
+            && self.sees_alias(from, identity)
     }
 
     /// Whether a reference in source `from` sees the `typealias` `identity`.
