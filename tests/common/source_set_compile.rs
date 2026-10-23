@@ -62,9 +62,41 @@ pub(crate) fn compile_source_set(
     metadata_version: Option<[i32; 3]>,
     language_settings: &krusty::language_settings::LanguageSettings,
 ) -> Option<Vec<(String, Vec<u8>)>> {
-    let _pg = super::ProfGuard::new("krusty");
-    let mut diags = DiagSink::new();
-    let stems = sources
+    let stems = source_stems(sources);
+    let inputs = source_inputs(sources, &stems, common, None);
+    compile_inputs(
+        &inputs,
+        &stems,
+        cp_jars,
+        jdk_modules,
+        class_major,
+        metadata_version,
+        language_settings,
+    )
+}
+
+/// Compile `sources` as one module with every script compiled against `script_definition`.
+pub(crate) fn compile_scripts_with_definition(
+    sources: &[(&str, &str)],
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+    script_definition: &krusty::script_definitions::ScriptDefinition,
+) -> Option<Vec<(String, Vec<u8>)>> {
+    let stems = source_stems(sources);
+    let inputs = source_inputs(sources, &stems, 0, Some(script_definition));
+    compile_inputs(
+        &inputs,
+        &stems,
+        cp_jars,
+        jdk_modules,
+        None,
+        None,
+        &krusty::language_settings::LanguageSettings::default(),
+    )
+}
+
+fn source_stems(sources: &[(&str, &str)]) -> Vec<String> {
+    sources
         .iter()
         .map(|(name, _)| {
             name.strip_suffix(".java")
@@ -72,18 +104,30 @@ pub(crate) fn compile_source_set(
                 .unwrap_or_else(|| name.trim_end_matches(".kt"))
                 .to_string()
         })
-        .collect::<Vec<_>>();
-    // A `.java` source joins the module as Java and a `.kts` source as a script, the way kotlinc
-    // reads a path it is given.
-    let inputs = sources
+        .collect()
+}
+
+/// A `.java` source joins the module as Java and a `.kts` source as a script, the way kotlinc
+/// reads a path it is given.
+fn source_inputs<'a>(
+    sources: &[(&str, &'a str)],
+    stems: &'a [String],
+    common: usize,
+    script_definition: Option<&'a krusty::script_definitions::ScriptDefinition>,
+) -> Vec<SourceInput<'a>> {
+    sources
         .iter()
-        .zip(&stems)
+        .zip(stems)
         .enumerate()
         .map(|(index, ((name, source), stem))| {
             let input = if name.ends_with(".java") {
                 SourceInput::java(source)
             } else if name.ends_with(".kts") {
-                SourceInput::kotlin_script(source)
+                let script = SourceInput::kotlin_script(source);
+                match script_definition {
+                    Some(definition) => script.with_script_definition(definition),
+                    None => script,
+                }
             } else {
                 SourceInput::kotlin(source)
             }
@@ -94,17 +138,30 @@ pub(crate) fn compile_source_set(
                 input
             }
         })
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+fn compile_inputs(
+    inputs: &[SourceInput<'_>],
+    stems: &[String],
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+    class_major: Option<u16>,
+    metadata_version: Option<[i32; 3]>,
+    language_settings: &krusty::language_settings::LanguageSettings,
+) -> Option<Vec<(String, Vec<u8>)>> {
+    let _pg = super::ProfGuard::new("krusty");
+    let mut diags = DiagSink::new();
     let cp = super::cached_classpath(cp_jars, jdk_modules);
     let platform = Box::new(
         krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone())
             .expect("JVM provider initialization"),
     );
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
-        &inputs,
+        inputs,
         super::with_native_plugins(CompilationTarget::Jvm, platform),
         &language_settings.features,
-        |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
+        |files, symbols| krusty::jvm::prepare_module_symbols(files, stems, symbols),
         &mut diags,
     );
     let backend = krusty::jvm::JvmBackend::new(cp)
@@ -112,7 +169,7 @@ pub(crate) fn compile_source_set(
         .with_annotations_in_metadata(language_settings.features.has("AnnotationsInMetadata"))
         .with_pre_release_metadata(language_settings.features.is_pre_release())
         .with_metadata_version(metadata_version);
-    let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
+    let outputs = krusty::compiler::emit_analyzed(analysis, stems, &backend, "main", &mut diags);
     let classes = outputs
         .into_iter()
         .map(|(path, bytes)| {

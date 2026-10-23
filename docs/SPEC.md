@@ -15772,8 +15772,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   without the script runtime, or an editor module that lacks it), the script class extends nothing:
   its constructor takes no arguments, has no line entry for the script's start, and a template
   member such as `args` is an unresolved reference. Not yet supported: a class that uses the script
-  instance (kotlinc makes it implicitly inner), top-level destructuring, type aliases declared in a
-  script, and a template-typed implicit receiver for extension calls such as `run { }`. Verified
+  instance (kotlinc makes it implicitly inner), top-level destructuring, and type aliases declared
+  in a script. Verified
   against kotlinc 2.4.21 and kotlinc's own script test corpus. (`tests/kotlin_script_e2e.rs`.)
 - **A script's constructor parameters keep the definition's types.** The standard definition
   names `kotlin.Array<kotlin.String>` by qualified identity, so a script importing its own
@@ -15836,6 +15836,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `declarations_are_in_the_order_ksp2_lists_them`; `ksp_round` unit tests
   `members_and_their_types_are_listed_in_ksps_order` and
   `declarations_are_in_ksps_order_with_the_members_the_language_contributes`.)
+- **A script definition's implicit receivers and default imports apply like kotlinc's.** A
+  definition (`ScriptDefinition`) names its template, the template's constructor parameters, its
+  implicit receivers and its default imports. Default imports are seen as if written before the
+  script's own imports. Each implicit receiver is a receiver of the whole script below the
+  script's own members and the template's: a name the script or template declares wins over the
+  receiver's member. The constructor takes the template's parameters, then one parameter per
+  receiver (`$script_receiver_1` onward, null-checked under that name), and stores each receiver
+  in a private final field named after its classifier (`$$implicitReceiver_Host`), which leads the
+  field table. A statement, and an inline or non-inline lambda or local function within it, reads
+  the constructor parameter (captured when a lambda escapes). Members, property initializers and
+  the lambdas within them read the field. Verified against kotlinc 2.4.21 with a custom
+  `@KotlinScript` template. (`tests/kotlin_script_e2e.rs`.)
 
 ## 8. Success criteria for the PoC
 

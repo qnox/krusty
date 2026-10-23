@@ -1526,18 +1526,29 @@ fn captured_declaration(
             });
     }
     Ok(match capture.source {
-        crate::fir::FirCaptureSource::Value(value) => CapturedDeclaration {
-            name: enclosing.debug_value_name(value).map(str::to_owned),
-            declaration: if enclosing
+        crate::fir::FirCaptureSource::Value(value) => {
+            match enclosing
                 .parameters()
                 .iter()
-                .any(|parameter| parameter.value == value)
+                .find(|parameter| parameter.value == value)
+                .map(|parameter| parameter.name)
             {
-                crate::ir::IrCapturedDeclaration::Parameter
-            } else {
-                crate::ir::IrCapturedDeclaration::Variable
-            },
-        },
+                Some(crate::fir::FirValueParameterName::ScriptReceiver { ordinal }) => {
+                    CapturedDeclaration {
+                        name: None,
+                        declaration: crate::ir::IrCapturedDeclaration::ScriptReceiver { ordinal },
+                    }
+                }
+                Some(_) => CapturedDeclaration {
+                    name: enclosing.debug_value_name(value).map(str::to_owned),
+                    declaration: crate::ir::IrCapturedDeclaration::Parameter,
+                },
+                None => CapturedDeclaration {
+                    name: enclosing.debug_value_name(value).map(str::to_owned),
+                    declaration: crate::ir::IrCapturedDeclaration::Variable,
+                },
+            }
+        }
         crate::fir::FirCaptureSource::ConstructorPrefix { .. } => CapturedDeclaration {
             name: None,
             declaration: crate::ir::IrCapturedDeclaration::Parameter,
@@ -1641,6 +1652,12 @@ fn local_function_parameter_identities(
                     role: crate::ir::IrParameterRole::DestructuredValue,
                     provenance: crate::ir::IrParameterProvenance::SourceDeclared,
                 },
+                crate::fir::FirValueParameterName::ScriptReceiver { ordinal } => {
+                    crate::ir::IrParameterIdentity::generated(
+                        crate::ir::IrGeneratedParameterRole::ScriptReceiver { ordinal },
+                        None,
+                    )
+                }
             }),
     );
     Ok(identities)
