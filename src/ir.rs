@@ -1489,6 +1489,12 @@ pub struct IrFile {
     /// Class initialization blocks in source order. Member-property initializers remain attached to
     /// their declarations so a backend can merge both without consulting syntax.
     pub checked_class_initializers: Vec<IrCheckedClassInitializer>,
+    /// For a class without a primary constructor, the values its initializers' locals are numbered
+    /// above once they are composed into its secondary constructors: `this` is value 0, the
+    /// constructor prefix and every constructor's parameters lie at or below this bound. A property
+    /// initializer re-evaluated elsewhere (a generated member applying the default) reads its locals
+    /// from here.
+    pub secondary_initializer_value_bases: crate::fx_hash::HashMap<ClassId, u32>,
     pub checked_enum_entry_bodies:
         crate::fx_hash::HashMap<crate::fir::DeclarationId, IrCheckedEnumEntryBody>,
     /// Lifted function parameter that carries a mutable capture's shared holder, keyed by

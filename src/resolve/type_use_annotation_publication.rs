@@ -70,6 +70,7 @@ pub(crate) fn publish_checked_type_use_annotations(
                         annotation: applied.internal,
                         arguments: applied.values.clone(),
                         facts: applied.facts,
+                        written: None,
                     }
                 });
             let occurrence = AnnotationOccurrence {
@@ -280,7 +281,12 @@ impl Checker<'_> {
     fn order_nested_as_written(&self, value: &mut crate::types::AnnotationValue, argument: ExprId) {
         use crate::types::AnnotationValue;
         match (value, self.file.expr(argument)) {
-            (AnnotationValue::Annotation { internal, values }, Expr::Call { args, .. }) => {
+            (
+                AnnotationValue::Annotation {
+                    internal, values, ..
+                },
+                Expr::Call { args, .. },
+            ) => {
                 let args = args.clone();
                 self.order_as_written(*internal, values, &args, Some(argument));
             }

@@ -795,15 +795,8 @@ impl Body<'_> {
 
     /// `lhs == rhs` on objects: `lhs?.equals(rhs) ?: (rhs === null)`.
     pub(super) fn object_equality(&mut self, lhs: u32, rhs: u32) -> Result<(), Unsupported> {
-        let lhs_ty = self
-            .type_of(lhs)?
-            .ok_or("an equality with no left operand")?;
-        if self.class_of_type(lhs_ty).is_none() {
-            return Err(format!(
-                "an equality on `{}` values",
-                super::describe(lhs_ty)
-            ));
-        }
+        // Both operands run once, left first, even when the left value is null. The static
+        // type can be Any: the GC representation, not that type, selects the equality body.
         let (left, right) = (self.local(REFERENCE), self.local(REFERENCE));
         self.value(lhs, any())?;
         self.code.local_set(left);
@@ -819,12 +812,37 @@ impl Body<'_> {
             .ref_is_null()
             .else_()
             .local_get(left)
+            .ref_test(false, STRING_HEAP)
+            .if_(BlockType::Value(ValType::I32))
+            .local_get(right)
+            .ref_test(false, STRING_HEAP)
+            .if_(BlockType::Value(ValType::I32))
+            .local_get(left)
+            .ref_cast(false, STRING_HEAP)
+            .local_get(right)
+            .ref_cast(false, STRING_HEAP)
+            .call(self.runtime.string_equals)
+            .else_()
+            .i32_const(0)
+            .end()
+            .else_()
+            .local_get(left)
+            .ref_test(false, HeapType::Concrete(self.runtime.objects.object))
+            .if_(BlockType::Value(ValType::I32))
+            .local_get(left)
             .local_get(right)
             .local_get(left);
         self.table_of_object();
         self.code
             .struct_get(any_table, AnyMember::Equals.slot())
             .call_ref(equals)
+            .else_()
+            // Non-object eq references have no virtual override: their default is identity.
+            .local_get(left)
+            .local_get(right)
+            .ref_eq()
+            .end()
+            .end()
             .end();
         Ok(())
     }

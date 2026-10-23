@@ -70,7 +70,9 @@ pub(crate) use object_regeneration::{AnonymousObjects, ObjectLambda, Regenerated
 pub(crate) use parameters::{Binding, Parameter, Parameters};
 pub(crate) use preparation::reads_local;
 pub(in crate::jvm) use reified::has_reified_markers;
-pub(crate) use returns::{is_non_local_return_marker, non_local_return_marker};
+pub(crate) use returns::{
+    is_non_local_return_marker, non_local_return_marker, non_local_return_name,
+};
 
 /// Why a body could not be inlined.
 #[derive(Clone, Debug, PartialEq, Eq)]

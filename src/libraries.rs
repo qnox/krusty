@@ -15,6 +15,7 @@ mod classifier_kind;
 mod classifier_role;
 mod compiler_intrinsic;
 mod core_builtins;
+mod declaration_header;
 mod default_value;
 mod dependency_access_policy;
 mod dependency_body_contract;
@@ -55,6 +56,9 @@ pub use classifier_callables::BoundInnerConstructor;
 pub(crate) use classifier_declaration::type_alias_target_classifier;
 pub use classifier_declaration::{AliasExpansion, ClassifierDeclaration};
 pub use classifier_kind::TypeKind;
+pub use declaration_header::{
+    DeclarationHeader, DeclarationLanguage, HeaderSignature, HeaderSupertype, HeaderTypeParameter,
+};
 pub use default_value::DefaultValue;
 pub use dependency_access_policy::DependencyAccessPolicy;
 pub use dependency_body_contract::DependencyBodyFacts;
@@ -429,6 +433,12 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
             }),
             None => Ok(()),
         }
+    }
+
+    /// The declaration of a library classifier as its source language states it, for a consumer
+    /// that shows declarations. `None` for a classifier this provider does not declare.
+    fn declaration_header(&self, _classifier: TypeName) -> Option<DeclarationHeader> {
+        None
     }
 
     /// Whether this classifier is an `expect annotation class` with no declaration on the current

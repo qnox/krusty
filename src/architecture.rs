@@ -333,6 +333,14 @@ mod tests {
                 let mut allowed = allowed.to_vec();
                 allowed.push("java_source");
                 assert_allowed_crate_modules_in_file(&path, &allowed);
+            } else if path.ends_with("src/jvm/array_casts.rs") {
+                // Array-cast realization reuses the core subtype relation over checked types and
+                // the frozen classifier inventory. Its oracle cannot resolve declarations or
+                // infer bindings; keep this dependency local rather than duplicating subtyping
+                // or admitting semantic selection throughout the JVM backend.
+                let mut allowed = allowed.to_vec();
+                allowed.push("assignable");
+                assert_allowed_crate_modules_in_file(&path, &allowed);
             } else {
                 assert_allowed_crate_modules_in_file(&path, &allowed);
             }
@@ -931,6 +939,9 @@ mod tests {
                 "metadata",
                 "parser",
                 "plugins",
+                // A script compiles against its definition, a public compilation input like the
+                // plugin selection.
+                "script_definitions",
                 "source",
                 "symbol_resolver",
                 "symbol_source",
