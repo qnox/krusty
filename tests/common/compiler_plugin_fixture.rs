@@ -116,6 +116,51 @@ impl PluginFixture {
         out
     }
 
+    /// Build `sources` with kotlinc, which must reject them; its diagnostics, with the fixture
+    /// directory spelled `<fixture>`.
+    pub fn kotlinc_rejects(
+        &self,
+        unit: &str,
+        sources: &[(&str, &str)],
+        classpath: &[PathBuf],
+        switches: &[String],
+    ) -> String {
+        let files = self.write(sources, unit);
+        let mut arguments = switches.to_vec();
+        if !classpath.is_empty() {
+            arguments.extend(["-cp".to_string(), join_classpath(classpath)]);
+        }
+        let out = self.dir.join(unit).join("kotlinc");
+        arguments.extend(["-d".to_string(), out.display().to_string()]);
+        arguments.extend(files);
+        let (code, diagnostics) =
+            common::kotlinc_compile(&arguments).expect("the reference compiler runs");
+        assert_ne!(code, 0, "kotlinc must reject {unit}");
+        self.normalized(&diagnostics)
+    }
+
+    /// `diagnostics` without `info:` notes, the fixture directory spelled `<fixture>` whether a
+    /// compiler printed it absolute or relative to the working directory.
+    fn normalized(&self, diagnostics: &str) -> String {
+        let absolute = self.dir.to_string_lossy().into_owned();
+        let relative = std::env::current_dir()
+            .ok()
+            .and_then(|cwd| self.dir.strip_prefix(cwd).ok().map(Path::to_path_buf))
+            .map(|dir| dir.to_string_lossy().into_owned());
+        diagnostics
+            .lines()
+            .filter(|line| !line.starts_with("info: "))
+            .map(|line| {
+                let line = line.replace(&absolute, "<fixture>");
+                let line = match &relative {
+                    Some(relative) => line.replace(relative, "<fixture>"),
+                    None => line,
+                };
+                line + "\n"
+            })
+            .collect()
+    }
+
     /// Build `sources` with the krusty binary into `<unit>/krusty`.
     pub fn krusty(
         &self,
@@ -140,11 +185,7 @@ impl PluginFixture {
     ) -> String {
         let (code, diagnostics) = self.run_krusty(unit, sources, classpath, switches);
         assert_eq!(code, Some(1), "krusty must reject {unit}: {diagnostics}");
-        diagnostics
-            .lines()
-            .filter(|line| !line.starts_with("info: "))
-            .map(|line| line.replace(&*self.dir.to_string_lossy(), "<fixture>") + "\n")
-            .collect()
+        self.normalized(&diagnostics)
     }
 
     fn run_krusty(

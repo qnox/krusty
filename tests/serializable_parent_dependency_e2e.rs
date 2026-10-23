@@ -10,7 +10,9 @@
 //! Each compiler builds the library itself, and krusty also compiles against kotlinc's library.
 //!
 //! A superclass whose classfile lacks the generated members (it was compiled without the plugin),
-//! or whose element types carry annotations the record does not describe, declines.
+//! or whose element types carry annotations the record does not describe, declines. kotlinc reads
+//! a library class's own elements by name, so a parent that overrides an inherited element names
+//! it twice; kotlinc rejects its subclasses and krusty declines them.
 
 use super::compiler_plugin_fixture::{
     assert_same_classes, assert_same_classes_and_box, PluginFixture,
@@ -188,6 +190,52 @@ fn a_parent_element_with_a_type_use_serializer_declines() {
     assert_eq!(
         fixture.krusty_rejects("main-on-kotlinc-lib", &sources, &reference_cp, &switches),
         "<fixture>/main-on-kotlinc-lib/src/Main.kt:1:1: error: krusty: this construct is not yet supported by the IR backend\n\
+         krusty: 1 error(s)\n"
+    );
+}
+
+const OVERRIDE_LIBRARY: &[(&str, &str)] = &[(
+    "Over.kt",
+    "package over\n\
+     import kotlinx.serialization.Serializable\n\
+     @Serializable\n\
+     open class Root(open val x: Int)\n\
+     @Serializable\n\
+     open class Over : Root(1) {\n\
+     \x20   override val x: Int get() = 2\n\
+     }\n",
+)];
+
+const OVERRIDE_MAIN: &str = "import kotlinx.serialization.Serializable\n\
+                             @Serializable\n\
+                             class Tip(val y: Int) : over.Over()\n";
+
+/// `Over` compiles, but kotlinc reads its own elements from a library by name: its getter-only
+/// override of `x` makes `x` both inherited and its own, so kotlinc rejects a subclass, and krusty
+/// declines one rather than accept what kotlinc does not.
+#[test]
+fn a_parent_overriding_an_inherited_element_declines() {
+    let (plugin, runtime) = plugin_and_runtime()
+        .expect("the serialization plugin and runtime must be available to this regression");
+    let switches = vec![format!("-Xplugin={}", plugin.display())];
+    let fixture = PluginFixture::new("serializable-parent-override");
+    let reference_lib = fixture.kotlinc("lib", OVERRIDE_LIBRARY, &runtime, &switches);
+    let krusty_lib = fixture.krusty("lib", OVERRIDE_LIBRARY, &runtime, &switches);
+    assert_same_classes(&reference_lib, &krusty_lib);
+    let sources = [("Main.kt", OVERRIDE_MAIN)];
+    let mut reference_cp = runtime.clone();
+    reference_cp.push(reference_lib);
+    assert_eq!(
+        fixture.kotlinc_rejects("main", &sources, &reference_cp, &switches),
+        "<fixture>/main/src/Main.kt:2:1: error: serializable class has a duplicate serial name for property 'x', either in the class itself or in its supertypes.\n\
+         @Serializable\n\
+         ^^^^^^^^^^^^^\n"
+    );
+    let mut krusty_cp = runtime.clone();
+    krusty_cp.push(krusty_lib);
+    assert_eq!(
+        fixture.krusty_rejects("main-krusty", &sources, &krusty_cp, &switches),
+        "<fixture>/main-krusty/src/Main.kt:1:1: error: krusty: this construct is not yet supported by the IR backend\n\
          krusty: 1 error(s)\n"
     );
 }

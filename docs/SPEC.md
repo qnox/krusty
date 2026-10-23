@@ -11470,14 +11470,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   orders them (the property records themselves are not in declaration order), each property's
   metadata types it, and the element is required exactly when it is a primary-constructor parameter
   without a default (a body property, `lateinit` included, is optional). The list names every
-  element in wire order, the inherited ones first, so krusty writes it that way too and reads a
-  class's own elements as the names after the inherited prefix; the superclass's own serializable
-  superclasses come first, transitively. The subclass calls the superclass's public `write$Self`
-  and delegates to its deserialization constructor, whose parameters are the inherited elements.
-  krusty reads the same list (field 18000) and constructor flags, and trusts the annotation only
-  when the classfile has the generated members: a public static `write$Self(self, output,
-  descriptor)` and a public constructor taking the `seen` masks, one value per listed element and
-  the marker. A dependency superclass compiled without the plugin, whose element or element type
+  element in wire order, the inherited ones first, so krusty writes it that way too. The prefix a
+  class inherits is its own serializable superclass's complete wire, derived the same way up the
+  chain, and must match the list; the names after it must each be a property the class itself
+  stores (its metadata names a backing field the classfile has). kotlinc reads a library class's
+  own elements by name, so a class that redeclares an inherited element (a getter-only `override
+  val x`) names it twice, and kotlinc rejects every subclass with "duplicate serial name"; krusty
+  declines such a subclass. The subclass calls the superclass's public `write$Self` and delegates
+  to its deserialization constructor, whose parameters are the inherited elements. krusty reads the
+  same list (field 18000) and constructor flags, and trusts the annotation only when the classfile
+  has the generated members with their exact descriptors: a public static `write$Self(self,
+  output, descriptor)` and a public constructor taking the `seen` masks, each element's
+  deserialization parameter type in wire order, and the marker. A dependency superclass compiled
+  without the plugin, whose element or element type
   carries annotations (`List<@Serializable(with = S::class) Item>` serializes with `S`), that
   publishes no order for its stored properties, or that is generic, declines the file rather than
   guess. (A superclass in another file of the same module is not handled yet and declines too.)

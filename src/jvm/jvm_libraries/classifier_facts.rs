@@ -140,60 +140,101 @@ pub(super) fn serializable_class_elements(
     libraries: &JvmLibraries,
     classifier: TypeName,
 ) -> Option<crate::types::SerializableClassElements> {
+    published_chain(libraries, classifier).map(|chain| chain.record)
+}
+
+/// A published class's record with every element on its wire, inherited ones first.
+struct PublishedChain {
+    record: crate::types::SerializableClassElements,
+    wire: Vec<(Box<str>, Ty)>,
+}
+
+fn published_chain(libraries: &JvmLibraries, classifier: TypeName) -> Option<PublishedChain> {
     let shape = SymbolSource::classifier(libraries, classifier)?;
-    if shape.kind != crate::libraries::TypeKind::Class {
-        return None;
-    }
-    let serializable = type_name("kotlinx/serialization/Serializable");
-    let generated = shape.annotations.iter().any(|annotation| {
-        annotation.annotation == serializable
-            && !annotation.arguments.iter().any(|(name, _)| name == "with")
-    });
-    if !generated {
+    if shape.kind != crate::libraries::TypeKind::Class || !generates_serializer(&shape.annotations)
+    {
         return None;
     }
     let class = libraries.cp.find_name(classifier)?;
     if class.this_class != classifier {
         return None;
     }
+    let any = type_name("kotlin/Any");
+    let superclass = shape
+        .supertype_templates
+        .iter()
+        .copied()
+        .find(|supertype| {
+            supertype
+                .kotlin_class_internal()
+                .and_then(|name| SymbolSource::classifier(libraries, name))
+                .is_some_and(|supertype| supertype.kind == crate::libraries::TypeKind::Class)
+        })
+        .filter(|ty| ty.kotlin_class_internal() != Some(any));
+    // The elements the class inherits are exactly its serializable superclass's wire; a
+    // superclass the plugin did not generate a serializer for contributes none.
+    let mut wire = match superclass {
+        Some(superclass) => {
+            let parent = superclass.kotlin_class_internal()?;
+            let parent_generates = SymbolSource::classifier(libraries, parent)
+                .is_some_and(|parent| generates_serializer(&parent.annotations));
+            if !parent_generates {
+                Vec::new()
+            } else if superclass.type_args().is_empty() {
+                published_chain(libraries, parent)?.wire
+            } else {
+                // A generic parent's elements need its type arguments, which no record carries.
+                return None;
+            }
+        }
+        None => Vec::new(),
+    };
     let meta = &class.meta;
-    // The annotation says the class asked for a generated serializer; only the generated members
-    // themselves say the plugin ran and what they take.
-    if !has_generated_parent_abi(&class.methods, classifier, meta.serial_element_names.len()) {
+    let listed = &meta.serial_element_names;
+    let inherited = wire.len();
+    if listed.len() < inherited
+        || !listed
+            .iter()
+            .zip(&wire)
+            .all(|(element, (name, _))| element.name == *name)
+    {
         return None;
     }
+    // kotlinc reads a library class's own elements as its listed, declared properties, so a
+    // class that redeclares an inherited element (an override) names it twice and kotlinc
+    // rejects every subclass with a duplicate serial name.
+    if meta.class_properties.iter().any(|property| {
+        wire.iter()
+            .any(|(name, _)| property.name.as_str() == &**name)
+    }) {
+        return None;
+    }
+    // A property the class stores itself: its metadata names a backing field the classfile has.
+    let stored = |property: &crate::jvm::metadata::MetaProp| {
+        property.field.as_ref().is_some_and(|field| {
+            class
+                .fields
+                .iter()
+                .any(|candidate| candidate.name == field.name && candidate.descriptor == field.desc)
+        })
+    };
     // Without the list a class with stored properties gives no element order to follow.
-    if meta.serial_element_names.is_empty()
-        && meta
-            .class_properties
-            .iter()
-            .any(|property| property.field.is_some())
-    {
+    if listed.len() == inherited && meta.class_properties.iter().any(stored) {
         return None;
     }
     let primary = meta
         .constructors
         .iter()
         .find(|constructor| constructor.primary);
-    // The list starts with the elements the class inherits, which its superclasses' records
-    // describe; the class declares the rest.
-    let own = meta
-        .serial_element_names
-        .iter()
-        .position(|element| {
-            meta.class_properties
-                .iter()
-                .any(|property| property.name.as_str() == &*element.name)
-        })
-        .unwrap_or(meta.serial_element_names.len());
-    let elements = meta.serial_element_names[own..]
+    let elements = listed[inherited..]
         .iter()
         .map(|element| {
             let name = &element.name;
             let property = meta
                 .class_properties
                 .iter()
-                .find(|property| property.name.as_str() == &**name)?;
+                .find(|property| property.name.as_str() == &**name)
+                .filter(|property| stored(property))?;
             // Annotations on the element or inside its type (a serial name, a serializer of its
             // own) change its wire shape, and this record carries none.
             if property.annotation_method.is_some() || element.annotated_type {
@@ -230,57 +271,65 @@ pub(super) fn serializable_class_elements(
             })
         })
         .collect::<Option<Box<[_]>>>()?;
-    let superclass = shape.supertype_templates.iter().copied().find(|supertype| {
-        supertype
-            .kotlin_class_internal()
-            .and_then(|name| SymbolSource::classifier(libraries, name))
-            .is_some_and(|supertype| supertype.kind == crate::libraries::TypeKind::Class)
-    });
-    let any = type_name("kotlin/Any");
-    Some(crate::types::SerializableClassElements {
-        elements,
-        superclass: superclass.filter(|ty| ty.kotlin_class_internal() != Some(any)),
+    wire.extend(
+        elements
+            .iter()
+            .map(|element| (element.name.clone(), element.ty)),
+    );
+    // The annotation says the class asked for a generated serializer; only the generated members
+    // themselves say the plugin ran and what they take.
+    if !has_generated_parent_abi(&class.methods, classifier, &wire) {
+        return None;
+    }
+    Some(PublishedChain {
+        record: crate::types::SerializableClassElements {
+            elements,
+            superclass,
+        },
+        wire,
     })
 }
 
-/// Whether `methods` hold the members the serialization plugin generates on an inheritable class
-/// that has no type parameters and `elements` serial elements: a public static `write$Self(self,
-/// output, descriptor)` and a public deserialization constructor taking the `seen` masks, one
-/// value per element and the marker.
+/// `@Serializable` without its own `with` serializer: the plugin generates the serializer.
+fn generates_serializer(annotations: &[crate::types::ResolvedAnnotation]) -> bool {
+    let serializable = type_name("kotlinx/serialization/Serializable");
+    annotations.iter().any(|annotation| {
+        annotation.annotation == serializable
+            && !annotation.arguments.iter().any(|(name, _)| name == "with")
+    })
+}
+
+/// Whether `methods` hold exactly the members the serialization plugin generates on an
+/// inheritable class without type parameters whose wire is `wire`: a public static
+/// `write$Self(self, output, descriptor)` and a public deserialization constructor taking the
+/// `seen` masks, each element as the subclass's delegation passes it, and the marker.
 fn has_generated_parent_abi(
     methods: &[crate::jvm::classreader::MethodSig],
     classifier: TypeName,
-    elements: usize,
+    wire: &[(Box<str>, Ty)],
 ) -> bool {
-    const PUBLIC_STATIC: u16 = 0x0001 | 0x0008;
+    const PUBLIC: u16 = 0x0001;
+    const STATIC: u16 = 0x0008;
     let write_self = format!(
         "(L{};Lkotlinx/serialization/encoding/CompositeEncoder;Lkotlinx/serialization/descriptors/SerialDescriptor;)V",
         classifier.render()
     );
-    let has_write_self = methods.iter().any(|method| {
-        method.name == "write$Self"
-            && method.access & PUBLIC_STATIC == PUBLIC_STATIC
-            && method.descriptor == write_self
-    });
-    let masks = elements / 32 + 1;
-    let has_constructor = methods.iter().any(|method| {
-        method.name == "<init>"
-            && method.access & 0x0001 != 0
-            && crate::jvm::names::parse_method_descriptor(&method.descriptor).is_some_and(
-                |(parameters, result)| {
-                    result == "V"
-                        && parameters.len() == masks + elements + 1
-                        && parameters[..masks]
-                            .iter()
-                            .all(|parameter| *parameter == "I")
-                        && parameters.last()
-                            == Some(
-                                &"Lkotlinx/serialization/internal/SerializationConstructorMarker;",
-                            )
-                },
-            )
-    });
-    has_write_self && has_constructor
+    let mut constructor = String::from("(");
+    constructor.push_str(&"I".repeat(wire.len() / 32 + 1));
+    for (_, ty) in wire {
+        constructor.push_str(&crate::jvm::names::type_descriptor(
+            crate::plugins::serialization::deserialization_parameter_ty(*ty),
+        ));
+    }
+    constructor.push_str("Lkotlinx/serialization/internal/SerializationConstructorMarker;)V");
+    let has = |name: &str, access: u16, descriptor: &str| {
+        methods.iter().any(|method| {
+            method.name == name
+                && method.access & access == access
+                && method.descriptor == descriptor
+        })
+    };
+    has("write$Self", PUBLIC | STATIC, &write_self) && has("<init>", PUBLIC, &constructor)
 }
 
 /// Whether `internal` is, transitively, a subtype of `target` (a superclass or implemented interface,
@@ -387,6 +436,63 @@ impl crate::types::ClassifierFactSource for JvmLibraries {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn method(access: u16, name: &str, descriptor: &str) -> crate::jvm::classreader::MethodSig {
+        crate::jvm::classreader::MethodSig {
+            access,
+            name: name.to_string(),
+            descriptor: descriptor.to_string(),
+            signature: None,
+            parameter_nullability: Vec::new(),
+            return_nullability: None,
+            deprecated_hidden: false,
+            deprecated_hidden_since: None,
+            deprecation: None,
+            has_annotation_default: false,
+            annotations: Box::default(),
+        }
+    }
+
+    /// A parent's deserialization constructor counts only when every parameter is what the
+    /// subclass's delegation passes: the right count of masks, elements and marker is not enough
+    /// when an element's descriptor differs.
+    #[test]
+    fn generated_parent_abi_requires_each_element_descriptor() {
+        let classifier = type_name("lib/Base");
+        let write_self = method(
+            0x0001 | 0x0008,
+            "write$Self",
+            "(Llib/Base;Lkotlinx/serialization/encoding/CompositeEncoder;Lkotlinx/serialization/descriptors/SerialDescriptor;)V",
+        );
+        let wire = [
+            (Box::<str>::from("zeta"), Ty::Int),
+            (Box::<str>::from("tags"), Ty::obj("kotlin/collections/List")),
+        ];
+        let constructor = |elements: &str| {
+            method(
+                0x0001,
+                "<init>",
+                &format!(
+                    "(I{elements}Lkotlinx/serialization/internal/SerializationConstructorMarker;)V"
+                ),
+            )
+        };
+        assert!(has_generated_parent_abi(
+            &[write_self.clone(), constructor("ILjava/util/List;")],
+            classifier,
+            &wire,
+        ));
+        assert!(!has_generated_parent_abi(
+            &[write_self.clone(), constructor("ILjava/lang/String;")],
+            classifier,
+            &wire,
+        ));
+        assert!(!has_generated_parent_abi(
+            &[constructor("ILjava/util/List;")],
+            classifier,
+            &wire,
+        ));
+    }
 
     #[derive(Clone, Copy)]
     enum InnerClassFixture {

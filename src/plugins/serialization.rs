@@ -24,6 +24,7 @@ mod external_parent;
 mod external_serializer;
 mod intrinsic_serializer;
 pub use external_parent::ExternalSerializableParents;
+pub(crate) use deserialization_constructor::deserialization_parameter_ty;
 pub(crate) use external_parent::{external_serializable_parents, inherited_element_types};
 pub use external_serializer::ExternalSerializer;
 pub(crate) use external_serializer::{custom_class_serializer, generated_external_serializer};

@@ -652,7 +652,9 @@ fn store_field_default(
 /// every parameter that is not a signed primitive nullable, so a value class is taken as `V?`.
 /// Whether `ty` is a value class is the backend's question: a sibling file's value class may not
 /// be known to this pass when the constructor is declared.
-fn deserialization_parameter_ty(ty: Ty) -> Ty {
+/// The deserialization constructor's parameter type for an element of type `ty`; a provider
+/// authenticating a dependency's constructor expects exactly these.
+pub(crate) fn deserialization_parameter_ty(ty: Ty) -> Ty {
     // An unsigned type is a value class, so it is taken nullable (boxed) like any other.
     if ty.is_jvm_scalar() && !ty.is_unsigned() {
         ty
