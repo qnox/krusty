@@ -498,6 +498,8 @@ mod classreader_e2e;
 mod cli_compiler_plugin_e2e;
 #[path = "cli_dropin_e2e.rs"]
 mod cli_dropin_e2e;
+#[path = "cli_verify_e2e.rs"]
+mod cli_verify_e2e;
 #[path = "closeable_use_receiver_e2e.rs"]
 mod closeable_use_receiver_e2e;
 #[path = "closure_in_class_e2e.rs"]
