@@ -18,6 +18,7 @@
 //! native track keeps. Nothing is ever emitted on a guess.
 
 use crate::compilation_target::CompilationTarget;
+mod dependency_intrinsics;
 mod lower;
 
 use crate::backend::{Artifact, Backend, CheckedIrFile};
@@ -32,6 +33,7 @@ use super::target::NativeTarget;
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct DependencyExport {
     symbol: String,
+    signature: crate::backend::DependencyFunctionSignature,
     member_receiver: Option<crate::backend::DependencyMemberReceiver>,
     singleton_member_receiver: Option<crate::backend::SingletonMemberReceiver>,
     singleton_extension_receiver: Option<crate::backend::SingletonExtensionUnreadReceiver>,
@@ -41,6 +43,7 @@ struct DependencyExport {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct DependencyExportDefinition {
     symbol: String,
+    signature: crate::backend::DependencyFunctionSignature,
     member_receiver: Option<crate::backend::DependencyMemberReceiver>,
 }
 
@@ -167,6 +170,13 @@ impl Backend for CraneliftBackend {
         true
     }
 
+    fn realizes_dependency_intrinsic(
+        &self,
+        operation: crate::backend::BackendCompilerIntrinsic,
+    ) -> bool {
+        dependency_intrinsics::operation_plan(operation).is_some()
+    }
+
     fn lower_ir_file(
         &self,
         mut file: CheckedIrFile<'_>,
@@ -264,10 +274,25 @@ impl Backend for CraneliftBackend {
         // its randomized iteration order or identical inputs would produce different objects.
         exports.sort_unstable_by_key(|(callable, _)| *callable);
         for (callable, identity) in exports {
+            let signature = match crate::backend::DependencyFunctionSignature::from_ir(
+                &file.ir,
+                callable,
+                file.dependency_exports.member_receiver(callable),
+            ) {
+                Ok(signature) => signature,
+                Err(error) => {
+                    diags.error(
+                        crate::diag::Span::new(0, 0),
+                        format!("internal error: {error}"),
+                    );
+                    return Vec::new();
+                }
+            };
             let symbol = format!("kt_klib_export_{}", state.next_dependency_symbol);
             state.next_dependency_symbol += 1;
             let export = DependencyExport {
                 symbol: symbol.clone(),
+                signature: signature.clone(),
                 member_receiver: file.dependency_exports.member_receiver(callable),
                 singleton_member_receiver: file
                     .dependency_exports
@@ -291,6 +316,7 @@ impl Backend for CraneliftBackend {
                 callable,
                 DependencyExportDefinition {
                     symbol,
+                    signature,
                     member_receiver: file.dependency_exports.member_receiver(callable),
                 },
             );

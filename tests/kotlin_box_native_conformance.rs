@@ -154,12 +154,16 @@ impl NativeLane {
             rayon::current_thread_index().unwrap_or(0)
         ));
         if let Err(error) = std::fs::write(&executable, &image) {
-            return Outcome::Failed(format!("writing the executable: {error}"));
+            return Outcome::Harness(format!("writing the executable: {error}"));
         }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755));
+            if let Err(error) =
+                std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+            {
+                return Outcome::Harness(format!("setting executable permissions: {error}"));
+            }
         }
         let outcome = box_lane::run_program(Command::new(&executable).env_clear());
         let _ = std::fs::remove_file(&executable);
@@ -275,38 +279,109 @@ fn kotlin_codegen_box_native_conformance() {
     box_lane::run(&NativeLane { target: host() });
 }
 
-/// Run one case selected by the shared backend-neutral multimodule conformance inventory.
-pub(super) fn run_multimodule_case(case: &super::multimodule_conformance_cases::Case) {
-    if not_applicable(case.source).is_some() {
-        return;
+fn run_native_abi_case(source: &str, stem: &str) -> Outcome {
+    if let Some(reason) = not_applicable(source) {
+        return Outcome::NotApplicable(reason);
     }
-    if let Some(answer) =
-        super::kotlin_native_multimodule_support::kotlin_native_multimodule_box(case.source)
-    {
-        assert_eq!(
-            answer, "OK",
-            "{}: pinned kotlinc-native must run the exact KLIB module graph as OK",
-            case.stem
+    let Some(target) = host() else {
+        return Outcome::Harness("required Native target/KLIB setup is unavailable".into());
+    };
+    let Some(answer) =
+        super::kotlin_native_multimodule_support::kotlin_native_multimodule_box(source)
+    else {
+        return Outcome::Harness(
+            "required pinned kotlinc-native module oracle is unavailable".into(),
         );
-    }
-    run_krusty_multimodule_case(case.source, &format!("native-{}", case.stem));
+    };
+    assert_eq!(
+        answer, "OK",
+        "{}: pinned kotlinc-native must run the exact KLIB module graph as OK",
+        stem
+    );
+    let modules = krusty::conformance::split_modules(source).expect("valid module test shape");
+    let units = krusty::conformance::module_units(&modules);
+    let lane = NativeLane {
+        target: Some(target),
+    };
+    lane.compile_modules_and_run(
+        &std::env::temp_dir(),
+        &format!("native-{stem}"),
+        &units,
+        source,
+    )
 }
 
-fn run_krusty_multimodule_case(src: &str, stem: &str) {
+/// A required inline dependency function whose body cannot become a template rejects its caller:
+/// it is never compiled as a direct call of the dependency function.
+// PLATFORM-SPECIFIC: Native expands required KLIB inline bodies in common IR; JVM uses bytecode.
+#[test]
+fn native_a_declined_required_inline_body_rejects_the_caller() {
+    let case = super::dependency_template_rejections::DECLINED_REQUIRED_INLINE_BODY;
+    super::box_reference_classes::checked_box(case.source, case.stem)
+        .expect("pinned kotlinc must run the required-inline rejection fixture");
+    let Some(target) = host() else {
+        if std::env::var_os("KRUSTY_REQUIRE_NATIVE_CONFORMANCE").is_some() {
+            panic!(
+                "{}: required Native target/KLIB setup is unavailable",
+                case.stem
+            );
+        }
+        return;
+    };
+    let modules = krusty::conformance::split_modules(case.source).expect("valid module test shape");
+    let units = krusty::conformance::module_units(&modules);
+    let lane = NativeLane {
+        target: Some(target),
+    };
+    let outcome =
+        lane.compile_modules_and_run(&std::env::temp_dir(), case.stem, &units, case.source);
+    assert!(
+        matches!(&outcome, Outcome::Frontend(message)
+            if super::dependency_template_rejections::required_inline_rejection(message).is_some()),
+        "{}: {outcome:?}",
+        case.stem
+    );
+}
+
+/// A required stdlib inline function whose template declines rejects its caller.
+// PLATFORM-SPECIFIC: this tests the Native KLIB template-decline contract, not Kotlin behavior.
+#[test]
+fn native_a_declined_required_stdlib_template_rejects_the_caller() {
+    super::dependency_template_rejections::verify_declined_stdlib_source_with_kotlinc();
+    let src = super::dependency_template_rejections::DECLINED_STDLIB_INLINE_BODY;
+    let stem = "declinedRequiredStdlibTemplate";
     let Some(target) = host() else {
         if std::env::var_os("KRUSTY_REQUIRE_NATIVE_CONFORMANCE").is_some() {
             panic!("{stem}: required Native target/KLIB setup is unavailable");
         }
         return;
     };
-    let modules = krusty::conformance::split_modules(src).expect("valid module test shape");
-    let units = krusty::conformance::module_units(&modules);
     let lane = NativeLane {
         target: Some(target),
     };
+    let outcome = lane.compile_and_run(
+        &std::env::temp_dir(),
+        stem,
+        &[(format!("{stem}.kt"), src.to_string())],
+        src,
+    );
+    assert!(
+        matches!(&outcome, Outcome::Frontend(message)
+            if super::dependency_template_rejections::required_inline_rejection(message).is_some()),
+        "{stem}: {outcome:?}"
+    );
+}
+
+#[test]
+fn native_module_abi_symbols_keep_same_named_internal_classifiers_distinct() {
+    // PLATFORM-SPECIFIC: Native value-class syntax and module-qualified runtime/box/unbox symbols.
+    let source = "// TARGET_BACKEND: NATIVE\n\
+                 // MODULE: left\npackage shared\ninternal class Token(val value: String)\ninternal value class Packed(val value: String)\n\
+                 // MODULE: right\npackage shared\ninternal class Token(val value: String)\ninternal value class Packed(val value: String)\n\
+                 // MODULE: main(left, right)\nfun box() = \"OK\"\n";
     assert_eq!(
-        lane.compile_modules_and_run(&std::env::temp_dir(), stem, &units, src),
+        run_native_abi_case(source, "multimoduleNativeAbiSymbols"),
         Outcome::Pass,
-        "{stem}: Native must run the exact separately analyzed module graph"
+        "Native ABI identities must remain distinct across the exact module graph"
     );
 }

@@ -83,6 +83,7 @@ pub struct BackendCallableFact {
     pub nonvirtual_realization: Option<Box<NonvirtualCallRealization>>,
     pub overridden_call_realizations: Box<[crate::libraries::OverriddenCallRealization]>,
     pub generic_sig: Option<Box<GenericSig>>,
+    pub reified_type_parameter_ordinals: Box<[u32]>,
     /// Exact serialized-IR identity the provider published for this declaration, if any.
     pub declaration_signature: Option<KlibDeclarationSignature>,
     /// Exact KLIB module and declaration identity for target linkage, if this declaration came
@@ -92,6 +93,12 @@ pub struct BackendCallableFact {
     pub direct_c_function: Option<DirectCFunction>,
     /// Frozen KLIB-only receiver contract for an associated companion extension body.
     pub(crate) klib_body_companion_receiver: Option<KlibBodyCompanionReceiver>,
+    pub(crate) klib_body_type_parameters: Box<[Ty]>,
+    pub(crate) klib_body_declaration_modifiers:
+        Option<crate::libraries::KlibBodyDeclarationModifiers>,
+    pub(crate) klib_body_class_contract: Option<crate::libraries::KlibBodyClassContract>,
+    pub(crate) klib_body_vararg_index: Option<usize>,
+    pub(crate) klib_body_parameter_defaults: Option<crate::libraries::ParamFlags>,
 }
 
 impl BackendCallableFact {
@@ -231,16 +238,29 @@ impl BackendCallableFact {
         singleton_dispatch: Option<SingletonDispatch>,
     ) -> Option<crate::libraries::KlibBodyCallable<'_>> {
         crate::libraries::KlibBodyCallable::new(
-            &self.name,
-            self.kind,
-            &self.params,
-            self.ret,
-            &self.parameter_identities,
-            self.context_count,
-            self.compiler_intrinsic,
-            singleton_dispatch.map(SingletonDispatch::ty),
-            singleton_dispatch.map(|dispatch| dispatch.classifier),
+            crate::libraries::KlibBodyCallableShape {
+                name: &self.name,
+                kind: self.kind,
+                visibility: self.visibility,
+                semantic_role: self.semantic_role,
+                params: &self.params,
+                ret: self.ret,
+                parameter_identities: &self.parameter_identities,
+                context_count: self.context_count,
+                vararg_index: self.klib_body_vararg_index,
+                parameter_defaults: self.klib_body_parameter_defaults,
+                generic_signature: self.generic_sig.as_deref(),
+                type_parameters: &self.klib_body_type_parameters,
+                reified_type_parameter_ordinals: &self.reified_type_parameter_ordinals,
+                compiler_intrinsic: self
+                    .compiler_intrinsic
+                    .or(self.member_realization.compiler_intrinsic()),
+                declaration_modifiers: self.klib_body_declaration_modifiers,
+                class_contract: self.klib_body_class_contract.as_ref(),
+            },
+            singleton_dispatch,
             self.klib_body_companion_receiver.as_ref(),
+            self.declaration_owner,
             self.dependency_callable.as_ref(),
         )
     }
@@ -250,10 +270,9 @@ impl BackendCallableFact {
 mod tests {
     use super::*;
 
-    #[test]
-    fn dependency_extensions_keep_their_provider_receiver_coordinate() {
+    fn extension_fact() -> BackendCallableFact {
         let params = vec![Ty::String, Ty::Float, Ty::Int];
-        let mut fact = BackendCallableFact {
+        BackendCallableFact {
             name: "sample".to_string(),
             physical_name: None,
             reflection_name: None,
@@ -268,7 +287,7 @@ mod tests {
             overridden_declarations: Box::new([]),
             member_realization: MemberRealization::Dispatch,
             params: params.clone(),
-            physical_params: params.clone(),
+            physical_params: params,
             parameter_identities: Box::new([]),
             physical_parameter_plan: None,
             ret: Ty::Unit,
@@ -284,11 +303,23 @@ mod tests {
             nonvirtual_realization: None,
             overridden_call_realizations: Box::new([]),
             generic_sig: None,
+            reified_type_parameter_ordinals: Box::new([]),
             declaration_signature: None,
             dependency_callable: None,
             direct_c_function: None,
             klib_body_companion_receiver: None,
-        };
+            klib_body_type_parameters: Box::new([]),
+            klib_body_declaration_modifiers: None,
+            klib_body_class_contract: None,
+            klib_body_vararg_index: None,
+            klib_body_parameter_defaults: None,
+        }
+    }
+
+    #[test]
+    fn dependency_extensions_keep_their_provider_receiver_coordinate() {
+        let mut fact = extension_fact();
+        let params = fact.params.clone();
         assert!(fact.matches_dependency_body_call(&params, Some(1), false));
         assert!(!fact.matches_dependency_body_call(&params, Some(0), false));
         assert!(!fact.matches_dependency_body_call(&params, Some(1), true));
@@ -298,6 +329,163 @@ mod tests {
         assert!(fact.matches_dependency_body_call(&params, Some(1), true));
         assert!(!fact.matches_dependency_body_call(&params, Some(0), true));
         assert!(!fact.matches_dependency_body_call(&params, Some(1), false));
+    }
+
+    fn accessor_facts() -> CheckedBackendCallables {
+        let mut facts = CheckedBackendCallables::default();
+        let mut getter = extension_fact();
+        getter.params.pop();
+        getter.ret = Ty::Long;
+        facts
+            .callables
+            .insert(ExternalCallableId::from_raw(1), getter);
+        facts
+            .callables
+            .insert(ExternalCallableId::from_raw(2), extension_fact());
+        facts.properties.insert(
+            ExternalPropertyId::from_raw(0),
+            BackendPropertyFact {
+                name: "selected".into(),
+                getter: ExternalCallableId::from_raw(1),
+                setter: Some(ExternalCallableId::from_raw(2)),
+                owner: TypeName::ROOT,
+                result: Ty::Long,
+                declares_value_class_storage: false,
+                compile_time_constant: None,
+            },
+        );
+        facts
+    }
+
+    fn property_read(receiver: Option<u32>) -> crate::ir::IrCheckedOperation {
+        crate::ir::IrCheckedOperation::ExternalPropertyRead {
+            target: ExternalPropertyId::from_raw(0),
+            dispatch: crate::ir::IrPropertyDispatch::Ordinary,
+            receiver,
+            arguments: if receiver.is_some() {
+                vec![20]
+            } else {
+                vec![20, 10]
+            },
+            parameters: if receiver.is_some() {
+                vec![Ty::String]
+            } else {
+                vec![Ty::String, Ty::Float]
+            },
+            result: Ty::Long,
+            source_receiver: None,
+        }
+    }
+
+    #[test]
+    fn dependency_accessors_retain_exact_targets_and_receiver_coordinates() {
+        let facts = accessor_facts();
+        for (receiver, expected_position) in [(Some(10), None), (None, Some(1))] {
+            let operation = property_read(receiver);
+            let access = facts.dependency_accessor(&operation).unwrap();
+            assert_eq!(access.target, ExternalCallableId::from_raw(1));
+            assert_eq!(access.receiver, receiver);
+            let crate::ir::Callee::External {
+                target,
+                params,
+                ret,
+                substitutions,
+                defaults,
+                extension_receiver_parameter,
+                default_provider,
+            } = access.callee().unwrap()
+            else {
+                panic!("an exact external getter")
+            };
+            assert_eq!(target, ExternalCallableId::from_raw(1));
+            assert_eq!(
+                params,
+                if receiver.is_some() {
+                    vec![Ty::String]
+                } else {
+                    vec![Ty::String, Ty::Float]
+                }
+            );
+            assert_eq!(ret, Ty::Long);
+            assert!(substitutions.is_empty());
+            assert!(defaults.is_empty());
+            assert_eq!(default_provider, None);
+            assert_eq!(extension_receiver_parameter, expected_position);
+        }
+        let operation = crate::ir::IrCheckedOperation::ExternalPropertyWrite {
+            target: ExternalPropertyId::from_raw(0),
+            dispatch: crate::ir::IrPropertyDispatch::Ordinary,
+            receiver: Some(10),
+            arguments: vec![20, 30],
+            parameters: vec![Ty::String, Ty::Int],
+            result: Ty::Unit,
+            source_receiver: None,
+        };
+        let access = facts.dependency_accessor(&operation).unwrap();
+        assert_eq!(access.target, ExternalCallableId::from_raw(2));
+        assert_eq!(access.arguments, [20, 30]);
+        assert!(
+            matches!(access.callee().unwrap(), crate::ir::Callee::External {
+            target, ret: Ty::Unit, extension_receiver_parameter: None, ..
+        } if target == ExternalCallableId::from_raw(2))
+        );
+    }
+
+    #[test]
+    fn dependency_accessors_do_not_invent_setters_or_generic_substitutions() {
+        let mut facts = accessor_facts();
+        let mut operation = property_read(Some(10));
+        if let crate::ir::IrCheckedOperation::ExternalPropertyRead { dispatch, .. } = &mut operation
+        {
+            *dispatch = crate::ir::IrPropertyDispatch::Super {
+                owner: TypeName::ROOT,
+                interface: false,
+            };
+        }
+        assert_eq!(
+            facts
+                .dependency_accessor(&operation)
+                .unwrap()
+                .callee()
+                .unwrap_err(),
+            "a dependency accessor export called through super"
+        );
+        facts
+            .callables
+            .get_mut(&ExternalCallableId::from_raw(1))
+            .unwrap()
+            .generic_sig = Some(Box::new(GenericSig {
+            formals: vec!["owned-T".to_owned()],
+            formal_bounds: vec![Vec::new()],
+            receiver: None,
+            params: Vec::new(),
+            ret: Ty::Long,
+            return_policy: Default::default(),
+        }));
+        let operation = property_read(Some(10));
+        assert_eq!(
+            facts
+                .dependency_accessor(&operation)
+                .unwrap()
+                .callee()
+                .unwrap_err(),
+            "a dependency property without checked generic substitutions"
+        );
+        facts
+            .properties
+            .get_mut(&ExternalPropertyId::from_raw(0))
+            .unwrap()
+            .setter = None;
+        let operation = crate::ir::IrCheckedOperation::ExternalPropertyWrite {
+            target: ExternalPropertyId::from_raw(0),
+            dispatch: crate::ir::IrPropertyDispatch::Ordinary,
+            receiver: Some(10),
+            arguments: vec![20, 30],
+            parameters: vec![Ty::String, Ty::Int],
+            result: Ty::Unit,
+            source_receiver: None,
+        };
+        assert!(facts.dependency_accessor(&operation).is_none());
     }
 
     #[test]
@@ -336,10 +524,16 @@ mod tests {
             nonvirtual_realization: None,
             overridden_call_realizations: Box::new([]),
             generic_sig: None,
+            reified_type_parameter_ordinals: Box::new([]),
             declaration_signature: None,
             dependency_callable: None,
             direct_c_function: None,
             klib_body_companion_receiver: None,
+            klib_body_type_parameters: Box::new([]),
+            klib_body_declaration_modifiers: None,
+            klib_body_class_contract: None,
+            klib_body_vararg_index: None,
+            klib_body_parameter_defaults: None,
         };
         assert!(fact.matches_dependency_body_call(&[Ty::Int], None, true));
         assert!(!fact.matches_dependency_body_call(&[Ty::Int], None, false));
@@ -391,6 +585,16 @@ pub struct CheckedBackendCallables {
 }
 
 impl CheckedBackendCallables {
+    /// The exact declaration view for one emitted edge, retaining only its checked singleton.
+    pub(crate) fn klib_body_callable_at(
+        &self,
+        expression: crate::ir::ExprId,
+        target: ExternalCallableId,
+    ) -> Option<crate::libraries::KlibBodyCallable<'_>> {
+        self.callable(target)?
+            .klib_body_callable_with_singleton(self.singleton_dispatch(expression))
+    }
+
     /// Selected KLIB callables in provider-identity order. Dependency-body lowering consumes this
     /// frozen semantic view; deterministic ordering keeps generated support-unit symbols stable.
     pub(crate) fn klib_body_callables(&self) -> Vec<crate::libraries::KlibBodyCallable<'_>> {
@@ -543,6 +747,11 @@ impl CheckedBackendCallables {
                 let dependency_callable = realization.dependency_callable;
                 let direct_c_function = realization.direct_c_function;
                 let klib_body_companion_receiver = realization.klib_body_companion_receiver;
+                let klib_body_type_parameters = realization.klib_body_type_parameters;
+                let klib_body_declaration_modifiers = realization.klib_body_declaration_modifiers;
+                let klib_body_class_contract = realization.klib_body_class_contract;
+                let klib_body_vararg_index = realization.klib_body_vararg_index;
+                let klib_body_parameter_defaults = realization.klib_body_parameter_defaults;
                 let callable = realization.callable;
                 slot.insert(BackendCallableFact {
                     name: callable.name,
@@ -575,10 +784,16 @@ impl CheckedBackendCallables {
                     nonvirtual_realization: callable.nonvirtual_realization,
                     overridden_call_realizations: callable.overridden_call_realizations,
                     generic_sig: callable.generic_sig,
+                    reified_type_parameter_ordinals: callable.reified_type_parameter_ordinals,
                     declaration_signature,
                     dependency_callable,
                     direct_c_function,
                     klib_body_companion_receiver,
+                    klib_body_type_parameters,
+                    klib_body_declaration_modifiers,
+                    klib_body_class_contract,
+                    klib_body_vararg_index,
+                    klib_body_parameter_defaults,
                 })
             }
         };
