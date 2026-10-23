@@ -38,7 +38,6 @@ pub(super) fn declaration_annotations(
 fn property_site_annotations(
     declared: &[ast::AnnotationRef],
     info: &TypeInfo,
-    on_constructor_parameter: bool,
     site: crate::types::PropertyAnnotationSite,
 ) -> crate::ir::DeclarationAnnotations {
     // Kotlin lowers explicit use-site applications before annotations whose declaration target
@@ -50,12 +49,11 @@ fn property_site_annotations(
                 return None;
             }
             let applied = info.applied_annotation(annotation)?;
-            let selected = annotation.property_site.or_else(|| {
-                applied
-                    .targets
-                    .property_declaration_site(on_constructor_parameter)
-            });
-            (selected == Some(site)).then_some(applied)
+            applied
+                .property_sites
+                .expect("frontend recorded the property application's selected destinations")
+                .contains(site)
+                .then_some(applied)
         })
     });
     let suppressed_source_application = site == crate::types::PropertyAnnotationSite::Property
@@ -166,7 +164,6 @@ pub(super) fn companion_block_property_annotations(
     property_site_annotations(
         &property.annotations,
         info,
-        false,
         crate::types::PropertyAnnotationSite::Property,
     )
 }
@@ -181,7 +178,6 @@ pub(super) fn companion_block_field_annotations(
     property_site_annotations(
         &property.annotations,
         info,
-        false,
         crate::types::PropertyAnnotationSite::Field,
     )
 }
@@ -215,20 +211,16 @@ pub(super) fn class_field_annotations(
         .props
         .iter()
         .filter(|parameter| parameter.is_property)
-        .map(|parameter| (&parameter.name, &parameter.annotations, true))
+        .map(|parameter| (&parameter.name, &parameter.annotations))
         .chain(
             class
                 .body_props
                 .iter()
-                .map(|property| (&property.name, &property.annotations, false)),
+                .map(|property| (&property.name, &property.annotations)),
         );
-    for (name, declared, on_constructor_parameter) in declarations {
-        let annotations = property_site_annotations(
-            declared,
-            info,
-            on_constructor_parameter,
-            crate::types::PropertyAnnotationSite::Field,
-        );
+    for (name, declared) in declarations {
+        let annotations =
+            property_site_annotations(declared, info, crate::types::PropertyAnnotationSite::Field);
         if annotations.declares_annotations() {
             out.push(crate::ir::FieldAnnotations {
                 field: name.clone(),
@@ -260,20 +252,17 @@ pub(super) fn class_property_annotations(
         .props
         .iter()
         .filter(|parameter| parameter.is_property)
-        .map(|parameter| (&parameter.name, &parameter.annotations, true))
+        .map(|parameter| (&parameter.name, &parameter.annotations))
         .chain(
             class
                 .body_props
                 .iter()
-                .map(|property| (&property.name, &property.annotations, false)),
+                .map(|property| (&property.name, &property.annotations)),
         );
-    for ((name, declared, on_constructor_parameter), &source_order) in
-        declarations.zip(source_orders)
-    {
+    for ((name, declared), &source_order) in declarations.zip(source_orders) {
         let annotations = property_site_annotations(
             declared,
             info,
-            on_constructor_parameter,
             crate::types::PropertyAnnotationSite::Property,
         );
         if let Some(source_order) = source_order.filter(|_| annotations.declares_annotations()) {
@@ -300,7 +289,6 @@ pub(super) fn primary_constructor_parameter_annotations(
                 property_site_annotations(
                     &parameter.annotations,
                     info,
-                    true,
                     crate::types::PropertyAnnotationSite::ValueParameter,
                 )
             } else {

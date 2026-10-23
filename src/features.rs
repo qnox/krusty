@@ -198,6 +198,7 @@ const MODELED_FEATURES: &[&str] = &[
     "NullableNothingInReifiedPosition",
     "PrioritizedEnumEntries",
     "ProhibitIntersectionReifiedTypeParameter",
+    "PropertyParamAnnotationDefaultTargetMode",
     "ReportDeprecatedCompanionInDelegation",
     "ReportDeprecationsOfClassifiersInImplicitInvokes",
     "ReportDeprecationsOfOuterImportedClasses",

@@ -13,9 +13,12 @@ mod inline_class;
 mod property_declarations;
 mod property_identity;
 mod realization_facts;
+mod serialization_program_order;
+pub use serialization_program_order::SerialElementName;
 mod since_kotlin;
 mod string_table;
 mod type_aliases;
+mod type_parameter_bodies;
 mod value_parameter;
 
 pub use function::{MetaFn, MfnFlags};
@@ -50,6 +53,7 @@ use crate::metadata::decode::{
     ParsedProjection, ParsedTypeArgument, ParsedTypeParam, ParsedValueParam, ParsedVariance, Pb,
 };
 use crate::types::{intern, type_name, Ty, TyKind, TypeName, Visibility};
+use type_parameter_bodies::type_param_bodies;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MetadataDecodeError {
@@ -1134,6 +1138,8 @@ pub struct KotlinMeta {
     /// `Class.flags.CLASS_KIND`. Present only for class metadata; package/file metadata has no
     /// classifier kind.
     pub class_kind: Option<TypeKind>,
+    /// `Class.flags` modality; `None` without class metadata.
+    pub class_modality: Option<crate::metadata::semantic::KotlinModality>,
     /// `Flags.IS_FUN_INTERFACE` from the Kotlin `Class.flags` word. Kotlin interfaces participate in
     /// SAM conversion only when this declaration flag is present; structural single-method detection
     /// remains valid for Java interfaces, which have no Kotlin metadata.
@@ -1148,6 +1154,8 @@ pub struct KotlinMeta {
     /// only its JVM realization and must never be unioned into this list.
     pub class_type_parameters: crate::types::TypeParameters<Vec<Vec<Ty>>>,
     pub class_supertypes: Vec<Ty>,
+    /// The typealias each of [`Self::class_supertypes`] was written as, parallel to it.
+    pub class_supertype_aliases: Vec<Option<TypeName>>,
     /// `Class.function` (field 9) — member/extension functions of a class kind. `Arc` slices so a
     /// consumer cache shares the decode instead of copying it.
     pub class_functions: std::sync::Arc<[MetaFn]>,
@@ -1175,6 +1183,9 @@ pub struct KotlinMeta {
     pub companion_name: Option<String>,
     /// `Class.sealedSubclassFqName` (field 16), as JVM internal names.
     pub sealed_subclasses: Vec<String>,
+    /// The serialization plugin's `propertiesNamesInProgramOrder` (field 18000): an open or
+    /// abstract serializable class's serial elements in wire order, inherited ones first.
+    pub serial_element_names: Box<[SerialElementName]>,
     /// The `@JvmInline value class` shape (fields 17-19), if this is one.
     pub inline: Option<InlineClass>,
     /// For a MULTI-FILE FACADE (`@Metadata(k = 4)`): the part class internal names its `d1` lists —
@@ -1192,12 +1203,14 @@ impl Default for KotlinMeta {
     fn default() -> Self {
         KotlinMeta {
             class_visibility: None,
+            class_modality: None,
             class_kind: None,
             is_fun_interface: false,
             is_companion_object: false,
             is_data: false,
             class_type_parameters: crate::types::TypeParameters::default(),
             class_supertypes: Vec::new(),
+            class_supertype_aliases: Vec::new(),
             class_functions: std::sync::Arc::from([]),
             package_functions: std::sync::Arc::from([]),
             class_properties: std::sync::Arc::from([]),
@@ -1209,6 +1222,7 @@ impl Default for KotlinMeta {
             class_qualified_name: None,
             companion_name: None,
             sealed_subclasses: Vec::new(),
+            serial_element_names: Box::default(),
             inline: None,
             multifile_parts: Vec::new(),
             package: None,
@@ -1335,11 +1349,12 @@ pub fn decode_metadata_within(
     } else {
         Vec::new()
     };
-    let (class_type_params, class_type_param_bounds, class_supertypes) = if k == Some(1) {
-        decode_class_signature(&ctx)?
-    } else {
-        (Vec::new(), Vec::new(), Vec::new())
-    };
+    let (class_type_params, class_type_param_bounds, class_supertypes, class_supertype_aliases) =
+        if k == Some(1) {
+            decode_class_signature(&ctx)?
+        } else {
+            Default::default()
+        };
     let class_type_param_variances = if k == Some(1) {
         type_param_bodies(ctx.msg, CLASS_TYPE_PARAMETER_FIELD)
             .into_iter()
@@ -1385,6 +1400,7 @@ pub fn decode_metadata_within(
             .map(flags_visibility)
             .map(crate::types::Visibility::from_metadata),
         class_kind: class_flags.map(class_identity::class_kind),
+        class_modality: class_flags.map(crate::metadata::semantic::declaration_modality),
         is_fun_interface: class_flags.is_some_and(|flags| flags & (1u64 << 14) != 0),
         is_companion_object: class_flags.is_some_and(|flags| (flags >> 6) & 0x7 == 6),
         is_data: class_flags.is_some_and(crate::metadata::semantic::class_is_data),
@@ -1394,6 +1410,7 @@ pub fn decode_metadata_within(
             class_type_param_variances,
         ),
         class_supertypes,
+        class_supertype_aliases,
         class_functions,
         package_functions: realizations
             .stamp_functions(decode_functions(&ctx, 3, &[], &[], None)?)
@@ -1412,7 +1429,8 @@ pub fn decode_metadata_within(
             None
         },
         companion_name: class_identity::companion_name(&ctx),
-        sealed_subclasses: sealed_subclasses(&ctx),
+        sealed_subclasses: class_identity::sealed_subclasses(&ctx),
+        serial_element_names: serialization_program_order::serial_element_names(&ctx),
         inline: inline_class::inline_class(&ctx),
         multifile_parts: Vec::new(),
         package,
@@ -1420,9 +1438,9 @@ pub fn decode_metadata_within(
 }
 
 /// What [`decode_class_signature`] reads off a Class proto: the class's own type-parameter NAMES,
-/// each one's declared BOUNDS (one inner `Vec` per parameter, in the same order), and the direct
-/// applied SUPERTYPES.
-type ClassSignature = (Vec<String>, Vec<Vec<Ty>>, Vec<Ty>);
+/// each one's declared BOUNDS (one inner `Vec` per parameter, in the same order), the direct
+/// applied SUPERTYPES, and the typealias each supertype was written as.
+type ClassSignature = (Vec<String>, Vec<Vec<Ty>>, Vec<Ty>, Vec<Option<TypeName>>);
 
 /// Decode a Kotlin class's own type parameters and direct applied supertypes from the Class proto.
 /// Both inline `supertype` (field 6) and table-backed `supertype_id` (field 2) are valid encodings.
@@ -1478,7 +1496,7 @@ fn decode_class_signature(ctx: &MetaCtx<'_>) -> MetadataResult<ClassSignature> {
         ctx.d2,
         table,
     ) else {
-        return Ok((Vec::new(), Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new()));
     };
 
     let decode = |body| {
@@ -1493,12 +1511,13 @@ fn decode_class_signature(ctx: &MetaCtx<'_>) -> MetadataResult<ClassSignature> {
             0,
         )
     };
-    let supertypes = inline_supertypes
+    let spelled = |body| type_aliases::parse_type_alias_name(body, ctx.records, ctx.d2);
+    let (supertypes, supertype_aliases) = inline_supertypes
         .into_iter()
-        .filter_map(decode)
+        .filter_map(|body| Some((decode(body)?, spelled(body))))
         .chain(supertype_ids.into_iter().filter_map(|id| {
             let (body, nullable) = type_table_entry(table?, id as usize)?;
-            decode_metadata_type(
+            let ty = decode_metadata_type(
                 body,
                 table,
                 ctx.records,
@@ -1507,14 +1526,16 @@ fn decode_class_signature(ctx: &MetaCtx<'_>) -> MetadataResult<ClassSignature> {
                 &parameters.erasure_bounds,
                 nullable,
                 0,
-            )
+            )?;
+            Some((ty, spelled(body)))
         }))
-        .collect();
+        .unzip();
     let own = enclosing.len();
     Ok((
         parameters.formals[own..].to_vec(),
         parameters.formal_bounds[own..].to_vec(),
         supertypes,
+        supertype_aliases,
     ))
 }
 
@@ -2282,60 +2303,6 @@ fn ctor_params(ctx: &MetaCtx) -> MetadataResult<Vec<MetaConstructor>> {
     Ok(out)
 }
 
-/// The direct subclasses of a `sealed` class, from its `@Metadata` — `Class.sealedSubclassFqName` (field
-/// 16, a repeated `QualifiedName` index). Returned as JVM internal names (`lib/D$A`), so an exhaustive
-/// `when` over a CLASSPATH sealed subject can be proven exhaustive the same way a same-module one is. Only
-/// a sealed class records these, so a non-empty result also implies `is_sealed`.
-fn sealed_subclasses(ctx: &MetaCtx) -> Vec<String> {
-    let records = ctx.records;
-    let d2 = ctx.d2;
-    let mut out = Vec::new();
-    let push_id = |id: usize, out: &mut Vec<String>| {
-        if let Some(name) = resolve_class_name(records, d2, id) {
-            // A metadata class name spells a nested type with `.` (`lib/D.A`) and the package with `/`;
-            // the JVM internal name uses `$` for nesting (`lib/D$A`). Convert only after the last `/`.
-            let internal = match name.rfind('/') {
-                Some(slash) => {
-                    format!("{}{}", &name[..=slash], name[slash + 1..].replace('.', "$"))
-                }
-                None => name.replace('.', "$"),
-            };
-            if !out.contains(&internal) {
-                out.push(internal);
-            }
-        }
-    };
-    let mut pb = Pb::new(ctx.msg);
-    while !pb.at_end() {
-        let Some(tag) = pb.varint() else { break };
-        match (tag >> 3, tag & 7) {
-            // sealedSubclassFqName = 16, unpacked repeated varint.
-            (16, 0) => {
-                if let Some(id) = pb.varint() {
-                    push_id(id as usize, &mut out);
-                }
-            }
-            // packed repeated form.
-            (16, 2) => {
-                if let Some(n) = pb.varint() {
-                    if let Some(bytes) = pb.bytes(n as usize) {
-                        let mut ip = Pb::new(bytes);
-                        while let Some(id) = ip.varint() {
-                            push_id(id as usize, &mut out);
-                        }
-                    }
-                }
-            }
-            (_, w) => {
-                if pb.skip(w).is_none() {
-                    break;
-                }
-            }
-        }
-    }
-    out
-}
-
 /// The `index`-th `Type` in a `TypeTable` message (field 1, repeated), plus whether the table's
 /// `firstNullable` (field 2) marks it nullable: kotlinc stores a nullable variant of type N at
 /// `firstNullable + k` positions, flagging every entry at `index >= firstNullable` nullable.
@@ -2591,29 +2558,6 @@ const BUILTIN_TYPE_DEPTH_LIMIT: u32 = 16;
 const CLASS_TYPE_PARAMETER_FIELD: u64 = 5;
 /// `TypeAlias.typeParameter` — the alias's OWN parameters, which its expansion refers to.
 const TYPE_ALIAS_TYPE_PARAMETER_FIELD: u64 = 3;
-/// Collect a message's repeated `type_parameter` sub-message bodies. The field number differs by
-/// carrier — callers pass the schema-owned field for their declaration kind.
-fn type_param_bodies(body: &[u8], field: u64) -> Vec<&[u8]> {
-    let mut pb = Pb::new(body);
-    let mut out = Vec::new();
-    while !pb.at_end() {
-        let Some(tag) = pb.varint() else { break };
-        match (tag >> 3, tag & 7) {
-            (f, 2) if f == field => {
-                let Some(n) = pb.varint() else { break };
-                let Some(b) = pb.bytes(n as usize) else { break };
-                out.push(b);
-            }
-            (_, w) => {
-                if pb.skip(w).is_none() {
-                    break;
-                }
-            }
-        }
-    }
-    out
-}
-
 /// Parse a `.kotlin_builtins` resource → every declared `Class` (qualified name → its supertypes +
 /// members). ONE walk over the fragment's `StringTable`/`QualifiedNameTable`/`Class` tables; each
 /// class's supertypes and member types are resolved through its `type_table` (field 30 → `Type

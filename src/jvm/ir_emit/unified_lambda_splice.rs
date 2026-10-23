@@ -217,7 +217,6 @@ impl Emitter<'_> {
         &mut self,
         call: &bytecode_inline_call::ClasspathInlineCall<'_, '_>,
         positions: &[usize],
-        route: bytecode_inline_call::SpliceReason,
         base: u16,
         code: &mut CodeBuilder,
     ) -> InlineCallOutcome {
@@ -230,7 +229,11 @@ impl Emitter<'_> {
             Ok((params, UnifiedSplice::Planned(plan))) => (params, plan),
             Ok((_, UnifiedSplice::UnsupportedHost))
                 if !call.target.inline_only
-                    && !matches!(route, bytecode_inline_call::SpliceReason::NonLocalJump) =>
+                    && !positions.iter().any(|&position| {
+                        call.args
+                            .get(position)
+                            .is_some_and(|&argument| self.literal_jumps_out(argument))
+                    }) =>
             {
                 crate::trace_compiler!(
                     "splice",

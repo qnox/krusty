@@ -162,6 +162,15 @@ pub trait SymbolSource {
         None
     }
 
+    /// The serial elements a dependency's `@Serializable` class publishes for subclasses compiled
+    /// apart from it; see [`crate::types::ClassifierFactSource::serializable_class_elements`].
+    fn serializable_class_elements(
+        &self,
+        _classifier: TypeName,
+    ) -> Option<crate::types::SerializableClassElements> {
+        None
+    }
+
     /// The annotations kotlinc's sam-with-receiver plugin is configured with: an interface carrying
     /// one directly converts a lambda with its abstract method's first parameter as the receiver.
     /// A compilation fact, published by the current-module provider.
@@ -230,6 +239,15 @@ impl SymbolSource for CompositeSource<'_> {
         self.children
             .iter()
             .find_map(|child| child.generated_serializer_singleton(classifier))
+    }
+
+    fn serializable_class_elements(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::types::SerializableClassElements> {
+        self.children
+            .iter()
+            .find_map(|child| child.serializable_class_elements(classifier))
     }
 
     fn sam_with_receiver_annotations(&self) -> &[TypeName] {
@@ -454,6 +472,13 @@ impl SymbolSource for CachedCompositeSource<'_> {
 
     fn generated_serializer_singleton(&self, classifier: TypeName) -> Option<TypeName> {
         self.source.generated_serializer_singleton(classifier)
+    }
+
+    fn serializable_class_elements(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::types::SerializableClassElements> {
+        self.source.serializable_class_elements(classifier)
     }
 
     fn sam_with_receiver_annotations(&self) -> &[TypeName] {

@@ -40,6 +40,9 @@ final class SourceProperty implements KSPropertyDeclaration {
     // The extension receiver; `receiverUndescribed` when it has one krusty could not describe.
     KSTypeReference extensionReceiver;
     boolean receiverUndescribed;
+    SourceAccessor.Getter getter;
+    // Null for a read-only property.
+    SourceAccessor.Setter setter;
 
     SourceProperty(SourceFile file, SourceClass owner, String name, boolean mutable, int line) {
         this.file = file;
@@ -55,12 +58,12 @@ final class SourceProperty implements KSPropertyDeclaration {
 
     @Override
     public KSPropertyGetter getGetter() {
-        throw Nodes.notImplemented("KSPropertyDeclaration.getter");
+        return getter;
     }
 
     @Override
     public KSPropertySetter getSetter() {
-        throw Nodes.notImplemented("KSPropertyDeclaration.setter");
+        return setter;
     }
 
     @Override
