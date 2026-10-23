@@ -547,6 +547,20 @@ pub(super) fn assertion_call(
     Some((symbol, compared))
 }
 
+/// The runtime's box and unbox entry points for a library value class whose box the runtime
+/// provides, as `(box, unbox)`.
+pub(super) fn runtime_value_box(classifier: TypeName) -> Option<(&'static str, &'static str)> {
+    classifier
+        .matches("kotlin/Result")
+        .then_some(("kt_result_box", "kt_result_unbox"))
+}
+
+/// Whether a construction of `classifier` is the value it is given: a value class this target
+/// carries as its value, whose declared constructor stores that value and does nothing else.
+pub(super) fn constructs_as_its_value(classifier: TypeName) -> bool {
+    Ty::obj_name(classifier).is_unsigned() || classifier.matches("kotlin/Result")
+}
+
 /// Whether this names the REIFIED `assertFailsWith`, whose class operand is its type argument.
 ///
 /// Two spellings arrive, because two providers do different things with the same declaration. A
@@ -1639,10 +1653,12 @@ pub(super) fn boxed_step(owner: DeclarationOwner, name: &str, params: &[Ty]) -> 
 ///
 /// A property reference is an object of a type of its own — the generator emits one per property —
 /// so the type written at the site is never the object's, exactly as for a function value. These
-/// markers are what the two have in common.
+/// markers are what the two have in common. A `typeOf` object wears the runtime's one `KTypeImpl`
+/// descriptor, which names the `KType` marker.
 pub(super) fn reflection_type_descriptor(owner: crate::types::TypeName) -> Option<&'static str> {
     [
         ("kotlin/reflect/KCallable", "kt_type_kcallable"),
+        ("kotlin/reflect/KType", "kt_type_ktype"),
         ("kotlin/reflect/KProperty", "kt_type_kproperty"),
         ("kotlin/reflect/KProperty0", "kt_type_kproperty0"),
         ("kotlin/reflect/KProperty1", "kt_type_kproperty1"),
@@ -1923,8 +1939,10 @@ pub(super) fn class_name_accessor(
 /// there is no object, and nothing dereferences it.
 pub(super) fn is_stateless_runtime_object(classifier: crate::types::TypeName) -> bool {
     // The stdlib's standard delegates. `Delegates` declares no state and every member of it this
-    // runtime answers takes its arguments alone.
+    // runtime answers takes its arguments alone. `Result.Companion` is the receiver of the inline
+    // `success` and `failure` an expanded `runCatching` reaches, whose bodies never read it.
     classifier.matches("kotlin/properties/Delegates")
+        || classifier.matches("kotlin/Result$Companion")
 }
 
 /// The runtime entry point answering the companion object of a BUILT-IN type, if this names one.
@@ -2015,6 +2033,8 @@ pub(super) fn runtime_member(signature: FunctionSignature<'_>) -> Option<&'stati
             // A builder's `append` takes one of a dozen overloads on the JVM and one function here:
             // every operand is rendered through its own `toString`, which is the same answer for all of
             // them, and the reference path has already boxed whichever primitive arrived.
+            // The builder's override of `Any.toString`: the text it holds.
+            ("toString", []) => Some("kt_to_string"),
             ("append", [_]) => Some("kt_string_builder_append"),
             ("appendLine", [_]) => Some("kt_string_builder_append_line"),
             ("appendLine", []) => Some("kt_string_builder_append_new_line"),

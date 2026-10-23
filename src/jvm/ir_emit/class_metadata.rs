@@ -107,7 +107,7 @@ pub(super) fn build_class_metadata_with_facts(
         c,
         run,
         override_results,
-        local_classifiers: crate::metadata::local_classifiers::names(ir),
+        local_classifiers: unmapped_classifiers(ir),
     };
     let signatures = realization.signatures(record, opts, locals);
     let approximate_intersection = |ty| signature_formatter.declaration_approximation(ty);
@@ -204,6 +204,17 @@ fn mentions_undescribed_value_class(
         .properties
         .iter()
         .any(|p| p.getter_jvm_name.is_some() && undescribed(&p.ty))
+}
+
+/// The classifiers whose class id a reader cannot map back to their JVM name, so that a signature
+/// mentioning one is recorded: the local ones, and in a script every class, since kotlinc gives
+/// the script's class an id of its own.
+fn unmapped_classifiers(ir: &IrFile) -> crate::fx_hash::HashSet<crate::types::TypeName> {
+    let mut classifiers = crate::metadata::local_classifiers::names(ir);
+    if ir.is_script() {
+        classifiers.extend(ir.classes.iter().map(crate::ir::IrClass::fq_name_id));
+    }
+    classifiers
 }
 
 /// How the JVM realizes a class's declarations, as its `@Metadata` names them.

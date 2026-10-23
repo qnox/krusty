@@ -30,6 +30,8 @@ names! {
     intrinsic_const_evaluation => "kotlin/internal/IntrinsicConstEvaluation",
     platform_dependent => "kotlin/internal/PlatformDependent",
     published_api => "kotlin/PublishedApi",
+    extension_function_type => "kotlin/ExtensionFunctionType",
+    context_function_type_params => "kotlin/ContextFunctionTypeParams",
     jvm_name => "kotlin/jvm/JvmName",
     continuation => "kotlin/coroutines/Continuation",
     function_root => "kotlin/Function",

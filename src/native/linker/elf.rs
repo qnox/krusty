@@ -18,7 +18,7 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 use object::read::elf::{ElfFile64, SectionHeader};
-use object::read::{Object, ObjectSection, ObjectSymbol, RelocationTarget};
+use object::read::{Object, ObjectComdat, ObjectSection, ObjectSymbol, RelocationTarget};
 use object::{
     LittleEndian, RelocationFlags, SectionFlags, SectionIndex, SectionKind, SymbolIndex,
     SymbolKind, SymbolSection,
@@ -220,6 +220,8 @@ struct Placed {
 /// Where everything goes: each input section's place, and the two segments that hold them.
 struct Layout {
     placed: HashMap<(usize, SectionIndex), Placed>,
+    /// The sections of a COMDAT group an earlier input already supplied, which are left out.
+    discarded: HashSet<(usize, SectionIndex)>,
     /// The target's maximum page size ([`Arch::max_page_size`]): both segments' alignment.
     page: u64,
     /// End of the read+execute segment, which is mapped from file offset 0 at `BASE`.
@@ -288,6 +290,7 @@ impl Layout {
         }
         let mut layout = Self {
             placed: HashMap::default(),
+            discarded: discarded_groups(files)?,
             page,
             text_end: 0,
             data_file_start: 0,
@@ -352,7 +355,10 @@ impl Layout {
         for (file_index, file) in files.iter().enumerate() {
             for section in file.sections() {
                 let name = section.name().unwrap_or("?");
-                if placement(section.kind()) != Some(wanted) || is_implementations_section(name) {
+                if placement(section.kind()) != Some(wanted)
+                    || is_implementations_section(name)
+                    || self.discarded.contains(&(file_index, section.index()))
+                {
                     continue;
                 }
                 let align = section.align().max(1);
@@ -403,6 +409,25 @@ impl Layout {
     }
 }
 
+/// The sections of every COMDAT group whose signature an earlier input's group already carries.
+///
+/// A group stands for one definition every input that needs it emits alike, such as a static
+/// reflection object; the first input's group is kept, as GNU ld and `ld.lld` keep it, and every
+/// later one is left out whole, so its symbols and relocations are as if never emitted.
+fn discarded_groups(files: &[Elf]) -> Result<HashSet<(usize, SectionIndex)>, ProgramLinkError> {
+    let mut kept = HashSet::default();
+    let mut discarded = HashSet::default();
+    for (file_index, file) in files.iter().enumerate() {
+        for group in file.comdats() {
+            let signature = group.name().map_err(parse_error)?;
+            if !kept.insert(signature.to_string()) {
+                discarded.extend(group.sections().map(|section| (file_index, section)));
+            }
+        }
+    }
+    Ok(discarded)
+}
+
 /// `value` rounded up to `align`, a power of two no larger than the maximum page size; `value` is at most
 /// `IMAGE_LIMIT`, so this cannot overflow.
 fn align_up(value: u64, align: u64) -> u64 {
@@ -445,7 +470,9 @@ impl Symbols {
                     }
                     SymbolSection::Section(index) => {
                         let Some(place) = layout.placed.get(&(file_index, index)) else {
-                            if symbol.is_local() {
+                            // A folded group's copy: the input that kept the group defines it.
+                            if symbol.is_local() || layout.discarded.contains(&(file_index, index))
+                            {
                                 continue; // debug info, notes: nothing at run time refers to it
                             }
                             return Err(ProgramLinkError::Unsupported(format!(
@@ -1157,6 +1184,33 @@ mod tests {
         assert_eq!(image.bytes(strong_foo, 2), [0xb8, 2]);
         let call = image.u32(TEXT + 1) as i32 as i64;
         assert_eq!(TEXT as i64 + 5 + call, strong_foo as i64);
+    }
+
+    /// Two inputs emitting one COMDAT group keep the first's copy: the second's section takes no
+    /// room, its symbol is not a second definition, and its own references reach the kept copy.
+    #[test]
+    fn a_comdat_group_an_earlier_input_carries_is_left_out() {
+        let mut inputs = Vec::new();
+        for value in [1u8, 2] {
+            let mut object = if value == 1 {
+                x86_64_start(&[0xc3]).0
+            } else {
+                Obj::new(Arch::X86_64)
+            };
+            let data = object.section(".data.rel.ro.shared", SectionKind::Data, &[value; 8], 8);
+            let shared = object.define_weak("shared", data, 0);
+            object.comdat(shared, data);
+            let reference = object.section(".data", SectionKind::Data, &[0; 8], 8);
+            object.reloc(reference, 0, shared, 0, object::elf::R_X86_64_64.0);
+            inputs.push(object);
+        }
+        let bytes = linked(Arch::X86_64, &[&inputs[0], &inputs[1]]);
+        let image = Image(&bytes);
+        // Data: the first input's group, its reference, then the second's reference alone.
+        let kept = 0x40_1000;
+        assert_eq!(image.bytes(kept, 8), [1; 8]);
+        assert_eq!(image.u64(kept + 8), kept);
+        assert_eq!(image.u64(kept + 16), kept);
     }
 
     /// With no definition anywhere, a weak reference is zero (plus its addend), not an error.

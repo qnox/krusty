@@ -1497,6 +1497,7 @@ fn extract_file_stub_inventory(
                         .hoisted_classifier_source_names
                         .contains_key(declaration)
                         || companion_declarations.contains(declaration));
+                let class_stub = stubs.len();
                 class_stubs(
                     file,
                     source,
@@ -1508,7 +1509,11 @@ fn extract_file_stub_inventory(
                     nested_owners.get(declaration).copied(),
                     u32::try_from(index).expect("too many file declarations"),
                     &mut stubs,
-                )
+                );
+                if file.script_class == Some(*declaration) {
+                    let flags = &mut stubs[class_stub].flags;
+                    *flags = flags.with(DeclarationFlags::SCRIPT, true);
+                }
             }
         }
         source_declarations[index] = Some(stubs[first_stub].id);
@@ -1630,30 +1635,6 @@ fn extract_file_stub_inventory(
                 DeclarationFlags::ACTUAL,
                 file.actual_type_aliases.contains(&index),
             ),
-        });
-    }
-    if let Some(script) = file.script_body {
-        let range = file
-            .expr_span(script)
-            .expect("a script body must have a parser-owned source span");
-        let id = ids.intern(DeclarationAnchor {
-            source,
-            range,
-            owner: None,
-            kind: DeclarationKind::Script,
-            sibling: 0,
-        });
-        stubs.push(DeclarationStub {
-            id,
-            source,
-            range,
-            lookup_name: None,
-            body: Some(BodyKind::Script),
-            signature_inference: None,
-            initialization_order: None,
-            kind: DeclarationKind::Script,
-            visibility: Visibility::Private,
-            flags: DeclarationFlags::default(),
         });
     }
     let mut body_local = stubs
@@ -2856,14 +2837,18 @@ pub fn stream_file_stub_inventory(
         let mut features = project_features.clone();
         features.apply_source_directives(source.text);
         let diagnostics_before = diags.diags.len();
-        let tokens = crate::lexer::lex(source.text, diags);
         let mut file = match source.kind {
             SourceKind::Kotlin => {
+                let tokens = crate::lexer::lex(source.text, diags);
                 crate::parser::parse_with_features(source.text, &tokens, diags, &features)
             }
-            SourceKind::KotlinScript => {
-                crate::parser::parse_script_with_features(source.text, &tokens, diags, &features)
-            }
+            SourceKind::KotlinScript => crate::frontend::parse_script(
+                source.text,
+                source.file_stem,
+                &crate::script_definitions::ScriptDefinition::standard(),
+                &features,
+                diags,
+            ),
             SourceKind::Java => unreachable!(),
         };
         if diags.diags[diagnostics_before..]

@@ -33,6 +33,7 @@ mod nesting;
 mod properties;
 mod qualified_type_arguments;
 mod return_labels;
+mod scripts;
 mod statements;
 mod superclass_references;
 mod type_annotations;
@@ -60,17 +61,20 @@ pub fn parse_with_features(
     diags: &mut DiagSink,
     features: &LangFeatures,
 ) -> File {
-    parse_with_features_and_script(src, tokens, diags, features, false)
+    parse_with_features_and_script(src, tokens, diags, features, None)
 }
 
-/// Parse a Kotlin script.
+/// Parse a Kotlin script as its script class, named after the file stem `file_stem` and built
+/// against `definition`.
 pub fn parse_script_with_features(
     src: &str,
     tokens: &[Token],
     diags: &mut DiagSink,
     features: &LangFeatures,
+    file_stem: &str,
+    definition: &crate::script_definitions::ScriptDefinition,
 ) -> File {
-    parse_with_features_and_script(src, tokens, diags, features, true)
+    parse_with_features_and_script(src, tokens, diags, features, Some((file_stem, definition)))
 }
 
 fn parse_with_features_and_script(
@@ -78,9 +82,9 @@ fn parse_with_features_and_script(
     tokens: &[Token],
     diags: &mut DiagSink,
     features: &LangFeatures,
-    is_script: bool,
+    script: Option<(&str, &crate::script_definitions::ScriptDefinition)>,
 ) -> File {
-    let mut p = Parser::new(src, tokens, diags, features, is_script);
+    let mut p = Parser::new(src, tokens, diags, features, script);
     // Run the parse with the recursion-bound stack reserve already in place (like the checker's
     // and lowering's pass entries): without this, the calling thread's remaining stack is
     // (almost) always under the reserve, so the FIRST `parse_bp` of every top-level expression
@@ -94,27 +98,8 @@ fn parse_with_features_and_script(
             "parser did not consume every non-trivia token",
         );
     }
-    if !p.script_stmts.is_empty() {
-        let first = p.file.stmt_spans[p.script_stmts[0].0 as usize];
-        let last = p.file.stmt_spans[p.script_stmts[p.script_stmts.len() - 1].0 as usize];
-        let stmts = std::mem::take(&mut p.script_stmts);
-        let body = p.file.add_expr(
-            Expr::Block {
-                stmts,
-                trailing: None,
-            },
-            Span::new(first.lo, last.hi),
-        );
-        p.file.script_body = Some(body);
-    }
     apply_file_features(&mut p.file, features);
-    let script_scope = is_script.then(|| {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        src.hash(&mut hasher);
-        hasher.finish()
-    });
-    hoist_local_classes(&mut p.file, script_scope);
+    hoist_local_classes(&mut p.file);
     fixup_parenless_base_classes(&mut p.file);
     debug_lines::attach(&mut p.file, src);
     p.file.binary_reference_tokens =
@@ -156,7 +141,7 @@ fn simple_type_ref(name: &str, span: crate::diag::Span) -> TypeRef {
 /// being taught anything new. It is also how kotlinc names a local class. Nothing in the source is
 /// rewritten to match: the SOURCE name is what the checker binds in `Ns::Classifier`, so a reference
 /// resolves where it was written.
-fn hoist_local_classes(file: &mut File, script_scope: Option<u64>) {
+fn hoist_local_classes(file: &mut File) {
     use crate::ast::{Decl, FunBody, Stmt, StmtId};
     let mut owners: Vec<(StmtId, String, Option<String>, Option<DeclId>)> = Vec::new();
     let record =
@@ -397,14 +382,6 @@ fn hoist_local_classes(file: &mut File, script_scope: Option<u64>) {
                     &mut owners,
                 );
             }
-        }
-    }
-    if let Some(root) = file.script_body {
-        // A script re-parses each snippet into the same facade, so the snippet identity separates
-        // two local classes that would otherwise share a name and an (empty) owner.
-        let owner = format!("script${:x}", script_scope.unwrap_or_default());
-        for stmt in local_class_stmts(file, root) {
-            owners.push((stmt, owner.clone(), None, None));
         }
     }
     let owner_of: crate::fx_hash::HashMap<StmtId, (String, Option<String>, Option<DeclId>)> =
@@ -702,8 +679,8 @@ struct Parser<'a> {
     /// The type parameters of the declaration whose `<…>` list was parsed last, with their spans,
     /// so its `where` clause can name the parameter each bound constrains.
     type_parameter_spans: Vec<(String, crate::diag::Span)>,
-    is_script: bool,
-    script_stmts: Vec<StmtId>,
+    /// The script class name and definition when this file is a Kotlin script.
+    script: Option<(String, crate::script_definitions::ScriptDefinition)>,
     /// Current expression-recursion depth (see [`Parser::parse_bp`]). Bounded by
     /// [`EXPR_DEPTH_LIMIT`] so a pathologically nested expression (`((((…x…))))`) degrades to an
     /// error expression instead of overflowing the stack — the same "degrade, never crash"
@@ -802,10 +779,10 @@ impl<'a> Parser<'a> {
         tokens: &'a [Token],
         diags: &'a mut DiagSink,
         features: &LangFeatures,
-        is_script: bool,
+        script: Option<(&str, &crate::script_definitions::ScriptDefinition)>,
     ) -> Self {
         let mut file = File::default();
-        file.is_script = is_script;
+        file.is_script = script.is_some();
         Self {
             src,
             t: tokens,
@@ -835,8 +812,9 @@ impl<'a> Parser<'a> {
             declaration_name_span: Span::new(0, 0),
             declaration_prefix: Default::default(),
             type_parameter_spans: Vec::new(),
-            is_script,
-            script_stmts: Vec::new(),
+            script: script.map(|(file_stem, definition)| {
+                (scripts::script_class_name(file_stem), definition.clone())
+            }),
             expr_depth: 0,
             type_depth: 0,
             stmt_depth: 0,
@@ -1024,6 +1002,47 @@ impl<'a> Parser<'a> {
             .adopt_hoisted_classifiers(id, declaration_index + 1);
     }
 
+    /// Parse one `import` directive, recording its path (and, for a single-name import, the
+    /// classifier reference it names).
+    fn parse_import_directive(&mut self) {
+        self.bump(); // 'import'
+        let import_span = self.tok().span;
+        let segments = self.parse_qualified_name_segments();
+        let fq = segments
+            .iter()
+            .map(|(segment, _)| segment.as_str())
+            .collect::<Vec<_>>()
+            .join(".");
+        // `import a.b.*` — the segment scan consumes the trailing `.` (it only keeps a
+        // segment when an `Ident` follows), leaving us at `*`. Recover the wildcard so it is
+        // recorded as `a.b.*` (the form the import-level builder recognizes).
+        let mut wildcard = false;
+        if self.at(TokenKind::Star) {
+            self.bump(); // '*'
+            wildcard = true;
+        }
+        let mut alias = None;
+        if self.at(TokenKind::Ident) && self.keyword_text("as") {
+            self.bump(); // 'as'
+            if self.at(TokenKind::Ident) {
+                alias = Some(self.text().to_string());
+                self.bump();
+            }
+        }
+        if !fq.is_empty() {
+            if !wildcard {
+                let mut reference = simple_type_ref(&fq, import_span);
+                reference.flags = reference.flags.with_import(true);
+                self.file.detached_type_refs.push(reference);
+            }
+            self.file.import_paths.push(crate::ast::ImportPath {
+                segments,
+                wildcard,
+                alias,
+            });
+        }
+    }
+
     fn parse_file(&mut self) {
         self.parse_file_with_declaration_sink(&mut |_| {});
     }
@@ -1041,28 +1060,16 @@ impl<'a> Parser<'a> {
             }
             self.pending_context_params.clear();
             if self.at_file_annotation() {
-                if self.is_script && !self.script_stmts.is_empty() {
-                    self.diags.error(
-                        self.tok().span,
-                        "file annotations must precede script statements",
-                    );
-                }
                 self.parse_annotation();
                 continue;
             }
-            let script_file_item =
-                matches!(self.kind(), TokenKind::KwPackage | TokenKind::KwImport)
-                    || (self.at(TokenKind::Ident) && self.keyword_text("typealias"));
-            if self.is_script && script_file_item && !self.script_stmts.is_empty() {
-                self.diags.error(
-                    self.tok().span,
-                    "package, import, and typealias directives must precede script statements",
-                );
-            }
-            if self.is_script && !script_file_item {
-                let stmt = self.parse_stmt();
-                self.script_stmts.push(stmt);
-                continue;
+            let file_header_item =
+                matches!(self.kind(), TokenKind::KwPackage | TokenKind::KwImport);
+            if !file_header_item {
+                if let Some((name, definition)) = self.script.take() {
+                    self.parse_script_class(&name, &definition);
+                    break;
+                }
             }
             // Consume leading annotations + declaration modifiers. `open`/`abstract` are applied to
             // the following class; the rest are ignored (krusty treats everything as public).
@@ -1118,44 +1125,7 @@ impl<'a> Parser<'a> {
                         self.file.package = Some(pkg);
                     }
                 }
-                TokenKind::KwImport => {
-                    self.bump(); // 'import'
-                    let import_span = self.tok().span;
-                    let segments = self.parse_qualified_name_segments();
-                    let fq = segments
-                        .iter()
-                        .map(|(segment, _)| segment.as_str())
-                        .collect::<Vec<_>>()
-                        .join(".");
-                    // `import a.b.*` — the segment scan consumes the trailing `.` (it only keeps a
-                    // segment when an `Ident` follows), leaving us at `*`. Recover the wildcard so it is
-                    // recorded as `a.b.*` (the form the import-level builder recognizes).
-                    let mut wildcard = false;
-                    if self.at(TokenKind::Star) {
-                        self.bump(); // '*'
-                        wildcard = true;
-                    }
-                    let mut alias = None;
-                    if self.at(TokenKind::Ident) && self.keyword_text("as") {
-                        self.bump(); // 'as'
-                        if self.at(TokenKind::Ident) {
-                            alias = Some(self.text().to_string());
-                            self.bump();
-                        }
-                    }
-                    if !fq.is_empty() {
-                        if !wildcard {
-                            let mut reference = simple_type_ref(&fq, import_span);
-                            reference.flags = reference.flags.with_import(true);
-                            self.file.detached_type_refs.push(reference);
-                        }
-                        self.file.import_paths.push(crate::ast::ImportPath {
-                            segments,
-                            wildcard,
-                            alias,
-                        });
-                    }
-                }
+                TokenKind::KwImport => self.parse_import_directive(),
                 // `fun interface F { fun m(…): R }` — a SAM interface (parsed as an interface).
                 TokenKind::KwFun
                     if self
@@ -1344,6 +1314,10 @@ impl<'a> Parser<'a> {
             if self.file.decls.len() > decls_before {
                 sink(self);
             }
+        }
+        // A script of only a file header is still a script class.
+        if let Some((name, definition)) = self.script.take() {
+            self.parse_script_class(&name, &definition);
         }
     }
 
@@ -2160,6 +2134,7 @@ impl<'a> Parser<'a> {
                     is_vararg,
                     is_var,
                     is_property,
+                    is_script_parameter: false,
                     is_actual: epmods.iter().any(|modifier| modifier == "actual"),
                     is_override: epmods.iter().any(|modifier| modifier == "override"),
                     has_open_modifier: epmods.iter().any(|modifier| modifier == "open"),
@@ -3058,6 +3033,7 @@ impl<'a> Parser<'a> {
                     is_vararg,
                     is_var,
                     is_property,
+                    is_script_parameter: false,
                     is_actual: cpmods.iter().any(|modifier| modifier == "actual"),
                     is_override: cpmods.iter().any(|modifier| modifier == "override"),
                     has_open_modifier: cpmods.iter().any(|modifier| modifier == "open"),
@@ -4110,13 +4086,17 @@ impl<'a> Parser<'a> {
             let mut receiver = self.parse_type();
             let receiver_hi = self.t[self.i.saturating_sub(1)].span.hi;
             receiver.span = Span::new(receiver_start, receiver_hi);
-            self.expect(TokenKind::Dot, "'.'");
+            self.expect_receiver_dot();
             return (Some(receiver), self.ident_or_error(name_context));
         }
 
         let receiver_start = self.tok().span.lo;
         let first = self.ident_or_error(name_context);
-        if !self.at(TokenKind::Dot) && !self.at(TokenKind::Lt) && !self.at(TokenKind::Question) {
+        let dot_follows = self
+            .t
+            .get(self.after_plain_newlines(self.i))
+            .is_some_and(|token| token.kind == TokenKind::Dot);
+        if !dot_follows && !self.at(TokenKind::Lt) && !self.at(TokenKind::Question) {
             return (None, first);
         }
 
@@ -4127,7 +4107,7 @@ impl<'a> Parser<'a> {
         };
         let mut nullable = self.eat_type_nullable();
         let mut receiver_hi = self.t[self.i.saturating_sub(1)].span.hi;
-        self.expect(TokenKind::Dot, "'.'");
+        self.expect_receiver_dot();
         let mut receiver_name = first;
 
         let declaration_name = loop {
@@ -4149,8 +4129,8 @@ impl<'a> Parser<'a> {
                 applied.extend(receiver_targs);
                 receiver_targs = applied;
                 receiver_hi = self.t[self.i.saturating_sub(1)].span.hi;
-                self.expect(TokenKind::Dot, "'.'");
-            } else if self.eat(TokenKind::Dot) {
+                self.expect_receiver_dot();
+            } else if self.eat_receiver_dot() {
                 receiver_name.push('.');
                 receiver_name.push_str(&segment);
                 nullable = false;
@@ -4526,7 +4506,14 @@ mod tests {
     fn script(src: &str) -> File {
         let mut diagnostics = DiagSink::new();
         let tokens = lex(src, &mut diagnostics);
-        let file = parse_script_with_features(src, &tokens, &mut diagnostics, &LangFeatures::new());
+        let file = parse_script_with_features(
+            src,
+            &tokens,
+            &mut diagnostics,
+            &LangFeatures::new(),
+            "test",
+            &crate::script_definitions::ScriptDefinition::standard(),
+        );
         assert!(
             !diagnostics.has_errors(),
             "{}",
@@ -4719,6 +4706,23 @@ mod tests {
         assert_eq!(&source[span.lo as usize..span.hi as usize], "override");
     }
 
+    /// The script class of a parsed script, and how each of its initialization steps runs: a
+    /// statement block, or a property initializer named by the property.
+    fn script_class_steps(file: &File) -> (&ClassDecl, Vec<String>) {
+        let Some(Decl::Class(class)) = file.script_class.map(|class| file.decl(class)) else {
+            panic!("script class");
+        };
+        let steps = class
+            .init_order
+            .iter()
+            .map(|step| match step {
+                ClassInit::Block(_) => "statement".to_string(),
+                ClassInit::PropInit(index) => class.body_props[*index].name.clone(),
+            })
+            .collect();
+        (class, steps)
+    }
+
     #[test]
     fn script_parses_declarations_and_modifier_shaped_calls_in_order() {
         let source = "fun context(value: String): String = value\n\
@@ -4727,47 +4731,32 @@ mod tests {
                       context(\"second\"); fun after(): Unit {}\n\
                       suspend {}";
         let file = script(source);
-        let Some(Expr::Block { stmts, .. }) = file.script_body.map(|body| file.expr(body)) else {
-            panic!("script body");
-        };
-        let declaration_names = stmts
+        let (class, steps) = script_class_steps(&file);
+        let methods = class
+            .methods
             .iter()
-            .filter_map(|statement| match file.stmt(*statement) {
-                Stmt::LocalFun(function) => Some(function.name.as_str()),
-                _ => None,
-            })
+            .map(|method| method.name.as_str())
             .collect::<Vec<_>>();
 
-        assert!(file.decls.is_empty());
-        assert_eq!(declaration_names, ["context", "suspend", "after"]);
-        assert_eq!(stmts.len(), 6);
+        assert_eq!(class.name, "Test");
+        assert_eq!(methods, ["context", "suspend", "after"]);
+        assert_eq!(steps, ["statement", "statement", "$$result"]);
     }
 
     #[test]
-    fn script_parses_prefixed_declarations_as_local_statements() {
+    fn script_parses_prefixed_declarations_as_members() {
         let source = "@Deprecated(\"test\")\n\
                       private fun hidden(): Unit {}\n\
                       context(value: String)\n\
                       private fun scoped(): String = value\n\
                       scoped()";
         let file = script(source);
+        let (class, steps) = script_class_steps(&file);
 
-        let Some(Expr::Block { stmts, .. }) = file.script_body.map(|body| file.expr(body)) else {
-            panic!("script body");
-        };
-        let functions = stmts
-            .iter()
-            .filter_map(|statement| match file.stmt(*statement) {
-                Stmt::LocalFun(function) => Some(function),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        assert!(file.decls.is_empty());
-        assert_eq!(functions.len(), 2);
-        assert_eq!(functions[0].visibility, Visibility::Private);
-        assert_eq!(functions[1].context_count, 1);
-        assert_eq!(stmts.len(), 3);
+        assert_eq!(class.methods.len(), 2);
+        assert_eq!(class.methods[0].visibility, Visibility::Private);
+        assert_eq!(class.methods[1].context_count, 1);
+        assert_eq!(steps, ["$$result"]);
     }
 
     #[test]
@@ -4778,17 +4767,12 @@ mod tests {
                       private fun declared() = value\n\
                       fun () {}";
         let file = script(source);
-        let Some(Expr::Block { stmts, .. }) = file.script_body.map(|body| file.expr(body)) else {
-            panic!("script body");
-        };
+        let (class, steps) = script_class_steps(&file);
 
-        assert_eq!(stmts.len(), 4);
-        assert!(matches!(file.stmt(stmts[1]), Stmt::Expr(_)));
-        assert!(matches!(
-            file.stmt(stmts[2]),
-            Stmt::LocalFun(function) if function.context_count == 1
-        ));
-        assert!(matches!(file.stmt(stmts[3]), Stmt::Expr(_)));
+        assert_eq!(class.methods.len(), 2);
+        assert_eq!(class.methods[1].name, "declared");
+        assert_eq!(class.methods[1].context_count, 1);
+        assert_eq!(steps, ["statement", "$$result"]);
     }
 
     #[test]
@@ -4986,6 +4970,45 @@ mod tests {
                 .map(|argument| argument.name.as_str())
                 .collect::<Vec<_>>(),
             ["Any", "Any", "String", "Float", "Int", "Number"]
+        );
+    }
+
+    #[test]
+    fn a_receiver_split_across_lines_spans_only_its_type() {
+        let mut diagnostics = DiagSink::new();
+        let source = "fun String\n    .plain() {}\n\
+                      fun Map<String, Int>\n    .generic() {}\n\
+                      fun String?\n    .nullable() {}\n\
+                      fun kotlin.String\n    .qualified() {}\n\
+                      fun String.\n    nameOnNextLine() {}\n\
+                      val List<String>\n    .property: Int get() = 0\n";
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(
+            !diagnostics.has_errors(),
+            "unexpected: {}",
+            diagnostics.render("t", source)
+        );
+        let receivers: Vec<_> = file
+            .decls
+            .iter()
+            .filter_map(|&id| match file.decl(id) {
+                Decl::Fun(function) => function.receiver.as_ref(),
+                Decl::Property(property) => property.receiver.as_ref(),
+                Decl::Class(_) => None,
+            })
+            .map(|receiver| &source[receiver.span.lo as usize..receiver.span.hi as usize])
+            .collect();
+        assert_eq!(
+            receivers,
+            [
+                "String",
+                "Map<String, Int>",
+                "String?",
+                "kotlin.String",
+                "String",
+                "List<String>"
+            ]
         );
     }
 

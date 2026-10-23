@@ -1,0 +1,20 @@
+# The krusty Bazel module: `krusty_jvm_library` (defs.bzl) and the prebuilt compiler as a toolchain.
+#
+# A release of this module is `krusty-bazel-<version>.tar.gz` on the krusty GitHub release, built
+# by scripts/package-bazel-module.sh. That script sets the version below and stamps the release's
+# `krusty.release(...)` tag in place of a `@krusty-release@` marker line, so a released module
+# downloads its own compiler. A source checkout keeps the marker, registers no toolchain, and its
+# rules need `--@krusty//:krusty_binary`.
+module(
+    name = "krusty",
+    version = "0.0.1",
+)
+
+bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "rules_java", version = "8.14.0")
+
+krusty = use_extension("//:extensions.bzl", "krusty")
+# @krusty-release@
+use_repo(krusty, "krusty_toolchains")
+
+register_toolchains("@krusty_toolchains//:all")

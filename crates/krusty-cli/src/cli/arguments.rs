@@ -127,29 +127,29 @@ fn version_warnings(settings: &LanguageSettings) -> Vec<CliWarning> {
     warnings
 }
 
-/// Split a classpath string on the platform separator (`:` on Unix).
+/// The separator `-classpath` entries are split on: `;` on Windows, `:` elsewhere, as kotlinc.
+pub const CLASSPATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
+
+/// Split a classpath string on the platform separator.
 fn split_classpath(v: &str) -> Vec<PathBuf> {
-    let sep = if cfg!(windows) { ';' } else { ':' };
-    v.split(sep)
+    v.split(CLASSPATH_SEPARATOR)
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .collect()
 }
 
-pub(super) fn collect_sources(path: &str, out: &mut Vec<String>, ignored: &mut Vec<String>) {
+pub(super) fn collect_sources(path: &str, out: &mut Vec<String>) {
     let p = std::path::Path::new(path);
     if p.is_dir() {
         if let Ok(rd) = std::fs::read_dir(p) {
             let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
             entries.sort();
             for e in entries {
-                collect_sources(&e.to_string_lossy(), out, ignored);
+                collect_sources(&e.to_string_lossy(), out);
             }
         }
     } else if krusty::source::is_batch_compilable_path(p) {
         out.push(path.to_string());
-    } else if krusty::source::kind(p).is_some() {
-        ignored.push(format!("{path} (script compilation is not supported yet)"));
     }
 }
 
@@ -334,7 +334,7 @@ pub(super) fn apply(
         // modes; `jvm` and `legacy` name runtime-checked shapes it does not reproduce yet.
         "-Xassertions" => match text {
             "always-enable" | "always-disable" => opts.assertions = Some(text.to_string()),
-            "jvm" | "legacy" => opts.errors.push(format!(
+            "jvm" | "legacy" => opts.refuse(format!(
                 "{name}={text} selects an output shape krusty does not emit"
             )),
             _ => opts.errors.push(format!(
@@ -346,7 +346,7 @@ pub(super) fn apply(
         // target default, so naming either `indy` mode explicitly is not modeled yet.
         "-Xstring-concat" => match text {
             "inline" => opts.inline_string_concat = true,
-            "indy" | "indy-with-constants" => opts.errors.push(format!(
+            "indy" | "indy-with-constants" => opts.refuse(format!(
                 "{name}={text} selects an output shape krusty does not emit"
             )),
             _ => opts.errors.push(format!(
@@ -514,11 +514,11 @@ pub(super) fn finish_language_settings(
     match LanguageSettings::for_release(reference_version, language_version, api_version, &settings)
     {
         Ok(settings) => {
-            opts.errors
-                .extend(language_features::unmodeled_feature_errors(
-                    &feature_arguments,
-                    &settings.features,
-                ));
+            for refusal in
+                language_features::unmodeled_feature_errors(&feature_arguments, &settings.features)
+            {
+                opts.refuse(refusal);
+            }
             let (cannot_disable, pre_release) = language_features::manual_setting_checks(
                 &manual,
                 table,
@@ -535,11 +535,11 @@ pub(super) fn finish_language_settings(
             for setting in &common {
                 before_progressive.set(&setting.feature, setting.enabled);
             }
-            opts.errors
-                .extend(language_features::unmodeled_progressive_error(
-                    &progressive,
-                    &before_progressive,
-                ));
+            if let Some(refusal) =
+                language_features::unmodeled_progressive_error(&progressive, &before_progressive)
+            {
+                opts.refuse(refusal);
+            }
             let redundant = language_features::redundancy_warnings(
                 &feature_arguments,
                 &defaults,
@@ -561,11 +561,11 @@ pub(super) fn finish_language_settings(
                 language_version,
                 api_version.unwrap_or(language_version),
             );
-            opts.errors
-                .extend(language_features::unmodeled_feature_errors(
-                    &feature_arguments,
-                    &features,
-                ));
+            for refusal in
+                language_features::unmodeled_feature_errors(&feature_arguments, &features)
+            {
+                opts.refuse(refusal);
+            }
             opts.errors.push(error);
         }
     }

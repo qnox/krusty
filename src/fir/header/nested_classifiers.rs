@@ -202,21 +202,29 @@ pub(super) fn nested_classifier_owners(
                     }))
                 })
             });
-        let classifier_owner = declarations
-            .iter()
-            .copied()
-            .filter(|candidate| *candidate != declaration)
-            .filter_map(|candidate| match file.decl(candidate) {
-                Decl::Class(candidate_class)
-                    if candidate_class.span.lo < class.span.lo
-                        && class.span.hi < candidate_class.span.hi =>
-                {
-                    Some((candidate_class.span.hi - candidate_class.span.lo, candidate))
-                }
-                Decl::Class(_) | Decl::Fun(_) | Decl::Property(_) => None,
+        // A script's class starts where its first member may, so containment alone cannot tell
+        // them apart: the parser's record names the script class as its members' owner.
+        let classifier_owner = file
+            .hoisted_classifier_owner(declaration)
+            .filter(|owner| file.script_class == Some(*owner))
+            .or_else(|| {
+                declarations
+                    .iter()
+                    .copied()
+                    .filter(|candidate| *candidate != declaration)
+                    .filter_map(|candidate| match file.decl(candidate) {
+                        Decl::Class(candidate_class)
+                            if candidate_class.span.lo < class.span.lo
+                                && class.span.hi < candidate_class.span.hi =>
+                        {
+                            Some((candidate_class.span.hi - candidate_class.span.lo, candidate))
+                        }
+                        Decl::Class(_) | Decl::Fun(_) | Decl::Property(_) => None,
+                    })
+                    .min_by_key(|(length, _)| *length)
+                    .map(|(_, owner)| owner)
             })
-            .min_by_key(|(length, _)| *length)
-            .and_then(|(_, owner)| stable.get(&owner).copied());
+            .and_then(|owner| stable.get(&owner).copied());
         // An anonymous classifier declared inside an executable belongs to that FUNCTION body,
         // even when source-span containment also places it inside the surrounding source class.
         // The executable edge is what lets Pass 1 identify anonymous declarations owned by an

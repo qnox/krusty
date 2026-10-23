@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run one runnable target's focused tests and the shared multimodule conformance set after its exact
-# toolchain and KLIBs have been provisioned. The corpus function stays in its dedicated process.
+# Run one runnable target's focused tests after its exact toolchain and KLIBs are provisioned.
+# The box inventory, including owned module graphs, stays in its dedicated corpus process.
 set -euo pipefail
 
 if [ "$#" -ne 3 ]; then
@@ -43,21 +43,13 @@ case "$target" in
 esac
 
 export KRUSTY_LANGUAGE_VERSION="$v"
-export KRUSTY_MULTIMODULE_CONFORMANCE_RUNNER="$target"
 export RUST_MIN_STACK="${RUST_MIN_STACK:-134217728}"
 set +e
 run_with_deadline "$KRUSTY_TARGET_CONFORMANCE_TIMEOUT_SECONDS" \
   "$bin" "$filter" "${skips[@]}" --test-threads 1
 focused_status=$?
-run_with_deadline "$KRUSTY_TARGET_CONFORMANCE_TIMEOUT_SECONDS" \
-  "$bin" multimodule_conformance_cases:: --test-threads 1
-multimodule_status=$?
 set -e
 if [ "$focused_status" -eq 124 ]; then
   echo "target-conformance-regressions: timed out after ${KRUSTY_TARGET_CONFORMANCE_TIMEOUT_SECONDS}s: Kotlin $v $target" >&2
 fi
-if [ "$multimodule_status" -eq 124 ]; then
-  echo "target-conformance-regressions: multimodule suite timed out after ${KRUSTY_TARGET_CONFORMANCE_TIMEOUT_SECONDS}s: Kotlin $v $target" >&2
-fi
-[ "$focused_status" -eq 0 ] || exit "$focused_status"
-exit "$multimodule_status"
+exit "$focused_status"

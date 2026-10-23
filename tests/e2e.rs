@@ -2,8 +2,12 @@
 //! crate, so product e2e modules live behind one target to keep link time and target size bounded.
 //! External corpus/reference-toolchain suites live in `conformance.rs`.
 
+#[path = "abstract_serializable_e2e.rs"]
+mod abstract_serializable_e2e;
 #[path = "annotation_documented_mirror_e2e.rs"]
 mod annotation_documented_mirror_e2e;
+#[path = "backticked_dotted_package_qualifier_e2e.rs"]
+mod backticked_dotted_package_qualifier_e2e;
 #[path = "bridge_result_cast_e2e.rs"]
 mod bridge_result_cast_e2e;
 #[path = "common/bytecode_comparison.rs"]
@@ -12,18 +16,26 @@ mod bytecode_comparison_support;
 mod captured_field_storage_e2e;
 #[path = "captured_receiver_names_e2e.rs"]
 mod captured_receiver_names_e2e;
+#[path = "cast_line_break_e2e.rs"]
+mod cast_line_break_e2e;
 #[path = "cast_operand_reread_e2e.rs"]
 mod cast_operand_reread_e2e;
+#[path = "class_comparison_e2e.rs"]
+mod class_comparison_e2e;
 #[path = "classfile_low_priority_annotation_e2e.rs"]
 mod classfile_low_priority_annotation_e2e;
 #[path = "common/mod.rs"]
 mod common_core;
+#[path = "jvm_conformance_deadline_e2e.rs"]
+mod jvm_conformance_deadline_e2e;
 #[cfg(test)]
 pub(crate) use common_core::server_pool::Pool as ServerPool;
 #[path = "common/compiler_plugin_fixture.rs"]
 mod compiler_plugin_fixture;
 #[path = "common/e2e.rs"]
 mod e2e_support;
+#[path = "generic_serializable_parent_e2e.rs"]
+mod generic_serializable_parent_e2e;
 #[path = "common/inner_class_rows.rs"]
 mod inner_class_rows_support;
 #[path = "common/reference_box.rs"]
@@ -34,6 +46,8 @@ mod reference_compiler_support;
 mod reference_recording_support;
 #[path = "common/reference_targets.rs"]
 mod reference_targets_support;
+#[path = "super_call_vararg_e2e.rs"]
+mod super_call_vararg_e2e;
 #[path = "common/target_diagnostics.rs"]
 mod target_diagnostics_support;
 
@@ -132,6 +146,8 @@ mod backtick_keyword_identifier_e2e;
 mod bare_accessor_and_setter_bridge_e2e;
 #[path = "bazel_cli_contract_e2e.rs"]
 mod bazel_cli_contract_e2e;
+#[path = "bazel_module_release_e2e.rs"]
+mod bazel_module_release_e2e;
 #[path = "block_slot_reuse_e2e.rs"]
 mod block_slot_reuse_e2e;
 #[path = "boolean_literal_equality_e2e.rs"]
@@ -1155,6 +1171,8 @@ mod inherited_reference_owner_e2e;
 mod init_block_lines_e2e;
 #[path = "e2e/inline.rs"]
 mod inline;
+#[path = "inline_member_super_arguments_e2e.rs"]
+mod inline_member_super_arguments_e2e;
 #[path = "inlined_code_inner_classes_e2e.rs"]
 mod inlined_code_inner_classes_e2e;
 #[path = "inlined_lambda_stack_spill_e2e.rs"]
@@ -1279,6 +1297,10 @@ mod java_not_null_null_argument_e2e;
 mod java_parameters_attribute_e2e;
 #[path = "java_platform_type_publication_e2e.rs"]
 mod java_platform_type_publication_e2e;
+#[path = "java_source_constant_e2e.rs"]
+mod java_source_constant_e2e;
+#[path = "java_source_field_initializer_e2e.rs"]
+mod java_source_field_initializer_e2e;
 #[path = "java_source_interop_e2e.rs"]
 mod java_source_interop_e2e;
 mod java_static_modules;
@@ -1317,14 +1339,14 @@ mod klib_semantic_e2e;
 mod kotlin_fun_java_sam_param_e2e;
 #[path = "kotlin_native_provisioning_e2e.rs"]
 mod kotlin_native_provisioning_e2e;
+#[path = "kotlin_script_e2e.rs"]
+mod kotlin_script_e2e;
 #[path = "kotlinc_argument_conformance_e2e.rs"]
 mod kotlinc_argument_conformance_e2e;
 #[path = "krusty_dep_dir_e2e.rs"]
 mod krusty_dep_dir_e2e;
 #[path = "krusty_roundtrip_class_metadata_e2e.rs"]
 mod krusty_roundtrip_class_metadata_e2e;
-#[path = "ksp_apt_loop_e2e.rs"]
-mod ksp_apt_loop_e2e;
 #[path = "ksp_provision_e2e.rs"]
 mod ksp_provision_e2e;
 #[path = "labeled_expression_e2e.rs"]
@@ -1565,6 +1587,8 @@ mod module_override_boxed_result_e2e;
 mod mpp_expect_actual_e2e;
 #[path = "mpp_requires_the_feature_e2e.rs"]
 mod mpp_requires_the_feature_e2e;
+#[path = "native_conformance_deadline_e2e.rs"]
+mod native_conformance_deadline_e2e;
 #[path = "nested_block_comment_e2e.rs"]
 mod nested_block_comment_e2e;
 #[path = "nested_class_annotation_scope_e2e.rs"]
@@ -1607,8 +1631,12 @@ mod primary_constructor_newline_e2e;
 mod primitive_explicit_equals_e2e;
 #[path = "primitive_hash_code_e2e.rs"]
 mod primitive_hash_code_e2e;
+#[path = "projected_member_extension_invoke_e2e.rs"]
+mod projected_member_extension_invoke_e2e;
 #[path = "public_inline_property_access_e2e.rs"]
 mod public_inline_property_access_e2e;
+#[path = "receiver_type_line_break_e2e.rs"]
+mod receiver_type_line_break_e2e;
 #[path = "reference_carrier_cast_e2e.rs"]
 mod reference_carrier_cast_e2e;
 #[path = "reified_type_arguments_e2e.rs"]
@@ -1621,6 +1649,8 @@ mod safe_call_null_line_e2e;
 mod sam_lambda_parameter_inference_e2e;
 #[path = "same_module_inline_frame_markers_e2e.rs"]
 mod same_module_inline_frame_markers_e2e;
+#[path = "sealed_serializable_e2e.rs"]
+mod sealed_serializable_e2e;
 #[path = "serialization_explicit_companion_e2e.rs"]
 mod serialization_explicit_companion_e2e;
 #[path = "setter_return_line_e2e.rs"]
@@ -1932,6 +1962,8 @@ mod native_receiver_property_e2e;
 mod native_reflection_type_checks_e2e;
 #[path = "native_reified_declarations_e2e.rs"]
 mod native_reified_declarations_e2e;
+#[path = "native_runtime_cache_e2e.rs"]
+mod native_runtime_cache_e2e;
 #[path = "native_runtime_e2e.rs"]
 mod native_runtime_e2e;
 #[path = "native_sam_e2e.rs"]
@@ -1962,6 +1994,8 @@ mod native_throws_e2e;
 mod native_try_catch_e2e;
 #[path = "native_type_checks_e2e.rs"]
 mod native_type_checks_e2e;
+#[path = "native_type_of_e2e.rs"]
+mod native_type_of_e2e;
 #[path = "native_unsigned_e2e.rs"]
 mod native_unsigned_e2e;
 #[path = "native_value_classes_e2e.rs"]
@@ -2469,6 +2503,8 @@ mod secondary_ctor_noprimary_e2e;
 mod secondary_ctor_this_sibling_e2e;
 #[path = "self_call_type_variables_e2e.rs"]
 mod self_call_type_variables_e2e;
+#[path = "serializable_inheritance_e2e.rs"]
+mod serializable_inheritance_e2e;
 #[path = "serializable_noarg_constructor_order_e2e.rs"]
 mod serializable_noarg_constructor_order_e2e;
 #[path = "serializable_value_class_cache_accessor_order_e2e.rs"]

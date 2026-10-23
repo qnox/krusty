@@ -880,6 +880,15 @@ pub(super) fn realize(
                 unreachable!("a target KLIB scalar instruction cannot reach JVM call realization")
             }
             Some(
+                crate::libraries::CompilerIntrinsic::UnsignedDivide { .. }
+                | crate::libraries::CompilerIntrinsic::UnsignedRemainder { .. }
+                | crate::libraries::CompilerIntrinsic::ResultFailure(_)
+                | crate::libraries::CompilerIntrinsic::TextTrim
+                | crate::libraries::CompilerIntrinsic::CollectionSizeOrDefault,
+            ) => {
+                unreachable!("a target KLIB library helper cannot reach JVM call realization")
+            }
+            Some(
                 crate::libraries::CompilerIntrinsic::ThrowableConstructor { .. }
                 | crate::libraries::CompilerIntrinsic::ThrowableMessage,
             ) => unreachable!("target KLIB Throwable storage cannot reach JVM call realization"),
@@ -890,6 +899,7 @@ pub(super) fn realize(
                 | crate::libraries::CompilerIntrinsic::ArrayGet
                 | crate::libraries::CompilerIntrinsic::ArraySet
                 | crate::libraries::CompilerIntrinsic::ArrayFactory(_)
+                | crate::libraries::CompilerIntrinsic::ListStorageConstruction(_)
                 | crate::libraries::CompilerIntrinsic::CharCode
                 | crate::libraries::CompilerIntrinsic::StringLength
                 | crate::libraries::CompilerIntrinsic::Assert

@@ -597,7 +597,7 @@ impl BodyFirChecker<'_> {
                     semantic_role: member.semantic_role,
                     overridden_declarations: &member.overridden_declarations,
                     suspend: member.suspend(),
-                    can_inline: member.inline.can_inline(),
+                    inline: member.inline,
                     inline_plan: member.inline_body_plan.as_deref(),
                     inline_receiver_parameter: None,
                     inline_declared_receiver: None,
@@ -893,7 +893,7 @@ impl BodyFirChecker<'_> {
                         semantic_role: extension.callable.semantic_role,
                         overridden_declarations: &extension.callable.overridden_declarations,
                         suspend: extension.callable.suspend,
-                        can_inline: extension.callable.inline.can_inline(),
+                        inline: extension.callable.inline,
                         inline_plan,
                         inline_receiver_parameter: None,
                         inline_declared_receiver:
@@ -1105,7 +1105,7 @@ impl BodyFirChecker<'_> {
                         semantic_role: selected.member.semantic_role,
                         overridden_declarations: selected.member.overridden_declarations.clone(),
                         suspend: selected.member.suspend(),
-                        can_inline: selected.member.inline.can_inline(),
+                        inline: selected.member.inline,
                         inline_plan: publish_inline_body_plan(
                             selected.member.inline_body_plan.as_deref(),
                             None,
@@ -1202,7 +1202,7 @@ impl BodyFirChecker<'_> {
                         semantic_role: selected.callable.semantic_role,
                         overridden_declarations: selected.callable.overridden_declarations.clone(),
                         suspend: selected.callable.suspend,
-                        can_inline: selected.callable.inline.can_inline(),
+                        inline: selected.callable.inline,
                         inline_plan: publish_inline_body_plan(
                             selected.callable.inline_body_plan.as_deref(),
                             Some(context_count),
@@ -1308,7 +1308,7 @@ impl BodyFirChecker<'_> {
                         semantic_role: None,
                         overridden_declarations: Box::new([]),
                         suspend: *suspend,
-                        can_inline: inline.can_inline(),
+                        inline: *inline,
                         inline_plan: publish_inline_body_plan(
                             inline_body_plan.as_deref(),
                             None,
@@ -1406,7 +1406,7 @@ impl BodyFirChecker<'_> {
                 Ok(FirTypeSubstitution {
                     parameter: parameter.into(),
                     reified,
-                    reified_runtime: self.reified_substitution_runtime(reified, value),
+                    reified_runtime: self.reified_substitution_runtime(reified, value, &additional_bounds),
                     value,
                     additional_bounds,
                 })
@@ -1447,7 +1447,7 @@ impl BodyFirChecker<'_> {
                 semantic_role: callable.semantic_role,
                 overridden_declarations: &callable.overridden_declarations,
                 suspend: callable.suspend,
-                can_inline: callable.inline.can_inline(),
+                inline: callable.inline,
                 inline_plan,
                 inline_receiver_parameter,
                 inline_declared_receiver:
@@ -1526,7 +1526,19 @@ impl BodyFirChecker<'_> {
                     BodyCheckFailureKind::UnsupportedCallShape,
                 )
             })?;
-            *parameter = array;
+            // A generic element is the selected one (`vararg values: T` with `T = String` packs a
+            // `String[]`); the physical slot carries only its erasure.
+            *parameter = match array.type_args().first().map(|argument| argument.kind()) {
+                Some(crate::types::TyKind::OutProjection(_)) if array.is_reference_array() => {
+                    Ty::obj_args_name(crate::types::wk::array(), &[Ty::out_projection(*parameter)])
+                }
+                // A reference array stays one when the element is a primitive: `T = Int` packs
+                // an `Integer[]`, never an `int[]`.
+                Some(_) if array.is_reference_array() => {
+                    Ty::obj_args_name(crate::types::wk::array(), &[*parameter])
+                }
+                _ => array,
+            };
         }
         if let Some(declaration) = stable_declaration {
             let callable = self
@@ -1584,7 +1596,7 @@ impl BodyFirChecker<'_> {
                 semantic_role: None,
                 overridden_declarations: &[],
                 suspend: *suspend,
-                can_inline: inline.can_inline(),
+                inline: *inline,
                 inline_plan: inline_body_plan.as_deref(),
                 inline_receiver_parameter: None,
                 inline_declared_receiver: None,
@@ -1660,7 +1672,7 @@ impl BodyFirChecker<'_> {
             semantic_role,
             overridden_declarations,
             suspend,
-            can_inline,
+            inline,
             inline_plan,
             inline_receiver_parameter,
             inline_declared_receiver,
@@ -1705,7 +1717,11 @@ impl BodyFirChecker<'_> {
                     },
                     reified,
                     value,
-                    reified_runtime: self.reified_substitution_runtime(reified, value),
+                    reified_runtime: self.reified_substitution_runtime(
+                        reified,
+                        value,
+                        &additional_bounds,
+                    ),
                     additional_bounds,
                 })
             })
@@ -1729,7 +1745,7 @@ impl BodyFirChecker<'_> {
                 semantic_role,
                 overridden_declarations: overridden_declarations.into(),
                 suspend,
-                can_inline,
+                inline,
                 inline_plan: publish_inline_body_plan(
                     inline_plan,
                     inline_receiver_parameter,
@@ -2397,7 +2413,7 @@ impl BodyFirChecker<'_> {
                 semantic_role: selected.member.semantic_role,
                 overridden_declarations: &selected.member.overridden_declarations,
                 suspend: selected.member.suspend(),
-                can_inline: selected.member.inline.can_inline(),
+                inline: selected.member.inline,
                 inline_plan: selected.member.inline_body_plan.as_deref(),
                 inline_receiver_parameter: None,
                 inline_declared_receiver: None,
@@ -2661,7 +2677,7 @@ impl BodyFirChecker<'_> {
             let expected = if self.file.is_spread_arg(operand) {
                 parameter_ty
             } else {
-                let element = parameter_ty.get().array_elem().ok_or_else(|| {
+                let element = parameter_ty.get().array_read_elem().ok_or_else(|| {
                     self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
                 })?;
                 self.resolved_type(

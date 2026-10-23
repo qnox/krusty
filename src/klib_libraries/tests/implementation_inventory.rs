@@ -7,7 +7,6 @@
 
 use std::rc::Rc;
 
-use super::super::builtin_realizations;
 use super::super::declaration_signatures::SignedFunction;
 use super::super::inventory::{ArchivePackageInput, PackageInventory};
 use super::super::lookup::{published_function, published_property};
@@ -72,9 +71,6 @@ fn normalized_function(
     enclosing: &crate::libraries::EnclosingBounds,
 ) -> FunctionInfo {
     let mut function = published_function(&libraries.identities, signed, placement, enclosing);
-    if let CallablePlacement::Member { owner, .. } = placement {
-        builtin_realizations::realize_member(owner, &mut function);
-    }
     let realization = libraries
         .external_callable(
             function
@@ -99,11 +95,7 @@ fn normalized_property(
     placement: CallablePlacement,
     enclosing: &crate::libraries::EnclosingBounds,
 ) -> PropertyInfo {
-    let mut property = published_property(&libraries.identities, signed, placement, enclosing);
-    if let CallablePlacement::Member { owner, .. } = placement {
-        builtin_realizations::realize_member_property(owner, &mut property);
-    }
-    property
+    published_property(&libraries.identities, signed, placement, enclosing)
 }
 
 fn record_callable(
@@ -358,7 +350,7 @@ pub(super) fn libraries(
     KlibLibraries::over_with_bodies(Rc::new(inventory), Rc::new(bodies))
 }
 
-fn declaration_tree(
+pub(super) fn declaration_tree(
     declaration: &KlibDeclarationSignature,
     name: &str,
     body: Option<KlibIrBody>,
@@ -367,7 +359,7 @@ fn declaration_tree(
         .expect("the fixture declaration tree has one exact function")
 }
 
-fn declaration_ir_tree(
+pub(super) fn declaration_ir_tree(
     declaration: &KlibDeclarationSignature,
     name: &str,
     body: Option<KlibIrBody>,
@@ -375,7 +367,7 @@ fn declaration_ir_tree(
     declaration_ir_tree_kind(declaration, name, false, body)
 }
 
-fn declaration_ir_tree_kind(
+pub(super) fn declaration_ir_tree_kind(
     declaration: &KlibDeclarationSignature,
     name: &str,
     constructor: bool,
@@ -1031,7 +1023,7 @@ fn an_interop_direct_c_declaration_is_an_exact_bodyless_operation() {
     );
 }
 
-fn fixture_class(functions: Vec<KotlinFunction>) -> KotlinClass {
+pub(super) fn fixture_class(functions: Vec<KotlinFunction>) -> KotlinClass {
     KotlinClass {
         supertypes: vec!["kotlin/Any".to_owned()],
         supertype_tys: vec![class("kotlin/Any", false)],

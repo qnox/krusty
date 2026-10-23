@@ -43,6 +43,33 @@ fn a_reference_carrying_an_argument_passes_it() {
     every_backend_agrees_with_kotlinc("DependencyReferenceArgument", source);
 }
 
+/// Native's checked extension-reference adapter packs the nullable receiver at parameter zero,
+/// unlike the separate dispatch operand of the member reference above. Pin that target ABI here;
+/// no Native-only box inventory or expectation allowance is needed.
+#[test]
+fn a_nullable_extension_reference_keeps_its_operand_roles() {
+    let source = "var visits = 0\n\
+         fun receiver(value: String?): String? {\n\
+         \x20   visits = visits * 10 + 1\n\
+         \x20   return value\n\
+         }\n\
+         fun argument(value: String?): Any? {\n\
+         \x20   visits = visits * 10 + 2\n\
+         \x20   return value\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val plus: (Any?) -> String = receiver(null)::plus\n\
+         \x20   if (visits != 1) return \"receiver effect\"\n\
+         \x20   if (plus(argument(\"K\")) != \"nullK\") return \"null receiver\"\n\
+         \x20   if (visits != 12) return \"operand order\"\n\
+         \x20   visits = 0\n\
+         \x20   val other: (Any?) -> String = receiver(\"O\")::plus\n\
+         \x20   if (other(argument(null)) != \"Onull\") return \"null argument\"\n\
+         \x20   return if (visits == 12) \"OK\" else \"second order\"\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("NullableDependencyReferenceOperands", source);
+}
+
 /// Kotlin says two references to ONE declaration are equal though they are different objects, and
 /// that a reference with a receiver bound to it is not equal to the unbound one.
 #[test]

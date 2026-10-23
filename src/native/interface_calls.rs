@@ -29,7 +29,7 @@ pub(super) const RECORD_SIZE: u64 = 24;
 /// Where a `KType` pointer sits in an object, and where the interface table pointer sits in a
 /// `KType` (`krusty_rt.h`): the two loads a table lookup makes.
 pub(super) const RECEIVER_TYPE_OFFSET: u32 = 0;
-pub(super) const ITABLE_OFFSET: u32 = 152;
+pub(super) const ITABLE_OFFSET: u32 = 160;
 
 const STUB_PREFIX: &str = "kt_itf_";
 

@@ -17,7 +17,8 @@ pub(crate) fn any_slot(role: Option<crate::types::SemanticCallRole>) -> Option<u
         Some(crate::types::SemanticCallRole::KotlinAnyHashCode) => Some(1),
         Some(crate::types::SemanticCallRole::KotlinAnyToString) => Some(2),
         Some(
-            crate::types::SemanticCallRole::KotlinComparableCompareTo
+            crate::types::SemanticCallRole::KotlinArrayAllocation
+            | crate::types::SemanticCallRole::KotlinComparableCompareTo
             | crate::types::SemanticCallRole::KotlinFunctionInvoke
             | crate::types::SemanticCallRole::KotlinCallableReferenceName
             | crate::types::SemanticCallRole::KotlinPropertyReferenceGet(_)

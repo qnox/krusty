@@ -244,8 +244,7 @@ impl ResolvedModuleIndex {
             }
             DeclarationKind::EnumEntry
             | DeclarationKind::TypeAlias
-            | DeclarationKind::Initializer
-            | DeclarationKind::Script => false,
+            | DeclarationKind::Initializer => false,
         }
     }
 

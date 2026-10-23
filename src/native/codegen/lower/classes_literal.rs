@@ -32,8 +32,14 @@ impl BodyLowering<'_, '_, '_> {
         let Some(ty) = classifier else {
             return Err("a class literal naming neither a type nor a value".into());
         };
-        let Some(descriptor) = self.file.type_descriptor(ty)? else {
-            return Err(declined!("a class literal of `{ty:?}`"));
+        // `kotlin.Any` has no class descriptor of its own to test against, but the runtime's
+        // `kt_type_any` is the class: a reified flow intersection reaches here as `Any::class`.
+        let descriptor = match self.file.type_descriptor(ty)? {
+            Some(descriptor) => descriptor,
+            None if ty.non_null().obj_internal() == Some(crate::types::wk::any()) => {
+                self.file.import_data("kt_type_any")?
+            }
+            None => return Err(declined!("a class literal of `{ty:?}`")),
         };
         let address = self.data_address(descriptor);
         self.runtime_call("kt_class_literal", &[Ty::Long], kclass(), &[address])

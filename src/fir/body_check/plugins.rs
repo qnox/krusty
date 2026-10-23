@@ -227,7 +227,7 @@ impl BodyFirChecker<'_> {
                 semantic_role: selected.member.semantic_role,
                 overridden_declarations: selected.member.overridden_declarations.clone(),
                 suspend: selected.suspend,
-                can_inline: selected.member.inline.can_inline(),
+                inline: selected.member.inline,
                 inline_plan: super::inline_body_plan::publish(
                     selected.member.inline_body_plan.as_deref(),
                     None,
@@ -307,7 +307,11 @@ impl BodyFirChecker<'_> {
                     parameter,
                     reified,
                     value,
-                    reified_runtime: self.reified_substitution_runtime(reified, value),
+                    reified_runtime: self.reified_substitution_runtime(
+                        reified,
+                        value,
+                        &additional_bounds,
+                    ),
                     additional_bounds,
                 })
             })

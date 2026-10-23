@@ -2,6 +2,25 @@
 
 use super::{PrimitiveBinaryIntrinsic, PrimitiveUnaryIntrinsic};
 
+/// The exact library helper used to construct or inspect a failed `Result`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResultFailureIntrinsic {
+    Create,
+    Check,
+    CheckOfClass,
+}
+
+/// Storage supplied by a target for an authenticated stdlib collection factory. The selected
+/// declaration distinguishes one array element from a packed array of elements before substitution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListStorageConstruction {
+    ReadonlyEmpty,
+    ReadonlySingleton,
+    ReadonlyPacked,
+    MutableEmpty,
+    MutablePacked,
+}
+
 /// A source-declared callable whose implementation is supplied by the compiler after ordinary symbol
 /// and overload selection. Providers attach this to the exact declaration identity; lowering never
 /// grants intrinsic behavior from a coincidental source name.
@@ -35,6 +54,9 @@ pub enum CompilerIntrinsic {
     /// The kind distinguishes reference/primitive varargs and the other language array creators;
     /// selected call-site types remain ordinary semantic types and are recorded in checked FIR.
     ArrayFactory(crate::types::ArrayFactoryKind),
+    /// A target may supply its collection storage instead of calling the declaration's body.
+    /// This is not common lowering of a library algorithm; other targets keep the ordinary call.
+    ListStorageConstruction(ListStorageConstruction),
     /// An array classifier's own `operator fun get(index: Int)` (`IntArray.get`, `Array<T>.get`).
     /// The array classifiers have no platform class, so a target reads the element directly.
     ArrayGet,
@@ -110,6 +132,13 @@ pub enum CompilerIntrinsic {
     Count,
     TrimIndent,
     TrimMargin,
+    /// The authenticated target stdlib's zero-argument `CharSequence.trim(): CharSequence`.
+    /// Targets must prove the receiver's representation supports their text reader before
+    /// replacing the ordinary extension call with a runtime operation.
+    TextTrim,
+    /// Authenticated stdlib Iterable<T>.collectionSizeOrDefault(Int): Int. Native tests the
+    /// Collection marker and invokes its selected size getter, never counting an Iterable.
+    CollectionSizeOrDefault,
     /// The common stdlib `kotlin.ranges` `Double`/`Float` `rangeTo` and `rangeUntil` declarations.
     /// Membership in their closed or open-end result is an IEEE comparison. The provider copies
     /// this role from the exact common declaration onto its physical realization; a nearer
@@ -139,9 +168,28 @@ pub enum CompilerIntrinsic {
     UnsignedCompare {
         carrier: crate::types::Ty,
     },
+    /// The stdlib's unsigned division helper, at its declared unsigned operand type.
+    UnsignedDivide {
+        operand: crate::types::Ty,
+    },
+    /// The corresponding unsigned remainder helper.
+    UnsignedRemainder {
+        operand: crate::types::Ty,
+    },
+    /// A fully normalized `Result` helper reached from an expanded library inline body.
+    ResultFailure(ResultFailureIntrinsic),
     /// `next()` declared by a Kotlin primitive iterator (`kotlin.collections.IntIterator.next`).
     /// A target may call the iterator's unboxed element operation instead of the boxed
     /// `Iterator<T>.next` bridge (kotlinc's `IteratorNext` intrinsic); outside that target rule the
     /// declaration is ordinary virtual dispatch.
     PrimitiveIteratorNext,
+}
+
+impl CompilerIntrinsic {
+    /// Whether the declaration's own body says nothing of what a call does: it only throws, and
+    /// the compiler supplies the whole behavior from the selected type argument. Such a call is
+    /// never expanded from that body, even where the library serializes it as an inline template.
+    pub fn replaces_its_body(self) -> bool {
+        matches!(self, Self::TypeOf | Self::EnumEntries)
+    }
 }

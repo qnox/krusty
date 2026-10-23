@@ -50,6 +50,42 @@ pub struct WorkUnit {
     pub resources: Vec<ResourceGroup>,
 }
 
+impl WorkUnit {
+    /// The krusty command line this unit compiles with. The classpath is joined with the separator
+    /// the CLI splits it on, so a Windows worker does not read several jars as one path.
+    pub fn compiler_arguments(&self) -> Vec<String> {
+        let mut argv: Vec<String> = vec!["-d".to_string(), self.output_jar.display().to_string()];
+        if let Some(module_name) = &self.module_name {
+            argv.push("-module-name".to_string());
+            argv.push(module_name.clone());
+        }
+        if !self.classpath.is_empty() {
+            argv.push("-classpath".to_string());
+            argv.push(
+                self.classpath
+                    .iter()
+                    .map(|entry| entry.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(&crate::cli::CLASSPATH_SEPARATOR.to_string()),
+            );
+        }
+        // kotlinc splits `-Xfriend-paths` on `,`, not on the path separator.
+        if !self.friend_paths.is_empty() {
+            argv.push(format!(
+                "-Xfriend-paths={}",
+                self.friend_paths
+                    .iter()
+                    .map(|entry| entry.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+        }
+        argv.extend(self.kotlinc_args.iter().cloned());
+        argv.extend(self.sources.iter().map(|path| path.display().to_string()));
+        argv
+    }
+}
+
 /// One `--resources` argument: files copied into the jar after their strip prefix is removed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResourceGroup {
@@ -214,7 +250,9 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                         if path.extension().and_then(|e| e.to_str()) == Some("java") {
                             return Err(Refusal::JavaSources(format!("{value} is a Java source")));
                         }
-                        if !krusty::source::is_batch_compilable_path(&path) {
+                        // A script compiles against a script definition the action does not
+                        // describe, so the worker leaves it to the reference compiler.
+                        if krusty::source::kind(&path) != Some(krusty::source::SourceKind::Kotlin) {
                             return Err(Refusal::Unsupported(format!(
                                 "--srcs {value}: krusty's batch compiler accepts only .kt sources"
                             )));
@@ -794,6 +832,25 @@ mod tests {
         values.iter().map(|value| value.to_string()).collect()
     }
 
+    #[test]
+    fn the_compiler_reads_every_classpath_entry_of_a_work_unit() {
+        let unit = translate(&args(&[
+            "--srcs",
+            "A.kt",
+            "--cp",
+            "lib/a.jar",
+            "lib/b.jar",
+            "--out",
+            "o.jar",
+        ]))
+        .expect("must translate");
+        let parsed = crate::cli::parse(unit.compiler_arguments());
+        assert_eq!(
+            parsed.classpath,
+            vec![PathBuf::from("lib/a.jar"), PathBuf::from("lib/b.jar")]
+        );
+    }
+
     /// The argument list intellij-community's own rules produce for a Kotlin-only target.
     fn intellij_request() -> Vec<String> {
         args(&[
@@ -1048,8 +1105,9 @@ mod tests {
         assert!(matches!(by_count, Refusal::JavaSources(_)), "{by_count:?}");
     }
 
-    /// The batch CLI silently ignores scripts and unknown path kinds. A worker cannot inherit that
-    /// compatibility behavior: Bazel would receive a successful jar missing a declared source.
+    /// The batch CLI silently ignores unknown path kinds. A worker cannot inherit that
+    /// compatibility behavior: Bazel would receive a successful jar missing a declared source. A
+    /// script is refused as well, since the action does not describe its script definition.
     #[test]
     fn every_declared_source_must_be_batch_compilable_kotlin() {
         for source in ["A.kts", "README", "generated/source.txt"] {

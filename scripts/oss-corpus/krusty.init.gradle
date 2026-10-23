@@ -1,0 +1,30 @@
+// Applies the krusty Gradle plugin to every Kotlin/JVM and Kotlin Multiplatform project of the
+// build, from the local Maven repository the corpus workflow unpacked.
+def repo = new File(System.getenv('KRUSTY_PLUGIN_REPOSITORY')).toURI()
+def version = System.getenv('KRUSTY_PLUGIN_VERSION')
+settingsEvaluated { s ->
+    s.pluginManagement.repositories { maven { url = repo } }
+}
+gradle.rootProject { p ->
+    p.buildscript.repositories { maven { url = repo } }
+    p.buildscript.dependencies { classpath "dev.krustythecompiler:krusty-gradle-plugin:$version" }
+}
+gradle.allprojects { p ->
+    p.pluginManager.withPlugin('org.jetbrains.kotlin.jvm') { p.pluginManager.apply('dev.krustythecompiler') }
+    p.pluginManager.withPlugin('org.jetbrains.kotlin.multiplatform') {
+        // A plugin build without Kotlin Multiplatform support rejects the project. Its compiles
+        // then stay with kotlinc, and each is reported the way the plugin reports a fallback, so
+        // the comparison counts it as a miss rather than as kotlinc's output matching itself.
+        try {
+            p.pluginManager.apply('dev.krustythecompiler')
+        } catch (Exception rejected) {
+            def reason = rejected.cause?.message ?: rejected.message
+            p.afterEvaluate {
+                p.tasks.names.findAll { it ==~ /compile.*Kotlin.*/ }.each { n ->
+                    def path = p.path == ':' ? ":$n" : "${p.path}:$n"
+                    p.logger.lifecycle("krusty: task '$path' is left to kotlinc: $reason")
+                }
+            }
+        }
+    }
+}

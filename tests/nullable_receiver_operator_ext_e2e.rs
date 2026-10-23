@@ -102,3 +102,23 @@ fun box(): String {\n\
 }\n";
     assert_eq!(run(SRC).expect("String?.plus extension"), "OK");
 }
+
+/// A build tool hands kotlinc the stdlib under its repository name (`kotlin-stdlib-2.3.20.jar`), with
+/// no Kotlin distribution beside it. kotlinc still concatenates `String?.plus` with StringBuilder;
+/// `kotlin.plus` is a builtin declaration with no JVM class to call.
+#[test]
+fn nullable_string_plus_concatenates_against_a_repository_named_stdlib() {
+    const SRC: &str = "fun join(s: String?, n: Int): String = s + \": \" + n\n\
+fun box(): String {\n\
+    val joined = join(null, 1) + \"|\" + join(\"a\", 2)\n\
+    return if (joined == \"null: 1|a: 2\") \"OK\" else \"fail: $joined\"\n\
+}\n";
+    let dir = common::scratch_dir().expect("allocate repository directory");
+    let stdlib = dir.join("kotlin-stdlib-2.4.21.jar");
+    std::fs::copy(common::stdlib_jar(), &stdlib).expect("copy stdlib under its repository name");
+    let classpath = [stdlib];
+    let reference = common::kotlinc_box_result_with_classpath(SRC, &classpath);
+    let jdk = common::jdk_modules();
+    let krusty = common::expect_box_run(SRC, "Main", &classpath, Some(jdk.as_path()));
+    assert_eq!((reference.as_str(), krusty.as_str()), ("OK", "OK"));
+}

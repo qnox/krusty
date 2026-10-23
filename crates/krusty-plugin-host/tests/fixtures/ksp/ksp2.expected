@@ -1,0 +1,46 @@
+# What KSP2 2.3.12 (KSPJvmMain) does with Dump.kt over sources/: the files it generates,
+# relative to their output directory, what the processor logs, and the dump it writes.
+# $SOURCES is the sources directory and $OUTPUT the output directory for Kotlin sources.
+kotlin gen/Generated.kt
+resource dump.txt
+w: [ksp] $SOURCES/Other.kt:5: seen here
+w: [ksp] finished after 2 rounds
+round 1
+file Sample.kt package=sample new=true
+  ANNOTATION_CLASS sample.Marker simple=Marker package=sample parent=null file=Sample.kt origin=KOTLIN location=FileLocation(filePath=$SOURCES/Sample.kt, lineNumber=3) fileParent=true
+    KSFunctionDeclaration <init>
+  CLASS sample.Plain simple=Plain package=sample parent=null file=Sample.kt origin=KOTLIN location=FileLocation(filePath=$SOURCES/Sample.kt, lineNumber=7) fileParent=true @Marker=sample.Marker
+    KSFunctionDeclaration <init>
+    INTERFACE sample.Plain.Inner simple=Inner package=sample parent=sample.Plain file=Sample.kt origin=KOTLIN location=FileLocation(filePath=$SOURCES/Sample.kt, lineNumber=8) fileParent=false
+    OBJECT sample.Plain.Holder simple=Holder package=sample parent=sample.Plain file=Sample.kt origin=KOTLIN location=FileLocation(filePath=$SOURCES/Sample.kt, lineNumber=11) fileParent=false @Marker=sample.Marker
+      KSFunctionDeclaration <init>
+  INTERFACE sample.Shape simple=Shape package=sample parent=null file=Sample.kt origin=KOTLIN location=FileLocation(filePath=$SOURCES/Sample.kt, lineNumber=14) fileParent=true
+  OBJECT sample.Single simple=Single package=sample parent=null file=Sample.kt origin=KOTLIN location=FileLocation(filePath=$SOURCES/Sample.kt, lineNumber=16) fileParent=true @Marker=sample.Marker
+    KSFunctionDeclaration <init>
+  ANNOTATION_CLASS sample.Tag simple=Tag package=sample parent=null file=Sample.kt origin=KOTLIN location=FileLocation(filePath=$SOURCES/Sample.kt, lineNumber=18) fileParent=true
+    KSFunctionDeclaration <init>
+file Other.kt package=sample.other new=true
+  CLASS sample.other.Root simple=Root package=sample.other parent=null file=Other.kt origin=KOTLIN location=FileLocation(filePath=$SOURCES/Other.kt, lineNumber=5) fileParent=true @Marker=sample.Marker @Tag=sample.Tag
+    KSFunctionDeclaration <init>
+round 2
+file Sample.kt package=sample new=false
+  ANNOTATION_CLASS sample.Marker simple=Marker package=sample parent=null file=Sample.kt origin=KOTLIN location=FileLocation(filePath=$SOURCES/Sample.kt, lineNumber=3) fileParent=true
+    KSFunctionDeclaration <init>
+  CLASS sample.Plain simple=Plain package=sample parent=null file=Sample.kt origin=KOTLIN location=FileLocation(filePath=$SOURCES/Sample.kt, lineNumber=7) fileParent=true @Marker=sample.Marker
+    KSFunctionDeclaration <init>
+    INTERFACE sample.Plain.Inner simple=Inner package=sample parent=sample.Plain file=Sample.kt origin=KOTLIN location=FileLocation(filePath=$SOURCES/Sample.kt, lineNumber=8) fileParent=false
+    OBJECT sample.Plain.Holder simple=Holder package=sample parent=sample.Plain file=Sample.kt origin=KOTLIN location=FileLocation(filePath=$SOURCES/Sample.kt, lineNumber=11) fileParent=false @Marker=sample.Marker
+      KSFunctionDeclaration <init>
+  INTERFACE sample.Shape simple=Shape package=sample parent=null file=Sample.kt origin=KOTLIN location=FileLocation(filePath=$SOURCES/Sample.kt, lineNumber=14) fileParent=true
+  OBJECT sample.Single simple=Single package=sample parent=null file=Sample.kt origin=KOTLIN location=FileLocation(filePath=$SOURCES/Sample.kt, lineNumber=16) fileParent=true @Marker=sample.Marker
+    KSFunctionDeclaration <init>
+  ANNOTATION_CLASS sample.Tag simple=Tag package=sample parent=null file=Sample.kt origin=KOTLIN location=FileLocation(filePath=$SOURCES/Sample.kt, lineNumber=18) fileParent=true
+    KSFunctionDeclaration <init>
+file Other.kt package=sample.other new=false
+  CLASS sample.other.Root simple=Root package=sample.other parent=null file=Other.kt origin=KOTLIN location=FileLocation(filePath=$SOURCES/Other.kt, lineNumber=5) fileParent=true @Marker=sample.Marker @Tag=sample.Tag
+    KSFunctionDeclaration <init>
+file Generated.kt package=gen new=true
+  CLASS gen.Generated simple=Generated package=gen parent=null file=Generated.kt origin=KOTLIN location=FileLocation(filePath=$OUTPUT/gen/Generated.kt, lineNumber=4) fileParent=true @Marker=sample.Marker
+    KSFunctionDeclaration <init>
+    CLASS gen.Generated.Nested simple=Nested package=gen parent=gen.Generated file=Generated.kt origin=KOTLIN location=FileLocation(filePath=$OUTPUT/gen/Generated.kt, lineNumber=5) fileParent=false
+      KSFunctionDeclaration <init>

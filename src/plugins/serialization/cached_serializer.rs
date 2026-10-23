@@ -1,12 +1,15 @@
-//! A serializer a declaration builds for itself once and caches: an enum's and an object's.
+//! A serializer a declaration builds for itself once and caches: an enum's, an object's, and an
+//! abstract or sealed class's.
 //!
 //! kotlinc gives such a declaration a `private static final Lazy $cachedSerializer$delegate`,
 //! initialized with `LazyKt.lazy(PUBLICATION) { … }` whose body is a private static
 //! `_init_$_anonymous_()`. An enum's body is its `EnumSerializer` factory; an object's is an
-//! `ObjectSerializer` over its own `INSTANCE`. Neither has a generated `$serializer` class.
+//! `ObjectSerializer` over its own `INSTANCE`; an abstract class's is a `PolymorphicSerializer`
+//! over its own class; a sealed class's is a `SealedClassSerializer` over its subclasses. None has
+//! a generated `$serializer` class.
 
 use super::class_ty;
-use crate::ir::{Callee, ClassId, ExprId, IrConst, IrExpr, IrFile, IrFunction, IrTypeOp};
+use crate::ir::{Callee, ClassId, ExprId, FunId, IrConst, IrExpr, IrFile, IrFunction, IrTypeOp};
 use crate::libraries::InlineKind;
 use crate::types::{type_name, Ty, TypeName};
 
@@ -14,13 +17,13 @@ const OBJECT_SERIALIZER_FQ: &str = "kotlinx/serialization/internal/ObjectSeriali
 const CACHED_SERIALIZER_DELEGATE: &str = "$cachedSerializer$delegate";
 
 /// `$cachedSerializer$delegate = LazyKt.lazy(PUBLICATION, ::_init_$_anonymous_)` on `class_id`,
-/// where `_init_$_anonymous_()` returns `serializer`.
+/// where `_init_$_anonymous_()` returns `serializer`. Returns that initializer function.
 pub(super) fn add_cached_serializer_delegate(
     ir: &mut IrFile,
     class_id: ClassId,
     class_name: TypeName,
     serializer: ExprId,
-) {
+) -> FunId {
     // The ANNOTATED start line (the `@Serializable` line), not the declaration keyword's — kotlinc
     // maps every generated member, and the delegate's `<clinit>` store, to where the declaration
     // begins, annotations included.
@@ -112,6 +115,251 @@ pub(super) fn add_cached_serializer_delegate(
         source_order: u32::MAX,
         property_delegate: false,
     });
+    anonymous
+}
+
+/// A serializer cached on `class_id` and served by its `Companion`, as kotlinc compiles an enum's
+/// and an abstract class's: a `private static final Lazy $cachedSerializer$delegate` on the class
+/// holding `serializer`, read through a `public static final Lazy
+/// access$get$cachedSerializer$delegate$cp()` accessor, and a `Companion.serializer()` delegating
+/// to a private `get$cachedSerializer()`. Returns the initializer and the accessor, which the
+/// class itself declares.
+pub(super) fn add_companion_cached_serializer(
+    ir: &mut IrFile,
+    class_id: ClassId,
+    class_name: TypeName,
+    serializer: ExprId,
+) -> [FunId; 2] {
+    // The ANNOTATED start line (the `@Serializable` line), not the declaration keyword's — kotlinc
+    // maps every generated member, and the delegate's `<clinit>` store, to where the declaration
+    // begins, annotations included.
+    let owner_line = ir.classes[class_id as usize].decl_start_line;
+    let initializer = add_cached_serializer_delegate(ir, class_id, class_name, serializer);
+    // `public static final Lazy access$get$cachedSerializer$delegate$cp()` — reads the private field.
+    let read =
+        ir.external_static_field_name(class_name, CACHED_SERIALIZER_DELEGATE, "Lkotlin/Lazy;");
+    let acc_ret = ir.add_expr(IrExpr::Return(Some(read)));
+    let acc_body = ir.add_expr(IrExpr::Block {
+        stmts: vec![acc_ret],
+        value: None,
+    });
+    let acc = ir.add_fun(IrFunction {
+        name: "access$get$cachedSerializer$delegate$cp".to_string(),
+        params: vec![],
+        // RAW `Lazy` on purpose: the FIELD carries the generic `Signature`, the synthetic
+        // accessor does not — kotlinc gives this bridge neither a `Signature` nor nullability.
+        ret: class_ty("kotlin/Lazy"),
+        body: Some(acc_body),
+        is_static: true,
+        dispatch_receiver: None,
+        param_checks: Vec::new(),
+    });
+    ir.synthetic_methods.insert(acc);
+    ir.classes[class_id as usize].methods.push(acc);
+    if owner_line != 0 {
+        ir.fn_decl_lines.insert(acc, owner_line);
+        ir.fn_sig_lines.insert(acc, owner_line);
+    }
+    // `Companion.serializer()` returns `(KSerializer) access$…$cp().getValue()` (the cached instance).
+    let acc_call = ir.add_expr(IrExpr::Call {
+        callee: Box::new(Callee::Static {
+            owner: class_name,
+            name: "access$get$cachedSerializer$delegate$cp".to_string(),
+            descriptor: "()Lkotlin/Lazy;".to_string(),
+            inline: InlineKind::None,
+        }),
+        dispatch_receiver: None,
+        args: vec![],
+    });
+    let get_value = ir.add_expr(IrExpr::Call {
+        callee: Box::new(Callee::realized_virtual(
+            type_name("kotlin/Lazy"),
+            "getValue".to_string(),
+            String::new(),
+            Some((vec![], class_ty("kotlin/Any"))),
+            true,
+        )),
+        dispatch_receiver: Some(acc_call),
+        args: vec![],
+    });
+    let cast = ir.add_expr(IrExpr::TypeOp {
+        op: IrTypeOp::Cast,
+        arg: get_value,
+        type_operand: Ty::obj("kotlinx/serialization/KSerializer"),
+    });
+    let sret = ir.add_expr(IrExpr::Return(Some(cast)));
+    let cached_body = ir.add_expr(IrExpr::Block {
+        stmts: vec![sret],
+        value: None,
+    });
+    // kotlinc does NOT inline the cached lookup into `serializer()`: it puts that body in a
+    // private `get$cachedSerializer()` on the companion and has `serializer()` delegate to it.
+    // The helper's descriptor is the RAW `KSerializer` (no generic Signature); only the public
+    // `serializer()` carries the type argument.
+    let companion = super::serializer_accessor_owner(ir, class_id);
+    let cached = ir.add_fun(IrFunction {
+        name: "get$cachedSerializer".to_string(),
+        params: vec![],
+        ret: Ty::obj("kotlinx/serialization/KSerializer"),
+        body: Some(cached_body),
+        is_static: false,
+        dispatch_receiver: Some(companion),
+        param_checks: Vec::new(),
+    });
+    // `private` makes the emitter mark it ACC_PRIVATE and reach it with `invokespecial` — which
+    // is what the delegating call has to become. That dispatch decision reads a RESOLVED
+    // `IrExpr::MethodCall` (class + member index), so the delegation below cannot be a
+    // by-name `Callee::Virtual`: that form emits `invokevirtual` and never consults the set.
+    ir.set_method_visibility(cached, crate::types::Visibility::Private);
+    // kotlinc marks the helper ACC_SYNTHETIC, which also keeps it OUT of `@Metadata`: it is a
+    // compiler-invented member, not a declaration the reflection layer should see.
+    ir.synthetic_methods.insert(cached);
+    // The frontend declared `serializer()` on the companion ahead of this helper — kotlinc's
+    // member order is `<init>`, `serializer()`, `get$cachedSerializer()`, then the synthetic
+    // marker ctor the emitter appends. Its body is completed once the helper's member index
+    // is known.
+    let comp_id = ir
+        .class_id_by_name(companion)
+        .expect("a companion-served serializer's companion is a class of this file")
+        as usize;
+    let cached_index = ir.classes[comp_id].methods.len() as u32;
+    ir.classes[comp_id].methods.push(cached);
+    // The helper exists only here, in the backend, so the frontend's generated-declaration line
+    // transfer never sees it — and the emitter attaches neither debug table without a line.
+    // The companion itself already carries the annotated owner's line by this point, which is
+    // the line kotlinc maps every one of its generated members to.
+    let companion_line = ir.classes[comp_id].decl_line;
+    if companion_line != 0 {
+        ir.fn_decl_lines.insert(cached, companion_line);
+        ir.fn_sig_lines.insert(cached, companion_line);
+    }
+    let this = ir.add_expr(IrExpr::GetValue(0));
+    let delegate = ir.add_expr(IrExpr::MethodCall {
+        class: comp_id as u32,
+        index: cached_index,
+        receiver: this,
+        args: vec![],
+    });
+    let dret = ir.add_expr(IrExpr::Return(Some(delegate)));
+    let sbody = ir.add_expr(IrExpr::Block {
+        stmts: vec![dret],
+        value: None,
+    });
+    super::complete_frontend_serializer_accessor(ir, companion, sbody);
+    [initializer, acc]
+}
+
+/// Whether kotlinc serializes `class` through a runtime serializer over its subclasses: an abstract
+/// class (a cached `PolymorphicSerializer`) or a sealed class (a cached `SealedClassSerializer`).
+/// It has no `$serializer`, but its subclasses still extend its `write$Self` and deserialization
+/// constructor. A generic one, and a sealed interface, are not read here.
+pub(super) fn is_polymorphic_base(class: &crate::ir::IrClass) -> bool {
+    (class.is_abstract || class.is_sealed)
+        && !class.is_interface
+        && !class.is_enum
+        && !class.is_object
+}
+
+/// [`is_polymorphic_base`] for the frontend's view of a source class, which decides whether a
+/// `$serializer` classifier is published at all. A sealed class publishes none either way.
+pub(super) fn frontend_is_polymorphic_base(ctx: &crate::plugins::FrontendClassContext<'_>) -> bool {
+    ctx.is_abstract && !ctx.is_sealed && ctx.kind == crate::libraries::TypeKind::Class
+}
+
+/// `Reflection.getOrCreateKotlinClass(<classifier>.class)`: the `KClass` literal kotlinc passes to
+/// a runtime serializer.
+pub(super) fn kclass_literal(ir: &mut IrFile, classifier: TypeName) -> ExprId {
+    let classlit = ir.add_expr(IrExpr::ClassConst {
+        internal: Some(classifier),
+    });
+    ir.add_expr(IrExpr::Call {
+        callee: Box::new(Callee::Static {
+            owner: type_name("kotlin/jvm/internal/Reflection"),
+            name: "getOrCreateKotlinClass".to_string(),
+            descriptor: "(Ljava/lang/Class;)Lkotlin/reflect/KClass;".to_string(),
+            inline: InlineKind::None,
+        }),
+        dispatch_receiver: None,
+        args: vec![classlit],
+    })
+}
+
+/// `new PolymorphicSerializer(<classifier>::class, <annotations>)`.
+pub(super) fn polymorphic_serializer(
+    ir: &mut IrFile,
+    classifier: TypeName,
+    annotations: ExprId,
+) -> ExprId {
+    let kclass = kclass_literal(ir, classifier);
+    ir.new_external(
+        "kotlinx/serialization/PolymorphicSerializer",
+        "(Lkotlin/reflect/KClass;[Ljava/lang/annotation/Annotation;)V",
+        vec![kclass, annotations],
+    )
+}
+
+/// A polymorphic base's `Companion.serializer()`: the cached
+/// `new PolymorphicSerializer(<class>::class, <serial-info annotations>)` of an abstract class, or
+/// the cached `SealedClassSerializer` of a sealed one.
+pub(super) fn add_polymorphic_serializer(
+    ir: &mut IrFile,
+    ctx: &crate::plugins::PluginContext,
+    class_id: ClassId,
+    class_name: TypeName,
+) {
+    let serializer = if ir.classes[class_id as usize].is_sealed {
+        super::sealed_serializer::sealed_class_serializer(ir, ctx, class_id)
+    } else {
+        let serial_info_unsupported = super::annotations::class_has_serial_info(ctx, ir, class_id);
+        let annotations = serial_info_annotations(ir, class_name, serial_info_unsupported);
+        polymorphic_serializer(ir, class_name, annotations)
+    };
+    // kotlinc narrows the initializer's value to the `KSerializer` it returns.
+    let serializer = ir.add_expr(IrExpr::TypeOp {
+        op: IrTypeOp::Cast,
+        arg: serializer,
+        type_operand: class_ty(super::KSERIALIZER_FQ),
+    });
+    // kotlinc generates the cached serializer after the deserialization constructor, beside the
+    // child-serializer cache, so the JVM emits both of its class members with that cache.
+    for function in add_companion_cached_serializer(ir, class_id, class_name, serializer) {
+        ir.serialization_cache_methods.insert(function);
+    }
+    // The class initializer ends with that store, and kotlinc returns from it on the class's last
+    // line.
+    let delegate = ir.statics.len() - 1;
+    ir.statics[delegate].accessor_lines.declaration_end =
+        ir.classes[class_id as usize].decl_end_line;
+}
+
+/// A generic polymorphic base's `Companion.serializer(typeSerial…)`: a new
+/// `PolymorphicSerializer(<class>::class, <serial-info annotations>)` for an abstract class, or a
+/// new `SealedClassSerializer` for a sealed one, on every call. Nothing is cached.
+pub(super) fn add_generic_polymorphic_serializer_accessor(
+    ir: &mut IrFile,
+    ctx: &crate::plugins::PluginContext,
+    class_id: ClassId,
+    class_name: TypeName,
+) {
+    if ir.classes[class_id as usize].is_sealed {
+        super::sealed_serializer::add_sealed_serializer_accessor(ir, ctx, class_id);
+        return;
+    }
+    let serial_info_unsupported = super::annotations::class_has_serial_info(ctx, ir, class_id);
+    let annotations = serial_info_annotations(ir, class_name, serial_info_unsupported);
+    let serializer = polymorphic_serializer(ir, class_name, annotations);
+    let serializer = ir.add_expr(IrExpr::TypeOp {
+        op: IrTypeOp::Cast,
+        arg: serializer,
+        type_operand: class_ty(super::KSERIALIZER_FQ),
+    });
+    let ret = ir.add_expr(IrExpr::Return(Some(serializer)));
+    let body = ir.add_expr(IrExpr::Block {
+        stmts: vec![ret],
+        value: None,
+    });
+    let owner = super::serializer_accessor_owner(ir, class_id);
+    super::complete_frontend_serializer_accessor(ir, owner, body);
 }
 
 /// `new ObjectSerializer(<serial name>, <object>.INSTANCE, <serial-info annotations>)`.
@@ -130,7 +378,7 @@ pub(super) fn object_serializer(
         ty: object,
         field: "INSTANCE".to_string(),
     });
-    let annotations = object_serial_info_annotations(ir, object, serial_info_unsupported);
+    let annotations = serial_info_annotations(ir, object, serial_info_unsupported);
     ir.new_external(
         OBJECT_SERIALIZER_FQ,
         "(Ljava/lang/String;Ljava/lang/Object;[Ljava/lang/annotation/Annotation;)V",
@@ -138,9 +386,9 @@ pub(super) fn object_serializer(
     )
 }
 
-fn object_serial_info_annotations(
+pub(super) fn serial_info_annotations(
     ir: &mut IrFile,
-    object: TypeName,
+    owner: TypeName,
     serial_info_unsupported: bool,
 ) -> ExprId {
     if serial_info_unsupported {
@@ -148,7 +396,7 @@ fn object_serial_info_annotations(
             plugin: "serialization",
             kind: "object-serial-info-annotations",
             exprs: Vec::new(),
-            data: vec![object],
+            data: vec![owner],
             types: Vec::new(),
         });
     }
@@ -176,7 +424,8 @@ pub(super) fn local_serializable_object(
     .then_some(class_id)
 }
 
-/// A generic `@Serializable` class declared in this file with its generated serializer: an element
+/// A generic `@Serializable` class declared in this file with its generated `$serializer` (not a
+/// sealed or abstract one, which has none): an element
 /// typed by it constructs that serializer class from the type arguments' serializers
 /// (`new G$$serializer(IntSerializer.INSTANCE)`), where a non-generic class reads a singleton.
 pub(super) fn local_generic_serializable_class(
@@ -187,7 +436,30 @@ pub(super) fn local_generic_serializable_class(
     ir.classes
         .iter()
         .position(|class| {
-            class.fq_name_id() == classifier && !class.is_object && !class.type_params.is_empty()
+            class.fq_name_id() == classifier
+                && !class.is_object
+                && !class.type_params.is_empty()
+                && !class.is_sealed
+                && !is_polymorphic_base(class)
+        })
+        .is_some_and(|index| {
+            let class_id = index as ClassId;
+            ctx.has_annotation(class_id, type_name(super::SERIALIZABLE_FQ))
+                && super::custom_serializer_of(ctx, ir, class_id).is_none()
+        })
+}
+
+/// A `@Serializable` sealed class or interface, or abstract class, declared in this file: its
+/// `serializer()` returns a runtime `SealedClassSerializer` or `PolymorphicSerializer`.
+pub(super) fn local_polymorphic_serializable_class(
+    ir: &IrFile,
+    ctx: &crate::plugins::PluginContext,
+    classifier: TypeName,
+) -> bool {
+    ir.classes
+        .iter()
+        .position(|class| {
+            class.fq_name_id() == classifier && (class.is_sealed || is_polymorphic_base(class))
         })
         .is_some_and(|index| {
             let class_id = index as ClassId;
@@ -308,7 +580,7 @@ mod tests {
         let object = type_name("sample/StampedObject");
         let mut ir = IrFile::default();
 
-        let unsupported = object_serial_info_annotations(&mut ir, object, true);
+        let unsupported = serial_info_annotations(&mut ir, object, true);
         assert!(matches!(
             ir.expr(unsupported),
             IrExpr::PluginPlaceholder {
@@ -320,7 +592,7 @@ mod tests {
             } if exprs.is_empty() && data == &[object] && types.is_empty()
         ));
 
-        let empty = object_serial_info_annotations(&mut ir, object, false);
+        let empty = serial_info_annotations(&mut ir, object, false);
         assert!(matches!(
             ir.expr(empty),
             IrExpr::Vararg {
