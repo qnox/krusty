@@ -256,6 +256,10 @@ abstract class KrustyVerifyReportTask @Inject constructor(
         // Every current compilation's verify task ran in this build and wrote its record; a missing
         // one fails the report rather than dropping that compilation.
         val recorded = records.files.toList() + unsupportedRecordFiles
+        if (recorded.isEmpty()) {
+            logger.lifecycle("krusty verify: no Kotlin/JVM compilation ran")
+            return
+        }
         val arguments = mutableListOf(
             "verify-report",
             "--out", reportDirectory.get().asFile.absolutePath,
