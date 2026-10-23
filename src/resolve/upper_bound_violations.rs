@@ -329,7 +329,13 @@ impl Checker<'_> {
                             classifier,
                             &declaration,
                         );
-                        self.check_type_argument_bounds(&formals, &owner, &resolved, &spans);
+                        self.check_type_argument_bounds(
+                            &formals,
+                            &owner,
+                            &resolved,
+                            &spans,
+                            &classifier_argument_bindings(&declaration, &resolved),
+                        );
                     }
                 }
                 template_arguments.to_vec()
@@ -408,7 +414,13 @@ impl Checker<'_> {
             })
             .collect::<Vec<_>>();
         let owner = classifier_type_parameter_owner(&self.fed_source(), classifier, declaration);
-        self.check_type_argument_bounds(&formals, &owner, resolved, &spans)
+        self.check_type_argument_bounds(
+            &formals,
+            &owner,
+            resolved,
+            &spans,
+            &classifier_argument_bindings(declaration, resolved),
+        )
     }
 
     /// Report a constructor call whose explicit type arguments violate `classifier`'s bounds;
@@ -449,6 +461,40 @@ impl Checker<'_> {
         );
     }
 
+    pub(super) fn report_bound_inner_constructor_type_arguments(
+        &mut self,
+        call: crate::ast::ExprId,
+        explicit: &[Ty],
+        bound: &super::library_constructor_failure::BoundConstructorDiagnostic,
+        display: &str,
+    ) -> bool {
+        let Some(written) = self.file.call_type_args.get(&call.0) else {
+            return false;
+        };
+        let spans = written
+            .arguments
+            .iter()
+            .map(type_argument_span)
+            .collect::<Vec<_>>();
+        let formals = bound
+            .signature
+            .formals
+            .iter()
+            .zip(&bound.signature.formal_bounds)
+            .map(|(identity, bounds)| BoundedFormal {
+                identity: crate::types::intern(identity),
+                bounds,
+            })
+            .collect::<Vec<_>>();
+        let owner = Self::bound_constructor_type_parameter_owner(bound.outer, &bound.signature);
+        if !self.check_type_argument_bounds(&formals, &owner, explicit, &spans, &Default::default())
+        {
+            return false;
+        }
+        self.report_bound_inapplicable_candidate(call, display);
+        true
+    }
+
     /// Report each argument of `resolved` (parallel to `formals`, projections kept) that violates
     /// its formal's substituted bounds, at the parallel `spans`; a `None` span is not checked.
     /// `owner` words the formals' declaration.
@@ -458,13 +504,16 @@ impl Checker<'_> {
         owner: &str,
         resolved: &[Ty],
         spans: &[Option<Span>],
+        context: &crate::symbol_resolver::GSigBinds,
     ) -> bool {
         let mut violated = false;
-        let bindings = formals
-            .iter()
-            .zip(resolved)
-            .map(|(formal, argument)| (formal.identity.to_string(), *argument))
-            .collect::<crate::symbol_resolver::GSigBinds>();
+        let mut bindings = context.clone();
+        bindings.extend(
+            formals
+                .iter()
+                .zip(resolved)
+                .map(|(formal, argument)| (formal.identity.to_string(), *argument)),
+        );
         for ((formal, argument), span) in formals.iter().zip(resolved).zip(spans) {
             let Some(span) = *span else { continue };
             let actual = {
@@ -1019,6 +1068,19 @@ fn type_argument_span(argument: &TypeRef) -> Option<Span> {
 /// A type the check can decide: resolved and no longer pending inference.
 fn is_determined(ty: Ty) -> bool {
     !ty.contains_error() && !ty.mentions_pending()
+}
+
+/// Complete application bindings, including enclosing parameters used by own bounds.
+fn classifier_argument_bindings(
+    declaration: &LibraryType,
+    resolved: &[Ty],
+) -> crate::symbol_resolver::GSigBinds {
+    declaration
+        .type_params()
+        .iter()
+        .cloned()
+        .zip(resolved.iter().copied())
+        .collect()
 }
 
 /// The own formals of a classifier declaration with their declared bounds.

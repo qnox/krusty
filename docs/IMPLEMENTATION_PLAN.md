@@ -5,6 +5,21 @@ front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
 
+## Receiver-bound constructor constraints
+
+Normalize inner constructors with complete own-plus-captured instance results, preserving independent
+callable formals while removing captured formals from the inference variables. One receiver context
+specializes member-level candidates and provider declarations before eager lambda analysis, fixes
+captured bindings before final admission, and supplies the declaration evidence for exact bound
+diagnostics. Rejected signature recovery preserves that completed application without repeating
+inference. Provider selection moves
+out of the resolver facade into its owning module. Shared classifier-bound checking also retains
+the full enclosing application for alias targets instead of validating own bounds in isolation.
+JVM boxing-cast byte parity remains separate in #2590; the bound slice proves complete ABI
+signatures, reference runtime and exact diagnostics.
+Inferred return types of receiver-bound alias calls remain a separate signature-lookup follow-up
+in #2592; declared alias calls and direct inferred calls are covered here.
+
 ## Local-call checked vararg signature
 
 Retain the checker's complete applied value-parameter list on local calls and consume it when

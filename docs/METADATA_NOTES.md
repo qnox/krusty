@@ -8,6 +8,15 @@ Goal: emit `@kotlin.Metadata` so krusty output is consumable as a **Kotlin** lib
 need only the signatures, already matched in Phase 5a). This is the single largest remaining piece —
 effectively a re-implementation of `kotlinx-metadata-jvm`'s writer.
 
+## Receiver-bound constructor signatures
+
+Receiver-bound constructor candidates retain the full classifier argument layout, including captured
+enclosing arguments, even when a source provider's provisional constructor result contains only its
+own arguments. Captured declaration identities are substituted from the selected outer application;
+they are not constructor inference variables. Ordinary callable-owned formals remain independent.
+The same complete result reaches inferred function signatures and rejected-call recovery. This
+changes no metadata schema, physical constructor descriptor or enclosing-instance ABI.
+
 ## Shared-target compiler/plugin model artifacts
 
 The Rust compiler/plugin model tracks checkout identity as a Cargo input, so a shared target cannot

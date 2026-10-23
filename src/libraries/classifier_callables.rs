@@ -33,6 +33,17 @@ pub(crate) fn constructor_generic_signature(
     if classifier.type_params().is_empty() {
         return None;
     }
+    Some(GenericSig {
+        formals: classifier.type_params().to_vec(),
+        formal_bounds: classifier.type_param_bounds().to_vec(),
+        receiver: None,
+        params: constructor.params.clone(),
+        ret: classifier_instance_type(internal, classifier),
+        return_policy: GenericReturnPolicy::Exact,
+    })
+}
+
+fn classifier_instance_type(internal: TypeName, classifier: &LibraryType) -> Ty {
     let type_arguments = classifier
         .type_params()
         .iter()
@@ -47,14 +58,7 @@ pub(crate) fn constructor_generic_signature(
             Ty::ty_param(formal, bound)
         })
         .collect::<Vec<_>>();
-    Some(GenericSig {
-        formals: classifier.type_params().to_vec(),
-        formal_bounds: classifier.type_param_bounds().to_vec(),
-        receiver: None,
-        params: constructor.params.clone(),
-        ret: Ty::obj_args_name(internal, &type_arguments),
-        return_policy: GenericReturnPolicy::Exact,
-    })
+    Ty::obj_args_name(internal, &type_arguments)
 }
 
 impl FunctionInfo {
@@ -153,6 +157,21 @@ impl FunctionInfo {
         let outer = classifier.outer_instance?;
         constructor.owner.get_or_insert(inner);
         constructor.generic_sig = constructor_generic_signature(inner, classifier, &constructor);
+        if let Some(signature) = &mut constructor.generic_sig {
+            let captured = &classifier.type_params()[classifier.own_type_parameter_count..];
+            let mut ordinal = 0;
+            signature.formal_bounds.retain(|_| {
+                let keep = !captured.contains(&signature.formals[ordinal]);
+                ordinal += 1;
+                keep
+            });
+            signature
+                .formals
+                .retain(|formal| !captured.contains(formal));
+            // Source declarations may publish an own-only constructor result. Its instance type
+            // always includes the declaration's captured slots before receiver specialization.
+            signature.ret = classifier_instance_type(inner, classifier);
+        }
         let result = constructor
             .generic_sig
             .as_ref()
@@ -171,6 +190,37 @@ mod tests {
     use crate::libraries::{
         CompilerIntrinsic, InlineBodyPlan, InlineBodyValue, InlineKind, MemberRealization,
     };
+
+    #[test]
+    fn an_inner_constructor_keeps_independent_formals_and_a_complete_instance_result() {
+        let inner = crate::types::type_name("fixtures/Outer$Inner");
+        let mut classifier = LibraryType::declaration_header();
+        classifier.outer_instance = Some(crate::types::type_name("fixtures/Outer"));
+        classifier.own_type_parameter_count = 1;
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        classifier.type_parameters = crate::types::TypeParameters::invariant(
+            vec!["inner:T".into(), "outer:T".into()],
+            vec![vec![any], vec![any]],
+        );
+        let mut constructor = LibraryMember::new("<init>".into(), vec![], Ty::Unit, "()V".into());
+        constructor.generic_sig = Some(GenericSig {
+            formals: vec!["inner:T".into(), "outer:T".into(), "constructor:T".into()],
+            formal_bounds: vec![vec![any]; 3],
+            receiver: None,
+            params: vec![],
+            ret: Ty::obj_args_name(inner, &[Ty::ty_param("inner:T", any)]),
+            return_policy: GenericReturnPolicy::Exact,
+        });
+        let candidate = FunctionInfo::receiver_bound_constructor(inner, &classifier, constructor)
+            .expect("inner candidate");
+        let signature = candidate.generic_sig.expect("generic constructor");
+        assert_eq!(signature.formals, ["inner:T", "constructor:T"]);
+        assert_eq!(signature.formal_bounds, vec![vec![any]; 2]);
+        assert_eq!(
+            signature.ret.type_args(),
+            [Ty::ty_param("inner:T", any), Ty::ty_param("outer:T", any),]
+        );
+    }
 
     #[test]
     fn classifier_member_round_trip_keeps_source_and_physical_names_separate() {
