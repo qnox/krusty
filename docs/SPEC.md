@@ -1685,9 +1685,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   no such choice. Pass 1 also publishes a constructor property's checked PROPERTY applications,
   including folded class literals, under its stable property identity before plugin constructor
   selection. Parameter- and accessor-targeted applications must not enter that property payload.
+  Partition constructor-property applications only after annotation policies from every source
+  file are available: declaring a property-only annotation in a later input must not select a
+  stale value-parameter default. Preserve only checked values, explicit sites and stable property
+  identities between the per-file fold and publication, not syntax or complete checker state.
   `frontend::tests::annotation_publication::pass_one_retains_constructor_property_payloads_only_at_their_checked_use_site`
   covers default and explicit sites; the unchanged property-level custom serializer runtime
   regression exercises the resulting selected constructor through common IR.
+  `constructor_property_payloads_do_not_depend_on_annotation_policy_file_order` checks stable
+  payloads in both input orders, with strict whole-class kotlinc coverage in
+  `property_accessor_annotation_e2e::constructor_property_annotations_match_kotlinc_in_both_source_orders`.
   Retention stays SEMANTIC through lowering (one ordered list per parameter) and is
   split into the two JVM attributes at emission via `split_declaration_annotations`, so the two
   halves cannot diverge. GAP: an annotation WITH ARGUMENTS is left out of
