@@ -57,7 +57,7 @@ pub fn render_markdown(
             Outcome::Unsupported { reasons } => {
                 reasons.iter().map(|reason| format!("- {reason}")).collect()
             }
-            Outcome::Compiled { .. } => continue,
+            Outcome::Compiled { .. } | Outcome::NoSources => continue,
         };
         report.push_str(&format!("\n#### `{}`\n\n", record.compilation));
         for line in details {
