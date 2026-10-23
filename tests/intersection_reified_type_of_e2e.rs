@@ -115,3 +115,50 @@ fun box(): String {
 "#,
     );
 }
+
+const DEPENDENCY_INTERSECTION_LIBRARY: &str = r#"
+interface Base
+interface A : Base
+interface B : Base
+
+inline fun <reified K> reify(x: K, onlyA: Any, onlyBase: Any, plain: Any): String
+    where K : A, K : B {
+    val array = Array<K>(2) { x }
+    val accepted = "${onlyA is K} ${onlyBase is K} ${plain is K}"
+    return "${K::class == Base::class} ${array.size} ${array[1] === x} $accepted"
+}
+"#;
+
+const DEPENDENCY_INTERSECTION_MAIN: &str = r#"
+// LANGUAGE: -ProhibitIntersectionReifiedTypeParameter
+class Both : A, B
+class OnlyA : A
+class OnlyBase : Base
+
+fun read(value: Any): String =
+    if (value is A && value is B) reify(value, OnlyA(), OnlyBase(), Any()) else "not both"
+
+fun box(): String {
+    val read = read(Both())
+    return if (read == "true 2 true true true false") "OK" else "fail: $read"
+}
+"#;
+
+/// The same flow intersection over a dependency's classifiers: `A` and `B` reach their common
+/// supertype `Base` only through the library's declared hierarchy, which the reified `Array<K>`,
+/// `K::class` and `is K` of the library's inline body all see.
+#[test]
+fn a_dependency_flow_intersection_reifies_its_common_supertype() {
+    let krusty = common::expect_box_run_against(
+        "dependency_flow_intersection",
+        DEPENDENCY_INTERSECTION_LIBRARY,
+        DEPENDENCY_INTERSECTION_MAIN,
+    )
+    .expect("krusty builds the library");
+    let library = common::kotlinc_libraries(&[("Lib.kt", DEPENDENCY_INTERSECTION_LIBRARY)])
+        .expect("kotlinc builds the library");
+    let kotlinc =
+        common::kotlinc_box_result_with_classpath(DEPENDENCY_INTERSECTION_MAIN, &[library]);
+    assert_eq!(kotlinc, "OK");
+    assert_eq!(krusty, kotlinc);
+}
