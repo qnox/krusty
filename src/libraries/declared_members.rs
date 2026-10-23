@@ -2,7 +2,7 @@
 //! [`super::DeclarationHeader`], for a consumer that shows declarations rather than resolving
 //! against them: no inherited member, no member a platform class adds, and every type as declared.
 
-use crate::metadata::semantic::KotlinModality;
+pub use crate::metadata::semantic::KotlinModality;
 use crate::types::{Ty, TyKind, TypeName, Visibility};
 
 /// The members a library classifier declares, each list in declaration order.

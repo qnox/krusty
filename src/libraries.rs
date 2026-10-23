@@ -40,7 +40,6 @@ mod result_nullability;
 mod scalar_instruction;
 mod singleton_dispatch;
 mod stdlib_klib_intrinsics;
-pub use crate::metadata::semantic::KotlinModality;
 pub use annotation_application::{
     AnnotationApplication, AnnotationElementDefault, AnnotationParameterPolicy,
     AnnotationPositionalPolicy,
@@ -65,6 +64,7 @@ pub use declaration_header::{
 };
 pub use declared_members::{
     DeclaredConstructor, DeclaredFunction, DeclaredMembers, DeclaredParameter, DeclaredProperty,
+    KotlinModality,
 };
 pub use default_value::DefaultValue;
 pub use dependency_access_policy::DependencyAccessPolicy;
