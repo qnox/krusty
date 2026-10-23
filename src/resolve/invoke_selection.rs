@@ -1351,8 +1351,10 @@ impl Checker<'_> {
                     // inferred element type.
                     let ret = match selected.generic_sig.clone() {
                         Some(signature) => {
-                            let (mut bindings, mut intersections) =
-                                (selected.bindings.clone(), selected.intersection_bindings.clone());
+                            let (mut bindings, mut intersections) = (
+                                selected.bindings.clone(),
+                                selected.intersection_bindings.clone(),
+                            );
                             self.commit_selected_call_intersections(
                                 call,
                                 &signature,
