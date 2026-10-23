@@ -561,6 +561,55 @@ fn expect_wasm_decline(src: &str, stem: &str, reason: &str) {
     }
 }
 
+// PLATFORM-SPECIFIC: a reference assertion cannot implement nullable scalar unboxing.
+fn expect_reference_assertion_box(src: &str, stem: &str) {
+    let jdk = super::common::jdk_modules();
+    let classpath = super::common::classpath_jars_for(src);
+    let reference = super::box_reference_classes::reference_compile(
+        src,
+        stem,
+        &classpath,
+        krusty::conformance::BoxJdk::Full { root: Some(&jdk) },
+        krusty::conformance::COROUTINE_HELPERS,
+    )
+    .expect("the exact Kotlin compiler must compile the nullable assertion fixture");
+    let classes = reference.flatten().into_iter().collect::<Vec<_>>();
+    let entry = super::common::find_box_class(&classes).expect("reference fixture must emit box()");
+    assert_eq!(
+        super::common::run_box(&classes, &entry, &classpath),
+        Some("OK".to_string()),
+        "{stem}: the exact Kotlin compiler must run the nullable assertion fixture"
+    );
+}
+
+// PLATFORM-SPECIFIC: a reference assertion cannot implement nullable scalar unboxing.
+#[test]
+fn wasm_nullable_scalar_assertions_decline_without_an_unboxing_contract() {
+    for (stem, scalar) in [
+        ("nullableIntAssertion", "Int"),
+        ("nullableLongAssertion", "Long"),
+        ("nullableFloatAssertion", "Float"),
+        ("nullableDoubleAssertion", "Double"),
+    ] {
+        let src =
+            format!("fun read(value: {scalar}?): {scalar} = value!!\nfun box(): String = \"OK\"");
+        expect_reference_assertion_box(&src, stem);
+        expect_wasm_decline(
+            &src,
+            stem,
+            "a not-null assertion requiring a scalar reference conversion",
+        );
+    }
+}
+
+// PLATFORM-SPECIFIC: the scalar boundary guard must preserve existing reference assertions.
+#[test]
+fn wasm_nullable_reference_assertions_keep_their_existing_carrier() {
+    let src = "fun read(value: String?): String = value!!\nfun box(): String = read(\"OK\")";
+    expect_reference_assertion_box(src, "nullableReferenceAssertion");
+    expect_wasm_box(src, "nullableReferenceAssertion");
+}
+
 #[test]
 fn wasm_string_intrinsics_count_and_read_utf16_code_units() {
     expect_wasm_box(

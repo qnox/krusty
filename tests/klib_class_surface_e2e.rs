@@ -83,6 +83,7 @@ fn written_packages(sources: &[(&str, &str)]) -> Option<(Vec<String>, Vec<Kotlin
 /// Write sources analyzed against the actual Native stdlib KLIB, including its selected bodies.
 fn written_packages_with_native_stdlib(
     sources: &[(&str, &str)],
+    features: &krusty::features::LangFeatures,
 ) -> Option<(Vec<String>, Vec<KotlinPackage>)> {
     let stdlib = krusty::toolchain::kotlin_stdlib_klib(
         krusty::compilation_target::CompilationTarget::Native,
@@ -109,7 +110,7 @@ fn written_packages_with_native_stdlib(
             krusty::compilation_target::CompilationTarget::Native,
             Box::new(libraries.for_compilation()),
         ),
-        &krusty::features::LangFeatures::new(),
+        features,
         &mut diags,
     );
     let (messages, fragments) = written_fragments(analysis, &stems, diags);
@@ -143,12 +144,7 @@ fn written_fragments(
     if !messages.is_empty() {
         return (messages, Vec::new());
     }
-    let root = std::env::temp_dir().join(format!(
-        "krusty-klib-classes-{}-{}",
-        std::process::id(),
-        stems.join("-")
-    ));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = common::scratch_dir().expect("allocate an independent written KLIB directory");
     for (entry, bytes) in &entries {
         let path = root.join(entry);
         std::fs::create_dir_all(path.parent().expect("an entry has a directory"))
@@ -500,6 +496,97 @@ fn every_supported_class_shape_reads_back_in_declaration_order() {
     assert_eq!(surface(&packages[0]), EXPECTED_SURFACE);
 }
 
+// PLATFORM: Native KLIB metadata records the checked property site. The JVM's physical annotation
+// attributes for these language modes are covered by property_accessor_annotation_e2e.
+#[test]
+fn constructor_property_annotation_sites_match_native_in_both_language_modes() {
+    use krusty::language_version::LanguageVersion;
+    use krusty::types::type_name;
+
+    let Some(native) = kotlin_native_root() else {
+        return;
+    };
+    for language in [LanguageVersion::V2_3, LanguageVersion::V2_4] {
+        let expected = [
+            if language == LanguageVersion::V2_4 {
+                vec![type_name("shapes/Marker")]
+            } else {
+                Vec::new()
+            },
+            Vec::new(),
+            vec![type_name("shapes/Marker")],
+        ];
+        let reference = native_property_annotation_sites(&native, language);
+        assert_eq!(reference, expected, "official Native language {language}");
+        let features = krusty::features::LangFeatures::for_language_version(language);
+        let (messages, packages) =
+            written_packages_with_native_stdlib(&[("shapes", CLASSES)], &features)
+                .expect("the selected Native stdlib is provisioned");
+        assert_eq!(messages, Vec::<String>::new());
+        assert_eq!(packages.len(), 1);
+        assert_eq!(
+            property_annotation_sites(&packages[0]),
+            reference,
+            "KLIB declaration sites in language {language}"
+        );
+    }
+}
+
+fn property_annotation_sites(package: &KotlinPackage) -> [Vec<krusty::types::TypeName>; 3] {
+    [
+        ("shapes/Outcome.Done", "label"),
+        ("shapes/Outcome.Done", "value"),
+        ("shapes/Registry", "count"),
+    ]
+    .map(|(classifier, name)| {
+        package.classes[classifier]
+            .members
+            .iter()
+            .find(|member| member.is_property && member.name == name)
+            .expect("the unchanged class fixture declares this property")
+            .annotations
+            .clone()
+    })
+}
+
+fn native_property_annotation_sites(
+    native: &std::path::Path,
+    language: krusty::language_version::LanguageVersion,
+) -> [Vec<krusty::types::TypeName>; 3] {
+    let work = common::scratch_dir().expect("allocate Native annotation oracle directory");
+    let source = work.join("shapes.kt");
+    std::fs::write(&source, CLASSES).expect("write the unchanged class surface fixture");
+    let output = work.join("annotations");
+    let result = std::process::Command::new(native.join("bin/kotlinc-native"))
+        .args(["-p", "library", "-nopack", "-language-version"])
+        .arg(language.to_string())
+        .arg("-o")
+        .arg(&output)
+        .arg(&source)
+        .output()
+        .expect("run the selected official Native compiler");
+    assert!(
+        result.status.success(),
+        "Native annotation oracle language {language}:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let archive = KlibArchive::open(&output).expect("open the official Native KLIB");
+    let fragments = archive
+        .package_fragments()
+        .into_iter()
+        .filter(|fragment| fragment.package_fqname == "shapes")
+        .collect::<Vec<_>>();
+    let [fragment] = fragments.as_slice() else {
+        panic!("the unchanged fixture produces one shapes fragment");
+    };
+    let bytes = archive.read(&fragment.entry).expect("read shapes metadata");
+    let package = parse_package_fragment_checked(&bytes).expect("decode official annotation sites");
+    let sites = property_annotation_sites(&package);
+    std::fs::remove_dir_all(work).expect("remove the Native annotation oracle directory");
+    sites
+}
+
 #[test]
 fn a_written_member_extension_is_visible_through_both_receivers() {
     let Some((messages, mut packages)) = written_packages(&[(
@@ -542,10 +629,13 @@ fn a_written_member_extension_is_visible_through_both_receivers() {
 
 #[test]
 fn executable_dependency_support_does_not_become_a_klib_fragment() {
-    let Some((messages, packages)) = written_packages_with_native_stdlib(&[(
-        "Bits",
-        "package bits\nfun bits(value: Float): Int = value.toBits()\n",
-    )]) else {
+    let Some((messages, packages)) = written_packages_with_native_stdlib(
+        &[(
+            "Bits",
+            "package bits\nfun bits(value: Float): Int = value.toBits()\n",
+        )],
+        &krusty::features::LangFeatures::new(),
+    ) else {
         return;
     };
     assert_eq!(messages, Vec::<String>::new());
@@ -784,7 +874,7 @@ class shapes/Outcome.Done Class Final Public nested=true : shapes/Outcome
   fun hashCode(): kotlin/Int abstract=false const=None annotations=[]
   fun toString(): kotlin/String abstract=false const=None annotations=[]
   val value(): kotlin/Int abstract=false const=None annotations=[]
-  val label(): kotlin/String abstract=false const=None annotations=[]
+  val label(): kotlin/String abstract=false const=None annotations=["shapes/Marker"]
 class shapes/Outcome.Pending Object Final Public nested=true : shapes/Outcome
   constructor [] () defaults=[] Private
 class shapes/Registry Object Final Public nested=false : kotlin/Any

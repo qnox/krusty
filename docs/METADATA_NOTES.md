@@ -187,6 +187,11 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   applications remain single-site and older first-only mode remains distinct. Common metadata
   consumes recorded site membership; stable plugin-visible property publication uses the same
   selection operation over final annotation target policies.
+  The KLIB class-surface fixture retains the same property annotation in current language mode.
+  A live official Native oracle compiles that unchanged fixture in both older first-only and
+  current param-property modes, decodes the complete annotation lists and checks a plain-property
+  positive control and an unannotated-property negative control. The full surface assertion is
+  preserved; output stamps do not select frontend semantics.
 - An annotation written on an accessor (`@A get`, `@A set`) sets `hasAnnotations` (bit 0) in that
   accessor's flags word (`getter_flags` f7, `setter_flags` f8), which therefore differs from the
   default word and is written. Its records go to `Property.getter_annotation` (f15) and
@@ -713,6 +718,10 @@ authority before constructor/accessor identities are published. The exact base `
 realizations; an ordinary dependency with identical metadata may not. This does not rewrite Kotlin
 metadata or change source overload selection. Wasm owns the GC fields and exception tag; common IR
 keeps the selected constructor/getter identities and typed `Try` / `Throw` nodes.
+
+Nullable assertion emission consumes the existing checked operand and result types; it adds no
+metadata field or nullability rewrite. A Wasm reference-to-scalar assertion declines until its
+unboxing and typed null failure have a complete target realization.
 
 ## Authenticated String concatenation declarations
 

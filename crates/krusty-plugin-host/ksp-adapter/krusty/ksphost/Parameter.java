@@ -10,28 +10,37 @@ import com.google.devtools.ksp.symbol.Location;
 import com.google.devtools.ksp.symbol.Origin;
 import kotlin.sequences.Sequence;
 
-// A primary-constructor parameter. Its name and modifiers are served; its type arrives with types.
+// A function or constructor parameter.
 final class Parameter implements KSValueParameter {
-    private final PrimaryConstructor owner;
+    private final SourceFunction owner;
     private final Name name;
     private final boolean isVal;
     private final boolean isVar;
     private final boolean isVararg;
-    private final boolean hasDefault;
+    // Null when krusty could not tell whether the parameter has a default.
+    private final Boolean hasDefault;
+    private final boolean noInline;
+    private final boolean crossInline;
+    // Null when krusty could not describe the type; the query is then refused.
+    KSTypeReference type;
 
     Parameter(
-            PrimaryConstructor owner,
+            SourceFunction owner,
             String name,
             boolean isVal,
             boolean isVar,
             boolean isVararg,
-            boolean hasDefault) {
+            Boolean hasDefault,
+            boolean noInline,
+            boolean crossInline) {
         this.owner = owner;
         this.name = new Name(name);
         this.isVal = isVal;
         this.isVar = isVar;
         this.isVararg = isVararg;
         this.hasDefault = hasDefault;
+        this.noInline = noInline;
+        this.crossInline = crossInline;
     }
 
     @Override
@@ -41,7 +50,10 @@ final class Parameter implements KSValueParameter {
 
     @Override
     public KSTypeReference getType() {
-        throw Nodes.notImplemented("KSValueParameter.type");
+        if (type == null) {
+            throw Nodes.notImplemented("KSValueParameter.type of a type it cannot describe");
+        }
+        return type;
     }
 
     @Override
@@ -49,16 +61,14 @@ final class Parameter implements KSValueParameter {
         return isVararg;
     }
 
-    // Only an inline function's parameters can be `noinline` or `crossinline`, never a
-    // constructor's.
     @Override
     public boolean isNoInline() {
-        return false;
+        return noInline;
     }
 
     @Override
     public boolean isCrossInline() {
-        return false;
+        return crossInline;
     }
 
     @Override
@@ -73,6 +83,9 @@ final class Parameter implements KSValueParameter {
 
     @Override
     public boolean getHasDefault() {
+        if (hasDefault == null) {
+            throw Nodes.notImplemented("KSValueParameter.hasDefault of an override of a library function");
+        }
         return hasDefault;
     }
 
@@ -83,7 +96,7 @@ final class Parameter implements KSValueParameter {
 
     @Override
     public Origin getOrigin() {
-        throw Nodes.notImplemented("KSValueParameter.origin");
+        return owner.getOrigin();
     }
 
     @Override

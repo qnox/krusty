@@ -5,9 +5,9 @@
 #
 # DIST_DIRECTORY holds the release's compiler archives (krusty-VERSION-<triple>.tar.gz/.zip). The
 # module's MODULE.bazel gets VERSION and a `krusty.release(...)` tag naming each archive's SHA-256,
-# so the released module downloads its own compiler. Writes krusty-bazel-VERSION.tar.gz and its
-# .sha256 into DIST_DIRECTORY and prints the archive's path. Two runs over the same inputs write the
-# same bytes.
+# so the released module downloads its own compiler. Writes krusty-bazel-VERSION.tar.gz, its
+# .sha256, and the stamped krusty-bazel-VERSION.MODULE.bazel into DIST_DIRECTORY and prints the
+# archive's path. Two runs over the same inputs write the same bytes.
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
@@ -81,4 +81,6 @@ out=$dist/krusty-bazel-$version.tar.gz
 (cd "$stage" && find . -type f | LC_ALL=C sort | sed 's#^\./##' |
   tar --owner=0 --group=0 --numeric-owner --mtime=@0 --mode=u+rw,go+r,go-w -cf - -T - | gzip -n -9) > "$out"
 (cd "$dist" && sha256sum "krusty-bazel-$version.tar.gz" > "krusty-bazel-$version.tar.gz.sha256")
+# The Bazel registry on the project site serves this file as the version's MODULE.bazel.
+cp "$stage/MODULE.bazel" "$dist/krusty-bazel-$version.MODULE.bazel"
 echo "$out"

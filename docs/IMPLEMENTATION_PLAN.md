@@ -35,6 +35,9 @@ and backing storage exists. Explicit sites stay singleton and older language mod
 selection. Stable constructor-property publication uses the same frontend selection operation.
 Preserve the existing cross-file policy-publication barrier. Keep the separate
 `-Xannotation-default-target` option unsupported until its own follow-up.
+Keep the complete KLIB surface comparison and verify its changed property annotation against the
+official Native compiler in both language modes, using the unchanged source fixture. Each written
+library owns a unique scratch directory so concurrent mode and surface checks cannot replace it.
 
 ## String operation authority publication
 
@@ -5612,6 +5615,10 @@ non-inline callers, still reads the field directly. Test:
   181/181/182; Native's counts are unchanged by the shared tables.
 - Known gap: `x as? C` on a value smart-cast earlier in the body lowers to a `When` with no
   checked type, which Wasm declines rather than infer one.
+- Nullable scalar assertions decline when the operand is a reference but the checked result has
+  a scalar carrier. Existing reference assertions remain unchanged; scalar unboxing and typed
+  null failures are separate work. The same Wasm contract tests cover both hosts and all four
+  scalar carriers against the JVM oracle.
 - Wasm consumes the published declaration-result provenance of a generic call beneath its
   checked result coercion. This preserves separate declared and selected types without inventing
   missing facts; it does not yet supply generic scalar boxing or a canonical dependency-call ABI.
