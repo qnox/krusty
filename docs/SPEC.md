@@ -11539,6 +11539,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and can read only the receiver, so its locals are renumbered from above every constructor's
   values.
   Test: `tests/serializable_parent_same_module_e2e.rs`.
+- **A serializable default that reads another property keeps kotlinc's line numbers.** When
+  `write$Self` or the deserialization constructor evaluates a default such as `id + 1`,
+  `"n" + code` or `this.id * 2`, kotlinc marks the default's own line where it starts and keeps
+  that entry when the property read it starts with marks the class's start line at the same
+  offset. That read is the method's own: a constructor property is re-read off the object at the
+  class's start line in both methods, and a read through `this` takes the class's start line in
+  `write$Self`, where the object is a parameter, while keeping its own line in the constructor.
+  The default's other code (a constant operand) is attributed to its property's line in both.
+  Test: `tests/serializable_default_read_lines_e2e.rs`.
 - **A serializable abstract class is serialized polymorphically.** kotlinc gives a non-generic,
   non-sealed abstract `@Serializable` class no `$serializer`: `Companion.serializer()` returns
   `new PolymorphicSerializer(C::class, new Annotation[0])`, cached in a `$cachedSerializer$delegate`
