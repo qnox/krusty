@@ -24,10 +24,17 @@ internal val pluginRelease: String?
 
 /**
  * The krusty compiler of [release] for this host, downloaded once from [releases] into
- * [gradleUserHome] and checked against the release's `SHA256SUMS`. Every build on the machine
- * shares that copy; a file lock keeps concurrent builds from downloading it twice.
+ * [gradleUserHome] and checked against the release's `SHA256SUMS`, whose signature must verify
+ * against [rootKey]. Every build on the machine shares that copy; a file lock keeps concurrent
+ * builds from downloading it twice.
  */
-internal fun releasedCompiler(release: String, releases: String, gradleUserHome: File, offline: Boolean): File {
+internal fun releasedCompiler(
+    release: String,
+    releases: String,
+    gradleUserHome: File,
+    offline: Boolean,
+    rootKey: () -> ReleaseRootKey = { ReleaseRootKey.bundled() },
+): File {
     val triple = hostTriple()
     val windows = triple.endsWith("windows-msvc")
     val directory = File(gradleUserHome, "caches/krusty/$release/$triple")
@@ -47,7 +54,7 @@ internal fun releasedCompiler(release: String, releases: String, gradleUserHome:
         FileChannel.open(File(directory, ".lock").toPath(), StandardOpenOption.CREATE, StandardOpenOption.WRITE)
             .use { channel ->
                 lockWaitingOutThisJvm(channel).use {
-                    if (!executable.isFile) publish(release, releases, triple, windows, directory, executable)
+                    if (!executable.isFile) publish(release, releases, triple, windows, directory, executable, rootKey())
                 }
             }
     }
@@ -67,9 +74,17 @@ private fun lockWaitingOutThisJvm(channel: FileChannel): FileLock {
 }
 
 /** Downloads, verifies and extracts the archive, then moves the compiler into place atomically. */
-private fun publish(release: String, releases: String, triple: String, windows: Boolean, directory: File, executable: File) {
+private fun publish(
+    release: String,
+    releases: String,
+    triple: String,
+    windows: Boolean,
+    directory: File,
+    executable: File,
+    rootKey: ReleaseRootKey,
+) {
     val archive = "krusty-$release-$triple." + if (windows) "zip" else "tar.gz"
-    val expected = expectedSha256(releases, release, archive)
+    val expected = expectedSha256(releases, release, archive, rootKey)
     val bytes = download("$releases/v$release/$archive")
     val actual = MessageDigest.getInstance("SHA-256").digest(bytes)
         .joinToString("") { "%02x".format(it) }
@@ -100,9 +115,17 @@ internal fun hostTriple(): String {
     }
 }
 
-private fun expectedSha256(releases: String, release: String, archive: String): String {
-    val sums = String(download("$releases/v$release/krusty-$release-SHA256SUMS"))
-    return sums.lineSequence()
+/**
+ * The checksum of [archive] in the release's `SHA256SUMS`, trusted only once its signature verifies
+ * against the release's signing subkey, which [rootKey] must have bound.
+ */
+private fun expectedSha256(releases: String, release: String, archive: String, rootKey: ReleaseRootKey): String {
+    val name = "krusty-$release-SHA256SUMS"
+    val sums = download("$releases/v$release/$name")
+    val signature = String(download("$releases/v$release/$name.asc"), Charsets.US_ASCII)
+    val certificate = String(download("$releases/v$release/krusty-$release-signing-key.asc"), Charsets.US_ASCII)
+    rootKey.verify(sums, signature, certificate, "$name of the krusty $release release")
+    return String(sums, Charsets.UTF_8).lineSequence()
         .map { it.trim().split(Regex("\\s+\\*?")) }
         .firstOrNull { it.size == 2 && it[1] == archive }
         ?.get(0)

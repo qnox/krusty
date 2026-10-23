@@ -55,6 +55,7 @@ versioning-tests:
 # its Maven Central upload, against a stand-in Gradle build and Central Portal.
 release-tests:
     bash scripts/test-signing-key-id.sh
+    bash scripts/test-sign-release-checksums.sh
     bash scripts/test-publish-maven-central.sh
 
 # Run the LSP package without coverage instrumentation.

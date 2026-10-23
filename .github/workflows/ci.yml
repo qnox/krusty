@@ -951,6 +951,9 @@ jobs:
       contents: write
       # Dispatches the pages workflow, which regenerates the Bazel registry.
       actions: write
+      # Sign and store the build provenance attestations of the release files.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1000,7 +1003,9 @@ jobs:
           ver=$(just version)
           echo "ver=$ver"  >> "$GITHUB_OUTPUT"
           echo "tag=v$ver" >> "$GITHUB_OUTPUT"
-      # The Gradle plugin downloads its release's compiler and checks it against this file.
+      # The Gradle plugin downloads its release's compiler and checks it against this file, which it
+      # trusts only through the signature beside it: by a subkey that the maintainer's root key
+      # (bundled in the plugin) binds, published as krusty-<ver>-signing-key.asc.
       - name: checksum the compiler archives
         if: steps.tip.outputs.publish == 'true'
         run: |
@@ -1008,6 +1013,13 @@ jobs:
           ver=${{ steps.v.outputs.ver }}
           (cd dist && sha256sum krusty-"$ver"-*.tar.gz krusty-"$ver"-*.zip > "krusty-$ver-SHA256SUMS")
           test "$(wc -l < "dist/krusty-$ver-SHA256SUMS")" -eq 6
+      - name: sign the compiler checksums
+        if: steps.tip.outputs.publish == 'true'
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          SIGNING_KEY_ID: ${{ secrets.SIGNING_KEY_ID }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: scripts/sign-release-checksums.sh "${{ steps.v.outputs.ver }}" dist
       - name: package Zed extension
         if: steps.tip.outputs.publish == 'true'
         shell: bash
@@ -1016,6 +1028,13 @@ jobs:
       - name: package Bazel module
         if: steps.tip.outputs.publish == 'true'
         run: scripts/package-bazel-module.sh "${{ steps.v.outputs.ver }}" dist
+      # SLSA build provenance for every published file, so `gh attestation verify <file> -R qnox/krusty`
+      # ties it to this workflow run and commit.
+      - name: attest build provenance
+        if: steps.tip.outputs.publish == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/**
       - name: publish
         if: steps.tip.outputs.publish == 'true'
         uses: softprops/action-gh-release@v3
