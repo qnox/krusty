@@ -236,11 +236,21 @@ impl Parser<'_> {
                     .add_expr(Expr::Elvis { lhs, rhs }, Span::new(lspan.lo, rspan.hi));
                 continue;
             }
-            // Prefix operators bind more tightly than casts.
-            if min_bp <= BP_CAST && self.at(TokenKind::Ident) && self.keyword_text("as") {
+            // Prefix operators bind more tightly than casts. The grammar's `NL* asOperator NL*
+            // type` continues the expression across line breaks on either side of `as`/`as?`; an
+            // explicit `;` still ends it.
+            let cast_at = self.after_plain_newlines(self.i);
+            if min_bp <= BP_CAST
+                && self
+                    .t
+                    .get(cast_at)
+                    .is_some_and(|token| self.token_keyword_text(*token, "as"))
+            {
+                self.i = cast_at;
                 let lspan = self.file.expr_spans[lhs.0 as usize];
                 self.bump(); // 'as'
                 let nullable = self.eat_type_nullable();
+                self.skip_plain_newlines();
                 let ty = self.parse_type();
                 let end = self.t[self.i.saturating_sub(1)].span;
                 lhs = self.file.add_expr(

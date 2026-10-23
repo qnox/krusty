@@ -37,6 +37,7 @@ pub struct GradleBuild {
     root: PathBuf,
     plugin_project: PathBuf,
     plugin_repository: Option<PathBuf>,
+    init_script: Option<PathBuf>,
     gradle: PathBuf,
     krusty_binary: PathBuf,
     tasks: Vec<String>,
@@ -60,6 +61,7 @@ impl GradleBuild {
             root,
             plugin_project: plugin_project.into(),
             plugin_repository: None,
+            init_script: None,
             gradle,
             krusty_binary: krusty_binary.into(),
             tasks: vec!["krustyCompile".to_string()],
@@ -101,6 +103,12 @@ impl GradleBuild {
         self
     }
 
+    /// Run with a Gradle init script, as a build that does not apply the plugin itself is driven.
+    pub fn init_script(mut self, script: impl Into<PathBuf>) -> Self {
+        self.init_script = Some(script.into());
+        self
+    }
+
     /// Arguments passed to `./gradlew`. `--include-build` supplies the `krusty` plugin. This crate
     /// is not on that command line.
     pub fn arguments(&self) -> Vec<String> {
@@ -112,6 +120,10 @@ impl GradleBuild {
             args.push("--configuration-cache".to_string());
         }
         args.push("--console=plain".to_string());
+        if let Some(script) = &self.init_script {
+            args.push("--init-script".to_string());
+            args.push(script.display().to_string());
+        }
         if let Some(repository) = &self.plugin_repository {
             args.push(format!(
                 "-Pkrusty.plugin.repository={}",
@@ -761,18 +773,24 @@ mod tests {
 
         // A value-taking option introduced in 2.4.20 must consume its following token only under
         // the grammar of 2.4.20 and later. Under 2.4.0/2.4.10, the same token is an unknown -X option and
-        // the following free -d remains visible to the plugin-owned destination check.
-        // Under 2.4.20 the option is one krusty does not implement, so the compile is left to
-        // kotlinc rather than failing the build.
+        // the following free -d remains visible to the plugin-owned destination check, which
+        // leaves the compile to kotlinc without asking krusty. Under 2.4.20 the option is one
+        // krusty does not implement, so the compile is left to kotlinc too. kotlinc itself runs
+        // only where it reads the option: before 2.4.20 the probe stops after the check.
         let _ = std::fs::remove_file(&log);
         let _ = std::fs::remove_file(&fixture.probes);
-        let release_boundary = build()
-            .property("krusty.negative", "release-specific-argument-boundary")
-            .tasks([":compiler:util:compileKotlin"])
-            .run_output();
         let release = krusty::kotlin_version::KotlinVersion::parse(&kgp)
             .unwrap_or_else(|| panic!("Kotlin Gradle plugin {kgp} is not a release version"));
-        if release >= krusty::kotlin_version::KotlinVersion::V2_4_20 {
+        let reads_option = release >= krusty::kotlin_version::KotlinVersion::V2_4_20;
+        let release_boundary = build()
+            .property("krusty.negative", "release-specific-argument-boundary")
+            .tasks([if reads_option {
+                ":compiler:util:compileKotlin"
+            } else {
+                ":compiler:util:compileKotlinKrustyCheck"
+            }])
+            .run_output();
+        if reads_option {
             let output = release_boundary
                 .unwrap_or_else(|error| panic!("release boundary probe failed: {error}"));
             let check = single_invocation(&fixture.probes);
@@ -788,27 +806,29 @@ mod tests {
                 "kotlinc, not krusty, compiles a refused argument"
             );
         } else {
-            let rendered = release_boundary
-                .expect_err("release boundary probe succeeded")
-                .to_string();
-            assert_eq!(
-                rendered
-                    .lines()
-                    .filter(|line| {
-                        line.trim()
-                            == "> freeCompilerArg '-d=forbidden' conflicts with the plugin-owned destination; configure the structured Gradle input instead"
-                    })
-                    .count(),
-                1,
-                "{kgp}: {rendered}",
+            let output = release_boundary
+                .unwrap_or_else(|error| panic!("{kgp}: release boundary probe failed: {error}"));
+            assert_left_to_kotlinc(
+                &output,
+                ":compiler:util:compileKotlin",
+                &["freeCompilerArg '-d=forbidden' conflicts with the plugin-owned destination; configure the structured Gradle input instead"
+                    .to_string()],
+            );
+            assert!(
+                !fixture.probes.exists(),
+                "{kgp}: the plugin refuses the free -d without asking krusty"
             );
             assert!(
                 !log.exists(),
-                "{kgp}: release boundary must fail before exec"
+                "{kgp}: kotlinc, not krusty, compiles a refused argument"
             );
         }
 
         if kgp == "2.4.10" {
+            // A request the plugin cannot derive krusty's arguments from is valid for kotlinc: the
+            // check reports it without asking krusty, and the compile is left to kotlinc. The
+            // probe stops after the check, since several of these requests name files that do not
+            // exist.
             for (case, expected) in [
                 (
                     "structured-option",
@@ -859,6 +879,10 @@ mod tests {
                     "freeCompilerArg '-Xcompiler-plugin=forbidden.jar' conflicts with compiler plugin configuration; configure the structured Gradle input instead",
                 ),
                 (
+                    "plugin-option-free-argument",
+                    "freeCompilerArg '-P' conflicts with compiler plugin configuration; configure the structured Gradle input instead",
+                ),
+                (
                     "reference-version-free-argument",
                     "freeCompilerArg '-Xkotlin-reference-version=2.4.0' conflicts with the Kotlin Gradle plugin version; configure the structured Gradle input instead",
                 ),
@@ -882,32 +906,77 @@ mod tests {
                     "opt-in-overlap",
                     "compilerOptions.optIn and freeCompilerArg '-opt-in=krusty.fixture.ExperimentalFirstApi' both request marker 'krusty.fixture.ExperimentalFirstApi'; configure exactly one",
                 ),
-                (
-                    "jvm-target",
-                    "Kotlin JVM target 17 differs from Java target 11",
-                ),
             ] {
                 let _ = std::fs::remove_file(&log);
-                let result = build()
+                let _ = std::fs::remove_file(&fixture.probes);
+                let output = build()
                     .property("krusty.negative", case)
-                    .tasks([":compiler:util:compileKotlin"])
-                    .run();
-                let error = match result {
-                    Ok(()) => panic!("negative case {case} succeeded"),
-                    Err(error) => error,
-                };
-                let rendered = error.to_string();
-                let expected_line = format!("> {expected}");
-                assert_eq!(
-                    rendered
-                        .lines()
-                        .filter(|line| line.trim() == expected_line)
-                        .count(),
-                    1,
-                    "{case}: {rendered}",
+                    .tasks([":compiler:util:compileKotlinKrustyCheck"])
+                    .run_output()
+                    .unwrap_or_else(|error| panic!("{case}: {error}"));
+                assert_left_to_kotlinc(
+                    &output,
+                    ":compiler:util:compileKotlin",
+                    &[expected.to_string()],
                 );
-                assert!(!log.exists(), "{case} must fail before execing krusty");
+                assert!(
+                    !fixture.probes.exists(),
+                    "{case}: the plugin refuses without asking krusty"
+                );
+                assert!(!log.exists(), "{case} must not compile with krusty");
             }
+
+            // End to end, such a compile is kotlinc's: the replacement is skipped and the Kotlin
+            // task writes the classes. A free `-progressive` is one kotlinc compiles as it is.
+            let _ = std::fs::remove_file(&log);
+            let _ = std::fs::remove_file(&fixture.probes);
+            let _ = std::fs::remove_dir_all(&kotlin_classes);
+            let output = build()
+                .property("krusty.negative", "progressive-free-argument")
+                .tasks([":compiler:util:compileKotlin"])
+                .run_output()
+                .unwrap_or_else(|error| panic!("progressive-free-argument: {error}"));
+            assert_left_to_kotlinc(
+                &output,
+                ":compiler:util:compileKotlin",
+                &["freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead"
+                    .to_string()],
+            );
+            assert!(
+                !fixture.probes.exists(),
+                "the plugin refuses a free -progressive without asking krusty"
+            );
+            assert!(
+                !log.exists(),
+                "kotlinc, not krusty, compiles a refused request"
+            );
+            assert!(
+                kotlin_classes
+                    .join("org/jetbrains/kotlin/util/UtilKt.class")
+                    .is_file(),
+                "kotlinc wrote the module's classes"
+            );
+
+            // A Kotlin JVM target that differs from the Java one fails the build, as it does with
+            // kotlinc under the default validation mode.
+            let _ = std::fs::remove_file(&log);
+            let rendered = build()
+                .property("krusty.negative", "jvm-target")
+                .tasks([":compiler:util:compileKotlin"])
+                .run()
+                .expect_err("negative case jvm-target succeeded")
+                .to_string();
+            assert_eq!(
+                rendered
+                    .lines()
+                    .filter(
+                        |line| line.trim() == "> Kotlin JVM target 17 differs from Java target 11"
+                    )
+                    .count(),
+                1,
+                "jvm-target: {rendered}",
+            );
+            assert!(!log.exists(), "jvm-target must fail before execing krusty");
 
             // A compiler plugin krusty does not implement leaves the compile to kotlinc, reported.
             let _ = std::fs::remove_file(&log);
@@ -1312,6 +1381,95 @@ error: warnings found and -Werror specified\n";
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A project applying `kotlin("kapt")` with a real annotation processor. kapt's stub
+    /// generation is a KotlinJvmCompile that runs kotlinc with the kapt plugin, so it is left to
+    /// kotlinc, visibly; the main compile after annotation processing goes through krusty, and the
+    /// processor's output is produced from krusty's sources.
+    #[test]
+    #[ignore = "downloads Gradle and the Kotlin Gradle plugin"]
+    fn kapt_project_compiles_through_krusty() {
+        let fixture = IntegrationFixture::new("krusty-kapt", write_kapt_build);
+        let root = &fixture.root;
+        let output = fixture
+            .build()
+            .tasks([":classes"])
+            .run_output()
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        let reports = output
+            .lines()
+            .filter(|line| line.trim().starts_with("krusty: "))
+            .map(str::trim)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reports,
+            [
+                "krusty: task ':kaptGenerateStubsKotlin' is left to kotlinc: it generates kapt stubs",
+                "krusty: task ':kaptGenerateStubsTestKotlin' is left to kotlinc: it generates kapt stubs",
+            ],
+            "{output}"
+        );
+        let runs = invocations(&std::fs::read_to_string(&fixture.log).expect("invocation log"));
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert_eq!(source_names(&runs[0]), ["Job.kt"], "{runs:?}");
+        assert!(root
+            .join("build/classes/kotlin/main/app/Job.class")
+            .is_file());
+        assert_eq!(
+            std::fs::read_to_string(
+                root.join("build/tmp/kapt3/classes/main/META-INF/services/java.lang.Runnable")
+            )
+            .expect("the processor's service file"),
+            "app.Job\n",
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The corpus comparison applies the plugin to an unmodified build through
+    /// `scripts/oss-corpus/krusty.init.gradle`, resolving it from the packaged Maven repository by
+    /// the published coordinates and plugin id. A build that applies only `kotlin("jvm")` must
+    /// then compile its main sources through krusty, with no compile reported as left to kotlinc.
+    #[test]
+    #[ignore = "downloads Gradle and the Kotlin Gradle plugin"]
+    fn oss_corpus_init_script_applies_the_packaged_plugin() {
+        let fixture = IntegrationFixture::new("krusty-corpus-init", write_corpus_build);
+        let root = &fixture.root;
+        let repository = fixture.plugin_project.join("repository");
+        assert!(
+            repository.is_dir(),
+            "the init script resolves the packaged plugin; KRUSTY_GRADLE_PLUGIN_PROJECT must name \
+             an unpacked distribution with a repository, not {}",
+            fixture.plugin_project.display()
+        );
+        std::env::set_var("KRUSTY_PLUGIN_REPOSITORY", &repository);
+        std::env::set_var("KRUSTY_PLUGIN_VERSION", &fixture.plugin_version);
+        let init_script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/oss-corpus/krusty.init.gradle");
+        let output = GradleBuild::new(root, repository_plugin_project(), &fixture.proxy)
+            .plugin_repository(&repository)
+            .init_script(init_script)
+            .no_daemon(true)
+            .tasks([":classes"])
+            .run_output()
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        let reports = output
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("krusty: "))
+            .collect::<Vec<_>>();
+        assert_eq!(reports, Vec::<&str>::new(), "{output}");
+        let runs = invocations(&std::fs::read_to_string(&fixture.log).expect("invocation log"));
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert_eq!(source_names(&runs[0]), ["App.kt"], "{runs:?}");
+        assert!(root
+            .join("build/classes/kotlin/main/app/AppKt.class")
+            .is_file());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// `kotlin("plugin.serialization")` reaches krusty exactly as kotlinc receives it — the Kotlin
     /// Gradle plugin's compiler-plugin classpath as `-Xplugin` — whether the build applies it before
     /// krusty (`:model`) or after (`:app`). The generated serializers are then exercised at run time
@@ -1466,7 +1624,7 @@ subprojects {
 plugins {
     kotlin("plugin.serialization") version "KGP_VERSION"
     kotlin("jvm")
-    id("krusty") version "PLUGIN_VERSION" apply false
+    id("dev.krustythecompiler") version "PLUGIN_VERSION" apply false
     kotlin("plugin.sam.with.receiver") version "KGP_VERSION"
     kotlin("plugin.assignment") version "KGP_VERSION" apply false
     `java-library`
@@ -1480,7 +1638,7 @@ samWithReceiver {
 if (providers.gradleProperty("krusty.negative").orNull == "compiler-plugin-before-krusty") {
     pluginManager.apply("org.jetbrains.kotlin.plugin.assignment")
 }
-pluginManager.apply("krusty")
+pluginManager.apply("dev.krustythecompiler")
 
 dependencies {
     api("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
@@ -1497,7 +1655,7 @@ dependencies {
             r#"
 plugins {
     kotlin("jvm")
-    id("krusty") version "PLUGIN_VERSION"
+    id("dev.krustythecompiler") version "PLUGIN_VERSION"
     kotlin("plugin.serialization") version "KGP_VERSION"
     application
 }
@@ -1740,7 +1898,7 @@ plugins {
     id("com.android.application") version "AGP_VERSION" apply false
     id("com.android.library") version "AGP_VERSION" apply false
     kotlin("android") version "KGP_VERSION" apply false
-    id("krusty") version "PLUGIN_VERSION" apply false
+    id("dev.krustythecompiler") version "PLUGIN_VERSION" apply false
 }
 "#,
         );
@@ -1749,7 +1907,7 @@ plugins {
             r#"
 plugins {
     id("com.android.library")
-    id("krusty")
+    id("dev.krustythecompiler")
 }
 
 android {
@@ -1780,7 +1938,7 @@ dependencies {
             r#"
 plugins {
     id("com.android.application")
-    id("krusty")
+    id("dev.krustythecompiler")
 }
 
 android {
@@ -1939,7 +2097,7 @@ class GreetProcessor(private val codeGenerator: CodeGenerator) : SymbolProcessor
 plugins {
     kotlin("jvm")
     id("com.google.devtools.ksp")
-    id("krusty") version "PLUGIN_VERSION"
+    id("dev.krustythecompiler") version "PLUGIN_VERSION"
     kotlin("plugin.assignment") version "KGP_VERSION" apply false
     application
 }
@@ -2246,11 +2404,13 @@ fun main() {
 
     /// The message `task` failed with, as Gradle reports it under "What went wrong", one entry
     /// per non-empty line. Gradle 9 names the plugin that registered the task in the header
-    /// (`Execution failed for task ':a' (registered by plugin 'krusty').`); Gradle 8 does not.
+    /// (`Execution failed for task ':a' (registered by plugin 'dev.krustythecompiler').`);
+    /// Gradle 8 does not.
     fn task_failure(rendered: &str, task: &str) -> Vec<String> {
         let header = format!("Execution failed for task '{task}'.");
-        let registered =
-            format!("Execution failed for task '{task}' (registered by plugin 'krusty').");
+        let registered = format!(
+            "Execution failed for task '{task}' (registered by plugin 'dev.krustythecompiler')."
+        );
         let lines = rendered.lines().collect::<Vec<_>>();
         let at = lines
             .iter()
@@ -2488,7 +2648,7 @@ pluginManagement {
             r#"
 plugins {
     kotlin("jvm") version "KGP_VERSION"
-    id("krusty") version "PLUGIN_VERSION"
+    id("dev.krustythecompiler") version "PLUGIN_VERSION"
     id("fixture.greeting")
 }
 
@@ -2509,7 +2669,7 @@ repositories {
             r#"
 plugins {
     `kotlin-dsl`
-    id("krusty") version "PLUGIN_VERSION"
+    id("dev.krustythecompiler") version "PLUGIN_VERSION"
 }
 
 repositories {
@@ -2534,6 +2694,93 @@ tasks.register("greet") {
     }
 }
 "#,
+        );
+    }
+
+    fn write_corpus_build(root: &Path, _plugin_version: &str, kgp_version: &str) {
+        let write = |rel: &str, body: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            std::fs::write(path, body.replace("KGP_VERSION", kgp_version)).expect("write");
+        };
+        write(
+            "settings.gradle.kts",
+            r#"
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "corpus-consumer"
+"#,
+        );
+        write(
+            "build.gradle.kts",
+            r#"
+plugins {
+    kotlin("jvm") version "KGP_VERSION"
+}
+
+repositories {
+    mavenCentral()
+}
+"#,
+        );
+        write(
+            "src/main/kotlin/app/App.kt",
+            "package app\n\nfun greeting() = \"hello\"\n",
+        );
+    }
+
+    fn write_kapt_build(root: &Path, plugin_version: &str, kgp_version: &str) {
+        let write = |rel: &str, body: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            let body = body
+                .replace("PLUGIN_VERSION", plugin_version)
+                .replace("KGP_VERSION", kgp_version);
+            std::fs::write(path, body).expect("write");
+        };
+        write(
+            "settings.gradle.kts",
+            r#"
+pluginManagement {
+    repositories {
+        providers.gradleProperty("krusty.plugin.repository").orNull?.let {
+            maven { url = uri(it) }
+        }
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "kapt-consumer"
+"#,
+        );
+        write(
+            "build.gradle.kts",
+            r#"
+plugins {
+    kotlin("jvm") version "KGP_VERSION"
+    kotlin("kapt") version "KGP_VERSION"
+    id("dev.krustythecompiler") version "PLUGIN_VERSION"
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    kapt("com.google.auto.service:auto-service:1.1.1")
+    compileOnly("com.google.auto.service:auto-service-annotations:1.1.1")
+}
+"#,
+        );
+        write(
+            "src/main/kotlin/app/Job.kt",
+            "package app\n\nimport com.google.auto.service.AutoService\n\n@AutoService(Runnable::class)\nclass Job : Runnable {\n    override fun run() {}\n}\n",
         );
     }
 
@@ -2585,7 +2832,7 @@ import org.gradle.api.tasks.compile.JavaCompile
 
 plugins {
     kotlin("jvm") version "KGP_VERSION"
-    id("krusty") version "PLUGIN_VERSION"
+    id("dev.krustythecompiler") version "PLUGIN_VERSION"
     `java-library`
 }
 
@@ -2669,7 +2916,7 @@ import org.gradle.api.tasks.compile.JavaCompile
 
 plugins {
     kotlin("jvm") version "KGP_VERSION"
-    id("krusty") version "PLUGIN_VERSION"
+    id("dev.krustythecompiler") version "PLUGIN_VERSION"
     kotlin("plugin.assignment") version "KGP_VERSION" apply false
     `java-library`
 }
@@ -2704,6 +2951,7 @@ val generateKotlin = tasks.register<GenerateKotlin>("generateKotlin") {
 kotlin {
     when (krustyNegative) {
         "compiler-version" -> compilerVersion.set("2.4.0")
+        "dev-compiler-version" -> compilerVersion.set("KGP_VERSION-dev-7885")
         else -> {}
     }
     sourceSets.named("main") {
@@ -2713,16 +2961,6 @@ kotlin {
     }
     sourceSets.named("test") {
         kotlin.srcDir("test-src")
-    }
-}
-
-// Override krusty's own task input, not KotlinTopLevelExtension.compilerVersion: changing the
-// latter asks KGP to resolve a different build-tools implementation before krusty can validate it.
-afterEvaluate {
-    if (krustyNegative == "dev-compiler-version") {
-        tasks.withType<krusty.KrustyCompileTask>().configureEach {
-            compilerVersion.set("KGP_VERSION-dev-7885")
-        }
     }
 }
 
@@ -2774,6 +3012,7 @@ tasks.withType<KotlinJvmCompile>().configureEach {
             "classpath-alias" -> freeCompilerArgs.addAll("-cp", "elsewhere.jar")
             "progressive-alias" -> freeCompilerArgs.add("-Xprogressive")
             "compiler-plugin-alias" -> freeCompilerArgs.add("-Xcompiler-plugin=forbidden.jar")
+            "plugin-option-free-argument" -> freeCompilerArgs.addAll("-P", "plugin:org.example.widget:annotation=probe.Open")
             "reference-version-free-argument" -> freeCompilerArgs.add("-Xkotlin-reference-version=2.4.0")
             "dependency-policy-free-argument" -> freeCompilerArgs.add("-no-stdlib=false")
             "release-specific-argument-boundary" -> freeCompilerArgs.addAll(

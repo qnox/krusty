@@ -84,48 +84,15 @@ impl Parser<'_> {
             }
         }
         // A modifier-prefixed LOCAL function (`tailrec fun f(…)`, `suspend fun g(…)`) is a
-        // declaration statement in any body, not just scripts — without the prefix scan the
-        // leading soft keyword parses as an expression name and reports itself unresolved.
-        let modifier_prefixed_local_fun = !self.is_script
-            && matches!(self.kind(), TokenKind::Ident | TokenKind::At)
-            && self.local_declaration_after_prefix() == Some(TokenKind::KwFun);
-        if self.is_script || modifier_prefixed_local_fun {
-            if let Some(kind) = self.local_declaration_after_prefix() {
-                let start = self.tok().span;
-                if kind == TokenKind::KwFun {
-                    let mods = self.parse_member_decl_prefix();
-                    let function = self.parse_fun(&mods);
-                    return self.finish_stmt(Stmt::LocalFun(function), start);
-                }
-                if self.kind() != kind {
-                    let mods = self.parse_member_decl_prefix();
-                    let context_params = std::mem::take(&mut self.pending_context_params);
-                    self.pending_annotations.clear();
-                    self.pending_annotation_args.clear();
-                    if kind == TokenKind::KwVar
-                        && mods.iter().any(|modifier| modifier == "lateinit")
-                    {
-                        self.bump();
-                        let name = self.ident_or_error("variable name");
-                        self.expect(TokenKind::Colon, "':'");
-                        let ty = self.parse_type();
-                        let statement = self.finish_stmt(Stmt::LocalLateinit { name, ty }, start);
-                        if !context_params.is_empty() {
-                            self.file
-                                .local_property_context_params
-                                .insert(statement, context_params);
-                        }
-                        return statement;
-                    }
-                    let statement = self.parse_stmt();
-                    if !context_params.is_empty() {
-                        self.file
-                            .local_property_context_params
-                            .insert(statement, context_params);
-                    }
-                    return statement;
-                }
-            }
+        // declaration statement — without the prefix scan the leading soft keyword parses as an
+        // expression name and reports itself unresolved.
+        if matches!(self.kind(), TokenKind::Ident | TokenKind::At)
+            && self.local_declaration_after_prefix() == Some(TokenKind::KwFun)
+        {
+            let start = self.tok().span;
+            let mods = self.parse_member_decl_prefix();
+            let function = self.parse_fun(&mods);
+            return self.finish_stmt(Stmt::LocalFun(function), start);
         }
         // Statement annotations have no codegen representation, but `@Suppress` and opt-in
         // acceptance are scoped frontend policies. Retain what they read on the transient statement.
@@ -301,8 +268,10 @@ impl Parser<'_> {
                 let after_nl = (self.i..self.t.len())
                     .find(|&i| self.t[i].kind != TokenKind::Newline)
                     .map(|i| self.t[i].kind);
+                // A script's last statement is its result, a value as well.
                 let keeps_value = bare_branch_value
-                    || (after_nl == Some(TokenKind::RBrace) && self.block_trailing_is_value);
+                    || (after_nl == Some(TokenKind::RBrace) && self.block_trailing_is_value)
+                    || (after_nl == Some(TokenKind::Eof) && self.file.is_script);
                 if !keeps_value {
                     if let Expr::IncDec {
                         target,

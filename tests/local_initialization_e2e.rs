@@ -297,7 +297,7 @@ fn script_roots_check_their_deferred_locals() {
     let jdk = common::jdk_modules();
     let (krusty_code, krusty_stderr) = common::front_end_named_input_result(
         "Deferred.kts",
-        krusty::frontend::SourceInput::kotlin_script(source),
+        krusty::frontend::SourceInput::kotlin_script(source).with_file_stem("Deferred"),
         std::slice::from_ref(&stdlib),
         Some(jdk.as_path()),
     );

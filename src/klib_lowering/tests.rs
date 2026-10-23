@@ -5,8 +5,15 @@ use std::path::PathBuf;
 
 mod body_forms;
 mod callee_headers;
+mod constructor_calls;
+mod constructor_contracts;
 mod control_forms;
 mod demo_package;
+mod inline_templates;
+mod primitive_calls;
+mod returnable_blocks;
+mod target_calls;
+mod varargs;
 
 use super::*;
 use crate::backend::{BackendCallableFact, CheckedBackendCallables};
@@ -258,6 +265,19 @@ pub(super) fn type_name_of(ty: Ty) -> String {
         TyKind::Unit => "Unit".to_owned(),
         // Any other class without type arguments, by its qualified name (a test rendering).
         TyKind::Obj(name, arguments) if arguments.is_empty() => name.render(),
+        TyKind::Nullable(inner) => format!("{}?", type_name_of(inner)),
+        // A type parameter by its interned name, which a test maps to its declared spelling.
+        TyKind::TyParam(name, _) => format!("<{name:?}>"),
+        TyKind::Fun(signature) => format!(
+            "({}) -> {}",
+            signature
+                .params
+                .iter()
+                .map(|param| type_name_of(*param))
+                .collect::<Vec<_>>()
+                .join(", "),
+            type_name_of(signature.ret)
+        ),
         _ => {
             let other = ty;
             format!("{other:?}")
@@ -326,6 +346,22 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
             ir.checked_return_depths.get(&expression),
             value.map_or(String::new(), |value| render(ir, value))
         ),
+        IrExpr::Vararg {
+            array_type,
+            spreads,
+            elements,
+        } => format!(
+            "vararg<{}>[{}]",
+            type_name_of(*array_type),
+            elements
+                .iter()
+                .zip(spreads)
+                .map(|(element, spread)| {
+                    format!("{}{}", if *spread { "*" } else { "" }, render(ir, *element))
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
         IrExpr::When { branches } => {
             let branches = branches
                 .iter()
@@ -383,6 +419,30 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
                 .join(", ");
             format!("call {}({args})", ir.fn_source_names[function])
         }
+        IrExpr::InvokeFunction { func, args, .. } => {
+            let operands = std::iter::once(func)
+                .chain(args)
+                .map(|operand| render(ir, *operand))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("invoke({operands})")
+        }
+        IrExpr::Call {
+            callee,
+            dispatch_receiver,
+            args,
+        } if let Callee::Intrinsic { operation, ret } = &**callee => {
+            let receiver = dispatch_receiver.map_or(String::new(), |receiver| render(ir, receiver));
+            let arguments = args
+                .iter()
+                .map(|argument| render(ir, *argument))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "intrinsic {operation:?}: {} receiver[{receiver}]({arguments})",
+                type_name_of(*ret)
+            )
+        }
         IrExpr::Variable {
             index,
             ty,
@@ -424,6 +484,29 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
         IrExpr::Break { label } => format!("break{}", label_suffix(label.as_deref())),
         IrExpr::Continue { label } => format!("continue{}", label_suffix(label.as_deref())),
         IrExpr::Throw { operand } => format!("throw {}", render(ir, *operand)),
+        IrExpr::Try {
+            body,
+            catches,
+            finally,
+            result,
+        } => format!(
+            "try {}{}{}: {}",
+            render(ir, *body),
+            catches
+                .iter()
+                .map(|catch| format!(
+                    " catch(v{} {:?}: {}) {}",
+                    catch.var,
+                    catch.binding.as_ref().map(|binding| binding.name.as_str()),
+                    type_name_of(catch.ty),
+                    render(ir, catch.body)
+                ))
+                .collect::<String>(),
+            finally
+                .map(|finally| format!(" finally {}", render(ir, finally)))
+                .unwrap_or_default(),
+            type_name_of(*result)
+        ),
         IrExpr::StringConcat(parts) => format!(
             "concat[{}]",
             parts
@@ -718,6 +801,10 @@ fn coerce_fixture_with_companion_marker(
             .skip(1)
             .collect();
         fact.source_receiver = None;
+        fact.generic_sig
+            .as_mut()
+            .expect("normalized signature")
+            .receiver = None;
         fact.klib_body_companion_receiver =
             Some(KlibBodyCompanionReceiver::new(type_name("kotlin/Int")));
     }
@@ -995,10 +1082,11 @@ fn a_signature_lowers_into_one_function() {
 }
 
 #[test]
-fn a_body_that_constructs_declines_by_its_form() {
+fn a_body_constructor_requires_its_own_serialized_declaration() {
     let message = declined(|parts, arena| {
         let less = parts.call(arena, less_int());
-        // Any constructor: the form declines before its callee is read.
+        // A constructor cannot borrow a function signature, including a builtin relation.
+        // Failed exact declaration authentication must leave the whole unit unchanged.
         let constructed = arena.push_expr(
             Some(parts.nothing),
             KlibIrExprKind::ConstructorCall {
@@ -1021,7 +1109,7 @@ fn a_body_that_constructs_declines_by_its_form() {
     });
     assert_eq!(
         message,
-        "the KLIB body of `kotlin.ranges.coerceAtLeast` (it uses a constructor call)"
+        "the KLIB body of `kotlin.ranges.coerceAtLeast` (it calls `kotlin.internal.ir.less`, which no reachable library serializes its declaration)"
     );
 }
 
@@ -1509,7 +1597,7 @@ fn stdlib_coerce_bodies_lower_as_their_source_does() {
 }
 
 #[test]
-fn stdlib_coerce_in_declines_by_its_exception_construction() {
+fn stdlib_coerce_in_requires_an_exact_constructor_realization() {
     let Some(root) = distribution_root() else {
         return;
     };
@@ -1529,10 +1617,10 @@ fn stdlib_coerce_in_declines_by_its_exception_construction() {
             bodies,
             &KlibCalleeFacts::default(),
         )
-        .expect_err("coerceIn constructs the exception it throws on an empty range");
+        .expect_err("the unit has no provider realization for the exception constructor");
     assert_eq!(
         decline.to_string(),
-        "the KLIB body of `kotlin.ranges.coerceIn` (it uses a constructor call)"
+        "the KLIB body of `kotlin.ranges.coerceIn` (it calls `kotlin.IllegalArgumentException.<init>`)"
     );
     assert!(unit.ir().exprs.is_empty());
 }
@@ -2127,4 +2215,68 @@ fn wasm_math_wrappers_are_scalar_roots_closing_through_one_instruction() {
             "{name} closes through exactly one call of its instruction: {calls:?}"
         );
     }
+}
+
+/// The public signature of the member `name(Any)` of `package.class`.
+fn member_of(package: &[&str], class: &str, name: &str) -> KlibPublicIdSignature {
+    let package = package
+        .iter()
+        .map(|segment| (*segment).to_owned())
+        .collect::<Vec<_>>();
+    let classes = [crate::metadata::id_signature::ClassScope {
+        name: class,
+        type_parameters: Vec::new(),
+        expect: false,
+    }];
+    let any = kotlin_class("Any");
+    callable_signature(
+        DeclarationContainer::<KotlinType> {
+            package: &package,
+            classes: &classes,
+            native_interop_library: false,
+        },
+        &CallableShape {
+            name,
+            contexts: Vec::new(),
+            receiver: None,
+            params: vec![&any],
+            vararg: None,
+            type_parameters: Vec::new(),
+            expect: false,
+            placement: Placement::Ordinary,
+        },
+    )
+    .expect("a non-generic shape is signable")
+}
+
+#[test]
+fn only_a_declared_function_invocation_has_invocation_semantics() {
+    use super::klib_types::function_invocation_arity;
+    assert_eq!(
+        function_invocation_arity(&member_of(&["kotlin"], "Function1", "invoke")),
+        Some(1)
+    );
+    // The function classifier declares no such member: its spelling alone is no invocation.
+    assert_eq!(
+        function_invocation_arity(&member_of(&["kotlin"], "Function1", "equals")),
+        None
+    );
+    // A class spelled like a function classifier outside Kotlin's builtins declares nothing.
+    assert_eq!(
+        function_invocation_arity(&member_of(&["demo"], "Function1", "invoke")),
+        None
+    );
+    // A suspend or reflective classifier's invocation is not a plain function invocation.
+    assert_eq!(
+        function_invocation_arity(&member_of(
+            &["kotlin", "coroutines"],
+            "SuspendFunction1",
+            "invoke"
+        )),
+        None
+    );
+    assert_eq!(
+        function_invocation_arity(&member_of(&["kotlin", "reflect"], "KFunction1", "invoke")),
+        None
+    );
 }

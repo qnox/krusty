@@ -527,10 +527,7 @@ mod tests {
                       fun after_line_call(): Unit {}\n\
                       context(\"sample\"); fun after_semicolon_call(): Unit {}\n\
                       suspend {}";
-        let inputs = [SourceInput::new(
-            krusty::source::SourceKind::KotlinScript,
-            source,
-        )];
+        let inputs = [SourceInput::kotlin_script(source).with_file_stem("script")];
 
         let analysis = analyze_standalone_source_inputs(&inputs);
 
@@ -539,7 +536,7 @@ mod tests {
             "{:?}",
             analysis.files[0].diagnostics
         );
-        assert!(analysis.files[0].file.script_body.is_some());
+        assert!(analysis.files[0].file.script_class.is_some());
         let call_start = source.find("render(\"sample\")").unwrap() as u32;
         assert!(analysis.files[0]
             .typed_expressions()
@@ -553,42 +550,50 @@ mod tests {
     }
 
     #[test]
-    fn kotlin_script_allows_unmodeled_host_calls_without_hiding_other_errors() {
+    fn kotlin_script_reports_its_calls_like_kotlinc() {
         let script = "fun localAction() {}\n\
                       hostAction(\"sample\")\n\
                       hostNamed(value = if (1) \"sample\" else \"other\")\n\
-                      if (1) {}\n\
-                      localAction(\"sample\")";
+                      localAction(\"sample\")\n\
+                      if (1) {}";
         let support = "fun hostAction() {}";
         let analysis = analyze_standalone_source_inputs(&[
-            SourceInput::new(krusty::source::SourceKind::KotlinScript, script),
+            SourceInput::kotlin_script(script).with_file_stem("script"),
             SourceInput::kotlin(support),
         ]);
-        let messages = analysis.files[0]
+        let diagnostics = analysis.files[0]
             .diagnostics
             .iter()
-            .map(|diagnostic| diagnostic.msg.as_str())
+            .map(|diagnostic| (diagnostic.span.lo, diagnostic.msg.as_str()))
             .collect::<Vec<_>>();
+        let at = |line: usize, column: usize| {
+            let start = script
+                .split('\n')
+                .take(line - 1)
+                .map(|text| text.len() + 1)
+                .sum::<usize>();
+            (start as u32) + column as u32 - 1
+        };
+        let mismatch =
+            "condition type mismatch: inferred type is 'Int' but 'Boolean' was expected.";
 
+        // kotlinc's diagnostics, in the order the checker reaches them: a script's last statement
+        // first, since it is typed as the script's result before the statements run.
         assert_eq!(
-            messages
-                .iter()
-                .filter(|message| message.contains("condition type mismatch"))
-                .count(),
-            2,
-            "{messages:?}"
-        );
-        assert!(
-            messages
-                .iter()
-                .any(|message| message.contains("localAction")),
-            "{messages:?}"
-        );
-        assert!(
-            messages
-                .iter()
-                .all(|message| !message.contains("hostAction") && !message.contains("hostNamed")),
-            "{messages:?}"
+            diagnostics,
+            [
+                (at(5, 5), mismatch),
+                (
+                    at(2, 12),
+                    "too many arguments for 'fun hostAction(): Unit'."
+                ),
+                (at(3, 23), mismatch),
+                (at(3, 1), "unresolved reference 'hostNamed'."),
+                (
+                    at(4, 13),
+                    "too many arguments for 'fun localAction(): Unit'."
+                ),
+            ]
         );
         assert!(analysis.files[1].diagnostics.is_empty());
     }

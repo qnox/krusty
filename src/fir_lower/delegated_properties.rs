@@ -272,13 +272,26 @@ pub(super) fn materialize_member_delegate(
     storage.constructor_store_line = property.decl_line;
     ir.classes[class_id as usize].fields.push(storage);
     let flags = property.flags;
+    // A script's property has no dispatch receiver: its delegate sees `null` and a reference that
+    // does not take the script, as a top-level property's does.
+    let script = ir.classes[class_id as usize].is_script;
     let reference =
-        move |ir: &mut IrFile| delegated_property_reference(ir, property_id, true, flags);
+        move |ir: &mut IrFile| delegated_property_reference(ir, property_id, !script, flags);
+    let thisref_argument = move |ir: &mut IrFile| {
+        if script {
+            (
+                ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null)),
+                Ty::Null,
+            )
+        } else {
+            (ir.add_expr(IrExpr::GetValue(0)), Ty::obj_name(owner_type))
+        }
+    };
     // Not this lowering's to decide: the checked plan publishes the type resolution selected the
     // conventions against, and every operand built from it carries that one answer.
     let property_reference_ty = plan.property_reference_type.get();
-    let this_ref = ir.add_expr(IrExpr::GetValue(0));
     let storage_initializer = if let Some(provide) = &plan.provide_delegate {
+        let this_ref = thisref_argument(ir);
         let property_reference = reference(ir);
         delegated_call(
             index,
@@ -286,10 +299,7 @@ pub(super) fn materialize_member_delegate(
             property.declaration,
             provide,
             initializer,
-            vec![
-                (this_ref, Ty::obj_name(owner_type)),
-                (property_reference, property_reference_ty),
-            ],
+            vec![this_ref, (property_reference, property_reference_ty)],
         )?
     } else {
         initializer
@@ -321,7 +331,7 @@ pub(super) fn materialize_member_delegate(
         },
         plan.storage_type.get(),
     );
-    let this_ref = ir.add_expr(IrExpr::GetValue(0));
+    let this_ref = thisref_argument(ir);
     let property_reference = reference(ir);
     let read = delegated_call(
         index,
@@ -329,10 +339,7 @@ pub(super) fn materialize_member_delegate(
         property.declaration,
         &plan.get_value,
         receiver,
-        vec![
-            (this_ref, Ty::obj_name(owner_type)),
-            (property_reference, property_reference_ty),
-        ],
+        vec![this_ref, (property_reference, property_reference_ty)],
     )?;
     at_property_line(ir, read, property.decl_line);
     let getter = add_accessor_function(
@@ -360,7 +367,7 @@ pub(super) fn materialize_member_delegate(
                 },
                 plan.storage_type.get(),
             );
-            let this_ref = ir.add_expr(IrExpr::GetValue(0));
+            let this_ref = thisref_argument(ir);
             let property_reference = reference(ir);
             let value = ir.add_expr(IrExpr::GetValue(1));
             let write = delegated_call(
@@ -370,7 +377,7 @@ pub(super) fn materialize_member_delegate(
                 set_value,
                 receiver,
                 vec![
-                    (this_ref, Ty::obj_name(owner_type)),
+                    this_ref,
                     (property_reference, property_reference_ty),
                     (value, property.ty),
                 ],

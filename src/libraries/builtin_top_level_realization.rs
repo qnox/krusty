@@ -262,13 +262,17 @@ fn array_factory(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntri
     valid.then_some(CompilerIntrinsic::ArrayFactory(kind))
 }
 
-fn kotlin_function(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
+fn kotlin_function(
+    facts: &BuiltinFunctionDeclaration<'_>,
+    compiler_builtin_owner: bool,
+) -> Option<CompilerIntrinsic> {
     if !facts.package.matches("kotlin") || !plain(facts, facts.kind) {
         return None;
     }
     match (facts.name, facts.kind, facts.receiver, facts.params) {
         ("plus", FnKind::Extension, Some(receiver), [parameter])
-            if facts.type_parameter_count == 0
+            if compiler_builtin_owner
+                && facts.type_parameter_count == 0
                 && facts.vararg.is_none()
                 && facts.is_operator
                 && receiver == Ty::nullable(Ty::String)
@@ -625,6 +629,9 @@ fn closed_range_contains(facts: &BuiltinFunctionDeclaration<'_>) -> Option<Compi
     if facts.kind != FnKind::Extension
         || facts.name != "contains"
         || !facts.is_operator
+        || facts.is_suspend
+        || facts.is_infix
+        || facts.ret != Ty::Boolean
         || facts.params.len() != 1
         || facts.context_count != 0
         || facts.vararg.is_some()
@@ -716,7 +723,7 @@ fn function_realization_with_stdlib_owner(
     if let Some(intrinsic) = with_index(&facts) {
         Some(intrinsic)
     } else if facts.package.matches("kotlin") {
-        kotlin_function(&facts)
+        kotlin_function(&facts, compiler_builtin_owner)
     } else if facts.package.matches("kotlin/io") {
         console(&facts)
     } else if facts.package.matches("kotlin/collections") || facts.package.matches("kotlin/text") {
@@ -1197,6 +1204,10 @@ mod tests {
     fn same_spelling_needs_the_complete_declaration() {
         let any = Ty::nullable(Ty::obj("kotlin/Any"));
         assert_eq!(
+            function_realization_with_stdlib_owner(string_plus(&[any], Ty::String), false),
+            None
+        );
+        assert_eq!(
             function_realization(string_plus(&[any], Ty::String)),
             Some(CompilerIntrinsic::StringPlus)
         );
@@ -1209,6 +1220,39 @@ mod tests {
         let mut non_operator = string_plus(&non_operator_params, Ty::String);
         non_operator.is_operator = false;
         assert_eq!(function_realization(non_operator), None);
+    }
+
+    #[test]
+    fn range_membership_requires_a_boolean_stdlib_operator() {
+        let declaration = |ret| BuiltinFunctionDeclaration {
+            package: crate::types::wk::kotlin_ranges_package(),
+            name: "contains",
+            kind: FnKind::Extension,
+            receiver: Some(Ty::obj("kotlin/ranges/IntRange")),
+            params: &[Ty::Byte],
+            ret,
+            context_count: 0,
+            type_parameter_count: 0,
+            vararg: None,
+            is_suspend: false,
+            is_operator: true,
+            is_infix: false,
+        };
+        assert_eq!(
+            function_realization_with_stdlib_owner(declaration(Ty::Boolean), true),
+            Some(CompilerIntrinsic::ClosedRangeContains)
+        );
+        assert_eq!(
+            function_realization_with_stdlib_owner(declaration(Ty::Boolean), false),
+            None
+        );
+        assert_eq!(
+            function_realization_with_stdlib_owner(declaration(Ty::Int), true),
+            None
+        );
+        let mut suspend = declaration(Ty::Boolean);
+        suspend.is_suspend = true;
+        assert_eq!(function_realization(suspend), None);
     }
 
     #[test]

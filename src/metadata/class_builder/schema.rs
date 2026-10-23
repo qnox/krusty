@@ -452,9 +452,11 @@ pub(crate) fn class_message(
         .collect();
 
     // An enum lists its declared interfaces, then the implicit `Enum<E>`; a class without declared
-    // supertypes lists `Any`.
+    // supertypes lists `Any`, and a script lists none.
     let mut supertype_msgs: Vec<Pb> = Vec::new();
-    if tail.is_enum {
+    if tail.is_script {
+        // The script's template is how the JVM hosts it, not a declared supertype.
+    } else if tail.is_enum {
         for (index, supertype) in tail.supertypes.iter().enumerate() {
             if matches!(supertype.kind(), TyKind::Obj(classifier, _) if classifier == crate::types::wk::kotlin_enum())
             {

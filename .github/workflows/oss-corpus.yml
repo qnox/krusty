@@ -1,0 +1,140 @@
+name: oss corpus
+
+# Conformance on the top-starred Kotlin projects listed in scripts/oss-corpus/projects.tsv. Each
+# project builds twice from a pinned commit with its own Gradle build: once with kotlinc, once with
+# the krusty Gradle plugin applied by an init script. The run reports, per project, how many
+# Kotlin/JVM compilations krusty built and how many classes match kotlinc's byte for byte. It needs
+# full network access for the projects' dependencies and toolchains. It is manual-only: ordinary
+# pushes and pull requests never schedule it, and it gates nothing.
+on:
+  workflow_dispatch:
+    inputs:
+      projects:
+        description: Space-separated project names from scripts/oss-corpus/projects.tsv; empty runs every project.
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      projects: ${{ steps.select.outputs.projects }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: test the corpus scripts
+        run: python3 -m unittest discover -s scripts/oss-corpus -p 'test_*.py'
+      - name: select projects
+        id: select
+        env:
+          REQUESTED: ${{ inputs.projects }}
+        run: |
+          set -euo pipefail
+          listed=$(awk -F'\t' '!/^#/ && NF { print $1 }' scripts/oss-corpus/projects.tsv)
+          if [ -n "$REQUESTED" ]; then
+            for name in $REQUESTED; do
+              grep -qxF "$name" <<<"$listed" || { echo "unknown corpus project: $name" >&2; exit 1; }
+            done
+            listed=$(tr ' ' '\n' <<<"$REQUESTED" | awk NF)
+          fi
+          echo "projects=$(jq -Rnc '[inputs]' <<<"$listed")" >> "$GITHUB_OUTPUT"
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - uses: actions/setup-java@v6.1.0
+        with:
+          distribution: zulu
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+      - name: build krusty and its Gradle plugin
+        run: |
+          set -euo pipefail
+          cargo build --profile gate -p krusty-cli --bin krusty
+          version=$(just version)
+          scripts/package-gradle-plugin.sh "$version" "$PWD/dist-gradle"
+          mkdir corpus-tools
+          cp target/gate/krusty corpus-tools/krusty
+          unzip -q "dist-gradle/krusty-gradle-plugin-$version.zip" -d corpus-tools
+          echo "$version" > corpus-tools/plugin-version
+      - uses: actions/upload-artifact@v7
+        with:
+          name: corpus-tools
+          path: corpus-tools
+          if-no-files-found: error
+
+  project:
+    needs: [prepare, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        project: ${{ fromJson(needs.prepare.outputs.projects) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v6.1.0
+        with:
+          distribution: zulu
+          java-version: |
+            25
+            17
+            21
+      - uses: actions/download-artifact@v8
+        with:
+          name: corpus-tools
+          path: corpus-tools
+      - name: build ${{ matrix.project }} with kotlinc and with krusty
+        run: |
+          set -euo pipefail
+          chmod +x corpus-tools/krusty
+          version=$(cat corpus-tools/plugin-version)
+          scripts/oss-corpus/run.sh "${{ matrix.project }}" "$RUNNER_TEMP/corpus" \
+            "$PWD/corpus-tools/krusty" \
+            "$PWD/corpus-tools/krusty-gradle-plugin-$version/repository" "$version"
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: corpus-${{ matrix.project }}
+          path: |
+            ${{ runner.temp }}/corpus/out/${{ matrix.project }}/compare.json
+            ${{ runner.temp }}/corpus/logs
+          if-no-files-found: warn
+
+  summary:
+    needs: [project]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: corpus-*
+          path: results
+      - name: summarize
+        run: |
+          set -euo pipefail
+          mapfile -t reports < <(find results -name compare.json | sort)
+          if [ "${#reports[@]}" -eq 0 ]; then
+            echo "no project produced a comparison" >&2
+            exit 1
+          fi
+          python3 scripts/oss-corpus/summarize.py "${reports[@]}" | tee summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: summary
+          path: summary.md

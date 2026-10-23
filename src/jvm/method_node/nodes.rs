@@ -202,4 +202,24 @@ impl MethodNode {
             _ => None,
         })
     }
+
+    /// The first slot above every local an instruction reads or writes: kotlinc's
+    /// `MaxLocalsCalculator`, without the parameters a method declares.
+    pub fn locals_top(&self) -> u16 {
+        self.instructions()
+            .filter_map(|insn| match insn {
+                Insn::Var { op, slot } => {
+                    let words = if matches!(op, 0x16 | 0x18 | 0x37 | 0x39) {
+                        2
+                    } else {
+                        1
+                    };
+                    Some(slot + words)
+                }
+                Insn::Iinc { slot, .. } => Some(slot + 1),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+    }
 }
