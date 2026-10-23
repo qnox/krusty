@@ -61,7 +61,13 @@ fn platform(runtime: &KspRuntime) -> krusty::frontend::PlatformProvider {
 /// Compiles the processor `fixtures/ksp/<stem>.kt` with krusty into a classpath directory that
 /// registers `provider`.
 fn processor(runtime: &KspRuntime, stem: &str, provider: &str) -> PathBuf {
-    let out = scratch(&format!("ksp-processor-{stem}"));
+    processor_in(runtime, stem, provider, &format!("ksp-processor-{stem}"))
+}
+
+/// [`processor`], built into the scratch directory `directory`, so tests that run at the same time
+/// can each build the same processor.
+fn processor_in(runtime: &KspRuntime, stem: &str, provider: &str, directory: &str) -> PathBuf {
+    let out = scratch(directory);
     let text = std::fs::read_to_string(fixtures().join(format!("{stem}.kt"))).unwrap();
     let inputs = [krusty::source::SourceInput::kotlin(&text).with_file_stem(stem)];
     let stems = [stem.to_string()];
@@ -276,6 +282,31 @@ fn primary_constructors_and_their_parameters_are_what_ksp2_reports() {
 
 #[test]
 #[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn class_headers_are_what_ksp2_reports() {
+    let (runtime, env) = runtime();
+    let processor = processor(&runtime, "Headers", "headers.HeadersProvider");
+    let out = scratch("ksp-outputs-headers");
+    let outputs = KspOutputs {
+        kotlin: out.join("kotlin"),
+        java: out.join("java"),
+        classes: out.join("classes"),
+        resources: out.join("resources"),
+    };
+    let sources = [fixtures().join("headers/Headers.kt")];
+    let run = run(&runtime, &env, &processor, &sources, &outputs)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(run.generated, Vec::<String>::new());
+    let expected: Vec<String> = std::fs::read_to_string(fixtures().join("headers.expected"))
+        .unwrap()
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(run.log, expected);
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
 fn a_kept_sequence_reads_again_and_through_two_iterators_as_under_ksp2() {
     let (runtime, env) = runtime();
     let processor = processor(&runtime, "Traverse", "traverse.TraverseProvider");
@@ -301,4 +332,52 @@ fn a_kept_sequence_reads_again_and_through_two_iterators_as_under_ksp2() {
         .map(str::to_string)
         .collect();
     assert_eq!(run.log, expected);
+}
+
+/// Runs the Members processor over `sources` and compares its log with `expected`.
+fn members_log_is_what_ksp2_reports(sources: &[PathBuf], scratch_name: &str, expected: &str) {
+    let (runtime, env) = runtime();
+    let processor = processor_in(
+        &runtime,
+        "Members",
+        "members.MembersProvider",
+        &format!("{scratch_name}-processor"),
+    );
+    let out = scratch(scratch_name);
+    let outputs = KspOutputs {
+        kotlin: out.join("kotlin"),
+        java: out.join("java"),
+        classes: out.join("classes"),
+        resources: out.join("resources"),
+    };
+    let run = run(&runtime, &env, &processor, sources, &outputs)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(run.generated, Vec::<String>::new());
+    let expected: Vec<String> = std::fs::read_to_string(fixtures().join(expected))
+        .unwrap()
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(run.log, expected);
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn members_and_their_types_are_what_ksp2_reports() {
+    members_log_is_what_ksp2_reports(
+        &[fixtures().join("members/Members.kt")],
+        "ksp-outputs-members",
+        "members.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn declarations_are_in_the_order_ksp2_lists_them() {
+    members_log_is_what_ksp2_reports(
+        &[fixtures().join("order/Order.kt")],
+        "ksp-outputs-order",
+        "order.expected",
+    );
 }

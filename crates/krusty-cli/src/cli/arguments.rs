@@ -127,10 +127,12 @@ fn version_warnings(settings: &LanguageSettings) -> Vec<CliWarning> {
     warnings
 }
 
-/// Split a classpath string on the platform separator (`:` on Unix).
+/// The separator `-classpath` entries are split on: `;` on Windows, `:` elsewhere, as kotlinc.
+pub const CLASSPATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
+
+/// Split a classpath string on the platform separator.
 fn split_classpath(v: &str) -> Vec<PathBuf> {
-    let sep = if cfg!(windows) { ';' } else { ':' };
-    v.split(sep)
+    v.split(CLASSPATH_SEPARATOR)
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .collect()

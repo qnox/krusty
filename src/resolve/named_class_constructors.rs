@@ -75,7 +75,7 @@ pub(crate) fn publish_named_class_constructors(
             selection.operands,
         );
     }
-    publish_type_use_serializer_constructors(index, table, diags, &host);
+    publish_type_use_serializer_constructors(files, index, table, diags, &host);
 }
 
 #[derive(Clone)]
@@ -95,15 +95,21 @@ struct NamedConstructorCandidate {
 /// expanded semantic type. Equal serializer/arity pairs share one primary-constructor decision;
 /// neither the plugin nor lowering recovers it from the source spelling.
 fn publish_type_use_serializer_constructors(
+    files: &[File],
     index: &mut ResolvedModuleIndex,
     table: &SymbolTable,
     diags: &mut DiagSink,
     host: &crate::plugins::PluginHost,
 ) {
-    let properties = table
-        .stable_declared_spellings
-        .iter()
-        .filter_map(|(&declaration, spellings)| {
+    // A declaration annotation needs a constructor plan even when no type spelling is retained.
+    let properties = (0..files.len())
+        .flat_map(|source| {
+            index
+                .declarations_in_source(crate::fir::SourceFileId::from_raw(source as u32))
+                .iter()
+                .copied()
+        })
+        .filter_map(|declaration| {
             let anchor = index.declaration_anchor(declaration)?;
             if anchor.kind != crate::fir::DeclarationKind::Property {
                 return None;
@@ -112,7 +118,10 @@ fn publish_type_use_serializer_constructors(
                 declaration,
                 anchor.source.raw(),
                 index.signature(declaration)?.result.get(),
-                spellings.ret.clone(),
+                table
+                    .stable_declared_spellings
+                    .get(&declaration)
+                    .map(|spellings| spellings.ret.clone()),
             ))
         })
         .collect::<Vec<_>>();
@@ -131,7 +140,9 @@ fn publish_type_use_serializer_constructors(
         // the same checked property type. The declaration occurrence has already been folded into
         // stable metadata; it needs the same exact constructor plan as a type-use occurrence.
         publisher.publish_applications(ty, &declaration_annotations, &[]);
-        publisher.publish_node(ty, &spelling, &mut path);
+        if let Some(spelling) = spelling {
+            publisher.publish_node(ty, &spelling, &mut path);
+        }
     }
 }
 

@@ -506,7 +506,7 @@ Landed on `master`, each round reviewed (cavecrew-reviewer), TDD:
 | Reliable diagnostics (native-sub / hosted / **unsupported=error**) | done | `plugins/registry.rs` |
 | Serialization native plugin: `$serializer`+members, `serializer()`, per-field `childSerializers`, ABI-from-classpath | done (decl/shape) | `plugins/serialization.rs` |
 | Annotation capture from source → plugin activates end-to-end | done | `parser.rs`, `plugins/mod.rs`, `tests/plugins_e2e.rs` |
-| KSP round view over the resolved declaration headers | done (classifiers, annotations) | `ksp_round.rs` |
+| KSP round view over the resolved declaration headers | done (classifiers, annotations, modifiers, type parameters, supertypes; functions, properties, constructors, type aliases and the language's data and enum members, with their resolved types, in KSP's order) | `ksp_round.rs`, `ksp_round/` |
 | KSP host: KSP's API in a JVM over krusty's round view, multi-round, refusal of unserved members | in progress | `crates/krusty-plugin-host/src/ksp/`, `crates/krusty-plugin-host/ksp-adapter/` |
 | Real annotation-processor-**from-jar** run (codegen-host mechanism) | done (APT) | `tests/codegen_host_e2e.rs` |
 | Toolchain **provisioning** (detect gradle/mvn/cs → fetch jars to folder) | done | `plugins/deps.rs`, `tests/ksp_provision_e2e.rs` |

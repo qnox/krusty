@@ -53,6 +53,63 @@ pub struct SourceSetAnalysis {
     pub(crate) streamed: Option<StreamedPassState>,
 }
 
+impl SourceSetAnalysis {
+    /// The classifier that declares the member function `declaration` and the function's index
+    /// among the classifier's written functions (`ClassDecl::methods`), or `None` when
+    /// `declaration` is no member function this analysis published.
+    pub fn member_function_slot(
+        &self,
+        declaration: FrontendDeclarationId,
+    ) -> Option<(FrontendDeclarationId, u32)> {
+        let anchor = self
+            .streamed
+            .as_ref()?
+            .module
+            .index()
+            .declaration_anchor(declaration)?;
+        if anchor.kind != crate::fir::DeclarationKind::Function {
+            return None;
+        }
+        Some((anchor.owner?, anchor.sibling))
+    }
+
+    /// Whether the compiler generated `declaration`, as it does a data class's `copy`.
+    pub fn is_compiler_generated(&self, declaration: FrontendDeclarationId) -> bool {
+        self.streamed
+            .as_ref()
+            .and_then(|streamed| streamed.module.index().declaration_header(declaration))
+            .is_some_and(|header| {
+                header
+                    .flags
+                    .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
+            })
+    }
+
+    /// The functions the member function `declaration` of the classifier `owner` directly
+    /// overrides: each one this module declares, or `None` for one a library declares.
+    pub fn overridden_functions(
+        &self,
+        owner: FrontendDeclarationId,
+        declaration: FrontendDeclarationId,
+    ) -> Vec<Option<FrontendDeclarationId>> {
+        use crate::fir::ResolvedFunctionOverrideTarget as Target;
+        let Some(streamed) = &self.streamed else {
+            return Vec::new();
+        };
+        let index = streamed.module.index();
+        let declared = |target: Target| match target {
+            Target::Module(callable) => index.callable(callable).map(|header| header.declaration),
+            Target::External(_) => None,
+        };
+        index
+            .function_overrides(owner)
+            .iter()
+            .filter(|edge| declared(edge.implementation) == Some(declaration))
+            .map(|edge| declared(edge.overridden))
+            .collect()
+    }
+}
+
 /// Production result after Pass 1 has been consumed.
 ///
 /// Unlike [`SourceSetAnalysis`], this type has no slot for parsed files, AST-keyed type tables, or
@@ -1490,6 +1547,15 @@ where
             }
         }
         crate::resolve::project_finalized_signatures(&index, &mut symbols);
+        // A `const val` initializer is a stable declaration dependency. Check each such bounded
+        // fragment now, while Pass 1 still owns its AST and exact operator selections can be
+        // consumed; retain only the folded payload before the signature graph and arenas die.
+        // Declaration annotations fold next and read these payloads: a classifier annotation's
+        // argument may name a top-level constant.
+        crate::resolve::publish_checked_compile_time_constants(
+            &files[..inferred_end],
+            &mut symbols,
+        );
         crate::resolve::publish_checked_declaration_annotations(
             &files[..inferred_end],
             &mut index,
@@ -1525,13 +1591,6 @@ where
                 diags,
             );
         }
-        // A `const val` initializer is a stable declaration dependency. Check each such bounded
-        // fragment now, while Pass 1 still owns its AST and exact operator selections can be
-        // consumed; retain only the folded payload before the signature graph and arenas die.
-        crate::resolve::publish_checked_compile_time_constants(
-            &files[..inferred_end],
-            &mut symbols,
-        );
         crate::resolve::publish_checked_type_use_annotations(
             &files[..inferred_end],
             &mut index,

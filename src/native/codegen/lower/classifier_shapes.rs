@@ -447,6 +447,33 @@ pub(super) fn function_type_descriptor(
     function_check_descriptor(TypeCheckRole::FunctionOfArity(arity))
 }
 
+/// The runtime marker of one of Kotlin's mapped collection interfaces, or `None` where the runtime
+/// has none of its own.
+pub(super) fn mapped_collection_descriptor(collection: MappedCollection) -> Option<&'static str> {
+    match collection.kind {
+        CollectionKind::Iterator => Some("kt_type_iterator_interface"),
+        CollectionKind::Iterable if collection.mutable => {
+            Some("kt_type_mutable_iterable_interface")
+        }
+        CollectionKind::Iterable => Some("kt_type_iterable_interface"),
+        CollectionKind::Collection if collection.mutable => {
+            Some("kt_type_mutable_collection_interface")
+        }
+        CollectionKind::Collection => Some("kt_type_collection_interface"),
+        CollectionKind::List if collection.mutable => Some("kt_type_mutable_list_interface"),
+        CollectionKind::List => Some("kt_type_list_interface"),
+        CollectionKind::Set if collection.mutable => Some("kt_type_mutable_set_interface"),
+        CollectionKind::Set => Some("kt_type_set_interface"),
+        CollectionKind::Map if collection.mutable => Some("kt_type_mutable_map_interface"),
+        CollectionKind::Map => Some("kt_type_map_interface"),
+        CollectionKind::MapEntry if collection.mutable => Some("kt_type_mutable_map_entry"),
+        CollectionKind::MapEntry => Some("kt_type_map_entry"),
+        // The runtime has no distinct ListIterator interface marker. Its provider-published
+        // Iterator supertype is visited separately and supplies the marker this target has.
+        CollectionKind::ListIterator => None,
+    }
+}
+
 /// Runtime marker descriptors for dependency interfaces in one class's declared interface graph.
 ///
 /// Same-file interfaces have descriptors emitted from their own declarations. Dependency
@@ -467,30 +494,9 @@ fn runtime_interface_descriptors(
             return None;
         }
         match fact.role {
-            Some(ClassifierRole::MappedCollection(collection)) => match collection.kind {
-                CollectionKind::Iterator => Some("kt_type_iterator_interface"),
-                CollectionKind::Iterable if collection.mutable => {
-                    Some("kt_type_mutable_iterable_interface")
-                }
-                CollectionKind::Iterable => Some("kt_type_iterable_interface"),
-                CollectionKind::Collection if collection.mutable => {
-                    Some("kt_type_mutable_collection_interface")
-                }
-                CollectionKind::Collection => Some("kt_type_collection_interface"),
-                CollectionKind::List if collection.mutable => {
-                    Some("kt_type_mutable_list_interface")
-                }
-                CollectionKind::List => Some("kt_type_list_interface"),
-                CollectionKind::Set if collection.mutable => Some("kt_type_mutable_set_interface"),
-                CollectionKind::Set => Some("kt_type_set_interface"),
-                CollectionKind::Map if collection.mutable => Some("kt_type_mutable_map_interface"),
-                CollectionKind::Map => Some("kt_type_map_interface"),
-                CollectionKind::MapEntry if collection.mutable => Some("kt_type_mutable_map_entry"),
-                CollectionKind::MapEntry => Some("kt_type_map_entry"),
-                // The runtime has no distinct ListIterator interface marker. Its provider-published
-                // Iterator supertype is visited separately and supplies the marker this target has.
-                CollectionKind::ListIterator => None,
-            },
+            Some(ClassifierRole::MappedCollection(collection)) => {
+                mapped_collection_descriptor(collection)
+            }
             Some(ClassifierRole::FunctionOfArity(arity)) => {
                 function_check_descriptor(TypeCheckRole::FunctionOfArity(arity))
             }

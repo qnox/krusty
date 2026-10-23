@@ -1760,6 +1760,177 @@ KRef kt_class_simple_name(KRef self) {
     return kt_string_utf8(described->simple_name, (kt_int)described->simple_name_length);
 }
 
+/* ---- typeOf --------------------------------------------------------------------------------- */
+
+/* `typeOf<T>()`: a `kotlin.reflect.KType`. The generator knows the whole type at the site, so each
+   distinct one is a STATIC object it emits once per file, laid out as below, and this side only
+   reads it. Nothing here allocates one, and the collector never sees one: the object lives in no
+   chunk, and neither do the descriptors and argument objects it points at.
+
+   A projection's variance is Kotlin/Native's own encoding (`KVarianceMapper`): -1 for a star, 0
+   invariant, 1 `in`, 2 `out`. A star carries no type. */
+typedef struct KTypeOfObject KTypeOfObject;
+
+typedef struct KTypeOfArgument {
+    kt_long variance;
+    const KTypeOfObject *type;
+} KTypeOfArgument;
+
+struct KTypeOfObject {
+    KObjectHeader header;
+    /* The class the type names. A type parameter is never one: the generator declines it. */
+    const KType *classifier;
+    kt_long nullable;
+    kt_long argument_count;
+    KTypeOfArgument arguments[];
+};
+
+#define KT_VARIANCE_STAR (-1)
+#define KT_VARIANCE_IN 1
+#define KT_VARIANCE_OUT 2
+
+static kt_boolean kt_ktype_equals(KRef self, KRef other);
+static kt_int kt_ktype_hash_code(KRef self);
+static KRef kt_ktype_to_string(KRef self);
+
+static const kt_fn kt_ktype_vtable[] = {(kt_fn)kt_ktype_equals, (kt_fn)kt_ktype_hash_code,
+                                        (kt_fn)kt_ktype_to_string};
+
+KT_REFLECT_TYPE(kt_type_ktype, "KType")
+
+static const KType *const kt_ktype_interfaces[] = {&kt_type_ktype};
+
+/* Kotlin/Native's own class for what `typeOf` answers, so a program printing `t::class` sees the
+   name Kotlin/Native shows. */
+const KType kt_type_ktype_impl = {KT_NAMED("kotlin.reflect.", "KTypeImpl"),
+                                  .instance_size = sizeof(KTypeOfObject),
+                                  .super = &kt_type_any,
+                                  .vtable = kt_ktype_vtable,
+                                  .vtable_length = 3,
+                                  .interfaces = kt_ktype_interfaces,
+                                  .interface_count = 1};
+
+static const KTypeOfObject *kt_ktype_of(KRef self) {
+    return (const KTypeOfObject *)self;
+}
+
+KRef kt_ktype_classifier(KRef self) {
+    if (self == NULL) {
+        kt_null_receiver();
+        return NULL;
+    }
+    return kt_class_literal(kt_ktype_of(self)->classifier);
+}
+
+kt_boolean kt_ktype_is_marked_nullable(KRef self) {
+    if (self == NULL) {
+        kt_null_receiver();
+        return 0;
+    }
+    return kt_ktype_of(self)->nullable != 0;
+}
+
+/* Structural, as `KTypeImpl.equals` is: the same classifier, the same nullability, and the same
+   projections in order. Two sites, or two files, emit two objects for one type, so identity would
+   be the wrong answer. */
+static kt_boolean kt_ktype_same(const KTypeOfObject *left, const KTypeOfObject *right) {
+    if (left == right) {
+        return 1;
+    }
+    if (left->classifier != right->classifier || left->nullable != right->nullable ||
+        left->argument_count != right->argument_count) {
+        return 0;
+    }
+    for (kt_long index = 0; index < left->argument_count; index++) {
+        const KTypeOfArgument *a = &left->arguments[index];
+        const KTypeOfArgument *b = &right->arguments[index];
+        if (a->variance != b->variance) {
+            return 0;
+        }
+        if (a->variance != KT_VARIANCE_STAR && !kt_ktype_same(a->type, b->type)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static kt_boolean kt_ktype_equals(KRef self, KRef other) {
+    if (other == NULL || other->header.type != &kt_type_ktype_impl) {
+        return 0;
+    }
+    return kt_ktype_same(kt_ktype_of(self), kt_ktype_of(other));
+}
+
+/* `KTypeImpl.hashCode`'s shape: `(classifier * 31 + arguments) * 31 + isMarkedNullable`, where the
+   arguments hash as a list of `KTypeProjection`s do. The classifier's part is the class literal's
+   own hash, so equal types hash equally across files. */
+static kt_int kt_ktype_hash(const KTypeOfObject *type) {
+    uintptr_t address = (uintptr_t)type->classifier;
+    uint32_t classifier = (uint32_t)((address >> 4) ^ (address >> 36));
+    uint32_t arguments = 1;
+    for (kt_long index = 0; index < type->argument_count; index++) {
+        const KTypeOfArgument *argument = &type->arguments[index];
+        uint32_t projection = 0;
+        if (argument->variance != KT_VARIANCE_STAR) {
+            projection = (uint32_t)(argument->variance + 1) * 31u +
+                         (uint32_t)kt_ktype_hash(argument->type);
+        }
+        arguments = arguments * 31u + projection;
+    }
+    uint32_t nullable = type->nullable ? 1231u : 1237u;
+    return (kt_int)((classifier * 31u + arguments) * 31u + nullable);
+}
+
+static kt_int kt_ktype_hash_code(KRef self) {
+    return kt_ktype_hash(kt_ktype_of(self));
+}
+
+#define KT_LITERAL(text) kt_string_utf8(text, (kt_int)(sizeof(text) - 1))
+
+/* `KTypeImpl.toString`: the classifier's qualified name, or its simple name where it has none,
+   then the projections, then `?`. A classifier with neither name prints `???` and nothing else. */
+static KRef kt_ktype_render(const KTypeOfObject *type) {
+    const KType *classifier = type->classifier;
+    KRef text;
+    if (classifier->class_names == KT_CLASS_NAMES_MEMBER && classifier->qualified_name != NULL) {
+        text = kt_string_utf8(classifier->qualified_name, (kt_int)classifier->qualified_name_length);
+    } else if (classifier->simple_name != NULL) {
+        text = kt_string_utf8(classifier->simple_name, (kt_int)classifier->simple_name_length);
+    } else {
+        return KT_LITERAL("???");
+    }
+    if (type->argument_count > 0) {
+        text = kt_string_plus(text, KT_LITERAL("<"));
+        for (kt_long index = 0; index < type->argument_count; index++) {
+            const KTypeOfArgument *argument = &type->arguments[index];
+            if (index > 0) {
+                text = kt_string_plus(text, KT_LITERAL(", "));
+            }
+            if (argument->variance == KT_VARIANCE_STAR) {
+                text = kt_string_plus(text, KT_LITERAL("*"));
+                continue;
+            }
+            if (argument->variance == KT_VARIANCE_IN) {
+                text = kt_string_plus(text, KT_LITERAL("in "));
+            } else if (argument->variance == KT_VARIANCE_OUT) {
+                text = kt_string_plus(text, KT_LITERAL("out "));
+            }
+            text = kt_string_plus(text, kt_ktype_render(argument->type));
+        }
+        text = kt_string_plus(text, KT_LITERAL(">"));
+    }
+    if (type->nullable) {
+        text = kt_string_plus(text, KT_LITERAL("?"));
+    }
+    return text;
+}
+
+#undef KT_LITERAL
+
+static KRef kt_ktype_to_string(KRef self) {
+    return kt_ktype_render(kt_ktype_of(self));
+}
+
 /* ---- lazy ---------------------------------------------------------------------------------- */
 
 typedef struct KLazy {

@@ -392,20 +392,41 @@ fn serializer_plan(
     // The old `obj_internal()` guard returned `None` for them, leaving a null child serializer → runtime NPE.
     let fq_name = ty.kotlin_class_internal()?;
     let type_args = nn.type_args();
-    // A sealed `@Serializable` class, and a non-generic abstract one, has NO `$serializer` (its
-    // `serializer()` returns a runtime `SealedClassSerializer` or `PolymorphicSerializer`); a field
-    // of that type uses `Class.serializer()` directly. Requires the generated `serializer()`
-    // accessor (i.e. the class IS `@Serializable`) — else a plain sealed type would call a
-    // non-existent method.
-    if ir.classes.iter().any(|c| {
+    // A sealed or abstract `@Serializable` class has NO `$serializer` (its `serializer()` returns a
+    // runtime `SealedClassSerializer` or `PolymorphicSerializer`); a field of that type uses
+    // `Class.serializer(…)` directly. Requires the generated `serializer()` accessor (i.e. the
+    // class IS `@Serializable`) — else a plain sealed type would call a non-existent method. A
+    // generic sealed class is given its type arguments' serializers; kotlinc hands a generic
+    // abstract class's accessor a `UnitSerializer` for each type parameter, since a
+    // `PolymorphicSerializer` never reads them.
+    if let Some(base) = ir.classes.iter().find(|c| {
         c.fq_name_id() == fq_name
             && (c.is_sealed || super::cached_serializer::is_polymorphic_base(c))
-    }) && generated_serializer_accessor(ir, fq_name, 0).is_some()
-    {
-        return Some(ElementSerializerPlan::Generated {
-            classifier: fq_name,
-            arguments: Vec::new(),
-        });
+    }) {
+        let arity = base.type_params.len();
+        let is_sealed = base.is_sealed;
+        if generated_serializer_accessor(ir, fq_name, arity).is_some() {
+            let mut arguments = Vec::with_capacity(arity);
+            for index in 0..arity {
+                arguments.push(if is_sealed {
+                    type_argument_serializer_plan(
+                        ir,
+                        ctx,
+                        type_args.get(index)?,
+                        scope,
+                        annotated.arg(index),
+                    )?
+                } else {
+                    ElementSerializerPlan::ExternalSingleton(crate::types::type_name(
+                        "kotlinx/serialization/internal/UnitSerializer",
+                    ))
+                });
+            }
+            return Some(ElementSerializerPlan::Generated {
+                classifier: fq_name,
+                arguments,
+            });
+        }
     }
     // An element whose TYPE the file declares contextual (`@file:UseContextualSerialization`)
     // serializes through a `ContextualSerializer`, exactly as a property of that type would. The

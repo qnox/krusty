@@ -53,6 +53,7 @@ mod scope;
 mod statics;
 mod strings;
 mod type_checks;
+mod type_of;
 mod unsigned;
 
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
@@ -295,6 +296,7 @@ pub fn lower_file(
         functions: Vec::new(),
         imports: imported_functions::ImportedFunctions::new(imported_abis),
         data_imports: HashMap::default(),
+        type_of_objects: HashMap::default(),
         strings: HashMap::default(),
         string_objects: HashMap::default(),
         classes: Vec::new(),
@@ -417,6 +419,8 @@ struct FileLowering<'a> {
     imports: imported_functions::ImportedFunctions<'a>,
     /// Runtime data this file imports (the built-in type descriptors), by symbol.
     data_imports: HashMap<String, DataId>,
+    /// The static `KType` object of each distinct type a `typeOf` in this file names.
+    type_of_objects: HashMap<Ty, DataId>,
     /// String literal data, deduplicated by content.
     strings: HashMap<Vec<u8>, DataId>,
     /// The interned string OBJECT for each distinct literal text — one slot per text, filled on
@@ -1855,6 +1859,20 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     .class_name_accessor(*target)
                     .expect("checked by the guard");
                 self.class_name(symbol, *receiver)
+            }
+            // `t.classifier` / `t.isMarkedNullable`: read off a `typeOf` object.
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    receiver: Some(receiver),
+                    ..
+                } = &**checked_op
+                    && self.type_of_member_of(*target).is_some() =>
+            {
+                let member = self
+                    .type_of_member_of(*target)
+                    .expect("checked by the guard");
+                self.type_of_member(member, *receiver)
             }
             // `e.message`: the one field a runtime `Throwable` carries.
             IrExpr::Checked(ref checked_op)

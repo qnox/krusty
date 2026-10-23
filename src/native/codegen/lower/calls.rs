@@ -415,11 +415,18 @@ impl BodyLowering<'_, '_, '_> {
                 ret,
                 defaults,
                 extension_receiver_parameter,
+                substitutions,
                 ..
             } => {
                 let Some(realization) = self.file.callables.callable(*target) else {
                     return Err("an unresolvable dependency call".into());
                 };
+                // The target stdlib's own `typeOf` body only says it is a compiler intrinsic.
+                if realization.compiler_intrinsic
+                    == Some(crate::backend::BackendCompilerIntrinsic::TypeOf)
+                {
+                    return self.type_of(*target, substitutions);
+                }
                 let export = realization
                     .dependency_callable
                     .as_ref()

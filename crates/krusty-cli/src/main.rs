@@ -177,34 +177,7 @@ fn run_persistent_worker() {
 
 /// Run one translated work request: compile, then satisfy the outputs bazel declared for the action.
 fn compile_work_unit(unit: krusty_cli::worker::WorkUnit) -> Result<(), String> {
-    let mut argv: Vec<String> = vec!["-d".to_string(), unit.output_jar.display().to_string()];
-    if let Some(module_name) = &unit.module_name {
-        argv.push("-module-name".to_string());
-        argv.push(module_name.clone());
-    }
-    if !unit.classpath.is_empty() {
-        argv.push("-classpath".to_string());
-        argv.push(
-            unit.classpath
-                .iter()
-                .map(|entry| entry.display().to_string())
-                .collect::<Vec<_>>()
-                .join(":"),
-        );
-    }
-    // kotlinc splits `-Xfriend-paths` on `,`, not on the path separator.
-    if !unit.friend_paths.is_empty() {
-        argv.push(format!(
-            "-Xfriend-paths={}",
-            unit.friend_paths
-                .iter()
-                .map(|entry| entry.display().to_string())
-                .collect::<Vec<_>>()
-                .join(",")
-        ));
-    }
-    argv.extend(unit.kotlinc_args.iter().cloned());
-    argv.extend(unit.sources.iter().map(|path| path.display().to_string()));
+    let argv = unit.compiler_arguments();
 
     // A module with no Kotlin sources (an export wrapper, or a jar that only carries resources)
     // still has a declared output. Running the compiler would also demand a Kotlin distribution

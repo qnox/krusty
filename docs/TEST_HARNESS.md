@@ -152,9 +152,13 @@ target test consumes JVM artifacts and no target waits for another target's corp
 `KRUSTY_LANGUAGE_VERSION`, `KRUSTY_KOTLINC`, and
 `KRUSTY_KOTLIN_BOX_DIR` select the runtime reference toolchain, so the matrix does not rebuild Rust
 code per Kotlin version or target. Toolchain and box/serialization corpora are isolated by version.
-JVM rows opt into KSP and require both KSP and pinned serialization-runtime
-provisioning, so missing prerequisites fail rather than turning those tests into passing skips. Each
-row uses its target's configurable process-group deadline. JVM rows upload `pct-<version>` and
+JVM rows require pinned serialization-runtime provisioning, so missing prerequisites fail rather
+than turning those tests into passing skips. Real KSP integrations belong to the plugin host and
+run unconditionally in the lint job through `cargo test -p krusty-plugin-host -- --include-ignored`;
+they use that host's pinned toolchain and the runner's JDK, not JVM matrix opt-in flags. Each row
+uses its target's configurable process-group deadline. The complete JVM non-box CI pass retains
+its 600-second cold serialization/reference-CLI toolchain budget. The local 120-second default
+and test inventory are unchanged; an exhausted deadline still fails. JVM rows upload `pct-<version>` and
 `jvm-byte-equality-<version>`; Native rows upload `native-pct-<version>`. A release publishes only
 after all target rows pass and every row matches its platform/version expectations.
 
@@ -710,9 +714,9 @@ All reports keep integer counts: `passed` and `applicable` cases for each target
 from its own sums. Thus only an exact count can display `100.0%`; `3145/3146` displays `99.9%`.
 The score is never an average of per-case or per-shard percentages, and neither report's counts
 stand in for another's. Only the box corpus feeds these badges. The JVM-owned regressions
-(serialization, KSP, and the rest of `just conformance-regressions`) and target-owned focused
+(serialization and the rest of `just conformance-regressions`) and target-owned focused
 Native/Wasm regressions are correctness gates in their respective version rows and contribute
-neither cases nor bytes.
+neither cases nor bytes. The plugin-host KSP integration likewise contributes no box score.
 
 The scores and runtime correctness are separate gates. A case whose classes differ from kotlinc's but
 whose `box()` returns `OK` still passes, and the exact outcome manifests (see "Box Outcome

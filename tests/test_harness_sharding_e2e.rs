@@ -781,7 +781,7 @@ fn ci_starts_jvm_without_waiting_for_focused_klib_binaries() {
         .expect("each version's JVM row runs every non-box conformance test");
     let release = workflow
         .find(
-            "needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, build-tool-bins, build-release]",
+            "needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, bazel, build-tool-bins, build-release]",
         )
         .expect(
             "release waits on combined conformance plus the exact tested Gradle artifact and matrix",
@@ -1013,9 +1013,8 @@ fn ci_starts_jvm_without_waiting_for_focused_klib_binaries() {
         "PR and merge-group updates may auto-cancel, but each master build needs a unique group so it always finishes"
     );
     assert!(
-        workflow.contains("KRUSTY_REQUIRE_KSP_E2E: \"1\"")
-            && workflow.contains("KRUSTY_REQUIRE_SERIALIZATION_CONFORMANCE: \"1\""),
-        "matrix conformance must fail instead of self-skipping required integrations"
+        workflow.contains("KRUSTY_REQUIRE_SERIALIZATION_CONFORMANCE: \"1\""),
+        "matrix conformance must fail instead of self-skipping required serialization"
     );
 }
 

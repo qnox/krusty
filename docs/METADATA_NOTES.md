@@ -10,6 +10,13 @@ KLIB dependency-root classification retains authenticated intrinsic-support owne
 of successful code emission. A declined wrapper does not become an ordinary body; its metadata and
 declaration identity remain unchanged, and ordinary roots retain their strict closure contracts.
 
+## Constructor parameter annotation pool order
+
+Constructor header reservation interns annotation element names and values, not just annotation
+descriptors. This changes only JVM constant-pool visit order; checked payloads, retention and Kotlin
+metadata remain unchanged. Strict whole-class comparisons cover both source input orders and mixed
+runtime/binary retention with nested annotations, arrays, class literals and nullable parameters.
+
 ## Declared JVM vararg array types
 
 The generic signature reader decodes each `ValueParameter.type`/`type_id` independently of its
@@ -871,6 +878,10 @@ The approved #2459 Native/Wasm outcome reset changes no metadata encoding or dec
 authority. It records known implementation debt for small follow-ups, pinned to exact loaded
 manifest blobs and effective releases. JVM/applicability and fatal-outcome policies remain
 unchanged; see [KLIB inline migration](KLIB_INLINE_MIGRATION.md).
+
+Nullable assertion emission consumes the existing checked operand and result types; it adds no
+metadata field or nullability rewrite. A Wasm reference-to-scalar assertion declines until its
+unboxing and typed null failure have a complete target realization.
 
 ## Authenticated String concatenation declarations
 

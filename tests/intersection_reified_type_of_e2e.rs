@@ -75,3 +75,43 @@ fun box(): String {
 "#,
     );
 }
+
+#[test]
+fn a_flow_intersection_reifies_its_common_supertype() {
+    // `K` is `A & B` from two smart casts. kotlinc reifies the whole intersection, so `K` is `Any`
+    // for `typeOf`, for `is` and for the class literal, and not the first constituent `A`.
+    agree(
+        r#"
+// LANGUAGE: -ProhibitIntersectionReifiedTypeParameter
+import kotlin.reflect.typeOf
+
+interface A
+interface B
+interface Z
+interface P : Z
+interface Q : Z
+class C : A, B
+class D : P, Q
+
+var log = ""
+inline fun <reified K> select(x: K, y: Any): K where K : A, K : B {
+    log += "${y is K};${K::class == Any::class};${typeOf<K>() == typeOf<Any>()};"
+    return x
+}
+inline fun <reified K> shared(x: K): Boolean where K : P, K : Q = typeOf<K>() == typeOf<Z>()
+
+fun test(a: Any, b: Any) {
+    if (a is A && a is B) select(a, b)
+}
+
+fun box(): String {
+    test(C(), object : A {})
+    test(C(), Any())
+    if (log != "true;true;true;true;true;true;") return log
+    val d: Any = D()
+    if (d is P && d is Q && !shared(d)) return "z"
+    return "OK"
+}
+"#,
+    );
+}
