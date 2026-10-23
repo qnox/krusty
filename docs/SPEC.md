@@ -15726,26 +15726,39 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a Kotlin builtin (`String`, `List`, `Map.Entry`) are `KOTLIN_LIB`; a Java class is `JAVA_LIB`,
   and so are its annotations. An interface is `abstract`, a Java interface Kotlin converts a
   lambda to also `fun`; an enum class is `enum final`, an object and an annotation class `final`.
+  A sealed class or interface is `sealed` only (its modality comes from the Kotlin metadata flags,
+  since the class file says just `abstract`), and a value class is `final inline`.
   An unbounded Kotlin type parameter is bounded by `kotlin.Any?`, a Java one by `kotlin.Any`, and
   a Java one is invariant. A Kotlin class's supertypes are its metadata's, each named as written,
   so a typealias stays (`kotlin.Pair` reports `kotlin.io.Serializable`); a builtin realized as a
   serializable JVM class adds `java.io.Serializable` (`String`, `Int`, `Enum`). A Java class's
   supertypes leave out `java.lang.Object`, name a mapped class by its Kotlin classifier
   (`kotlin.Cloneable`, `kotlin.Enum`) and list a mapped collection interface last, as its mutable
-  Kotlin form (`java.util.ArrayList` ends with `kotlin.collections.MutableList<E>`). A class with
+  Kotlin form (`java.util.ArrayList` ends with `kotlin.collections.MutableList<E>`); a raw
+  `kotlin.jvm.functions.FunctionN` is the function classifier `kotlin.FunctionN`. A class with
   no supertype but `kotlin.Any` reports `kotlin.Any`. The annotations are the declaration's own:
   never `kotlin.Metadata`, not the Java meta-annotations the compiler mirrors onto a Kotlin
-  annotation class, and on a Java annotation class `Documented`, `Retention` and `Target` as
-  `MustBeDocumented`, `Retention(AnnotationRetention)` and `Target(AnnotationTarget)`. A typealias
+  annotation class (`Documented`, `Retention`, `Target`, `Repeatable`), and on a Java annotation
+  class `Documented`, `Retention` and `Target` as `MustBeDocumented`,
+  `Retention(AnnotationRetention)` and `Target(AnnotationTarget)`. A Java class's
+  `java.lang.Deprecated` is `kotlin.Deprecated("Deprecated in Java")`. A repeated Kotlin annotation
+  is each of its applications, never the container the compiler stores them in, and that
+  container (`kotlin.internal.RequireKotlin.Container`) finds nothing by name. An annotation
+  read from a class file lists the values it records, then its class's other defaults; a nested
+  default is `SYNTHETIC`. A typealias
   name (`kotlin.io.Serializable`) and an unknown name find nothing, but a supertype written as one
   resolves to that type alias. An annotation argument naming an entry of a library enum is that
   entry: an `ENUM_ENTRY` declaration of the enum class with its name, qualified name, parent and
-  origin. A sealed, inner or value class,
-  a Java package-private class, and a supertype written as a typealias with arguments are refused
+  origin. A Java class whose generic signature cannot be read has its other facts but answers
+  neither its type parameters nor its supertypes, rather than claiming it has none. An inner
+  class, a Java package-private class, and a supertype written as a typealias with arguments are refused
   for that query only.
+  The fixture's dependency (`dependency/Dependency.kt`) is built by krusty for the tests and by
+  kotlinc only to record KSP2's transcript.
   (`crates/krusty-plugin-host/tests/ksp.rs`, `library_classes_are_what_ksp2_reports`;
   `crates/krusty-plugin-host/tests/ksp_library_classes.rs`,
-  `library_classes_are_the_headers_ksp2_reports`.)
+  `library_classes_are_the_headers_ksp2_reports`; `src/jvm/jvm_libraries/declaration_headers.rs`,
+  `an_unreadable_generic_signature_is_not_a_nongeneric_class`.)
 
 ## 8. Success criteria for the PoC
 

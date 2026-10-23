@@ -1136,6 +1136,8 @@ pub struct KotlinMeta {
     /// `Class.flags.CLASS_KIND`. Present only for class metadata; package/file metadata has no
     /// classifier kind.
     pub class_kind: Option<TypeKind>,
+    /// `Class.flags` modality; `None` without class metadata.
+    pub class_modality: Option<crate::metadata::semantic::KotlinModality>,
     /// `Flags.IS_FUN_INTERFACE` from the Kotlin `Class.flags` word. Kotlin interfaces participate in
     /// SAM conversion only when this declaration flag is present; structural single-method detection
     /// remains valid for Java interfaces, which have no Kotlin metadata.
@@ -1196,6 +1198,7 @@ impl Default for KotlinMeta {
     fn default() -> Self {
         KotlinMeta {
             class_visibility: None,
+            class_modality: None,
             class_kind: None,
             is_fun_interface: false,
             is_companion_object: false,
@@ -1391,6 +1394,7 @@ pub fn decode_metadata_within(
             .map(flags_visibility)
             .map(crate::types::Visibility::from_metadata),
         class_kind: class_flags.map(class_identity::class_kind),
+        class_modality: class_flags.map(crate::metadata::semantic::declaration_modality),
         is_fun_interface: class_flags.is_some_and(|flags| flags & (1u64 << 14) != 0),
         is_companion_object: class_flags.is_some_and(|flags| (flags >> 6) & 0x7 == 6),
         is_data: class_flags.is_some_and(crate::metadata::semantic::class_is_data),

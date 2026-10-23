@@ -55,7 +55,7 @@ pub(crate) use classifier_declaration::type_alias_target_classifier;
 pub use classifier_declaration::{AliasExpansion, ClassifierDeclaration};
 pub use classifier_kind::TypeKind;
 pub use declaration_header::{
-    DeclarationHeader, DeclarationLanguage, HeaderSupertype, HeaderTypeParameter,
+    DeclarationHeader, DeclarationLanguage, HeaderSignature, HeaderSupertype, HeaderTypeParameter,
 };
 pub use default_value::DefaultValue;
 pub use dependency_access_policy::DependencyAccessPolicy;

@@ -30,11 +30,9 @@ pub struct DeclarationHeader {
     pub is_fun: bool,
     pub is_inner: bool,
     pub is_value: bool,
-    pub type_parameters: Vec<HeaderTypeParameter>,
-    /// The direct supertypes in the order the declaration lists them. A Java class's are in
-    /// Kotlin terms: `Object` is left out, a mapped class becomes its Kotlin classifier, and a
-    /// mapped collection interface becomes its mutable Kotlin form after every other supertype.
-    pub supertypes: Vec<HeaderSupertype>,
+    /// The type parameters and supertypes, or `None` when the class file states a generic
+    /// signature that cannot be read.
+    pub signature: Option<HeaderSignature>,
     /// The annotations the declaration states, in class-file order. A Java annotation class's
     /// meta-annotations are their Kotlin counterparts.
     pub annotations: Vec<ResolvedAnnotation>,
@@ -53,6 +51,16 @@ impl DeclarationHeader {
     pub fn is_final(&self) -> bool {
         self.modality == KotlinModality::Final
     }
+}
+
+/// The generic part of a declaration header.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HeaderSignature {
+    pub type_parameters: Vec<HeaderTypeParameter>,
+    /// The direct supertypes in the order the declaration lists them. A Java class's are in
+    /// Kotlin terms: `Object` is left out, a mapped class becomes its Kotlin classifier, and a
+    /// mapped collection interface becomes its mutable Kotlin form after every other supertype.
+    pub supertypes: Vec<HeaderSupertype>,
 }
 
 /// A type parameter of a declaration header. The bounds are the declared ones; an unbounded Kotlin

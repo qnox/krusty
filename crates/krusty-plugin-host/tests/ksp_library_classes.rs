@@ -1,11 +1,16 @@
 //! The headers krusty serves a KSP processor for classpath classifiers, against what KSP2 logs for
 //! them (`tests/fixtures/ksp/library.expected`).
 
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+
 use krusty::diag::DiagSink;
 use krusty::features::LangFeatures;
 use krusty::frontend::{
     analyze_source_set_prefix_with_features, PlatformProvider, SourceSetAnalysis,
 };
+use krusty::jvm::classpath::Classpath;
+use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty::ksp_round::KspLibraries;
 use krusty::source::SourceInput;
 use krusty_plugin_ir::{
@@ -13,18 +18,61 @@ use krusty_plugin_ir::{
     KspTypeArgument, KspTypeDeclaration, KspValue, KspVariance,
 };
 
+fn fixtures() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ksp")
+}
+
+fn platform(paths: Vec<PathBuf>) -> PlatformProvider {
+    let classpath = Rc::new(Classpath::new(paths));
+    let libraries = JvmLibraries::new(classpath).expect("the JVM provider");
+    PlatformProvider::jvm(Box::new(libraries))
+}
+
+/// The library fixture's dependency, compiled by krusty into a classpath directory.
+fn dependency(paths: &[PathBuf]) -> PathBuf {
+    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ksp-library-classes-dependency");
+    let _ = std::fs::remove_dir_all(&out);
+    let text = std::fs::read_to_string(fixtures().join("dependency/Dependency.kt")).unwrap();
+    let inputs = [SourceInput::kotlin(&text).with_file_stem("Dependency")];
+    let mut diagnostics = DiagSink::new();
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
+        &inputs,
+        platform(paths.to_vec()),
+        &LangFeatures::from_source(&text),
+        &mut diagnostics,
+    );
+    let backend = krusty::jvm::JvmBackend::new(Rc::new(Classpath::new(paths.to_vec())));
+    let artifacts = krusty::compiler::emit_analyzed(
+        analysis,
+        &["Dependency".to_string()],
+        &backend,
+        "main",
+        &mut diagnostics,
+    );
+    assert!(!diagnostics.has_errors(), "krusty refused Dependency.kt");
+    for (path, bytes) in artifacts {
+        let file = out.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, bytes).unwrap();
+    }
+    out
+}
+
 fn analysis() -> Option<SourceSetAnalysis> {
     krusty::toolchain::stdlib_jar()?;
-    let classpath = krusty::toolchain::stdlib_and_jdk_classpath();
-    let libraries =
-        krusty::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(classpath)).ok()?;
+    let paths: Vec<PathBuf> = krusty::toolchain::stdlib_jar()
+        .into_iter()
+        .chain(krusty::toolchain::jdk_modules())
+        .collect();
+    let mut classpath = paths.clone();
+    classpath.push(dependency(&paths));
     let inputs = [SourceInput::kotlin("package library\n")];
     let mut diagnostics = DiagSink::new();
     Some(analyze_source_set_prefix_with_features(
         &inputs,
         0,
         inputs.len(),
-        PlatformProvider::jvm(Box::new(libraries)),
+        platform(classpath),
         &LangFeatures::new(),
         &mut diagnostics,
     ))
@@ -55,8 +103,14 @@ fn render(ty: &KspType) -> String {
     out
 }
 
-/// An annotation of a library classifier in the form the library fixture's processor logs it.
+/// An annotation of a library classifier in the form the library fixture's processor logs it: with
+/// the classifier's origin, or the compiler's for a default nested in one.
 fn logged_annotation(annotation: &KspAnnotation, origin: &str) -> String {
+    let origin = if annotation.synthetic {
+        "SYNTHETIC"
+    } else {
+        origin
+    };
     let arguments: Vec<String> = annotation
         .arguments
         .iter()
@@ -180,11 +234,7 @@ fn library_classes_are_the_headers_ksp2_reports() {
         return;
     };
     let libraries = KspLibraries::new(&analysis);
-    let expected = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/ksp/library.expected"),
-    )
-    .unwrap();
+    let expected = std::fs::read_to_string(fixtures().join("library.expected")).unwrap();
     let mut mismatches = Vec::new();
     for line in expected.lines() {
         let line = line.trim_start_matches("w: [ksp] ");
