@@ -11,7 +11,9 @@
 #   release-publisher.sh record                       advance the released ref with a lease
 #
 # Environment: RELEASE_SHA (GITHUB_SHA), RELEASE_REMOTE (origin), RELEASE_BRANCH (master),
-# RELEASE_LOCK_TTL seconds (1800), RELEASE_LOCK_WAIT seconds (900), RELEASE_LOCK_POLL seconds (10).
+# RELEASE_LOCK_TTL seconds (1800), RELEASE_LOCK_WAIT seconds (900), RELEASE_LOCK_POLL seconds (10),
+# RELEASE_TOKEN (a token that may push refs/krusty/*; the release job checks out without persisted
+# credentials, so only this script's pushes are authenticated).
 set -euo pipefail
 shopt -s inherit_errexit
 
@@ -24,6 +26,13 @@ released_ref=refs/krusty/released
 ttl=${RELEASE_LOCK_TTL:-1800}
 wait_limit=${RELEASE_LOCK_WAIT:-900}
 poll=${RELEASE_LOCK_POLL:-10}
+
+# The header actions/checkout would have persisted, set for this process's Git commands only.
+if [ -n "${RELEASE_TOKEN:-}" ]; then
+  export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+  GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$RELEASE_TOKEN" | base64 | tr -d '\n')"
+  export GIT_CONFIG_VALUE_0
+fi
 
 usage() {
   echo "usage: $0 acquire|release LOCK|check|bind-tag TAG|acquire-latest|release-latest LOCK|check-promotion|record" >&2
