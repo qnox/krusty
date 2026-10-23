@@ -11,6 +11,7 @@ mod class_application_headers;
 mod classifier_facts;
 mod classpath_annotation_classes;
 mod collection_canonicalization;
+mod declaration_headers;
 use classpath_annotation_classes::{classpath_annotation_targets, java_annotation_parameter_list};
 use collection_canonicalization::{
     canonicalize_jvm_collections, overlay_metadata_collection_names,
@@ -4850,6 +4851,13 @@ fn collection_barrier_role(
 }
 
 impl crate::libraries::SemanticPlatform for JvmLibraries {
+    fn declaration_header(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::libraries::DeclarationHeader> {
+        self.classpath_declaration_header(classifier)
+    }
+
     fn dependency_access_policy(&self) -> &dyn crate::libraries::DependencyAccessPolicy {
         self
     }
@@ -5326,22 +5334,6 @@ impl JvmLibraries {
             until,
             through_static,
         })
-    }
-
-    pub(super) fn unsigned_compare_callable(&self, ty: Ty) -> Option<LibraryCallable> {
-        let (owner, primitive, physical) = match ty {
-            Ty::UInt => ("java/lang/Integer", "I", Ty::Int),
-            Ty::ULong => ("java/lang/Long", "J", Ty::Long),
-            _ => return None,
-        };
-        Some(LibraryCallable::library(
-            type_name(owner),
-            "compareUnsigned",
-            vec![ty, ty],
-            Ty::Int,
-            physical,
-            format!("({primitive}{primitive})I"),
-        ))
     }
 }
 

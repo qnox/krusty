@@ -57,6 +57,11 @@ type-table forms share the same decoding path; no metadata encoding changes. Con
 packed array projection but use the readable element value type for listed-argument conversions,
 adapted references and evaluation-order spills; whole-array spreads keep the array type.
 
+Local calls retain the checker-applied value-parameter list for packing too. It may select a concrete
+reference array while the lifted local declaration still has an erased generic array descriptor.
+This changes neither that declaration's generic signature nor metadata encoding, and does not
+reconstruct selected element types from operands or physical descriptors.
+
 ## Reference (`fun f(a: Int): Int = a` in `M.kt` → class `MKt`)
 
 > The `d1` byte capture below was taken from kotlinc **1.9.24** when this format was first
@@ -937,3 +942,10 @@ so source candidates, opaque callable lookup and module-qualified serialized-dec
 retain the same operation.
 No Kotlin metadata encoding or declaration identity changes. The actual Native stdlib regression
 checks both declaration forms through all three views, with and without platform authority.
+
+## Reference-array cast bound evidence
+
+Compatible JVM array casts read the existing IR generic signatures and exact recorded non-local
+and lambda bound declarations. They introduce no Kotlin metadata encoding or provider lookup.
+Expected components use declaration-primary erasure; actual components retain the complete
+intersection of declared bounds. Backend wrapper names do not replace Kotlin classifier identity.

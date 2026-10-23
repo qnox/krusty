@@ -66,28 +66,34 @@ impl KotlinTarget {
     }
 
     fn named(entry: &str) -> Option<Self> {
-        Some(match entry {
-            "CLASS" => Self::Class,
-            "ANNOTATION_CLASS" => Self::AnnotationClass,
-            "TYPE_PARAMETER" => Self::TypeParameter,
-            "PROPERTY" => Self::Property,
-            "FIELD" => Self::Field,
-            "LOCAL_VARIABLE" => Self::LocalVariable,
-            "VALUE_PARAMETER" => Self::ValueParameter,
-            "CONSTRUCTOR" => Self::Constructor,
-            "FUNCTION" => Self::Function,
-            "PROPERTY_GETTER" => Self::PropertyGetter,
-            "PROPERTY_SETTER" => Self::PropertySetter,
-            "TYPE" => Self::Type,
-            "EXPRESSION" => Self::Expression,
-            "FILE" => Self::File,
-            "TYPEALIAS" => Self::Typealias,
-            _ => return None,
-        })
+        Self::ALL
+            .into_iter()
+            .find(|target| target.entry_name() == entry)
+    }
+
+    /// The name of the `kotlin.annotation.AnnotationTarget` entry this target is.
+    pub fn entry_name(self) -> &'static str {
+        match self {
+            Self::Class => "CLASS",
+            Self::AnnotationClass => "ANNOTATION_CLASS",
+            Self::TypeParameter => "TYPE_PARAMETER",
+            Self::Property => "PROPERTY",
+            Self::Field => "FIELD",
+            Self::LocalVariable => "LOCAL_VARIABLE",
+            Self::ValueParameter => "VALUE_PARAMETER",
+            Self::Constructor => "CONSTRUCTOR",
+            Self::Function => "FUNCTION",
+            Self::PropertyGetter => "PROPERTY_GETTER",
+            Self::PropertySetter => "PROPERTY_SETTER",
+            Self::Type => "TYPE",
+            Self::Expression => "EXPRESSION",
+            Self::File => "FILE",
+            Self::Typealias => "TYPEALIAS",
+        }
     }
 
     /// The targets a Java `ElementType` entry stands for (kotlinc's `JavaAnnotationTargetMapper`).
-    fn of_java_element_type(entry: &str) -> &'static [Self] {
+    pub fn of_java_element_type(entry: &str) -> &'static [Self] {
         match entry {
             "TYPE" => &[Self::Class, Self::File],
             "ANNOTATION_TYPE" => &[Self::AnnotationClass],

@@ -5,101 +5,11 @@
 //! its supertypes are read through the one classifier model both this module's and the
 //! dependencies' classes normalize into, so a module class and a library class take one path.
 
-use crate::backend::BackendClassifierSource;
+pub(super) use super::checked_classifiers::{
+    CheckedClassifiers as CheckedDispatchClassifiers, MissingClassifier,
+};
 use crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal;
-use crate::libraries::ClassifierAccess;
 use crate::types::TypeName;
-
-/// The semantic classifier facts needed to choose one virtual invocation owner.
-///
-/// The module snapshot deliberately excludes classifiers declared in executable bodies: their
-/// completed shape belongs to the active common-IR file. Backend-generated classes likewise exist
-/// only in that file. This view freezes those exact IR declarations beside the already-frozen
-/// module/dependency facts, so owner selection has one identity-keyed source without reopening a
-/// resolver or interpreting an emitted name.
-pub(super) struct CheckedDispatchClassifiers<'a> {
-    stable: &'a dyn BackendClassifierSource,
-    file: crate::fx_hash::HashMap<TypeName, DispatchClassifierFact>,
-}
-
-#[derive(Clone)]
-struct DispatchClassifierFact {
-    /// Whether a call emitted in this file may name the classifier as its invocation owner.
-    /// File-local/generated classes have no semantic visibility publication; absence there means
-    /// nameable inside this emitting package, not an invented public declaration.
-    nameable: bool,
-    interface: bool,
-    value_class: bool,
-    supertypes: Box<[TypeName]>,
-}
-
-impl<'a> CheckedDispatchClassifiers<'a> {
-    pub(super) fn new(ir: &crate::ir::IrFile, stable: &'a dyn BackendClassifierSource) -> Self {
-        let mut file = crate::fx_hash::HashMap::default();
-        let mut published_by = crate::fx_hash::HashMap::default();
-        for (class_id, class) in ir.classes.iter().enumerate().filter(|(_, class)| {
-            !class.is_source_declared || crate::metadata::local_classifiers::is_local(ir, class)
-        }) {
-            let identity = class.fq_name_id();
-            let mut supertypes = Vec::new();
-            let mut publish = |supertype: TypeName| {
-                if supertype != identity && !supertypes.contains(&supertype) {
-                    supertypes.push(supertype);
-                }
-            };
-            publish(class.superclass);
-            for supertype in class
-                .supertypes
-                .iter()
-                .filter_map(|ty| ty.non_null().obj_internal())
-            {
-                publish(supertype);
-            }
-            for interface in class.interfaces.iter_ids() {
-                publish(interface);
-            }
-            let fact = DispatchClassifierFact {
-                nameable: !matches!(
-                    ir.class_visibilities.get(&identity),
-                    Some(crate::types::Visibility::PackagePrivate)
-                ),
-                interface: class.is_interface || class.is_annotation,
-                value_class: class.is_value,
-                supertypes: supertypes.into_boxed_slice(),
-            };
-            if let Some(previous) = published_by.insert(identity, class_id) {
-                panic!(
-                    "one common-IR file may publish one classifier per semantic identity: {identity} belongs to class {previous} and class {class_id}"
-                );
-            }
-            file.insert(identity, fact);
-        }
-        Self { stable, file }
-    }
-
-    fn classifier(&self, classifier: TypeName) -> Option<DispatchClassifierFact> {
-        if let Some(fact) = self.file.get(&classifier) {
-            return Some(fact.clone());
-        }
-        self.stable
-            .classifier(classifier)
-            .map(|fact| DispatchClassifierFact {
-                nameable: fact.access != ClassifierAccess::PackagePrivate,
-                interface: fact.is_interface(),
-                value_class: fact.value_underlying.is_some(),
-                supertypes: fact.supertypes.clone(),
-            })
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct MissingClassifier(pub TypeName);
-
-impl std::fmt::Display for MissingClassifier {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "missing backend classifier fact for {}", self.0)
-    }
-}
 
 /// The class and interface-ness a virtual call to a member declared in `declared` names when its
 /// dispatch receiver statically has `receiver`. The receiver's class is named when it inherits the
@@ -218,8 +128,9 @@ pub(super) fn inherits(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::BackendClassifierFact;
+    use crate::backend::{BackendClassifierFact, BackendClassifierSource};
     use crate::fx_hash::HashMap;
+    use crate::libraries::ClassifierAccess;
     use std::sync::Arc;
 
     #[derive(Default)]

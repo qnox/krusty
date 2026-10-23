@@ -8,7 +8,7 @@ use krusty::diag::DiagSink;
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty_cli::staged_output::StagedOutput;
-use krusty_cli::{cli, kotlinc_arguments};
+use krusty_cli::{cli, kotlinc_arguments, verify};
 
 /// The compiler's allocation pattern (many short-lived vectors and strings) runs markedly faster on
 /// mimalloc than on the platform allocator; see the dependency's note in `Cargo.toml`.
@@ -41,6 +41,22 @@ fn main() {
     // arguments itself; a build tool hands a refused one to kotlinc instead.
     if argv.first().is_some_and(|command| command == "refusals") {
         run_refusals(argv[1..].to_vec());
+        return;
+    }
+    // `krusty verify-compile …` compiles a compilation kotlinc compiled too and records how krusty
+    // did; `krusty verify-report …` turns a build's records into its verify report.
+    if argv
+        .first()
+        .is_some_and(|command| command == "verify-compile")
+    {
+        run_verify_compile(&argv[1..]);
+        return;
+    }
+    if argv
+        .first()
+        .is_some_and(|command| command == "verify-report")
+    {
+        run_verify_report(&argv[1..]);
         return;
     }
     // Bazel starts a persistent worker by appending `--persistent_worker` to the tool's command
@@ -108,42 +124,250 @@ fn run_cinterop(arguments: &[String]) {
 }
 
 /// Print each part of the command line krusty refuses, one per line, and exit 1 when there is one;
-/// exit 0 when krusty compiles the whole request. These are the refusals a compilation with the
-/// same arguments reports as errors before it reads a source: a kotlinc argument, output shape or
-/// language feature krusty does not implement, or a compiler plugin it neither reimplements nor
-/// hosts. A command line that fails for any other reason fails kotlinc too, so it is no refusal:
-/// this exits 2 with the report the compilation fails with, and neither compiler runs.
+/// exit 0 when krusty compiles the whole request. See [`refusals`]; a command line that fails for
+/// any other reason exits 2 with the report the compilation fails with, and neither compiler runs.
 fn run_refusals(argv: Vec<String>) {
     let opts = cli::parse(argv);
-    let invalid = argument_error_report(&opts)
-        .or_else(|| {
-            opts.errors
-                .iter()
-                .any(|error| !opts.refusals.contains(error))
-                .then(|| error_report(&opts))
-                .flatten()
-        })
-        .or_else(|| {
-            configuration_report(&opts)
-                .err()
-                .map(|report| parse_report(&opts) + &report)
-        });
-    if let Some(report) = invalid {
+    let refused = refusals(&opts).unwrap_or_else(|report| {
         eprint!("{report}");
         std::process::exit(2);
-    }
-    let refused = opts
-        .refusals
-        .iter()
-        .cloned()
-        .chain(opts.resolve_plugins(&[]).errors)
-        .collect::<Vec<_>>();
+    });
     for refusal in &refused {
         println!("{refusal}");
     }
     if !refused.is_empty() {
         std::process::exit(1);
     }
+}
+
+/// The parts of the command line krusty refuses: the refusals a compilation with the same
+/// arguments reports as errors before it reads a source, a kotlinc argument, output shape or
+/// language feature krusty does not implement, or a compiler plugin it neither reimplements nor
+/// hosts. A command line that fails for any other reason fails kotlinc too, so it is no refusal:
+/// it is the error, the report the compilation fails with.
+fn refusals(opts: &cli::Options) -> Result<Vec<String>, String> {
+    let invalid = argument_error_report(opts)
+        .or_else(|| {
+            opts.errors
+                .iter()
+                .any(|error| !opts.refusals.contains(error))
+                .then(|| error_report(opts))
+                .flatten()
+        })
+        .or_else(|| {
+            configuration_report(opts)
+                .err()
+                .map(|report| parse_report(opts) + &report)
+        });
+    if let Some(report) = invalid {
+        return Err(report);
+    }
+    Ok(opts
+        .refusals
+        .iter()
+        .cloned()
+        .chain(opts.resolve_plugins(&[]).errors)
+        .collect())
+}
+
+/// Compile one compilation kotlinc has compiled too, and record whether krusty supports it, how
+/// long it took, its peak memory and how its output differs from kotlinc's. The record is the
+/// result: a refused or failed compilation still exits 0, since the build ships kotlinc's output.
+fn run_verify_compile(argv: &[String]) {
+    let started = std::time::Instant::now();
+    let arguments = verify::VerifyCompileArguments::parse(argv).unwrap_or_else(|error| {
+        eprintln!("error: {error}\n{}", verify::VERIFY_COMPILE_USAGE);
+        std::process::exit(2);
+    });
+    let mut record = verify::CompilationRecord {
+        compilation: arguments.compilation.clone(),
+        source_set: arguments.source_set.clone(),
+        kotlin_version: arguments.kotlin_version.clone(),
+        outcome: verify::Outcome::Unsupported {
+            reasons: arguments.unsupported.clone(),
+        },
+        kotlinc_millis: arguments.kotlinc_millis,
+        krusty_millis: None,
+        krusty_peak_rss_bytes: None,
+    };
+    let opts = cli::parse(arguments.kotlinc_arguments.clone());
+    // Only a request that compiles has a destination, and only the `-d` it names: a request
+    // without kotlinc arguments must not reach the parser's default output.
+    let destination = (!arguments.kotlinc_arguments.is_empty()).then_some(opts.dest.as_path());
+    // Nothing is written, and the previous record is not removed, until the layout is proven safe.
+    if let Err(error) = verify::check_layout(&arguments.reference, destination, &arguments.record) {
+        eprintln!("error: {error}");
+        std::process::exit(2);
+    }
+    // A record left by an earlier invocation never stands in for this one, even if this one fails.
+    let _ = std::fs::remove_file(&arguments.record);
+    // The destination is verify's own, proven apart from kotlinc's output: an earlier run's classes
+    // must not appear as krusty's.
+    if let Some(destination) = destination.filter(|destination| destination.is_dir()) {
+        if let Err(error) = std::fs::remove_dir_all(destination) {
+            eprintln!("error: cannot clear {}: {error}", destination.display());
+            std::process::exit(2);
+        }
+    }
+    // A request without kotlinc arguments is one the build tool already knows krusty does not
+    // support; one with arguments but no Kotlin source compiles nothing.
+    if !arguments.kotlinc_arguments.is_empty()
+        && !opts.sources.iter().any(|source| source.ends_with(".kt"))
+    {
+        record.outcome = verify::Outcome::NoSources;
+        // Neither compiler compiled anything, so there is no time to compare.
+        record.kotlinc_millis = None;
+    } else if arguments.unsupported.is_empty() {
+        record.outcome = match refusals(&opts) {
+            Err(report) => verify::Outcome::Failed {
+                errors: error_lines(&report),
+            },
+            Ok(refused) if !refused.is_empty() => verify::Outcome::Unsupported { reasons: refused },
+            Ok(_) => {
+                eprint!("{}", parse_report(&opts));
+                // A panic is one more way krusty fails this compilation, not a reason to lose the
+                // record of the build's other compilations.
+                let compiled =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compile(&opts)))
+                        .unwrap_or_else(|payload| {
+                            Err(format!(
+                                "error: internal compiler panic: {}\n",
+                                panic_text(&*payload)
+                            ))
+                        });
+                record.krusty_millis = Some(started.elapsed().as_millis() as u64);
+                record.krusty_peak_rss_bytes = verify::peak_rss_bytes();
+                match compiled {
+                    Err(report) => verify::Outcome::Failed {
+                        errors: error_lines(&report),
+                    },
+                    Ok(_) => match verify::compare_outputs(&arguments.reference, &opts.dest) {
+                        Ok(comparison) => verify::Outcome::Compiled { comparison },
+                        Err(error) => {
+                            eprintln!("error: cannot compare the outputs: {error}");
+                            std::process::exit(2);
+                        }
+                    },
+                }
+            }
+        };
+    }
+    let json = serde_json::to_string_pretty(&record).expect("a record serializes");
+    if let Some(parent) = arguments.record.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(error) = std::fs::write(&arguments.record, json + "\n") {
+        eprintln!(
+            "error: cannot write {}: {error}",
+            arguments.record.display()
+        );
+        std::process::exit(2);
+    }
+    println!("{}", verify::record_line(&record));
+}
+
+/// The error lines of a failed compilation's report, or the whole report when none is marked.
+fn error_lines(report: &str) -> Vec<String> {
+    let lines = report.lines().filter(|line| !line.trim().is_empty());
+    let errors = lines
+        .clone()
+        .filter(|line| line.contains("error: "))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        lines.map(str::to_string).collect()
+    } else {
+        errors
+    }
+}
+
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|text| text.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "panic".to_string())
+}
+
+/// Write the HTML, Markdown and issue reports of a build's verify records, and say where.
+fn run_verify_report(argv: &[String]) {
+    let arguments = verify::VerifyReportArguments::parse(argv).unwrap_or_else(|error| {
+        eprintln!("error: {error}\n{}", verify::VERIFY_REPORT_USAGE);
+        std::process::exit(2);
+    });
+    let fail = |error: String| -> ! {
+        eprintln!("error: {error}");
+        std::process::exit(2);
+    };
+    // Every input is known and kept apart from the reports before any report is removed.
+    let files = arguments
+        .record_files()
+        .unwrap_or_else(|error| fail(format!("cannot list the records: {error}")));
+    if let Err(error) = verify::check_report_layout(&arguments.out, &files) {
+        fail(error);
+    }
+    // An earlier invocation's report never survives this one, even when this one fails.
+    for name in verify::REPORT_FILES {
+        let path = arguments.out.join(name);
+        if let Err(error) = std::fs::remove_file(&path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                fail(format!("cannot remove {}: {error}", path.display()));
+            }
+        }
+    }
+    let records = files
+        .iter()
+        .map(|file| {
+            let text = std::fs::read_to_string(file)
+                .unwrap_or_else(|error| fail(format!("cannot read {}: {error}", file.display())));
+            serde_json::from_str::<verify::CompilationRecord>(&text).unwrap_or_else(|error| {
+                fail(format!(
+                    "{} is not a verify record: {error}",
+                    file.display()
+                ))
+            })
+        })
+        .collect::<Vec<_>>();
+    let environment = verify::Environment {
+        krusty_version: cli::VERSION.to_string(),
+        build_tool: arguments.build_tool.clone(),
+        jdk: arguments.jdk.clone(),
+        platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+    };
+    let issue_url = verify::issue_url(&records, &environment, arguments.share_names);
+    let [html, markdown, issue] = verify::REPORT_FILES;
+    let outputs = [
+        (
+            html,
+            verify::render_html(&records, &environment, &issue_url),
+        ),
+        (
+            markdown,
+            verify::render_markdown(&records, &environment, &issue_url),
+        ),
+        (
+            issue,
+            verify::issue_body(&records, &environment, arguments.share_names, true),
+        ),
+    ];
+    std::fs::create_dir_all(&arguments.out).unwrap_or_else(|error| {
+        fail(format!(
+            "cannot create {}: {error}",
+            arguments.out.display()
+        ))
+    });
+    for (name, text) in &outputs {
+        let path = arguments.out.join(name);
+        std::fs::write(&path, text)
+            .unwrap_or_else(|error| fail(format!("cannot write {}: {error}", path.display())));
+    }
+    println!("{}", verify::summary_line(&verify::Summary::of(&records)));
+    println!("report: {}", arguments.out.join(html).display());
+    println!(
+        "submit it to help prioritize krusty: open the report's issue button, or paste {} into {}",
+        arguments.out.join(issue).display(),
+        verify::NEW_ISSUE_URL,
+    );
 }
 
 /// Serve Bazel work requests until stdin closes.

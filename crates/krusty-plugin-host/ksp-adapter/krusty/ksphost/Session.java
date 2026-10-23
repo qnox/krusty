@@ -24,6 +24,7 @@ import kotlin.KotlinVersion;
 // krusty deciding when another round runs.
 final class Session {
     final List<String> providers = new ArrayList<>();
+    final Classpath classpath;
     private final List<SymbolProcessor> processors = new ArrayList<>();
     private final URLClassLoader loader;
     private final CodeGen codeGen;
@@ -31,8 +32,14 @@ final class Session {
     private final String moduleName;
     private final Set<String> seenPaths = new HashSet<>();
 
-    private Session(URLClassLoader loader, CodeGen codeGen, Logger logger, String moduleName) {
+    private Session(
+            URLClassLoader loader,
+            CodeGen codeGen,
+            Logger logger,
+            String moduleName,
+            Classpath classpath) {
         this.loader = loader;
+        this.classpath = classpath;
         this.codeGen = codeGen;
         this.logger = logger;
         this.moduleName = moduleName;
@@ -51,8 +58,8 @@ final class Session {
         }
     }
 
-    static Session load(DataInputStream in) throws IOException {
-        List<String> classpath = Wire.readList(in, Wire::readString);
+    static Session load(DataInputStream in, Classpath classpath) throws IOException {
+        List<String> processorClasspath = Wire.readList(in, Wire::readString);
         Map<String, String> options = new LinkedHashMap<>();
         for (String[] option : Wire.readList(in, o -> new String[] {Wire.readString(o), Wire.readString(o)})) {
             options.put(option[0], option[1]);
@@ -71,14 +78,14 @@ final class Session {
         int logLevel = in.readInt();
         boolean warningsAsErrors = Wire.readBoolean(in);
 
-        URL[] urls = new URL[classpath.size()];
+        URL[] urls = new URL[processorClasspath.size()];
         for (int i = 0; i < urls.length; i++) {
-            urls[i] = new File(classpath.get(i)).toURI().toURL();
+            urls[i] = new File(processorClasspath.get(i)).toURI().toURL();
         }
         URLClassLoader loader = new URLClassLoader(urls, Session.class.getClassLoader());
         CodeGen codeGen = new CodeGen(kotlinDir, javaDir, classDir, resourceDir);
         Logger logger = new Logger(logLevel, warningsAsErrors);
-        Session session = new Session(loader, codeGen, logger, moduleName);
+        Session session = new Session(loader, codeGen, logger, moduleName, classpath);
         List<PlatformInfo> platforms =
                 Collections.singletonList(new JvmPlatform(jvmTarget, jvmDefaultMode));
         SymbolProcessorEnvironment environment =

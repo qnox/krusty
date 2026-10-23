@@ -107,6 +107,8 @@ struct SourceDeclaration {
     qualified_name: Option<Box<str>>,
     /// Exact accessor owner and arity published by the serialization frontend plugin.
     serialization_companion_accessor: Option<(Box<str>, TypeName, usize)>,
+    /// The serial elements the serialization plugin committed to for the class.
+    serializable_elements: Option<crate::types::SerializableClassElements>,
 }
 
 impl BackendClassifierFact {
@@ -348,6 +350,7 @@ impl BackendModuleFacts {
                     serialization_companion_accessor: index
                         .serialization_companion_accessor(declaration)
                         .map(|(field, companion, arity)| (Box::from(field), companion, arity)),
+                    serializable_elements: index.serializable_class_elements(declaration).cloned(),
                 },
             );
             if let Some(underlying) = value_underlying {
@@ -634,8 +637,10 @@ impl crate::types::ClassifierFactSource for CheckedBackendClassifiers<'_> {
         &self,
         classifier: TypeName,
     ) -> Option<crate::types::SerializableClassElements> {
-        // A source classifier of this module is described from its own checked declaration, which
-        // this frozen view does not retain.
+        if let Some(source) = self.module.source_declarations.get(&classifier) {
+            return source.serializable_elements.clone();
+        }
+        // A body-local classifier's completed shape belongs to its own file's IR.
         if self.module.classifier(classifier).is_some() || self.module.is_body_local(classifier) {
             return None;
         }

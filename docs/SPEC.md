@@ -2723,6 +2723,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   against its own type parameters, not their erasure; only the descriptor erases them. An
   anonymous function is signed the same way, while a lambda literal's method carries no
   `Signature` (`tests/local_function_signature_e2e.rs`).
+- **Local-call applied parameters.** Checked local calls retain every selected value parameter in
+  declaration order, including context slots but excluding extension receivers and lifted captures.
+  Generic vararg packing uses that applied array type, not the local declaration's erased array;
+  `T = Int` packs a reference `Array<Int>`, while the declaration's own parameter and generic
+  signature stay unchanged. Physical capture/default mapping and declaration-boundary coercions
+  remain separate. A mismatched checked/declaration value arity is rejected, not reconstructed.
+  Tests: `local_function_signature_e2e::local_generic_vararg_arrays_keep_the_selected_element_at_runtime`
+  and the companion strict whole-class comparison, plus checked-FIR parameter/arity units.
 - **Lifted captured value order (kotlinc's `ClosureAnnotator`).** The captured values lead a lifted
   local function's parameters in the order its closure first sees them, never by name: first the
   values its defaults and body read, in source order, then the closures of the local functions it
@@ -11532,8 +11540,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   without the plugin, whose element or element type
   carries annotations (`List<@Serializable(with = S::class) Item>` serializes with `S`), that
   publishes no order for its stored properties, or that is generic, declines the file rather than
-  guess. (A superclass in another file of the same module is not handled yet and declines too.)
+  guess.
   Test: `tests/serializable_parent_dependency_e2e.rs`.
+- **A serializable superclass in another file of the same module contributes its declared
+  elements.** A file's plugin pass sees only its own classes, so before any file is lowered the
+  serialization plugin publishes, for each source class whose `write$Self` and deserialization
+  constructor it generates (a `@Serializable` class without `with`, not an enum, object, value
+  class or interface), the same record a dependency's metadata provides: the class's stored
+  properties (primary-constructor properties first, then body properties with a backing field)
+  without `@Transient` ones, each typed by its signature and optional exactly when it has a
+  default: a primary-constructor parameter's default or a body property's initializer. The
+  backend copies that record; it decides nothing itself. An element with an annotation on the
+  property or anywhere in its written type publishes no record and declines the subclass's file,
+  as for a dependency.
+- **A body property's initializer is a default in a class without a primary constructor.**
+  kotlinc marks the element optional, applies the initializer in the deserialization constructor
+  when the input omits it, and compares against it in `write$Self`, exactly as with a primary
+  constructor. The initializer there runs in the secondary constructors that delegate to `super`
+  and can read only the receiver, so its locals are renumbered from above every constructor's
+  values.
+  Test: `tests/serializable_parent_same_module_e2e.rs`.
 - **A serializable abstract class is serialized polymorphically.** kotlinc gives a non-generic,
   non-sealed abstract `@Serializable` class no `$serializer`: `Companion.serializer()` returns
   `new PolymorphicSerializer(C::class, new Annotation[0])`, cached in a `$cachedSerializer$delegate`
@@ -15891,8 +15917,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   without the script runtime, or an editor module that lacks it), the script class extends nothing:
   its constructor takes no arguments, has no line entry for the script's start, and a template
   member such as `args` is an unresolved reference. Not yet supported: a class that uses the script
-  instance (kotlinc makes it implicitly inner), top-level destructuring, type aliases declared in a
-  script, and a template-typed implicit receiver for extension calls such as `run { }`. Verified
+  instance (kotlinc makes it implicitly inner), top-level destructuring, and type aliases declared
+  in a script. Verified
   against kotlinc 2.4.21 and kotlinc's own script test corpus. (`tests/kotlin_script_e2e.rs`.)
 - **A script's constructor parameters keep the definition's types.** The standard definition
   names `kotlin.Array<kotlin.String>` by qualified identity, so a script importing its own
@@ -15955,6 +15981,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `declarations_are_in_the_order_ksp2_lists_them`; `ksp_round` unit tests
   `members_and_their_types_are_listed_in_ksps_order` and
   `declarations_are_in_ksps_order_with_the_members_the_language_contributes`.)
+- **A script definition's implicit receivers and default imports apply like kotlinc's.** A
+  definition (`ScriptDefinition`) names its template, the template's constructor parameters, its
+  implicit receivers and its default imports. Default imports are seen as if written before the
+  script's own imports. Each implicit receiver is a receiver of the whole script below the
+  script's own members and the template's: a name the script or template declares wins over the
+  receiver's member. The constructor takes the template's parameters, then one parameter per
+  receiver (`$script_receiver_1` onward, null-checked under that name), and stores each receiver
+  in a private final field named after its classifier (`$$implicitReceiver_Host`), which leads the
+  field table. A statement, and an inline or non-inline lambda or local function within it, reads
+  the constructor parameter (captured when a lambda escapes). Members, property initializers and
+  the lambdas within them read the field. Verified against kotlinc 2.4.21 with a custom
+  `@KotlinScript` template. (`tests/kotlin_script_e2e.rs`.)
 - **KSP annotations carry their arguments as KSP2 reports them.** An annotation's `arguments` are
   the arguments the source wrote, in written order (origin `KOTLIN`), then the default of each
   element it did not write, in declaration order (origin `SYNTHETIC`); `defaultArguments` are
@@ -15972,12 +16010,54 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   modifiers. An annotation on a classifier, function or constructor has the `shortName` the
   source wrote, an import alias's name when it used one; one on a property, parameter or
   accessor, and a nested one, has its class's simple name. An annotation whose arguments the
-  frontend did not fold, an array class literal, a
-  library enum entry, and a non-public compiler-made accessor's modifiers are refused for that
+  frontend did not fold, an array class literal, and a
+  non-public compiler-made accessor's modifiers are refused for that
   query only.
   (`crates/krusty-plugin-host/tests/ksp.rs`, `annotation_arguments_and_accessors_are_what_ksp2_reports`;
   frontend tests `pass_one_publishes_folded_annotation_element_defaults` and
   `pass_one_publishes_value_parameter_annotations_as_written`.)
+- **A KSP library class is the declaration KSP2 reads from the classpath.** A processor reaches a
+  classpath classifier by name (`getClassDeclarationByName`) or through a source supertype, and
+  the host asks krusty for its header when it first does. A class with Kotlin class metadata and
+  a Kotlin builtin (`String`, `List`, `Map.Entry`) are `KOTLIN_LIB`; a Java class is `JAVA_LIB`,
+  and so are its annotations. An interface is `abstract`, a Java interface Kotlin converts a
+  lambda to also `fun`; an enum class is `enum final`, an object and an annotation class `final`.
+  A sealed class or interface is `sealed` only (its modality comes from the Kotlin metadata flags,
+  since the class file says just `abstract`), and a value class is `final inline`.
+  An unbounded Kotlin type parameter is bounded by `kotlin.Any?`, a Java one by `kotlin.Any`, and
+  a Java one is invariant. A Kotlin class's supertypes are its metadata's, each named as written,
+  so a typealias stays (`kotlin.Pair` reports `kotlin.io.Serializable`); a builtin realized as a
+  serializable JVM class adds `java.io.Serializable` (`String`, `Int`, `Enum`). A Java class's
+  supertypes leave out `java.lang.Object`, name a mapped class by its Kotlin classifier
+  (`kotlin.Cloneable`, `kotlin.Enum`) and list a mapped collection interface last, as its mutable
+  Kotlin form (`java.util.ArrayList` ends with `kotlin.collections.MutableList<E>`); a raw
+  `kotlin.jvm.functions.FunctionN` is the function classifier `kotlin.FunctionN`. A class with
+  no supertype but `kotlin.Any` reports `kotlin.Any`. The annotations are the declaration's own:
+  never `kotlin.Metadata`, not the Java meta-annotations the compiler mirrors onto a Kotlin
+  annotation class (`Documented`, `Retention`, `Target`, `Repeatable`), and on a Java annotation
+  class `Documented`, `Retention` and `Target` as `MustBeDocumented`,
+  `Retention(AnnotationRetention)` and `Target(AnnotationTarget)`. A Java class's
+  `java.lang.Deprecated` is `kotlin.Deprecated("Deprecated in Java")`. A repeated Kotlin annotation
+  is each of its applications, never the container the compiler stores them in, and that
+  container (`kotlin.internal.RequireKotlin.Container`) finds nothing by name. A container whose
+  value is not an array of annotations leaves the declaration's annotations unanswered rather
+  than listing the rest. An annotation
+  read from a class file lists the values it records, then its class's other defaults; a nested
+  default is `SYNTHETIC`. A typealias
+  name (`kotlin.io.Serializable`) and an unknown name find nothing, but a supertype written as one
+  resolves to that type alias. An annotation argument naming an entry of a library enum is that
+  entry: an `ENUM_ENTRY` declaration of the enum class with its name, qualified name, parent and
+  origin. A Java class whose generic signature cannot be read has its other facts but answers
+  neither its type parameters nor its supertypes, rather than claiming it has none. An inner
+  class, a Java package-private class, and a supertype written as a typealias with arguments are refused
+  for that query only.
+  The fixture's dependency (`dependency/Dependency.kt`) is built by krusty for the tests and by
+  kotlinc only to record KSP2's transcript.
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `library_classes_are_what_ksp2_reports`;
+  `crates/krusty-plugin-host/tests/ksp_library_classes.rs`,
+  `library_classes_are_the_headers_ksp2_reports`; `src/jvm/jvm_libraries/declaration_headers.rs`,
+  `an_unreadable_generic_signature_is_not_a_nongeneric_class`,
+  `a_container_holding_a_value_that_is_not_an_annotation_is_unreadable`.)
 
 ## 8. Success criteria for the PoC
 
@@ -21028,3 +21108,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   earlier copy of it gains nothing. Tests:
   `jvm_libraries::provider_normalization_tests::a_repository_named_stdlib_owns_its_builtins`,
   `nullable_receiver_operator_ext_e2e::nullable_string_plus_concatenates_against_a_repository_named_stdlib`.
+- **Compatible reference-array casts precede JVM written-cast null guards.** Peel matched
+  `Array` layers through their readable projected elements, including nullable array layers.
+  Compare the remaining actual type against the expected declaration's primary erased-bound
+  classifier using semantic Kotlin inheritance. An actual type parameter contributes all declared
+  bounds; an expected parameter uses the primary class bound, not the first interface bound.
+  A compatible cast performs only the existing physical coercion of the already-emitted operand;
+  a required erased-array `checkcast` remains. This does not establish a general non-null call
+  result fact. Primitive-array and incompatible component casts keep ordinary cast behavior.
+  Regression: `call_result_non_null_cast_e2e` compares complete classfiles and real JVM results.

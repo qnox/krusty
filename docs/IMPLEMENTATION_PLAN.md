@@ -16,6 +16,14 @@ This is declaration evidence for #2537. Raw occurrence construction, lossless ex
 parsing and erased-application semantics remain separate follow-ups. Enclosing-method formal scopes
 need explicit header evidence; unavailable bounds are refused rather than replaced with `Any`.
 
+## Local-call checked vararg signature
+
+Retain the checker's complete applied value-parameter list on local calls and consume it when
+packing varargs. The lifted declaration still owns ABI coercions, captures, extension receivers
+and defaults; reject mismatched value arity. Real-kotlinc runtime and whole-class regressions cover
+the selected Int/String array carriers. This functional slice does not implement #2554's broader
+call-owned operand-preparation/result contract or introduce the private numeric carrier prototype.
+
 KLIB dependency-emission categories have disjoint declaration-owned roots before lowering begins.
 An authenticated intrinsic wrapper keeps that ownership when its body transaction declines; the
 ordinary-body category cannot retry it and turn the target decline into an ordinary-closure error.
@@ -5814,6 +5822,14 @@ write the dependency libraries itself; kotlinc only supplies the expected progra
   module's KLIB with this backend, the dependent compilation reads it through the KLIB library
   provider, and Native links and runs `box()`; the expected-failure ratchet records each case until
   it runs.
+
+## Compatible JVM reference-array casts
+
+The JVM array-cast boundary consumes checked semantic types, declaration-owned bounds and the
+same frozen classifier inventory used for invocation ownership. It reuses core subtyping without
+JVM owner aliases. Scratch inline-lambda emission scopes its declaration context explicitly.
+Unknown/cyclic formal evidence never proves compatibility; normal written-cast behavior remains.
+This prerequisite is separate from checked local-call argument preparation (#2554).
 
 ## KLIB inline migration debt
 
