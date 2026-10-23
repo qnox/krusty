@@ -32,9 +32,35 @@ impl BoundInnerConstructorContext {
             .into_iter()
             .find(|(owner, ..)| *owner == outer)?;
         let outer_declaration = source.classifier(outer)?;
+        let captured = &classifier.type_params()[classifier.own_type_parameter_count..];
+        let outer_bindings = classifier_bindings(&outer_declaration, applied);
+        // The inner declaration owns the captured slots. A provider renames a captured formal
+        // hidden by an own formal in a complete enclosing layout. A selective capture layout
+        // instead retains the captured declarations' semantic identities. An unapplied enclosing
+        // type contributes only its existing bindings, without inventing argument evidence.
+        let bindings = if captured.len() == outer_declaration.type_params().len() {
+            captured
+                .iter()
+                .zip(outer_declaration.type_params())
+                .filter_map(|(capture, formal)| {
+                    outer_bindings
+                        .get(formal)
+                        .map(|&actual| (capture.clone(), actual))
+                })
+                .collect()
+        } else {
+            captured
+                .iter()
+                .filter_map(|capture| {
+                    outer_bindings
+                        .get(capture)
+                        .map(|&actual| (capture.clone(), actual))
+                })
+                .collect()
+        };
         Some(Self {
             outer: applied,
-            bindings: classifier_bindings(&outer_declaration, applied),
+            bindings,
             rank: u32::try_from(rank).expect("receiver hierarchy depth exceeds callable rank"),
         })
     }
@@ -137,6 +163,103 @@ mod tests {
 
     struct EmptySource;
     impl SymbolSource for EmptySource {}
+
+    #[test]
+    fn captured_bindings_use_the_inner_layout_when_an_own_formal_shadows_the_outer() {
+        struct OuterSource {
+            owner: TypeName,
+            declaration: std::sync::Arc<LibraryType>,
+        }
+        impl SymbolSource for OuterSource {
+            fn classifier(&self, owner: TypeName) -> Option<std::sync::Arc<LibraryType>> {
+                (owner == self.owner).then(|| self.declaration.clone())
+            }
+        }
+        let outer = crate::types::type_name("fixtures/ShadowOuter");
+        let inner = crate::types::type_name("fixtures/ShadowOuter$Inner");
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let mut outer_declaration = LibraryType::declaration_header();
+        outer_declaration.own_type_parameter_count = 1;
+        outer_declaration.type_parameters =
+            crate::types::TypeParameters::invariant(vec!["T".into()], vec![vec![any]]);
+        let source = OuterSource {
+            owner: outer,
+            declaration: std::sync::Arc::new(outer_declaration),
+        };
+        let mut classifier = LibraryType::declaration_header();
+        classifier.outer_instance = Some(outer);
+        classifier.own_type_parameter_count = 1;
+        classifier.type_parameters = crate::types::TypeParameters::invariant(
+            vec!["T".into(), "captured:T".into()],
+            vec![vec![any], vec![any]],
+        );
+        let receiver = Ty::obj_args_name(outer, &[Ty::String]);
+        let context = BoundInnerConstructorContext::new(&source, receiver, &classifier)
+            .expect("an applied enclosing instance");
+        let raw = BoundInnerConstructorContext::new(&source, Ty::obj_name(outer), &classifier)
+            .expect("an unapplied enclosing instance retains its partial context");
+        assert_eq!(
+            raw.bindings(),
+            &crate::symbol_resolver::GSigBinds::default()
+        );
+        assert_eq!(
+            context.bindings(),
+            &crate::symbol_resolver::GSigBinds::from_iter([("captured:T".into(), Ty::String),])
+        );
+        let own = Ty::ty_param("T", any);
+        let constructor = LibraryMember::new("<init>".into(), vec![own], Ty::Unit, "".into());
+        let candidate = context
+            .candidate(&source, receiver, inner, &classifier, constructor)
+            .expect("a normalized constructor");
+        assert_eq!(candidate.semantic_signature().formals, ["T"]);
+        assert_eq!(candidate.semantic_signature().params, [own]);
+        assert_eq!(
+            candidate.semantic_signature().ret,
+            Ty::obj_args_name(inner, &[own, Ty::String])
+        );
+        let mut inferred = crate::symbol_resolver::GSigBinds::from_iter([("T".into(), Ty::Int)]);
+        inferred.extend(context.bindings().clone());
+        assert_eq!(
+            inferred,
+            crate::symbol_resolver::GSigBinds::from_iter([
+                ("T".into(), Ty::Int),
+                ("captured:T".into(), Ty::String),
+            ])
+        );
+        let mut selective = classifier.clone();
+        selective.type_parameters =
+            crate::types::TypeParameters::invariant(vec!["inner:T".into()], vec![vec![any]]);
+        let context = BoundInnerConstructorContext::new(&source, receiver, &selective)
+            .expect("an inner declaration may omit an unused enclosing formal");
+        assert_eq!(
+            context.bindings(),
+            &crate::symbol_resolver::GSigBinds::default()
+        );
+        let mut outer_declaration = LibraryType::declaration_header();
+        outer_declaration.own_type_parameter_count = 2;
+        outer_declaration.type_parameters = crate::types::TypeParameters::invariant(
+            vec!["A".into(), "B".into()],
+            vec![vec![any], vec![any]],
+        );
+        let source = OuterSource {
+            owner: outer,
+            declaration: std::sync::Arc::new(outer_declaration),
+        };
+        selective.type_parameters = crate::types::TypeParameters::invariant(
+            vec!["inner:T".into(), "B".into()],
+            vec![vec![any], vec![any]],
+        );
+        let context = BoundInnerConstructorContext::new(
+            &source,
+            Ty::obj_args_name(outer, &[Ty::Int, Ty::String]),
+            &selective,
+        )
+        .expect("a selective capture keeps its original declaration identity");
+        assert_eq!(
+            context.bindings(),
+            &crate::symbol_resolver::GSigBinds::from_iter([("B".into(), Ty::String),])
+        );
+    }
 
     #[test]
     fn a_bound_constructor_publishes_the_same_complete_application_on_every_result_facet() {

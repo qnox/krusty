@@ -14,6 +14,12 @@ Receiver-bound constructor candidates retain the full classifier argument layout
 enclosing arguments, even when a source provider's provisional constructor result contains only its
 own arguments. Captured declaration identities are substituted from the selected outer application;
 they are not constructor inference variables. Ordinary callable-owned formals remain independent.
+The enclosing declaration's normalized argument bindings are re-keyed onto the inner classifier's
+captured suffix. A hidden captured parameter and a same-spelled own parameter retain their distinct
+provider identities, including Java declarations; projection and dependent-star bounds stay intact.
+Complete capture layouts provide declaration-order correspondence; selective layouts retain exact
+semantic outer identities. Only present normalized bindings enter the captured context, so an
+unapplied outer does not acquire invented type arguments.
 The same complete result reaches inferred function signatures and rejected-call recovery. This
 changes no metadata schema, physical constructor descriptor or enclosing-instance ABI.
 

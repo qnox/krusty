@@ -14718,7 +14718,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Inner(1)`. Source and dependency calls, including fixed aliases, retain complete own-plus-captured
   result arguments. Receiver-bound alias calls with inferred function returns remain tracked in
   #2592; declared alias returns are covered. Captured formals are removed by declaration identity;
-  independently declared constructor formals remain inferable. The enclosing application supplies the input type
+  independently declared constructor formals remain inferable. A shadowing own parameter also
+  remains independent when a Java provider renames the hidden captured parameter: enclosing
+  bindings use the inner declaration's capture identities (`tests/java_class_formal_bound_e2e.rs`).
+  The enclosing application supplies the input type
   during eager lambda overload selection, before Unit coercion decides between constructor
   candidates. (`tests/inner_constructor_bounds_e2e.rs`.)
 

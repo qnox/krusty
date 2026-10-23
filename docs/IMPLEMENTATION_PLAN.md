@@ -9,6 +9,9 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 
 Normalize inner constructors with complete own-plus-captured instance results, preserving independent
 callable formals while removing captured formals from the inference variables. One receiver context
+re-keys normalized enclosing arguments onto the inner declaration's captured identities, including
+captures renamed by a shadowing own parameter; it never overwrites that independent own inference.
+That context
 specializes member-level candidates and provider declarations before eager lambda analysis, fixes
 captured bindings before final admission, and supplies the declaration evidence for exact bound
 diagnostics. Rejected signature recovery preserves that completed application without repeating
