@@ -1629,6 +1629,8 @@ mod primary_constructor_newline_e2e;
 mod primitive_explicit_equals_e2e;
 #[path = "primitive_hash_code_e2e.rs"]
 mod primitive_hash_code_e2e;
+#[path = "projected_member_extension_invoke_e2e.rs"]
+mod projected_member_extension_invoke_e2e;
 #[path = "public_inline_property_access_e2e.rs"]
 mod public_inline_property_access_e2e;
 #[path = "receiver_type_line_break_e2e.rs"]

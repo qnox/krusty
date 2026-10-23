@@ -10492,7 +10492,10 @@ fn member_extension_function_shapes_in(
             );
             for (member, function) in functions {
                 let generic = function.signature.generic_sig.as_ref();
-                let declared_receiver = crate::symbol_resolver::ty_subst(
+                // The method's own type parameters stay open: they are inferred from this very
+                // receiver, so `Key<in List<T>>` accepts `Key<List<String>>` with `T = String`
+                // rather than demanding `List<Any>`.
+                let declared_receiver = crate::symbol_resolver::ty_subst_keep_unbound(
                     generic
                         .and_then(|signature| signature.receiver)
                         .unwrap_or(function.receiver_ty),
