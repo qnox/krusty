@@ -11485,8 +11485,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   without the plugin, whose element or element type
   carries annotations (`List<@Serializable(with = S::class) Item>` serializes with `S`), that
   publishes no order for its stored properties, or that is generic, declines the file rather than
-  guess. (A superclass in another file of the same module is not handled yet and declines too.)
+  guess.
   Test: `tests/serializable_parent_dependency_e2e.rs`.
+- **A serializable superclass in another file of the same module contributes its declared
+  elements.** A file's plugin pass sees only its own classes, so before any file is lowered the
+  serialization plugin publishes, for each source class whose `write$Self` and deserialization
+  constructor it generates (a `@Serializable` class without `with`, not an enum, object, value
+  class or interface), the same record a dependency's metadata provides: the class's stored
+  properties (primary-constructor properties first, then body properties with a backing field)
+  without `@Transient` ones, each typed by its signature and optional exactly when it has a
+  default: a primary-constructor parameter's default or a body property's initializer. The
+  backend copies that record; it decides nothing itself. An element with an annotation on the
+  property or anywhere in its written type publishes no record and declines the subclass's file,
+  as for a dependency.
+- **A body property's initializer is a default in a class without a primary constructor.**
+  kotlinc marks the element optional, applies the initializer in the deserialization constructor
+  when the input omits it, and compares against it in `write$Self`, exactly as with a primary
+  constructor. The initializer there runs in the secondary constructors that delegate to `super`
+  and can read only the receiver, so its locals are renumbered from above every constructor's
+  values.
+  Test: `tests/serializable_parent_same_module_e2e.rs`.
 - **A serializable abstract class is serialized polymorphically.** kotlinc gives a non-generic,
   non-sealed abstract `@Serializable` class no `$serializer`: `Companion.serializer()` returns
   `new PolymorphicSerializer(C::class, new Annotation[0])`, cached in a `$cachedSerializer$delegate`

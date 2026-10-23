@@ -48,6 +48,8 @@ mod reference_recording_support;
 mod reference_targets_support;
 #[path = "serializable_parent_dependency_e2e.rs"]
 mod serializable_parent_dependency_e2e;
+#[path = "serializable_parent_same_module_e2e.rs"]
+mod serializable_parent_same_module_e2e;
 #[path = "super_call_vararg_e2e.rs"]
 mod super_call_vararg_e2e;
 #[path = "common/target_diagnostics.rs"]
