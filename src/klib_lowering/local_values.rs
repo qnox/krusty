@@ -22,6 +22,10 @@ const IS_LATEINIT: u64 = 1 << 3;
 
 /// The origin of a variable the source declares, rather than one the compiler introduced.
 const DEFINED: &str = "DEFINED";
+/// The parameter of a source `catch` clause.
+const CATCH_PARAMETER: &str = "CATCH_PARAMETER";
+/// The variable of a source `for` loop, which kotlinc declares from its iterator's `next()`.
+const FOR_LOOP_VARIABLE: &str = "FOR_LOOP_VARIABLE";
 
 /// One declared local variable.
 #[derive(Clone, Copy, Debug)]
@@ -57,14 +61,14 @@ impl LocalValues {
     }
 
     /// The slot and binding facts of the serialized `variable`, of semantic type `ty`, before it is
-    /// declared. Only a source `val` or `var` is modelled; a compiler temporary, a `const` and a
-    /// `lateinit` variable decline by form.
+    /// declared. Only a source `val` or `var`, a `for` loop's variable among them, is modelled; a
+    /// compiler temporary, a `const` and a `lateinit` variable decline by form.
     pub(super) fn slot(
         &self,
         variable: &KlibIrVariable,
         ty: Ty,
     ) -> Result<LocalValue, KlibBodyDeclineReason> {
-        if variable.base.origin != DEFINED {
+        if variable.base.origin != DEFINED && variable.base.origin != FOR_LOOP_VARIABLE {
             return Err(KlibBodyDeclineReason::UnsupportedOperation(
                 "a compiler-introduced variable",
             ));
@@ -93,7 +97,26 @@ impl LocalValues {
         })
     }
 
-    /// Declare `symbol` in the slot [`Self::slot`] gave it.
+    /// The slot of a `catch` clause's parameter `variable`, of semantic type `ty`, before it is
+    /// declared: an immutable binding the source names.
+    pub(super) fn catch_parameter(
+        &self,
+        variable: &KlibIrVariable,
+        ty: Ty,
+    ) -> Result<LocalValue, KlibBodyDeclineReason> {
+        if variable.base.origin != CATCH_PARAMETER || variable.base.flags & !HAS_ANNOTATIONS != 0 {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "a `catch` parameter is not an immutable catch-parameter variable".to_owned(),
+            ));
+        }
+        Ok(LocalValue {
+            index: self.next,
+            ty,
+            mutable: false,
+        })
+    }
+
+    /// Declare `symbol` in the slot [`Self::slot`] or [`Self::catch_parameter`] gave it.
     pub(super) fn declare(
         &mut self,
         symbol: &KlibIrSymbol,
@@ -109,7 +132,30 @@ impl LocalValues {
         Ok(())
     }
 
+    /// Declare the immutable compiler temporary `symbol` of semantic type `ty` in the next slot.
+    pub(super) fn temporary(
+        &mut self,
+        symbol: &KlibIrSymbol,
+        ty: Ty,
+    ) -> Result<LocalValue, KlibBodyDeclineReason> {
+        let value = LocalValue {
+            index: self.next,
+            ty,
+            mutable: false,
+        };
+        self.declare(symbol, value)?;
+        Ok(value)
+    }
+
     pub(super) fn get(&self, symbol: &KlibIrSymbol) -> Option<LocalValue> {
         self.values.get(symbol).copied()
+    }
+
+    /// Reserve internal storage without declaring a serialized value identity. A return-target
+    /// symbol owns control flow, not a readable local, even when its frame needs result storage.
+    pub(super) fn anonymous_slot(&mut self) -> u32 {
+        let index = self.next;
+        self.next += 1;
+        index
     }
 }

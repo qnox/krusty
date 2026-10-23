@@ -457,10 +457,13 @@ impl Checker<'_> {
             } else {
                 (!resolved_property_ty.mentions_error()).then_some(resolved_property_ty)
             };
-            let it = match declared.filter(|_| p.declared_ty().is_some()) {
-                Some(expected) => self.expr_declared(scope, init, expected),
-                None => self.expr(scope, init),
-            };
+            // An initializer has no function to return from: `return` in it is prohibited.
+            let it = self.with_ret_allowed(Ty::Unit, false, |c| {
+                match declared.filter(|_| p.declared_ty().is_some()) {
+                    Some(expected) => c.expr_declared(scope, init, expected),
+                    None => c.expr(scope, init),
+                }
+            });
             if p.declared_ty().is_none() {
                 self.report_unbound_call_result_type_parameter(scope, init);
                 if let Some(declaration) = stable_property {

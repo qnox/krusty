@@ -43,20 +43,20 @@ impl ClassWriter {
         }
         // The constructor's PARAMETER annotations, which kotlinc visits before the body. The whole
         // `RuntimeVisibleParameterAnnotations` attribute is written first, so every parameter's
-        // RUNTIME-retained USER annotation type interns ahead of anything invisible.
+        // RUNTIME-retained USER application interns its type AND values ahead of anything invisible.
         for parameter in parameters {
-            for ty in &parameter.visible_ann_types {
-                self.cp.utf8(ty);
+            for annotation in &parameter.visible_annotations {
+                let _ = self.encode_annotation(annotation);
             }
         }
         // Then `RuntimeInvisibleParameterAnnotations`, parameter by parameter: the BINARY-retained USER
-        // types, then that parameter's synthesized `@NotNull`/`@Nullable`. The nullability types are
+        // applications, then that parameter's synthesized `@NotNull`/`@Nullable`. Nullability types are
         // reused by every getter return / setter parameter annotation and guard.
         let mut seeded_notnull = false;
         let mut seeded_nullable = false;
         for parameter in parameters {
-            for ty in &parameter.invisible_ann_types {
-                self.cp.utf8(ty);
+            for annotation in &parameter.invisible_annotations {
+                let _ = self.encode_annotation(annotation);
             }
             let kind = if self.nullability_annotations {
                 parameter.ann_kind

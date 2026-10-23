@@ -68,11 +68,13 @@ pub(crate) fn compile_source_set(
         .iter()
         .map(|(name, _)| {
             name.strip_suffix(".java")
+                .or_else(|| name.strip_suffix(".kts"))
                 .unwrap_or_else(|| name.trim_end_matches(".kt"))
                 .to_string()
         })
         .collect::<Vec<_>>();
-    // A `.java` source joins the module as Java, the way kotlinc reads a Java path it is given.
+    // A `.java` source joins the module as Java and a `.kts` source as a script, the way kotlinc
+    // reads a path it is given.
     let inputs = sources
         .iter()
         .zip(&stems)
@@ -80,6 +82,8 @@ pub(crate) fn compile_source_set(
         .map(|(index, ((name, source), stem))| {
             let input = if name.ends_with(".java") {
                 SourceInput::java(source)
+            } else if name.ends_with(".kts") {
+                SourceInput::kotlin_script(source)
             } else {
                 SourceInput::kotlin(source)
             }

@@ -10,6 +10,27 @@ The Rust compiler/plugin model tracks checkout identity as a Cargo input, so a s
 reuse another checkout's incompatible declaration structure. No serialized plugin fields, protocol
 versions, classfile metadata or annotation payloads change.
 
+## KLIB emission root categories
+
+KLIB dependency-root classification retains authenticated intrinsic-support ownership independently
+of successful code emission. A declined wrapper does not become an ordinary body; its metadata and
+declaration identity remain unchanged, and ordinary roots retain their strict closure contracts.
+
+## Constructor parameter annotation pool order
+
+Constructor header reservation interns annotation element names and values, not just annotation
+descriptors. This changes only JVM constant-pool visit order; checked payloads, retention and Kotlin
+metadata remain unchanged. Strict whole-class comparisons cover both source input orders and mixed
+runtime/binary retention with nested annotations, arrays, class literals and nullable parameters.
+
+## Constructor-property annotation publication order
+
+The stable property index receives checked applied-annotation payloads only after every source
+annotation class has published its target policy. Per-file checking releases its TypeInfo while
+retaining just folded values, explicit use sites and the property identity until that partition.
+This changes semantic publication order, not annotation encoding; whole-class oracle checks retain
+the same Kotlin metadata and physical annotation attributes in both source input orders.
+
 ## Declared JVM vararg array types
 
 The generic signature reader decodes each `ValueParameter.type`/`type_id` independently of its
@@ -633,6 +654,40 @@ Both lists lead with the superclass. The emitter then moves it to the slot that 
 in `ResolvedClassifierHeader` and lowering published as `IrFile::class_superclass_positions`, so the
 spellings move with it. Tests: `tests/metadata_supertype_order_e2e.rs`.
 
+## Prepared KLIB inline return targets
+
+Successful prepared dependency expansion retains external-inline provenance on its final common IR
+root, including the operand prelude when present. This is an IR fact, not a metadata wire-format
+change; the real kotlinc-native producer test requires a distinct marked region for each call.
+
+The selected Native stdlib's prepared `requireNotNull` and `checkNotNull` bodies contain
+branch-local returns to serialized returnable-block symbols. Those symbols are control-flow
+identities, not local-value declarations or returns from the containing callable. Common lowering
+keeps a lexical target stack for every block, including the sole-tail-return fast path, and uses
+anonymous result storage only for structural frames. Repeated enclosing target declarations,
+reads of a target as a value, and value frames with reachable fallthrough reject explicitly.
+The existing IR decoder and metadata wire format are unchanged. Structural tests live in
+`klib_lowering::tests::returnable_blocks`; `tests/box_regressions/multimodule/inlineNullCheckReturnTargets.kt` supplies one shared
+JVM/Native/Wasm declaration graph with reference/scalar results, exact failure messages and
+single evaluation of its argument.
+
+Prepared calls retain the callee's recorded extension-receiver parameter coordinate; it does not
+become a dispatch receiver merely because the body came from a KLIB. Native's existing range-builder
+roles consume either a separate receiver and one argument or the serialized parameter-zero receiver
+and one argument through the same representation path. Other layouts reject explicitly. This adds
+no declaration role or metadata wire format; the selected provider fact still owns the operation.
+
+The caller's nameless initializer context is a lowering fact as well. It is inherited through
+source lambdas, not named local functions, so an absent source callable spelling in an initializer
+does not reject an otherwise valid inline copy. This adds no metadata field or synthetic name.
+
+The target stdlib's exact zero-argument `CharSequence.trim(): CharSequence` extension is published
+with `CompilerIntrinsic::TextTrim` only after the provider authenticates the selected stdlib and
+its complete receiver, parameter, result and modifier shape. An identical ordinary dependency
+does not acquire that operation. Native consumes the fact and the recorded receiver coordinate,
+and proves contiguous String/StringBuilder storage before invoking its existing trim runtime.
+Neither the serialized signature nor the callable is reconstructed from a backend spelling.
+
 ## KLIB accessor declaration modifiers
 
 Property getter and setter words are decoded independently, including visibility, modality,
@@ -646,7 +701,83 @@ Each accessor also carries the property's declaration-owned reified formal ordin
 existing schema facts, not new intrinsic markers or a metadata format change. This producer fix
 alone does not enable ordinary dependency-body or inline-accessor emission.
 
+## Ordinary KLIB generic declaration headers
+
+The KLIB body contract separately freezes known implementation modifiers from each exact signed
+function or accessor. Constructors and providers without such a contract keep `None`, not an
+invented non-inline default. Known modifiers survive provider realization and the checked backend
+handoff, participate in declaration-contract equality, and authenticate raw function headers.
+Serialized IR FunctionFlags use inline bit 10, external bit 12, suspend bit 13 and modality bits
+4-5; these happen to share metadata function encoding, not the shorter accessor encoding.
+Property external status stays independent of the accessor's own external bit. Ordinary-body
+admission must require known facts and veto both external statuses; this contract does not itself
+enable a new emission root category.
+
+The ordinary-body emitter consumes these facts only for exact checked uses in structurally
+emitted bodies. It freezes provider realizations for transitive body-bearing declarations before
+lowering and does not allow an unselected callee to bypass the metadata contract via a bare raw
+header. The top-level/extension declaration-frame capability is independent of scalar shape,
+intrinsic adjacency and stdlib origin. Instance-storage capabilities remain target-owned.
+Target-specific default-wrapper and enum-entry-only roots still require a later inventory slice;
+the emitter does not scan all default/inline-template expressions as an approximation.
+
+Provider header evidence remains distinct from checked source-call obligations. Adding the exact
+declaration of a transitive primitive does not require an out-of-line export or suppress its
+existing common-IR builtin lowering. Conflicting declaration evidence still declines even when
+no source call selected that identity.
+
+Graph preparation asks the common body's exact builtin call-disposition capability before
+requiring a provider declaration or traversing its implementation. The same decision drives
+actual call lowering; compiler-owned operations do not acquire spurious body/header obligations.
+Selected source declarations and ambiguous contracts cannot use this capability, and already
+emitted exports remain external edges. This is positive builtin recognition, never recovery from
+a failed provider lookup. Non-builtin bodyless declarations still require their exact provider.
+
+Raw call-header authentication distinguishes an external declaration from an emitted support
+body. A bodyless external member retains its dispatch operand and authenticates its classifier
+against the selected declaration owner; it does not need the singleton receiver-erasure proof
+required to emit a member support body. Both purposes still check the same raw modifier, generic,
+parameter-role and result contracts. Target intrinsic leaves use the external declaration boundary.
+
+The KLIB provider retains each formal's exact normalized semantic type alongside the full generic
+signature. Both use the same metadata identities, enclosing bounds and bound-normalization helper;
+the frozen backend handoff copies the formal types unchanged. Full bounds can contain deeper
+finite self/forward references than the formal's primary bound, so consumers must not rebuild
+formal types from `GenericSig.formal_bounds`. Ordinary header lowering binds all serialized
+symbols first, then compares every bound and the complete selected parameter/result contract.
+Prepared-inline erasure is not accepted by this path.
+
+Native linkage retains the actual emitted IR signature beside each exact dependency export.
+Provider generic signatures and checked external-formal substitutions validate source operand
+roles separately; specializing a call never changes the published symbol's physical signature.
+No serialized metadata format or formal identity is rewritten to achieve ABI coercion.
+
+Common IR separately records an inner generic call's declared result and the checked result of
+its enclosing conversion. Wasm now consumes that existing declaration-result provenance when
+the inner call deliberately has no logical type; this changes no KLIB metadata or type identity.
+
+Serialized type-parameter flags use the active Kotlin `TypeParameterFlags` encoding, which
+delegates to `IrFlags`: annotations at bit 0, variance at bits 1 and 2, and reification at bit 3.
+Invariant non-reified formals have flags 4; invariant reified formals have flags 12. Ordinary
+function headers require invariant formals and exact raw/provider reification agreement before
+rejecting standalone emission of reified bodies. This changes no metadata wire format.
+
 ## Authenticated KLIB collection classifier roles
+
+The ordinary stdlib `Iterable<T>.collectionSizeOrDefault(Int): Int` helper receives a normalized
+implementation fact only after authenticating the selected stdlib, its single declaration-owned
+formal with the nullable Any bound, the complete extension signature and modifiers. This does not
+invent a TypedIntrinsic annotation or make other ordinary bodies eligible as support roots. Native
+consumes exact property override identities to expose program Collection.size through a typed
+descriptor thunk; classifier roles distinguish Collections from plain Iterables.
+
+The selected stdlib's size-only `Array<T>` constructor also publishes a semantic allocation role,
+after checking its class formal and full constructor signature. The role survives ordinary
+constructor realization and lets prepared inline bodies lower allocation to the same `NewArray`
+operation as source arrays. It is not an annotation synthesized onto the serialized declaration,
+and an ordinary dependency with the same spelling has no authority to publish it. Getter calls in
+prepared bodies retain the exact selected property's normalized name independently of the
+accessor's physical spelling (`Collection.size` versus `<get-size>`). No metadata fields change.
 
 Collection kind and read-only/mutable face are normalized provider facts, not new metadata fields.
 The compilation-selected platform stdlib authenticates the sixteen canonical collection interface
@@ -656,6 +787,49 @@ an ordinary dependency grants no role. Consumers read that fact rather than infe
 Native 2.4.21 metadata declares one own parameter for iterable/iterator/collection/list/set faces
 and two for map/entry faces, including the static nested `Map.Entry` and `MutableMap.MutableEntry`.
 This changes no metadata wire format. Tests: `klib_libraries::tests::classes::collection_roles`.
+
+## Authenticated KLIB primitive headers
+
+KLIB body-callable views retain the effective compiler operation from either the callable or its
+normalized member realization. Instance members also freeze their exact declaring module/class
+signature and the original class-formal types, full bounds, variance and own/captured count from
+the signed classifier. This is provider-owned header evidence, not a later classifier-name lookup.
+Common primitive lowering binds the actual raw class symbols and checks the serialized receiver,
+accessor/property membership and full function header before using that evidence. It neither
+publishes private implementation functions nor broadens ordinary instance-body emission. No wire
+format or Native runtime layout changes. Tests: `klib_lowering::tests::primitive_calls`.
+
+Constructors retain the same class contract through provider lookup and both frozen views. The
+join requires the exact declaring module and complete constructor signature, including its mask.
+Class-owned formals and bounds stay in that contract; they are not constructor-owned function
+parameters. The invocation result remains `Unit`, without a function generic signature, independently
+of source inference's constructed type. The body view separately retains known constructor-default
+flags, vararg position, visibility and semantic role. Empty canonical metadata defaults expand to
+the constructor's exact parameter count; unknown non-KLIB defaults remain unknown. Shared raw
+authentication checks constructor kind and slot, exact class application and all parameter facts
+before ordinary or prepared bodies instantiate class arguments and their complete upper bounds.
+The executed-body inventory includes construction without treating serialized constructor bodies
+as top-level support exports or granting intrinsic-root authority.
+Missing optional provider evidence does not erase a proven raw constructor declaration: the
+body declines its realization, while contradictory kind/handle evidence remains a hard mismatch. Tests:
+`klib_lowering::tests::constructor_contracts`, `::constructor_calls`.
+
+Wasm dependency publication retains the actual function's declared semantic ABI beside its exact
+module-qualified identity. Selected property operations use frozen getter/setter identities to join
+the same export registry as ordinary calls; they never invent property globals or recover accessor
+spellings. Native and Wasm share receiver-coordinate authentication. Property IR currently carries
+no checked generic substitutions, so generic accessors remain explicitly unsupported by this route.
+
+## Declaration-owned KLIB vararg coordinates
+
+Metadata value-parameter vararg indices include context parameters but exclude an extension
+receiver. The provider freezes the declaration index in its normalized parameter order, inserting
+the extension offset at the context boundary. Associated companion receivers remain a separate
+contract and are accounted for only when authenticating their actual serialized slot. The frozen
+body view never reads the callable's call-site-specialized `vararg_elem`/`vararg_index` fields.
+The declared packed parameter supplies its element; raw element markers use the same formal binder
+and must agree exactly. Prepared copies keep their existing checked declared/erased type boundary.
+No serialized layout or runtime ABI changes. Tests: `klib_lowering::tests::varargs`.
 
 ## Compiler-plugin declarations in a KLIB
 
@@ -688,7 +862,20 @@ parameter/result uses, declared vararg position and modifiers before call-site s
 The JVM provider supplies its metadata typealias expansion for `ArrayList`; KLIB supplies its
 declared classifier. This adds no Kotlin metadata field or wire encoding. Frozen callable facts
 carry the typed plan, and Native uses it instead of recovering an operation from a facade name or
-physical parameter. Broader dependency-root admission remains separate work.
+physical parameter. Dependency graph admission also requires the target's positive implementation
+capability and complete serialized/header agreement. Body-bearing target leaves retain their raw
+external signature and generic formals; they are not previously emitted body exports. Neither this
+capability nor its bookkeeping adds a metadata encoding or publishes a private implementation.
+
+Native's typed dependency plan also consumes the provider's existing authenticated `StringPlus`
+operation for both member and nullable-extension declarations. This publishes no new metadata fact:
+raw headers still prove the exact module, receiver roles, argument and result. A serialized extension
+retains its receiver coordinate; target emission does not recover it from a callable spelling. The
+positive plan does not admit ordinary library algorithm adapters or bypass declaration checks.
+Both member and package normalization require the compilation-selected stdlib input's existing
+authority before publishing StringPlus. The identical archive opened as an ordinary dependency
+receives no such operation, including either frozen callable lookup path; matching bytes, module
+names and complete signatures do not grant platform authority.
 
 ## Authenticated Throwable realization
 
@@ -698,6 +885,19 @@ authority before constructor/accessor identities are published. The exact base `
 realizations; an ordinary dependency with identical metadata may not. This does not rewrite Kotlin
 metadata or change source overload selection. Wasm owns the GC fields and exception tag; common IR
 keeps the selected constructor/getter identities and typed `Try` / `Throw` nodes.
+
+## Inline-body migration outcomes
+
+The approved #2459 Native/Wasm outcome reset changes no metadata encoding or declaration
+authority. It records known implementation debt for small follow-ups, pinned to exact loaded
+manifest blobs and effective releases. JVM/applicability and fatal-outcome policies remain
+unchanged; see [KLIB inline migration](KLIB_INLINE_MIGRATION.md).
+
+## Wasm nullable assertions
+
+Nullable assertion emission consumes the existing checked operand and result types; it adds no
+metadata field or nullability rewrite. A Wasm reference-to-scalar assertion declines until its
+unboxing and typed null failure have a complete target realization.
 
 ## Authenticated String concatenation declarations
 

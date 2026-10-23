@@ -31,7 +31,8 @@ final class Nodes {
     static Sequence<KSDeclaration> declarations(
             String owner, boolean complete, List<KSDeclaration> declarations) {
         if (!complete) {
-            throw notImplemented(owner + ".declarations of a body with functions or properties");
+            throw notImplemented(
+                    owner + ".declarations of a body with a declaration it cannot describe");
         }
         return sequence(declarations);
     }

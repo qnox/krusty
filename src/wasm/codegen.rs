@@ -445,6 +445,20 @@ mod tests {
     }
 
     #[test]
+    fn an_explicitly_returning_getter_does_not_require_a_unit_value() {
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(
+                target,
+                "var reads = 0\n\
+                 val answer: Int get() { reads++; return 42 }\n\
+                 fun box(): String = if (answer == 42 && reads == 1) \"OK\" else \"fail\"",
+            );
+            assert_eq!(diagnostics, Vec::<String>::new());
+            assert_eq!(outputs.len(), 2);
+        }
+    }
+
+    #[test]
     fn a_program_without_its_entry_emits_nothing() {
         for source in [
             "fun notBox(): String = \"OK\"",

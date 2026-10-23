@@ -59,11 +59,11 @@ impl WasmLane {
             rayon::current_thread_index().unwrap_or(0)
         ));
         if let Err(error) = std::fs::create_dir_all(&directory) {
-            return Outcome::Failed(format!("creating the case directory: {error}"));
+            return Outcome::Harness(format!("creating the case directory: {error}"));
         }
         for (name, bytes) in &artifacts {
             if let Err(error) = std::fs::write(directory.join(name), bytes) {
-                return Outcome::Failed(format!("writing {name}: {error}"));
+                return Outcome::Harness(format!("writing {name}: {error}"));
             }
         }
         let outcome = box_lane::run_program(
@@ -459,6 +459,7 @@ fun box(): String {
 
 #[test]
 fn wasm_declines_an_instruction_wrapper_whose_body_lowering_does_not_model() {
+    // PLATFORM-SPECIFIC: pin the Wasm intrinsic-support decline, including its category ownership.
     // `pow` reaches fdlibm's `__ieee754_pow`, whose locals have no initializer: the wrapper is not
     // support code, so its call declines instead of failing compilation.
     expect_wasm_decline(
@@ -499,24 +500,54 @@ fn focused_wasm_lane_available(lane: &WasmLane, stem: &str) -> bool {
     false
 }
 
-/// Run one case selected by the shared backend-neutral multimodule conformance inventory.
-pub(super) fn run_multimodule_case(case: &super::multimodule_conformance_cases::Case) {
+/// A required inline dependency function whose body cannot become a template rejects its caller:
+/// it is never compiled as a direct call of the dependency function.
+// PLATFORM-SPECIFIC: Wasm expands required KLIB inline bodies in common IR; JVM uses bytecode.
+#[test]
+fn wasm_a_declined_required_inline_body_rejects_the_caller() {
+    let case = super::dependency_template_rejections::DECLINED_REQUIRED_INLINE_BODY;
+    super::box_reference_classes::checked_box(case.source, case.stem)
+        .expect("pinned kotlinc must run the required-inline rejection fixture");
     let modules = krusty::conformance::split_modules(case.source).expect("valid module test shape");
     let units = krusty::conformance::module_units(&modules);
     for target in WasmTarget::ALL {
         let lane = WasmLane { target };
-        if lane.not_applicable(case.source).is_some() {
-            continue;
-        }
         let stem = format!("{}-{}", target.name(), case.stem);
         if !focused_wasm_lane_available(&lane, &stem) {
             return;
         }
-        assert_eq!(
-            lane.compile_modules_and_run(&std::env::temp_dir(), &stem, &units, case.source,),
-            Outcome::Pass,
-            "{stem}: {} must run the exact separately analyzed module graph",
-            target.name()
+        let outcome =
+            lane.compile_modules_and_run(&std::env::temp_dir(), &stem, &units, case.source);
+        assert!(
+            matches!(&outcome, Outcome::Frontend(message)
+                if super::dependency_template_rejections::required_inline_rejection(message).is_some()),
+            "{stem}: {outcome:?}"
+        );
+    }
+}
+
+/// A required stdlib inline function whose template declines rejects its caller.
+// PLATFORM-SPECIFIC: this tests the Wasm KLIB template-decline contract, not Kotlin behavior.
+#[test]
+fn wasm_a_declined_required_stdlib_template_rejects_the_caller() {
+    super::dependency_template_rejections::verify_declined_stdlib_source_with_kotlinc();
+    let src = super::dependency_template_rejections::DECLINED_STDLIB_INLINE_BODY;
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        let stem = format!("{}-declinedRequiredStdlibTemplate", target.name());
+        if !focused_wasm_lane_available(&lane, &stem) {
+            return;
+        }
+        let outcome = lane.compile_and_run(
+            &std::env::temp_dir(),
+            &stem,
+            &[(format!("{stem}.kt"), src.to_string())],
+            src,
+        );
+        assert!(
+            matches!(&outcome, Outcome::Frontend(message)
+                if super::dependency_template_rejections::required_inline_rejection(message).is_some()),
+            "{stem}: {outcome:?}"
         );
     }
 }
@@ -559,6 +590,55 @@ fn expect_wasm_decline(src: &str, stem: &str, reason: &str) {
             target.name()
         );
     }
+}
+
+// PLATFORM-SPECIFIC: a reference assertion cannot implement nullable scalar unboxing.
+fn expect_reference_assertion_box(src: &str, stem: &str) {
+    let jdk = super::common::jdk_modules();
+    let classpath = super::common::classpath_jars_for(src);
+    let reference = super::box_reference_classes::reference_compile(
+        src,
+        stem,
+        &classpath,
+        krusty::conformance::BoxJdk::Full { root: Some(&jdk) },
+        krusty::conformance::COROUTINE_HELPERS,
+    )
+    .expect("the exact Kotlin compiler must compile the nullable assertion fixture");
+    let classes = reference.flatten().into_iter().collect::<Vec<_>>();
+    let entry = super::common::find_box_class(&classes).expect("reference fixture must emit box()");
+    assert_eq!(
+        super::common::run_box(&classes, &entry, &classpath),
+        Some("OK".to_string()),
+        "{stem}: the exact Kotlin compiler must run the nullable assertion fixture"
+    );
+}
+
+// PLATFORM-SPECIFIC: a reference assertion cannot implement nullable scalar unboxing.
+#[test]
+fn wasm_nullable_scalar_assertions_decline_without_an_unboxing_contract() {
+    for (stem, scalar) in [
+        ("nullableIntAssertion", "Int"),
+        ("nullableLongAssertion", "Long"),
+        ("nullableFloatAssertion", "Float"),
+        ("nullableDoubleAssertion", "Double"),
+    ] {
+        let src =
+            format!("fun read(value: {scalar}?): {scalar} = value!!\nfun box(): String = \"OK\"");
+        expect_reference_assertion_box(&src, stem);
+        expect_wasm_decline(
+            &src,
+            stem,
+            "a not-null assertion requiring a scalar reference conversion",
+        );
+    }
+}
+
+// PLATFORM-SPECIFIC: the scalar boundary guard must preserve existing reference assertions.
+#[test]
+fn wasm_nullable_reference_assertions_keep_their_existing_carrier() {
+    let src = "fun read(value: String?): String = value!!\nfun box(): String = read(\"OK\")";
+    expect_reference_assertion_box(src, "nullableReferenceAssertion");
+    expect_wasm_box(src, "nullableReferenceAssertion");
 }
 
 #[test]

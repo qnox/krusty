@@ -97,15 +97,13 @@ argument, member, initializer, or assignment location is a test failure.
 
 `just test` is equivalent. When `just` is available, the harness provisions the matching Kotlin
 compiler and codegen/box corpus, exports `KRUSTY_KOTLINC` and `KRUSTY_KOTLIN_BOX_DIR`, builds the test
-binaries once with Cargo's `gate` profile, runs the conformance binary alone in nine passes (JVM
-box corpus, Native box corpus, Native-focused regressions, the shared multimodule set on Native,
-the `wasm-js` and `wasm-wasi` box corpora, Wasm-focused regressions, the same multimodule set on
-Wasm, then JVM-owned regressions including that set on JVM), then runs the internally parallel e2e
+binaries once with Cargo's `gate` profile, runs the conformance binary alone in seven passes (JVM
+box inventory, Native box inventory, Native-focused regressions, the `wasm-js` and `wasm-wasi` box
+inventories, Wasm-focused regressions, then JVM-owned regressions), then runs the internally parallel e2e
 binary once, then runs the remaining small test binaries in parallel. The e2e suite is one process under
 `KRUSTY_E2E_TIMEOUT_SECONDS`. The native codegen/box lane also runs once, excluded from the
 JVM-owned pass, under its dedicated `KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS` suite deadline.
-`scripts/target-conformance-regressions.sh <native|wasm>` owns the focused target pass, selects that
-target's runner for the shared multimodule set, and applies its
+`scripts/target-conformance-regressions.sh <native|wasm>` owns the focused target pass and applies its
 `KRUSTY_TARGET_CONFORMANCE_TIMEOUT_SECONDS` deadline; it requires the Native distribution or Wasm
 compiler distribution/dependency cache that owns the target KLIBs instead of silently accepting a
 skip. It does not run a JVM oracle or read a JVM stdlib. `scripts/box-lane-run.sh
@@ -219,6 +217,43 @@ KRUSTY_BLESS_BOX_EXPECTATIONS=1 KRUSTY_LANGUAGE_VERSION=<v> \
 Blessing requires the exact value `1` and is refused under CI and on a partial run. Each tracked file
 is replaced atomically. Review and commit the platform/version diff. The failure lists only shrink;
 the long-term goal is zero expected failures on every platform.
+
+### Repository-owned box regressions
+
+`tests/box_regressions/` joins the upstream box corpus in the normal inventory on every backend.
+Physical files retain their complete Kotlin source, including `// MODULE:` graphs; the existing
+box compiler handles both regular and multimodule cases. Keys use `regressions/<relative-path>`,
+for example `regressions/multimodule/multimoduleTopLevelDependency.kt`. Discovery validates unique
+keys before the normal `BOX_ONLY`/`BOX_LIMIT` selection. There is no separate runner or ratchet.
+
+Every owned portable case first requires the actual JVM/kotlinc oracle to return `OK`, on every
+backend. Native module graphs also require the Native oracle. JVM is strict: krusty must return
+`OK`. Native/Wasm use the existing `tests/box_expected_failures/` inventories and canonical release
+inheritance, with no applicability exclusions for owned sources. Harness errors, unavailable setup,
+compiler panics and target skips are fatal before any expectation write. The ordinary upstream
+per-case applicability policy is unchanged. Full sweeps require the provisioned upstream corpus;
+the separate vendored smoke test does not replace missing setup.
+
+Unexpected program failures retain their exact case path and complete link/exit/verdict reason in
+the lane's failure report, alongside the inventory mismatch. Provisioning the full corpus must not
+discard those diagnostics. Expected program failures keep the same details in the known-failure
+report; neither reporting path changes the committed expectations.
+
+The owned oracle prepares raw source for JVM independently of the tested backend, including the
+portable value-class annotation placeholder. The JVM runner's already-prepared source uses a
+separate entry point, so support declarations are never injected twice. The compiler panic hook
+is restored after worker compilation and before outcome validation, keeping fatal setup and
+inventory diagnostics visible without allowing them into the failure ratchet.
+
+The existing Wasm failure inventories include the newly covered
+`regressions/multimodule/multimoduleDependencyFunctionImplementationMarkers.kt`: its former
+Native-only directive hid portable function-instance behavior that Wasm declines as a class
+implementing a function type. Full runs on every supported release measured this sole new gap;
+all 19 previously exercised owned Wasm cases remain strict positives. Native adds no failure entry.
+The normal `KRUSTY_BLESS_BOX_EXPECTATIONS=1` full-local-only policy applies; a failure-to-pass change
+fails until its entry is removed. A genuinely platform-specific Native ABI fixture instead remains
+in `native_module_abi_symbols_keep_same_named_internal_classifiers_distinct` with its exact source,
+mandatory Native oracle and `PLATFORM-SPECIFIC` marker.
 
 A pull request is judged against its own base, so two that each match the lists can still disagree
 with them once both land: one fixes a file the other's list still names, or their changes interact.
@@ -409,9 +444,10 @@ conformance matrix, `build-gradle-plugin`, and the whole `gradle` compatibility 
 supported Kotlin version has distinct JVM, Native and Wasm conformance
 rows; the maximum-version Native row also runs the focused KLIB decoder, value-class and
 kotlinc-native oracle coverage formerly owned by a standalone job, while `just klib-semantics`
-remains the focused local recipe. One backend-neutral multimodule case table runs through the
-runner provisioned by every JVM, Native and Wasm row; a genuinely platform-specific source stays
-there only behind its explicit `TARGET_BACKEND` directive. The JVM row owns JVM regressions; Native
+remains the focused local recipe. One backend-neutral box inventory includes upstream and owned
+portable regular/multimodule cases in every JVM, Native and Wasm row; directives may not silently
+skip owned cases. Genuinely platform-specific sources live in named target-owned tests with a
+`PLATFORM-SPECIFIC` marker. The JVM row owns JVM regressions; Native
 and Wasm own their focused non-corpus regressions. The job is scheduled with `if: always()`,
 because a required check that is skipped counts as passing, and it fails unless every dependency
 result is `success`. A failed, skipped, cancelled, or absent dependency therefore fails it,
