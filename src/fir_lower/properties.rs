@@ -1911,6 +1911,10 @@ fn merge_class_initialization(
                 .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
             let prefix = ir.classes[class_id as usize].constructor_prefix_count;
             rebase_initializer_values(ir, initialization, prefix, constructor_value_count)?;
+            let base = prefix
+                .checked_add(constructor_value_count)
+                .ok_or(FirFileLoweringFailure::ValueIdentityOverflow)?;
+            ir.secondary_initializer_value_bases.insert(class_id, base);
             let direct_super_bodies = ir.classes[class_id as usize]
                 .secondary_ctors
                 .iter()
