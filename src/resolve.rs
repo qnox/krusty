@@ -77,6 +77,7 @@ mod callable_reference_selection;
 mod candidate_display;
 mod class_literal_array_of_nothing;
 mod class_literal_receiver;
+mod star_projected_classifier;
 mod class_literal_type_arguments;
 mod class_names_aliases;
 use candidate_display::{

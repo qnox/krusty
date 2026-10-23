@@ -15,6 +15,10 @@ ordinary-body category cannot retry it and turn the target decline into an ordin
   projection, while preserving bare-owner reachability. Direct and inherited regression cases
   cover the previous zipped-prefix acceptance. This prerequisite is separate from dependency-body
   type evidence and adds no backend capability or outcome allowance.
+- ✅ Producers that handed the relation a raw generic classifier now supply a complete
+  application: the delegated-property convention's reference argument is the `KProperty`
+  declaration's star projection (shared with bare class literals), and the core `Array`
+  declaration publishes its `T` formal for erased-cast proofs with an empty classpath.
 
 ## Constructor parameter annotation pool order
 

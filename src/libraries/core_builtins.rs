@@ -221,6 +221,12 @@ impl EmptySymbolSource {
             classifier.type_parameters =
                 TypeParameters::invariant(vec!["R".to_string()], vec![Vec::new()]);
         }
+        if name == "Array" {
+            // `class Array<T>`: a runtime test or subtype proof against `Array<*>` projects the
+            // symbolic application `Array<T>`, never a raw `Array`.
+            classifier.type_parameters =
+                TypeParameters::invariant(vec!["T".to_string()], vec![Vec::new()]);
+        }
         if name == "Enum" {
             // `enum class E` has the implicit semantic supertype `Enum<E>` even with an empty
             // target classpath. Publish the corresponding core declaration through the same symbol
