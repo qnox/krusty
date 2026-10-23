@@ -159,3 +159,25 @@ fn a_script_without_its_template_on_the_classpath_extends_nothing_like_kotlinc()
         differences.join("\n\n")
     );
 }
+
+/// The standard definition's `args: Array<String>` names `kotlin.Array` and `kotlin.String` by
+/// identity: a script that imports a same-named `String` or `Array` keeps the template's
+/// constructor and reads `args` as kotlinc does.
+#[test]
+fn imports_do_not_rebind_the_template_parameter_type_like_kotlinc() {
+    assert_module_matches_kotlinc(&[
+        (
+            "shadow/Shadow.kt",
+            "package shadow\n\
+             class String\n\
+             class Array<T>\n",
+        ),
+        (
+            "shadowed.kts",
+            "import shadow.String\n\
+             import shadow.Array\n\
+             println(args.size)\n\
+             val mine: Array<String> = Array()\n",
+        ),
+    ]);
+}

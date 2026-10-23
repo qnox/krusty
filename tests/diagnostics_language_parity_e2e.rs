@@ -51,7 +51,8 @@ fn prohibited_script_returns_match_kotlinc() {
         ("ReturnStatement.kts", "return"),
         ("ReturnExpression.kts", "null ?: return"),
     ] {
-        let input = krusty::frontend::SourceInput::kotlin_script(source);
+        let stem = filename.strip_suffix(".kts").expect("a script file name");
+        let input = krusty::frontend::SourceInput::kotlin_script(source).with_file_stem(stem);
         let krusty_diagnostics = common::front_end_diagnostics_inputs(
             &[input],
             std::slice::from_ref(&stdlib),
@@ -189,5 +190,27 @@ fn local_override_visibility_access_matches_kotlinc() {
             27,
             "cannot access 'fun f(): Int': it is protected in file."
         )],
+    );
+}
+
+/// An initializer has no function to return from: an `init` block, in a class as in an enum
+/// entry, and a property initializer, top-level as in a class.
+#[test]
+fn an_initializer_return_is_prohibited_like_kotlinc() {
+    common::assert_errors_match_kotlinc(
+        &[(
+            "Init.kt",
+            "val top: Int = null ?: return\n\
+             class C {\n\
+             \x20   val member: Int = null ?: return\n\
+             \x20   init { return }\n\
+             }\n\
+             enum class E {\n\
+             \x20   A {\n\
+             \x20       init { if (true) return }\n\
+             \x20   };\n\
+             }\n",
+        )],
+        &[],
     );
 }

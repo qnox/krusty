@@ -17,9 +17,10 @@ pub struct ScriptDefinition {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScriptParameter {
     pub name: String,
-    /// The parameter's classifier, as a Kotlin name.
+    /// The parameter's classifier, as a qualified Kotlin name. The definition owns this identity:
+    /// a script's imports and declarations never rebind it.
     pub classifier: String,
-    /// The classifier's type arguments, each a Kotlin name.
+    /// The classifier's type arguments, each a qualified Kotlin name.
     pub type_arguments: Vec<String>,
 }
 
@@ -32,8 +33,8 @@ impl ScriptDefinition {
             template: Some("kotlin.script.templates.standard.ScriptTemplateWithArgs".to_string()),
             constructor_parameters: vec![ScriptParameter {
                 name: "args".to_string(),
-                classifier: "Array".to_string(),
-                type_arguments: vec!["String".to_string()],
+                classifier: "kotlin.Array".to_string(),
+                type_arguments: vec!["kotlin.String".to_string()],
             }],
         }
     }

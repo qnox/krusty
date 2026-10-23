@@ -152,6 +152,14 @@ impl Checker<'_> {
         self.finish_executable_root(body);
     }
 
+    /// Type-check an `init` block, or a script statement, which kotlinc compiles to one. Neither has
+    /// a function to return from, so a `return` in it is prohibited.
+    pub(super) fn check_initializer_block(&mut self, scope: &CheckerScope<'_>, body: ExprId) {
+        self.with_ret_allowed(Ty::Unit, false, |checker| {
+            checker.check_executable_body(scope, body);
+        });
+    }
+
     /// Completes the body-check phase for one independently evaluated expression root.
     ///
     /// Type checking records resolved local reads, declarations, writes, and calls-in-place facts;

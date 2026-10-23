@@ -15675,6 +15675,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   instance (kotlinc makes it implicitly inner), top-level destructuring, type aliases declared in a
   script, and a template-typed implicit receiver for extension calls such as `run { }`. Verified
   against kotlinc 2.4.21 and kotlinc's own script test corpus. (`tests/kotlin_script_e2e.rs`.)
+- **A script's constructor parameters keep the definition's types.** The standard definition
+  names `kotlin.Array<kotlin.String>` by qualified identity, so a script importing its own
+  `String` or `Array` still takes `String[]` and reads `args` through the template.
+  (`tests/kotlin_script_e2e.rs`, `imports_do_not_rebind_the_template_parameter_type_like_kotlinc`.)
+- **An initializer has no function to return from.** A `return` in an `init` block (of a class or
+  an enum entry), a property initializer (top-level or member), or a script statement, the script's
+  final `$$result` expression included, is `'return' is prohibited here.`, as kotlinc reports it.
+  (`tests/diagnostics_language_parity_e2e.rs`.)
+- **An `if` without `else` is a `Unit` statement whose branch still constrains inference.** An
+  inferred property type such as `val f = run { sequence { if (c) { yield("OK") } }.toList() }`
+  keeps the branch's builder call as a constraint on the builder variable (`List<String>`), while
+  the `if` itself has type `Unit`. (`tests/builder_inference_receivers_e2e.rs`; box:
+  `coroutines/suspendFunctionAsCoroutine/ifExpressionInsideCoroutine_1_3.kt`.)
 
 ## 8. Success criteria for the PoC
 

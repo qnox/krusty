@@ -48534,7 +48534,7 @@ impl<'a> Checker<'a> {
                     }
                     for step in &entry.init_order {
                         if let ClassInit::Block(body) = step {
-                            self.check_executable_body(&entry_init_scope, *body);
+                            self.check_initializer_block(&entry_init_scope, *body);
                         }
                     }
                     self.this_labels.truncate(label_depth);
@@ -49794,23 +49794,28 @@ impl<'a> Checker<'a> {
                                     .get(&(bp.span.lo, bp.span.hi))
                                     .copied()
                             });
-                        let it = match (prechecked_storage, declared) {
-                            (Some(storage), _) => storage,
-                            (None, Some(expected)) => {
-                                // The declared type is the initializer's committed expected type:
-                                // an `Int` constant expression adapts to a declared `Long` exactly
-                                // as it does for a top-level property or a local.
-                                let nominal =
-                                    self.expr_declared(&initializer_scope, init, expected);
-                                self.recorded_expression_type_for_expected(
-                                    &initializer_scope,
-                                    init,
-                                    nominal,
-                                    expected,
-                                )
+                        // An initializer has no function to return from: `return` in it is
+                        // prohibited.
+                        let it = self.with_ret_allowed(Ty::Unit, false, |c| {
+                            match (prechecked_storage, declared) {
+                                (Some(storage), _) => storage,
+                                (None, Some(expected)) => {
+                                    // The declared type is the initializer's committed expected
+                                    // type: an `Int` constant expression adapts to a declared
+                                    // `Long` exactly as it does for a top-level property or a
+                                    // local.
+                                    let nominal =
+                                        c.expr_declared(&initializer_scope, init, expected);
+                                    c.recorded_expression_type_for_expected(
+                                        &initializer_scope,
+                                        init,
+                                        nominal,
+                                        expected,
+                                    )
+                                }
+                                (None, None) => c.expr(&initializer_scope, init),
                             }
-                            (None, None) => self.expr(&initializer_scope, init),
-                        };
+                        });
                         if declared.is_none() && it != Ty::Error {
                             let inferred = self
                                 .inferred_declaration_value_ty(init, inferred_declaration_ty(it));
@@ -50085,7 +50090,7 @@ impl<'a> Checker<'a> {
                                         .is_some_and(|span| selected.contains(&span))
                                 });
                         if selected {
-                            self.check_executable_body(scope, *b);
+                            self.check_initializer_block(scope, *b);
                         }
                     }
                 }
