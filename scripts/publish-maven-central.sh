@@ -31,7 +31,6 @@ version=$1
 : "${MAVEN_CENTRAL_USERNAME:?}" "${MAVEN_CENTRAL_PASSWORD:?}" "${ORG_GRADLE_PROJECT_signingInMemoryKey:?}"
 
 api=https://central.sonatype.com/api/v1/publisher
-auth="Authorization: Bearer $(printf '%s:%s' "$MAVEN_CENTRAL_USERNAME" "$MAVEN_CENTRAL_PASSWORD" | base64 -w0)"
 repo=$(cd "$(dirname "$0")/.." && pwd)
 project=$repo/tools/krusty-gradle
 remote=${RELEASE_REMOTE:-origin}
@@ -43,11 +42,25 @@ poll=10
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 
+# The Portal takes the user token as a bearer header. GitHub masks the secrets themselves, not
+# this encoding of them, and a command line is readable by every process on the machine, so the
+# encoding is masked and curl reads the header from a file only this user can read.
+token=$(printf '%s:%s' "$MAVEN_CENTRAL_USERNAME" "$MAVEN_CENTRAL_PASSWORD" | base64 -w0)
+if [[ -n ${GITHUB_ACTIONS:-} ]]; then
+  echo "::add-mask::$token"
+fi
+auth=$stage/authorization
+(
+  umask 077
+  printf 'Authorization: Bearer %s\n' "$token" > "$auth"
+)
+unset token
+
 # request SECONDS CURL-ARGS...
 request() {
   local limit=$1
   shift
-  curl -fsS --connect-timeout "$((limit < 10 ? limit : 10))" --max-time "$limit" -H "$auth" "$@"
+  curl -fsS --connect-timeout "$((limit < 10 ? limit : 10))" --max-time "$limit" -H "@$auth" "$@"
 }
 
 published() {
@@ -96,7 +109,8 @@ record_deployment() {
 }
 
 upload() {
-  "$project/gradlew" --no-daemon -p "$project" -PkrustyPluginVersion="$version" \
+  # The build signs; it has no use for the Portal token.
+  env -u MAVEN_CENTRAL_USERNAME -u MAVEN_CENTRAL_PASSWORD "$project/gradlew" --no-daemon -p "$project" -PkrustyPluginVersion="$version" \
     clean publishAllPublicationsToReleaseRepository >&2
   (
     cd "$project/build/release-repository"

@@ -34,6 +34,7 @@ cat > "$tree/tools/krusty-gradle/gradlew" <<GRADLEW
 #!/usr/bin/env bash
 set -euo pipefail
 echo "\$*" >> "$fixture/builds"
+env | grep '^MAVEN_CENTRAL_' >> "$fixture/gradle-env" || true
 root="$tree/tools/krusty-gradle/build/release-repository/dev/krustythecompiler"
 rm -rf "$tree/tools/krusty-gradle/build"
 for f in krusty-gradle-plugin/1.2.3/krusty-gradle-plugin-1.2.3.jar \
@@ -57,7 +58,16 @@ GRADLEW
 cat > "$fixture/bin/curl" <<CURL
 #!/usr/bin/env bash
 set -euo pipefail
-echo "\$*" >> "$fixture/curl.log"
+args=()
+for arg in "\$@"; do
+  if [[ \$arg == @* ]]; then
+    cp "\${arg#@}" "$fixture/auth-header"
+    stat -c %a "\${arg#@}" > "$fixture/auth-mode"
+    arg=@authorization-file
+  fi
+  args+=("\$arg")
+done
+echo "\${args[*]}" >> "$fixture/curl.log"
 if [[ -e "$fixture/curl-fails" ]]; then
   echo "curl: (28) Operation timed out after 60000 milliseconds" >&2
   exit 28
@@ -109,9 +119,11 @@ fail() {
   echo "$1" >&2
   failures=$((failures + 1))
 }
+# Extra environment for the next run_case calls, such as GITHUB_ACTIONS=true.
+case_env=()
 run_case() {
   local name=$1 status=$2 stdout=$3 stderr=$4 actual_status=0
-  PATH="$fixture/bin:$PATH" MAVEN_CENTRAL_USERNAME=user MAVEN_CENTRAL_PASSWORD=token \
+  env -u GITHUB_ACTIONS "${case_env[@]}" PATH="$fixture/bin:$PATH" MAVEN_CENTRAL_USERNAME=user MAVEN_CENTRAL_PASSWORD=token \
     ORG_GRADLE_PROJECT_signingInMemoryKey=key \
     "$tree/scripts/publish-maven-central.sh" 1.2.3 > "$fixture/out" 2> "$fixture/err" ||
     actual_status=$?
@@ -131,7 +143,7 @@ recorded() {
 }
 # A new release: nothing published, no recorded deployment, a fresh clock and call log.
 reset() {
-  rm -f "$fixture"/{builds,bundle,unsigned,curl-fails,curl.log,states-*,status-seconds}
+  rm -f "$fixture"/{builds,gradle-env,auth-header,auth-mode,bundle,unsigned,curl-fails,curl.log,states-*,status-seconds}
   git -C "$tree" remote set-url origin "$fixture/remote.git"
   git -C "$fixture/remote.git" update-ref -d "$ref" 2>/dev/null || true
   echo false > "$fixture/published-krusty-gradle-plugin"
@@ -149,9 +161,18 @@ echo true > "$fixture/published-krusty-gradle-plugin"
 echo true > "$fixture/published-dev.krustythecompiler.gradle.plugin"
 run_case published 0 'krusty-gradle-plugin 1.2.3 is already on Maven Central' ''
 check 'published: builds' "$(count "$fixture/builds")" 0
+token=$(printf user:token | base64 -w0)
+check 'published: header' "$(cat "$fixture/auth-header")" "Authorization: Bearer $token"
+check 'published: header file mode' "$(cat "$fixture/auth-mode")" 600
+check 'published: token off the command line' "$(grep -c -e "$token" -e user:token "$fixture/curl.log")" 0
 check 'published: requests' "$(cat "$fixture/curl.log")" "$(printf '%s\n' \
-  "-fsS --connect-timeout 10 --max-time 60 -H Authorization: Bearer $(printf user:token | base64 -w0) https://central.sonatype.com/api/v1/publisher/published?namespace=dev.krustythecompiler&name=krusty-gradle-plugin&version=1.2.3" \
-  "-fsS --connect-timeout 10 --max-time 60 -H Authorization: Bearer $(printf user:token | base64 -w0) https://central.sonatype.com/api/v1/publisher/published?namespace=dev.krustythecompiler&name=dev.krustythecompiler.gradle.plugin&version=1.2.3")"
+  "-fsS --connect-timeout 10 --max-time 60 -H @authorization-file https://central.sonatype.com/api/v1/publisher/published?namespace=dev.krustythecompiler&name=krusty-gradle-plugin&version=1.2.3" \
+  "-fsS --connect-timeout 10 --max-time 60 -H @authorization-file https://central.sonatype.com/api/v1/publisher/published?namespace=dev.krustythecompiler&name=dev.krustythecompiler.gradle.plugin&version=1.2.3")"
+# Under GitHub Actions the bearer encoding, which GitHub does not know to mask, is masked first.
+case_env=(GITHUB_ACTIONS=true)
+run_case 'published under Actions' 0 "::add-mask::$token
+krusty-gradle-plugin 1.2.3 is already on Maven Central" ''
+case_env=()
 
 reset
 echo true > "$fixture/published-dev.krustythecompiler.gradle.plugin"
@@ -164,6 +185,7 @@ echo 0 > "$fixture/uploads"
 printf 'VALIDATING\nPUBLISHING\n' > "$fixture/states-dep-1"
 run_case accepted 0 $'uploaded deployment dep-1\ndeployment dep-1 is PUBLISHING' 'Gradle output'
 check 'accepted: builds' "$(cat "$fixture/builds")" "$gradle_tasks"
+check 'accepted: Portal token kept from the build' "$(count "$fixture/gradle-env")" 0
 check 'accepted: recorded' "$(recorded)" 'central deployment dep-1 of krusty-gradle-plugin 1.2.3'
 check 'accepted: record identity' "$(git -C "$fixture/remote.git" log -1 --format='%an <%ae> / %cn <%ce>' "$ref")" \
   'Anton Efimchuk <anton.efimchuk@gmail.com> / Anton Efimchuk <anton.efimchuk@gmail.com>'
@@ -274,4 +296,4 @@ if [[ $failures -ne 0 ]]; then
   echo "$failures Maven Central publishing check(s) failed" >&2
   exit 1
 fi
-echo "Maven Central publishing: 15 cases passed"
+echo "Maven Central publishing: 16 cases passed"
