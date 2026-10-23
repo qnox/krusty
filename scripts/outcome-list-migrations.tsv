@@ -1,0 +1,14 @@
+# Approval #2459: one-time measured Native/Wasm migration, approved 2026-10-22.
+# lane	effective-kotlin-release	old-loaded-blob	new-loaded-blob	approval
+tests/box_expected_failures/native-klib	2.4.0	fa868c5216e0192224af49cdef19d6b91085447a	a649ad0962736d7620561f2d25b47ecc306e6050	2459
+tests/box_expected_failures/native-klib	2.4.10	fa868c5216e0192224af49cdef19d6b91085447a	a649ad0962736d7620561f2d25b47ecc306e6050	2459
+tests/box_expected_failures/native-klib	2.4.20	537f37cb60e9f3ef619ee23067798a7d2105054e	3108572ffd1b4cf6114da73ee7ee5da4c2e90529	2459
+tests/box_expected_failures/native-klib	2.4.21	cbe0404ff57b39dcbb7d13dbc90378e7080fa2cc	2091a8aef8c1f315632a0e7cebb61f7997e9c569	2459
+tests/box_expected_failures/wasm-js-klib	2.4.0	2003aee19b716e0ef3cce1d7b0253a787edb8b92	a40f62e99990a9aaa4c4fa0deed690cd4dc52037	2459
+tests/box_expected_failures/wasm-js-klib	2.4.10	c6449d7c9c5326f309b8d72ea9fce051bcf1726e	8e3f9638e5e988e1f8a75870dd9689668a059445	2459
+tests/box_expected_failures/wasm-js-klib	2.4.20	b5452fff35fc941b3f2918cebcb4334d21582850	96eda5ee7c85f973c6a67ed4c5f969fd809fb86b	2459
+tests/box_expected_failures/wasm-js-klib	2.4.21	44dd294dd6926814732ce69ecffbffb5efbc56cc	e216350798ec076fc563231ce9ca54946ff59279	2459
+tests/box_expected_failures/wasm-wasi-klib	2.4.0	a3af9761ca55aacc3f9853ce0331efc905099e04	3dda1340d7c897f91cbbfc3b8eb586739a2b4f31	2459
+tests/box_expected_failures/wasm-wasi-klib	2.4.10	0b4971fec19f64459ec6c8671838d6e2fb45f1b1	98a9547427c0a1e96d80076e3792e70f5e376680	2459
+tests/box_expected_failures/wasm-wasi-klib	2.4.20	78a9371d196e28d6a42f090e986d6ac300a67196	c8090c67afbc0f725dbc295f1659391c86321ce3	2459
+tests/box_expected_failures/wasm-wasi-klib	2.4.21	a55af80fc4d25cfc76ba55cec4224446c0f266c8	845c4c1293da3f174527f62117bced851fe98524	2459

@@ -12,10 +12,10 @@
 //! version)`. A new non-pass, a stale entry, or any transition between pass/fail/not-applicable
 //! fails until the reviewed inventory is updated; compiler panics are never expected.
 //!
-//! The harness reads the corpus from `KRUSTY_KOTLIN_BOX_DIR` (as the JVM gate does). A local run
-//! without it falls back to the vendored cases under `tests/box_data/`, which the committed
-//! inventory does not describe; a scheduled gate run requires the provisioned corpus instead, so a
-//! broken setup fails rather than reporting a green lane over nothing.
+//! The harness joins `KRUSTY_KOTLIN_BOX_DIR` with owned portable regressions in one inventory.
+//! Every sweep requires its provisioned corpus and lane; the separate vendored smoke test does
+//! not stand in for missing sweep setup. Owned fixtures require a JVM oracle before compilation,
+//! and their harness errors, panics and applicability exclusions can never be blessed.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::Read;
@@ -150,12 +150,6 @@ fn validate_bless(bless: bool, full_run: bool, provisioned: bool, ci: bool) -> R
     Ok(())
 }
 
-/// The corpus: the reference checkout when provisioned, else the vendored cases.
-fn corpus_dir() -> PathBuf {
-    krusty::toolchain::box_corpus_dir()
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/box_data"))
-}
-
 pub struct Scratch(pub PathBuf);
 
 impl Scratch {
@@ -188,7 +182,8 @@ pub enum Libraries {
     /// class there, so the JDK has to be present for those names to resolve at all.
     JvmArtifacts,
     /// The target's own stdlib KLIB (`toolchain::kotlin_stdlib_klib`), the library kotlinc
-    /// compiles that target against. `kotlin.test` is part of it.
+    /// compiles that target against. Native includes `kotlin.test`; Wasm adds its exact target
+    /// kotlin-test KLIB as an ordinary dependency.
     StdlibKlib,
 }
 
@@ -254,6 +249,7 @@ impl Libraries {
                             .expect("checked by `Libraries::available`"),
                         klib_stdlib_semantics(target),
                     ));
+                    libraries.extend(wasm_test_library(target));
                     let (libraries, native_imports) = open_klib_inputs(target, &libraries)
                         .unwrap_or_else(|error| {
                             panic!("opening the {target:?} dependency KLIBs: {error}")
@@ -274,10 +270,11 @@ impl Libraries {
                 }
                 let stdlib = krusty::toolchain::kotlin_stdlib_klib(target)
                     .expect("checked by `Libraries::available`");
-                let inputs = [krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
+                let mut inputs = vec![krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
                     stdlib,
                     klib_stdlib_semantics(target),
                 )];
+                inputs.extend(wasm_test_library(target));
                 let (libraries, native_imports) = open_klib_inputs(target, &inputs)
                     .unwrap_or_else(|error| panic!("opening the {target:?} stdlib KLIB: {error}"));
                 let compilation = PlatformLibraries {
@@ -289,6 +286,28 @@ impl Libraries {
             }),
         }
     }
+}
+
+/// Wasm publishes kotlin-test separately from its stdlib. Retain it as an ordinary dependency:
+/// these coordinates select the exact target/version but confer no compiler intrinsic authority.
+fn wasm_test_library(
+    target: krusty::compilation_target::CompilationTarget,
+) -> Option<krusty::klib_libraries::KlibLibraryInput> {
+    use krusty::compilation_target::CompilationTarget;
+    let artifact = match target {
+        CompilationTarget::WasmJs => "kotlin-test-wasm-js",
+        CompilationTarget::WasmWasi => "kotlin-test-wasm-wasi",
+        _ => return None,
+    };
+    let version = krusty::kotlin_version::target().to_string();
+    let path = krusty::toolchain::ensure_maven_artifact(
+        "org.jetbrains.kotlin",
+        artifact,
+        &version,
+        "klib",
+    )
+    .unwrap_or_else(|| panic!("cannot provision exact {artifact}:{version}"));
+    Some(krusty::klib_libraries::KlibLibraryInput::dependency(path))
 }
 
 fn klib_stdlib_semantics(
@@ -655,8 +674,15 @@ pub fn run_program(command: &mut Command) -> Outcome {
         // than a stream. The answer is compared whole, so one that spans lines (`"FAIL\nOK"`) is
         // the wrong answer it is, not a last line that happens to read OK.
         Ok(output) => framed_outcome(output),
-        Err(error) => Outcome::Failed(error),
+        Err(ProgramRunError::Harness(error)) => Outcome::Harness(error),
+        Err(ProgramRunError::Program(error)) => Outcome::Failed(error),
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ProgramRunError {
+    Harness(String),
+    Program(String),
 }
 
 /// Run the program with a deadline; its stdout, or what went wrong.
@@ -664,14 +690,17 @@ pub fn run_program(command: &mut Command) -> Outcome {
 /// Both pipes are drained concurrently into bounded trailing buffers. Waiting before draining can
 /// deadlock once either pipe fills; retaining output without a bound lets a broken program fill the
 /// host until the deadline. Keeping the tail preserves the final result frame.
-fn run_with_timeout(command: &mut Command, timeout: Duration) -> Result<ProgramOutput, String> {
+fn run_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<ProgramOutput, ProgramRunError> {
     let mut child = super::common::spawn_freshly_written(
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped()),
     )
-    .map_err(|error| format!("could not start the program: {error}"))?;
+    .map_err(|error| ProgramRunError::Harness(format!("could not start the program: {error}")))?;
     let stdout = child.stdout.take().expect("piped child stdout");
     let stderr = child.stderr.take().expect("piped child stderr");
     let stdout = std::thread::spawn(move || output_tail(stdout));
@@ -685,10 +714,10 @@ fn run_with_timeout(command: &mut Command, timeout: Duration) -> Result<ProgramO
                 let _ = child.wait();
                 let _ = stdout.join();
                 let _ = stderr.join();
-                return Err(format!(
+                return Err(ProgramRunError::Program(format!(
                     "the program did not finish within {}s",
                     timeout.as_secs()
-                ));
+                )));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(2)),
             Err(error) => {
@@ -696,15 +725,17 @@ fn run_with_timeout(command: &mut Command, timeout: Duration) -> Result<ProgramO
                 let _ = child.wait();
                 let _ = stdout.join();
                 let _ = stderr.join();
-                return Err(format!("waiting for the program: {error}"));
+                return Err(ProgramRunError::Harness(format!(
+                    "waiting for the program: {error}"
+                )));
             }
         }
     };
-    let stdout = captured_output(stdout, "stdout")?;
-    let stderr = captured_output(stderr, "stderr")?;
+    let stdout = captured_output(stdout, "stdout").map_err(ProgramRunError::Harness)?;
+    let stderr = captured_output(stderr, "stderr").map_err(ProgramRunError::Harness)?;
     let stdout_text = String::from_utf8_lossy(&stdout.bytes).into_owned();
     if !status.success() {
-        return Err(format!(
+        return Err(ProgramRunError::Program(format!(
             "exit {}; stdout{} {stdout_text:?}; stderr{} {:?}",
             status,
             if stdout.truncated {
@@ -718,7 +749,7 @@ fn run_with_timeout(command: &mut Command, timeout: Duration) -> Result<ProgramO
                 ""
             },
             String::from_utf8_lossy(&stderr.bytes).trim()
-        ));
+        )));
     }
     Ok(ProgramOutput {
         stdout: stdout_text,
@@ -850,21 +881,84 @@ pub fn prepare_sources(
     Ok(sources)
 }
 
+fn checked_outcome(file: &Path, result: &Outcome) -> Result<box_ratchet::Outcome, String> {
+    if super::box_inventory::owned(file)
+        && matches!(
+            result,
+            Outcome::Harness(_) | Outcome::CompilerPanic(_) | Outcome::NotApplicable(_)
+        )
+    {
+        return Err(format!(
+            "owned box case {} has fatal outcome: {result:?}",
+            file.display()
+        ));
+    }
+    Ok(ratchet_outcome(result))
+}
+
+#[test]
+fn owned_fatal_outcomes_cannot_be_blessed_as_box_failures() {
+    let file =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/box_regressions/multimodule/example.kt");
+    for result in [
+        Outcome::Harness("missing executable".into()),
+        Outcome::CompilerPanic("panic".into()),
+        Outcome::NotApplicable("target directive"),
+    ] {
+        assert_eq!(
+            checked_outcome(&file, &result),
+            Err(format!(
+                "owned box case {} has fatal outcome: {result:?}",
+                file.display()
+            ))
+        );
+    }
+    assert_eq!(
+        checked_outcome(&file, &Outcome::Pass),
+        Ok(box_ratchet::Outcome::Pass)
+    );
+    assert_eq!(
+        checked_outcome(&file, &Outcome::Declined("unsupported".into())),
+        Ok(box_ratchet::Outcome::Fail)
+    );
+    assert_eq!(
+        checked_outcome(
+            Path::new("/upstream/a.kt"),
+            &Outcome::Harness("existing policy".into())
+        ),
+        Ok(box_ratchet::Outcome::Fail)
+    );
+}
+
 fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path) -> Outcome {
     let source = match std::fs::read_to_string(file) {
         Ok(source) => source,
         Err(error) => return Outcome::Harness(format!("reading case: {error}")),
     };
+    let stem = file
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("Case");
+    if super::box_inventory::owned(file) {
+        if let Err(error) = super::box_reference_classes::checked_box(&source, stem) {
+            return Outcome::Harness(format!("required JVM oracle: {error}"));
+        }
+        if lane.platform() == box_ratchet::Platform::Native && source.contains("// MODULE:") {
+            let answer =
+                super::kotlin_native_multimodule_support::kotlin_native_multimodule_box(&source);
+            if answer.as_deref() != Some("OK") {
+                return Outcome::Harness(format!(
+                    "required Native oracle must return OK, got {answer:?}"
+                ));
+            }
+        }
+    }
     if let Some(reason) = lane.not_applicable(&source) {
         return Outcome::NotApplicable(reason);
     }
     if let Some(reason) = lane.harness_limitation(&source) {
         return Outcome::Harness(reason.to_string());
     }
-    let stem = file
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("Case");
     if source.contains("// MODULE:") {
         let prepared = krusty::conformance::prepare_test_source(&source, lane.test_target());
         let Some(mut modules) = krusty::conformance::split_modules(&prepared) else {
@@ -922,47 +1016,31 @@ fn may_write_blessed_expectations(bless: bool, compiler_panics: usize) -> bool {
     bless && compiler_panics == 0
 }
 
+fn record_program_failure(
+    file: &Path,
+    reason: String,
+    expected: bool,
+    known_failures: &mut Vec<(PathBuf, String)>,
+    failed: &mut Vec<(PathBuf, String)>,
+) {
+    if expected {
+        known_failures.push((file.to_path_buf(), reason));
+    } else {
+        failed.push((file.to_path_buf(), reason));
+    }
+}
+
 /// Run the whole corpus through `lane` and hold it to the lane's committed ratchet.
 pub fn run(lane: &dyn Lane) {
     let env = |knob: &str| format!("KRUSTY_{}_{knob}", lane.env_infix());
     let label = lane.label();
-    // A scheduled gate may not report green over a missing toolchain or corpus. A plain local run
-    // may still skip or fall back.
-    let gate =
-        std::env::var_os(format!("KRUSTY_REQUIRE_{}_CONFORMANCE", lane.env_infix())).is_some();
     let unavailable = lane.unavailable();
-    if gate {
-        assert!(
-            unavailable.is_none(),
-            "scheduled {label} conformance cannot run here: {}",
-            unavailable.as_deref().unwrap_or_default()
-        );
-        assert!(
-            krusty::toolchain::box_corpus_dir().is_some(),
-            "scheduled {label} conformance needs the provisioned box corpus \
-             (KRUSTY_KOTLIN_BOX_DIR); the vendored fallback is for local runs"
-        );
-    }
-    if let Some(reason) = unavailable {
-        eprintln!("{label} conformance: skipped ({reason})");
-        return;
-    }
-    let corpus = corpus_dir();
-    // The committed expectations describe the provisioned corpus; the vendored fallback is a
-    // smoke test they say nothing about.
     let provisioned = krusty::toolchain::box_corpus_dir().is_some();
-    let files = krusty::conformance::kotlin_files(&corpus);
-    let relative = |file: &Path| {
-        file.strip_prefix(&corpus)
-            .unwrap_or(file)
-            .to_string_lossy()
-            .into_owned()
-    };
-    assert!(
-        !files.is_empty(),
-        "no Kotlin sources under {}",
-        corpus.display()
-    );
+    super::box_inventory::require_setup(unavailable.as_deref(), provisioned)
+        .unwrap_or_else(|error| panic!("{label}: {error}"));
+    let corpus = krusty::toolchain::box_corpus_dir().expect("validated corpus setup");
+    let files = super::box_inventory::discover(&corpus).unwrap_or_else(|error| panic!("{error}"));
+    let relative = |file: &Path| box_ratchet::corpus_key(&corpus, file);
     let platform = lane.platform();
     let version = krusty::kotlin_version::target();
     let corpus_cases: BTreeSet<String> = files.iter().map(|file| relative(file)).collect();
@@ -1041,6 +1119,10 @@ pub fn run(lane: &dyn Lane) {
             })
             .collect()
     });
+    // Compilation is finished. Restore ordinary panic reporting before validating outcomes:
+    // an owned fatal outcome or a broken inventory must remain visible, not fail silently under
+    // the compiler-only hook.
+    let _ = std::panic::take_hook();
 
     let mut passed = 0usize;
     let mut frontend = 0usize;
@@ -1055,7 +1137,7 @@ pub fn run(lane: &dyn Lane) {
     let mut current = BTreeMap::new();
     for (file, result) in outcomes {
         let relative = relative(file);
-        let observed = ratchet_outcome(&result);
+        let observed = checked_outcome(file, &result).unwrap_or_else(|error| panic!("{error}"));
         assert!(
             current.insert(relative.clone(), observed).is_none(),
             "corpus contains the duplicate path {relative:?}"
@@ -1084,11 +1166,13 @@ pub fn run(lane: &dyn Lane) {
                 let expected = baseline
                     .as_ref()
                     .is_some_and(|baseline| baseline.failures.contains(&relative));
-                if expected || bless {
-                    known_failures.push((file.clone(), reason));
-                } else if !provisioned {
-                    failed.push((file.clone(), reason));
-                }
+                record_program_failure(
+                    file,
+                    reason,
+                    expected || bless,
+                    &mut known_failures,
+                    &mut failed,
+                );
             }
         }
     }
@@ -1176,7 +1260,6 @@ pub fn run(lane: &dyn Lane) {
     for (file, reason) in &known_failures {
         eprintln!("  known failure {}: {reason}", file.display());
     }
-    let _ = std::panic::take_hook();
     for (file, reason) in &failed {
         eprintln!("FAILED {}: {reason}", file.display());
     }
@@ -1253,6 +1336,23 @@ fn blessing_is_a_deliberate_local_full_corpus_operation() {
 }
 
 #[test]
+fn an_unexpected_program_failure_preserves_its_case_and_complete_reason() {
+    let file = Path::new("regressions/linkFailure.kt");
+    let reason = "link: symbol `declared_function` is defined twice\nfirst.o and second.o";
+    let mut known = Vec::new();
+    let mut failed = Vec::new();
+    record_program_failure(file, reason.to_string(), false, &mut known, &mut failed);
+    assert_eq!(known, Vec::new());
+    assert_eq!(failed, [(file.to_path_buf(), reason.to_string())]);
+
+    known.clear();
+    failed.clear();
+    record_program_failure(file, reason.to_string(), true, &mut known, &mut failed);
+    assert_eq!(known, [(file.to_path_buf(), reason.to_string())]);
+    assert_eq!(failed, Vec::new());
+}
+
+#[test]
 fn a_bless_with_a_compiler_panic_cannot_write_expectations() {
     assert_eq!(
         [(false, 0), (false, 1), (true, 1), (true, 0),]
@@ -1295,6 +1395,17 @@ fn runner_does_not_block_on_large_stdout_or_stderr() {
     assert!(
         output.stdout.ends_with("done"),
         "the final answer is retained"
+    );
+}
+
+#[test]
+fn a_missing_program_is_a_harness_error_not_a_recordable_failure() {
+    let scratch = Scratch::new("missing-program");
+    let missing = scratch.0.join("not-an-executable");
+    let error = Command::new(&missing).output().unwrap_err();
+    assert_eq!(
+        run_program(&mut Command::new(&missing)),
+        Outcome::Harness(format!("could not start the program: {error}"))
     );
 }
 
@@ -1344,7 +1455,9 @@ fn runner_kills_a_program_at_its_deadline() {
 
     assert_eq!(
         run_with_timeout(&mut Command::new(&executable), Duration::from_millis(20)),
-        Err("the program did not finish within 0s".to_string())
+        Err(ProgramRunError::Program(
+            "the program did not finish within 0s".to_string()
+        ))
     );
 }
 

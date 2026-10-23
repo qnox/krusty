@@ -613,7 +613,8 @@ impl<'a> Lexer<'a> {
                     self.i += 1;
                     self.retain(RetainedKind::Whitespace, start, self.i);
                 }
-                b'#' if self.formatting.is_some() && self.i == 0 && self.peek2() == b'!' => {
+                // Kotlin's grammar starts a file with an optional shebang line.
+                b'#' if self.i == 0 && self.peek2() == b'!' => {
                     self.i += 2;
                     while self.i < self.b.len() && !matches!(self.b[self.i], b'\r' | b'\n') {
                         self.i += 1;
@@ -1464,7 +1465,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_lexer_keeps_shebang_and_nests_block_comments() {
+    fn ordinary_lexer_skips_a_leading_shebang_and_nests_block_comments() {
         let source = "#!/bin\n/* outer /* inner */ tail */ val value = 1";
         let mut diagnostics = DiagSink::new();
         let tokens = lex(source, &mut diagnostics);
@@ -1476,10 +1477,6 @@ mod tests {
         assert_eq!(
             token_text,
             vec![
-                (TokenKind::Unknown, "#"),
-                (TokenKind::Not, "!"),
-                (TokenKind::Slash, "/"),
-                (TokenKind::Ident, "bin"),
                 (TokenKind::Newline, "\n"),
                 (TokenKind::KwVal, "val"),
                 (TokenKind::Ident, "value"),
@@ -1495,9 +1492,6 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                (NameTokenKind::Operator, "!"),
-                (NameTokenKind::Operator, "/"),
-                (NameTokenKind::Ident, "bin"),
                 (NameTokenKind::Newline, "\n"),
                 (NameTokenKind::Ident, "value"),
             ]

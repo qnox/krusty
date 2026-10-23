@@ -10,6 +10,7 @@ pub use crate::fir::DeclarationId as FrontendDeclarationId;
 pub use crate::lexer::{NameToken as FrontendNameToken, NameTokenKind as FrontendNameTokenKind};
 use crate::libraries::{EmptySymbolSource, SemanticPlatform};
 use crate::plugins::registry::NativePlugins;
+use crate::script_definitions::ScriptDefinition;
 
 mod explicit_api;
 mod external_modifier_targets;
@@ -154,6 +155,10 @@ pub(crate) struct ReparseSource {
     kind: SourceKind,
     is_common: bool,
     text: Box<str>,
+    /// The file name without its extension. A script class is named after it.
+    file_stem: Option<Box<str>>,
+    /// The definition a script compiles against; `None` for any other source.
+    script_definition: Option<ScriptDefinition>,
     #[cfg(test)]
     parse_count: std::cell::Cell<usize>,
     #[cfg(test)]
@@ -196,13 +201,32 @@ impl ReparseSource {
         diags: &mut DiagSink,
         mut visit: impl FnMut(File, &mut DiagSink),
     ) {
-        assert_eq!(
+        assert_ne!(
             self.kind,
-            SourceKind::Kotlin,
-            "production declaration-unit streaming accepts Kotlin files only"
+            SourceKind::Java,
+            "production declaration-unit streaming accepts Kotlin sources only"
         );
         #[cfg(test)]
         self.parse_count.set(self.parse_count.get() + 1);
+        if self.kind == SourceKind::KotlinScript {
+            // A script is one declaration: its script class.
+            let features = module_features.for_source(&self.text);
+            let definition = self
+                .script_definition
+                .as_ref()
+                .expect("a script source keeps its script definition");
+            let mut file = parse_script(
+                &self.text,
+                self.file_stem.as_deref(),
+                definition,
+                &features,
+                diags,
+            );
+            file.is_common = self.is_common;
+            record_local_class_name_provenance(&mut file);
+            visit(file, diags);
+            return;
+        }
         let tokens = crate::lexer::lex(&self.text, diags);
         let mut local_name_counters = LocalNameCounters::default();
         crate::parser::visit_declaration_units_with_features(
@@ -219,10 +243,6 @@ impl ReparseSource {
                 visit(file, diags);
             },
         );
-    }
-
-    pub(crate) fn is_script(&self) -> bool {
-        self.kind == SourceKind::KotlinScript
     }
 
     /// The file's whole text.
@@ -257,21 +277,15 @@ impl ReparseSource {
         &self,
         module_features: &LangFeatures,
         diags: &mut DiagSink,
-        mut visit: impl FnMut(File, &mut DiagSink),
+        visit: impl FnMut(File, &mut DiagSink),
     ) {
         match self.kind {
             // Invalid stable signatures cannot enter checked FIR, but ordinary Kotlin declarations
             // still recover diagnostics through the same bounded Pass-2 parser used by successful
             // modules. Keeping the whole reparsed file alive here would make error recovery a hidden
             // non-streaming architecture.
-            SourceKind::Kotlin => self.visit_declaration_units(module_features, diags, visit),
-            SourceKind::KotlinScript => {
-                #[cfg(test)]
-                self.parse_count.set(self.parse_count.get() + 1);
-                let features = module_features.for_source(&self.text);
-                let mut file = parse_source_kind(&self.text, self.kind, &features, diags);
-                file.is_common = self.is_common;
-                visit(file, diags);
+            SourceKind::Kotlin | SourceKind::KotlinScript => {
+                self.visit_declaration_units(module_features, diags, visit)
             }
             SourceKind::Java => {}
         }
@@ -774,26 +788,53 @@ fn has_signature_defaults(file: &File) -> bool {
 
 /// Lex and parse one source string with an explicit feature set.
 pub fn parse_source(src: &str, features: &LangFeatures, diags: &mut DiagSink) -> File {
-    parse_source_kind(src, SourceKind::Kotlin, features, diags)
+    let tokens = crate::lexer::lex(src, diags);
+    crate::parser::parse_with_features(src, &tokens, diags, features)
 }
 
 fn parse_source_kind(
-    src: &str,
-    kind: SourceKind,
+    source: &SourceInput<'_>,
+    script_definition: &ScriptDefinition,
     features: &LangFeatures,
     diags: &mut DiagSink,
 ) -> File {
-    if kind == SourceKind::Java {
+    if source.kind == SourceKind::Java {
         return File::default();
     }
-    let tokens = crate::lexer::lex(src, diags);
-    match kind {
-        SourceKind::Kotlin => crate::parser::parse_with_features(src, &tokens, diags, features),
-        SourceKind::KotlinScript => {
-            crate::parser::parse_script_with_features(src, &tokens, diags, features)
+    match source.kind {
+        SourceKind::Kotlin => {
+            let tokens = crate::lexer::lex(source.text, diags);
+            crate::parser::parse_with_features(source.text, &tokens, diags, features)
         }
+        SourceKind::KotlinScript => parse_script(
+            source.text,
+            source.file_stem,
+            script_definition,
+            features,
+            diags,
+        ),
         SourceKind::Java => unreachable!(),
     }
+}
+
+/// Parse a Kotlin script as its script class. kotlinc names that class after the file, so a script
+/// without a file name cannot be compiled.
+pub(crate) fn parse_script(
+    src: &str,
+    file_stem: Option<&str>,
+    definition: &ScriptDefinition,
+    features: &LangFeatures,
+    diags: &mut DiagSink,
+) -> File {
+    let tokens = crate::lexer::lex(src, diags);
+    let Some(file_stem) = file_stem else {
+        diags.error(
+            crate::diag::Span::new(0, 0),
+            "internal error: a Kotlin script needs its file name",
+        );
+        return File::default();
+    };
+    crate::parser::parse_script_with_features(src, &tokens, diags, features, file_stem, definition)
 }
 
 /// Tokenize only source names and the separators needed to interpret their declaration/reference
@@ -1151,6 +1192,12 @@ where
                 .for_source(source.text)
                 .has("MultiPlatformProjects")
         });
+    let script_definition = ScriptDefinition::standard().on_classpath(|template| {
+        platform
+            .platform
+            .as_ref()
+            .is_ok_and(|platform| platform.classifier(template).is_some())
+    });
     for (index, source) in sources.iter().enumerate() {
         diags.set_file(index as u32);
         let features = project_features.for_source(source.text);
@@ -1158,13 +1205,16 @@ where
             kind: source.kind,
             is_common: source.is_common,
             text: source.text.into(),
+            file_stem: source.file_stem.map(Into::into),
+            script_definition: (source.kind == SourceKind::KotlinScript)
+                .then(|| script_definition.clone()),
             #[cfg(test)]
             parse_count: std::cell::Cell::new(0),
             #[cfg(test)]
             released_before_collection: false,
         });
         let diagnostics_before = diags.diags.len();
-        let mut file = parse_source_kind(source.text, source.kind, &features, diags);
+        let mut file = parse_source_kind(source, &script_definition, &features, diags);
         let parser_error = source.kind != SourceKind::Java
             && diags.diags[diagnostics_before..]
                 .iter()

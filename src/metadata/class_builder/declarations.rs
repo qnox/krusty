@@ -305,6 +305,9 @@ pub struct ClassTail<'a> {
     pub enum_entry_bodies: &'a crate::fx_hash::HashSet<TypeName>,
     /// Whether the class is an `enum class`, whose implicit `Enum<E>` supertype metadata omits.
     pub is_enum: bool,
+    /// Whether the class is a script's. kotlinc describes a script by its own declarations alone,
+    /// listing no supertype: not its template, and not an implicit `Any`.
+    pub is_script: bool,
     /// kotlinc's `LanguageFeature.AnnotationsInMetadata` (since 2.4): `false` keeps every
     /// `HAS_ANNOTATIONS` flag bit but writes none of the annotation RECORDS (`Class.annotation`,
     /// `Constructor.annotation`, `Property.annotation`, `Function.annotation`, the value-parameter
@@ -347,6 +350,7 @@ impl Default for ClassTail<'_> {
             local_classifiers: &NO_LOCAL_CLASSIFIERS,
             enum_entry_bodies: &NO_LOCAL_CLASSIFIERS,
             is_enum: false,
+            is_script: false,
             annotations_in_metadata: true,
         }
     }

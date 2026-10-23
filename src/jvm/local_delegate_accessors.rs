@@ -293,9 +293,6 @@ fn emitted_expressions(ir: &IrFile) -> HashSet<ExprId> {
         }
     }
     roots.extend(ir.statics.iter().filter_map(|property| property.init));
-    if let Some(body) = ir.checked_script_body {
-        roots.push(body);
-    }
 
     let mut visited = HashSet::default();
     for root in roots {

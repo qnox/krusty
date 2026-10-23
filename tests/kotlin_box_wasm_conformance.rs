@@ -59,11 +59,11 @@ impl WasmLane {
             rayon::current_thread_index().unwrap_or(0)
         ));
         if let Err(error) = std::fs::create_dir_all(&directory) {
-            return Outcome::Failed(format!("creating the case directory: {error}"));
+            return Outcome::Harness(format!("creating the case directory: {error}"));
         }
         for (name, bytes) in &artifacts {
             if let Err(error) = std::fs::write(directory.join(name), bytes) {
-                return Outcome::Failed(format!("writing {name}: {error}"));
+                return Outcome::Harness(format!("writing {name}: {error}"));
             }
         }
         let outcome = box_lane::run_program(
@@ -459,6 +459,7 @@ fun box(): String {
 
 #[test]
 fn wasm_declines_an_instruction_wrapper_whose_body_lowering_does_not_model() {
+    // PLATFORM-SPECIFIC: pin the Wasm intrinsic-support decline, including its category ownership.
     // `pow` reaches fdlibm's `__ieee754_pow`, whose locals have no initializer: the wrapper is not
     // support code, so its call declines instead of failing compilation.
     expect_wasm_decline(
@@ -499,24 +500,54 @@ fn focused_wasm_lane_available(lane: &WasmLane, stem: &str) -> bool {
     false
 }
 
-/// Run one case selected by the shared backend-neutral multimodule conformance inventory.
-pub(super) fn run_multimodule_case(case: &super::multimodule_conformance_cases::Case) {
+/// A required inline dependency function whose body cannot become a template rejects its caller:
+/// it is never compiled as a direct call of the dependency function.
+// PLATFORM-SPECIFIC: Wasm expands required KLIB inline bodies in common IR; JVM uses bytecode.
+#[test]
+fn wasm_a_declined_required_inline_body_rejects_the_caller() {
+    let case = super::dependency_template_rejections::DECLINED_REQUIRED_INLINE_BODY;
+    super::box_reference_classes::checked_box(case.source, case.stem)
+        .expect("pinned kotlinc must run the required-inline rejection fixture");
     let modules = krusty::conformance::split_modules(case.source).expect("valid module test shape");
     let units = krusty::conformance::module_units(&modules);
     for target in WasmTarget::ALL {
         let lane = WasmLane { target };
-        if lane.not_applicable(case.source).is_some() {
-            continue;
-        }
         let stem = format!("{}-{}", target.name(), case.stem);
         if !focused_wasm_lane_available(&lane, &stem) {
             return;
         }
-        assert_eq!(
-            lane.compile_modules_and_run(&std::env::temp_dir(), &stem, &units, case.source,),
-            Outcome::Pass,
-            "{stem}: {} must run the exact separately analyzed module graph",
-            target.name()
+        let outcome =
+            lane.compile_modules_and_run(&std::env::temp_dir(), &stem, &units, case.source);
+        assert!(
+            matches!(&outcome, Outcome::Frontend(message)
+                if super::dependency_template_rejections::required_inline_rejection(message).is_some()),
+            "{stem}: {outcome:?}"
+        );
+    }
+}
+
+/// A required stdlib inline function whose template declines rejects its caller.
+// PLATFORM-SPECIFIC: this tests the Wasm KLIB template-decline contract, not Kotlin behavior.
+#[test]
+fn wasm_a_declined_required_stdlib_template_rejects_the_caller() {
+    super::dependency_template_rejections::verify_declined_stdlib_source_with_kotlinc();
+    let src = super::dependency_template_rejections::DECLINED_STDLIB_INLINE_BODY;
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        let stem = format!("{}-declinedRequiredStdlibTemplate", target.name());
+        if !focused_wasm_lane_available(&lane, &stem) {
+            return;
+        }
+        let outcome = lane.compile_and_run(
+            &std::env::temp_dir(),
+            &stem,
+            &[(format!("{stem}.kt"), src.to_string())],
+            src,
+        );
+        assert!(
+            matches!(&outcome, Outcome::Frontend(message)
+                if super::dependency_template_rejections::required_inline_rejection(message).is_some()),
+            "{stem}: {outcome:?}"
         );
     }
 }

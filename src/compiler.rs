@@ -4,6 +4,7 @@ mod backend_handoff;
 mod checked_body_observer;
 mod declaration_metadata;
 mod dependency_body_emission;
+mod dependency_inline_templates;
 mod diagnostic_recovery;
 mod emission_session;
 mod local_visibility;
@@ -166,14 +167,6 @@ fn emit_analyzed_into<B: Backend>(
         );
         return;
     }
-    if let Some(index) = reparse_sources.iter().position(|source| source.is_script()) {
-        diags.set_file(index as u32);
-        diags.error(
-            Span::new(0, 0),
-            "Kotlin scripts can be analyzed but cannot be emitted",
-        );
-        return;
-    }
     let (mut index, mut inline_bodies, mut default_arguments, mut source_map) = module.into_parts();
     let backend_module_facts = match crate::backend::BackendModuleFacts::from_resolved_index(&index)
     {
@@ -241,6 +234,8 @@ fn emit_analyzed_into<B: Backend>(
                     Span::new(0, 0),
                     format!("internal error: cannot initialize FIR lowering: {error:?}"),
                 );
+                // A failed source lowers nothing, so its checked defaults are dropped with it.
+                default_arguments.take_for_source(&index, source_id);
                 continue;
             }
         };
@@ -249,11 +244,21 @@ fn emit_analyzed_into<B: Backend>(
             &index,
             sink.ir_mut(),
         );
+        if backend.same_module_inlining() == crate::ir::SameModuleInlining::ExpandInIr {
+            if let Some(templates) = dependency_inline_templates::KlibInlineTemplates::of(
+                symbols.shared_semantic_platform(),
+            ) {
+                sink.provide_dependency_templates(std::rc::Rc::new(templates));
+            } else {
+                crate::trace_compiler!("lower", "the platform serializes no inline templates");
+            }
+        }
         if let Err(error) = sink.accept_inline_bodies(&index, &mut inline_bodies) {
             diags.error(
                 Span::new(0, 0),
                 format!("internal error: cannot consume inline FIR: {error:?}"),
             );
+            default_arguments.take_for_source(&index, source_id);
             continue;
         }
         // Stable callable defaults must precede ordinary body lowering: the tailrec transform
@@ -426,7 +431,7 @@ fn emit_analyzed_into<B: Backend>(
         if diags.has_errors() {
             continue;
         }
-        dependency_body_emission::emit_intrinsic_dependencies(
+        dependency_body_emission::emit_dependencies(
             &file,
             &symbols,
             &backend_module_facts,
@@ -1199,64 +1204,6 @@ pub fn check_frontend_only(
 
     for (raw_source, source) in reparse_sources.iter().enumerate() {
         if source.is_java() {
-            continue;
-        }
-        if source.is_script() {
-            // Scripts are not JVM emission units yet, but their executable body still belongs to
-            // frontend conformance. Reparse and check it in Pass 2 against the finalized module;
-            // do not retain its AST or invent a script FIR/backend path merely to obtain diagnostics.
-            let source_id = crate::fir::SourceFileId::from_raw(raw_source as u32);
-            diags.set_file(raw_source as u32);
-            let diagnostics_start = diags.diags.len();
-            let streamed_cache = crate::fir::StreamedModuleProjectionCache::default();
-            source.visit_diagnostic_units(
-                reparse_sources.features(),
-                diags,
-                |active_file, diags| {
-                    let mut cursor = crate::fir::ActiveSourceCursor::new(source_id, &index);
-                    let active = match cursor.bind_next(&active_file, source_id, &index) {
-                        Ok(active) if cursor.is_finished() => active,
-                        Ok(_) | Err(_) => {
-                            diags.error(
-                            Span::new(0, 0),
-                            "internal error: script declarations did not bind to the stable module",
-                        );
-                            return;
-                        }
-                    };
-                    let selected_spans = crate::fx_hash::HashSet::default();
-                    let selected_bodies = crate::fx_hash::HashSet::default();
-                    drop(crate::resolve::check_selected_declarations_in_pass_two(
-                        &active_file,
-                        raw_source as u32,
-                        &selected_spans,
-                        &selected_spans,
-                        &active,
-                        &selected_bodies,
-                        &mut symbols,
-                        &index,
-                        &streamed_cache,
-                        diags,
-                    ));
-                },
-            );
-            let reported = diags.diags[diagnostics_start..]
-                .iter()
-                .find(|diagnostic| diagnostic.severity == crate::diag::Severity::Error);
-            census.failures.push(FrontendFailure {
-                stage: FrontendStage::Check,
-                source: raw_source as u32,
-                span: reported.map(|diagnostic| diagnostic.span),
-                kind: if reported.is_some() {
-                    "Rejected".to_string()
-                } else {
-                    "UnsupportedScript".to_string()
-                },
-                detail: reported.map_or_else(
-                    || "Kotlin scripts are outside the production JVM body stream".to_string(),
-                    |diagnostic| diagnostic.msg.clone(),
-                ),
-            });
             continue;
         }
         let source_id = crate::fir::SourceFileId::from_raw(raw_source as u32);

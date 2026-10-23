@@ -7,11 +7,20 @@ use super::declaration_signatures::{SignedFunction, SignedProperty};
 use crate::fir::{ExternalCallableId, ExternalPropertyId, ResolvedParameterIdentity};
 use crate::libraries::{
     ExternalCallableKind, ExternalCallableRealization, ExternalPropertyRealization, FnKind,
-    FunctionInfo, KlibBodyCompanionReceiver, KlibDeclarationSignature, KlibDependencyCallable,
-    LibraryCallable, LibraryMember, PropertyInfo,
+    FunctionInfo, KlibBodyCompanionReceiver, KlibBodyDeclarationModifiers,
+    KlibDeclarationSignature, KlibDependencyCallable, LibraryCallable, LibraryMember, PropertyInfo,
 };
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::types::{SemanticCallableOwner, TypeName};
+
+#[derive(Default)]
+struct BodyContract {
+    vararg_index: Option<usize>,
+    parameter_defaults: Option<crate::libraries::ParamFlags>,
+    companion_receiver: Option<KlibBodyCompanionReceiver>,
+    type_parameters: Box<[crate::types::Ty]>,
+    declaration_modifiers: Option<KlibBodyDeclarationModifiers>,
+}
 
 /// One identity per exact declaration signature. The signature, not a spelling or a parameter
 /// tuple, decides whether two candidates are the same declaration.
@@ -33,6 +42,7 @@ impl ExternalIdentities {
         &self,
         signed: &SignedFunction,
         kind: ExternalCallableKind,
+        enclosing: &crate::libraries::EnclosingBounds,
         function: &mut FunctionInfo,
     ) {
         let companion_receiver = function
@@ -45,7 +55,25 @@ impl ExternalIdentities {
             &signed.parameters.physical,
             signed.internal_friend,
             signed.module.as_deref(),
-            companion_receiver,
+            BodyContract {
+                vararg_index: function.call_sig.vararg_index.map(|index| {
+                    index
+                        + usize::from(
+                            function.callable.source_receiver.is_some()
+                                && index >= function.callable.context_count,
+                        )
+                }),
+                companion_receiver,
+                parameter_defaults: None,
+                declaration_modifiers: Some(KlibBodyDeclarationModifiers::function(
+                    &signed.declaration,
+                )),
+                type_parameters: crate::libraries::declared_formal_types(
+                    &signed.declaration.formals,
+                    enclosing,
+                    &signed.type_parameters,
+                ),
+            },
             signed.direct_c_function.clone(),
             &mut function.callable,
         );
@@ -58,6 +86,7 @@ impl ExternalIdentities {
         &self,
         signed: &SignedProperty,
         kind: ExternalCallableKind,
+        enclosing: &crate::libraries::EnclosingBounds,
         property: &mut PropertyInfo,
     ) {
         let companion_receiver = property
@@ -70,7 +99,20 @@ impl ExternalIdentities {
             &signed.parameters.getter,
             signed.internal_friend,
             signed.module.as_deref(),
-            companion_receiver.clone(),
+            BodyContract {
+                vararg_index: None,
+                companion_receiver: companion_receiver.clone(),
+                parameter_defaults: None,
+                declaration_modifiers: Some(KlibBodyDeclarationModifiers::accessor(
+                    &signed.declaration,
+                    &signed.declaration.getter_modifiers,
+                )),
+                type_parameters: crate::libraries::declared_formal_types(
+                    &signed.declaration.formals,
+                    enclosing,
+                    &signed.type_parameters,
+                ),
+            },
             None,
             &mut property.getter,
         );
@@ -90,15 +132,36 @@ impl ExternalIdentities {
                 parameters,
                 signed.internal_friend,
                 signed.module.as_deref(),
-                companion_receiver,
+                BodyContract {
+                    vararg_index: None,
+                    companion_receiver,
+                    parameter_defaults: None,
+                    declaration_modifiers: Some(KlibBodyDeclarationModifiers::accessor(
+                        &signed.declaration,
+                        &signed.declaration.setter_modifiers,
+                    )),
+                    type_parameters: crate::libraries::declared_formal_types(
+                        &signed.declaration.formals,
+                        enclosing,
+                        &signed.type_parameters,
+                    ),
+                },
                 None,
                 setter,
             );
         }
         let identity = self.intern_property(signed, property);
-        property.getter.external_property_identity = Some(identity);
-        if let Some(setter) = &mut property.setter {
-            setter.external_property_identity = Some(identity);
+        // Each accessor's realization names its property, as the published accessor does.
+        let mut realizations = self.realizations.borrow_mut();
+        for accessor in std::iter::once(&mut property.getter).chain(property.setter.as_deref_mut())
+        {
+            accessor.external_property_identity = Some(identity);
+            if let Some(realization) = accessor
+                .external_identity
+                .and_then(|accessor| realizations.get_mut(accessor.raw() as usize))
+            {
+                realization.callable.external_property_identity = Some(identity);
+            }
         }
     }
 
@@ -120,7 +183,15 @@ impl ExternalIdentities {
             parameters,
             internal_friend,
             module,
-            None,
+            BodyContract {
+                vararg_index: constructor.call_sig.vararg_index,
+                parameter_defaults: Some(if constructor.call_sig.param_defaults.is_empty() {
+                    crate::libraries::ParamFlags::repeat(false, constructor.params.len())
+                } else {
+                    constructor.call_sig.param_defaults
+                }),
+                ..Default::default()
+            },
             None,
             &mut callable,
         );
@@ -148,7 +219,7 @@ impl ExternalIdentities {
             parameters,
             internal_friend,
             module,
-            None,
+            BodyContract::default(),
             None,
             &mut callable,
         );
@@ -199,7 +270,7 @@ impl ExternalIdentities {
         parameters: &[ResolvedParameterIdentity],
         internal_friend: bool,
         module: Option<&str>,
-        klib_body_companion_receiver: Option<KlibBodyCompanionReceiver>,
+        body: BodyContract,
         direct_c_function: Option<crate::libraries::DirectCFunction>,
         callable: &mut LibraryCallable,
     ) {
@@ -235,7 +306,12 @@ impl ExternalIdentities {
                 declaration: signature,
             }),
             direct_c_function,
-            klib_body_companion_receiver,
+            klib_body_companion_receiver: body.companion_receiver,
+            klib_body_type_parameters: body.type_parameters,
+            klib_body_declaration_modifiers: body.declaration_modifiers,
+            klib_body_class_contract: None,
+            klib_body_vararg_index: body.vararg_index,
+            klib_body_parameter_defaults: body.parameter_defaults,
         });
         self.by_signature.borrow_mut().insert(key, identity);
     }

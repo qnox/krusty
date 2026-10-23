@@ -22,6 +22,7 @@ mod inventory;
 mod lookup;
 pub(crate) mod parameter_defaults;
 mod platform;
+mod serialized_references;
 mod target_intrinsics;
 #[cfg(test)]
 mod tests;
@@ -35,6 +36,9 @@ pub use archives::{KlibLibrariesOpenError, KlibLibraryInput, KlibStdlibSemantics
 pub(crate) use declaration_bodies::KlibCalleeOrigin;
 pub use declaration_bodies::{KlibBodyLibrary, KlibDeclarationBodies, KlibDeclarationBodiesError};
 pub use declaration_signatures::KlibLibraryError;
+pub use serialized_references::{
+    KlibReferenceBinding, KlibReferenceBindings, KlibReferenceDispatch, KlibReferenceOrigin,
+};
 pub use target_intrinsics::{KlibIntrinsicCallable, KlibIntrinsicFacts};
 
 /// Declarations of a set of KLIB libraries, published as one symbol source.
@@ -45,6 +49,9 @@ pub use target_intrinsics::{KlibIntrinsicCallable, KlibIntrinsicFacts};
 pub struct KlibLibraries {
     inventory: std::rc::Rc<inventory::PackageInventory>,
     bodies: std::rc::Rc<KlibDeclarationBodies>,
+    /// The prepared-inline copies, the exclusive source of an inline function's cross-module body.
+    inline_bodies: std::rc::Rc<KlibDeclarationBodies>,
+    references: std::rc::Rc<KlibReferenceBindings>,
     body_snapshot: Option<crate::libraries::DependencyBodySnapshot>,
     identities: external_identities::ExternalIdentities,
     lookups: lookup::SymbolLookups,
@@ -89,11 +96,15 @@ impl KlibLibraries {
 
     /// The same declarations, for another compilation with no selected identities yet.
     pub fn for_compilation(&self) -> Self {
-        Self::over_with_bodies_and_snapshot(
-            std::rc::Rc::clone(&self.inventory),
-            std::rc::Rc::clone(&self.bodies),
-            self.body_snapshot.clone(),
-        )
+        Self {
+            inventory: std::rc::Rc::clone(&self.inventory),
+            bodies: std::rc::Rc::clone(&self.bodies),
+            inline_bodies: std::rc::Rc::clone(&self.inline_bodies),
+            references: std::rc::Rc::clone(&self.references),
+            body_snapshot: self.body_snapshot.clone(),
+            identities: external_identities::ExternalIdentities::default(),
+            lookups: lookup::SymbolLookups::default(),
+        }
     }
 
     fn over(inventory: std::rc::Rc<inventory::PackageInventory>) -> Self {
@@ -107,21 +118,31 @@ impl KlibLibraries {
         inventory: std::rc::Rc<inventory::PackageInventory>,
         bodies: std::rc::Rc<KlibDeclarationBodies>,
     ) -> Self {
-        Self::over_with_bodies_and_snapshot(inventory, bodies, None)
+        Self::over_with_bodies_and_snapshot(
+            inventory,
+            bodies,
+            std::rc::Rc::new(KlibDeclarationBodies::default()),
+            None,
+        )
     }
 
     fn over_with_bodies_and_snapshot(
         inventory: std::rc::Rc<inventory::PackageInventory>,
         bodies: std::rc::Rc<KlibDeclarationBodies>,
+        inline_bodies: std::rc::Rc<KlibDeclarationBodies>,
         body_snapshot: Option<crate::libraries::DependencyBodySnapshot>,
     ) -> Self {
-        Self {
+        let mut libraries = Self {
             inventory,
             bodies,
+            inline_bodies,
+            references: std::rc::Rc::default(),
             body_snapshot,
             identities: external_identities::ExternalIdentities::default(),
             lookups: lookup::SymbolLookups::default(),
-        }
+        };
+        libraries.references = std::rc::Rc::new(KlibReferenceBindings::freeze(&libraries));
+        libraries
     }
 
     /// Intrinsic declarations authenticated from the compilation-selected target stdlib.
@@ -132,6 +153,16 @@ impl KlibLibraries {
     /// Exact serialized bodies indexed from the same compilation inputs as the declarations.
     pub fn declaration_bodies(&self) -> &KlibDeclarationBodies {
         &self.bodies
+    }
+
+    /// The prepared-inline copies of the inline functions the same inputs declare.
+    pub fn inline_declaration_bodies(&self) -> &KlibDeclarationBodies {
+        &self.inline_bodies
+    }
+
+    /// Frozen serialized-reference bindings from the same archive generation as the bodies.
+    pub fn reference_bindings(&self) -> &KlibReferenceBindings {
+        &self.references
     }
 
     pub(crate) fn dependency_body_snapshot(
@@ -160,7 +191,20 @@ impl SymbolSource for KlibLibraries {
         &self,
         identity: crate::fir::ExternalCallableId,
     ) -> Option<crate::libraries::ExternalCallableRealization> {
-        self.identities.realization(identity)
+        let mut realization = self.identities.realization(identity)?;
+        if let Some((owner, class)) = realization
+            .dependency_callable
+            .as_ref()
+            .and_then(|identity| self.inventory.dependency_declaring_class(identity))
+        {
+            realization.klib_body_class_contract = Some(crate::libraries::KlibBodyClassContract {
+                module: class.module.clone()?,
+                signature: class.signature.clone(),
+                classifier: owner,
+                parameters: class.type_parameters.klib_body_parameters(),
+            });
+        }
+        Some(realization)
     }
 
     fn external_callable_by_dependency(
@@ -170,11 +214,49 @@ impl SymbolSource for KlibLibraries {
         crate::fir::ExternalCallableId,
         crate::libraries::ExternalCallableRealization,
     )> {
-        let (placement, signed) = self.inventory.dependency_function(identity)?;
-        let function =
-            lookup::published_function(&self.identities, signed, placement, &Default::default());
-        let external = function.callable.external_identity?;
-        let realization = self.identities.realization(external)?;
+        // A serialized identity names one declaration: a function, a property accessor or a
+        // constructor.
+        let external =
+            if let Some((placement, signed)) = self.inventory.dependency_function(identity) {
+                let package = crate::libraries::EnclosingBounds::default();
+                let enclosing = self
+                    .inventory
+                    .dependency_declaring_class(identity)
+                    .map_or(&package, |(_, class)| class.type_parameters.enclosing());
+                lookup::published_function(&self.identities, signed, placement, enclosing)
+                    .callable
+                    .external_identity?
+            } else if let Some((placement, signed, classifier)) =
+                self.inventory.dependency_property(identity)
+            {
+                let package = crate::libraries::EnclosingBounds::default();
+                let enclosing = classifier.map_or(&package, |classifier| {
+                    classifier.type_parameters.enclosing()
+                });
+                let property =
+                    lookup::published_property(&self.identities, signed, placement, enclosing);
+                // The accessor the identity serializes; the realization check below proves it.
+                let setter = signed.setter.as_ref().is_some_and(|setter| {
+                    identity.declaration
+                        == crate::libraries::KlibDeclarationSignature::Accessor(setter.clone())
+                });
+                if setter {
+                    property.setter?.external_identity?
+                } else {
+                    property.getter.external_identity?
+                }
+            } else {
+                let (owner, classifier, constructor) =
+                    self.inventory.dependency_constructor(identity)?;
+                classifier_records::published_constructor(
+                    &self.identities,
+                    owner,
+                    classifier,
+                    constructor,
+                )
+                .external_identity?
+            };
+        let realization = self.external_callable(external)?;
         (realization.dependency_callable.as_ref() == Some(identity))
             .then_some((external, realization))
     }

@@ -360,7 +360,7 @@ if [ -n "$gate" ]; then
   echo "run-tests.sh: conformance jvm-box" >&2
   KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS" \
     run_one \
-      "$logdir" "$gate::--exact kotlin_codegen_box_conformance::kotlin_codegen_box_conformance --test-threads=1" \
+      "$logdir" "$gate::--exact kotlin_box_ir_jvm_conformance::kotlin_codegen_box_conformance --test-threads=1" \
       "jvm-box"
   # The native box lane compiles, links and runs every accepted case in one process under its own
   # suite-wide deadline. It reads the same committed platform/version expectations locally and in
@@ -380,14 +380,6 @@ if [ -n "$gate" ]; then
       "$logdir" \
       "$gate::kotlin_box_native_conformance:: --skip kotlin_box_native_conformance::kotlin_codegen_box_native_conformance --test-threads=1" \
       "native-focused"
-  echo "run-tests.sh: conformance native-multimodule" >&2
-  KRUSTY_REQUIRE_NATIVE_CONFORMANCE=1 \
-    KRUSTY_MULTIMODULE_CONFORMANCE_RUNNER=native \
-    KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_TARGET_CONFORMANCE_TIMEOUT_SECONDS" \
-    run_one \
-      "$logdir" \
-      "$gate::multimodule_conformance_cases:: --test-threads=1" \
-      "native-multimodule"
   # The two Wasm corpus lanes run every accepted case under Node.js. Their focused companion pass
   # below requires both target setups, matching the Wasm CI row.
   for lane in wasm_js wasm_wasi; do
@@ -407,17 +399,7 @@ if [ -n "$gate" ]; then
       "$logdir" \
       "$gate::kotlin_box_wasm_conformance:: --skip kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_js_conformance --skip kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_wasi_conformance --test-threads=1" \
       "wasm-focused"
-  echo "run-tests.sh: conformance wasm-multimodule" >&2
-  KRUSTY_REQUIRE_WASM_JS_CONFORMANCE=1 \
-    KRUSTY_REQUIRE_WASM_WASI_CONFORMANCE=1 \
-    KRUSTY_MULTIMODULE_CONFORMANCE_RUNNER=wasm \
-    KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_TARGET_CONFORMANCE_TIMEOUT_SECONDS" \
-    run_one \
-      "$logdir" \
-      "$gate::multimodule_conformance_cases:: --test-threads=1" \
-      "wasm-multimodule"
-  KRUSTY_MULTIMODULE_CONFORMANCE_RUNNER=jvm \
-    KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS" \
+  KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS" \
     run_one "$logdir" "$gate::--skip kotlin_codegen_box_conformance --skip kotlin_box_native_conformance:: --skip kotlin_box_wasm_conformance:: --test-threads=$conf_threads"
 fi
 jobs="${KRUSTY_TEST_JOBS:-$ncpu}"

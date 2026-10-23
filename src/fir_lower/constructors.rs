@@ -8,7 +8,7 @@ use crate::ir::{
 use super::checked_arguments::{
     materialize_checked_arguments, CheckedArgumentSlot, CheckedArgumentValue,
 };
-use super::{lower_body_with_context, FirFileLoweringFailure, LocalCallableLoweringContext};
+use super::{lower_body_with_context, FileLoweringContext, FirFileLoweringFailure};
 
 #[cfg(test)]
 mod enclosing_superclass_capture_tests;
@@ -1255,7 +1255,7 @@ pub(super) fn accept_constructor_body(
     body: FirBody,
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
-    local_callables: &mut LocalCallableLoweringContext,
+    local_callables: &mut FileLoweringContext,
 ) -> Result<(), FirFileLoweringFailure> {
     let default_fragment = body.is_default_fragment();
     let constructor_capture_parameter_count = body.constructor_capture_parameter_count() as usize;
@@ -1463,6 +1463,9 @@ pub(super) fn accept_constructor_body(
                 0
             };
         let semantic_prefix_count = published_capture_parameter_count + classifier_context_count;
+        // A script class keeps each constructor parameter in a field of its own, beside the
+        // template's copy that the script body reads.
+        let script = classifier_flags.has(crate::fir::DeclarationFlags::SCRIPT);
         let declared_arguments = parameters
             .iter()
             .zip(&semantic_parameters)
@@ -1470,13 +1473,22 @@ pub(super) fn accept_constructor_body(
             .skip(semantic_prefix_count)
             .map(|(((name, ty), semantic_ty), parameter)| {
                 let flags = parameter.flags();
+                let script_field = (script && !flags.is_property()).then(|| {
+                    let field = u32::try_from(class.fields.len()).expect("too many class fields");
+                    class.fields.push(
+                        crate::ir::IrField::new(name.clone(), *ty)
+                            .with_is_final(true)
+                            .with_is_private(false),
+                    );
+                    field
+                });
                 IrCtorArg {
                     name: Some(name.clone()),
                     context_kind: crate::types::ContextParameterKind::None,
                     ty: *ty,
                     declared_ty: Some(*semantic_ty),
-                    is_field: flags.is_property(),
-                    field_index: None,
+                    is_field: flags.is_property() || script_field.is_some(),
+                    field_index: script_field,
                     has_default: flags.has_default(),
                     is_vararg: flags.is_vararg(),
                     type_param: (!flags.is_vararg())
