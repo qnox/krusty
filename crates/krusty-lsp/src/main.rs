@@ -3,7 +3,9 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 mod analysis_group;
-use analysis_group::{project_group_inputs, project_group_uris, ProjectAnalysisGroup};
+use analysis_group::{
+    project_group_inputs, project_group_script_stems, project_group_uris, ProjectAnalysisGroup,
+};
 mod canonical_support;
 use canonical_support::{register_canonical_support, OpenDocumentSlots};
 use std::io;
@@ -834,6 +836,8 @@ fn main() {
 struct AnalysisPayload<'a> {
     sources: &'a [String],
     source_kinds: &'a [SourceKind],
+    /// Parallel to `sources`: each script's file stem, which names its class.
+    file_stems: &'a [Option<String>],
     /// Parallel to `sources`. Empty for a slot whose text was blanked out because the document
     /// belongs to another analysis group, so such a slot never matches a dump request.
     uris: &'a [String],
@@ -849,6 +853,7 @@ struct AnalysisPayload<'a> {
 struct RetainedGroup {
     sources: Vec<String>,
     source_kinds: Vec<SourceKind>,
+    file_stems: Vec<Option<String>>,
     uris: Vec<String>,
     result_count: usize,
     inferred_count: usize,
@@ -867,6 +872,7 @@ fn retained_group_fingerprint(payload: &AnalysisPayload<'_>) -> u64 {
     for kind in payload.source_kinds {
         kind.wire_code().hash(&mut fingerprint);
     }
+    payload.file_stems.hash(&mut fingerprint);
     payload.uris.hash(&mut fingerprint);
     payload.result_count.hash(&mut fingerprint);
     payload.inferred_count.hash(&mut fingerprint);
@@ -898,6 +904,14 @@ fn retained_payload_bytes(payload: &AnalysisPayload<'_>) -> usize {
     std::mem::size_of::<RetainedGroup>()
         .saturating_add(strings(payload.sources))
         .saturating_add(std::mem::size_of_val(payload.source_kinds))
+        .saturating_add(std::mem::size_of_val(payload.file_stems))
+        .saturating_add(
+            payload
+                .file_stems
+                .iter()
+                .flatten()
+                .fold(0usize, |bytes, stem| bytes.saturating_add(stem.len())),
+        )
         .saturating_add(strings(payload.uris))
         .saturating_add(strings(payload.java_sources))
         .saturating_add(strings(payload.language_arguments))
@@ -920,6 +934,7 @@ impl RetainedGroup {
         DumpTarget {
             sources: &self.sources,
             source_kinds: &self.source_kinds,
+            file_stems: &self.file_stems,
             target,
             label,
             cache_key,
@@ -982,6 +997,7 @@ impl RetainedAnalysis {
         self.groups.push(RetainedGroup {
             sources: payload.sources.to_vec(),
             source_kinds: payload.source_kinds.to_vec(),
+            file_stems: payload.file_stems.to_vec(),
             uris: payload.uris.to_vec(),
             result_count: payload.result_count,
             inferred_count: payload.inferred_count,
@@ -1761,13 +1777,18 @@ impl krusty_lsp::Analysis for WorkerHost {
                 )
             });
             if let Some((classpath, language_arguments)) = group_config.as_ref() {
-                let inputs = project_group_inputs(documents, &group);
+                let script_stems = project_group_script_stems(documents, &group);
+                let inputs = project_group_inputs(documents, &group, &script_stems);
                 let retained_uris = project_group_uris(documents, &group);
                 let retained_sources = inputs
                     .iter()
                     .map(|input| input.text.to_string())
                     .collect::<Vec<_>>();
                 let retained_kinds = inputs.iter().map(|input| input.kind).collect::<Vec<_>>();
+                let retained_stems = inputs
+                    .iter()
+                    .map(|input| input.file_stem.map(str::to_string))
+                    .collect::<Vec<_>>();
                 let retained_java = group
                     .java_sources
                     .iter()
@@ -1778,6 +1799,7 @@ impl krusty_lsp::Analysis for WorkerHost {
                     &AnalysisPayload {
                         sources: &retained_sources,
                         source_kinds: &retained_kinds,
+                        file_stems: &retained_stems,
                         uris: &retained_uris,
                         result_count: documents.len(),
                         inferred_count: documents.len() + group.inferred_support_count,
@@ -1805,7 +1827,8 @@ impl krusty_lsp::Analysis for WorkerHost {
                         &self.options,
                     )
                 });
-                let inputs = project_group_inputs(documents, &group);
+                let script_stems = project_group_script_stems(documents, &group);
+                let inputs = project_group_inputs(documents, &group, &script_stems);
                 let result = self.worker.analyze_inputs_prefix_with_config(
                     &inputs,
                     documents.len(),
@@ -2360,7 +2383,8 @@ mod tests {
             Vec::new(),
             Vec::new(),
         );
-        let texts = project_group_inputs(&documents, &group)
+        let texts_stems = project_group_script_stems(&documents, &group);
+        let texts = project_group_inputs(&documents, &group, &texts_stems)
             .iter()
             .map(|input| input.text)
             .collect::<Vec<_>>();
@@ -2458,7 +2482,9 @@ mod tests {
             Vec::new(),
             vec![(3, 4), (4, 0)],
         );
-        let dependency_inputs = project_group_inputs(&documents, &dependency_group);
+        let dependency_inputs_stems = project_group_script_stems(&documents, &dependency_group);
+        let dependency_inputs =
+            project_group_inputs(&documents, &dependency_group, &dependency_inputs_stems);
         assert_eq!(
             dependency_inputs
                 .iter()
@@ -2466,7 +2492,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             [documents[0].1, "", "", dependency_support.1]
         );
-        let consumer_inputs = project_group_inputs(&documents, &consumer_group);
+        let consumer_inputs_stems = project_group_script_stems(&documents, &consumer_group);
+        let consumer_inputs =
+            project_group_inputs(&documents, &consumer_group, &consumer_inputs_stems);
         assert_eq!(
             consumer_inputs
                 .iter()
@@ -2809,7 +2837,9 @@ mod tests {
             (consumer_uri.as_str(), "fun consumer() {}"),
         ];
 
-        let inputs = project_group_inputs(&documents, &group);
+        let script_stems = project_group_script_stems(&documents, &group);
+
+        let inputs = project_group_inputs(&documents, &group, &script_stems);
         let uris = project_group_uris(&documents, &group);
 
         assert_eq!(
@@ -2852,7 +2882,8 @@ mod tests {
             (unowned_uri.as_str(), "fun unowned() {}"),
             (consumer_uri.as_str(), "fun consumer() {}"),
         ];
-        let inputs = project_group_inputs(&documents, &group);
+        let script_stems = project_group_script_stems(&documents, &group);
+        let inputs = project_group_inputs(&documents, &group, &script_stems);
         let uris = project_group_uris(&documents, &group);
         let sources = inputs
             .iter()
@@ -2872,6 +2903,7 @@ mod tests {
             &AnalysisPayload {
                 sources: &sources,
                 source_kinds: &kinds,
+                file_stems: &[],
                 uris: &uris,
                 result_count: documents.len(),
                 inferred_count: documents.len() + group.inferred_support_count,
@@ -2899,6 +2931,7 @@ mod tests {
             &AnalysisPayload {
                 sources: &[source.to_string()],
                 source_kinds: &[SourceKind::Kotlin],
+                file_stems: &[],
                 uris: &[uri.to_string()],
                 result_count: 1,
                 inferred_count: 1,
@@ -2950,6 +2983,7 @@ mod tests {
             AnalysisPayload {
                 sources: source,
                 source_kinds: kinds,
+                file_stems: &[],
                 uris,
                 result_count: 1,
                 inferred_count: 1,
@@ -3143,6 +3177,7 @@ mod tests {
             &AnalysisPayload {
                 sources: &sources,
                 source_kinds: &[SourceKind::Kotlin],
+                file_stems: &[],
                 uris: &uris,
                 result_count: 1,
                 inferred_count: 1,
@@ -3177,6 +3212,7 @@ mod tests {
             &AnalysisPayload {
                 sources: &sources,
                 source_kinds: &source_kinds,
+                file_stems: &[],
                 uris: &uris,
                 result_count: 2,
                 inferred_count: 3,

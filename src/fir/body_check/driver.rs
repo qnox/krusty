@@ -84,9 +84,7 @@ fn property_for_work<'a>(
     let declaration = match work.kind {
         BodyKind::Initializer | BodyKind::Delegate => work.declaration,
         BodyKind::Getter | BodyKind::Setter => index.declaration_anchor(work.declaration)?.owner?,
-        BodyKind::Function | BodyKind::EnumEntry | BodyKind::Constructor | BodyKind::Script => {
-            return None
-        }
+        BodyKind::Function | BodyKind::EnumEntry | BodyKind::Constructor => return None,
     };
     let property = match active {
         Some(active) => active.property(file, declaration)?,
@@ -108,7 +106,7 @@ fn property_body_root(property: &PropDecl, kind: BodyKind) -> Option<crate::ast:
             .as_ref()
             .and_then(|setter| setter.body.as_ref())
             .and_then(fun_body_root),
-        BodyKind::Function | BodyKind::EnumEntry | BodyKind::Constructor | BodyKind::Script => None,
+        BodyKind::Function | BodyKind::EnumEntry | BodyKind::Constructor => None,
     }
 }
 
@@ -179,7 +177,8 @@ fn class_initialization_parameters<'a>(
                 span: parameter.span,
                 context_kind: crate::types::ContextParameterKind::None,
                 inline_modifier: crate::types::InlineParameterModifier::None,
-                name_binding: if parameter.is_property {
+                // A script's statements see its template's members, not its own parameters.
+                name_binding: if parameter.is_property || parameter.is_script_parameter {
                     super::CheckedBodyParameterNameBinding::PhysicalOnly
                 } else {
                     super::CheckedBodyParameterNameBinding::Lexical
@@ -380,22 +379,6 @@ fn check_and_dispatch_body_in_session_with_source(
                 session,
                 active,
             )
-        }
-        BodyKind::Script => {
-            let root = file
-                .script_body
-                .ok_or(CheckedBodyDriverFailure::MissingBody)?;
-            let body = check_expression_body_with_parameters_in_session(
-                unit,
-                work.owner,
-                root,
-                &[],
-                origins,
-                session,
-            )
-            .map_err(CheckedBodyDriverFailure::Check)?;
-            ordinary_sink.accept(work.owner, body);
-            Ok(())
         }
         BodyKind::EnumEntry => check_and_dispatch_enum_entry(
             EnumEntryBodySource {
@@ -730,8 +713,7 @@ fn check_and_dispatch_property_body(
                 | BodyKind::Setter
                 | BodyKind::Function
                 | BodyKind::EnumEntry
-                | BodyKind::Constructor
-                | BodyKind::Script => None,
+                | BodyKind::Constructor => None,
             },
         },
         CheckedBodySignature {
@@ -768,7 +750,7 @@ fn check_and_dispatch_property_body(
             super::delegates::property_delegate_plan(file, info, index, root, property.is_var)
                 .map_err(CheckedBodyDriverFailure::Check)?,
         ),
-        BodyKind::Function | BodyKind::EnumEntry | BodyKind::Constructor | BodyKind::Script => {
+        BodyKind::Function | BodyKind::EnumEntry | BodyKind::Constructor => {
             return Err(CheckedBodyDriverFailure::UnsupportedBodyKind(work.kind));
         }
     }

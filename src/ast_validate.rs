@@ -473,7 +473,6 @@ impl File {
         for (index, alias) in self.type_alias_decls.iter().enumerate() {
             type_alias(source, alias, &format!("file type alias {index}"))?;
         }
-        exprs(self, self.script_body, "script body")?;
         annotation_args(
             self,
             &self

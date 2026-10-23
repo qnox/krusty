@@ -68,6 +68,9 @@ impl WorkerAnalysisOptions<'static> {
 struct AnalysisRequest<'a, J> {
     sources: &'a [&'a str],
     source_kinds: &'a [u8],
+    /// File stems parallel to `sources`. A script's class is named after its file, so a script
+    /// cannot be analyzed without one.
+    file_stems: &'a [Option<&'a str>],
     result_count: usize,
     inferred_count: usize,
     language: WireLanguage,
@@ -84,6 +87,8 @@ struct OwnedAnalysisRequest {
     sources: Vec<String>,
     #[serde(default)]
     source_kinds: Vec<u8>,
+    #[serde(default)]
+    file_stems: Vec<Option<String>>,
     result_count: usize,
     #[serde(default)]
     inferred_count: Option<usize>,
@@ -96,6 +101,30 @@ struct OwnedAnalysisRequest {
     /// Absent means a full analysis. Older supervisors, and every interactive request, omit it.
     #[serde(default)]
     diagnostics_only: bool,
+}
+
+/// Give each input its file stem. No stems at all leaves every input unnamed; otherwise the stems
+/// must align with the inputs.
+fn with_file_stems<'a>(
+    inputs: Vec<SourceInput<'a>>,
+    file_stems: &'a [Option<String>],
+) -> Option<Vec<SourceInput<'a>>> {
+    if file_stems.is_empty() {
+        return Some(inputs);
+    }
+    if file_stems.len() != inputs.len() {
+        return None;
+    }
+    Some(
+        inputs
+            .into_iter()
+            .zip(file_stems)
+            .map(|(input, stem)| match stem {
+                Some(stem) => input.with_file_stem(stem),
+                None => input,
+            })
+            .collect(),
+    )
 }
 
 fn is_false(value: &bool) -> bool {
@@ -250,6 +279,8 @@ pub struct DumpTarget<'a> {
     pub sources: &'a [String],
     /// Kinds parallel to `sources`. Empty means every source is Kotlin.
     pub source_kinds: &'a [SourceKind],
+    /// File stems parallel to `sources`. Empty means no source has one.
+    pub file_stems: &'a [Option<String>],
     /// Index into `sources` of the file to render.
     pub target: usize,
     /// Workspace-relative presentation label shown in the dump heading.
@@ -504,12 +535,17 @@ fn encode_request<J: AsRef<str> + Serialize>(
         .iter()
         .map(|source| source.kind.wire_code())
         .collect::<Vec<_>>();
+    let file_stems = inputs
+        .iter()
+        .map(|source| source.file_stem)
+        .collect::<Vec<_>>();
     let mut request = BoundedVec::new(MAX_WORKER_MESSAGE_BYTES);
     serde_json::to_writer(
         &mut request,
         &AnalysisRequest {
             sources: &sources,
             source_kinds: &source_kinds,
+            file_stems: &file_stems,
             result_count,
             inferred_count,
             language: WireLanguage::of(language),
@@ -574,6 +610,11 @@ fn encode_dump_request(
         .iter()
         .map(|kind| kind.wire_code())
         .collect::<Vec<_>>();
+    let file_stems = target
+        .file_stems
+        .iter()
+        .map(Option::as_deref)
+        .collect::<Vec<_>>();
     let language = match target.language_arguments {
         Some(arguments) => language_settings_of(arguments)?,
         None => session_language.clone(),
@@ -582,6 +623,7 @@ fn encode_dump_request(
         analysis: AnalysisRequest {
             sources: &sources,
             source_kinds: &source_kinds,
+            file_stems: &file_stems,
             result_count: target.result_count,
             inferred_count: target.inferred_count,
             language: WireLanguage::of(&language),
@@ -1243,6 +1285,12 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
                 Ok(SourceInput::new(kind, source))
             })
             .collect::<io::Result<Vec<_>>>()?;
+        let inputs = with_file_stems(inputs, &request.file_stems).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "analysis file stems do not align with source texts",
+            )
+        })?;
         let sources = inputs.iter().map(|input| input.text).collect::<Vec<_>>();
         let java_documents = inputs
             .iter()
@@ -1419,6 +1467,9 @@ fn render_dump_request(
         .zip(&kinds)
         .map(|(source, kind)| SourceInput::new(*kind, source))
         .collect::<Vec<_>>();
+    let Some(inputs) = with_file_stems(inputs, &request.analysis.file_stems) else {
+        return (None, None);
+    };
 
     let Ok(language) = WireLanguage::settings(request.analysis.language.as_ref()) else {
         return (None, None);
@@ -1927,6 +1978,7 @@ mod tests {
             &DumpTarget {
                 sources: &sources,
                 source_kinds: &[SourceKind::Kotlin],
+                file_stems: &[],
                 target: 0,
                 label: "src/Main.kt",
                 cache_key,
@@ -2251,6 +2303,7 @@ mod tests {
         let target = DumpTarget {
             sources: &sources,
             source_kinds: &[SourceKind::Kotlin, SourceKind::Java],
+            file_stems: &[],
             target: 0,
             label: "src/Main.kt",
             cache_key: "file:///workspace/src/Main.kt",
@@ -2305,6 +2358,7 @@ mod tests {
         let target = DumpTarget {
             sources: &sources,
             source_kinds: &[SourceKind::Kotlin],
+            file_stems: &[],
             target: 0,
             label: "src/Main.kt",
             cache_key: "file:///workspace/src/Main.kt",
@@ -2343,6 +2397,7 @@ mod tests {
                 "analysis": {
                     "sources": ["fun render(value: String): String = value\nrender(\"sample\")"],
                     "source_kinds": [SourceKind::KotlinScript.wire_code()],
+                    "file_stems": ["build.gradle"],
                     "result_count": 1,
                 },
                 "target": 0,
@@ -2468,6 +2523,7 @@ mod tests {
         let request = serde_json::to_vec(&AnalysisRequest {
             sources: &sources,
             source_kinds: &source_kinds,
+            file_stems: &[],
             result_count: sources.len(),
             inferred_count: sources.len(),
             language: WireLanguage::of(&LanguageSettings::default()),
@@ -2510,6 +2566,7 @@ mod tests {
         let request = serde_json::to_vec(&AnalysisRequest {
             sources: &sources,
             source_kinds: &[0],
+            file_stems: &[],
             result_count: 1,
             inferred_count: 1,
             language: WireLanguage::of(&LanguageSettings::default()),
@@ -2552,6 +2609,7 @@ mod tests {
         let full = serde_json::to_vec(&AnalysisRequest {
             sources: &sources,
             source_kinds: &[0],
+            file_stems: &[],
             result_count: 1,
             inferred_count: 1,
             language: WireLanguage::of(&LanguageSettings::default()),
@@ -2589,6 +2647,7 @@ mod tests {
         let request = serde_json::to_vec(&AnalysisRequest {
             sources: &sources,
             source_kinds: &[0],
+            file_stems: &[],
             result_count: 1,
             inferred_count: 1,
             language: WireLanguage::of(&LanguageSettings::default()),
@@ -2708,6 +2767,7 @@ mod tests {
         let request = serde_json::to_vec(&AnalysisRequest {
             sources: &sources,
             source_kinds: &[0],
+            file_stems: &[],
             result_count: 1,
             inferred_count: 1,
             language: WireLanguage::of(&LanguageSettings::default()),
@@ -2761,6 +2821,7 @@ mod tests {
         let request = serde_json::to_vec(&AnalysisRequest {
             sources: &sources,
             source_kinds: &source_kinds,
+            file_stems: &[],
             result_count: sources.len(),
             inferred_count: sources.len(),
             language: WireLanguage::of(&LanguageSettings::default()),
@@ -2794,6 +2855,7 @@ mod tests {
         let request = serde_json::to_vec(&AnalysisRequest {
             sources: &sources,
             source_kinds: &source_kinds,
+            file_stems: &[],
             result_count: sources.len(),
             inferred_count: sources.len(),
             language: WireLanguage::of(&LanguageSettings::default()),
@@ -2853,6 +2915,7 @@ fun combine(entries: Array<Entry>): String {
         let request = serde_json::to_vec(&AnalysisRequest {
             sources: &sources,
             source_kinds: &source_kinds,
+            file_stems: &[],
             result_count: sources.len(),
             inferred_count: sources.len(),
             language: WireLanguage::of(
@@ -2881,6 +2944,7 @@ fun combine(entries: Array<Entry>): String {
         let request = serde_json::to_vec(&AnalysisRequest {
             sources: &sources,
             source_kinds: &[krusty::source::SourceKind::KotlinScript.wire_code()],
+            file_stems: &[Some("script")],
             result_count: 1,
             inferred_count: 1,
             language: WireLanguage::of(&LanguageSettings::default()),

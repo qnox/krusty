@@ -167,7 +167,6 @@ pub(super) fn published_function(
         enclosing,
     );
     function.default_values = signed.defaults.clone();
-    function.callable.inline_body_plan = signed.inline_body_plan.clone();
     // A KLIB declaration's implementation is its serialized IR body unless provider normalization
     // authenticated an exact shared builtin or target-stdlib intrinsic declaration.
     match placement {
@@ -177,8 +176,8 @@ pub(super) fn published_function(
             &signed.signature,
             &mut function,
         ),
-        // Publish the same authenticated operation with the source declaration and both
-        // frozen identity lookups, rather than attaching it after identity assignment.
+        // Before the identity is assigned, so the realization every consumer of that identity
+        // reads — a source call's and an expanded template's alike — carries the operation.
         CallablePlacement::Member { owner, .. } => builtin_realizations::realize_member(
             owner,
             signed.compiler_builtin_owner,
@@ -194,7 +193,7 @@ pub(super) fn published_function(
         }
     }
     let kind = realization_kind(placement, function.kind == FnKind::Extension);
-    identities.assign_function(signed, kind, &mut function);
+    identities.assign_function(signed, kind, enclosing, &mut function);
     function
 }
 
@@ -221,8 +220,21 @@ pub(super) fn published_property(
     );
     // As for functions, the implementation is the serialized IR body of each accessor, unless
     // the property is a builtin.
-    if let CallablePlacement::Package(package) = placement {
-        builtin_realizations::realize_package_property(package, &mut property);
+    match placement {
+        CallablePlacement::Package(package) => {
+            builtin_realizations::realize_package_property(package, &mut property)
+        }
+        CallablePlacement::Member { owner, .. } => {
+            builtin_realizations::realize_member_property(owner, &mut property)
+        }
+        CallablePlacement::Associated { .. } => {}
+    }
+    if let CallablePlacement::Member { owner, .. } = placement {
+        builtin_realizations::realize_throwable_property(
+            owner,
+            signed.compiler_builtin_owner,
+            &mut property,
+        );
     }
     if let CallablePlacement::Member { owner, .. } = placement {
         builtin_realizations::realize_throwable_property(
@@ -232,7 +244,7 @@ pub(super) fn published_property(
         );
     }
     let kind = realization_kind(placement, property.receiver.is_some());
-    identities.assign_property(signed, kind, &mut property);
+    identities.assign_property(signed, kind, enclosing, &mut property);
     property
 }
 

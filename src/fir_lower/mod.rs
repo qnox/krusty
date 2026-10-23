@@ -34,6 +34,7 @@ mod construction_target_tests;
 mod constructors;
 mod data_classes;
 mod delegated_properties;
+mod dependency_templates;
 #[cfg(test)]
 mod entry_point_tests;
 mod erased_parameters;
@@ -82,6 +83,7 @@ mod when_expressions;
 mod when_result_type_tests;
 mod with_index_loops;
 
+pub use dependency_templates::{DependencyInlineTemplate, DependencyInlineTemplates};
 pub use error::*;
 pub use sink::*;
 
@@ -177,24 +179,22 @@ pub fn lower_body(
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
 ) -> Result<LoweredFirBody, FirLoweringFailure> {
-    lower_body_with_context(
-        body,
-        index,
-        ir,
-        &mut LocalCallableLoweringContext::default(),
-    )
+    lower_body_with_context(body, index, ir, &mut FileLoweringContext::default())
 }
 
+/// What lowering one file's bodies carries from one body to the next: the realizations of the
+/// body-local callables lowered so far, and the inline dependency templates asked for so far.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct LocalCallableLoweringContext {
+pub(crate) struct FileLoweringContext {
     realizations: HashMap<crate::fir::BodyLocalCallableDeclarationId, LocalCallableRealization>,
+    dependency_templates: dependency_templates::DependencyTemplateCache,
 }
 
 pub(crate) fn lower_body_with_context(
     body: FirBody,
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
-    local_callables: &mut LocalCallableLoweringContext,
+    local_callables: &mut FileLoweringContext,
 ) -> Result<LoweredFirBody, FirLoweringFailure> {
     let owner = body.owner();
     ir.source_line_count = ir.source_line_count.max(body.source_line_count());
@@ -213,12 +213,25 @@ pub(crate) fn lower_body_with_context(
         index,
         ir,
         has_dispatch_receiver,
-        HashMap::default(),
-        vec![HashMap::default()],
-        local_callables.realizations.clone(),
+        BodyScopes {
+            capture_slots: HashMap::default(),
+            local_callable_scopes: vec![HashMap::default()],
+            published_local_callables: local_callables.realizations.clone(),
+        },
+        &mut local_callables.dependency_templates,
     );
     let root_is_default = body.is_default_fragment();
     lowering.expansion_enclosure = root_enclosure(index, lowering.ir, declaration);
+    lowering.allows_empty_inline_caller_name = matches!(
+        lowering.expansion_enclosure,
+        Some(
+            crate::ir::IrEnclosure::Constructor { .. }
+                | crate::ir::IrEnclosure::File
+                | crate::ir::IrEnclosure::ClassInitializer(_)
+                | crate::ir::IrEnclosure::Classifier(_)
+                | crate::ir::IrEnclosure::PropertyAccessor { .. }
+        )
+    );
     lowering.inline_declaration = index
         .declaration_header(declaration)
         .filter(|header| header.flags.has(crate::fir::DeclarationFlags::INLINE))
@@ -353,6 +366,8 @@ struct BodyLowering<'a> {
     local_callable_scopes: Vec<HashMap<crate::fir::LocalCallableId, LocalCallableRealization>>,
     published_local_callables:
         HashMap<crate::fir::BodyLocalCallableDeclarationId, LocalCallableRealization>,
+    /// The inline dependency templates this file's calls expand.
+    dependency_templates: &'a mut dependency_templates::DependencyTemplateCache,
     control_path: Vec<crate::fir::LocalCallableId>,
     /// Nesting depth of the recursive expression funnel, used to decide when to re-check the
     /// remaining stack. See [`BodyLowering::expression`].
@@ -362,6 +377,9 @@ struct BodyLowering<'a> {
     /// The declaration whose body or default fragment contains an inline expansion. Unlike
     /// `enclosure`, this retains a default fragment's lexical callable/constructor identity.
     expansion_enclosure: Option<crate::ir::IrEnclosure>,
+    /// A checked nameless root context, inherited through source lambdas but not named local
+    /// functions. Such a lambda legitimately has no source caller-name segment for inline copies.
+    allows_empty_inline_caller_name: bool,
     /// Checked source inline declaration whose body copies this nested callable and its locals.
     inline_declaration: Option<crate::ir::IrInlineDeclaration>,
     /// The values of this body that hold an inline parameter of that declaration.
@@ -584,19 +602,29 @@ struct CapturedDeclaration {
     declaration: crate::ir::IrCapturedDeclaration,
 }
 
+/// The captures and local callables a body is lowered within: its own capture slots, the local
+/// callables of each enclosing scope, and those the file has published so far.
+struct BodyScopes {
+    capture_slots: HashMap<(u32, crate::fir::FirCaptureSource), CaptureSlot>,
+    local_callable_scopes: Vec<HashMap<crate::fir::LocalCallableId, LocalCallableRealization>>,
+    published_local_callables:
+        HashMap<crate::fir::BodyLocalCallableDeclarationId, LocalCallableRealization>,
+}
+
 impl<'a> BodyLowering<'a> {
     fn new(
         body: &'a FirBody,
         index: &'a ResolvedModuleIndex,
         ir: &'a mut IrFile,
         has_dispatch_receiver: bool,
-        capture_slots: HashMap<(u32, crate::fir::FirCaptureSource), CaptureSlot>,
-        local_callable_scopes: Vec<HashMap<crate::fir::LocalCallableId, LocalCallableRealization>>,
-        published_local_callables: HashMap<
-            crate::fir::BodyLocalCallableDeclarationId,
-            LocalCallableRealization,
-        >,
+        scopes: BodyScopes,
+        dependency_templates: &'a mut dependency_templates::DependencyTemplateCache,
     ) -> Self {
+        let BodyScopes {
+            capture_slots,
+            local_callable_scopes,
+            published_local_callables,
+        } = scopes;
         let context_parameter_count = u32::try_from(body.context_receiver_types().len())
             .expect("too many FIR context parameters");
         let context_value_count = body.context_value_count();
@@ -654,9 +682,11 @@ impl<'a> BodyLowering<'a> {
             local_class_captures: HashMap::default(),
             local_callable_scopes,
             published_local_callables,
+            dependency_templates,
             control_path: Vec::new(),
             enclosure: None,
             expansion_enclosure: None,
+            allows_empty_inline_caller_name: false,
             inline_declaration: None,
             inline_parameter_values: Default::default(),
             callables_reading_inline_parameters: Default::default(),

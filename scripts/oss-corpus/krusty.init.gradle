@@ -7,16 +7,16 @@ settingsEvaluated { s ->
 }
 gradle.rootProject { p ->
     p.buildscript.repositories { maven { url = repo } }
-    p.buildscript.dependencies { classpath "dev.krusty:krusty-gradle-plugin:$version" }
+    p.buildscript.dependencies { classpath "dev.krustythecompiler:krusty-gradle-plugin:$version" }
 }
 gradle.allprojects { p ->
-    p.pluginManager.withPlugin('org.jetbrains.kotlin.jvm') { p.pluginManager.apply('krusty') }
+    p.pluginManager.withPlugin('org.jetbrains.kotlin.jvm') { p.pluginManager.apply('dev.krustythecompiler') }
     p.pluginManager.withPlugin('org.jetbrains.kotlin.multiplatform') {
         // A plugin build without Kotlin Multiplatform support rejects the project. Its compiles
         // then stay with kotlinc, and each is reported the way the plugin reports a fallback, so
         // the comparison counts it as a miss rather than as kotlinc's output matching itself.
         try {
-            p.pluginManager.apply('krusty')
+            p.pluginManager.apply('dev.krustythecompiler')
         } catch (Exception rejected) {
             def reason = rejected.cause?.message ?: rejected.message
             p.afterEvaluate {

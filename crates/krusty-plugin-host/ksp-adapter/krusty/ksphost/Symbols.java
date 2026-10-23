@@ -1,12 +1,16 @@
 package krusty.ksphost;
 
+import com.google.devtools.ksp.symbol.AnnotationUseSiteTarget;
 import com.google.devtools.ksp.symbol.ClassKind;
+import com.google.devtools.ksp.symbol.FunctionKind;
+import com.google.devtools.ksp.symbol.KSAnnotation;
 import com.google.devtools.ksp.symbol.KSClassDeclaration;
 import com.google.devtools.ksp.symbol.KSDeclaration;
 import com.google.devtools.ksp.symbol.KSNode;
 import com.google.devtools.ksp.symbol.KSTypeArgument;
 import com.google.devtools.ksp.symbol.KSTypeParameter;
 import com.google.devtools.ksp.symbol.KSTypeReference;
+import com.google.devtools.ksp.symbol.KSValueArgument;
 import com.google.devtools.ksp.symbol.Modifier;
 import com.google.devtools.ksp.symbol.Variance;
 import java.io.DataInputStream;
@@ -19,11 +23,12 @@ import java.util.Map;
 import java.util.Set;
 
 // One round's symbol model, read from what krusty sends (`KspRound`): the module's source files and
-// their classifiers, and the library classifiers they name.
+// their declarations, and the library classifiers they name.
 final class Symbols {
     final List<SourceFile> files = new ArrayList<>();
     private final Map<String, SourceClass> sourceClasses = new HashMap<>();
     private final Map<String, LibraryClass> libraryClasses = new HashMap<>();
+    private final Map<Integer, KSTypeParameter> typeParameters = new HashMap<>();
 
     static Symbols read(DataInputStream in) throws IOException {
         Symbols symbols = new Symbols();
@@ -33,13 +38,15 @@ final class Symbols {
             String packageName = Wire.readString(in);
             boolean complete = Wire.readBoolean(in);
             SourceFile file = new SourceFile(path, packageName, complete);
-            symbols.readClasses(in, file, null, file.declarations);
+            symbols.readDeclarations(in, file, null, file.declarations);
             symbols.files.add(file);
         }
         return symbols;
     }
 
-    private void readClasses(
+    // The declarations of a file or of the classifier `owner` (`put_declaration` in
+    // `src/ksp/protocol.rs`).
+    private void readDeclarations(
             DataInputStream in,
             SourceFile file,
             SourceClass owner,
@@ -47,67 +54,245 @@ final class Symbols {
             throws IOException {
         int count = in.readInt();
         for (int i = 0; i < count; i++) {
-            String simpleName = Wire.readString(in);
-            String qualifiedName = Wire.readString(in);
-            ClassKind kind = classKind(in.readByte());
-            int line = in.readInt();
-            List<String[]> annotations =
-                    Wire.readList(in, a -> new String[] {Wire.readString(a), Wire.readString(a)});
-            List<String> modifiers =
-                    Wire.readBoolean(in) ? Wire.readList(in, Wire::readString) : null;
-            SourceClass declaration =
-                    new SourceClass(file, owner, simpleName, qualifiedName, kind, line);
-            if (modifiers != null) {
-                Set<Modifier> set = EnumSet.noneOf(Modifier.class);
-                for (String modifier : modifiers) {
-                    set.add(Modifier.valueOf(modifier));
-                }
-                declaration.modifiers = set;
+            byte tag = in.readByte();
+            switch (tag) {
+                case 0:
+                    into.add(readClass(in, file, owner));
+                    break;
+                case 1:
+                    into.add(readFunction(in, file, owner));
+                    break;
+                case 2:
+                    into.add(readProperty(in, file, owner));
+                    break;
+                case 3:
+                    String simpleName = Wire.readString(in);
+                    into.add(new SourceTypeAlias(file, simpleName, Wire.readString(in)));
+                    break;
+                default:
+                    throw new IOException("unknown declaration " + tag);
             }
-            if (Wire.readBoolean(in)) {
-                declaration.typeParameters = readTypeParameters(in, declaration);
-            }
-            if (Wire.readBoolean(in)) {
-                declaration.superTypes = readReferences(in, declaration);
-            }
-            List<Object[]> primaryParameters = Wire.readBoolean(in)
-                    ? Wire.readList(in, p -> new Object[] {Wire.readString(p), p.readByte()})
-                    : null;
-            declaration.declarationsComplete = Wire.readBoolean(in);
-            for (String[] annotation : annotations) {
-                declaration.annotations.add(
-                        new SourceAnnotation(declaration, annotation[0], annotation[1], this));
-            }
-            if (primaryParameters != null) {
-                PrimaryConstructor constructor = declaration.addPrimaryConstructor();
-                for (Object[] parameter : primaryParameters) {
-                    byte flags = (Byte) parameter[1];
-                    constructor.parameters.add(new Parameter(
-                            constructor,
-                            (String) parameter[0],
-                            (flags & 1) != 0,
-                            (flags & 2) != 0,
-                            (flags & 4) != 0,
-                            (flags & 8) != 0));
-                }
-            }
-            readClasses(in, file, declaration, declaration.declarations);
-            sourceClasses.put(qualifiedName, declaration);
-            into.add(declaration);
         }
     }
 
-    private List<KSTypeParameter> readTypeParameters(DataInputStream in, SourceClass owner)
+    private SourceClass readClass(DataInputStream in, SourceFile file, SourceClass owner)
+            throws IOException {
+        String simpleName = Wire.readString(in);
+        String qualifiedName = Wire.readString(in);
+        ClassKind kind = classKind(in.readByte());
+        int line = in.readInt();
+        SourceClass declaration =
+                new SourceClass(file, owner, simpleName, qualifiedName, kind, line);
+        readAnnotations(in, declaration, declaration.annotations);
+        declaration.modifiers = readModifiers(in);
+        if (Wire.readBoolean(in)) {
+            declaration.typeParameters = readTypeParameters(in, declaration);
+        }
+        if (Wire.readBoolean(in)) {
+            declaration.superTypes = readReferences(in, declaration);
+        }
+        declaration.declarationsComplete = Wire.readBoolean(in);
+        sourceClasses.put(qualifiedName, declaration);
+        readDeclarations(in, file, declaration, declaration.declarations);
+        return declaration;
+    }
+
+    // A function (`put_function` in `src/ksp/protocol.rs`).
+    private SourceFunction readFunction(DataInputStream in, SourceFile file, SourceClass owner)
+            throws IOException {
+        String name = Wire.readString(in);
+        byte kind = in.readByte();
+        boolean isAbstract = Wire.readBoolean(in);
+        int line = Wire.readBoolean(in) ? in.readInt() : 0;
+        SourceFunction function =
+                new SourceFunction(
+                        file, owner, name, functionKind(kind), kind == 3 || kind == 4, isAbstract, line);
+        readAnnotations(in, function, function.annotations);
+        function.modifiers = readModifiers(in);
+        if (Wire.readBoolean(in)) {
+            function.typeParameters = readTypeParameters(in, function);
+        }
+        byte receiver = in.readByte();
+        function.extensionReceiver = receiver == 1 ? readReference(in, function) : null;
+        function.receiverUndescribed = receiver == 2;
+        int parameterCount = in.readInt();
+        for (int i = 0; i < parameterCount; i++) {
+            String parameterName = Wire.readString(in);
+            // The parameter is its type's parent, and it is made after its type is read.
+            SourceTypeReference type = Wire.readBoolean(in) ? readReference(in, null) : null;
+            byte flags = in.readByte();
+            Parameter parameter = new Parameter(
+                    function,
+                    parameterName,
+                    (flags & 1) != 0,
+                    (flags & 2) != 0,
+                    (flags & 4) != 0,
+                    (flags & 64) != 0 ? null : Boolean.valueOf((flags & 8) != 0),
+                    (flags & 16) != 0,
+                    (flags & 32) != 0);
+            if (type != null) {
+                type.parent = parameter;
+            }
+            parameter.type = type;
+            readAnnotations(in, parameter, parameter.annotations);
+            function.parameters.add(parameter);
+        }
+        function.returnType = Wire.readBoolean(in) ? readReference(in, function) : null;
+        if (kind == 3 && owner != null) {
+            owner.primaryConstructor = function;
+        }
+        return function;
+    }
+
+    // A property (`put_property` in `src/ksp/protocol.rs`).
+    private SourceProperty readProperty(DataInputStream in, SourceFile file, SourceClass owner)
+            throws IOException {
+        String name = Wire.readString(in);
+        boolean mutable = Wire.readBoolean(in);
+        int line = Wire.readBoolean(in) ? in.readInt() : 0;
+        SourceProperty property = new SourceProperty(file, owner, name, mutable, line);
+        readAnnotations(in, property, property.annotations);
+        property.modifiers = readModifiers(in);
+        if (Wire.readBoolean(in)) {
+            property.typeParameters = readTypeParameters(in, property);
+        }
+        byte receiver = in.readByte();
+        property.extensionReceiver = receiver == 1 ? readReference(in, property) : null;
+        property.receiverUndescribed = receiver == 2;
+        property.type = Wire.readBoolean(in) ? readReference(in, property) : null;
+        property.getter = new SourceAccessor.Getter(property);
+        if (readAccessor(in, property.getter)) {
+            throw new IOException("a getter has no parameter");
+        }
+        if (Wire.readBoolean(in)) {
+            SourceAccessor.Setter setter = new SourceAccessor.Setter(property);
+            if (!readAccessor(in, setter)) {
+                throw new IOException("a setter has a parameter");
+            }
+            setter.parameter = new SetterParameter(setter, Wire.readString(in));
+            readAnnotations(in, setter.parameter, setter.parameter.annotations);
+            property.setter = setter;
+        }
+        return property;
+    }
+
+    // An accessor up to its parameter (`put_accessor` in `src/ksp/protocol.rs`): whether it has
+    // one, which follows.
+    private boolean readAccessor(DataInputStream in, SourceAccessor accessor) throws IOException {
+        accessor.written = Wire.readBoolean(in);
+        accessor.modifiers = readModifiers(in);
+        readAnnotations(in, accessor, accessor.annotations);
+        return Wire.readBoolean(in);
+    }
+
+    private void readAnnotations(DataInputStream in, KSNode parent, List<KSAnnotation> into)
+            throws IOException {
+        int count = in.readInt();
+        for (int i = 0; i < count; i++) {
+            into.add(readAnnotation(in, parent));
+        }
+    }
+
+    // An annotation (`put_annotation` in `src/ksp/protocol.rs`).
+    private SourceAnnotation readAnnotation(DataInputStream in, KSNode parent) throws IOException {
+        String shortName = Wire.readString(in);
+        String qualifiedName = Wire.readString(in);
+        String useSite = Wire.readString(in);
+        boolean synthetic = Wire.readBoolean(in);
+        SourceAnnotation annotation = new SourceAnnotation(
+                parent,
+                shortName,
+                qualifiedName,
+                useSite.isEmpty() ? null : AnnotationUseSiteTarget.valueOf(useSite),
+                synthetic,
+                this);
+        if (Wire.readBoolean(in)) {
+            annotation.arguments = readArguments(in, annotation);
+            annotation.defaultArguments = readArguments(in, annotation);
+        }
+        return annotation;
+    }
+
+    private List<KSValueArgument> readArguments(DataInputStream in, SourceAnnotation annotation)
+            throws IOException {
+        int count = in.readInt();
+        List<KSValueArgument> arguments = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            String name = Wire.readString(in);
+            boolean written = Wire.readBoolean(in);
+            arguments.add(new SourceValueArgument(annotation, name, readValue(in, annotation), written));
+        }
+        return arguments;
+    }
+
+    // A constant (`put_value` in `src/ksp/protocol.rs`). A nested annotation's parent is the
+    // annotation it is an argument of.
+    private ConstantValue readValue(DataInputStream in, SourceAnnotation annotation)
+            throws IOException {
+        byte tag = in.readByte();
+        switch (tag) {
+            case 0: return ConstantValue.of(Wire.readBoolean(in));
+            case 1: return ConstantValue.of(in.readByte());
+            case 2: return ConstantValue.of(in.readShort());
+            case 3: return ConstantValue.of(in.readInt());
+            case 4: return ConstantValue.of(in.readLong());
+            case 5: return ConstantValue.of(in.readChar());
+            case 6: return ConstantValue.of(Float.intBitsToFloat(in.readInt()));
+            case 7: return ConstantValue.of(Double.longBitsToDouble(in.readLong()));
+            case 8: return ConstantValue.of(Wire.readString(in));
+            case 9:
+                String enumClass = Wire.readString(in);
+                return ConstantValue.enumEntry(this, enumClass, Wire.readString(in));
+            case 10: return ConstantValue.type(readReference(in, annotation));
+            case 11: return ConstantValue.annotation(readAnnotation(in, annotation));
+            case 12:
+                int count = in.readInt();
+                List<ConstantValue> elements = new ArrayList<>(count);
+                for (int i = 0; i < count; i++) {
+                    elements.add(readValue(in, annotation));
+                }
+                return ConstantValue.array(elements);
+            default:
+                throw new IOException("unknown constant " + tag);
+        }
+    }
+
+    // A modifier set, or null when krusty has no record of it.
+    private static Set<Modifier> readModifiers(DataInputStream in) throws IOException {
+        if (!Wire.readBoolean(in)) {
+            return null;
+        }
+        Set<Modifier> modifiers = EnumSet.noneOf(Modifier.class);
+        int count = in.readInt();
+        for (int i = 0; i < count; i++) {
+            modifiers.add(Modifier.valueOf(Wire.readString(in)));
+        }
+        return modifiers;
+    }
+
+    // Type parameters by their round-unique ids. A constructor lists its classifier's, which are
+    // the same declarations.
+    private List<KSTypeParameter> readTypeParameters(DataInputStream in, KSDeclaration owner)
             throws IOException {
         int count = in.readInt();
         List<KSTypeParameter> parameters = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
+            int id = in.readInt();
             String name = Wire.readString(in);
             Variance variance = variance(in.readByte());
             boolean reified = Wire.readBoolean(in);
-            SourceTypeParameter parameter = new SourceTypeParameter(owner, name, variance, reified);
-            parameter.bounds.addAll(readReferences(in, parameter));
-            parameters.add(parameter);
+            KSTypeParameter declared = typeParameters.get(id);
+            if (declared != null) {
+                // A constructor repeats its classifier's parameters, bounds included.
+                readReferences(in, declared);
+            } else {
+                SourceTypeParameter parameter =
+                        new SourceTypeParameter(owner, name, variance, reified);
+                parameter.bounds.addAll(readReferences(in, parameter));
+                typeParameters.put(id, parameter);
+                declared = parameter;
+            }
+            parameters.add(declared);
         }
         return parameters;
     }
@@ -126,9 +311,16 @@ final class Symbols {
     private SourceTypeReference readReference(DataInputStream in, KSNode parent)
             throws IOException {
         SourceTypeReference reference = new SourceTypeReference(parent);
-        boolean isParameter = in.readByte() == 1;
-        String name = Wire.readString(in);
-        String parameter = isParameter ? Wire.readString(in) : null;
+        String name;
+        int parameter;
+        if (in.readByte() == 1) {
+            parameter = in.readInt();
+            Wire.readString(in); // the owner, which the id already names
+            name = Wire.readString(in);
+        } else {
+            parameter = -1;
+            name = Wire.readString(in);
+        }
         boolean nullable = Wire.readBoolean(in);
         int count = in.readInt();
         List<KSTypeArgument> arguments = new ArrayList<>(count);
@@ -175,6 +367,16 @@ final class Symbols {
         }
     }
 
+    // A constructor is a member to KSP; the language's `values` and `valueOf` are static.
+    private static FunctionKind functionKind(byte tag) throws IOException {
+        switch (tag) {
+            case 0: return FunctionKind.TOP_LEVEL;
+            case 1: case 3: case 4: return FunctionKind.MEMBER;
+            case 2: return FunctionKind.STATIC;
+            default: throw new IOException("unknown function kind " + tag);
+        }
+    }
+
     // The classifier named `qualifiedName`: the module's own when it declares one, else the
     // classpath's.
     KSClassDeclaration classNamed(String qualifiedName) {
@@ -185,17 +387,12 @@ final class Symbols {
         return libraryClasses.computeIfAbsent(qualifiedName, LibraryClass::new);
     }
 
-    // The type parameter `name` of the source classifier `owner`.
-    KSTypeParameter typeParameter(String owner, String name) {
-        SourceClass declaration = sourceClasses.get(owner);
-        if (declaration == null) {
-            throw new IllegalStateException("no source classifier " + owner);
+    // The type parameter with the round-unique `id`.
+    KSTypeParameter typeParameter(int id) {
+        KSTypeParameter parameter = typeParameters.get(id);
+        if (parameter == null) {
+            throw new IllegalStateException("no type parameter " + id);
         }
-        for (KSTypeParameter parameter : declaration.getTypeParameters()) {
-            if (parameter.getName().asString().equals(name)) {
-                return parameter;
-            }
-        }
-        throw new IllegalStateException(owner + " declares no type parameter " + name);
+        return parameter;
     }
 }
