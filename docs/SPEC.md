@@ -1,6 +1,7 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
 **Status:** PoC / experiment. NOT a production Kotlin compiler.
+
 **Goal:** demonstrate that a **linear, data-oriented, per-file streaming pipeline** compiles a
 useful subset of Kotlin to JVM bytecode with a **working-set bounded by a single file**, instead of
 the whole-module FIR+IR graph that makes `kotlinc` memory scale with module size.
@@ -1666,6 +1667,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   attribute at the annotated source parameter. krusty sized it from the source list and wrote `1`,
   describing a different parameter list; `set_method_param_annotations` now derives the count from the
   descriptor (`descriptor_param_count`) and pads.
+  Primary-constructor parameter annotations reserve their complete checked type and argument payload
+  at the constructor header visit, before body constants. Visit every runtime-retained parameter
+  application before binary-retained applications, preserving each parameter's existing synthesized
+  nullability position. Reuse the ordinary annotation encoder, including nested, array and
+  class-literal values. Strict whole-class regressions live in `property_accessor_annotation_e2e`.
   The frontend never CHECKED a function's value-parameter annotations on either the top-level
   (`check_fun`) or the member path, so no application was recorded and lowering had nothing to read;
   constructor parameters were already recorded and only lacked a consumer. Both function paths now
