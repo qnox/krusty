@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use krusty::jvm::class_comparison::compare_classes;
+use krusty::jvm::class_comparison::{compare_classes, is_kotlin_class};
 use serde::{Deserialize, Serialize};
 
 /// How krusty's output of a compilation differs from kotlinc's. Paths are relative to the output
@@ -52,10 +52,38 @@ fn is_class(path: &str) -> bool {
     path.ends_with(".class")
 }
 
+/// Which of the reference directory's files kotlinc wrote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReferenceOutputs {
+    /// All of them: the directory is kotlinc's alone, as a Gradle Kotlin task's is.
+    All,
+    /// Its Kotlin classes and `.kotlin_module` files: the directory is shared with javac and the
+    /// resources, as Maven's `target/classes` is.
+    KotlinOnly,
+}
+
 /// Compare every file under `candidate` (krusty's output) with the same file under `reference`
 /// (kotlinc's).
-pub fn compare_outputs(reference: &Path, candidate: &Path) -> std::io::Result<OutputComparison> {
-    let reference_files = files(reference)?;
+pub fn compare_outputs(
+    reference: &Path,
+    candidate: &Path,
+    outputs: ReferenceOutputs,
+) -> std::io::Result<OutputComparison> {
+    let mut reference_files = files(reference)?;
+    if outputs == ReferenceOutputs::KotlinOnly {
+        let mut kotlin = BTreeMap::new();
+        for (path, file) in reference_files {
+            let written_by_kotlinc = if is_class(&path) {
+                is_kotlin_class(&std::fs::read(&file)?)
+            } else {
+                path.ends_with(".kotlin_module")
+            };
+            if written_by_kotlinc {
+                kotlin.insert(path, file);
+            }
+        }
+        reference_files = kotlin;
+    }
     let candidate_files = files(candidate)?;
     let mut comparison = OutputComparison {
         classes: reference_files.keys().filter(|path| is_class(path)).count(),
@@ -156,7 +184,7 @@ mod tests {
         write(&krusty, "a/New.class", b"new");
         write(&kotlinc, "META-INF/main.kotlin_module", b"one");
         write(&krusty, "META-INF/main.kotlin_module", b"two");
-        let comparison = compare_outputs(&kotlinc, &krusty).unwrap();
+        let comparison = compare_outputs(&kotlinc, &krusty, ReferenceOutputs::All).unwrap();
         assert_eq!(
             comparison,
             OutputComparison {
@@ -186,7 +214,9 @@ mod tests {
         write(&kotlinc, "A.class", b"not a class");
         write(&krusty, "A.class", b"not one either");
         assert_eq!(
-            compare_outputs(&kotlinc, &krusty).unwrap().differences,
+            compare_outputs(&kotlinc, &krusty, ReferenceOutputs::All)
+                .unwrap()
+                .differences,
             vec![FileDifference {
                 path: "A.class".to_string(),
                 kind: "unreadable".to_string(),
@@ -197,10 +227,30 @@ mod tests {
     }
 
     #[test]
+    fn a_shared_reference_directory_contributes_only_its_kotlin_outputs() {
+        let root = scratch("kotlin-only");
+        let (kotlinc, krusty) = (root.join("kotlinc"), root.join("krusty"));
+        write(&kotlinc, "a/FromJavac.class", b"not kotlin");
+        write(&kotlinc, "application.properties", b"x=1");
+        write(&kotlinc, "META-INF/app.kotlin_module", b"module");
+        write(&krusty, "META-INF/app.kotlin_module", b"module");
+        assert_eq!(
+            compare_outputs(&kotlinc, &krusty, ReferenceOutputs::KotlinOnly).unwrap(),
+            OutputComparison::default()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn absent_output_directories_hold_no_files() {
         let root = scratch("absent");
         assert_eq!(
-            compare_outputs(&root.join("kotlinc"), &root.join("krusty")).unwrap(),
+            compare_outputs(
+                &root.join("kotlinc"),
+                &root.join("krusty"),
+                ReferenceOutputs::All
+            )
+            .unwrap(),
             OutputComparison::default()
         );
     }
