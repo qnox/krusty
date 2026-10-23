@@ -75,6 +75,12 @@ pub fn issue_body(
         "| Unsupported, left to kotlinc | {} |\n",
         summary.unsupported
     ));
+    if summary.no_sources > 0 {
+        body.push_str(&format!(
+            "| Without Kotlin sources | {} |\n",
+            summary.no_sources
+        ));
+    }
     body.push_str(&format!(
         "| Byte-identical classes | {} / {} ({}) |\n",
         summary.identical_classes,
@@ -112,11 +118,20 @@ pub fn issue_body(
             masked_message(text)
         }
     };
-    let unsupported = tally(records.iter().flat_map(|record| match &record.outcome {
-        Outcome::Unsupported { reasons } => {
-            reasons.iter().map(|reason| mask_paths(reason)).collect()
+    let unsupported = tally(records.iter().flat_map(|record| {
+        match &record.outcome {
+            Outcome::Unsupported { reasons } => reasons
+                .iter()
+                .map(|reason| {
+                    if share_names {
+                        reason.clone()
+                    } else {
+                        masked_reason(reason)
+                    }
+                })
+                .collect(),
+            _ => Vec::new(),
         }
-        _ => Vec::new(),
     }));
     if !unsupported.is_empty() {
         body.push_str(
@@ -156,6 +171,7 @@ pub fn issue_body(
             let (outcome, classes) = match &record.outcome {
                 Outcome::Unsupported { .. } => ("unsupported", String::new()),
                 Outcome::Failed { .. } => ("failed", String::new()),
+                Outcome::NoSources => ("no sources", String::new()),
                 Outcome::Compiled { comparison } => (
                     if comparison.is_identical() {
                         "identical"
@@ -180,7 +196,7 @@ pub fn issue_body(
     body.push_str(if share_names {
         "\n<sub>Written by `krusty verify-report`, with names shared.</sub>\n"
     } else {
-        "\n<sub>Written by `krusty verify-report`. Compilation, class and member names, paths and the identifiers errors quote are left out.</sub>\n"
+        "\n<sub>Written by `krusty verify-report`. Compilation, class and member names, paths and the names in errors are left out.</sub>\n"
     });
     body
 }
@@ -250,8 +266,10 @@ fn table_cell(text: &str) -> String {
     text.replace('|', "\\|").replace('\n', " ")
 }
 
-/// An error without its location, its quoted identifiers and its paths: `Foo.kt:3:5: error:
-/// Unresolved reference 'bar'.` becomes `Unresolved reference '…'.`.
+/// An error reduced to its shape: without its location, its quoted text, what follows its first
+/// `: ` (where a diagnostic names its subject: `conflicting declarations: Foo`), any other word
+/// shaped like an identifier, and its paths. `Foo.kt:3:5: error: Unresolved reference 'bar'.`
+/// becomes `Unresolved reference '…'.`.
 pub(super) fn masked_message(error: &str) -> String {
     let message = error
         .split_once(": error: ")
@@ -277,9 +295,69 @@ pub(super) fn masked_message(error: &str) -> String {
     }
     // An unclosed quote was an apostrophe: keep what followed it.
     if open.is_some() {
-        return mask_paths(message);
+        masked = message.to_string();
     }
-    mask_paths(&masked)
+    if let Some(colon) = masked.find(": ") {
+        masked.truncate(colon);
+        masked.push_str(": …");
+    }
+    let mut first = true;
+    let words = masked
+        .split(' ')
+        .map(|word| {
+            let shown = if plain_word(word, first) { word } else { "…" };
+            first = false;
+            shown
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    mask_paths(&words)
+}
+
+/// Whether a word of an error is prose rather than a name: lowercase letters, with an apostrophe
+/// (`can't`), surrounding punctuation, a capital first letter when it opens the message, or the
+/// `…` standing in for masked text.
+fn plain_word(word: &str, first: bool) -> bool {
+    let core = word.trim_matches(|character: char| {
+        matches!(
+            character,
+            '.' | ',' | ':' | ';' | '(' | ')' | '[' | ']' | '\'' | '`' | '"' | '…' | '!' | '?'
+        )
+    });
+    let mut characters = core.chars();
+    match characters.next() {
+        None => true,
+        Some(initial) => {
+            (initial.is_ascii_lowercase() || (first && initial.is_ascii_uppercase()))
+                && characters.all(|character| character.is_ascii_lowercase() || character == '\'')
+        }
+    }
+}
+
+/// An unsupported request without its paths or the names it carries: an option value naming a
+/// qualified declaration (`annotation=com.example.Open`) becomes `…`.
+pub(super) fn masked_reason(reason: &str) -> String {
+    let masked = mask_paths(reason);
+    let mut result = String::with_capacity(masked.len());
+    let mut rest = masked.as_str();
+    while let Some(equals) = rest.find('=') {
+        result.push_str(&rest[..=equals]);
+        rest = &rest[equals + 1..];
+        let end = rest
+            .find(|character: char| {
+                character.is_whitespace() || matches!(character, ',' | '\'' | '"' | '`' | ')' | ']')
+            })
+            .unwrap_or(rest.len());
+        let value = &rest[..end];
+        if value.trim_end_matches('.').contains('.') {
+            result.push('…');
+        } else {
+            result.push_str(value);
+        }
+        rest = &rest[end..];
+    }
+    result.push_str(rest);
+    result
 }
 
 /// Each path in `text` replaced by `<path>`: a run of characters containing a separator, delimited
@@ -435,7 +513,7 @@ mod tests {
              | compilation 2 | other | failed |  | 0.5 s | 0.1 s |  |\n\
              | compilation 3 | main | unsupported |  | 0.7 s |  |  |\n\
              \n\
-             <sub>Written by `krusty verify-report`. Compilation, class and member names, paths and the identifiers errors quote are left out.</sub>\n"
+             <sub>Written by `krusty verify-report`. Compilation, class and member names, paths and the names in errors are left out.</sub>\n"
         );
     }
 
@@ -483,7 +561,9 @@ mod tests {
         // The error table keeps the 25 most frequent errors, so many compilations fit without
         // their rows.
         let many = issue_url(
-            &failing(500, &|index| format!("error: failure {index}")),
+            &failing(500, &|index| {
+                format!("error: failure {}", "x".repeat(index % 40 + 1))
+            }),
             &environment(),
             false,
         );
@@ -491,7 +571,7 @@ mod tests {
         assert!(!many.contains("%23%23%23%23%20Compilations"), "{many}");
         let long = issue_url(
             &failing(30, &|index| {
-                format!("error: {index} {}", "long ".repeat(100))
+                format!("error: failure {}", "long ".repeat(100 + index))
             }),
             &environment(),
             false,
@@ -512,8 +592,42 @@ mod tests {
             masked_message(
                 "A.kt:1:2: error: Type mismatch: inferred type is `Foo` but \"Bar\" was expected."
             ),
-            "Type mismatch: inferred type is `…` but \"…\" was expected."
+            "Type mismatch: …"
         );
         assert_eq!(masked_message("error: can't infer it"), "can't infer it");
+    }
+
+    #[test]
+    fn unquoted_names_in_errors_are_masked() {
+        assert_eq!(
+            masked_message("A.kt:1:2: error: conflicting declarations: SecretCustomer"),
+            "conflicting declarations: …"
+        );
+        assert_eq!(
+            masked_message("error: SecretCustomer cannot extend secretBase from com.acme.Billing"),
+            "… cannot extend … from …"
+        );
+        assert_eq!(
+            masked_message("error: internal compiler panic: no slot for SecretCustomer.charge"),
+            "internal compiler panic: …"
+        );
+        assert_eq!(
+            masked_message("error: 'Secret' is unresolved in Billing_2"),
+            "'…' is unresolved in …"
+        );
+    }
+
+    #[test]
+    fn qualified_names_in_unsupported_requests_are_masked() {
+        assert_eq!(
+            masked_reason(
+                "krusty: plugin option 'all-open:annotation=com.acme.Open' at /a/b.jar is not supported"
+            ),
+            "krusty: plugin option 'all-open:annotation=…' at <path> is not supported"
+        );
+        assert_eq!(
+            masked_reason("krusty does not implement the kotlinc argument '-Xjdk-release=8'."),
+            "krusty does not implement the kotlinc argument '-Xjdk-release=8'."
+        );
     }
 }
