@@ -193,6 +193,13 @@ plugins listed above.
 - Kotlin/Wasm
 - Compose
 
+## Contributing
+
+krusty accepts issues, not code: turning a precise issue into our own implementation is faster than
+reviewing an outside change. Ask your coding agent to draft one with a minimal reproduction and
+kotlinc's vs. krusty's result, or submit a `krustyVerify` report. See
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
+
 ## Sponsor
 
 If krusty saves your team build time or CI money, please consider sending part of it back through
