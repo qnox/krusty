@@ -12,6 +12,8 @@ mod backticked_dotted_package_qualifier_e2e;
 mod bridge_result_cast_e2e;
 #[path = "common/bytecode_comparison.rs"]
 mod bytecode_comparison_support;
+#[path = "call_result_non_null_cast_e2e.rs"]
+mod call_result_non_null_cast_e2e;
 #[path = "captured_field_storage_e2e.rs"]
 mod captured_field_storage_e2e;
 #[path = "captured_receiver_names_e2e.rs"]

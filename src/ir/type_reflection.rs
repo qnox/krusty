@@ -175,6 +175,17 @@ impl IrFile {
             .map(|(classifier, type_params)| (*classifier, type_params.as_slice()))
     }
 
+    /// Exact formal declarations retained for a referenced inline member's classifier owner.
+    pub(crate) fn foreign_template_classifier_parameters(
+        &self,
+        classifier: TypeName,
+    ) -> Option<&[IrTypeParameter]> {
+        self.type_reflection
+            .foreign_template_classifiers
+            .get(&classifier)
+            .map(Vec::as_slice)
+    }
+
     pub(crate) fn record_lambda_type_parameters(
         &mut self,
         lambda: u32,

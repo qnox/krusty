@@ -21015,3 +21015,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   earlier copy of it gains nothing. Tests:
   `jvm_libraries::provider_normalization_tests::a_repository_named_stdlib_owns_its_builtins`,
   `nullable_receiver_operator_ext_e2e::nullable_string_plus_concatenates_against_a_repository_named_stdlib`.
+- **Compatible reference-array casts precede JVM written-cast null guards.** Peel matched
+  `Array` layers through their readable projected elements, including nullable array layers.
+  Compare the remaining actual type against the expected declaration's primary erased-bound
+  classifier using semantic Kotlin inheritance. An actual type parameter contributes all declared
+  bounds; an expected parameter uses the primary class bound, not the first interface bound.
+  A compatible cast performs only the existing physical coercion of the already-emitted operand;
+  a required erased-array `checkcast` remains. This does not establish a general non-null call
+  result fact. Primitive-array and incompatible component casts keep ordinary cast behavior.
+  Regression: `call_result_non_null_cast_e2e` compares complete classfiles and real JVM results.

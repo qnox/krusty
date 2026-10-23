@@ -5121,6 +5121,8 @@ struct Emitter<'a> {
     static_owner: Option<StaticOwner>,
     /// Source or backend-generated function whose body is currently being emitted.
     function: Option<u32>,
+    /// Declaration scope of a scratch inline-lambda body, without changing emission ownership.
+    type_parameter_function: Option<u32>,
     export_private_calls: bool,
     method_exports_private_access: bool,
     /// This method is `inline`, so each copy of a `finally` is bracketed by
@@ -5133,7 +5135,7 @@ struct Emitter<'a> {
     self_companion: Option<TypeName>,
     /// Checked classifier declarations: which kind of classifier an operand's type names.
     classifiers: &'a dyn BackendClassifierSource,
-    /// Complete classifier facts used only for physical virtual-call owner selection.
+    /// One checked inventory for physical call owners and semantic array-cast leaf proofs.
     dispatch_classifiers: std::rc::Rc<crate::jvm::member_dispatch::CheckedDispatchClassifiers<'a>>,
     owner: String,
     facade: String,
@@ -5320,6 +5322,7 @@ impl<'a> Emitter<'a> {
             intrinsic_probe_continuations: env.intrinsic_probe_continuations,
             static_owner,
             function: None,
+            type_parameter_function: None,
             export_private_calls: false,
             method_exports_private_access: false,
             finally_markers: false,
