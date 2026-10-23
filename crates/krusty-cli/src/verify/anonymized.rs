@@ -1,6 +1,8 @@
 //! The issue a user submits from a verify report. Unless they choose to share names, it carries
-//! totals, difference kinds, unsupported requests and the shape of krusty's errors, and never a
-//! compilation, class, member, path or the identifiers an error quotes.
+//! totals, difference kinds and unsupported requests, never a compilation, class or member name or
+//! a path, and krusty's errors masked by rule. The rule removes what an error quotes, what follows
+//! its first `: ` and every identifier-shaped word, but a rule over free text cannot prove that no
+//! name survives, so the issue asks the user to review it.
 
 use std::collections::BTreeMap;
 
@@ -196,7 +198,7 @@ pub fn issue_body(
     body.push_str(if share_names {
         "\n<sub>Written by `krusty verify-report`, with names shared.</sub>\n"
     } else {
-        "\n<sub>Written by `krusty verify-report`. Compilation, class and member names, paths and the names in errors are left out.</sub>\n"
+        "\n<sub>Written by `krusty verify-report`. Compilation, class and member names and paths are left out; krusty's errors are masked by rule. Review before submitting.</sub>\n"
     });
     body
 }
@@ -513,7 +515,7 @@ mod tests {
              | compilation 2 | other | failed |  | 0.5 s | 0.1 s |  |\n\
              | compilation 3 | main | unsupported |  | 0.7 s |  |  |\n\
              \n\
-             <sub>Written by `krusty verify-report`. Compilation, class and member names, paths and the names in errors are left out.</sub>\n"
+             <sub>Written by `krusty verify-report`. Compilation, class and member names and paths are left out; krusty's errors are masked by rule. Review before submitting.</sub>\n"
         );
     }
 

@@ -108,9 +108,11 @@ pub fn render_html(
 
     page.push_str(&format!(
         "<div class=\"submit\"><b>Help prioritize krusty.</b> Submitting this report as an issue \
-         tells the maintainers what to fix first. The issue is anonymized: it holds totals, \
-         difference kinds and the shape of krusty's errors, without compilation, class or member \
-         names. Review it before you submit; <code>krusty-verify-issue.md</code> beside this page \
+         tells the maintainers what to fix first. The issue holds totals, difference kinds and \
+         unsupported requests, without compilation, class or member names or paths. krusty's \
+         errors are masked by rule (their wording up to the first colon, with quoted text and \
+         identifier-like words replaced), which cannot promise to catch every name: review the \
+         issue before you submit; <code>krusty-verify-issue.md</code> beside this page \
          is the same text.<p><a class=\"button\" href=\"{}\">Open the issue on GitHub</a></p></div>\n",
         escape(issue_url)
     ));

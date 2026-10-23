@@ -51,36 +51,30 @@ fn display(option: &str, reference: &Path, destination: &Path, record: &Path) ->
     }
 }
 
-/// `path` made absolute, with its longest existing prefix canonicalized (resolving symbolic links)
-/// and the rest normalized lexically.
+/// `path` made absolute and resolved component by component, as the file system will once the
+/// missing directories are created: each existing prefix is canonicalized (following a symbolic
+/// link wherever one appears, including after a `..`), and a missing component stays lexical,
+/// since krusty creates it as a plain directory.
 fn resolved(path: &Path) -> PathBuf {
     let absolute = std::env::current_dir()
         .map(|directory| directory.join(path))
         .unwrap_or_else(|_| path.to_path_buf());
-    let mut existing = absolute.as_path();
-    let mut rest = Vec::new();
-    loop {
-        if let Ok(canonical) = existing.canonicalize() {
-            let mut resolved = canonical;
-            for component in rest.iter().rev() {
-                match component {
-                    Component::ParentDir => {
-                        resolved.pop();
-                    }
-                    Component::CurDir => {}
-                    other => resolved.push(other.as_os_str()),
+    let mut resolved = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            other => {
+                resolved.push(other.as_os_str());
+                if let Ok(canonical) = resolved.canonicalize() {
+                    resolved = canonical;
                 }
             }
-            return resolved;
-        }
-        match (existing.parent(), existing.components().next_back()) {
-            (Some(parent), Some(last)) => {
-                rest.push(last);
-                existing = parent;
-            }
-            _ => return absolute,
         }
     }
+    resolved
 }
 
 #[cfg(test)]
@@ -156,6 +150,24 @@ mod tests {
             Err(format!(
                 "-d {} overlaps --reference {}; kotlinc's output, krusty's output and the record must be separate",
                 link.join("classes").display(),
+                reference.display()
+            ))
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symbolic_link_after_a_missing_directory_and_its_parent_is_refused() {
+        let root = scratch("missing-link");
+        let reference = root.join("kotlinc");
+        std::os::unix::fs::symlink(&reference, root.join("alias")).expect("link");
+        let destination = root.join("missing/../alias/classes");
+        assert_eq!(
+            check_layout(&reference, &destination, &root.join("main.json")),
+            Err(format!(
+                "-d {} overlaps --reference {}; kotlinc's output, krusty's output and the record must be separate",
+                destination.display(),
                 reference.display()
             ))
         );

@@ -7,6 +7,7 @@ labels: verify-report
 
 <!--
 Paste krusty-verify-issue.md here, or open this issue from the report's button so it is filled in.
-It is anonymized: it holds totals, difference kinds and the shape of krusty's errors, without
-compilation, class or member names. Review it before submitting.
+It holds totals, difference kinds and unsupported requests, without compilation, class or member
+names or paths. krusty's errors are masked by rule, which cannot promise to catch every name:
+review it before submitting.
 -->
