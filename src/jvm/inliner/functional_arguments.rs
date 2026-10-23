@@ -6,6 +6,7 @@
 //! recorded, in order, for the lambda's body to replace, and the instructions that only moved the
 //! lambda around are deleted. So is every instruction no path reaches.
 
+use crate::fx_hash::HashSet;
 use crate::jvm::bytecode_passes::analysis::{
     analyze_with, AnalyzerError, AnalyzerOptions, At, BasicInterpreter, BasicValue, FrameView,
     Interpreter, PlainFrames, Value,
@@ -14,7 +15,7 @@ use crate::jvm::bytecode_passes::descriptors;
 use crate::jvm::bytecode_passes::opcodes::*;
 use crate::jvm::method_node::{Insn, MethodNode, Node};
 
-use super::{InlineError, Parameters};
+use super::{ClassRoles, InlineError, Parameters};
 
 /// A value of the inlined body: a plain value, or one of the call's inline lambdas
 /// (`FunctionalArgumentValue`, which keeps the plain value it stands for).
@@ -48,6 +49,19 @@ impl Value for ArgumentValue {
 struct FunctionalArgumentInterpreter<'a> {
     parameters: &'a Parameters,
     basic: BasicInterpreter,
+    /// Every operation that took a lambda as an operand: the lambda, the instruction's index, and
+    /// the operand's position.
+    consumers: HashSet<(usize, usize, usize)>,
+}
+
+impl FunctionalArgumentInterpreter<'_> {
+    fn consume<'v>(&mut self, at: &At, operands: impl IntoIterator<Item = &'v ArgumentValue>) {
+        for (operand, value) in operands.into_iter().enumerate() {
+            if let Some(lambda) = value.lambda() {
+                self.consumers.insert((lambda, at.index, operand));
+            }
+        }
+    }
 }
 
 fn plain(value: Option<BasicValue>) -> Option<ArgumentValue> {
@@ -86,6 +100,7 @@ impl Interpreter for FunctionalArgumentInterpreter<'_> {
         at: &At,
         value: &ArgumentValue,
     ) -> Result<Option<ArgumentValue>, AnalyzerError> {
+        self.consume(at, [value]);
         Ok(plain(self.basic.unary_operation(at, value.basic())?))
     }
 
@@ -95,6 +110,7 @@ impl Interpreter for FunctionalArgumentInterpreter<'_> {
         first: &ArgumentValue,
         second: &ArgumentValue,
     ) -> Result<Option<ArgumentValue>, AnalyzerError> {
+        self.consume(at, [first, second]);
         Ok(plain(self.basic.binary_operation(
             at,
             first.basic(),
@@ -109,6 +125,7 @@ impl Interpreter for FunctionalArgumentInterpreter<'_> {
         second: &ArgumentValue,
         third: &ArgumentValue,
     ) -> Result<Option<ArgumentValue>, AnalyzerError> {
+        self.consume(at, [first, second, third]);
         Ok(plain(self.basic.ternary_operation(
             at,
             first.basic(),
@@ -122,16 +139,18 @@ impl Interpreter for FunctionalArgumentInterpreter<'_> {
         at: &At,
         values: &[ArgumentValue],
     ) -> Result<Option<ArgumentValue>, AnalyzerError> {
+        self.consume(at, values);
         let values: Vec<BasicValue> = values.iter().map(|value| value.basic().clone()).collect();
         Ok(plain(self.basic.nary_operation(at, &values)?))
     }
 
     fn return_operation(
         &mut self,
-        _at: &At,
-        _value: &ArgumentValue,
+        at: &At,
+        value: &ArgumentValue,
         _expected: &ArgumentValue,
     ) -> Result<(), AnalyzerError> {
+        self.consume(at, [value]);
         Ok(())
     }
 
@@ -182,6 +201,7 @@ pub(super) fn mark_places(
     let mut interpreter = FunctionalArgumentInterpreter {
         parameters,
         basic: BasicInterpreter,
+        consumers: HashSet::default(),
     };
     let options = AnalyzerOptions {
         prune_exception_edges: true,
@@ -243,4 +263,76 @@ pub(super) fn mark_places(
     });
     super::preparation::remove_empty_try_catch_blocks(node);
     Ok(invokes)
+}
+
+/// Where a compiled inline body places one of its inline lambdas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LambdaPlacement {
+    /// The body never uses it, so no frame runs its body.
+    Unused,
+    /// The body invokes it: each `invoke` becomes the lambda's body, in the frame of the call.
+    Invoked,
+    /// The body passes it to the constructor of an anonymous object the call regenerates, whose
+    /// methods run its body.
+    Retained,
+}
+
+/// Where `node`, a compiled inline body with the call's lambdas bound in `parameters`, places each
+/// of its `lambdas` lambdas: the uses `markPlacesForInlineAndRemoveInlinable` and
+/// `AnonymousObjectTransformer` give it. A lambda is invoked when a `FunctionN.invoke` is called on
+/// it, and retained when it is an argument of a regenerated object's `<init>`; a parameter null
+/// check is no use. `Err` names any other use, and a lambda the body both invokes and retains.
+pub(crate) fn lambda_placements(
+    node: &MethodNode,
+    parameters: &Parameters,
+    lambdas: usize,
+    classes: &dyn ClassRoles,
+) -> Result<Vec<LambdaPlacement>, String> {
+    let mut interpreter = FunctionalArgumentInterpreter {
+        parameters,
+        basic: BasicInterpreter,
+        consumers: HashSet::default(),
+    };
+    let options = AnalyzerOptions {
+        prune_exception_edges: true,
+        ..AnalyzerOptions::default()
+    };
+    analyze_with(node, "fake", &mut interpreter, &mut PlainFrames, options)
+        .map_err(|error| error.message)?;
+    let mut placements = vec![LambdaPlacement::Unused; lambdas];
+    for &(lambda, at, operand) in &interpreter.consumers {
+        let Node::Insn(insn) = &node.nodes[at] else {
+            unreachable!("only an instruction takes operands");
+        };
+        let placement = match insn {
+            Insn::Method { owner, .. } if owner == "kotlin/jvm/internal/Intrinsics" => continue,
+            _ if is_invoke_on_lambda(insn) && operand == 0 => LambdaPlacement::Invoked,
+            Insn::Method {
+                op: INVOKESPECIAL,
+                owner,
+                name,
+                ..
+            } if name == "<init>" && operand > 0 && classes.is_regenerated(owner) => {
+                LambdaPlacement::Retained
+            }
+            _ => {
+                return Err(format!(
+                    "inline lambda {lambda} has a use the inliner does not place: {insn:?}"
+                ))
+            }
+        };
+        let slot = placements
+            .get_mut(lambda)
+            .ok_or_else(|| format!("inline lambda {lambda} is not one of the call's"))?;
+        match *slot {
+            LambdaPlacement::Unused => *slot = placement,
+            current if current == placement => {}
+            _ => {
+                return Err(format!(
+                    "inline lambda {lambda} is both invoked and retained"
+                ))
+            }
+        }
+    }
+    Ok(placements)
 }

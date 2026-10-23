@@ -6827,8 +6827,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   only the `new`. A multifile facade (kotlinx's `FlowKt`) only forwards to its parts, so an inline
   body is read from the part its forwarder names (also for a plain inline function, which krusty
   used to call through the facade); another part's private function with the same JVM name and
-  descriptor is neither that body nor the facade function's metadata. Tests: `tests/crossinline_suspend_object_e2e.rs`,
-  `tests/multifile_inline_part_splice_e2e.rs`.
+  descriptor is neither that body nor the facade function's metadata. Where a call to a
+  `suspend inline` factory places such a lambda is read from the body the emitter splices (its
+  `$$forInline` copy, or its `$default` bridge) before coroutine lowering: a lambda the body
+  invokes runs in the caller's frame and its suspensions are the caller's, and a lambda the body
+  only passes to a regenerated object's constructor runs in the object's method, so the caller's
+  machine ignores it. A factory that is not suspend can only do the latter. A body that is
+  unavailable, uses a lambda any other way, or both invokes it and hands it to an object is
+  refused (`cannot tell where … places its suspend lambdas`). Tests:
+  `tests/crossinline_suspend_object_e2e.rs`, `tests/multifile_inline_part_splice_e2e.rs`.
 
 - **A lambda inlined into a classpath inline body runs on an empty operand stack.** kotlinc's
   `MethodInliner` brackets each inlined lambda with `InlineMarker.beforeInlineCall` /

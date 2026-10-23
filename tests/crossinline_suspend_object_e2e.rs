@@ -278,3 +278,133 @@ fun box(): String {
         .expect("reference kotlinc is provisioned");
     assert_eq!(output, "OK");
 }
+
+/// The same factory declared `suspend inline`: its `$$forInline` copy still only hands the lambda to
+/// the object it constructs, so the lambda's suspensions are the object's method's, not the
+/// caller's, and the call is no suspension of its own.
+const SUSPEND_LIB: &str = r#"
+package lib
+
+interface Source<out T> {
+    suspend fun next(): T
+}
+
+suspend inline fun <T> source(crossinline produce: suspend () -> T): Source<T> =
+    object : Source<T> {
+        override suspend fun next(): T = produce()
+    }
+"#;
+
+const SUSPEND_MAIN: &str = r#"
+import lib.*
+
+suspend fun answer() = source { 42 }
+
+suspend fun plusOne(s: Source<Int>) = source { s.next() + 1 }
+
+suspend fun ticks(s: Source<Unit>) = source {
+    s.next()
+    s.next()
+}
+"#;
+
+/// A `suspend inline` factory's object is regenerated like a plain inline one's, byte for byte.
+#[test]
+fn a_suspend_inline_factory_regenerates_the_object_like_kotlinc() {
+    let classes = common::classes_against_kotlinc_lib(
+        "SuspendFactory",
+        &[("Lib.kt", SUSPEND_LIB)],
+        SUSPEND_MAIN,
+    )
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(
+        classes.reference.keys().collect::<Vec<_>>(),
+        [
+            "SuspendFactoryKt",
+            "SuspendFactoryKt$answer$$inlined$source$1",
+            "SuspendFactoryKt$plusOne$$inlined$source$1",
+            "SuspendFactoryKt$plusOne$$inlined$source$1$1",
+            "SuspendFactoryKt$ticks$$inlined$source$1",
+            "SuspendFactoryKt$ticks$$inlined$source$1$1",
+        ]
+    );
+    let differences = classes.differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
+const SUSPEND_RUN_MAIN: &str = r#"
+import lib.*
+import kotlin.coroutines.*
+
+var pending: Continuation<Int>? = null
+
+class Later : Source<Int> {
+    override suspend fun next(): Int = suspendCoroutine { pending = it }
+}
+
+suspend fun plusOne(s: Source<Int>) = source { s.next() + 1 }
+
+fun box(): String {
+    var result: Any? = null
+    suspend { plusOne(Later()).next() }
+        .startCoroutine(Continuation(EmptyCoroutineContext) { result = it.getOrThrow() })
+    if (result != null) return "FAIL completed before resuming: $result"
+    pending!!.resume(41)
+    if (result != 42) return "FAIL resumed: $result"
+    return "OK"
+}
+"#;
+
+/// The object a `suspend inline` factory returns suspends after the factory has returned, and
+/// resumes through its regenerated continuation.
+#[test]
+fn a_suspend_inline_factorys_object_resumes_through_its_continuation() {
+    let output = common::expect_box_run_against_ref(
+        "suspend_inline_factory_object",
+        SUSPEND_LIB,
+        SUSPEND_RUN_MAIN,
+    )
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(output, "OK");
+}
+
+/// A factory that both invokes its lambda and hands it to the object it returns places one body
+/// in two frames. Placement has no answer for that yet, so the call is refused, naming the body.
+const PRIMED_LIB: &str = r#"
+package lib
+
+interface Source<out T> {
+    suspend fun next(): T
+}
+
+suspend inline fun <T> primed(crossinline produce: suspend () -> T): Source<T> {
+    produce()
+    return object : Source<T> {
+        override suspend fun next(): T = produce()
+    }
+}
+"#;
+
+#[test]
+fn a_lambda_both_invoked_and_retained_is_refused_with_its_placement() {
+    let library =
+        common::kotlinc_library(PRIMED_LIB).expect("reference compiler must build the fixture");
+    let jdk = common::jdk_modules();
+    let classpath = [library, common::stdlib_jar(), jdk.clone()];
+    let outcome = common::backend_outcome_in_process(
+        "import lib.*\n\nsuspend fun answer() = primed { 42 }\n",
+        "Main",
+        &classpath,
+        Some(jdk.as_path()),
+    )
+    .expect("the call is frontend-valid");
+    assert_eq!(
+        outcome,
+        common::BackendOutcome::Rejected(vec![
+            "krusty: cannot tell where lib/LibKt.primed$$forInline\
+             (Lkotlin/jvm/functions/Function1;Lkotlin/coroutines/Continuation;)Ljava/lang/Object; \
+             places its suspend lambdas: inline lambda 0 is both invoked and retained"
+                .to_string()
+        ])
+    );
+}

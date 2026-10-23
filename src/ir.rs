@@ -2088,6 +2088,12 @@ pub struct IrFile {
     /// return, before CPS erasure to `Object`), recorded from the checked FIR call target: the
     /// cross-unit complement of `suspend_funs`, for a callee in ANOTHER file or a dependency.
     pub suspend_calls: crate::fx_hash::HashMap<u32, Ty>,
+    /// Each call to a classpath `suspend inline` function that passes a suspend lambda to an inline
+    /// parameter → the positions of the arguments whose lambda the callee's compiled body hands to
+    /// an object it constructs, so the lambda runs in that object's method, not in the caller's
+    /// frame. Read from the body before coroutine lowering; a listed call with no position invokes
+    /// each of its suspend lambdas itself.
+    pub retained_suspend_lambdas: crate::fx_hash::HashMap<ExprId, Box<[u32]>>,
     /// A cross-unit suspend call → the declared results of the declarations its callee overrides,
     /// nearest first, when it overrides any: how its result crosses the continuation is the target's.
     pub suspend_call_overridden_results: crate::fx_hash::HashMap<ExprId, Box<[Ty]>>,
