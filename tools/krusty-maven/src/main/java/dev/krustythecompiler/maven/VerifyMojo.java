@@ -122,7 +122,7 @@ public class VerifyMojo extends AbstractMojo {
         command.add("--kotlin-outputs-only");
         command.add("--reference");
         command.add(compilation.reference.getAbsolutePath());
-        File record = new File(records, compilation.name.replace(':', '_').replace('@', '_') + ".json");
+        File record = new File(records, fileName(compilation.name) + ".json");
         command.add("--record");
         command.add(record.getAbsolutePath());
         command.add("--compilation");
@@ -249,6 +249,24 @@ public class VerifyMojo extends AbstractMojo {
             Thread.currentThread().interrupt();
             throw new MojoExecutionException("interrupted while krusty ran", e);
         }
+    }
+
+    /**
+     * {@code name} as a file name, one to one: every byte other than an ASCII letter, digit, '.', '-'
+     * or '_' becomes {@code %XX}, so two compilations never share a record.
+     */
+    static String fileName(String name) {
+        StringBuilder file = new StringBuilder();
+        for (byte b : name.getBytes(StandardCharsets.UTF_8)) {
+            char c = (char) (b & 0xff);
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-'
+                    || c == '_') {
+                file.append(c);
+            } else {
+                file.append(String.format("%%%02X", b & 0xff));
+            }
+        }
+        return file.toString();
     }
 
     private static File temporary(String text) throws MojoExecutionException {
