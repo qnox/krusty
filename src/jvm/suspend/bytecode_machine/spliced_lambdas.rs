@@ -7,12 +7,11 @@
 //! its coroutine transformer builds the machine over it. A body placed in a suspend function's own frame belongs to
 //! that function's machine instead, which collects its points itself.
 
-use crate::fx_hash::HashSet;
-use crate::ir::{ExprId, IrExpr, IrFile};
+use crate::ir::{ExprId, InlineLambdaPlacement, IrExpr, IrFile};
 
 use super::super::append_continuation;
 use super::super::cps::TransformedSuspension;
-use super::super::lambda_placement::retained_in_an_object;
+use super::super::lambda_placement::recorded_placement;
 use super::{owned_suspensions, Route, Subject};
 
 /// The suspension points of a suspend lambda's placed bodies.
@@ -27,7 +26,7 @@ struct PlacedSuspensions {
 /// whose every value an inline call splices, their suspension points, and add them to the lambda's
 /// machine. This runs once every function is lowered: lowering a function that holds such a value
 /// gives its body nodes of its own, the placed body's among them. `false` when a call could not
-/// be given its continuation.
+/// be given its continuation, or a value's placement was never decided.
 pub(in crate::jvm::suspend) fn place_bodies(
     fids: &[u32],
     ir: &mut IrFile,
@@ -52,7 +51,7 @@ pub(in crate::jvm::suspend) fn place_bodies(
 
 /// Give each placed body of `fid`'s lambda values `values` the CPS form of its suspension points,
 /// which pass a fake continuation, and return the points. `None` when a call could not be given
-/// its continuation.
+/// its continuation, or a value's placement was never decided.
 fn placed_suspensions(
     ir: &mut IrFile,
     fid: u32,
@@ -68,8 +67,12 @@ fn placed_suspensions(
         else {
             continue;
         };
-        if placed_in_suspend_frame(ir, value, route.suspend_set) {
-            continue;
+        // Only a body an object's method runs is placed here: the caller's machine takes one its
+        // frame runs, and nothing runs an unused one. A value no emitted call bound was never
+        // decided, so its body has no known frame.
+        match recorded_placement(ir, value)? {
+            InlineLambdaPlacement::Retained => {}
+            InlineLambdaPlacement::Invoked | InlineLambdaPlacement::Unused => continue,
         }
         let suspensions = owned_suspensions(ir, fid, body, route, Subject::NamedFunction)?;
         for suspension in &suspensions {
@@ -95,25 +98,8 @@ fn placed_suspensions(
     Some(placed)
 }
 
-/// Whether the lambda value `value` is passed to a suspend inline call that invokes it in its own
-/// body: the caller's lowering takes the body's suspension points where the call places it. A
-/// suspend callee whose body hands the lambda to an object it constructs places it in that object's
-/// method, as does every function that is not suspend, which cannot invoke a suspend lambda.
-fn placed_in_suspend_frame(ir: &IrFile, value: ExprId, suspend_set: &HashSet<u32>) -> bool {
-    ir.exprs.iter().enumerate().any(|(call, expression)| {
-        let call = ExprId::try_from(call).expect("IR expression index exceeds ExprId");
-        let IrExpr::Call { args, .. } = expression else {
-            return false;
-        };
-        args.iter().enumerate().any(|(position, &argument)| {
-            argument == value && !retained_in_an_object(ir, call, position)
-        }) && super::super::is_suspension_point(ir, call, suspend_set)
-    })
-}
-
 /// Whether `value` is a suspend lambda whose body an inline call places in an object it constructs,
 /// not in the frame of the function the lambda is written in.
-pub(super) fn placed_in_an_object(ir: &IrFile, value: ExprId, suspend_set: &HashSet<u32>) -> bool {
-    matches!(&ir.exprs[value as usize], IrExpr::Lambda { impl_fn, .. } if suspend_set.contains(impl_fn))
-        && !placed_in_suspend_frame(ir, value, suspend_set)
+pub(super) fn placed_in_an_object(ir: &IrFile, value: ExprId) -> bool {
+    recorded_placement(ir, value) == Some(InlineLambdaPlacement::Retained)
 }
