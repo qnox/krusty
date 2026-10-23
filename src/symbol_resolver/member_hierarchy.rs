@@ -1,8 +1,13 @@
 //! Declared and inherited member lookup over applied classifier hierarchies.
 
+mod bound_inner_aliases;
 mod bound_inner_constructors;
 mod result_enhancement;
 
+pub(crate) use bound_inner_aliases::{
+    apply_inner_alias_outer_in_source, apply_inner_classifier_outer_in_source,
+    bound_inner_classifier_in_source, InnerAliasOuterApplication,
+};
 pub(crate) use bound_inner_constructors::bound_inner_constructor_candidates;
 pub(crate) use bound_inner_constructors::BoundInnerConstructorContext;
 
@@ -1447,7 +1452,7 @@ pub(crate) fn imported_object_member_symbols(
     (!matches!(callables, Callables::None)).then(|| {
         std::rc::Rc::new(crate::libraries::ResolvedSymbols {
             callables,
-            ..Default::default()
+            ..(*declared).clone()
         })
     })
 }

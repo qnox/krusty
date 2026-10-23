@@ -324,12 +324,7 @@ impl Checker<'_> {
         owner: String,
         unresolved: &[String],
     ) -> TypeParameterOwnerScope {
-        let mut scope = TypeParameterOwnerScope::default();
-        for (index, formal) in signature.formals.iter().enumerate() {
-            // `GenericSig::formals` stores the opaque semantic identity as owned text; this
-            // restores that exact identity to the interner rather than interning source spelling
-            // or deriving identity from it.
-            let identity = crate::types::intern(formal);
+        let formals = signature.formals.iter().enumerate().map(|(index, formal)| {
             let platform = unresolved.contains(formal).then(|| {
                 signature
                     .formal_bounds
@@ -337,6 +332,44 @@ impl Checker<'_> {
                     .and_then(|bounds| bounds.first())
                     .is_some_and(|bound| bound.is_platform_nullable())
             });
+            (formal.as_str(), platform)
+        });
+        self.publish_formal_identity_owners(formals, owner)
+    }
+
+    /// An alias exposes its own inferable formals, while independent formals of the underlying
+    /// constructor stay rigid and retain that constructor's declaration owner in diagnostics.
+    pub(super) fn publish_constructor_alias_rigid_formals(
+        &mut self,
+        alias: &crate::libraries::ConstructorAlias,
+    ) -> TypeParameterOwnerScope {
+        if alias.rigid_formals.is_empty() {
+            return TypeParameterOwnerScope::default();
+        }
+        let signature = &alias.underlying_signature;
+        let outer = signature
+            .receiver
+            .expect("bound alias has an enclosing receiver");
+        let owner = Self::bound_constructor_type_parameter_owner(outer, signature);
+        self.publish_formal_identity_owners(
+            alias
+                .rigid_formals
+                .iter()
+                .map(|formal| (formal.as_str(), None)),
+            owner,
+        )
+    }
+
+    fn publish_formal_identity_owners<'f>(
+        &mut self,
+        formals: impl IntoIterator<Item = (&'f str, Option<bool>)>,
+        owner: String,
+    ) -> TypeParameterOwnerScope {
+        let mut scope = TypeParameterOwnerScope::default();
+        for (formal, platform) in formals {
+            // Provider-normalized formals carry opaque declaration identities. Restore those
+            // exact identities to the interner without looking up their source spelling.
+            let identity = crate::types::intern(formal);
             scope.publish(
                 &mut self.type_parameter_owners,
                 &mut self.uninferred_type_parameters,

@@ -1,6 +1,7 @@
 //! Resolver-backed evaluation of compact signature expressions.
 
 use super::callable_references::AppliedSourceAlias;
+use super::constructor_results::selected_sam_constructor_result;
 use super::top_level_call::SelectedTopLevelCall;
 use super::*;
 use crate::resolve::implicit_rungs::ImplicitRung;
@@ -15,35 +16,6 @@ mod value_flow_constraints;
 pub(super) use constructor_expectations::ReceiverLevelCall;
 use result_approximation::denotable_signature_result;
 use result_constraints::signature_call_result_constraint;
-
-/// Select the language-defined SAM construction for a classifier call. Qualified and unqualified
-/// classifier spellings share this path; the qualifier affects only how the classifier was found,
-/// never whether its abstract method is applicable.
-fn selected_sam_constructor_result(
-    semantics: &ProductionSignatureSemantics<'_>,
-    scope: crate::fir::SignatureScope,
-    internal: crate::types::TypeName,
-    actual: Ty,
-    type_arguments: &[Ty],
-) -> Option<Ty> {
-    let module =
-        crate::module_symbols::ModuleSymbols::for_file(semantics.table, scope.source.raw());
-    let source = crate::symbol_source::CompositeSource::new(vec![
-        &module as &dyn crate::symbol_source::SymbolSource,
-        &*semantics.table.libraries as &dyn crate::symbol_source::SymbolSource,
-    ]);
-    let classifier = crate::symbol_source::SymbolSource::classifier(&source, internal)?;
-    if !type_arguments.is_empty() && type_arguments.len() != classifier.type_params.len() {
-        return None;
-    }
-    let target = if type_arguments.is_empty() {
-        Ty::obj_name(internal)
-    } else {
-        Ty::obj_args_name(internal, type_arguments)
-    };
-    let signature = crate::symbol_resolver::semantic_sam_signature(&source, target)?;
-    super::super::select_sam_constructor(&source, signature, actual).map(|selected| selected.result)
-}
 
 impl ProductionSignatureSemantics<'_> {
     /// Capture storage visible from a compact inferred member signature. Pass-1 capture discovery
@@ -1494,6 +1466,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 crate::resolve::implicit_rungs::ImplicitRung::Receiver(receiver) => receiver,
             };
             let selected_constructor = std::cell::Cell::new(false);
+            let selected_alias = std::cell::RefCell::new(None);
             if let Ok((
                 result,
                 member,
@@ -1503,9 +1476,10 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 postponed_bindings,
                 extension_parameters,
             )) = self.with_resolver(scope, |resolver| {
-                let callables = self
-                    .receiver_member_level(scope, resolver, receiver, spelling)
+                let level = self
+                    .receiver_member_level_with_context_status(scope, resolver, receiver, spelling)
                     .ok()?;
+                let callables = level.callables;
                 let (selected_arguments, selected_argument_types) =
                     Self::mapped_call_arguments(callables.functions(), arguments, trailing_lambda)?;
                 let projected = self.project_postponed_callables(
@@ -1541,7 +1515,10 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 };
                 let postponed_bindings = projected.selected_bindings(&selected);
                 selected_constructor.set(selected.bound_inner_constructor.is_some());
-                if selected.kind == crate::libraries::FnKind::Member {
+                if selected_constructor.get() {
+                    *selected_alias.borrow_mut() = selected.constructor_alias().cloned();
+                }
+                if selected.kind == crate::libraries::FnKind::Member || selected_constructor.get() {
                     let mut member = selected.member_with_return(result);
                     member.params = parameters.clone();
                     return Some((
@@ -1566,6 +1543,16 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             }) {
                 self.commit_postponed_bindings(scope, postponed_bindings);
                 if let Some(member) = member.as_ref().filter(|_| selected_constructor.get()) {
+                    if let Some(alias) = selected_alias.borrow_mut().take() {
+                        return self.named_construction_result(
+                            scope,
+                            origin,
+                            AppliedSourceAlias::selected(Some(&alias), &resolved_type_arguments),
+                            result,
+                            selected_argument_types.first().copied(),
+                            expected,
+                        );
+                    }
                     return self.selected_inner_constructor_result(
                         scope,
                         receiver,
@@ -3125,12 +3112,12 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
                     ]);
                     if matches!(
-                        super::super::inner_constructor_calls::apply_inner_alias_outer_in_source(
+                        crate::symbol_resolver::apply_inner_alias_outer_in_source(
                             &source,
                             alias.expansion,
                             receiver.get(),
                         ),
-                        super::super::inner_constructor_calls::InnerAliasOuterApplication::ReceiverMismatch
+                        crate::symbol_resolver::InnerAliasOuterApplication::ReceiverMismatch
                     ) {
                         // The selected alias is a constructor-reference candidate, not a missing
                         // member. Checked-body selection owns its declaration-shaped receiver
@@ -3883,11 +3870,12 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             }
         }
         let selected_constructor = std::cell::Cell::new(false);
+        let selected_alias = std::cell::RefCell::new(None);
         let selected = self.with_resolver(scope, |resolver| {
-            let (mut functions, properties) = self
-                .receiver_member_level(scope, resolver, receiver.get(), spelling)
-                .ok()?
-                .into_parts();
+            let level = self
+                .receiver_member_level_with_context_status(scope, resolver, receiver.get(), spelling)
+                .ok()?;
+            let (mut functions, properties) = level.callables.into_parts();
             // Selection sees the arguments one per parameter SLOT, with an omitted defaulted slot
             // as `OmittedDefault`, so a sibling overload that has NO default there looked just as
             // applicable and `Instant.fromEpochSeconds(0)` — `(Long, Int = 0)` beside
@@ -3961,7 +3949,10 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 trailing_lambda,
             );
             selected_constructor.set(selected.bound_inner_constructor.is_some());
-            if selected.kind == crate::libraries::FnKind::Member {
+            if selected_constructor.get() {
+                *selected_alias.borrow_mut() = selected.constructor_alias().cloned();
+            }
+            if selected.kind == crate::libraries::FnKind::Member || selected_constructor.get() {
                 let declared_receiver = selected.receiver;
                 let mut member = selected.member_with_return(result);
                 member.params = parameters;
@@ -4015,6 +4006,21 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             )) => {
                 self.commit_postponed_bindings(scope, postponed_bindings);
                 if let Some(member) = member.as_ref().filter(|_| selected_constructor.get()) {
+                    if let Some(alias) = selected_alias.borrow_mut().take() {
+                        let ty = self.named_construction_result(
+                            scope,
+                            origin,
+                            AppliedSourceAlias::selected(Some(&alias), &type_arguments),
+                            result,
+                            argument_types.first().copied(),
+                            expected,
+                        )?;
+                        self.record_final_selected_publication(origin, publication, ty);
+                        return Ok(crate::fir::ResolvedMemberCall {
+                            ty: Some(ty),
+                            declaration: None,
+                        });
+                    }
                     let ty = self.selected_inner_constructor_result(
                         scope,
                         receiver.get(),
@@ -4666,48 +4672,5 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         declaration: crate::fir::DeclarationId,
     ) -> crate::fir::DiagnosticId {
         self.record_missing_signature(declaration)
-    }
-}
-
-impl ProductionSignatureSemantics<'_> {
-    /// A selected member's result restated under the call's expectation. `any<T>()` used where
-    /// `Instant` is expected binds `T := Instant` from the result alone, as the top-level and
-    /// source-callable paths already do; a result that mentions no open formal is returned as is.
-    fn member_result_under_expectation(
-        &self,
-        scope: crate::fir::SignatureScope,
-        member: &crate::libraries::LibraryMember,
-        result: Ty,
-        expected: Option<Ty>,
-    ) -> Ty {
-        let (Some(expected), Some(generic)) = (expected, member.generic_sig.as_ref()) else {
-            return result;
-        };
-        if generic.formals.is_empty() || !result.mentions_ty_param() {
-            return result;
-        }
-        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let semantic_source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
-        let oracle = crate::symbol_resolver::SourceOracle(&semantic_source);
-        let admits = |actual: Ty, bound: Ty| {
-            crate::assignable::is_assignable(
-                &crate::assignable::TyCtx::new(),
-                &oracle,
-                actual,
-                bound,
-            )
-        };
-        match crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
-            &semantic_source,
-            generic,
-            expected,
-            admits,
-        ) {
-            Some(bindings) => crate::symbol_resolver::ty_subst_keep_unbound(result, &bindings),
-            None => result,
-        }
     }
 }

@@ -51,8 +51,8 @@ pub use call_realization::{
 };
 pub(crate) use call_realization::{KlibBodyCallableShape, KlibBodyCompanionReceiver};
 pub use callable_scope_rung::CallableScopeRung;
-pub(crate) use classifier_callables::constructor_generic_signature;
 pub use classifier_callables::BoundInnerConstructor;
+pub(crate) use classifier_callables::{constructor_generic_signature, ConstructorAlias};
 pub(crate) use classifier_declaration::type_alias_target_classifier;
 pub use classifier_declaration::{AliasExpansion, ClassifierDeclaration};
 pub use classifier_kind::TypeKind;
@@ -1629,6 +1629,8 @@ pub struct FunctionInfo {
     /// receiver's member level beside same-named member functions; selection runs once over both
     /// and the constructor path then materializes the selected declaration.
     pub bound_inner_constructor: Option<BoundInnerConstructor>,
+    /// The alias selected on the caller's scope tower for this constructor candidate.
+    pub(crate) constructor_alias: Option<Box<ConstructorAlias>>,
 }
 
 /// Where an extension receiver sits among a callable's PHYSICAL parameters. Kotlin puts the leading
@@ -1822,6 +1824,12 @@ impl FunctionInfo {
         }
     }
 
+    pub(crate) fn constructor_alias(&self) -> Option<&AliasExpansion> {
+        self.constructor_alias
+            .as_deref()
+            .map(|alias| &alias.declaration)
+    }
+
     pub fn plain(kind: FnKind, receiver: Option<Ty>, callable: LibraryCallable) -> Self {
         let logical_parameter_count = callable
             .params
@@ -1853,6 +1861,7 @@ impl FunctionInfo {
             source_member: None,
             implicit_classifier_callable: None,
             bound_inner_constructor: None,
+            constructor_alias: None,
         }
     }
 

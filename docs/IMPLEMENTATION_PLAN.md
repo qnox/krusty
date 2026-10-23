@@ -20,8 +20,13 @@ out of the resolver facade into its owning module. Shared classifier-bound check
 the full enclosing application for alias targets instead of validating own bounds in isolation.
 JVM boxing-cast byte parity remains separate in #2590; the bound slice proves complete ABI
 signatures, reference runtime and exact diagnostics.
-Inferred return types of receiver-bound alias calls remain a separate signature-lookup follow-up
-in #2592; declared alias calls and direct inferred calls are covered here.
+The #2592 alias slice normalizes the selected lexical/file/import alias into the ordinary receiver
+candidate family. Alias-owned formals control written arity and inference; the selected physical
+constructor and enclosing receiver remain declaration-owned. Signature publication consumes the
+same named-argument substitution as body checking, retaining the alias expansion without a second
+lookup. Rigid underlying constructor formals retain scoped diagnostic owners from declaration
+substitutions. Source/dependency oracles cover full ABI, receiver and target bounds, scope/member
+priority, reordered and unused alias formals, named arguments, and independent constructor formals.
 
 ## Nested JVM generic applications
 

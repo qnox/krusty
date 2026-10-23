@@ -1008,10 +1008,12 @@ mod tests {
         let named = crate::symbol_resolver::ClassifierImportLevel {
             packages: vec![package],
             builtins_only: true,
+            callable_position: (crate::libraries::CallableScopeRung::Import, 2),
         };
         let star = crate::symbol_resolver::ClassifierImportLevel {
             packages: vec![package],
             builtins_only: false,
+            callable_position: (crate::libraries::CallableScopeRung::Import, 1),
         };
         assert!(
             crate::symbol_resolver::classifier_candidates_at_import_level(&earlier, "List", &named)

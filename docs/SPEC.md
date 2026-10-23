@@ -14722,14 +14722,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   inapplicable-candidate and upper-bound diagnostics, with or without an explicit function return.
   A receiver `Outer<Long>` also supplies the bound used to contextualize `Inner<Long>(1)` and
   `Inner(1)`. Source and dependency calls, including fixed aliases, retain complete own-plus-captured
-  result arguments. Receiver-bound alias calls with inferred function returns remain tracked in
-  #2592; declared alias returns are covered. Captured formals are removed by declaration identity;
+  result arguments. Captured formals are removed by declaration identity;
   independently declared constructor formals remain inferable. A shadowing own parameter also
   remains independent when a Java provider renames the hidden captured parameter: enclosing
   bindings use the inner declaration's capture identities (`tests/java_class_formal_bound_e2e.rs`).
   The enclosing application supplies the input type
   during eager lambda overload selection, before Unit coercion decides between constructor
   candidates. (`tests/inner_constructor_bounds_e2e.rs`.)
+
+- **A receiver-bound alias constructor retains its selected alias application.** An inferred
+  function return such as `fun f(o: Outer<Number>) = o.Generic(1)` uses the same selected alias and
+  mapped constructor arguments as body checking. Lexical aliases shadow package aliases, applicable
+  members keep priority, and written type arguments follow the alias's own formal order, including
+  unused formals. Named value arguments do not reorder those formals. Both source and dependency
+  aliases retain their complete own-plus-captured return arguments and target bounds. Independent
+  underlying constructor formals stay rigid through an alias; a rejection names their underlying
+  declaration owner with the alias's declaration substitutions, rather than the call's inferred or
+  written arguments. Same-spelled alias and constructor formals keep distinct semantic identities.
+  An inadmissible alias receiver retains its receiver-derived bindings but does not infer remaining
+  alias formals from value arguments or an expected result; those formals receive inference errors.
+  (`tests/bound_inner_alias_inference_e2e.rs`: runtime, complete source/dependency ABI, and exact
+  diagnostic comparisons with kotlinc.)
 
 - **Inner constructors and same-named member functions are one overload family.** kotlinc places
   the constructors of an `inner` classifier in the member level of the receiver that supplies its

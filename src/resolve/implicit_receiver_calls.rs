@@ -68,9 +68,14 @@ impl Checker<'_> {
                 member_receiver.kind(),
                 TyKind::Obj(..) | TyKind::TyParam(..)
             ) {
-            match self
-                .record_member_call_with_slots(scope, call, rt, name, args, tower_rung, expected)
-            {
+            match self.record_member_call_with_slots(
+                scope,
+                call,
+                (rt, name),
+                args,
+                tower_rung,
+                expected,
+            ) {
                 MemberSlotCall::Resolved(ret) => {
                     self.mark_implicit_receiver_selection(call, receiver);
                     return Some(ret);

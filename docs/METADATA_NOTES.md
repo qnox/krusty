@@ -30,6 +30,15 @@ unapplied outer does not acquire invented type arguments.
 The same complete result reaches inferred function signatures and rejected-call recovery. This
 changes no metadata schema, physical constructor descriptor or enclosing-instance ABI.
 
+Receiver-bound aliases carry the already-selected alias expansion and its declaration signature on
+the constructor candidate. Alias formal order governs written type arguments independently of the
+target classifier's own-plus-captured layout. Inferred return publication uses the selected named
+argument mapping and preserves the alias abbreviation. Independent underlying constructor formals
+retain their semantic identities and declaration-specialized owner signature for diagnostics; they
+are not added to the alias's inference variables. No metadata schema or physical descriptor changes.
+Receiver-call inventories retain classifier and callable facets from the same declaration read;
+object-import singleton projection preserves those classifier and alias facts as well.
+
 ## Shared-target compiler/plugin model artifacts
 
 The Rust compiler/plugin model tracks checkout identity as a Cargo input, so a shared target cannot

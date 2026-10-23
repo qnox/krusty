@@ -6,8 +6,8 @@
 //! candidate structure so every call position collects them into the same overload family.
 
 use super::{
-    FnKind, FunctionInfo, GenericReturnPolicy, GenericSig, LibraryCallable, LibraryMember,
-    LibraryType, ReturnInfo,
+    AliasExpansion, FnKind, FunctionInfo, GenericReturnPolicy, GenericSig, LibraryCallable,
+    LibraryMember, LibraryType, ReturnInfo,
 };
 use crate::types::{Ty, TypeName};
 
@@ -17,6 +17,16 @@ use crate::types::{Ty, TypeName};
 pub struct BoundInnerConstructor {
     pub inner: TypeName,
     pub outer: TypeName,
+}
+
+/// The alias declaration and uninstantiated callable shape retained by a selected constructor.
+/// Receiver-specialized inference bounds are call constraints, not bounds declared by the alias.
+#[derive(Clone)]
+pub(crate) struct ConstructorAlias {
+    pub(crate) declaration: AliasExpansion,
+    pub(crate) signature: GenericSig,
+    pub(crate) underlying_signature: GenericSig,
+    pub(crate) rigid_formals: Vec<String>,
 }
 
 /// Constructor signature as a callable: the classifier's type parameters are the constructor's
