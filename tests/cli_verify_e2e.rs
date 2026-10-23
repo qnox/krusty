@@ -164,7 +164,7 @@ fn layouts_that_could_overwrite_kotlincs_output_are_refused_before_anything_is_w
 }
 
 #[test]
-fn each_run_replaces_the_record_and_one_without_sources_says_so() {
+fn each_run_replaces_the_record_with_its_own_outcome() {
     let layout = Layout::new("fresh");
     let record = layout.root.join("records/compileKotlin.json");
     let destination = layout.root.join("krusty");
@@ -188,5 +188,26 @@ fn each_run_replaces_the_record_and_one_without_sources_says_so() {
     assert_eq!(
         std::fs::read_to_string(&record).expect("record"),
         "{\n  \"compilation\": \":compileKotlin\",\n  \"outcome\": {\n    \"status\": \"no-sources\"\n  }\n}\n"
+    );
+
+    // A compilation the build tool already knows krusty does not support, with no request to pass.
+    let output = Command::new(common::krusty_binary())
+        .arg("verify-compile")
+        .arg("--reference")
+        .arg(layout.root.join("kotlinc-dsl"))
+        .arg("--record")
+        .arg(&record)
+        .args([
+            "--compilation",
+            ":compileKotlinDsl",
+            "--unsupported",
+            "kotlin-dsl compilations stay with kotlinc",
+        ])
+        .output()
+        .expect("run krusty verify-compile");
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        std::fs::read_to_string(&record).expect("record"),
+        "{\n  \"compilation\": \":compileKotlinDsl\",\n  \"outcome\": {\n    \"status\": \"unsupported\",\n    \"reasons\": [\n      \"kotlin-dsl compilations stay with kotlinc\"\n    ]\n  }\n}\n"
     );
 }
