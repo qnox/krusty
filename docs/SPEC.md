@@ -27,6 +27,11 @@ whole-module architecture or plugin contract to fight.
 
 ## 2. Scope (what the PoC compiles)
 
+The configured constructor-property annotation default sites apply to Native KLIB metadata as well
+as JVM attributes. The unchanged class-surface fixture's annotated constructor property carries its
+property annotation in current mode and not in older first-only mode. Both are compared with live
+official Native output in `tests/klib_class_surface_e2e.rs`; the full class-surface assertion remains.
+
 ### v0 supported Kotlin subset
 - A single package; multiple `.kt` files compiled together.
 - **Top-level functions**: `fun name(p: T, ...): R = expr` and block bodies `{ ... }`.
@@ -1679,10 +1684,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   NOT diagnosed (`diags.truncate` around the loop) — because krusty's folder is narrower than
   kotlinc's and these applications were never checked before, so a diagnostic here would reject
   sources kotlinc accepts. Placement follows Kotlin's use-site defaulting rather than a guess: a
-  constructor `val`/`var` parameter's annotation reaches the PARAMETER only when
-  `AnnotationTargets::property_declaration_site` resolves to `ValueParameter`, leaving the property-
-  and field-targeted ones to the marker method and the backing field; a plain function parameter has
-  no such choice. Pass 1 also publishes a constructor property's checked PROPERTY applications,
+  constructor `val`/`var` parameter's annotation uses the configured
+  `PropertyParamAnnotationDefaultTargetMode`. First-only mode chooses the first applicable of
+  PARAMETER, PROPERTY and FIELD. Param-property mode selects an applicable PARAMETER and separately
+  PROPERTY (or FIELD when PROPERTY is inapplicable and backing storage exists). Explicit use-site
+  applications select only that site; getters and setters are never implicit destinations. The
+  checker records the selected site set and metadata consumes membership without reselecting targets.
+  A plain parameter has no property/field destinations. Pass 1 also publishes a constructor
+  property's checked PROPERTY applications,
   including folded class literals, under its stable property identity before plugin constructor
   selection. Parameter- and accessor-targeted applications must not enter that property payload.
   Partition constructor-property applications only after annotation policies from every source
@@ -1695,6 +1704,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `constructor_property_payloads_do_not_depend_on_annotation_policy_file_order` checks stable
   payloads in both input orders, with strict whole-class kotlinc coverage in
   `property_accessor_annotation_e2e::constructor_property_annotations_match_kotlinc_in_both_source_orders`.
+  `constructor_parameter_property_default_targets_match_kotlinc` compares all output classes in
+  both source orders; `configured_default_targets_in_older_and_current_language_match_kotlinc`
+  compares explicit older/current language settings with the same real reference compiler.
+  `fieldless_annotation_properties_do_not_gain_a_default_field_application` covers annotation-class
+  storage absence. This feature does not implement the separate `-Xannotation-default-target` option.
   Retention stays SEMANTIC through lowering (one ordered list per parameter) and is
   split into the two JVM attributes at emission via `split_declaration_annotations`, so the two
   halves cannot diverge. GAP: an annotation WITH ARGUMENTS is left out of

@@ -34,7 +34,22 @@ Constructor-plan discovery uses source declarations, not the optional spelling s
 constructor-property values and explicit sites remain in a private pending record until every
 file has published its annotation policies; no syntax or full TypeInfo is retained across files.
 Forward and reverse input orders must publish the same property payload and class bytes.
-The configured param-property default-target mode is a separate semantic follow-up (#2542).
+The configured param-property default-target mode is a separate semantic layer (#2542), described
+below; it does not change cross-file target-policy publication ownership.
+
+## Configured property-parameter annotation defaults
+
+Project `PropertyParamAnnotationDefaultTargetMode` through the shared parser feature boundary.
+The checker records selected property annotation sites from the declaration's parameter/storage
+facts and resolved target policy; common metadata only partitions those recorded sites. Modern
+defaulting selects an applicable parameter plus PROPERTY, or FIELD when PROPERTY is inapplicable
+and backing storage exists. Explicit sites stay singleton and older language modes retain first-only
+selection. Stable constructor-property publication uses the same frontend selection operation.
+Preserve the existing cross-file policy-publication barrier. Keep the separate
+`-Xannotation-default-target` option unsupported until its own follow-up.
+Keep the complete KLIB surface comparison and verify its changed property annotation against the
+official Native compiler in both language modes, using the unchanged source fixture. Each written
+library owns a unique scratch directory so concurrent mode and surface checks cannot replace it.
 
 ## String operation authority publication
 

@@ -24,8 +24,10 @@ pub use semantic_callable_owner::SemanticCallableOwner;
 mod annotation_targets;
 mod interning;
 mod spelling;
+pub(crate) use annotation_targets::PropertyAnnotationHost;
 pub use annotation_targets::{
-    AnnotationTargets, DeclaredTargetPolicies, KotlinTarget, PropertyAnnotationSite,
+    AnnotationTargets, DeclaredTargetPolicies, KotlinTarget, PropertyAnnotationDefaultTargetMode,
+    PropertyAnnotationSite, PropertyAnnotationSites,
 };
 mod equality_mode;
 mod substitute;
@@ -2297,6 +2299,9 @@ pub struct AppliedAnnotation {
     pub retention: AnnotationRetention,
     /// The annotation's DECLARED `@Target` set (see [`AnnotationTargets`]).
     pub targets: AnnotationTargets,
+    /// Selected destinations when this application belongs to a property declaration. Non-property
+    /// applications have no property placement; an empty set is not an absent decision.
+    pub property_sites: Option<PropertyAnnotationSites>,
 }
 
 impl AppliedAnnotation {
