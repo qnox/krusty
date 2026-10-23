@@ -1,5 +1,18 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Class application header ownership
+
+A classpath classifier's generic layout is read from declaration headers before its members are
+published. Its own formals precede those captured from authenticated enclosing-instance edges.
+Inner bounds are hydrated in that enclosing scope, and shadowed captures keep distinct identities.
+Reading this layout does not construct the enclosing classifier's member record.
+
+Static nested classes capture no outer formals. A local or anonymous `InnerClasses` entry with no
+outer does not invent a member-class capture. Kotlin class metadata owns Kotlin formals; mapped
+physical Java classifiers retain invariant variance while semantic Kotlin views retain their
+declared variance. Missing headers, cyclic owners and unavailable bound scopes decline instead of
+becoming nongeneric declarations or guessed `Any` bounds.
+
 **Status:** PoC / experiment. NOT a production Kotlin compiler.
 
 **Goal:** demonstrate that a **linear, data-oriented, per-file streaming pipeline** compiles a

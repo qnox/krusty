@@ -1,5 +1,17 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Class formal layouts before member publication
+
+Kotlin class metadata supplies own formals and bounds. A mapped builtin declaration supplies its
+semantic layout when applicable; Java class signatures supply the remaining declarations. Captured
+class formals come from non-static `InnerClasses` outer edges, with bound hydration before own-first
+capture/shadow renaming. Local or anonymous entries without an outer are not member capture edges.
+
+Layout reads use class headers and builtin declaration tables, not the enclosing `LibraryType` or
+its members. Physical mapped Java requests keep invariant formals independently of a Kotlin view's
+declared variance. This changes no metadata wire fields or physical descriptors. Missing lexical
+formal scopes, including unavailable enclosing-method evidence, do not license placeholder bounds.
+
 Wasm's erased-reference binary equality realization uses the already checked operator and the
 runtime GC representation. It changes no metadata, callable identity, or provider authorization;
 explicit dependency `Any.equals` realization remains a separate authenticated-callable contract.

@@ -5,6 +5,17 @@ front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
 
+## Class application headers
+
+JVM classifier assembly reads complete own/captured formal layouts without recursively publishing
+enclosing members. The header reader preserves metadata authority, bound chains, shadowed identities,
+static boundaries, local/anonymous entries and physical mapped-class variance. Owner tests constrain
+the member-cache lifetime as well as the resulting layout.
+
+This is declaration evidence for #2537. Raw occurrence construction, lossless explicit outer-segment
+parsing and erased-application semantics remain separate follow-ups. Enclosing-method formal scopes
+need explicit header evidence; unavailable bounds are refused rather than replaced with `Any`.
+
 KLIB dependency-emission categories have disjoint declaration-owned roots before lowering begins.
 An authenticated intrinsic wrapper keeps that ownership when its body transaction declines; the
 ordinary-body category cannot retry it and turn the target decline into an ordinary-closure error.
