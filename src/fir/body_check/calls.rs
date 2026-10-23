@@ -1406,7 +1406,12 @@ impl BodyFirChecker<'_> {
                 Ok(FirTypeSubstitution {
                     parameter: parameter.into(),
                     reified,
-                    reified_runtime: self.reified_substitution_runtime(reified, value, &additional_bounds),
+                    reified_runtime: self.reified_substitution_runtime(
+                        reified,
+                        value,
+                        self.info
+                            .resolved_call_type_argument_reified_runtime(expression, ordinal as usize),
+                    ),
                     value,
                     additional_bounds,
                 })
@@ -1720,7 +1725,10 @@ impl BodyFirChecker<'_> {
                     reified_runtime: self.reified_substitution_runtime(
                         reified,
                         value,
-                        &additional_bounds,
+                        self.info.resolved_call_type_argument_reified_runtime(
+                            expression,
+                            ordinal as usize,
+                        ),
                     ),
                     additional_bounds,
                 })
