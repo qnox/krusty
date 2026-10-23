@@ -5619,6 +5619,12 @@ non-inline callers, still reads the field directly. Test:
 - Wasm consumes the published declaration-result provenance of a generic call beneath its
   checked result coercion. This preserves separate declared and selected types without inventing
   missing facts; it does not yet supply generic scalar boxing or a canonical dependency-call ABI.
+- Erased-reference `==` / `!=` uses runtime GC String classification and the existing virtual
+  equality slot without requiring a file-local static class. The shared portable regression
+  establishes its result with kotlinc before exercising both Wasm hosts. Explicit dependency
+  `Any.equals` capability publication, default hash/rendering, arrays and numeric boxing remain
+  separate follow-ups. Five fake-override bridge cases and `fieldRename/genericPropertyWithItself.kt`
+  now pass on both Wasm hosts and leave their expected-failure inventories.
 - Not yet selectable from the CLI: a user-facing wasm target waits on that klib platform.
 - Catch-only EH: a module-owned tag carries the same Throwable reference across calls/modules.
   The selected stdlib's exact `Throwable()` / `Throwable(String?)` and nullable `message` getter

@@ -20917,7 +20917,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   interface member has the same number in every implementing class. Class, interface and `Any`
   values are carried as `(ref null eq)`, so an override never needs a signature of its own; an
   override carried differently from the member it overrides (a bridge) declines. `==` on a class
-  value calls its `equals` slot null-safely, whose default is identity. `kotlin.Any`'s own
+  value calls its `equals` slot null-safely, whose default is identity. Erasing a reference to
+  `Any?` preserves structural `==` and `!=`: runtime Strings compare UTF-16 contents, class
+  instances dispatch their actual `equals` slot, and other GC references use identity. Both
+  operands evaluate once, left before right, including a null left operand; a non-null receiver's
+  override may accept null or reject itself. `===` remains reference identity. This operator
+  realization does not authorize explicit dependency calls to `Any.equals`, add Kotlin-array
+  carriers, or implement boxing. The shared `erasedReferenceEquality.kt` regression compares
+  kotlinc/JVM, krusty/JVM and both Wasm hosts. `kotlin.Any`'s own
   `hashCode` and `toString` have no body in the module yet: their slots trap, and a call or
   template that could reach one on a class that does not override it declines the compilation by
   name rather than print something kotlinc would not. An `object` is built on first use and
