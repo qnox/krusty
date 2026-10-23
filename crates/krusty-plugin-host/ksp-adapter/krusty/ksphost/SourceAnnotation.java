@@ -16,11 +16,25 @@ final class SourceAnnotation implements KSAnnotation {
     private final KSNode parent;
     private final Name shortName;
     private final AnnotationTypeReference type;
+    // Null when it has no use-site target.
+    private final AnnotationUseSiteTarget useSite;
+    private final boolean synthetic;
+    // Both null when krusty could not fold the arguments; the queries are then refused.
+    List<KSValueArgument> arguments;
+    List<KSValueArgument> defaultArguments;
 
-    SourceAnnotation(KSNode parent, String shortName, String qualifiedName, Symbols symbols) {
+    SourceAnnotation(
+            KSNode parent,
+            String shortName,
+            String qualifiedName,
+            AnnotationUseSiteTarget useSite,
+            boolean synthetic,
+            Symbols symbols) {
         this.parent = parent;
         this.shortName = new Name(shortName);
         this.type = new AnnotationTypeReference(this, qualifiedName, symbols);
+        this.useSite = useSite;
+        this.synthetic = synthetic;
     }
 
     @Override
@@ -30,12 +44,18 @@ final class SourceAnnotation implements KSAnnotation {
 
     @Override
     public List<KSValueArgument> getArguments() {
-        throw Nodes.notImplemented("KSAnnotation.arguments");
+        if (arguments == null) {
+            throw Nodes.notImplemented("KSAnnotation.arguments of an annotation it cannot fold");
+        }
+        return arguments;
     }
 
     @Override
     public List<KSValueArgument> getDefaultArguments() {
-        throw Nodes.notImplemented("KSAnnotation.defaultArguments");
+        if (defaultArguments == null) {
+            throw Nodes.notImplemented("KSAnnotation.defaultArguments of an annotation it cannot fold");
+        }
+        return defaultArguments;
     }
 
     @Override
@@ -45,12 +65,12 @@ final class SourceAnnotation implements KSAnnotation {
 
     @Override
     public AnnotationUseSiteTarget getUseSiteTarget() {
-        throw Nodes.notImplemented("KSAnnotation.useSiteTarget");
+        return useSite;
     }
 
     @Override
     public Origin getOrigin() {
-        return Origin.KOTLIN;
+        return synthetic ? Origin.SYNTHETIC : Origin.KOTLIN;
     }
 
     @Override

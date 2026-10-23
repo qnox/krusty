@@ -63,8 +63,6 @@ pub(super) struct SignedFunction {
     /// The constant default of each value parameter, read from the library's IR; empty when the
     /// IR was not read or no default is a constant.
     pub(super) defaults: Vec<Option<crate::libraries::DefaultValue>>,
-    /// Structural inline body authenticated from the same module-qualified IR declaration.
-    pub(super) inline_body_plan: Option<Box<crate::libraries::InlineBodyPlan>>,
 }
 
 /// A property joined with the identities its library serialized it and its accessors under, and
@@ -206,7 +204,6 @@ pub(super) fn sign_function(
         internal_friend,
         module: None,
         defaults: Vec::new(),
-        inline_body_plan: None,
     })
 }
 

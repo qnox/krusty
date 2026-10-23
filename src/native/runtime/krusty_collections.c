@@ -248,11 +248,11 @@ kt_int kt_list_size(KRef list) {
 
 kt_boolean kt_list_is_empty(KRef list) { return kt_list_size(list) == 0; }
 
-/* `Collection.size` over a receiver the static type does not narrow to a list or a set: every
-   collection this runtime makes is one of the two list shapes or something a map holds (a set, or
-   a map's key, value or entry view). The generator never reaches here with a collection of the
-   program's own; see `FileLowering::implements_collection_of`. */
+/* Runtime-owned collection storage, or a program's selected virtual Collection.size getter. */
 kt_int kt_collection_size(KRef collection) {
+    if (collection->header.type->collection_size != NULL) {
+        return collection->header.type->collection_size(collection);
+    }
     if (collection->header.type == &kt_type_list || kt_is_mutable_list(collection)) {
         return kt_list_size(collection);
     }
@@ -261,6 +261,13 @@ kt_int kt_collection_size(KRef collection) {
         KT_FAIL("krusty: a runtime collection was expected here\n");
     }
     return held;
+}
+
+kt_int kt_collection_size_or_default(KRef iterable, kt_int fallback) {
+    if (!kt_is_instance(iterable, &kt_type_collection_interface)) {
+        return fallback;
+    }
+    return kt_collection_size(iterable);
 }
 
 kt_boolean kt_collection_is_empty(KRef collection) { return kt_collection_size(collection) == 0; }

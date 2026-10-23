@@ -2775,13 +2775,18 @@ pub struct SymbolTable {
 /// reparsed.
 pub(crate) struct PassTwoSymbols {
     compilation_id: u64,
-    libraries: Box<dyn SemanticPlatform>,
+    libraries: std::rc::Rc<dyn SemanticPlatform>,
     native_plugins: crate::plugins::registry::NativePlugins,
 }
 
 impl PassTwoSymbols {
     pub(crate) fn semantic_platform(&self) -> &dyn SemanticPlatform {
         &*self.libraries
+    }
+
+    /// A shared handle on the platform, for a consumer that outlives one borrow of these symbols.
+    pub(crate) fn shared_semantic_platform(&self) -> std::rc::Rc<dyn SemanticPlatform> {
+        std::rc::Rc::clone(&self.libraries)
     }
 
     pub(crate) fn native_plugins(&self) -> &crate::plugins::registry::NativePlugins {
@@ -2793,7 +2798,7 @@ impl SymbolTable {
     pub(crate) fn into_pass_two_symbols(self) -> PassTwoSymbols {
         PassTwoSymbols {
             compilation_id: self.compilation_id,
-            libraries: self.libraries,
+            libraries: std::rc::Rc::from(self.libraries),
             native_plugins: self.native_plugins,
         }
     }
@@ -46451,7 +46456,7 @@ impl<'a> Checker<'a> {
         let class_suppression_depth =
             self.push_declaration_policies(scope, &cl.annotations, &cl.annotation_args);
         if self.fragment.is_declaration_annotations() {
-            self.fold_classifier_declaration_annotations(scope, cl);
+            self.fold_classifier_declaration_annotations(scope, cl, current_owner);
             self.active_lexical_policies
                 .truncate(class_suppression_depth);
             return;
@@ -65005,7 +65010,7 @@ impl<'a> Checker<'a> {
         function: &FunDecl,
         declaration_target: &'static str,
     ) -> usize {
-        self.fold_function_annotation_applications(scope, function, true, declaration_target)
+        self.fold_function_annotation_applications(scope, function, declaration_target)
     }
 
     /// Materialize only declaration annotations for a class method whose checked body was retained
@@ -65016,7 +65021,7 @@ impl<'a> Checker<'a> {
         class_scope: &CheckerScope<'_>,
         function: &FunDecl,
     ) {
-        self.fold_method_annotations_in_temporary_scope(class_scope, function, true);
+        self.fold_method_annotations_in_temporary_scope(class_scope, function);
     }
 
     fn reject_package_private_classifier_call(
@@ -65126,6 +65131,9 @@ impl<'a> Checker<'a> {
             flags: SigFlags::default()
                 .with_is_operator(member.is_operator())
                 .with_is_suspend(member.suspend())
+                .with_is_inline(member.inline.can_inline())
+                .with_requires_splice(member.inline.must_inline())
+                .with_has_reified_type_params(member.reified)
                 .with_is_final(true)
                 .with_vararg(vararg_index.is_some()),
             annotations: member.annotations.clone(),

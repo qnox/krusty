@@ -8,6 +8,8 @@ import com.google.devtools.ksp.symbol.KSValueParameter;
 import com.google.devtools.ksp.symbol.KSVisitor;
 import com.google.devtools.ksp.symbol.Location;
 import com.google.devtools.ksp.symbol.Origin;
+import java.util.ArrayList;
+import java.util.List;
 import kotlin.sequences.Sequence;
 
 // A function or constructor parameter.
@@ -23,6 +25,7 @@ final class Parameter implements KSValueParameter {
     private final boolean crossInline;
     // Null when krusty could not describe the type; the query is then refused.
     KSTypeReference type;
+    final List<KSAnnotation> annotations = new ArrayList<>();
 
     Parameter(
             SourceFunction owner,
@@ -91,7 +94,7 @@ final class Parameter implements KSValueParameter {
 
     @Override
     public Sequence<KSAnnotation> getAnnotations() {
-        throw Nodes.notImplemented("KSValueParameter.annotations");
+        return Nodes.sequence(annotations);
     }
 
     @Override

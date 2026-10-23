@@ -4425,6 +4425,34 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `klib_libraries::tests::analysis::an_omitted_constant_default_is_the_klib_parameter_default` and
   `…_constructor_default_is_the_klib_parameter_default`, plus
   `klib_libraries::parameter_defaults::tests`.
+- **Native collection property reads retain their selected property identity.** A `Collection.size`
+  read in a serialized inline body uses the frozen property's normalized name and its exact
+  getter's declaring collection face, parameter list and result type. An accessor's physical
+  spelling, such as KLIB's `<get-size>`, does not change which property was selected. This does
+  not make a same-named property on a dependency subtype a runtime collection operation.
+  Test: shared box fixture `collectionSizeInInlineBody.kt` (JVM oracle, receiver evaluated once,
+  copied elements and empty collection).
+
+- **An authenticated size-only KLIB array constructor lowers to array allocation.** The selected
+  platform stdlib's boxed `Array<T>` class and its exact `<init>(Int)` declaration publish an array
+  allocation role only after validating class arity, the linked generic class application and the
+  complete constructor shape. Constructor normalization preserves that role. Common body lowering
+  consumes it as `NewArray`, using the recorded element type and supplied size, rather than an
+  ordinary dependency-object construction. Missing sizes and malformed role-bearing calls decline;
+  an identical ordinary dependency gains no role. Tests:
+  `builtin_realizations::arrays::tests`,
+  `collection_to_typed_array_uses_the_selected_array_allocation`, and the shared
+  `collectionSizeInInlineBody.kt` fixture.
+
+- **Native collection sizing does not walk a plain Iterable.** The authenticated stdlib
+  `Iterable<T>.collectionSizeOrDefault(Int): Int` declaration retains its exact generic receiver
+  and argument coordinate. Both arguments evaluate eagerly, receiver first. A runtime Collection
+  answers through its selected virtual `size` getter, exactly once; an ordinary Iterable returns
+  the supplied default without asking for an iterator. Program descriptors publish a typed getter
+  thunk from the checked property override identity, inherited independently of iterator overrides.
+  Size-getter exceptions propagate normally. Shared cross-module regression:
+  `collectionSizeOrDefault.kt` (JVM oracle, custom and inherited size, plain and throwing cases).
+
 - **KLIB collection roles come from authenticated platform declarations.** The selected platform
   stdlib's sixteen canonical collection interfaces publish their existing collection kind and
   read-only/mutable face. Publication validates an interface with the exact own and total type
@@ -6927,6 +6955,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   The file facade does not keep an implementation method for it. The copy is named from the
   caller's final placement (`caller$$inlined$callee$N`) only after lifted names exist; until then
   it has a private identity so it cannot collide with the declaration class.
+  An inline call inside a source lambda also retains whether its root executable context has no
+  source callable-name segment (for example an initializer). Lowering records that fact once and
+  inherits it through lambdas, including suspend lambdas, but resets it for named local functions.
+  An unnamed initializer lambda is therefore a valid caller of both source and dependency inline
+  bodies; a missing name on a named-function context still declines. No generated placeholder is
+  used as source provenance. Shared runtime regression: `inlineCallsInInitializerLambda.kt`.
   A local delegated property keeps the checker-selected declaration accessor plan across those
   copies. Kotlin emits that convention helper with the declaration's erased signature and reuses
   it across call-site type substitutions; common lowering therefore specializes the copied access
@@ -13794,7 +13828,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   root-package class is spelled `<root>.Token` there) and tests an `as?` before its `checkcast`.
   (`tests/type_intrinsics_e2e.rs`,
   `tests/native_function_type_checks_e2e.rs`,
-  `tests/multimodule_conformance_cases.rs`,
+  `tests/box_regressions/multimodule/multimoduleDependencyFunctionImplementationMarkers.kt`,
   `jvm::inliner::reified::tests::a_suspend_function_argument_tests_the_marker_and_the_jvm_arity`,
   `fir::body_check::local_function_tests::suspend_local_function_reference_keeps_its_suspend_function_type`.)
   Corpus: `coroutines/featureIntersection/suspendFunctionIsAs.kt`.
@@ -14035,11 +14069,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Native consumes only this plan: a singleton array remains one list element, readonly packed
   storage wraps its array and mutable storage copies it. Malformed operand counts reject rather
   than retry by name or physical array shape. Other backends retain their ordinary selected call.
-  This storage fact alone does not widen dependency-body root admission. Tests:
+  This storage fact alone does not widen dependency-body root admission. A target additionally
+  supplies a positive implementation capability, shared by emitted-root selection, both dependency
+  closure walks and its actual call emission. A target leaf authenticates its complete raw external
+  header even when the producer serialized a body, preserves declared generic formals and checked
+  substitutions, and is never published as an emitted body export. Existing emitted exports retain
+  priority. Targets without the capability still owe the ordinary body; unknown, conflicting or
+  malformed declarations never become leaves. Tests: `klib_lowering::tests::target_calls`,
   `builtin_top_level_realization::tests::list_storage_construction_*`,
   `provider_normalization_tests::list_storage_plans_use_the_selected_stdlib_and_its_array_list_alias`,
   `klib_libraries::tests::builtin_operations::target_stdlib_list_factories_publish_their_exact_storage_plans`
   and `tests/native_lists_e2e.rs`.
+- **Native dependency leaves consume typed target operations.** The already authenticated
+  `String.plus(Any?): String` member and nullable `String?.plus(Any?): String` extension share
+  Native's existing string representation operation. The same target plan drives dependency
+  admission and emission; complete raw declaration authentication still runs. A member receiver
+  stays separate, while a serialized extension receiver occupies only its declared slot zero.
+  Both operands evaluate once, left to right, including null values. A foreign module, changed
+  result or mismatched target operation never gains this capability. Library algorithm adapters
+  (assertion helpers, collection sizing, trim, Result helpers and unsigned division) remain outside
+  this positive target-leaf capability. Tests: `klib_target_string_plus_*`,
+  `library_algorithm_adapters_are_not_native_dependency_capabilities`, and
+  `native_dependency_reference_e2e::a_nullable_extension_reference_keeps_its_operand_roles`.
 - **A native list is Kotlin's collection interfaces, and equals any `List`.** The growable list is
   `kotlin.collections.ArrayList` and implements `MutableList`, `List`, `MutableCollection`,
   `Collection`, `MutableIterable`, `Iterable` and `RandomAccess`, each an interface descriptor an
@@ -15848,6 +15899,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the constructor parameter (captured when a lambda escapes). Members, property initializers and
   the lambdas within them read the field. Verified against kotlinc 2.4.21 with a custom
   `@KotlinScript` template. (`tests/kotlin_script_e2e.rs`.)
+- **KSP annotations carry their arguments as KSP2 reports them.** An annotation's `arguments` are
+  the arguments the source wrote, in written order (origin `KOTLIN`), then the default of each
+  element it did not write, in declaration order (origin `SYNTHETIC`); `defaultArguments` are
+  every element default. An omitted vararg element is not listed, an explicit empty spread is an
+  empty list, and a spread is flattened. Values are folded constants: boxed primitives, a string,
+  an enum entry as its `ENUM_ENTRY` class declaration, a class literal as the class applied to a
+  star for each type parameter, a nested annotation (`SYNTHETIC` when it is a default) with its own
+  arguments in the order it wrote them and its omitted vararg element not listed, and a list for
+  an array. A library annotation's defaults are those its class file records, so a vararg
+  element declared without one has an empty one. An unprefixed annotation on a constructor `val`
+  parameter is on both the property and the parameter; `@property:` and `@field:` only on the
+  property, `@param:` only on the parameter, `@get:`/`@set:` on the accessor, and `@setparam:` on
+  the setter's parameter with origin `SYNTHETIC`. Every property has a getter and a `var` a
+  setter; a compiler-made one is `SYNTHETIC` and `final public`, a written one `KOTLIN` with no
+  modifiers. An annotation on a classifier, function or constructor has the `shortName` the
+  source wrote, an import alias's name when it used one; one on a property, parameter or
+  accessor, and a nested one, has its class's simple name. An annotation whose arguments the
+  frontend did not fold, an array class literal, a
+  library enum entry, and a non-public compiler-made accessor's modifiers are refused for that
+  query only.
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `annotation_arguments_and_accessors_are_what_ksp2_reports`;
+  frontend tests `pass_one_publishes_folded_annotation_element_defaults` and
+  `pass_one_publishes_value_parameter_annotations_as_written`.)
 
 ## 8. Success criteria for the PoC
 
@@ -17970,6 +18044,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/custom_floating_range_membership_e2e.rs`, box
   `ranges/contains/inComparableRange.kt`.
 
+- **Mixed-width floating range membership keeps its IEEE representation.** An authenticated
+  `ClosedRange.contains` extension reached from an expanded KLIB body may operate on a
+  `ClosedFloatingPointRange<Float>` or `ClosedFloatingPointRange<Double>`. Native uses its
+  floating-range ABI, not the integral-range ABI, evaluates each operand once, and retains the
+  representation guard against program-defined interface implementations. The ordinary shared
+  fixture `tests/box_regressions/floatingRangeContainsMixedWidths.kt` covers both widths, an empty
+  range, NaN and operand effects.
+
 - **A KLIB body's built-in relation is the source comparison.** Kotlin serializes `a < b` (and `<=`,
   `>`, `>=`) on two operands of one primitive type as a call of a compiler built-in,
   `kotlin.internal.ir.less` (`lessOrEqual`, `greater`, `greaterOrEqual`), which no library declares.
@@ -18020,8 +18102,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   module-qualified key, so an ordinary dependency cannot supply the default or body selected from
   an equal-signature friend declaration. Neither path treats the signature alone, package spelling,
   dependency order, or friend package as an origin. Tests:
-  `multimodule_conformance_cases::EQUAL_INTERNAL_SIGNATURES` through
-  `multimodule_conformance_cases::multimodule_cases_run_through_the_matrix_selected_backend`,
+  `tests/box_regressions/multimodule/multimoduleEqualInternalSignatures.kt` through the common box inventory,
   `klib_libraries::tests::classes::a_friend_classifier_is_not_hidden_by_an_equal_nonfriend_signature`,
   `klib_libraries::parameter_defaults::tests::equal_signatures_keep_each_modules_own_default`,
   `klib_lowering::tests::equal_internal_body_signatures_from_distinct_modules_remain_distinct`.
@@ -18045,9 +18126,31 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   classifier FQNs. Function/default-wrapper, property accessor, file initializer, constructor, and
   value-class box/unbox entry points therefore include the exact source module before their stable
   declaration component. File-local class/runtime symbols remain local linkage. Tests:
-  `multimodule_conformance_cases::{DEFAULT_CALLABLE_IDS, PROPERTY_IDS, NATIVE_ABI_SYMBOLS}` through
-  `multimodule_conformance_cases::multimodule_cases_run_through_the_matrix_selected_backend`.
+  `tests/box_regressions/multimodule/{multimoduleDefaultCallableIds,multimodulePropertyIds}.kt`
+  through the common box inventory, and
+  the Native-specific `native_module_abi_symbols_keep_same_named_internal_classifiers_distinct`.
 
+- **An ordinary KLIB generic header preserves its provider's declaration.** Serialized formal
+  symbols bind to the exact declaration-owned formal types frozen by the provider, not to source
+  spellings or types rebuilt from full upper bounds. Recursive and forward bounds have finite
+  semantic representations; normalizing a full bound and wrapping it again changes that
+  representation. Every serialized upper bound is checked separately against metadata's complete
+  bounds. Formal counts and identities, receiver roles, invariant function variance and exact
+  reification must agree; reified functions cannot be emitted as ordinary standalone functions.
+  Unlike prepared-inline headers, ordinary headers do not accept erased parameter/result types.
+  Tests: `callee_headers::recursive_formals_keep_the_real_provider_normalization_through_the_frozen_handoff`,
+  `a_forward_bound_binds_all_real_provider_formals_before_reading_any_bounds`, and
+  `generic_header_contract_mismatches_are_rejected_without_erasure_or_role_recovery`.
+- **A Native dependency export has one declaration-owned ABI across generic instantiations.**
+  The emitted IR function's parameter and result types, including a retained class dispatch
+  receiver, determine its exported wrapper and every later import. Checked substitutions bind
+  only the exact selected external declaration's formal ordinals; foreign, missing, repeated,
+  out-of-range or reified bindings cannot instantiate an ordinary export. Instantiated types
+  validate the checked operand roles and context/extension coordinates, but do not replace the
+  emitted signature. Operands are evaluated once and coerced into its carriers; its result is
+  converted back to the checked call type. Tests: `backend::dependency_signature::tests`,
+  `an_instantiated_dependency_call_cannot_change_its_parameter_types`, and the shared
+  `tests/box_regressions/genericDependencyAbi.kt` (ordinary and extension calls at Int/String/Long).
 - **A KLIB body's call of a dependency function lowers that function too.** A call of a public
   declaration is joined, by its exact module-qualified signature, to the callee's serialized
   declaration in the loaded trees (`KlibDeclarationBodies`, the join a body uses), and the callee is declared from
@@ -18245,11 +18348,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `DEFINED`) lowers to a named variable in the next value slot after the parameters, reads of a
   `val` publish a stable binding and reads of a `var` a mutable one, and an assignment is a `Unit`
   `SetValue`, as checked FIR lowering publishes them. The serialized local-variable flags are, from
-  bit 0: has annotations, `var`, `const`, `lateinit`. Compiler temporaries, `lateinit` and `const`
-  locals, a declaration without an initializer and an assignment to a `val` decline by form. Tests:
+  bit 0: has annotations, `var`, `const`, `lateinit`. Outside the explicitly modelled compiler
+  expression blocks, compiler temporaries decline by form, as do `lateinit` and `const` locals,
+  a declaration without an initializer and an assignment to a `val`. Tests:
   `local_variables_lower_as_the_source_declarations_do`,
   `unmodelled_local_variables_decline_by_form`,
   `stdlib_local_variable_flags_have_the_decoded_layout`.
+
+  Locals declared inside an initializer take their slots before the containing declaration, as
+  checked FIR lowering orders them. The containing symbol becomes visible only after its
+  initializer is lowered. Selecting its slot earlier could alias a nested precondition temporary
+  and make an array-valued local read back the integer size. Test:
+  `control_forms::a_local_initializer_cannot_reuse_its_containing_declarations_slot`.
+
+- **KLIB increment blocks preserve their serialized effects and value.** `PREFIX_INCR`,
+  `PREFIX_DECR`, `POSTFIX_INCR` and `POSTFIX_DECR` blocks contain the selected operation and
+  assignment already; common lowering preserves their statement order and final expression.
+  A compiler temporary reading a mutable local snapshots it before the write, rather than
+  aliasing a later read, so postfix returns the old value and prefix the updated one. Unknown
+  block origins still decline. Tests:
+  `control_forms::increment_blocks_keep_their_ordered_effects_and_selected_value`,
+  `control_forms::an_unmodelled_expression_block_origin_still_declines`.
 
 - **A KLIB body's implicit cast to the value's own type is no conversion.** An `IMPLICIT_CAST`
   whose target is the operand's semantic type adds no node, as the source has none. One from `T?` to
@@ -18274,18 +18393,242 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   cannot do so. A default accessor claiming an inline or external implementation is inconsistent
   metadata. Tests: `klib_libraries::tests::accessor_modifiers`.
 
-- **A KLIB `also`/`apply` call expands as an invocation that answers the receiver.** The direct
-  lambda invocation plan of an exact `@InlineOnly` prepared-inline body accepts, besides one
-  `return` of the invocation (`let`, `run`, `with`), the two statements `block(...)` and
-  `return <parameter>`: the invocation runs for its effect and the call answers the returned
-  parameter (`InvokeLambda { result: Some(..) }`, as the JVM provider decodes the same
-  declarations). Every existing guard stays: the compiler-owned `INVOKE` origin, operands and the
-  returned value read only declaration-owned parameter symbols, the lambda parameter is a non-null,
-  non-suspend `FunctionN` of matching arity whose metadata modifier runs it in the caller's frame,
-  and a body returning the lambda parameter itself publishes no plan. Tests:
-  `klib_libraries::tests::native_prepared_also_and_apply_return_their_receiver_after_the_invocation`,
-  `multimodule_conformance_cases::RECEIVER_RETURNING_SCOPE_FUNCTIONS` (JVM, Native and Wasm,
-  including a taken non-local `return` out of `also`).
+- **A selected ordinary KLIB header authenticates known declaration modifiers.** The provider
+  freezes inline, suspend, external and modality facts from the selected declaration; the backend
+  handoff preserves them unchanged. Its serialized function word must agree before body lowering.
+  Property-level externality remains separate from an accessor's own external word. Missing facts
+  are not a non-inline declaration, and differing or missing facts cannot coalesce with a known
+  declaration contract. Tests: `klib_lowering::tests::callee_headers`.
+
+- **An ordinary KLIB dependency body is selected by an emitted use, not an arena reference.**
+  The current category covers top-level/extension functions and their property accessors with
+  known non-inline, non-suspend, non-external concrete implementations. Structural emitted function,
+  static-initializer and constructor bodies contribute exact checked call/accessor identities;
+  orphan expressions and inline-only templates do not. Transitive body-bearing declarations need
+  exact provider metadata and agreeing raw headers. Closure failure is a compilation decline, not
+  permission to try an algorithm adapter. Authenticated intrinsic support closes separately.
+  Freeze category ownership before lowering: an eligible intrinsic-support wrapper remains owned
+  by that category even if its body transaction declines. Never retry it under ordinary-body
+  obligations merely because it published no code. The Wasm unmodelled-wrapper regression pins
+  the exact target decline without relaxing ordinary closure validation.
+  Native property accesses use the selected accessor's exact export and declaration-owned ABI,
+  evaluating operands once. Instance-storage members retain their separate target capability;
+  generic-property substitutions and `super` accesses are not invented. Defaults-only and
+  enum-entry-only ordinary roots are not yet covered by this structural inventory.
+  Tests: `ir::emitted_body_roots`, `box_regressions/floatingSign.kt`.
+
+- **KLIB closure preparation uses common lowering's exact builtin call disposition.** A producer-
+  resolved call replaced by an existing common-IR builtin operation needs no emitted function or
+  provider handle. Both closure prewalks use the same exact-signature capability as body lowering,
+  before traversing the callee's implementation. A real selected source call (including recursive
+  root calls), an ambiguous declaration, or an already-emitted external edge retains its normal
+  declaration obligation. Missing providers alone never authorize folding; non-builtin calls and
+  operand/type-argument validation keep their existing failure paths. Tests:
+  `common_call_disposition_preserves_selected_and_ambiguous_obligations`,
+  `common_builtin_capability_distinguishes_headers_source_calls_and_conflicts`, and
+  `a_previously_retained_builtin_edge_is_not_folded_without_a_current_source_call`, plus
+  `box_regressions/floatingSign.kt`.
+
+- **A normalized KLIB member primitive is a common operation, not its private implementation.**
+  The provider's effective primitive realization survives both frozen declaration views. Before
+  closure treats it as a leaf, common lowering authenticates the exact module, full class and
+  member signatures, direct accessor/property membership, declaration modifiers and call shape.
+  Class formals retain provider-owned finite identities, full bounds and variance; all raw symbols
+  bind before bounds are checked, and the serialized receiver must actually use those formals.
+  The current capability covers scalar unary identity/negation and array/string length. The actual
+  body lowerer consumes the same proof as both graph walks, validates operands, and evaluates the
+  receiver once. Byte/Short unary operands promote before realization; floating negation uses
+  `PrimitiveNeg`, never subtraction from zero. Source selections, ambiguity and retained exports
+  keep their declaration obligations. A malformed known primitive is an error, not permission to
+  inspect private implementation helpers. Ordinary member-body emission and target representation
+  remain separate capabilities. Intrinsic support retains its existing body-bearing raw-header
+  capability; optional provider enrichment cannot invent a primitive when no provider is present.
+  Tests: `klib_lowering::tests::primitive_calls`, `box_regressions/floatingSign.kt`.
+
+- **KLIB constructors retain class generics separately from invocation types.** The exact declaring
+  module and full constructor signature select the class contract, including its formal identities,
+  full bounds, variance and own/captured count. Provider lookup and both frozen declaration views
+  retain that contract. Class formals are not function-owned constructor parameters: the callable
+  invocation result stays `Unit`, without a function generic signature, even when source inference
+  constructs a parameterized class type. Ordinary bodies and prepared-inline templates share one
+  authenticator for the exact raw class membership, constructor slot, parameter identities,
+  visibility, declared defaults and packed-vararg position. The serialized result must be that
+  class applied to its own formals. Call-site class arguments bind simultaneously, satisfy every
+  substituted upper bound using authenticated caller bounds and explicit hierarchy evidence, and
+  produce exactly the declared class application. Constructor-owned generics and captured outer
+  formals remain unsupported. Constructors are explicit external construction leaves, even when
+  their KLIB contains a body; they are not emitted as ordinary top-level support functions.
+  Emission inventories walk only executed body expressions, not unused defaults or nested
+  declaration bodies, and do not widen the separate call-only intrinsic-root proof. A declared
+  default permits an omission but does not establish an available default implementation.
+  A producer-proven serialized constructor without provider evidence declines as an unrealized
+  callee, not as a missing declaration. Contradictory raw/frozen constructor kinds and an
+  authenticated constructor without its exact construction handle remain hard mismatches.
+  Tests: `klib_lowering::tests::constructor_contracts`, `::constructor_calls`.
+
+- **A selected dependency accessor is a call of its exact export.** Both Wasm hosts join the
+  frozen property identity to its selected getter or setter, then to the complete module-qualified
+  dependency identity. The published function's declared signature owns operand/result carriers;
+  a specialized use cannot replace it. Native and Wasm share the source-versus-serialized receiver
+  shape proof, but keep target conversion and instruction emission separate. Accessors without
+  checked generic substitutions and accesses through `super` do not use this ordinary export path.
+  Receiver and value operands execute once in the recorded order. Tests:
+  `backend::dependency_facts::tests::dependency_accessors_*`,
+  `wasm::codegen::callable_registry::tests::a_dependency_export_retains_one_declared_abi_and_rejects_contradictions`,
+  `multimoduleDependencyAccessors.kt`, `floatingSign.kt`.
+  A Unit-typed statement block consumed as a value still requires a value unless common IR proves
+  it always transfers control. After that proven return/throw there is no conversion to perform;
+  live Unit blocks remain rejected. Tests:
+  `wasm::codegen::lower::tests::only_a_proven_nonreturning_unit_operand_can_satisfy_a_value_use`,
+  `wasm::codegen::tests::an_explicitly_returning_getter_does_not_require_a_unit_value`.
+
+- **A KLIB vararg retains one packed array parameter.** The declaration's vararg position is
+  frozen independently of call-site specialization, in the same context/extension/value ordering
+  as its declared parameter types. Raw and prepared headers authenticate a unique regular value
+  marker, its exact position and its element through the same formal binder as the packed type.
+  Dispatch and extension/context receivers cannot be varargs; a specialized array has no type
+  arguments and a reference array has exactly one invariant or `out` element. The packed array
+  is non-null even when its element is nullable. Serialized vararg expressions lower to the same
+  common `Vararg` array node as checked source, preserving listed/spread operands once in source
+  order; calls do not unpack or repack an already packed parameter. Ordinary dependency units
+  without class-hierarchy evidence still decline implicit reference-array covariance; this does
+  not authorize erasure or invent a subtype relationship. Tests:
+  `klib_lowering::tests::varargs`, `dispatch_slots_cannot_carry_a_vararg_marker`.
+
+- **The inline-body migration has one explicitly approved outcome reset.** The Native/Wasm
+  failures recorded for #2459 are migration debt, not a claim of supported behavior. Exact loaded
+  manifest blobs and effective releases pin the one-time exception; subsequent changes remain
+  shrink-only. JVM, applicability, panic and owned-fixture setup policies are unchanged. See
+  [KLIB inline migration](KLIB_INLINE_MIGRATION.md) for the evidence contract and small follow-ups.
+
+- **A KLIB inline function expands from its prepared body through the module inliner.** When the
+  backend expands same-module inline calls in IR (Native, Wasm), every `inline` declaration of a
+  dependency KLIB has its prepared-inline IR body decoded and, on its first call in a file, lowered
+  into that file as an inline-only template function. The checked call then expands exactly as a
+  same-module inline call does: the inliner takes an `InlineCallee` that is either a module
+  `CallableId` or the dependency's `ExternalCallableId` with its template, and nothing else about
+  the expansion differs. A successful dependency expansion records its final expression, including
+  any operand-evaluation prelude, as both an inline region and an external-inline expansion in
+  common IR. A declined expansion publishes no such provenance marker. The template keeps the
+  declaration's parameter order (dispatch receiver,
+  context parameters, extension receiver, value parameters) and its parameter defaults, lowered in
+  the callee's scope. kotlinc's prepared copy of a member carries its dispatch receiver as the
+  leading regular parameter; the template reads it back as the dispatch receiver, and the
+  receiver's classifier must be the provider-normalized declaration owner the KLIB body contract
+  carries, or the template declines. A call the template makes of a non-inline dependency function
+  is the external call a source call of it is, by the calling compilation's provider identity for
+  the exact serialized callee; a member call keeps its dispatch receiver. Before template lowering,
+  the provider freezes inherited-reference bindings from exact archive override edges or the shared
+  semantic hierarchy: a non-nested, non-generic reference owner may name an inherited member with
+  no value/context/extension parameters or function formals and no class-dependent result. The
+  existing KLIB mangler projects the canonical declaration into that owner and must match the
+  WHOLE serialized signature, including member id and mask. The binding keeps the canonical
+  module-qualified declaration and the referenced receiver with its applied declaring parent
+  (`IntIterator` through `Iterator<Int>`); missing or ambiguous producer evidence still declines.
+  No inherited declaration is added to the provider's direct inventory, and these template-only
+  bindings grant no intrinsic-support authority
+  (`klib_libraries::tests::serialized_references`). A call of another inline function, or of a generic
+  member or member extension, declines the template for now. A call has function-value invocation
+  semantics only when the provider normalizes the callee as a declared `FunctionN` invocation
+  (`SemanticCallRole::KotlinFunctionInvoke`), never by the `invoke` spelling; prepared copies erase
+  function-type context and receiver markers, so the invocation's context and receiver arguments
+  lead its value arguments, and a plain `FunctionN` read matches a declared context or receiver
+  function type of the same arity. A KLIB `inline` declaration is `MustInline` when it is
+  `@InlineOnly` (by the annotation's qualified identity in its metadata) or declares a reified type
+  parameter: it has no legal direct call. Any other KLIB `inline` function is `CanInline`, as its
+  public declaration is callable, and checked FIR keeps the callee's whole `InlineKind`. A must-inline call whose
+  template is missing or declined is rejected, never compiled as a call of the dependency
+  function; a `CanInline` callee without a template stays an ordinary call. A call that selected a
+  template but cannot expand from it is rejected too. No per-shape plan is decoded for a KLIB
+  declaration and checked FIR carries none: KLIB inline knowledge enters at IR only. The same
+  template expansion executes the `also`/`apply` lambda for its effects and returns the receiver,
+  preserving a taken non-local return from the lambda. A member
+  extension keeps its declaration's `inline`/`reified` flags through the checker's member-extension
+  view, as a top-level or member function does. Tests:
+  `klib_lowering::tests::inline_templates::*`,
+  `klib_lowering::tests::only_a_declared_function_invocation_has_invocation_semantics`,
+  `tests/box_regressions/multimodule/multimoduleFloatingBits.kt` (Native, a member call from a template),
+  `klib_libraries::tests::prepared_inline_selection_takes_every_inline_declaration_of_its_module`,
+  `tests/box_regressions/multimodule/multimoduleReceiverReturningScopeFunctions.kt` and
+  `tests/box_regressions/multimodule/multimoduleReifiedCallableOrigins.kt` (JVM, Native and Wasm), and
+  `wasm_a_declined_required_inline_body_rejects_the_caller` /
+  `native_a_declined_required_inline_body_rejects_the_caller` (a library reified inline function
+  with no template), and `wasm_a_declined_required_stdlib_template_rejects_the_caller` /
+  `native_a_declined_required_stdlib_template_rejects_the_caller` (`compareBy`, whose prepared
+  factory contains an unsupported rich function reference). The original `repeat` caller is
+  retained separately as `tests/box_regressions/multimodule/inlineStdlibRepeat.kt`; its template now
+  binds the inherited iterator declaration instead of asserting that the old gap remains.
+
+- **A KLIB template lowers the forms kotlinc's prepared copy introduces.** A constructor call
+  constructs by the provider identity of the exact serialized constructor, with the provider's
+  parameter types and omitted arguments left to the constructor's defaults; a generic constructor
+  declines. A call of a generic non-member function binds the provider's formals to the serialized
+  type arguments and records each as a substitution of the external callable's type parameter, so
+  the call is checked exactly as a source call with explicit type arguments. An argument whose
+  type is a proper subtype of the parameter type (by the calling compilation's subtyping over its
+  providers, never by names), or the non-null form of a nullable parameter type, is passed as is;
+  any other mismatch is an implicit conversion and declines. `CHECK_NOT_NULL` is the source `!!`.
+  A call of a non-generic property's getter or setter is the source read or write of the
+  property: the provider's property identity for the exact serialized accessor, read or written
+  with the accessor's dispatch receiver, context and extension arguments; whether the accessor is
+  the setter comes from the provider's property realization, never from the accessor's name. Each
+  KLIB accessor's realization names its property, as the published accessor does.
+  The prepared copy's own blocks lower to their source meaning: an `IR_TEMPORARY_VARIABLE` whose
+  initializer reads an immutable value (a constant, a parameter, or another immutable local) is
+  that value, any other one is an unnamed immutable local; an inline-arguments container is a
+  block whose value is its last expression; and an already inlined function's returnable block is
+  a block whose value is its sole tail `return`. Branch-local returns instead store their value
+  once and leave a labelled structural return frame. Each exit names the exact serialized block
+  symbol; it neither returns from the template function nor leaves an unrelated nested loop.
+  A block target never declares a readable local, and nested blocks cannot redeclare an enclosing
+  target, including tail-only blocks that need no structural frame. A
+  non-`Unit` frame must have no reachable fallthrough before its result is read. Compiler inlined
+  statement blocks are flattened only within an authenticated enclosing return frame. A
+  source file whose must-inline call is rejected lowers nothing, so its checked parameter defaults
+  are dropped with it. Tests: `klib_lowering::tests::inline_templates::*` (among them
+  `a_dependency_constructor_call_constructs_by_the_provider_identity` and
+  `a_dependency_property_read_reads_the_provider_property`), `klib_lowering::tests::body_forms::*`,
+  `klib_lowering::tests::returnable_blocks::*`, and the shared JVM/Native/Wasm declaration graph
+  `tests/box_regressions/multimodule/inlineNullCheckReturnTargets.kt`.
+- **A KLIB template lowers objects, class literals, conversions, loops and `try` as their source.**
+  A singleton read is the source object value when the provider says the classifier is an object.
+  `C::class`, `T::class` and `value::class` are the source class literals. A member of a generic
+  class is called at the type arguments its receiver applies to the class (by the calling
+  compilation's subtyping), so its parameters and result are substituted as a source member call
+  is. A value used as one of its supertypes, by an implicit cast, a branch or an argument, is the
+  value itself, with the coercion checked FIR places for a nullable target. An implicit cast to a
+  subtype, or to another parameterization of the same classifier, is the smart cast kotlinc proved
+  and lowers as a cast; any other implicit cast declines. A prepared copy erases the type
+  parameters of the inline functions it already expanded to their bounds, so a value typed with a
+  supertype of the declared type, passed to a function value or produced by one, is that erased
+  value. A `FOR_LOOP` block is the source `for` over an iterator: an unnamed iterator local and a
+  `while (hasNext())` loop whose body declares the named loop variable from `next()`. A `try` is the
+  source `try`, each `catch` parameter bound to the next value slot under its source name, each
+  branch of a non-`Unit` `try` converted to its type as a conditional's branches are. Tests:
+  `klib_lowering::tests::control_forms::try_lowers_as_the_source_try_does`,
+  `klib_lowering::tests::inline_templates::a_member_of_a_generic_class_is_called_at_its_receiver_type_arguments`.
+- **The Native backend realizes what an expanded library body reaches.** A KLIB member's builtin
+  operation (`Int.and`, `Long.times`, `Int.inv`, `Array.size`, `String.length`) is attached when
+  the provider publishes the member, before its identity is assigned, so a template's call of it
+  carries the same operation a source call does, and the Native backend emits the primitive
+  instruction. A construction of an unsigned type or of `kotlin.Result` is its argument at the
+  underlying type, since the target carries those classes as their value; `UInt.data` is the
+  receiver's bits. A runtime throwable constructed with every parameter defaulted takes the
+  default the runtime owns (`NotImplementedError()` reads "An operation is not implemented.").
+  `IntRange(a, b)` and its integral siblings are the runtime's range. A failed `Result` is the
+  runtime's `Result.Failure`, made by `createFailure`, and a `Result` held as `Any` is a runtime box
+  of its own type. kotlin-test's `checkResultIsFailure`, which an expanded `assertFailsWith` and
+  `assertFails` call, answers the held exception when it is an instance of the class literal's
+  type and otherwise fails the assertion with kotlin-test's wording. The stdlib's unsigned division
+  helpers are the unsigned `div` and `rem`; `x in range` through a facade extension is the runtime
+  range test, including a range typed `ClosedRange<Int>` in a file that implements no
+  `ClosedRange` itself. These helper operations are attached to the exact provider declaration
+  after checking its complete signature and the selected platform stdlib's authority, including
+  kotlin-test's helpers contained in that stdlib. Native consumes those facts without an
+  owner/name fallback.
+  Tests: the `inline*.kt` cases in `tests/box_regressions/multimodule`, through the ordinary box
+  inventory and its backend-owned expectations, and
+  `klib_libraries::builtin_realizations::library_helpers::tests`.
 
 - **A KLIB `when` keeps its source form.** A `when` with an `else` (a final branch whose condition
   is the constant `true`) of origin `WHEN` lowers to one flat `when` recorded as exhaustive at its
@@ -18380,6 +18723,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   answers `IrFile::checked_type`, so a backend that types every value (Wasm) never meets an
   untyped one; the `Unit` value a coerced branch gains is typed `Unit`. Loops, local declarations
   and jumps are statements and need none. Test: `every_lowered_value_has_a_checked_type`.
+
+- **A target-stdlib trim operation retains its receiver proof.** The authenticated zero-argument
+  `CharSequence.trim(): CharSequence` extension carries its complete declaration's compiler
+  operation, not a backend package/name match. Native's existing trim reader requires contiguous
+  String or StringBuilder storage; an arbitrary or nullable CharSequence operand declines before
+  entering it. A String inline wrapper's reference cast retains its operand's storage proof;
+  the original cast still executes, and a nullable safe cast supplies no such proof.
+  Whitespace, Unicode whitespace, empty inputs and unchanged text follow the pinned Kotlin oracle
+  in the shared `INLINE_TEXT_TRIM` dependency graph. Provider and representation contracts:
+  `text_trim_requires_the_stdlib_and_the_complete_extension_signature`,
+  `trim_requires_a_proven_contiguous_runtime_text_representation`.
+
+- **Native range extensions consume their recorded operand layout.** A selected `RangeUntil` or
+  `RangeDownTo` role uses the same range representation when common IR carries an extension
+  receiver separately or a prepared KLIB call carries it at its recorded parameter-zero
+  coordinate. The two operands retain their order. Missing, extra, duplicated or incorrectly
+  positioned receiver operands reject; there is no member-name retry. Test:
+  `native::codegen::lower::compiler_intrinsics::tests::a_range_extension_preserves_its_two_authenticated_operand_layouts`.
 
 - **Open-end membership names `rangeUntil`.** `x in a..<b`, `x in a until b`, and
   `x in a downTo b` first select that syntax's operator. The result then uses `contains` unless the

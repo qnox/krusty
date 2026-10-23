@@ -4,6 +4,9 @@
 /// or target metadata.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SemanticCallRole {
+    /// The platform stdlib's size-only boxed-array allocation constructor. Its initializer, when
+    /// any, is already explicit in the serialized body surrounding this allocation.
+    KotlinArrayAllocation,
     KotlinAnyEquals,
     KotlinAnyHashCode,
     KotlinAnyToString,

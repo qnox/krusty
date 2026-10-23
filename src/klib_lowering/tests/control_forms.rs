@@ -296,6 +296,118 @@ fn a_block_branch_lowers_as_the_source_block_does() {
 }
 
 #[test]
+fn increment_blocks_keep_their_ordered_effects_and_selected_value() {
+    for (origin, prefix) in [
+        ("POSTFIX_INCR", false),
+        ("POSTFIX_DECR", false),
+        ("PREFIX_INCR", true),
+        ("PREFIX_DECR", true),
+    ] {
+        let demo = demo(
+            &[("f", &[T::Boolean, T::Int, T::Int], T::Int)],
+            |_, body| {
+                let initial = body.param(1);
+                let (variable, x) = body.var(T::Int, initial);
+                let mut statements = Vec::new();
+                let saved = if prefix {
+                    None
+                } else {
+                    let old = body.get(&x, T::Int);
+                    let (temporary, saved) =
+                        body.variable_with(T::Int, Some(old), 0, "IR_TEMPORARY_VARIABLE");
+                    statements.push(temporary);
+                    Some(saved)
+                };
+                let updated = body.param(2);
+                statements.push(body.set(&x, updated));
+                let value = body.get(saved.as_ref().unwrap_or(&x), T::Int);
+                statements.push(KlibIrStatement::Expression(value));
+                let block = body.expr(
+                    T::Int,
+                    KlibIrExprKind::Block {
+                        statements,
+                        origin: Some(origin.to_owned()),
+                    },
+                );
+                let condition = body.param(0);
+                let otherwise = body.otherwise();
+                let zero = body.int(0);
+                let conditional =
+                    body.branches("IF", vec![(condition, block), (otherwise, zero)], T::Int);
+                Some(vec![variable, body.ret(conditional)])
+            },
+        );
+        let branch = if prefix {
+            "x = c; x"
+        } else {
+            "val old = x; x = c; old"
+        };
+        let source = format!(
+            "fun f(a: Boolean, b: Int, c: Int): Int {{\n var x = b\n return if (a) {{ {branch} }} else 0\n}}\n"
+        );
+        // Source names its saved value; a compiler block deliberately publishes an unnamed
+        // temporary. Pin both complete forms instead of erasing that provenance distinction.
+        let (expected, source_expected) = if prefix {
+            let expected = "scope {scope {val v3: Int = v1!: Int; return@Some(0) \
+                when[v0!: Boolean -> {v3 = v2!: Int: Unit => v3~: Int}: Int, \
+                else -> Int(0): Int]: Int: Nothing}: Nothing}";
+            (expected, expected)
+        } else {
+            (
+                "scope {scope {val v3: Int = v1!: Int; return@Some(0) when[v0!: Boolean -> \
+                 {temp v4: Int = v3~: Int; v3 = v2!: Int: Unit => v4!: Int}: Int, \
+                 else -> Int(0): Int]: Int: Nothing}: Nothing}",
+                "scope {scope {val v3: Int = v1!: Int; return@Some(0) when[v0!: Boolean -> \
+                 {val v4: Int = v3~: Int; v3 = v2!: Int: Unit => v4!: Int}: Int, \
+                 else -> Int(0): Int]: Int: Nothing}: Nothing}",
+            )
+        };
+        assert_eq!(lowered_f(&demo), expected, "{origin}");
+        assert_eq!(source_body(&source, "f", 3), source_expected, "{origin}");
+    }
+}
+
+#[test]
+fn a_local_initializer_cannot_reuse_its_containing_declarations_slot() {
+    let demo = demo(&[("f", &[T::Boolean, T::Int], T::Int)], |_, body| {
+        let argument = body.param(1);
+        let (inner, inner_symbol) = body.val(T::Int, argument);
+        let read = body.get(&inner_symbol, T::Int);
+        let block = body.block(vec![inner, KlibIrStatement::Expression(read)], T::Int);
+        let condition = body.param(0);
+        let otherwise = body.otherwise();
+        let zero = body.int(0);
+        let initializer = body.branches("IF", vec![(condition, block), (otherwise, zero)], T::Int);
+        let (outer, outer_symbol) = body.val(T::Int, initializer);
+        let result = body.get(&outer_symbol, T::Int);
+        Some(vec![outer, body.ret(result)])
+    });
+    assert_eq!(
+        lowered_f(&demo),
+        source_body("fun f(a: Boolean, b: Int): Int {\n val x = if (a) { val y = b; y } else 0\n return x\n}\n", "f", 2)
+    );
+}
+
+#[test]
+fn an_unmodelled_expression_block_origin_still_declines() {
+    let demo = demo(&[("f", &[], T::Int)], |_, body| {
+        let one = body.int(1);
+        let block = body.expr(
+            T::Int,
+            KlibIrExprKind::Block {
+                statements: vec![KlibIrStatement::Expression(one)],
+                origin: Some("UNMODELLED_EXPRESSION_BLOCK".to_owned()),
+            },
+        );
+        Some(vec![body.ret(block)])
+    });
+    assert_eq!(
+        demo.declined("f", &[]),
+        "the KLIB body of `demo.f` (it uses a block of a compiler-introduced form)"
+    );
+}
+
+#[test]
 fn a_returning_block_is_typed_by_its_jump() {
     // A KLIB types the braced branch of a `Unit` `if` `Unit`; the source block ends in a jump.
     let demo = demo(&[("f", &[T::Int], T::Int)], |_, body| {
@@ -468,12 +580,36 @@ fn throw_lowers_as_the_source_throw_does() {
 }
 
 #[test]
-fn a_constructor_call_declines_by_its_form() {
+fn try_lowers_as_the_source_try_does() {
+    let shapes: [Shape; 1] = [("f", &[T::Int, T::Throwable], T::Int)];
+    let demo = demo(&shapes, |_, body| {
+        let a = body.param(0);
+        let attempt = body.block(vec![KlibIrStatement::Expression(a)], T::Int);
+        let caught = body.try_catch(
+            attempt,
+            |body, parameter| {
+                let thrown = body.get(parameter, T::Throwable);
+                let thrown = body.throw(thrown);
+                body.block(vec![KlibIrStatement::Expression(thrown)], T::Nothing)
+            },
+            T::Int,
+        );
+        Some(vec![body.ret(caught)])
+    });
+    let source = format!(
+        "{THROWABLE}fun f(a: Int, e: Throwable): Int {{\n return try {{ a }} catch (local2001: Throwable) {{ throw local2001 }}\n}}\n"
+    );
+    assert_eq!(lowered(&demo, "f", &[]), source_body(&source, "f", 2));
+}
+
+#[test]
+fn a_constructor_call_requires_an_exact_serialized_constructor() {
     let demo = demo(&[("f", &[T::Throwable], T::Nothing)], |_, body| {
         let KlibIrSignature::Public(signature) = body.function.signature.clone() else {
             unreachable!("a demo function is public");
         };
-        // Any constructor: the form declines before its callee is read.
+        // A serialized ordinary function is not a constructor slot, even if the call site labels
+        // the reference as a Constructor. Known contradictory kinds remain hard mismatches.
         let constructed = body.expr(
             T::Throwable,
             KlibIrExprKind::ConstructorCall {
@@ -490,7 +626,8 @@ fn a_constructor_call_declines_by_its_form() {
     });
     assert_eq!(
         demo.declined("f", &[]),
-        "the KLIB body of `demo.f` (it uses a constructor call)"
+        "the KLIB body of `demo.f` (its serialized declaration disagrees with the selected one: \
+         the selected constructor is not serialized in a constructor slot)"
     );
 }
 
@@ -812,8 +949,8 @@ fn type_checks_and_casts_lower_as_the_source_operators_do() {
     }
     assert_eq!(
         lowered_f(&type_check(KlibIrTypeOperator::Cast, T::String, T::String)),
-        "scope {scope {return@Some(0) written CastNonNull<String>(v0!: \
-         Nullable(Obj(TypeName(\"kotlin/Any\"), []))): String: Nothing}: Nothing}"
+        "scope {scope {return@Some(0) written CastNonNull<String>(v0!: kotlin/Any?): String: \
+         Nothing}: Nothing}"
     );
 }
 

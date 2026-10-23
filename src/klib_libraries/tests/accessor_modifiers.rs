@@ -164,6 +164,67 @@ fn accessor_external_status_is_independent_of_the_property_and_other_accessor() 
 }
 
 #[test]
+fn body_contract_keeps_property_external_separate_from_each_accessor() {
+    let external = 6 | (1 << 6) | (1 << 7);
+    for (property_flags, getter_flags, setter_flags, expected) in [
+        (
+            PROPERTY_FLAGS | (1 << 14),
+            None,
+            None,
+            [(true, false), (true, false)],
+        ),
+        (
+            PROPERTY_FLAGS,
+            Some(external),
+            None,
+            [(false, true), (false, false)],
+        ),
+        (
+            PROPERTY_FLAGS,
+            None,
+            Some(external),
+            [(false, false), (false, true)],
+        ),
+    ] {
+        let decoded = parse_package_fragment_checked(&property_fragment(
+            property_flags,
+            getter_flags,
+            setter_flags,
+            &[],
+        ))
+        .expect("independent property and accessor implementation facts");
+        let libraries =
+            KlibLibraries::from_named_packages("p", vec![(vec!["p".to_owned()], decoded)])
+                .expect("a module-owned property");
+        let symbols = libraries.symbols(SymbolNamespace::Package(type_name("p")), "value");
+        let [property] = symbols.callables.properties() else {
+            panic!("one property")
+        };
+        for (accessor, (property_external, own_external)) in [
+            &property.getter,
+            property.setter.as_deref().expect("setter"),
+        ]
+        .into_iter()
+        .zip(expected)
+        {
+            let realization = libraries
+                .external_callable(accessor.external_identity.expect("selected accessor"))
+                .expect("provider realization");
+            let contract = realization
+                .klib_body_callable()
+                .expect("a module-owned accessor")
+                .declaration_modifiers()
+                .expect("known metadata modifiers");
+            assert_eq!(contract.property_is_external, property_external);
+            assert_eq!(contract.is_external, own_external);
+            assert!(!contract.is_inline);
+            assert!(!contract.is_suspend);
+            assert_eq!(contract.modality, KotlinModality::Final);
+        }
+    }
+}
+
+#[test]
 fn inline_only_obligation_belongs_to_its_annotated_accessor() {
     let inline = 6 | (1 << 6) | (1 << 8);
     for (field, getter, setter) in [
