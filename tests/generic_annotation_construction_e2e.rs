@@ -9,6 +9,10 @@ annotation class ArrayEnvelope(val nested: Nest<String>)
 annotation class GenericEnvelope<T>(val leaf: Leaf<T>)
 annotation class Fixed(val leaves: Array<Leaf<String>>)
 annotation class FixedEnvelope(val nested: Fixed)
+interface Marker<T>
+class Marked<T> : Marker<T>
+annotation class Compound<A, B : Marker<A>>(val leaf: Leaf<Marker<B>>)
+annotation class CompoundArray(val values: Array<Compound<Int, Marked<Int>>>)
 @Envelope(Leaf(1)) class Inferred
 @Envelope(Leaf<String>(2)) class Explicit
 @ArrayEnvelope(Nest<String>([Leaf<String>(1), Leaf<String>(2)])) class ArrayValues
@@ -16,6 +20,8 @@ annotation class FixedEnvelope(val nested: Fixed)
 @GenericEnvelope<String>(Leaf(3)) class GenericInferred
 @GenericEnvelope<String>(Leaf<String>(4)) class GenericExplicit
 @FixedEnvelope(Fixed([Leaf(5), Leaf<String>(6)])) class FixedContext
+@CompoundArray([Compound<Int, Marked<Int>>(Leaf(7))]) class CompoundContext
+@Compound<String, Marked<String>>(Leaf(8)) class CompoundOwner
 fun box(): String = "OK"
 "#;
 

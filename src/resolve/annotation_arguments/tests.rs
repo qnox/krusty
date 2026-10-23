@@ -96,3 +96,29 @@ fn annotation_alias_owner_expands_its_selected_declaration_before_specializing_e
         1,
     );
 }
+
+#[test]
+fn annotation_constructor_bounds_substitute_all_explicit_classifier_arguments() {
+    let source = "annotation class Leaf<T>(val n: Int)\n\
+                  interface Marker<T>\n\
+                  class Marked<T> : Marker<T>\n\
+                  annotation class Compound<A, B : Marker<A>>(val leaf: Leaf<Marker<B>>)\n\
+                  annotation class Envelope(val values: Array<Compound<Int, Marked<Int>>>)\n\
+                  @Envelope([Compound<Int, Marked<Int>>(Leaf(1))]) class Tagged\n";
+    let (file, info) = analyze(source);
+    let marked = Ty::obj_args("Marked", &[Ty::Int]);
+    assert_selected_applications(
+        &file,
+        &info,
+        "Compound",
+        Ty::obj_args("Compound", &[Ty::Int, marked]),
+        1,
+    );
+    assert_selected_applications(
+        &file,
+        &info,
+        "Leaf",
+        Ty::obj_args("Leaf", &[Ty::obj_args("Marker", &[marked])]),
+        1,
+    );
+}
