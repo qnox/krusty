@@ -3,24 +3,21 @@ package krusty
 import org.gradle.api.DefaultTask
 import org.gradle.api.GradleException
 import org.gradle.api.Project
-import org.gradle.api.file.ConfigurableFileCollection
+import org.gradle.api.Task
 import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.file.FileSystemOperations
+import org.gradle.api.file.RegularFile
 import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.invocation.Gradle
-import org.gradle.api.provider.MapProperty
 import org.gradle.api.provider.Property
 import org.gradle.api.provider.Provider
 import org.gradle.api.services.BuildService
 import org.gradle.api.services.BuildServiceParameters
 import org.gradle.api.tasks.Input
-import org.gradle.api.tasks.InputFiles
 import org.gradle.api.tasks.Internal
 import org.gradle.api.tasks.Optional
 import org.gradle.api.tasks.OutputDirectory
 import org.gradle.api.tasks.OutputFile
-import org.gradle.api.tasks.PathSensitive
-import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.TaskAction
 import org.gradle.api.tasks.TaskProvider
 import org.gradle.build.event.BuildEventsListenerRegistry
@@ -50,17 +47,40 @@ private const val VERIFY_TASK_PROPERTY = "krusty.verifyTaskProvider"
 internal fun verifyRequested(gradle: Gradle): Boolean =
     gradle.startParameter.taskNames.any { it == VERIFY_TASK_NAME || it.endsWith(":$VERIFY_TASK_NAME") }
 
-/** The root project's `krustyVerify` task, registered by the first project applying the plugin. */
-internal fun verifyReportTask(project: Project): TaskProvider<KrustyVerifyReportTask> {
+/**
+ * The root project's `krustyVerify` task, registered by the first project applying the plugin.
+ *
+ * Projects that each request the plugin load it in a classloader of their own, so the task may be
+ * another classloader's [KrustyVerifyReportTask]. Every project therefore reaches it as a plain
+ * [Task] and contributes through its runtime inputs: [RECORD_INPUT] and [UNSUPPORTED_INPUT].
+ */
+internal fun verifyReportTask(project: Project, binaryPath: Provider<String>): TaskProvider<Task> {
     val root = project.rootProject
     val extra = root.extensions.extraProperties
-    if (extra.has(VERIFY_TASK_PROPERTY)) {
-        return root.tasks.named(VERIFY_TASK_NAME, KrustyVerifyReportTask::class.java)
+    if (!extra.has(VERIFY_TASK_PROPERTY)) {
+        registerVerifyReport(root, project.layout.file(binaryPath.map(::File)))
+        extra.set(VERIFY_TASK_PROPERTY, true)
     }
-    return root.tasks.register(VERIFY_TASK_NAME, KrustyVerifyReportTask::class.java) {
+    return root.tasks.named(VERIFY_TASK_NAME)
+}
+
+/** The input naming the record of the compilation that follows it. */
+private const val RECORD_INPUT = "krusty.record:"
+
+/** The input naming why the compilation that follows it is left to kotlinc. */
+private const val UNSUPPORTED_INPUT = "krusty.unsupported:"
+
+/** Report [compilation] as left to kotlinc without asking krusty, for [reason]. */
+internal fun reportUnsupported(report: TaskProvider<Task>, compilation: String, reason: String) {
+    report.configure { inputs.property(UNSUPPORTED_INPUT + compilation, reason) }
+}
+
+private fun registerVerifyReport(root: Project, binary: Provider<RegularFile>) {
+    root.tasks.register(VERIFY_TASK_NAME, KrustyVerifyReportTask::class.java) {
         group = "verification"
         description = "Compiles every Kotlin/JVM compilation with kotlinc and with krusty, and reports " +
             "what krusty compiles and how its classes differ from kotlinc's"
+        this.binary.set(binary)
         reportDirectory.set(root.layout.buildDirectory.dir("reports/krusty-verify"))
         unsupportedRecords.set(root.layout.buildDirectory.dir("krusty/verify-unsupported"))
         gradleVersion.set(root.gradle.gradleVersion)
@@ -68,8 +88,6 @@ internal fun verifyReportTask(project: Project): TaskProvider<KrustyVerifyReport
         shareNames.set(
             root.providers.gradleProperty("krusty.verify.shareNames").map(String::toBoolean).orElse(false),
         )
-    }.also {
-        extra.set(VERIFY_TASK_PROPERTY, true)
     }
 }
 
@@ -91,9 +109,12 @@ abstract class TaskTimings : BuildService<BuildServiceParameters.None>, Operatio
     fun millis(taskPath: String): Long? = millis[taskPath]
 }
 
+/** This classloader's [TaskTimings]: a service's type is fixed by the classloader that registers it. */
 internal fun taskTimings(project: Project, buildEvents: BuildEventsListenerRegistry) =
-    project.gradle.sharedServices.registerIfAbsent("krustyTaskTimings", TaskTimings::class.java) {}
-        .also(buildEvents::onTaskCompletion)
+    project.gradle.sharedServices.registerIfAbsent(
+        "krustyTaskTimings@" + Integer.toHexString(System.identityHashCode(TaskTimings::class.java.classLoader)),
+        TaskTimings::class.java,
+    ) {}.also(buildEvents::onTaskCompletion)
 
 /**
  * Register the krusty compile that verifies [kotlinTask] against kotlinc. kotlinc compiles every
@@ -103,7 +124,7 @@ internal fun taskTimings(project: Project, buildEvents: BuildEventsListenerRegis
 internal fun registerVerifyCompile(
     project: Project,
     kotlinTask: KotlinJvmCompile,
-    report: TaskProvider<KrustyVerifyReportTask>,
+    report: TaskProvider<Task>,
     timings: Provider<TaskTimings>,
     configure: KrustyVerifyCompileTask.() -> Unit,
 ): TaskProvider<KrustyVerifyCompileTask> {
@@ -121,7 +142,10 @@ internal fun registerVerifyCompile(
         dependsOn(kotlinTask)
         configure()
     }
-    report.configure { records.from(verify.flatMap { it.record }) }
+    report.configure {
+        inputs.property(RECORD_INPUT + kotlinTask.path, verify.flatMap { it.record }.map { it.asFile.absolutePath })
+        dependsOn(verify)
+    }
     return verify
 }
 
@@ -205,14 +229,6 @@ abstract class KrustyVerifyReportTask @Inject constructor(
     private val execOperations: ExecOperations,
     private val fileSystemOperations: FileSystemOperations,
 ) : DefaultTask() {
-    @get:InputFiles
-    @get:PathSensitive(PathSensitivity.ABSOLUTE)
-    abstract val records: ConfigurableFileCollection
-
-    /** Compilations the plugin leaves to kotlinc without asking krusty, by task path, and why. */
-    @get:Input
-    abstract val unsupportedCompilations: MapProperty<String, String>
-
     @get:Internal
     abstract val binary: RegularFileProperty
 
@@ -243,7 +259,11 @@ abstract class KrustyVerifyReportTask @Inject constructor(
         fileSystemOperations.delete { delete(reportDirectory) }
         val unsupported = unsupportedRecords.get().asFile
         fileSystemOperations.delete { delete(unsupported) }
-        val unsupportedRecordFiles = unsupportedCompilations.get().entries.mapIndexed { index, (compilation, reason) ->
+        // The compilations' contributions, from projects whose plugin classloader may not be this one.
+        val contributed = inputs.properties.toSortedMap()
+        fun contributions(prefix: String) = contributed.filterKeys { it.startsWith(prefix) }
+            .map { (name, value) -> name.removePrefix(prefix) to value.toString() }
+        val unsupportedRecordFiles = contributions(UNSUPPORTED_INPUT).mapIndexed { index, (compilation, reason) ->
             val record = File(unsupported, "records/$index.json")
             exec(
                 executable,
@@ -259,7 +279,7 @@ abstract class KrustyVerifyReportTask @Inject constructor(
         }
         // Every current compilation's verify task ran in this build and wrote its record; a missing
         // one fails the report rather than dropping that compilation.
-        val recorded = records.files.toList() + unsupportedRecordFiles
+        val recorded = contributions(RECORD_INPUT).map { File(it.second) } + unsupportedRecordFiles
         if (recorded.isEmpty()) {
             logger.lifecycle("krusty verify: no Kotlin/JVM compilation ran")
             return

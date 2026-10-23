@@ -117,9 +117,6 @@ private fun replaceKotlinJvmCompiles(
     // change call resolution, and its compiler settings add arguments krusty does not model. A
     // replacement would drop the scripts or reject the build, so kotlinc keeps those compiles.
     val kotlinDsl = project.pluginManager.hasPlugin(KOTLIN_DSL_BASE_PLUGIN_ID)
-    val verifying = verifyRequested(project.gradle)
-    val verifyReport = verifyReportTask(project)
-    val timings = if (verifying) taskTimings(project, buildEvents) else null
     val android = project.pluginManager.hasPlugin(ANDROID_BASE_PLUGIN_ID)
     // Without an explicit binary, the compiler of the release this plugin was published with.
     val gradleUserHome = project.gradle.gradleUserHomeDir
@@ -134,7 +131,10 @@ private fun replaceKotlinJvmCompiles(
     val binaryPath = project.providers.gradleProperty("krusty.binary")
         .orElse(project.providers.environmentVariable("KRUSTY_BIN"))
         .orElse(releasedBinary)
-    verifyReport.configure { binary.set(project.layout.file(binaryPath.map(::File))) }
+    // Verify tasks exist only in a build that runs krustyVerify.
+    val verifyReport = if (verifyRequested(project.gradle)) verifyReportTask(project, binaryPath) else null
+    val verifying = verifyReport != null
+    val timings = if (verifying) taskTimings(project, buildEvents) else null
     project.tasks.withType(KotlinJvmCompile::class.java).all {
         val kotlinTask = this
         // A KotlinJvmCompile outside every source-set compilation is not a krusty compile either:
@@ -158,13 +158,12 @@ private fun replaceKotlinJvmCompiles(
             )
             // A kotlin-dsl compile is a compilation of the project that krusty does not take; kapt
             // stubs and script `plugins {}` blocks are no compilation of their own.
-            if (verifying && kotlinDsl && kotlinTask !is KaptGenerateStubs && sourceSetName != null) {
-                verifyReport.configure {
-                    unsupportedCompilations.put(
-                        kotlinTask.path,
-                        "krusty: the project applies kotlin-dsl, whose compiles stay with kotlinc",
-                    )
-                }
+            if (verifyReport != null && kotlinDsl && kotlinTask !is KaptGenerateStubs && sourceSetName != null) {
+                reportUnsupported(
+                    verifyReport,
+                    kotlinTask.path,
+                    "krusty: the project applies kotlin-dsl, whose compiles stay with kotlinc",
+                )
             }
             return@all
         }
@@ -231,12 +230,14 @@ private fun replaceKotlinJvmCompiles(
             onlyIf("krusty implements everything the compile requests") { !compilerChoice.refuses() }
             onlyIf("the build verifies krusty against kotlinc, which compiles") { !verifying }
         }
-        val verify = timings?.let {
-            registerVerifyCompile(project, kotlinTask, verifyReport, it) {
+        val verify = if (verifyReport != null && timings != null) {
+            registerVerifyCompile(project, kotlinTask, verifyReport, timings) {
                 configureCompilation()
                 refusals.set(compilerChoice)
                 dependsOn(supportCheck)
             }
+        } else {
+            null
         }
         val compilations = listOfNotNull(replacement, verify).map {
             project.tasks.named(it.name, KrustyCompilation::class.java)

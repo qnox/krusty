@@ -261,6 +261,90 @@ fn verify_task_reports_an_unsupported_kotlin_gradle_plugin() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// Projects that each request the plugin load it in a classloader of their own, so each holds its
+/// own copy of the plugin's classes; one report still covers every project's compilations.
+#[test]
+#[ignore = "downloads Gradle and the Kotlin Gradle plugin"]
+fn verify_task_reports_projects_that_each_load_the_plugin() {
+    let fixture = IntegrationFixture::new("krusty-verify-projects", write_projects_build);
+    let output = fixture
+        .build()
+        .tasks(["krustyVerify"])
+        .run_output()
+        .unwrap_or_else(|error| panic!("{error}"));
+    let mut reports = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("krusty verify: "))
+        .map(without_measurements)
+        .collect::<Vec<_>>();
+    // The report comes last; the compilations' own lines arrive in whatever order their verify
+    // tasks ran.
+    let summary = reports.pop();
+    reports.sort();
+    assert_eq!(
+        (reports, summary),
+        (
+            [
+                ":first:compileKotlin: 1 of 1 classes byte-identical, output identical",
+                ":first:compileTestKotlin: no Kotlin sources",
+                ":second:compileKotlin: 1 of 1 classes byte-identical, output identical",
+                ":second:compileTestKotlin: no Kotlin sources",
+            ]
+            .iter()
+            .map(|line| format!("krusty verify: {line}"))
+            .collect::<Vec<_>>(),
+            Some("krusty verify: 2/2 compilations compiled (2 byte-identical), 0 failed, 0 unsupported, 2 without Kotlin sources; 100.0% of classes byte-identical".to_string()),
+        ),
+        "{output}"
+    );
+    let _ = std::fs::remove_dir_all(&fixture.root);
+}
+
+fn write_projects_build(root: &Path, plugin_version: &str, kgp_version: &str) {
+    write_verify_build(root, plugin_version, kgp_version);
+    let write = |rel: &str, body: &str| {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        let body = body
+            .replace("PLUGIN_VERSION", plugin_version)
+            .replace("KGP_VERSION", kgp_version);
+        std::fs::write(path, body).expect("write");
+    };
+    std::fs::remove_dir_all(root.join("src")).expect("remove the single project's sources");
+    let settings = root.join("settings.gradle.kts");
+    let mut text = std::fs::read_to_string(&settings).expect("settings");
+    text.push_str("include(\":first\", \":second\")\n");
+    std::fs::write(&settings, text).expect("settings");
+    write(
+        "build.gradle.kts",
+        r#"
+plugins {
+    kotlin("jvm") version "KGP_VERSION" apply false
+}
+"#,
+    );
+    for project in ["first", "second"] {
+        write(
+            &format!("{project}/build.gradle.kts"),
+            r#"
+plugins {
+    kotlin("jvm")
+    id("dev.krustythecompiler") version "PLUGIN_VERSION"
+}
+
+repositories {
+    mavenCentral()
+}
+"#,
+        );
+        write(
+            &format!("{project}/src/main/kotlin/{project}/Point.kt"),
+            &format!("package {project}\n\nclass Point(val x: Int, val y: Int)\n"),
+        );
+    }
+}
+
 /// A Kotlin Gradle plugin release that exists and that the kotlin-versions manifest does not list.
 const UNSUPPORTED_KGP: &str = "2.3.20";
 
