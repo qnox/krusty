@@ -25,6 +25,7 @@ import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.TaskAction
 import org.gradle.api.tasks.TaskProvider
+import org.gradle.build.event.BuildEventsListenerRegistry
 import org.gradle.jvm.toolchain.JavaToolchainService
 import org.gradle.process.ExecOperations
 import org.jetbrains.kotlin.buildtools.api.ExperimentalBuildToolsApi
@@ -56,6 +57,7 @@ import javax.inject.Inject
  */
 abstract class KrustyKotlinPlugin @Inject constructor(
     private val javaToolchains: JavaToolchainService,
+    private val buildEvents: BuildEventsListenerRegistry,
 ) : Plugin<Project> {
     override fun apply(project: Project) {
         if (KOTLIN_PLUGIN_IDS.none(project.pluginManager::hasPlugin)) {
@@ -71,7 +73,7 @@ abstract class KrustyKotlinPlugin @Inject constructor(
         // applying the Kotlin JVM plugin), and Gradle forbids registering a task from inside a
         // task configuration callback.
         project.afterEvaluate {
-            replaceKotlinJvmCompiles(project, javaToolchains, aggregate)
+            replaceKotlinJvmCompiles(project, javaToolchains, buildEvents, aggregate)
         }
     }
 }
@@ -106,6 +108,7 @@ private fun aggregateTask(root: Project): TaskProvider<Task> {
 private fun replaceKotlinJvmCompiles(
     project: Project,
     javaToolchains: JavaToolchainService,
+    buildEvents: BuildEventsListenerRegistry,
     aggregate: TaskProvider<Task>,
 ) {
     // Gradle's kotlin-dsl (applied through `kotlin-dsl` or `kotlin-dsl.base`) owns every Kotlin
@@ -114,6 +117,9 @@ private fun replaceKotlinJvmCompiles(
     // change call resolution, and its compiler settings add arguments krusty does not model. A
     // replacement would drop the scripts or reject the build, so kotlinc keeps those compiles.
     val kotlinDsl = project.pluginManager.hasPlugin(KOTLIN_DSL_BASE_PLUGIN_ID)
+    val verifying = verifyRequested(project.gradle)
+    val verifyReport = verifyReportTask(project)
+    val timings = if (verifying) taskTimings(project, buildEvents) else null
     val android = project.pluginManager.hasPlugin(ANDROID_BASE_PLUGIN_ID)
     // Without an explicit binary, the compiler of the release this plugin was published with.
     val gradleUserHome = project.gradle.gradleUserHomeDir
@@ -125,6 +131,10 @@ private fun replaceKotlinJvmCompiles(
         )
         releasedCompiler(release, releases, gradleUserHome, offline).absolutePath
     }
+    val binaryPath = project.providers.gradleProperty("krusty.binary")
+        .orElse(project.providers.environmentVariable("KRUSTY_BIN"))
+        .orElse(releasedBinary)
+    verifyReport.configure { binary.set(project.layout.file(binaryPath.map(::File))) }
     project.tasks.withType(KotlinJvmCompile::class.java).all {
         val kotlinTask = this
         // A KotlinJvmCompile outside every source-set compilation is not a krusty compile either:
@@ -146,15 +156,22 @@ private fun replaceKotlinJvmCompiles(
                 kotlinTask,
                 kotlincReason,
             )
+            // A kotlin-dsl compile is a compilation of the project that krusty does not take; kapt
+            // stubs and script `plugins {}` blocks are no compilation of their own.
+            if (verifying && kotlinDsl && kotlinTask !is KaptGenerateStubs && sourceSetName != null) {
+                verifyReport.configure {
+                    unsupportedCompilations.put(
+                        kotlinTask.path,
+                        "krusty: the project applies kotlin-dsl, whose compiles stay with kotlinc",
+                    )
+                }
+            }
             return@all
         }
         val replacementName = "${kotlinTask.name}WithKrusty"
         val pluginVersion = project.provider {
             project.plugins.withType(KotlinBasePlugin::class.java).single().pluginVersion
         }
-        val binaryPath = project.providers.gradleProperty("krusty.binary")
-            .orElse(project.providers.environmentVariable("KRUSTY_BIN"))
-            .orElse(releasedBinary)
         val compilerPluginArguments = kotlinTask.pluginOptions.map(::pluginOptionArguments)
         val compilerVersion = project.extensions.getByType(KotlinTopLevelExtension::class.java)
             .compilerVersion.orElse(pluginVersion)
@@ -178,15 +195,14 @@ private fun replaceKotlinJvmCompiles(
             binary.set(project.layout.file(binaryPath.map(::File)))
             refusals.set(compilerChoice)
         }
-        val replacement = project.tasks.register(replacementName, KrustyCompileTask::class.java) {
-            group = kotlinTask.group ?: "build"
-            description = "${kotlinTask.description ?: kotlinTask.name}, using krusty"
+        // Both krusty compiles of this Kotlin task, the replacement and the verify compile beside
+        // kotlinc, receive the same request.
+        val configureCompilation: KrustyCompilation.() -> Unit = {
             sourceFiles.from(
                 kotlinTask.sources.asFileTree.matching { include("**/*.kt") },
             )
             libraries.from(kotlinTask.libraries)
             friendPaths.from(kotlinTask.friendPaths)
-            destinationDirectory.set(kotlinTask.destinationDirectory)
             compilerArguments.set(kotlincArguments)
             kotlinTarget.set(kotlinTask.compilerOptions.jvmTarget.map { it.target })
             targetValidationMode.set(kotlinTask.jvmTargetValidationMode.map { it.name })
@@ -196,6 +212,12 @@ private fun replaceKotlinJvmCompiles(
             compilerPluginClasspath.from(kotlinTask.pluginClasspath)
             compilerPluginOptions.set(compilerPluginArguments)
             binary.set(project.layout.file(binaryPath.map(::File)))
+        }
+        val replacement = project.tasks.register(replacementName, KrustyCompileTask::class.java) {
+            group = kotlinTask.group ?: "build"
+            description = "${kotlinTask.description ?: kotlinTask.name}, using krusty"
+            configureCompilation()
+            destinationDirectory.set(kotlinTask.destinationDirectory)
             // A build that adds a source directory by path wires its generator onto the Kotlin
             // task (`compileKotlin { dependsOn(generator) }`), not onto the directory. The compile
             // runs here now, so it needs those dependencies; the Kotlin task's dependency on this
@@ -207,6 +229,17 @@ private fun replaceKotlinJvmCompiles(
             )
             dependsOn(supportCheck)
             onlyIf("krusty implements everything the compile requests") { !compilerChoice.refuses() }
+            onlyIf("the build verifies krusty against kotlinc, which compiles") { !verifying }
+        }
+        val verify = timings?.let {
+            registerVerifyCompile(project, kotlinTask, verifyReport, it) {
+                configureCompilation()
+                refusals.set(compilerChoice)
+                dependsOn(supportCheck)
+            }
+        }
+        val compilations = listOfNotNull(replacement, verify).map {
+            project.tasks.named(it.name, KrustyCompilation::class.java)
         }
         // The aggregate reaches the replacement through the Kotlin task, which depends on it: a
         // compile left to kotlinc runs only as that task's own action.
@@ -220,15 +253,17 @@ private fun replaceKotlinJvmCompiles(
             val selectedJavaVersion = launcher
                 .map { it.metadata.languageVersion.asInt().toString() }
                 .orElse(project.provider { JavaVersion.current().majorVersion })
-            replacement.configure {
-                jdkHome.set(selectedJdkHome)
-                javaVersion.set(selectedJavaVersion)
-                kotlinJavaVersion.set(
-                    kotlinTask.kotlinJavaToolchainProvider
-                        .flatMap { it.javaVersion }
-                        .map { it.majorVersion }
-                        .orElse(selectedJavaVersion),
-                )
+            for (compilation in compilations) {
+                compilation.configure {
+                    jdkHome.set(selectedJdkHome)
+                    javaVersion.set(selectedJavaVersion)
+                    kotlinJavaVersion.set(
+                        kotlinTask.kotlinJavaToolchainProvider
+                            .flatMap { it.javaVersion }
+                            .map { it.majorVersion }
+                            .orElse(selectedJavaVersion),
+                    )
+                }
             }
             if (android) {
                 // An Android variant is no Java source set. kotlinc reads the Java sources the
@@ -240,28 +275,32 @@ private fun replaceKotlinJvmCompiles(
                     project.tasks.findByName(javaCompileName) as? JavaCompile
                         ?: throw GradleException("${kotlinTask.path} has no Android Java compile task $javaCompileName")
                 }
-                replacement.configure {
-                    javaSourceFiles.from(javaCompile.map { it.source })
-                    javaTarget.set(
-                        javaCompile.flatMap { task ->
-                            task.options.release.map { it.toString() }
-                                .orElse(project.provider { task.targetCompatibility })
-                        },
-                    )
-                }
-            }
-            java.sourceSets.configureEach {
-                val sourceSet = this
-                if (sourceSet.name == sourceSetName) {
-                    val javaCompile = project.tasks.named(sourceSet.compileJavaTaskName, JavaCompile::class.java)
-                    replacement.configure {
-                        javaSourceFiles.from(sourceSet.allJava)
+                for (compilation in compilations) {
+                    compilation.configure {
+                        javaSourceFiles.from(javaCompile.map { it.source })
                         javaTarget.set(
                             javaCompile.flatMap { task ->
                                 task.options.release.map { it.toString() }
                                     .orElse(project.provider { task.targetCompatibility })
                             },
                         )
+                    }
+                }
+            }
+            java.sourceSets.configureEach {
+                val sourceSet = this
+                if (sourceSet.name == sourceSetName) {
+                    val javaCompile = project.tasks.named(sourceSet.compileJavaTaskName, JavaCompile::class.java)
+                    for (compilation in compilations) {
+                        compilation.configure {
+                            javaSourceFiles.from(sourceSet.allJava)
+                            javaTarget.set(
+                                javaCompile.flatMap { task ->
+                                    task.options.release.map { it.toString() }
+                                        .orElse(project.provider { task.targetCompatibility })
+                                },
+                            )
+                        }
                     }
                 }
             }
@@ -272,15 +311,18 @@ private fun replaceKotlinJvmCompiles(
         // compiler actions, so no private action list is mutated. kotlinc runs only for a compile
         // whose request krusty refused.
         kotlinTask.dependsOn(replacement)
-        kotlinTask.onlyIf("krusty refused part of the compile's request") { compilerChoice.refuses() }
+        kotlinTask.onlyIf("krusty refused part of the compile's request, or the build verifies krusty") {
+            verifying || compilerChoice.refuses()
+        }
     }
 }
 
-@CacheableTask
-abstract class KrustyCompileTask @Inject constructor(
-    private val execOperations: ExecOperations,
-    private val fileSystemOperations: FileSystemOperations,
-) : DefaultTask() {
+/**
+ * What krusty receives for one Kotlin/JVM compile: the Kotlin task's sources, classpath, options and
+ * compiler-plugin request, and the Java toolchain it compiles against. [KrustyCompileTask] compiles
+ * it in place of kotlinc; [KrustyVerifyCompileTask] compiles it beside kotlinc.
+ */
+abstract class KrustyCompilation : DefaultTask() {
     @get:InputFiles
     @get:PathSensitive(PathSensitivity.RELATIVE)
     abstract val sourceFiles: ConfigurableFileCollection
@@ -329,11 +371,8 @@ abstract class KrustyCompileTask @Inject constructor(
     @get:PathSensitive(PathSensitivity.NONE)
     abstract val binary: RegularFileProperty
 
-    @get:OutputDirectory
-    abstract val destinationDirectory: DirectoryProperty
-
-    @TaskAction
-    fun compile() {
+    /** The Kotlin and Java sources krusty compiles, in path order. */
+    protected fun sources(): List<File> {
         validateJvmTargets(kotlinTarget.get(), javaTarget.get(), targetValidationMode.get()) {
             logger.warn(it)
         }
@@ -345,9 +384,11 @@ abstract class KrustyCompileTask @Inject constructor(
             )
         }
         val javaSources = javaSourceFiles.asFileTree.files.filter { it.extension == "java" }
-        val sources = (kotlinSources + javaSources).distinct().sortedBy(File::getAbsolutePath)
-        val destination = destinationDirectory.get().asFile
+        return (kotlinSources + javaSources).distinct().sortedBy(File::getAbsolutePath)
+    }
 
+    /** krusty's command line for [sources], writing to [destination]. */
+    protected fun krustyArguments(sources: List<File>, destination: File): List<String> {
         val arguments = ArrayList<String>()
         arguments.addAll(sources.map(File::getAbsolutePath))
         if (!libraries.isEmpty) {
@@ -383,6 +424,23 @@ abstract class KrustyCompileTask @Inject constructor(
         arguments.add("-no-reflect")
         arguments.add("-d")
         arguments.add(destination.absolutePath)
+        return arguments
+    }
+}
+
+@CacheableTask
+abstract class KrustyCompileTask @Inject constructor(
+    private val execOperations: ExecOperations,
+    private val fileSystemOperations: FileSystemOperations,
+) : KrustyCompilation() {
+    @get:OutputDirectory
+    abstract val destinationDirectory: DirectoryProperty
+
+    @TaskAction
+    fun compile() {
+        val sources = sources()
+        val destination = destinationDirectory.get().asFile
+        val arguments = krustyArguments(sources, destination)
 
         // A source removal and changes to multifile facades or module metadata must not leave any
         // product of the previous full invocation behind. Validate every option before mutating it.

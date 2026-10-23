@@ -113,6 +113,29 @@ from a mirror with the same layout instead. To run another compiler binary, use 
 KRUSTY_BIN=/absolute/path/to/krusty ./gradlew krustyCompile
 ```
 
+### Is krusty for my build?
+
+`krustyVerify` answers that without changing what the build ships. It compiles every Kotlin/JVM
+compilation with kotlinc, as the build would without krusty, and compiles each one with krusty
+beside it:
+
+```sh
+./gradlew krustyVerify
+```
+
+The report in `build/reports/krusty-verify/` says which compilations krusty compiles, which it
+leaves to kotlinc and why (an unsupported compiler plugin is reported as unsupported, not as a
+failure), krusty's errors, how many classes are byte-identical to kotlinc's and how the others
+differ (instructions, line numbers, Kotlin metadata, ...), and kotlinc's and krusty's compile time
+and krusty's peak memory. kotlinc compiles every source again for the comparison, so its time is a
+full compile's too.
+
+Please submit the report: its button opens a prefilled GitHub issue, or paste
+`krusty-verify-issue.md`. It is anonymized: totals, difference kinds, unsupported requests with paths
+masked, and the shape of krusty's errors without their locations or the identifiers they quote; no
+compilation, class or member name. `-Pkrusty.verify.shareNames=true` names them, for an issue you
+are free to share in full.
+
 ## Features
 
 - **kotlinc-compatible command line** for the supported subset, output to a class directory or a jar.
