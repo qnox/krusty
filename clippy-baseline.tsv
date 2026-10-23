@@ -74,7 +74,6 @@
 1	src/jvm/inline/invoke_receiver.rs	this OR pattern can be rewritten using a range: help: try: `0xbc..=0xbe`
 1	src/jvm/inliner/default_lambda.rs	type `jvm::reified_arguments::ReifiedArguments` is more private than the item `jvm::inliner::default_lambda::load`: function `jvm::inliner::default_lambda::load` is reachable at visibility `pub(crate)`
 1	src/jvm/ir_emit/access_bridges.rs	usage of `contains_key` followed by `insert` on a `HashMap`
-1	src/jvm/ir_emit/binary_operation.rs	replacing an `Option` with `Some(..)`: help: consider using `Option::replace()` instead: `self.unsigned_receiver_line_moves.replace(move_line)`
 1	src/jvm/ir_emit/block_scope.rs	this function has too many arguments (8/7)
 1	src/jvm/ir_emit/bytecode_inline_call/lambda_node.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/jvm/ir_emit/method_defaults.rs	items after a test module
@@ -176,7 +175,6 @@
 1	src/resolve/member_extension_selection.rs	items after a test module
 1	src/resolve/operator_calls.rs	this function has too many arguments (10/7)
 1	src/resolve/operator_calls.rs	this function has too many arguments (9/7)
-1	src/resolve/operator_override_relations.rs	called `.iter().copied().collect()` on a slice to create a `Vec`
 1	src/resolve/postponed_constraints.rs	this function has too many arguments (10/7)
 1	src/resolve/property_read_selection.rs	called `map(..).flatten()` on `Option`: help: try replacing `map` with `and_then` and remove the `.flatten()`: `and_then(|getter| getter.member.external_identity)`
 1	src/resolve/reified_type_arguments.rs	this function has too many arguments (9/7)
@@ -202,8 +200,6 @@
 1	src/resolve/streaming_signature_bridge/operator_conventions.rs	this block may be rewritten with the `?` operator
 1	src/resolve/streaming_signature_bridge/rejected_member_call.rs	this function has too many arguments (10/7)
 1	src/resolve/streaming_signature_bridge/selected_result_publication.rs	this function has too many arguments (13/7)
-1	src/resolve/streaming_signature_bridge/semantics.rs	this `if let` can be collapsed into the outer `if let`
-1	src/resolve/streaming_signature_bridge/semantics.rs	this expression creates a reference which is immediately dereferenced by the compiler: help: change this to: `arguments`
 1	src/resolve/streaming_signature_bridge/semantics.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/resolve/streaming_signature_tests.rs	called `Iterator::last` on a `DoubleEndedIterator`; this will needlessly iterate the entire iterator
 1	src/resolve/type_parameter_owners.rs	this loop could be written as a `while let` loop: help: try: `while let Some(header) = index.declaration_header(current) { .. }`
@@ -277,7 +273,6 @@
 2	src/resolve/streaming_signature_bridge/local_signatures.rs	this function has too many arguments (8/7)
 2	src/resolve/streaming_signature_bridge/operator_conventions.rs	this function has too many arguments (8/7)
 2	src/resolve/streaming_signature_bridge/qualified_calls.rs	explicit call to `.into_iter()` in function argument accepting `IntoIterator`
-2	src/resolve/streaming_signature_bridge/semantics.rs	matching on `Some` with `ok()` is redundant
 2	src/resolve/streaming_signature_bridge/semantics.rs	this function has too many arguments (8/7)
 2	tests/private_inline_property_ref_e2e.rs	writing `&PathBuf` instead of `&Path` involves a new object where a slice will do
 2	tests/reified_anonymous_object_e2e.rs	very complex type used. Consider factoring parts into `type` definitions

@@ -179,6 +179,7 @@ fn render(
     let mut text = format!(
         "# Kotlin {version} codegen/box files expected to {expected} on {}, relative to\n\
          # compiler/testData/codegen/box. Later releases with no file of their own read this one.\n\
+         # Owned fixtures use regressions/<path relative to tests/box_regressions>.\n\
          # Regenerate both exact inventories with KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local\n\
          # {} run. The lists only shrink.\n",
         platform.name(),
@@ -293,12 +294,7 @@ pub fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
 }
 
 pub fn corpus_key(box_dir: &Path, file: &Path) -> String {
-    let relative = file.strip_prefix(box_dir).unwrap_or(file);
-    relative
-        .components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
+    super::box_inventory::key(box_dir, file)
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]

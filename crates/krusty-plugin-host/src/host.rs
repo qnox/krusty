@@ -1,15 +1,16 @@
-//! The host process: a JVM running the adapter on the provisioned compiler, which krusty drives over
-//! its stdin and stdout. Its stderr is the user's, so what a plugin prints reaches them.
+//! The plugin host: a JVM running the adapter on the provisioned compiler, which krusty drives over
+//! its stdin and stdout.
 
-use std::io::{BufReader, BufWriter, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
 use krusty_plugin_ir::{CallableIdentity, ModuleIr};
 
 use crate::adapter;
 use crate::environment::Environment;
+use crate::process::{HostProcess, EXIT_GRACE};
 use crate::protocol::{self, LoadedPlugin, Reply, Request, PROTOCOL};
 use crate::provision::HostRuntime;
 use crate::session::SessionRequest;
@@ -51,6 +52,11 @@ pub enum HostError {
     Plugin {
         message: String,
     },
+    /// A KSP processor reached an API member the KSP host does not implement yet. The module's
+    /// processors cannot run on the host, rather than run on a partial answer.
+    Unsupported {
+        member: String,
+    },
 }
 
 impl HostError {
@@ -90,24 +96,20 @@ impl std::fmt::Display for HostError {
                 "the plugin host loaded kotlinc {host}, but the build's Kotlin version is {build}"
             ),
             HostError::Plugin { message } => f.write_str(message),
+            HostError::Unsupported { member } => write!(
+                f,
+                "krusty's KSP host does not implement {member} yet, which a processor uses"
+            ),
         }
     }
 }
 
 impl std::error::Error for HostError {}
 
-/// How long a host may take to exit once asked to, or once its connection is lost, before it is
-/// killed. A plugin can start threads that keep a JVM alive, and none of them may hang krusty.
-const EXIT_GRACE: Duration = Duration::from_secs(5);
-
 /// A running host. Dropping it stops the process: it is asked to exit, and killed when it has not
-/// within [`EXIT_GRACE`].
+/// within a grace interval.
 pub struct Host {
-    child: Child,
-    /// `None` once closed, which tells the host to exit as a shutdown request does.
-    stdin: Option<BufWriter<ChildStdin>>,
-    stdout: BufReader<ChildStdout>,
-    grace: Duration,
+    process: HostProcess,
 }
 
 impl Host {
@@ -130,30 +132,10 @@ impl Host {
     }
 
     /// Runs `command` as a host and reads its greeting.
-    fn spawn(
-        mut command: Command,
-        kotlin_version: &str,
-        grace: Duration,
-    ) -> Result<Host, HostError> {
-        let program = PathBuf::from(command.get_program());
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|error| HostError::Start {
-                java: program,
-                detail: error.to_string(),
-            })?;
-        let stdin = Some(BufWriter::new(child.stdin.take().expect("a piped stdin")));
-        let stdout = BufReader::new(child.stdout.take().expect("a piped stdout"));
-        let mut host = Host {
-            child,
-            stdin,
-            stdout,
-            grace,
-        };
-        let hello = protocol::read_hello(&mut host.stdout).map_err(|error| host.failure(error))?;
+    fn spawn(command: Command, kotlin_version: &str, grace: Duration) -> Result<Host, HostError> {
+        let mut process = HostProcess::spawn(command, grace, protocol::SHUTDOWN)?;
+        let hello =
+            protocol::read_hello(process.stdout()).map_err(|error| process.failure(error))?;
         if hello.protocol != PROTOCOL {
             return Err(HostError::ProtocolVersion {
                 host: hello.protocol,
@@ -165,7 +147,7 @@ impl Host {
                 build: kotlin_version.to_string(),
             });
         }
-        Ok(host)
+        Ok(Host { process })
     }
 
     /// Loads a plugin classpath as kotlinc's `-Xplugin` does, with `options` the `-P` values
@@ -244,53 +226,13 @@ impl Host {
 
     /// The host process's id.
     pub fn id(&self) -> u32 {
-        self.child.id()
+        self.process.id()
     }
 
     fn exchange(&mut self, request: &Request) -> Result<Reply, HostError> {
-        let stdin = self.stdin.as_mut().expect("open until the host is dropped");
-        protocol::write_request(stdin, request).map_err(|error| self.failure(error))?;
-        protocol::read_reply(&mut self.stdout).map_err(|error| self.failure(error))
-    }
-
-    /// The error for a failed read or write: the host's exit when it is gone, else the bad message.
-    fn failure(&mut self, error: std::io::Error) -> HostError {
-        match error.kind() {
-            std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::BrokenPipe => {
-                HostError::Exited {
-                    status: self.reap(),
-                }
-            }
-            _ => HostError::Protocol {
-                detail: error.to_string(),
-            },
-        }
-    }
-}
-
-impl Host {
-    /// Waits up to the grace interval for the host to exit, then kills it, and always reaps it.
-    /// Says how it ended.
-    fn reap(&mut self) -> String {
-        let deadline = Instant::now() + self.grace;
-        loop {
-            match self.child.try_wait() {
-                Ok(Some(status)) => return status.to_string(),
-                Ok(None) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(10))
-                }
-                Ok(None) => break,
-                Err(error) => return format!("its exit status is unknown: {error}"),
-            }
-        }
-        let _ = self.child.kill();
-        match self.child.wait() {
-            Ok(_) => format!(
-                "it did not exit within {} s and was stopped",
-                self.grace.as_secs_f64()
-            ),
-            Err(error) => format!("it did not exit and could not be reaped: {error}"),
-        }
+        protocol::write_request(self.process.stdin(), request)
+            .map_err(|error| self.process.failure(error))?;
+        protocol::read_reply(self.process.stdout()).map_err(|error| self.process.failure(error))
     }
 }
 
@@ -300,19 +242,10 @@ fn unexpected(request: &str) -> HostError {
     }
 }
 
-impl Drop for Host {
-    fn drop(&mut self) {
-        // A host that cannot take the request is ended the same way, after the same grace.
-        if let Some(mut stdin) = self.stdin.take() {
-            let _ = protocol::write_request(&mut stdin, &Request::Shutdown);
-        }
-        self.reap();
-    }
-}
-
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     /// The host's greeting for protocol 4 and kotlinc 2.4.20, as `printf` octal escapes.
     const HELLO: &str = r"\000\000\000\017\000\000\000\000\004\000\000\000\0062.4.20";

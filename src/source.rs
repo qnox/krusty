@@ -13,7 +13,7 @@ pub enum SourceKind {
 
 impl SourceKind {
     pub fn is_batch_compilable(self) -> bool {
-        matches!(self, Self::Kotlin | Self::Java)
+        matches!(self, Self::Kotlin | Self::KotlinScript | Self::Java)
     }
 
     pub fn wire_code(self) -> u8 {
@@ -387,7 +387,7 @@ mod tests {
         assert!(!is_supported_path(Path::new("README.md")));
         assert!(is_batch_compilable_path(Path::new("Main.kt")));
         assert!(is_batch_compilable_path(Path::new("Main.java")));
-        assert!(!is_batch_compilable_path(Path::new("script.kts")));
+        assert!(is_batch_compilable_path(Path::new("script.kts")));
         assert_eq!(
             SourceKind::from_wire_code(SourceKind::KotlinScript.wire_code()),
             Some(SourceKind::KotlinScript)
@@ -483,6 +483,8 @@ val text = \"import q.Quoted\"
                 &tokens,
                 &mut diagnostics,
                 &crate::features::LangFeatures::default(),
+                "script",
+                &crate::script_definitions::ScriptDefinition::standard(),
             ),
             _ => crate::parser::parse(text, &tokens, &mut diagnostics),
         };

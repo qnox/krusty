@@ -99,7 +99,12 @@ pub(super) fn attach_synth_debug_tables(
         );
         cw.prepend_ranged_locals("<init>", ctor_desc, init_locals);
         if !ctor_lines.is_empty() {
-            let mut entries = vec![(ctor_pc, ctor_start_line)];
+            // A script's delegation has no line of its own; its first entry is its operands'.
+            let mut entries = if c.is_script {
+                Vec::new()
+            } else {
+                vec![(ctor_pc, ctor_start_line)]
+            };
             entries.extend_from_slice(ctor_lines);
             // kotlinc never emits two consecutive entries for the same line — a run of stores on the
             // class-declaration line (a single-line `class C(val a: Int)`) collapses to one entry —

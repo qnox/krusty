@@ -5,11 +5,13 @@
 
 use super::lambda_route::SpliceReason;
 use super::*;
+use crate::ir::lambda_exits::LambdaExit;
 use crate::jvm::classreader::{ExcEntry, MethodLocal};
 use crate::jvm::method_node::{CodeAttribute, LabelId};
 use crate::types::TyKind;
 
 const GETSTATIC: u8 = 0xb2;
+const IRETURN: u8 = 0xac;
 const ARETURN: u8 = 0xb0;
 const RETURN: u8 = 0xb1;
 
@@ -244,12 +246,13 @@ impl Emitter<'_> {
         if self.suspends_within(lambda.inline_body) || lambda.parameter_types.len() != arity {
             return Ok(Some(SpliceReason::SuspendingLambda));
         }
-        if self
+        match self
             .ir
-            .lambda_exits_non_locally(lambda.inline_body)
+            .lambda_exit(lambda.inline_body)
             .ok_or("an inline lambda reached emission without its recorded non-local exit")?
         {
-            return Ok(Some(SpliceReason::NonLocalJump));
+            LambdaExit::Jump => return Ok(Some(SpliceReason::NonLocalJump)),
+            LambdaExit::Return | LambdaExit::Local => {}
         }
         if lambda
             .parameter_coercions
@@ -604,6 +607,11 @@ impl Emitter<'_> {
         // to the method's end, as a function's own locals do, and only nested blocks close theirs.
         let caller_depth = std::mem::replace(&mut self.block_depth, 0);
         let caller_locals = std::mem::take(&mut self.open_locals);
+        // A non-local `return` in the body leaves only the body's own `try`s here. The caller's
+        // `finally` blocks run ahead of it where the inlined code is written into the caller, and
+        // the caller's protected regions are ranges of the caller's code, not of this node.
+        let caller_finalizers = std::mem::take(&mut self.return_finalizers);
+        let caller_regions = std::mem::take(&mut self.protected_regions);
         // The scratch lambda is a separate method with its own inline-frame identity space.
         let caller_next_inline_frame_identity =
             std::mem::replace(&mut self.next_inline_frame_identity, 0);
@@ -622,6 +630,8 @@ impl Emitter<'_> {
         let marker_start = u16::try_from(scratch.bytes.len())
             .map_err(|_| "an inline lambda's code is too long")?;
         let result = self.emit_fn_body_inline(inline_body, &parameter_slots, &mut scratch);
+        self.return_finalizers = caller_finalizers;
+        self.protected_regions = caller_regions;
         self.frame = caller_frame;
         self.block_depth = caller_depth;
         let body_locals = std::mem::replace(&mut self.open_locals, caller_locals);
@@ -640,7 +650,8 @@ impl Emitter<'_> {
             }
         }
         // A `Unit` body may or may not leave `Unit.INSTANCE`; any other body leaves its value. A
-        // body that always throws ends without a return.
+        // body that always throws or returns non-locally ends without a return of its own.
+        let own_return = scratch.bytes.len();
         let return_type = match type_descriptor(result).as_str() {
             _ if scratch.is_dead() => match type_descriptor(declared_result).as_str() {
                 "V" | "Lkotlin/Unit;" => "V".to_string(),
@@ -749,6 +760,7 @@ impl Emitter<'_> {
         let mut node = self
             .read_scratch(&scratch, &descriptor)
             .ok_or("an inline lambda's code cannot be read back as a method node")?;
+        mark_non_local_returns(&mut node, &scratch.bytes, own_return)?;
         let return_type = return_unit_as_void(&mut node, return_type);
         Ok(LambdaArgument {
             lambda: inliner::Lambda {
@@ -877,6 +889,38 @@ impl Emitter<'_> {
     }
 }
 
+/// Mark each return of the lambda's `node`, read from `code`, except its own return at `own_return`:
+/// the body lowers a local return to its value, so every other return leaves the function the
+/// lambda is written in (kotlinc's `generateGlobalReturnFlag`).
+fn mark_non_local_returns(
+    node: &mut MethodNode,
+    code: &[u8],
+    own_return: usize,
+) -> Result<(), &'static str> {
+    let mut offsets = Vec::new();
+    let mut pc = 0;
+    while pc < code.len() {
+        offsets.push(pc);
+        pc += crate::jvm::bytecode::instruction_len(code, pc)
+            .ok_or("an inline lambda's code has a malformed instruction")?;
+    }
+    let mut offsets = offsets.into_iter();
+    let mut at = 0;
+    while at < node.nodes.len() {
+        if let Node::Insn(insn) = &node.nodes[at] {
+            let offset = offsets
+                .next()
+                .ok_or("an inline lambda's node has more instructions than its code")?;
+            if matches!(insn, Insn::Op(IRETURN..=RETURN)) && offset != own_return {
+                node.nodes.insert(at, inliner::non_local_return_marker());
+                at += 1;
+            }
+        }
+        at += 1;
+    }
+    Ok(())
+}
+
 /// A `Unit` lambda: krusty's body yields `Unit.INSTANCE` for the `Object` `invoke` returns, where
 /// kotlinc's lambda returns `void` and the inliner loads `Unit.INSTANCE` after it. When every
 /// return is such a load, the lambda is made to return `void`. The load may precede the closing
@@ -911,7 +955,10 @@ fn return_unit_as_void(node: &mut MethodNode, return_type: String) -> String {
     };
     let mut loads = Vec::new();
     for (at, entry) in node.nodes.iter().enumerate() {
-        if !matches!(entry, Node::Insn(Insn::Op(ARETURN))) {
+        let marked = at
+            .checked_sub(1)
+            .is_some_and(|before| inliner::is_non_local_return_marker(&node.nodes[before]));
+        if marked || !matches!(entry, Node::Insn(Insn::Op(ARETURN))) {
             continue;
         }
         let load = node.nodes[..at]

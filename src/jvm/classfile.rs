@@ -92,12 +92,12 @@ pub struct SeedCtorParameter {
     /// 0 = primitive (no annotation), 1 = non-null reference (`@NotNull`), 2 = nullable reference
     /// (`@Nullable`).
     pub ann_kind: u8,
-    /// USER annotation type descriptors on this constructor parameter (`class C(@Mark val x: Int)`),
-    /// split by the attribute each retention selects. kotlinc writes the whole
+    /// Checked USER applications on this constructor parameter, split by retention. kotlinc writes
     /// `RuntimeVisibleParameterAnnotations` before `RuntimeInvisible…`, so every parameter's `visible`
-    /// entries intern before any `invisible` one — and both before the synthesized `@NotNull`.
-    pub visible_ann_types: Vec<String>,
-    pub invisible_ann_types: Vec<String>,
+    /// entries intern before any `invisible` one; each parameter's invisible applications precede
+    /// its synthesized nullability annotation.
+    pub visible_annotations: Vec<crate::ir::AppliedAnnotation>,
+    pub invisible_annotations: Vec<crate::ir::AppliedAnnotation>,
 }
 
 /// Primary-constructor JVM generic `Signature`, passed to
@@ -1832,7 +1832,8 @@ impl ClassWriter {
                 }
             }
         }
-        // Assemble the class attribute table in kotlinc's fixed order. `self.class_attributes` is empty
+        // Assemble the class attribute table in kotlinc's fixed order (ASM's: `BootstrapMethods`
+        // precedes `PermittedSubclasses`). `self.class_attributes` is empty
         // in practice (nothing pushes to it outside `finish`); it is prepended to preserve the API.
         let mut ordered: Vec<(u16, Vec<u8>)> = std::mem::take(&mut self.class_attributes);
         // `InnerClasses`, then `EnclosingMethod`, then `Signature` — kotlinc's order for a generic
@@ -1853,8 +1854,8 @@ impl ClassWriter {
                 deprecated_attr,
                 rva_attr,
                 ria_attr,
-                permitted_attr,
                 bootstrap_attr,
+                permitted_attr,
             ]
             .into_iter()
             .flatten(),

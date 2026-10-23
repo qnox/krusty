@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run every JVM-owned non-box test, including the shared multimodule set through its JVM runner, in
+# Run every JVM-owned non-box test in
 # one prebuilt conformance binary. Runnable-target modules are excluded wholesale: their focused
 # tests require the exact Native/Wasm setup, and scripts/target-conformance-regressions.sh runs
 # them plus the same shared set through the provisioned target runner in those matrix rows.
@@ -28,7 +28,6 @@ if [ -z "${KRUSTY_KOTLINC:-}" ]; then
   just --justfile "$repo_root/justfile" ser-corpus "$v" >/dev/null
 fi
 export KRUSTY_LANGUAGE_VERSION="$v"
-export KRUSTY_MULTIMODULE_CONFORMANCE_RUNNER=jvm
 if [ -z "${KRUSTY_KOTLIN_BOX_DIR:-}" ]; then
   export KRUSTY_KOTLIN_BOX_DIR="$repo_root/target/cache/box-corpus/$v/compiler/testData/codegen/box"
 fi

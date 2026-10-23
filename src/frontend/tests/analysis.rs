@@ -1028,53 +1028,40 @@ fn unavailable_context_does_not_hide_inapplicable_candidate_family() {
 }
 
 #[test]
-fn script_analysis_respects_declaration_order() {
-    let mut diags = DiagSink::new();
-    let inputs = [SourceInput::new(
-        SourceKind::KotlinScript,
+fn script_members_see_each_other_in_either_order() {
+    for source in [
         "fun read(): Int = value\nval value = 1",
-    )];
-    analyze_source_set_with_features(
-        &inputs,
-        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
-        &LangFeatures::new(),
-        &mut diags,
-    );
-    assert!(diags.has_errors());
-
-    let mut diags = DiagSink::new();
-    let inputs = [SourceInput::new(
-        SourceKind::KotlinScript,
         "val value = 1\nfun read(): Int = value\nread()",
-    )];
-    analyze_source_set_with_features(
-        &inputs,
-        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
-        &LangFeatures::new(),
-        &mut diags,
-    );
-    assert!(!diags.has_errors(), "{:?}", diags.diags);
+    ] {
+        let mut diags = DiagSink::new();
+        let inputs = [SourceInput::kotlin_script(source).with_file_stem("order")];
+        analyze_source_set_with_features(
+            &inputs,
+            crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
+            &LangFeatures::new(),
+            &mut diags,
+        );
+        assert_eq!(emitted(&diags), [], "{source}");
+    }
 }
 
 #[test]
 fn script_declarations_do_not_enter_module_scope() {
     let mut diags = DiagSink::new();
     let inputs = [
-        SourceInput::new(
-            SourceKind::KotlinScript,
+        SourceInput::kotlin_script(
             "fun scriptFunction(): Int = 1\n\
                  class ScriptClass\n\
                  ScriptClass()\n\
                  scriptFunction()",
-        ),
+        )
+        .with_file_stem("first"),
         SourceInput::kotlin(
             "fun useFunction(): Int = scriptFunction()\n\
                  fun useClass(): ScriptClass = ScriptClass()",
         ),
-        SourceInput::new(
-            SourceKind::KotlinScript,
-            "class ScriptClass\nval instance = ScriptClass()",
-        ),
+        SourceInput::kotlin_script("class ScriptClass\nval instance = ScriptClass()")
+            .with_file_stem("second"),
     ];
     analyze_source_set_with_features(
         &inputs,
@@ -1083,18 +1070,21 @@ fn script_declarations_do_not_enter_module_scope() {
         &mut diags,
     );
 
-    assert!(diags.diags.iter().any(|diagnostic| diagnostic.file == 1));
-    assert!(!diags.diags.iter().any(|diagnostic| diagnostic.file == 0));
-    assert!(!diags.diags.iter().any(|diagnostic| diagnostic.file == 2));
+    assert_eq!(
+        emitted(&diags),
+        // The signature's type is resolved before either body.
+        [
+            (1, 58, "unresolved reference 'ScriptClass'."),
+            (1, 25, "unresolved reference 'scriptFunction'."),
+            (1, 72, "unresolved reference 'ScriptClass'."),
+        ]
+    );
 }
 
 #[test]
-fn script_analysis_rejects_jumps_without_an_enclosing_target() {
+fn script_analysis_rejects_jumps_without_an_enclosing_loop() {
     let mut diags = DiagSink::new();
-    let inputs = [SourceInput::new(
-        SourceKind::KotlinScript,
-        "return\nbreak\ncontinue",
-    )];
+    let inputs = [SourceInput::kotlin_script("return\nbreak\ncontinue").with_file_stem("jumps")];
     analyze_source_set_with_features(
         &inputs,
         crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
@@ -1102,7 +1092,31 @@ fn script_analysis_rejects_jumps_without_an_enclosing_target() {
         &mut diags,
     );
 
-    assert_eq!(diags.diags.len(), 3);
+    // kotlinc lets a script `return`; only `break` and `continue` need a loop.
+    assert_eq!(
+        emitted(&diags),
+        [
+            (
+                0,
+                7,
+                "'break' and 'continue' are only allowed inside loops."
+            ),
+            (
+                0,
+                13,
+                "'break' and 'continue' are only allowed inside loops."
+            ),
+        ]
+    );
+}
+
+/// Each diagnostic as its file, start offset and message, in emitted order.
+fn emitted(diags: &DiagSink) -> Vec<(u32, u32, &str)> {
+    diags
+        .diags
+        .iter()
+        .map(|diagnostic| (diagnostic.file, diagnostic.span.lo, diagnostic.msg.as_str()))
+        .collect()
 }
 
 #[test]

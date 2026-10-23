@@ -93,44 +93,6 @@ impl InlineBodySelection {
     }
 }
 
-fn is_inline_only(function: &SignedFunction) -> bool {
-    let inline_only = type_name("kotlin/internal/InlineOnly");
-    function
-        .declaration
-        .annotations
-        .iter()
-        .any(|annotation| annotation == &inline_only)
-}
-
-fn has_caller_frame_lambda(function: &SignedFunction) -> bool {
-    function
-        .declaration
-        .params
-        .iter()
-        .zip(&function.declaration.inline_modifiers)
-        .any(|(parameter, modifier)| {
-            modifier.runs_in_caller_frame()
-                && matches!(parameter,
-                    crate::metadata::semantic::KotlinType::Class {
-                        internal,
-                        nullable: false,
-                        ..
-                    } if crate::metadata::semantic::is_kotlin_function_classifier(internal))
-        })
-}
-
-fn can_publish_reified_type_test(function: &SignedFunction) -> bool {
-    function.declaration.is_inline && function.declaration.has_reified_type_params
-}
-
-fn can_publish_direct_lambda_invocation(function: &SignedFunction) -> bool {
-    function.declaration.is_inline && is_inline_only(function) && has_caller_frame_lambda(function)
-}
-
-fn can_publish_inline_body_plan(function: &SignedFunction) -> bool {
-    can_publish_reified_type_test(function) || can_publish_direct_lambda_invocation(function)
-}
-
 impl PackageInventory {
     pub(super) fn from_packages(
         packages: Vec<(Vec<String>, KotlinPackage, bool)>,
@@ -478,11 +440,11 @@ impl PackageInventory {
         wanted
     }
 
-    /// Inline declarations whose prepared bodies can contribute a normalized call-site plan.
+    /// Inline declarations, whose prepared bodies a call expands from as templates.
     pub(super) fn inline_body_selection(&self) -> InlineBodySelection {
         let mut selected = InlineBodySelection::default();
         let mut select = |function: &SignedFunction| {
-            if can_publish_inline_body_plan(function) {
+            if function.declaration.is_inline {
                 selected.insert(function.module.as_deref(), &function.signature);
             }
         };
@@ -514,101 +476,6 @@ impl PackageInventory {
                 let signature = KlibIrSignature::Public(constructor.signature.clone());
                 constructor.defaults = defaults.of(classifier.module.as_deref(), &signature);
             }
-            classifier.functions.iter_mut().for_each(&mut attach);
-            classifier
-                .associated_functions
-                .iter_mut()
-                .for_each(&mut attach);
-        }
-    }
-
-    /// Attach structural inline plans only where metadata and the exact module-qualified body
-    /// agree that the referenced formal is reified. The provider performs this join once; call
-    /// checking and lowering never search declarations by spelling.
-    pub(super) fn attach_inline_body_plans(&mut self, bodies: &super::KlibDeclarationBodies) {
-        let mut attach = |function: &mut SignedFunction| {
-            if !can_publish_inline_body_plan(function) {
-                return;
-            }
-            let Some(module) = function.module.as_ref() else {
-                return;
-            };
-            let identity = crate::libraries::KlibDependencyCallable {
-                module: module.clone(),
-                declaration: crate::libraries::KlibDeclarationSignature::Public(
-                    function.signature.clone(),
-                ),
-            };
-            let plan = if can_publish_reified_type_test(function) {
-                let Some(
-                    plan @ crate::libraries::InlineBodyPlan::ReifiedTypeTest {
-                        type_parameter, ..
-                    },
-                ) = bodies.reified_type_test_inline_plan(&identity)
-                else {
-                    return;
-                };
-                if !function
-                    .declaration
-                    .formals
-                    .get(type_parameter as usize)
-                    .is_some_and(|parameter| parameter.reified)
-                {
-                    return;
-                }
-                plan
-            } else {
-                let Some(plan @ crate::libraries::InlineBodyPlan::InvokeLambda { .. }) =
-                    bodies.direct_lambda_invocation_inline_plan(&identity, &function.declaration)
-                else {
-                    return;
-                };
-                plan
-            };
-            let body_defaults = match &plan {
-                crate::libraries::InlineBodyPlan::ReifiedTypeTest { defaults, .. }
-                | crate::libraries::InlineBodyPlan::InvokeLambda { defaults, .. } => defaults,
-                crate::libraries::InlineBodyPlan::Iteration { .. }
-                | crate::libraries::InlineBodyPlan::CollectionTransform { .. } => unreachable!(),
-            };
-            let mut declared_default_count = 0usize;
-            for (parameter, &declares_default) in
-                function.declaration.param_defaults.iter().enumerate()
-            {
-                if !declares_default {
-                    continue;
-                }
-                declared_default_count += 1;
-                if parameter < function.declaration.context_count {
-                    // Context defaults are not in the regular-parameter default table.
-                    return;
-                }
-                let body_parameter = parameter
-                    + usize::from(
-                        function.declaration.receiver.is_some()
-                            && parameter >= function.declaration.context_count,
-                    );
-                if !body_defaults.iter().any(|default| {
-                    default.parameter == body_parameter
-                        && default.value == crate::libraries::DefaultValue::Null
-                }) {
-                    // Prepared IR owns defaults only inside this exact template. It may never
-                    // borrow a missing/general default from ordinary IR or metadata alone.
-                    return;
-                }
-            }
-            if body_defaults.len() != declared_default_count {
-                // A prepared body default not declared in metadata is equally inconsistent.
-                return;
-            }
-            function.inline_body_plan = Some(Box::new(plan));
-        };
-        self.functions.values_mut().flatten().for_each(&mut attach);
-        self.companion_functions
-            .values_mut()
-            .flatten()
-            .for_each(|extension| attach(&mut extension.signed));
-        for classifier in self.classifiers.values_mut() {
             classifier.functions.iter_mut().for_each(&mut attach);
             classifier
                 .associated_functions
@@ -726,6 +593,138 @@ impl PackageInventory {
             })
     }
 
+    /// The actual declaration container, joined by exact callable identity, not a classifier
+    /// spelling recovered from its receiver. Associated declarations are not instance members.
+    pub(super) fn dependency_declaring_class(
+        &self,
+        identity: &crate::libraries::KlibDependencyCallable,
+    ) -> Option<(TypeName, &SignedClassifier)> {
+        self.classifiers.iter().find_map(|(&owner, class)| {
+            if class.module.as_deref() != Some(identity.module.as_str()) {
+                return None;
+            }
+            let declares = match &identity.declaration {
+                crate::libraries::KlibDeclarationSignature::Public(signature) => {
+                    class
+                        .functions
+                        .iter()
+                        .any(|function| &function.signature == signature)
+                        || class
+                            .constructors
+                            .iter()
+                            .any(|constructor| &constructor.signature == signature)
+                }
+                crate::libraries::KlibDeclarationSignature::Accessor(accessor) => {
+                    class.properties.iter().any(|property| {
+                        &property.getter == accessor || property.setter.as_ref() == Some(accessor)
+                    })
+                }
+            };
+            declares.then_some((owner, class))
+        })
+    }
+
+    /// The constructor serialized under exactly `identity`, with the class that declares it.
+    pub(super) fn dependency_constructor(
+        &self,
+        identity: &crate::libraries::KlibDependencyCallable,
+    ) -> Option<(
+        TypeName,
+        &SignedClassifier,
+        &super::classifier_signatures::SignedConstructor,
+    )> {
+        let crate::libraries::KlibDeclarationSignature::Public(signature) = &identity.declaration
+        else {
+            return None;
+        };
+        self.classifiers
+            .iter()
+            .filter(|(_, signed)| signed.module.as_deref() == Some(identity.module.as_str()))
+            .find_map(|(&classifier, signed)| {
+                signed
+                    .constructors
+                    .iter()
+                    .find(|constructor| &constructor.signature == signature)
+                    .map(|constructor| (classifier, signed, constructor))
+            })
+    }
+
+    /// The property whose getter or setter is serialized under exactly `identity`, at its
+    /// placement, with the class that declares it as a member or companion-block member.
+    pub(super) fn dependency_property(
+        &self,
+        identity: &crate::libraries::KlibDependencyCallable,
+    ) -> Option<(
+        crate::libraries::CallablePlacement,
+        &SignedProperty,
+        Option<&SignedClassifier>,
+    )> {
+        let crate::libraries::KlibDeclarationSignature::Accessor(accessor) = &identity.declaration
+        else {
+            return None;
+        };
+        let declares = |property: &&SignedProperty| {
+            property.module.as_deref() == Some(identity.module.as_str())
+                && (&property.getter == accessor || property.setter.as_ref() == Some(accessor))
+        };
+        self.properties
+            .iter()
+            .find_map(|(&package, properties)| {
+                properties.iter().find(declares).map(|property| {
+                    (
+                        crate::libraries::CallablePlacement::Package(package),
+                        property,
+                        None,
+                    )
+                })
+            })
+            .or_else(|| {
+                self.companion_properties
+                    .iter()
+                    .find_map(|(&classifier, extensions)| {
+                        extensions
+                            .iter()
+                            .find(|extension| declares(&&extension.signed))
+                            .map(|extension| {
+                                (extension.placement(classifier), &extension.signed, None)
+                            })
+                    })
+            })
+            .or_else(|| {
+                self.classifiers.iter().find_map(|(&classifier, signed)| {
+                    signed
+                        .properties
+                        .iter()
+                        .find(declares)
+                        .map(|property| {
+                            (
+                                crate::libraries::CallablePlacement::Member {
+                                    owner: classifier,
+                                    owner_is_interface: signed.shape.is_interface(),
+                                },
+                                property,
+                                Some(signed),
+                            )
+                        })
+                        .or_else(|| {
+                            signed
+                                .associated_properties
+                                .iter()
+                                .find(declares)
+                                .map(|property| {
+                                    (
+                                        super::classifier_records::block_member_placement(
+                                            classifier,
+                                        ),
+                                        property,
+                                        Some(signed),
+                                    )
+                                })
+                        })
+                })
+            })
+    }
+
     /// The top-level properties `package` declares under `name`, in library order.
     pub(super) fn properties<'a>(
         &'a self,
@@ -756,7 +755,6 @@ impl PackageInventory {
     }
 
     /// Every published class with its identity, in no particular order.
-    #[cfg(test)]
     pub(super) fn all_classifiers(&self) -> impl Iterator<Item = (TypeName, &SignedClassifier)> {
         self.classifiers
             .iter()

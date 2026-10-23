@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Apply bazel/intellij/*.patch to an intellij-community checkout and build one target with krusty.
+# Apply tools/krusty-bazel/intellij/*.patch to an intellij-community checkout and build one target with krusty.
 #
 # Kotlin-only, plugin-free jvm_library targets compile with the binary in KRUSTY_BINARY. Java
 # sources, source jars, and build-supplied plugins stay on the project's JPS builder.
@@ -30,9 +30,9 @@ if [[ ! -f "$ij/MODULE.bazel" ]]; then
 fi
 
 shopt -s nullglob
-patches=("$root"/bazel/intellij/*.patch)
+patches=("$root"/tools/krusty-bazel/intellij/*.patch)
 if [[ ${#patches[@]} -eq 0 ]]; then
-  echo "no patches in $root/bazel/intellij" >&2
+  echo "no patches in $root/tools/krusty-bazel/intellij" >&2
   exit 1
 fi
 for patch in "${patches[@]}"; do

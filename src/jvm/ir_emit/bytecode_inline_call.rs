@@ -1512,6 +1512,8 @@ impl Emitter<'_> {
         // locals when the class is written, so inside a written bracket the stack holds only what
         // the lambda pushes, as `stack_shapes` follows it.
         let mut brackets: Vec<bool> = Vec::new();
+        // A marked return is being written: the protected regions reopen after it.
+        let mut returning = false;
         let under = |brackets: &[bool]| {
             if brackets.contains(&true) {
                 0
@@ -1546,6 +1548,20 @@ impl Emitter<'_> {
                         code.set_stack_height(0);
                     }
                     brackets.push(saves);
+                }
+                // A non-local return of a lambda stays a return of this code, behind the
+                // `finally` blocks active here; the lambda node that holds this code, if it is
+                // one, marks it again when it is read back.
+                // kotlinc's `generateAndInsertFinallyBlocks` lays the copies out above every
+                // local of the inlined code (`frameMap.skipTo(intoNode.maxLocals)`), and marks
+                // their lines afresh: the code around them ran under the inlined lines.
+                Node::Insn(_) if inliner::is_non_local_return_marker(node) => {
+                    code.forget_line();
+                    let mark = self.frame.mark();
+                    self.frame.reserve_through(inlined.locals_top());
+                    self.emit_finalizers_before_return(code);
+                    self.frame.rewind_to(mark);
+                    returning = true;
                 }
                 Node::Insn(_) if is_after_inline_marker(node) => {
                     if brackets.pop().unwrap_or(false) {
@@ -1586,6 +1602,9 @@ impl Emitter<'_> {
                         continue;
                     }
                     self.write_inlined_instruction(insn, &labels, code);
+                    if std::mem::take(&mut returning) {
+                        self.reopen_finally_segments(code);
+                    }
                 }
             }
         }

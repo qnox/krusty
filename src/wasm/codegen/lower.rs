@@ -19,6 +19,7 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 mod default_arguments;
+mod dependency_exports;
 mod exceptions;
 mod intrinsic_operations;
 mod objects;
@@ -32,7 +33,7 @@ pub(super) fn is_direct_operation(operation: crate::backend::BackendCompilerIntr
         || operation == crate::backend::BackendCompilerIntrinsic::ThrowableMessage
 }
 
-use crate::backend::{BackendCallableFact, CheckedBackendCallables, DependencyExportSignatures};
+use crate::backend::{CheckedBackendCallables, DependencyExportSignatures};
 use crate::ir::{
     module_override_callable, Callee, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic,
     IrTypeOp,
@@ -226,7 +227,14 @@ pub(super) fn lower_file(
                     },
                 );
             }
-            Err(reason) => return Err(reason),
+            Err(reason) => {
+                crate::trace_compiler!(
+                    "lower",
+                    "Wasm function {id} {:?} declined: {reason}",
+                    function.name
+                );
+                return Err(reason);
+            }
         }
     }
     default_arguments::define(&context, module, runtime)?;
@@ -269,7 +277,7 @@ pub(super) fn lower_file(
     } else {
         None
     };
-    callable_registry.publish(dependency_exports, &indices)?;
+    callable_registry.publish(ir, dependency_exports, &indices)?;
     Ok(LoweredFile {
         functions: indices,
         initializer,
@@ -700,9 +708,26 @@ impl<'a> Body<'a> {
     fn value(&mut self, id: u32, target: Ty) -> Result<(), Unsupported> {
         let source_ty = self.type_of(id)?;
         self.expression(id)?;
+        // A statement-shaped operand may return/throw before its enclosing value use resumes.
+        // Its Unit annotation must stay Unit; only the common completion proof removes the
+        // impossible conversion. Live Unit operands still fail below rather than invent a value.
+        if source_ty == Some(Ty::Unit)
+            && carrier(target)?.is_some()
+            && self.ir.expr_diverges_by(id, &|_, _| false)
+        {
+            self.code.unreachable();
+            return Ok(());
+        }
         let Some(source) = source_ty else {
             return Ok(());
         };
+        if source == Ty::Unit && carrier(target)?.is_some() {
+            crate::trace_compiler!(
+                "lower",
+                "Wasm value {id} {:?} is Unit but is requested at {target:?}",
+                self.ir.expr(id)
+            );
+        }
         self.coerce_emitted_value(source, target)
     }
 
@@ -765,6 +790,9 @@ impl<'a> Body<'a> {
     /// Emit `id`, leaving its value on the stack when it has one.
     fn expression(&mut self, id: u32) -> Result<(), Unsupported> {
         let node = self.ir.expr(id).clone();
+        if let Some(result) = self.emitted_dependency_expression(id, &node) {
+            return result;
+        }
         match node {
             IrExpr::Const(constant) => self.constant(&constant)?,
             IrExpr::UnitInstance | IrExpr::InlineFrameMarker => {}
@@ -992,336 +1020,6 @@ impl<'a> Body<'a> {
             }
             IrExpr::Call {
                 callee: ref call_callee,
-                dispatch_receiver: None,
-                args,
-            } if let Callee::External {
-                target,
-                params,
-                ret,
-                defaults,
-                extension_receiver_parameter,
-                ..
-            } = &**call_callee
-                && defaults.is_empty() =>
-            {
-                let function = self
-                    .calls
-                    .external(*target)
-                    .ok_or_else(|| "an unregistered dependency callable identity".to_string())?;
-                let callable = self.callables.callable(*target).ok_or_else(|| {
-                    "a dependency callable without frozen callable facts".to_string()
-                })?;
-                let emitted_ret = callable.declared_ret.unwrap_or(callable.ret);
-                if let Some(receiver_position) = callable.klib_body_companion_receiver_position() {
-                    let receiver_ty = self
-                        .calls
-                        .singleton_extension_unread_receiver(*target)
-                        .ok_or_else(|| {
-                            "a classifier-associated dependency without its exported body effect"
-                                .to_string()
-                        })?
-                        .semantic_type();
-                    if extension_receiver_parameter.is_some() {
-                        // A call lowered from another support body already contains the retained
-                        // receiver at its serialized coordinate. Validate that exact shape and do
-                        // not synthesize a second ABI slot.
-                        if callable.serialized_companion_receiver_position(
-                            params,
-                            *extension_receiver_parameter,
-                            false,
-                            Some(receiver_ty),
-                        ) != Some(receiver_position)
-                        {
-                            return Err(
-                                "a serialized companion dependency receiver whose declaration disagrees"
-                                    .to_string(),
-                            );
-                        }
-                        self.direct_call(function, params, &args)?;
-                    } else {
-                        // Source lookup exposes the declaration as a receiver-less top-level call.
-                        // The frozen contract authenticates the extra body slot; the emitted body
-                        // effect remains authoritative for that slot's ABI type.
-                        if !callable.is_top_level_function()
-                            || callable.params.as_slice() != params.as_slice()
-                            || params.len() != args.len()
-                            || receiver_position > params.len()
-                        {
-                            return Err(
-                                "a classifier-associated dependency receiver whose declaration disagrees"
-                                    .to_string(),
-                            );
-                        }
-                        self.direct_inert_extension_call(
-                            function,
-                            receiver_ty,
-                            receiver_position,
-                            None,
-                            params,
-                            &args,
-                        )?;
-                    }
-                } else {
-                    self.direct_call(function, params, &args)?;
-                }
-                self.coerce_emitted_value(emitted_ret, *ret)?;
-            }
-            IrExpr::Call {
-                callee: ref call_callee,
-                dispatch_receiver: Some(receiver),
-                args,
-            } if let Callee::External {
-                target,
-                params,
-                ret,
-                defaults,
-                extension_receiver_parameter: None,
-                ..
-            } = &**call_callee
-                && defaults.is_empty()
-                && self
-                    .calls
-                    .singleton_extension_unread_receiver(*target)
-                    .is_some_and(|effect| {
-                        crate::backend::authenticated_singleton_receiver(
-                            Some(receiver),
-                            self.callables
-                                .singleton_dispatch(id)
-                                .map(|dispatch| dispatch.classifier),
-                            effect.semantic_type(),
-                        )
-                    }) =>
-            {
-                // The exact emitted body does not read its extension receiver, and the checked
-                // source edge supplies a singleton of the same semantic type. The exact edge fact
-                // remains authoritative when inline staging turns the receiver into a local read.
-                // Keep the ABI slot without inventing a dependency object; every unauthenticated
-                // receiver follows the ordinary extension path below and remains evaluated.
-                let function = self
-                    .calls
-                    .external(*target)
-                    .ok_or_else(|| "an unregistered dependency extension identity".to_string())?;
-                let callable = self.callables.callable(*target).ok_or_else(|| {
-                    "a dependency extension without frozen callable facts".to_string()
-                })?;
-                let emitted_ret = callable.declared_ret.unwrap_or(callable.ret);
-                let (function, receiver_ty, receiver_position) =
-                    Self::dependency_extension_call(function, callable, params, &args)?;
-                let effect = self
-                    .calls
-                    .singleton_extension_unread_receiver(*target)
-                    .ok_or_else(|| {
-                        "an unread singleton extension without its exported effect".to_string()
-                    })?;
-                if effect.semantic_type() != receiver_ty {
-                    return Err(
-                        "an unread singleton extension receiver whose declaration disagrees"
-                            .to_string(),
-                    );
-                }
-                self.direct_inert_extension_call(
-                    function,
-                    receiver_ty,
-                    receiver_position,
-                    effect.evaluate_source().then_some(receiver),
-                    params,
-                    &args,
-                )?;
-                self.coerce_emitted_value(emitted_ret, *ret)?;
-            }
-            IrExpr::Call {
-                callee: ref call_callee,
-                dispatch_receiver: Some(receiver),
-                args,
-            } if let Callee::External {
-                target,
-                params,
-                ret,
-                defaults,
-                extension_receiver_parameter: None,
-                ..
-            } = &**call_callee
-                && defaults.is_empty()
-                && self.calls.singleton_member_receiver(*target).is_some()
-                && super::callable_registry::authenticated_singleton_member_call(
-                    Some(receiver),
-                    self.callables.singleton_dispatch(id).is_some(),
-                    self.callables
-                        .callable(*target)
-                        .is_some_and(|callable| callable.is_member_function()),
-                ) =>
-            {
-                // Common KLIB lowering proved this exact compiler-owned wrapper never reads its
-                // singleton receiver, so its support export has only the regular semantic
-                // parameters. The exported effect says whether the exact serialized singleton has
-                // observable first-access initialization; only the provider's narrow inert-object
-                // proof may erase evaluation of the source receiver expression.
-                let function = self
-                    .calls
-                    .external(*target)
-                    .ok_or_else(|| "an unregistered dependency singleton member".to_string())?;
-                let callable = self.callables.callable(*target).ok_or_else(|| {
-                    "a dependency member without frozen callable facts".to_string()
-                })?;
-                let emitted_ret = callable.declared_ret.unwrap_or(callable.ret);
-                let selected = self
-                    .callables
-                    .singleton_dispatch(id)
-                    .expect("the guarded singleton call has its frozen per-expression fact");
-                let effect = self
-                    .calls
-                    .singleton_member_receiver(*target)
-                    .ok_or_else(|| {
-                        "a receiver-erased dependency member without its singleton effect"
-                            .to_string()
-                    })?;
-                if effect.classifier() != selected.classifier {
-                    return Err(
-                        "a receiver-erased dependency member whose singleton effect disagrees"
-                            .to_string(),
-                    );
-                }
-                if effect.evaluate_source() {
-                    self.statement(receiver)?;
-                }
-                self.direct_call(function, params, &args)?;
-                self.coerce_emitted_value(emitted_ret, *ret)?;
-            }
-            IrExpr::Call {
-                callee: ref call_callee,
-                dispatch_receiver: Some(receiver),
-                args,
-            } if let Callee::External {
-                target,
-                params,
-                ret,
-                defaults,
-                extension_receiver_parameter: None,
-                ..
-            } = &**call_callee
-                && defaults.is_empty()
-                && self
-                    .callables
-                    .callable(*target)
-                    .is_some_and(BackendCallableFact::is_member_function) =>
-            {
-                let function = self
-                    .calls
-                    .external(*target)
-                    .ok_or_else(|| "an unregistered dependency member identity".to_string())?;
-                let callable = self.callables.callable(*target).ok_or_else(|| {
-                    "a dependency member without frozen callable facts".to_string()
-                })?;
-                let emitted_ret = callable.declared_ret.unwrap_or(callable.ret);
-                let receiver_ty = self
-                    .calls
-                    .member_receiver(*target)
-                    .ok_or_else(|| {
-                        "an ordinary dependency member without its exported receiver type"
-                            .to_string()
-                    })?
-                    .semantic_type();
-                if params.len() != args.len() {
-                    return Err(
-                        "a dependency member whose arguments do not match its parameters"
-                            .to_string(),
-                    );
-                }
-                self.value(receiver, receiver_ty)?;
-                for (&argument, &parameter) in args.iter().zip(params.iter()) {
-                    self.value(argument, parameter)?;
-                }
-                self.code.call(function);
-                self.coerce_emitted_value(emitted_ret, *ret)?;
-            }
-            IrExpr::Call {
-                callee: ref call_callee,
-                dispatch_receiver: Some(receiver),
-                args,
-            } if let Callee::External {
-                target,
-                params,
-                ret,
-                defaults,
-                extension_receiver_parameter: None,
-                ..
-            } = &**call_callee
-                && defaults.is_empty() =>
-            {
-                let function = self
-                    .calls
-                    .external(*target)
-                    .ok_or_else(|| "an unregistered dependency extension identity".to_string())?;
-                let callable = self.callables.callable(*target).ok_or_else(|| {
-                    "a dependency extension without frozen callable facts".to_string()
-                })?;
-                let emitted_ret = callable.declared_ret.unwrap_or(callable.ret);
-                let (function, receiver_ty, receiver_position) =
-                    Self::dependency_extension_call(function, callable, params, &args)?;
-                self.direct_extension_call(
-                    function,
-                    receiver_ty,
-                    receiver_position,
-                    receiver,
-                    params,
-                    &args,
-                )?;
-                self.coerce_emitted_value(emitted_ret, *ret)?;
-            }
-            IrExpr::Call {
-                callee: ref call_callee,
-                dispatch_receiver: Some(dispatch_receiver),
-                args,
-            } if let Callee::External {
-                target,
-                params,
-                ret,
-                defaults,
-                extension_receiver_parameter: Some(extension_receiver_parameter),
-                ..
-            } = &**call_callee
-                && defaults.is_empty()
-                && self.calls.member_receiver(*target).is_some()
-                && self
-                    .callables
-                    .callable(*target)
-                    .is_some_and(BackendCallableFact::is_member_extension) =>
-            {
-                let function = self
-                    .calls
-                    .external(*target)
-                    .ok_or_else(|| "an unregistered dependency member extension".to_string())?;
-                let callable = self.callables.callable(*target).ok_or_else(|| {
-                    "a dependency member extension without frozen callable facts".to_string()
-                })?;
-                let receiver_position =
-                    usize::try_from(*extension_receiver_parameter).map_err(|_| {
-                        "a dependency member extension with an invalid receiver coordinate"
-                    })?;
-                if params.len() != args.len()
-                    || receiver_position != callable.context_count
-                    || callable.params.as_slice() != params.as_slice()
-                    || callable.source_receiver != params.get(receiver_position).copied()
-                {
-                    return Err(
-                        "a dependency member extension whose receiver contract disagrees with its call"
-                            .to_string(),
-                    );
-                }
-                let dispatch_receiver_ty = self
-                    .calls
-                    .member_receiver(*target)
-                    .expect("guarded dependency member extension receiver")
-                    .semantic_type();
-                self.value(dispatch_receiver, dispatch_receiver_ty)?;
-                for (&argument, &parameter) in args.iter().zip(params.iter()) {
-                    self.value(argument, parameter)?;
-                }
-                self.code.call(function);
-                self.coerce_emitted_value(callable.declared_ret.unwrap_or(callable.ret), *ret)?;
-            }
-            IrExpr::Call {
-                callee: ref call_callee,
                 dispatch_receiver,
                 args,
             } if let Callee::Intrinsic { operation, .. } = &**call_callee => {
@@ -1377,9 +1075,21 @@ impl<'a> Body<'a> {
                 }
             }
             IrExpr::NotNullAssert { operand, .. } => {
-                // A failed assertion traps: there are no exceptions to throw yet.
+                let operand_carrier = self.carrier_of(operand)?;
+                if matches!(operand_carrier, Some(ValType::Ref { .. }))
+                    && matches!(
+                        self.carrier_of(id)?,
+                        Some(ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64)
+                    )
+                {
+                    return Err(
+                        "a not-null assertion requiring a scalar reference conversion".into(),
+                    );
+                }
+                // A reference assertion alone supplies neither scalar unboxing nor a typed null
+                // failure. Keep the existing reference path without claiming either capability.
                 self.expression(operand)?;
-                if matches!(self.carrier_of(operand)?, Some(ValType::Ref { .. })) {
+                if matches!(operand_carrier, Some(ValType::Ref { .. })) {
                     self.code.ref_as_non_null();
                 }
             }
@@ -1521,103 +1231,6 @@ impl<'a> Body<'a> {
         }
         for (&arg, &param) in args.iter().zip(params) {
             self.value(arg, param)?;
-        }
-        self.code.call(function);
-        Ok(())
-    }
-
-    /// Validate the exact serialized/source parameter join of an already-emitted dependency
-    /// extension and answer its target plus receiver slot.
-    fn dependency_extension_call(
-        function: u32,
-        callable: &BackendCallableFact,
-        params: &[Ty],
-        args: &[u32],
-    ) -> Result<(u32, Ty, usize), Unsupported> {
-        if !callable.is_extension() {
-            return Err("a dependency receiver which is not an extension receiver".to_string());
-        }
-        let receiver_ty = callable.source_receiver.ok_or_else(|| {
-            "a dependency extension without its recorded receiver type".to_string()
-        })?;
-        let receiver_position = callable.context_count;
-        if params.len() != args.len()
-            || receiver_position > params.len()
-            || callable.params.len() != params.len() + 1
-            || callable.params[..receiver_position] != params[..receiver_position]
-            || callable.params[receiver_position] != receiver_ty
-            || callable.params[receiver_position + 1..] != params[receiver_position..]
-        {
-            return Err(
-                "a dependency extension whose receiver coordinate disagrees with its call"
-                    .to_string(),
-            );
-        }
-        Ok((function, receiver_ty, receiver_position))
-    }
-
-    /// Call one already-emitted dependency extension in its serialized parameter order:
-    /// context parameters, extension receiver, then ordinary value parameters. The provider's
-    /// frozen kind, receiver type and coordinate are the authority; a member receiver or an
-    /// inconsistent declaration is declined rather than treated as a top-level extension.
-    fn direct_extension_call(
-        &mut self,
-        function: u32,
-        receiver_ty: Ty,
-        receiver_position: usize,
-        receiver: u32,
-        params: &[Ty],
-        args: &[u32],
-    ) -> Result<(), Unsupported> {
-        for (&argument, &parameter) in args[..receiver_position]
-            .iter()
-            .zip(&params[..receiver_position])
-        {
-            self.value(argument, parameter)?;
-        }
-        self.value(receiver, receiver_ty)?;
-        for (&argument, &parameter) in args[receiver_position..]
-            .iter()
-            .zip(&params[receiver_position..])
-        {
-            self.value(argument, parameter)?;
-        }
-        self.code.call(function);
-        Ok(())
-    }
-
-    /// Call an emitted dependency extension whose exact serialized body does not read its
-    /// extension receiver. `source_receiver` is the exact matching singleton supplied by an
-    /// ordinary source extension call; evaluate it at its source-order coordinate before the inert
-    /// null substitutes only the unread ABI slot. A classifier-associated call has no source value
-    /// access and passes `None`.
-    fn direct_inert_extension_call(
-        &mut self,
-        function: u32,
-        receiver_ty: Ty,
-        receiver_position: usize,
-        source_receiver: Option<u32>,
-        params: &[Ty],
-        args: &[u32],
-    ) -> Result<(), Unsupported> {
-        if !matches!(carrier(receiver_ty)?, Some(ValType::Ref { .. })) {
-            return Err("an inert extension receiver without a reference carrier".into());
-        }
-        for (&argument, &parameter) in args[..receiver_position]
-            .iter()
-            .zip(&params[..receiver_position])
-        {
-            self.value(argument, parameter)?;
-        }
-        if let Some(receiver) = source_receiver {
-            self.statement(receiver)?;
-        }
-        self.code.ref_null(HeapType::None);
-        for (&argument, &parameter) in args[receiver_position..]
-            .iter()
-            .zip(&params[receiver_position..])
-        {
-            self.value(argument, parameter)?;
         }
         self.code.call(function);
         Ok(())
@@ -2040,6 +1653,65 @@ fn describe_node(node: &IrExpr) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lower_unit_operand(
+        target: crate::wasm::WasmTarget,
+        diverges: bool,
+    ) -> Result<(), Unsupported> {
+        let mut ir = IrFile::default();
+        let seven = ir.add_expr(IrExpr::Const(IrConst::Int(7)));
+        ir.logical_types.insert(seven, Ty::Int);
+        let statement = if diverges {
+            ir.add_expr(IrExpr::Return(Some(seven)))
+        } else {
+            ir.add_expr(IrExpr::UnitInstance)
+        };
+        ir.logical_types
+            .insert(statement, if diverges { Ty::Nothing } else { Ty::Unit });
+        let operand = ir.add_expr(IrExpr::Block {
+            stmts: vec![statement],
+            value: None,
+        });
+        ir.logical_types.insert(operand, Ty::Unit);
+        let returned = ir.add_expr(IrExpr::Return(Some(operand)));
+        let body = ir.add_expr(IrExpr::Block {
+            stmts: vec![returned],
+            value: None,
+        });
+        ir.add_fun(crate::ir::IrFunction {
+            name: "nestedReturn".to_owned(),
+            params: Vec::new(),
+            ret: Ty::Int,
+            body: Some(body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        let mut started = super::super::Started::new(target);
+        let properties = crate::backend::local_properties::realize(&mut ir).unwrap();
+        lower_file(
+            &ir,
+            &properties,
+            &CheckedBackendCallables::default(),
+            &DependencyExportSignatures::default(),
+            &mut started.module,
+            &mut started.runtime,
+            &mut started.callables,
+            &mut started.properties,
+        )
+        .map(|_| ())
+    }
+
+    #[test]
+    fn only_a_proven_nonreturning_unit_operand_can_satisfy_a_value_use() {
+        for target in crate::wasm::WasmTarget::ALL {
+            assert_eq!(lower_unit_operand(target, true), Ok(()));
+            assert_eq!(
+                lower_unit_operand(target, false),
+                Err("a `Unit` value where a value is expected".to_owned())
+            );
+        }
+    }
 
     #[test]
     fn an_untyped_call_uses_only_its_published_declared_result() {
