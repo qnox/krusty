@@ -574,6 +574,22 @@ pub fn classes_against_kotlinc_module(sources: &[(&str, &str)]) -> ClassSets {
 /// are common sources: kotlinc gets `-Xmulti-platform -Xcommon-sources=…`, krusty marks the same
 /// sources common.
 pub fn classes_against_kotlinc_source_set(sources: &[(&str, &str)], common: usize) -> ClassSets {
+    classes_against_kotlinc(sources, common, true)
+}
+
+/// [`classes_against_kotlinc_module`] on a classpath of the standard library alone, without the
+/// script runtime kotlinc otherwise adds beside it.
+pub fn classes_against_kotlinc_module_without_script_runtime(
+    sources: &[(&str, &str)],
+) -> ClassSets {
+    classes_against_kotlinc(sources, 0, false)
+}
+
+fn classes_against_kotlinc(
+    sources: &[(&str, &str)],
+    common: usize,
+    script_runtime: bool,
+) -> ClassSets {
     let common_root = super::common_core::scratch_dir().expect("allocate module class inventory");
     let output = common_root.join("reference");
     let mut arguments = vec!["-d".to_owned(), output.to_string_lossy().into_owned()];
@@ -590,6 +606,12 @@ pub fn classes_against_kotlinc_source_set(sources: &[(&str, &str)], common: usiz
         }
         paths.push(path.to_string_lossy().into_owned());
     }
+    let stdlib = super::common_core::stdlib_jar();
+    if !script_runtime {
+        arguments.push("-no-stdlib".to_owned());
+        arguments.push("-cp".to_owned());
+        arguments.push(stdlib.to_string_lossy().into_owned());
+    }
     if common > 0 {
         arguments.push("-Xmulti-platform".to_owned());
         arguments.push(format!("-Xcommon-sources={}", common_paths.join(",")));
@@ -605,12 +627,15 @@ pub fn classes_against_kotlinc_source_set(sources: &[(&str, &str)], common: usiz
     let mut reference = std::collections::BTreeMap::new();
     collect_classes(&output, &output, &mut reference);
     let _ = std::fs::remove_dir_all(common_root);
-    let stdlib = super::common_core::stdlib_jar();
     let jdk = super::common_core::jdk_modules();
+    // kotlinc compiles against its script runtime as well as the standard library.
+    let classpath = std::iter::once(stdlib)
+        .chain(krusty::jvm::kotlin_dist_jar("kotlin-script-runtime.jar").filter(|_| script_runtime))
+        .collect::<Vec<_>>();
     let krusty = super::e2e_support::compile_in_process_files_common(
         sources,
         common,
-        &[stdlib],
+        &classpath,
         Some(jdk.as_path()),
     )
     .expect("krusty accepted module inventory fixture")

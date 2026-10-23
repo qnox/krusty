@@ -10,6 +10,7 @@ mod catalog_presence;
 mod classifier_facts;
 mod classpath_annotation_classes;
 mod collection_canonicalization;
+mod declaration_headers;
 use classpath_annotation_classes::{classpath_annotation_targets, java_annotation_parameter_list};
 use collection_canonicalization::{
     canonicalize_jvm_collections, overlay_metadata_collection_names,
@@ -1277,7 +1278,11 @@ impl JvmLibraries {
             // `Map.put` returns the PREVIOUS value (`V?`, null for a fresh key) — Kotlin enhances this Java
             // method's nullability. It applies to ANY `Map` subtype (`HashMap`, `TreeMap`, …), since a call
             // resolves the member on the concrete class, not on `Map` itself.
-            let is_map = class_implements_name(&self.cp, internal_name, type_name("java/util/Map"));
+            let is_map = classifier_facts::class_implements_name(
+                &self.cp,
+                internal_name,
+                type_name("java/util/Map"),
+            );
             // The class's `@Metadata` function records — carry each member's SOURCE parameter names and
             // default flags, which the erased JVM descriptor loses. Populate every member's `call_sig` from
             // its record so a named-argument / omitted-`$default` member call resolves through the ONE
@@ -2919,28 +2924,6 @@ pub(crate) fn parse_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
     ))
 }
 
-/// Whether `internal` is, transitively, a subtype of `target` (a superclass or implemented interface,
-/// at any depth). Names are normalized to their JVM spelling so a Kotlin built-in (`kotlin/collections/
-/// MutableMap`) and its `java/util/Map` realization compare equal.
-fn class_implements_name(cp: &Classpath, internal: TypeName, target: TypeName) -> bool {
-    let target = super::jvm_class_map::to_jvm_type_name(target);
-    let mut seen = crate::fx_hash::HashSet::default();
-    let mut q = std::collections::VecDeque::new();
-    q.push_back(super::jvm_class_map::to_jvm_type_name(internal));
-    while let Some(name) = q.pop_front() {
-        if name == target {
-            return true;
-        }
-        if !seen.insert(name) {
-            continue;
-        }
-        if let Some(ci) = cp.find_name(name) {
-            q.extend(ci.interfaces.iter_ids().chain(ci.super_class));
-        }
-    }
-    false
-}
-
 impl JvmLibraries {
     /// The packages `symbols()` combines (classpath, optional annotations, core declarations), or
     /// an explicit import can be rejected before its symbol is queried.
@@ -4334,6 +4317,13 @@ impl SymbolSource for JvmLibraries {
     fn generated_serializer_singleton(&self, classifier: TypeName) -> Option<TypeName> {
         classifier_facts::generated_serializer_singleton(self, classifier)
     }
+
+    fn serializable_class_elements(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::types::SerializableClassElements> {
+        classifier_facts::serializable_class_elements(self, classifier)
+    }
 }
 
 impl JvmLibraries {
@@ -4870,6 +4860,13 @@ fn collection_barrier_role(
 }
 
 impl crate::libraries::SemanticPlatform for JvmLibraries {
+    fn declaration_header(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::libraries::DeclarationHeader> {
+        self.classpath_declaration_header(classifier)
+    }
+
     fn dependency_access_policy(&self) -> &dyn crate::libraries::DependencyAccessPolicy {
         self
     }
@@ -5346,22 +5343,6 @@ impl JvmLibraries {
             until,
             through_static,
         })
-    }
-
-    pub(super) fn unsigned_compare_callable(&self, ty: Ty) -> Option<LibraryCallable> {
-        let (owner, primitive, physical) = match ty {
-            Ty::UInt => ("java/lang/Integer", "I", Ty::Int),
-            Ty::ULong => ("java/lang/Long", "J", Ty::Long),
-            _ => return None,
-        };
-        Some(LibraryCallable::library(
-            type_name(owner),
-            "compareUnsigned",
-            vec![ty, ty],
-            Ty::Int,
-            physical,
-            format!("({primitive}{primitive})I"),
-        ))
     }
 }
 

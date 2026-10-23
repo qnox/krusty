@@ -34,7 +34,17 @@ impl Emitter<'_> {
         let super_ctor_params =
             capture_order::physical_for(self.ir, c.superclass, c.super_ctor_params.clone());
         let super_args = capture_order::physical_for(self.ir, c.superclass, c.super_args.clone());
-        self.emit_constructor_delegation_arguments(&super_args, &super_ctor_params, &[], ctor);
+        // kotlinc places a script's delegation operands, but not the call, where the script starts.
+        // A script whose template is not on the classpath passes none, so it has no such line.
+        let operand_line = (c.is_script && c.decl_start_line != 0 && !super_args.is_empty())
+            .then_some(c.decl_start_line);
+        self.emit_constructor_delegation_arguments(
+            &super_args,
+            &super_ctor_params,
+            &[],
+            operand_line,
+            ctor,
+        );
         // The call is back on the delegation's line after an operand on another, at its first
         // default mask when it has one. The marker an accessor call appends carries no position,
         // so without masks the line returns at the call itself.

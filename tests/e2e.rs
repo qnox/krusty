@@ -12,6 +12,8 @@ mod backticked_dotted_package_qualifier_e2e;
 mod bridge_result_cast_e2e;
 #[path = "common/bytecode_comparison.rs"]
 mod bytecode_comparison_support;
+#[path = "call_result_non_null_cast_e2e.rs"]
+mod call_result_non_null_cast_e2e;
 #[path = "captured_field_storage_e2e.rs"]
 mod captured_field_storage_e2e;
 #[path = "captured_receiver_names_e2e.rs"]
@@ -46,6 +48,10 @@ mod reference_compiler_support;
 mod reference_recording_support;
 #[path = "common/reference_targets.rs"]
 mod reference_targets_support;
+#[path = "serializable_parent_dependency_e2e.rs"]
+mod serializable_parent_dependency_e2e;
+#[path = "serializable_parent_same_module_e2e.rs"]
+mod serializable_parent_same_module_e2e;
 #[path = "super_call_vararg_e2e.rs"]
 mod super_call_vararg_e2e;
 #[path = "common/target_diagnostics.rs"]
@@ -1341,6 +1347,8 @@ mod klib_semantic_e2e;
 mod kotlin_fun_java_sam_param_e2e;
 #[path = "kotlin_native_provisioning_e2e.rs"]
 mod kotlin_native_provisioning_e2e;
+#[path = "kotlin_script_e2e.rs"]
+mod kotlin_script_e2e;
 #[path = "kotlinc_argument_conformance_e2e.rs"]
 mod kotlinc_argument_conformance_e2e;
 #[path = "krusty_dep_dir_e2e.rs"]
@@ -1587,6 +1595,8 @@ mod module_override_boxed_result_e2e;
 mod mpp_expect_actual_e2e;
 #[path = "mpp_requires_the_feature_e2e.rs"]
 mod mpp_requires_the_feature_e2e;
+#[path = "native_conformance_deadline_e2e.rs"]
+mod native_conformance_deadline_e2e;
 #[path = "nested_block_comment_e2e.rs"]
 mod nested_block_comment_e2e;
 #[path = "nested_class_annotation_scope_e2e.rs"]
@@ -1629,6 +1639,8 @@ mod primary_constructor_newline_e2e;
 mod primitive_explicit_equals_e2e;
 #[path = "primitive_hash_code_e2e.rs"]
 mod primitive_hash_code_e2e;
+#[path = "projected_member_extension_invoke_e2e.rs"]
+mod projected_member_extension_invoke_e2e;
 #[path = "public_inline_property_access_e2e.rs"]
 mod public_inline_property_access_e2e;
 #[path = "receiver_type_line_break_e2e.rs"]

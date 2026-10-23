@@ -62,6 +62,31 @@ pub enum GeneratedClassifierKind {
     Enum,
 }
 
+/// The serial elements of a `@Serializable` class whose serializer kotlinx.serialization's plugin
+/// generated, as a subclass compiled apart from the class inherits them: the elements the class's
+/// own `write$Self` writes, and the superclass whose `write$Self` writes the ones before them.
+///
+/// A provider that cannot state every element exactly (an element carries annotations it does not
+/// read, or the class lists no program order) publishes no record rather than a partial one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SerializableClassElements {
+    /// The class's own elements, in program order.
+    pub elements: Box<[SerializableElement]>,
+    /// The superclass as the class declares it, type arguments included; `None` for `Any`.
+    pub superclass: Option<Ty>,
+}
+
+/// One serial element of a [`SerializableClassElements`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SerializableElement {
+    pub name: Box<str>,
+    /// The property's declared type, over the class's own type parameters.
+    pub ty: Ty,
+    /// The input may omit the element: its property is not a primary-constructor parameter
+    /// without a default value.
+    pub optional: bool,
+}
+
 /// Declaration facts of a classifier, as its declaring compilation fixed them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClassifierDeclarationFacts {

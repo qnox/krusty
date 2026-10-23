@@ -12,7 +12,7 @@ mod semantic_callable_owner;
 pub use classifier_declarations::{
     ClassifierDeclarationFacts, ClassifierDeclarationKind, DeclaredValueClass,
     GeneratedClassifierFact, GeneratedClassifierKind, GeneratedClassifierPurpose,
-    SerializationGeneratedMemberStatuses,
+    SerializableClassElements, SerializableElement, SerializationGeneratedMemberStatuses,
 };
 pub use deprecation::{
     DeclaredDeprecation, DeprecatedDeclaration, DeprecatedSinceKotlin, Deprecation,
@@ -24,8 +24,10 @@ pub use semantic_callable_owner::SemanticCallableOwner;
 mod annotation_targets;
 mod interning;
 mod spelling;
+pub(crate) use annotation_targets::PropertyAnnotationHost;
 pub use annotation_targets::{
-    AnnotationTargets, DeclaredTargetPolicies, KotlinTarget, PropertyAnnotationSite,
+    AnnotationTargets, DeclaredTargetPolicies, KotlinTarget, PropertyAnnotationDefaultTargetMode,
+    PropertyAnnotationSite, PropertyAnnotationSites,
 };
 mod equality_mode;
 mod substitute;
@@ -2075,9 +2077,12 @@ pub enum AnnotationValue {
     /// their component type; collapsing `Array<String>::class` to the `kotlin/Array` classifier
     /// loses the class-file descriptor before lowering can encode it.
     Class(Ty),
+    /// A nested annotation. `written` is how the source wrote it, `None` for one read from a
+    /// class file or made by a compiler plugin.
     Annotation {
         internal: TypeName,
         values: Vec<(String, AnnotationValue)>,
+        written: Option<Box<WrittenAnnotation>>,
     },
     Array(Vec<AnnotationValue>),
 }
@@ -2102,10 +2107,15 @@ impl std::fmt::Debug for AnnotationValue {
             Self::String(value) => f.debug_tuple("String").field(value).finish(),
             Self::Enum(class, entry) => f.debug_tuple("Enum").field(class).field(entry).finish(),
             Self::Class(ty) => f.debug_tuple("Class").field(ty).finish(),
-            Self::Annotation { internal, values } => f
+            Self::Annotation {
+                internal,
+                values,
+                written,
+            } => f
                 .debug_struct("Annotation")
                 .field("internal", internal)
                 .field("values", values)
+                .field("written", written)
                 .finish(),
             Self::Array(values) => f.debug_tuple("Array").field(values).finish(),
         }
@@ -2158,6 +2168,25 @@ pub struct ResolvedAnnotation {
     pub annotation: TypeName,
     pub arguments: Vec<(String, AnnotationValue)>,
     pub facts: AnnotationSemanticFacts,
+    /// How a source application was written. `None` for an application read from a class file or
+    /// made by a compiler plugin, which has no written form.
+    pub written: Option<Box<WrittenAnnotation>>,
+}
+
+/// How a checked source application was written, beyond the values it folded to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WrittenAnnotation {
+    /// The annotation class's name as the source wrote it: its last segment, an import alias's
+    /// name when the source used one. For rendering only; the application's identity is resolved.
+    pub short_name: Box<str>,
+    /// The use-site target written before the annotation's name (`@get:A`), if any. A nested
+    /// annotation has none.
+    pub use_site: Option<PropertyAnnotationSite>,
+    /// The arguments the application wrote, as indices into its declaration-ordered arguments, in
+    /// the order the source wrote them; a `vararg` element once, where its first value is. An
+    /// argument absent here was not written: an omitted Kotlin `vararg` element folds to an empty
+    /// array all the same.
+    pub order: Box<[u16]>,
 }
 
 impl ResolvedAnnotation {
@@ -2201,6 +2230,15 @@ pub trait ClassifierFactSource {
     /// this only from a declaration/classifier record; consumers must not manufacture the plugin's
     /// nested-class spelling and probe it.
     fn generated_serializer_singleton(&self, _classifier: TypeName) -> Option<TypeName> {
+        None
+    }
+
+    /// The serial elements of `classifier`, a `@Serializable` class whose serializer the
+    /// serialization plugin generated, as a subclass compiled apart from it inherits them.
+    fn serializable_class_elements(
+        &self,
+        _classifier: TypeName,
+    ) -> Option<SerializableClassElements> {
         None
     }
 
@@ -2257,9 +2295,25 @@ pub struct AppliedAnnotation {
     pub internal: TypeName,
     pub values: Vec<(String, AnnotationValue)>,
     pub facts: AnnotationSemanticFacts,
+    pub written: Box<WrittenAnnotation>,
     pub retention: AnnotationRetention,
     /// The annotation's DECLARED `@Target` set (see [`AnnotationTargets`]).
     pub targets: AnnotationTargets,
+    /// Selected destinations when this application belongs to a property declaration. Non-property
+    /// applications have no property placement; an empty set is not an absent decision.
+    pub property_sites: Option<PropertyAnnotationSites>,
+}
+
+impl AppliedAnnotation {
+    /// The application as published with its declaration, written form included.
+    pub fn resolved(&self) -> ResolvedAnnotation {
+        ResolvedAnnotation {
+            annotation: self.internal,
+            arguments: self.values.clone(),
+            facts: self.facts,
+            written: Some(self.written.clone()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

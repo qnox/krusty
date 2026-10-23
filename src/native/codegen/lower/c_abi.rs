@@ -5,7 +5,6 @@
 //! property defined here has its value even though the caller is not Kotlin.
 
 use super::*;
-use crate::types::TyKind;
 
 impl<'a> FileLowering<'a> {
     /// Export exact dependency declaration identities as target symbols. The ordinary
@@ -17,14 +16,7 @@ impl<'a> FileLowering<'a> {
         exports: &HashMap<FunId, super::super::DependencyExportDefinition>,
     ) -> Result<(), Unsupported> {
         for (&function, export) in exports {
-            self.define_dependency_export(
-                file_init,
-                function,
-                &export.symbol,
-                export
-                    .member_receiver
-                    .map(|receiver| receiver.semantic_type()),
-            )?;
+            self.define_dependency_export(file_init, function, export)?;
         }
         Ok(())
     }
@@ -35,27 +27,23 @@ impl<'a> FileLowering<'a> {
         &mut self,
         file_init: FuncId,
         function: u32,
-        symbol: &str,
-        member_receiver: Option<Ty>,
+        export: &super::super::DependencyExportDefinition,
     ) -> Result<(), Unsupported> {
-        let declared = &self.ir.functions[function as usize];
-        let mut params =
-            Vec::with_capacity(declared.params.len() + usize::from(member_receiver.is_some()));
-        match (member_receiver.map(Ty::kind), declared.dispatch_receiver) {
-            (Some(TyKind::Obj(receiver, arguments)), Some(owner))
-                if receiver == owner && arguments.is_empty() =>
-            {
-                params.push(member_receiver.expect("matched a member receiver"));
-            }
-            (None, None) => {}
-            _ => {
-                return Err(declined!(
-                    "a dependency export whose member receiver disagrees with its body"
-                ))
-            }
+        let actual = crate::backend::DependencyFunctionSignature::from_ir(
+            self.ir,
+            function,
+            export.member_receiver,
+        )
+        .map_err(Unsupported::from)?;
+        if actual != export.signature {
+            return Err("a dependency export changed its frozen function signature".into());
         }
-        params.extend(declared.params.iter().copied());
-        self.define_export_with_params(file_init, function, symbol, params)
+        self.define_export_with_params(
+            file_init,
+            function,
+            &export.symbol,
+            export.signature.parameters().to_vec(),
+        )
     }
 
     pub(super) fn define_c_exports(

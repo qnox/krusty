@@ -14,6 +14,28 @@ use super::TypeParameterIdentities;
 /// scope, keyed by their metadata identity. Empty for a top-level declaration.
 pub(crate) type EnclosingBounds = HashMap<KotlinTypeParameterId, crate::types::Ty>;
 
+/// The exact finite formal types used by this declaration's normalized parameters and result.
+/// Full upper bounds are normalized separately and may contain a deeper self/forward reference;
+/// rebuilding a formal from those bounds would therefore change its semantic type.
+pub(crate) fn declared_formal_types(
+    formals: &[KotlinTypeParameter],
+    enclosing: &EnclosingBounds,
+    identities: &TypeParameterIdentities,
+) -> Box<[crate::types::Ty]> {
+    let bounds = semantic_bounds_with_identities(formals, enclosing, identities.by_id());
+    formals
+        .iter()
+        .map(|parameter| {
+            crate::types::Ty::ty_param(
+                identities
+                    .get(parameter.id)
+                    .expect("a signed formal has its provider identity"),
+                bounds[&parameter.id],
+            )
+        })
+        .collect()
+}
+
 /// A top-level function's declared signature using source names. This is retained only for
 /// consumers that have no provider declaration identity; a provider uses the identity-aware form.
 pub(crate) fn function_generic_sig(function: &KotlinFunction) -> GenericSig {

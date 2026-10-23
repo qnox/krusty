@@ -78,6 +78,32 @@ tasks.withType<AbstractArchiveTask>().configureEach {
 publishing {
     publications.withType<MavenPublication>().configureEach {
         if (name == "pluginMaven") artifactId = "krusty-gradle-plugin"
+        // Maven Central requires a name, description, URL, license, developer, and SCM in each POM.
+        val implementation = name == "pluginMaven"
+        pom {
+            if (implementation) {
+                name.set("krusty Gradle plugin")
+                description.set("Compiles Kotlin/JVM source sets with krusty, a Kotlin compiler written in Rust.")
+            }
+            url.set("https://krustythecompiler.dev")
+            licenses {
+                license {
+                    name.set("Apache-2.0")
+                    url.set("https://www.apache.org/licenses/LICENSE-2.0.txt")
+                }
+            }
+            developers {
+                developer {
+                    id.set("qnox")
+                    name.set("Anton Efimchuk")
+                }
+            }
+            scm {
+                url.set("https://github.com/qnox/krusty")
+                connection.set("scm:git:https://github.com/qnox/krusty.git")
+                developerConnection.set("scm:git:ssh://git@github.com/qnox/krusty.git")
+            }
+        }
     }
     repositories {
         maven {

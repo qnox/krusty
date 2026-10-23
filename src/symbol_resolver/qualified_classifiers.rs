@@ -119,6 +119,13 @@ impl SymbolResolver<'_> {
     /// Bind a fully qualified classifier name (`a.b.Outer.Nested`) from the root package, outside
     /// any file's imports, as a compiler argument names one.
     pub(crate) fn fully_qualified_classifier(&self, name: &str) -> Option<TypeName> {
+        self.fully_qualified_declaration(name)
+            .map(|selected| selected.classifier)
+    }
+
+    /// The declaration a fully qualified name binds from the root package: a classifier, or the
+    /// typealias naming one, which [`ScopedClassifier::alias`] then carries.
+    pub(crate) fn fully_qualified_declaration(&self, name: &str) -> Option<ScopedClassifier> {
         let segments = name
             .split('.')
             .filter(|segment| !segment.is_empty())
@@ -133,7 +140,7 @@ impl SymbolResolver<'_> {
             None,
         )
         .ok()
-        .map(|selected| selected.selected.classifier)
+        .map(|selected| selected.selected)
     }
 
     /// Advance a qualified classifier path from an already selected first-segment identity.

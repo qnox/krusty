@@ -414,7 +414,6 @@ impl<'a> OpenedKlibLibraries<'a> {
             .map_err(KlibLibrariesOpenError::Bodies)?;
         let inline_bodies = KlibDeclarationBodies::from_body_libraries(inline_body_libraries)
             .map_err(KlibLibrariesOpenError::Bodies)?;
-        inventory.attach_inline_body_plans(&inline_bodies);
         let body_snapshot = platform_module.map(|platform_module| {
             let reachable = bodies.body_provider_modules(&platform_module);
             crate::libraries::DependencyBodySnapshot::new(
@@ -426,18 +425,21 @@ impl<'a> OpenedKlibLibraries<'a> {
                     .collect(),
             )
         });
-        // Decoders read the immutable bytes frozen by `KlibArchive::open`, so they cannot combine
-        // channels from two generations. Before publishing those decoded facts, prove that the
+        let libraries = KlibLibraries::over_with_bodies_and_snapshot(
+            std::rc::Rc::new(inventory),
+            std::rc::Rc::new(bodies),
+            std::rc::Rc::new(inline_bodies),
+            body_snapshot,
+        );
+        // Decoders and reference normalization read the immutable bytes frozen by
+        // `KlibArchive::open`, so they cannot combine channels from two generations. Before
+        // publishing those decoded facts, prove that the
         // selected path still names that same consumed generation. A later module will make the
         // same check independently and the session snapshot will join the two fingerprints.
         for record in &records {
             validate_current_generation(record)?;
         }
-        Ok(KlibLibraries::over_with_bodies_and_snapshot(
-            std::rc::Rc::new(inventory),
-            std::rc::Rc::new(bodies),
-            body_snapshot,
-        ))
+        Ok(libraries)
     }
 }
 

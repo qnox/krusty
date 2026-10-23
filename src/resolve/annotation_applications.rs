@@ -14,6 +14,9 @@ pub(super) struct CheckedAnnotationApplications {
     checked: HashMap<(u32, u32), crate::types::AppliedAnnotation>,
     discarded: crate::fx_hash::HashSet<(u32, u32)>,
     suppressed_source_property_applications: crate::fx_hash::HashSet<(u32, u32)>,
+    /// The folded default of each element of a source annotation class that declares one, by
+    /// class, in declaration order.
+    element_defaults: HashMap<TypeName, Vec<(String, crate::types::AnnotationValue)>>,
 }
 
 impl CheckedAnnotationApplications {
@@ -38,6 +41,14 @@ impl CheckedAnnotationApplications {
     pub(super) fn record(&mut self, key: (u32, u32), applied: crate::types::AppliedAnnotation) {
         self.discarded.remove(&key);
         self.checked.insert(key, applied);
+    }
+
+    pub(super) fn record_element_defaults(
+        &mut self,
+        class: TypeName,
+        defaults: Vec<(String, crate::types::AnnotationValue)>,
+    ) {
+        self.element_defaults.insert(class, defaults);
     }
 
     fn retain_suppressed_source_property_application(&mut self, annotation: &AnnotationRef) {
@@ -67,6 +78,18 @@ impl TypeInfo {
     ) -> Option<&crate::types::AppliedAnnotation> {
         self.applied_annotations
             .get(&(annotation.span.lo, annotation.span.hi))
+    }
+
+    /// The folded element defaults of the source annotation class `class`, when this pass folded
+    /// them: the declaration-annotation fragment does, for every annotation class it selects.
+    pub(crate) fn annotation_element_defaults(
+        &self,
+        class: TypeName,
+    ) -> Option<&[(String, crate::types::AnnotationValue)]> {
+        self.applied_annotations
+            .element_defaults
+            .get(&class)
+            .map(Vec::as_slice)
     }
 
     pub(crate) fn retains_suppressed_source_property_application(
@@ -450,7 +473,12 @@ impl Checker<'_> {
         };
         let applied =
             if self.check_annotation_arguments(scope, annotation.span, &shape, arguments, None) {
-                match self.fold_annotation_application(internal, arguments) {
+                match self.fold_annotation_application(
+                    internal,
+                    arguments,
+                    annotation.property_site,
+                    written_short_name(&annotation.name),
+                ) {
                     Some(applied) => Some(applied),
                     None => {
                         if !self.report_non_constant_annotation_arguments(arguments) {
@@ -473,7 +501,22 @@ impl Checker<'_> {
             return Some(internal);
         }
         if contract_valid {
-            if let Some(applied) = applied {
+            if let Some(mut applied) = applied {
+                if let AnnotationApplicationHost::Property {
+                    constructor_parameter,
+                    has_backing_field,
+                    ..
+                } = host
+                {
+                    applied.property_sites = Some(applied.targets.property_declaration_sites(
+                        crate::types::PropertyAnnotationHost {
+                            constructor_parameter,
+                            has_backing_field,
+                        },
+                        self.file.property_annotation_default_target_mode,
+                        annotation.property_site,
+                    ));
+                }
                 let key = (annotation.span.lo, annotation.span.hi);
                 self.applied_annotations.record(key, applied);
             }
@@ -710,4 +753,9 @@ pub(super) fn annotation_retention(
             Some(_) => return None,
         })
     })
+}
+
+/// The last segment of an annotation's written class reference, which names it in rendering.
+fn written_short_name(spelling: &str) -> &str {
+    spelling.rsplit('.').next().unwrap_or(spelling)
 }

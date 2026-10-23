@@ -50,7 +50,7 @@ fn assert_script_reported_like_kotlinc(source: &str, reference_args: &[String]) 
     let jdk = common::jdk_modules();
     let (krusty_code, krusty_stderr) = common::front_end_named_input_result(
         "Use.kts",
-        krusty::frontend::SourceInput::kotlin_script(source),
+        krusty::frontend::SourceInput::kotlin_script(source).with_file_stem("Use"),
         std::slice::from_ref(&stdlib),
         Some(jdk.as_path()),
     );
