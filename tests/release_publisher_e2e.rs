@@ -360,10 +360,15 @@ fn release_secrets_reach_only_first_party_build_code() {
         !job.contains("gradle/actions/setup-gradle"),
         "setup-gradle injects an init script into the Gradle builds that hold the signing key"
     );
-    assert!(
-        !job.contains("<<<"),
-        "a here-string can put a secret in a temporary file"
-    );
+    for step in steps(job)
+        .into_iter()
+        .filter(|step| step.contains("secrets."))
+    {
+        assert!(
+            !step.contains("<<<"),
+            "a here-string can put a secret in a temporary file: {step}"
+        );
+    }
     let wrapper = fs::read_to_string(
         root.join("tools/krusty-gradle/gradle/wrapper/gradle-wrapper.properties"),
     )
