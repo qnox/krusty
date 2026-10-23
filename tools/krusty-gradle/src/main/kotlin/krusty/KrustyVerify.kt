@@ -119,7 +119,6 @@ internal fun registerVerifyCompile(
         taskTimings.set(timings)
         usesService(timings)
         dependsOn(kotlinTask)
-        onlyIf("kotlinc compiled sources") { !sourceFiles.isEmpty }
         configure()
     }
     report.configure { records.from(verify.flatMap { it.record }) }
@@ -176,13 +175,13 @@ abstract class KrustyVerifyCompileTask @Inject constructor(
         taskTimings.get().millis(compilationPath.get())?.let {
             arguments.addAll(listOf("--kotlinc-millis", it.toString()))
         }
-        val refused = refusals.asFile.orNull?.takeIf { it.length() > 0 }
-        if (refused != null) {
-            arguments.addAll(listOf("--unsupported-from", refused.absolutePath))
-        } else {
-            arguments.add("--")
-            arguments.addAll(krustyArguments(sources(), destination))
+        refusals.asFile.orNull?.takeIf { it.length() > 0 }?.let {
+            arguments.addAll(listOf("--unsupported-from", it.absolutePath))
         }
+        // Always the full request: without Kotlin sources the record says so, and an earlier run's
+        // record never stands in for this one.
+        arguments.add("--")
+        arguments.addAll(krustyArguments(sources(), destination))
         val output = ByteArrayOutputStream()
         val result = execOperations.exec {
             executable = binary.get().asFile.absolutePath
@@ -236,25 +235,27 @@ abstract class KrustyVerifyReportTask @Inject constructor(
     @TaskAction
     fun report() {
         val executable = binary.get().asFile.absolutePath
+        // Only this invocation's records and report: nothing an earlier one wrote survives it.
+        fileSystemOperations.delete { delete(reportDirectory) }
         val unsupported = unsupportedRecords.get().asFile
         fileSystemOperations.delete { delete(unsupported) }
-        unsupportedCompilations.get().entries.forEachIndexed { index, (compilation, reason) ->
+        val unsupportedRecordFiles = unsupportedCompilations.get().entries.mapIndexed { index, (compilation, reason) ->
+            val record = File(unsupported, "records/$index.json")
             exec(
                 executable,
                 listOf(
                     "verify-compile",
-                    "--reference", unsupported.absolutePath,
-                    "--record", File(unsupported, "$index.json").absolutePath,
+                    "--reference", File(unsupported, "reference").absolutePath,
+                    "--record", record.absolutePath,
                     "--compilation", compilation,
                     "--unsupported", reason,
                 ),
             )
+            record
         }
-        val recorded = records.files.filter(File::exists) + listOfNotNull(unsupported.takeIf(File::exists))
-        if (recorded.isEmpty()) {
-            logger.lifecycle("krusty verify: no Kotlin/JVM compilation ran")
-            return
-        }
+        // Every current compilation's verify task ran in this build and wrote its record; a missing
+        // one fails the report rather than dropping that compilation.
+        val recorded = records.files.toList() + unsupportedRecordFiles
         val arguments = mutableListOf(
             "verify-report",
             "--out", reportDirectory.get().asFile.absolutePath,
