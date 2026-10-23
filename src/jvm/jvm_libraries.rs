@@ -11,6 +11,7 @@ mod classifier_facts;
 mod classpath_annotation_classes;
 mod collection_canonicalization;
 mod declaration_headers;
+mod declared_members;
 use classpath_annotation_classes::{classpath_annotation_targets, java_annotation_parameter_list};
 use collection_canonicalization::{
     canonicalize_jvm_collections, overlay_metadata_collection_names,
@@ -25,6 +26,7 @@ mod generic_signatures;
 mod inline_body_plan;
 mod inline_capability;
 mod java_nullability;
+mod java_operator_convention;
 mod mapped_builtin_member_status;
 mod object_methods;
 mod override_slots;
@@ -75,6 +77,8 @@ use crate::runtime::{PlatformRangeCtor, RangeConstruction};
 use crate::symbol_resolver::{ty_subst, ty_subst_all, ty_subst_keep_unbound};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{type_name, SemanticCallableOwner, Ty, TyKind, TypeName, TypeNameList};
+
+use java_operator_convention::java_method_has_operator_convention;
 
 fn effective_class_access(class: &super::classreader::ClassInfo) -> u16 {
     class
@@ -139,31 +143,6 @@ pub(super) struct JvmStaticField {
     pub(super) is_final: bool,
     /// API-normalized availability from the exact metadata field declaration, when one exists.
     pub(super) deprecated_hidden: bool,
-}
-
-/// Kotlin operator capability of a Java instance method. Java declarations cannot encode
-/// Kotlin's `operator` modifier, so the interoperability rule is defined entirely by the declared
-/// method name and value-parameter arity.
-fn java_method_has_operator_convention(name: &str, arity: usize) -> bool {
-    match name {
-        "invoke" => true,
-        "unaryPlus" | "unaryMinus" | "not" | "inc" | "dec" | "iterator" | "hasNext" | "next" => {
-            arity == 0
-        }
-        "plus" | "minus" | "times" | "div" | "rem" | "rangeTo" | "rangeUntil" | "contains"
-        | "compareTo" | "plusAssign" | "minusAssign" | "timesAssign" | "divAssign"
-        | "remAssign" => arity == 1,
-        "get" => arity >= 1,
-        "set" => arity >= 2,
-        "getValue" | "provideDelegate" => arity == 2,
-        "setValue" => arity == 3,
-        _ => name.strip_prefix("component").is_some_and(|suffix| {
-            arity == 0
-                && !suffix.is_empty()
-                && suffix.bytes().all(|byte| byte.is_ascii_digit())
-                && suffix.bytes().any(|byte| byte != b'0')
-        }),
-    }
 }
 
 impl JvmLibraries {
@@ -4866,6 +4845,10 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         classifier: TypeName,
     ) -> Option<crate::libraries::DeclarationHeader> {
         self.classpath_declaration_header(classifier)
+    }
+
+    fn declared_members(&self, classifier: TypeName) -> Option<crate::libraries::DeclaredMembers> {
+        self.classpath_declared_members(classifier)
     }
 
     fn abi(&self) -> Option<&dyn crate::libraries::PlatformAbi> {

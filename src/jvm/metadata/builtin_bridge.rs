@@ -114,9 +114,12 @@ fn package_from_common(package: common::KotlinPackage) -> BuiltinPackage {
                                 params: member.params.into_iter().map(ty_from_common).collect(),
                                 ret: ty_from_common(member.ret),
                                 is_property: member.is_property,
+                                is_var: member.is_var,
                                 is_operator: member.is_operator,
                                 is_infix: member.is_infix,
                                 is_abstract: member.is_abstract,
+                                modality: member.modality,
+                                visibility: member.visibility,
                                 return_value_status: member.return_value_status,
                                 formals: member
                                     .formals

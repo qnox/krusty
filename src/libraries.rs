@@ -16,6 +16,7 @@ mod classifier_role;
 mod compiler_intrinsic;
 mod core_builtins;
 mod declaration_header;
+mod declared_members;
 mod default_value;
 mod dependency_access_policy;
 mod dependency_body_contract;
@@ -39,6 +40,7 @@ mod result_nullability;
 mod scalar_instruction;
 mod singleton_dispatch;
 mod stdlib_klib_intrinsics;
+pub use crate::metadata::semantic::KotlinModality;
 pub use annotation_application::{
     AnnotationApplication, AnnotationElementDefault, AnnotationParameterPolicy,
     AnnotationPositionalPolicy,
@@ -60,6 +62,9 @@ pub use classifier_declaration::{AliasExpansion, ClassifierDeclaration};
 pub use classifier_kind::TypeKind;
 pub use declaration_header::{
     DeclarationHeader, DeclarationLanguage, HeaderSignature, HeaderSupertype, HeaderTypeParameter,
+};
+pub use declared_members::{
+    DeclaredConstructor, DeclaredFunction, DeclaredMembers, DeclaredParameter, DeclaredProperty,
 };
 pub use default_value::DefaultValue;
 pub use dependency_access_policy::DependencyAccessPolicy;
@@ -441,6 +446,13 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// The declaration of a library classifier as its source language states it, for a consumer
     /// that shows declarations. `None` for a classifier this provider does not declare.
     fn declaration_header(&self, _classifier: TypeName) -> Option<DeclarationHeader> {
+        None
+    }
+
+    /// The members a library classifier declares, as its source language states them, beside its
+    /// [`Self::declaration_header`]. `None` for a classifier this provider does not declare, or
+    /// whose members it does not read yet.
+    fn declared_members(&self, _classifier: TypeName) -> Option<DeclaredMembers> {
         None
     }
 
