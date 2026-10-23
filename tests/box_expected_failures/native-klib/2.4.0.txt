@@ -2522,6 +2522,7 @@ regressions/multimodule/inlineUnsignedConstructionAndData.kt
 regressions/objectCaptureOuterConstructorProperty.kt
 regressions/objectInsideDelegation.kt
 regressions/resolvedCallForGetOperator.kt
+regressions/unitClassLiteralAnnotationArgument.kt
 reified/callChain.kt
 reified/callableReferenceInlinedFun.kt
 reified/callableReferenceInlinedFunFromOtherModule.kt

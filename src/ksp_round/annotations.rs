@@ -9,7 +9,8 @@ use super::{Source, Subject};
 use crate::ast::AnnotationRef;
 use crate::frontend::{FrontendSymbols, SourceSetAnalysis};
 use crate::types::{
-    stored_value_ty, AnnotationValue, PropertyAnnotationSite, ResolvedAnnotation, Ty, TypeName,
+    stored_value_ty, AnnotationValue, PropertyAnnotationSite, ResolvedAnnotation, Ty, TyKind,
+    TypeName,
 };
 
 /// Which of the applications written on a declaration KSP shows on one of the nodes it makes of
@@ -239,7 +240,7 @@ impl<'a> Annotations<'a> {
     fn class_literal(&self, ty: Ty, read: ValueSource) -> Option<krusty_plugin_ir::KspType> {
         let scope = TypeParameterScope::default();
         if read == ValueSource::ClassFile {
-            return scope.ty(ty);
+            return scope.ty(self.read_as_kotlin(ty));
         }
         let class = stored_value_ty(ty).kotlin_class_internal()?;
         if class == crate::types::type_name("kotlin/Array") {
@@ -259,6 +260,27 @@ impl<'a> Annotations<'a> {
             described.arguments = vec![krusty_plugin_ir::KspTypeArgument::Star; arity];
         }
         Some(described)
+    }
+
+    /// The class `ty` a class file records as Kotlin reads it: a platform class the platform maps
+    /// to a Kotlin classifier (`java.lang.Integer` to `kotlin.Int`) is that classifier, and so is an
+    /// array's element.
+    fn read_as_kotlin(&self, ty: Ty) -> Ty {
+        let TyKind::Obj(class, arguments) = ty.kind() else {
+            return ty;
+        };
+        if class == crate::types::wk::array() {
+            let arguments: Vec<Ty> = arguments
+                .as_slice()
+                .iter()
+                .map(|argument| self.read_as_kotlin(*argument))
+                .collect();
+            return Ty::obj_args_name(class, &arguments);
+        }
+        match self.symbols.libraries.mapped_classifier(class) {
+            Some(mapped) => Ty::obj_name(mapped).canonical_semantic(),
+            None => ty,
+        }
     }
 
     /// `value`, read from where `read` says, as KSP hands it over; a nested annotation is written
