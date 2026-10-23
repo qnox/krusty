@@ -3,6 +3,70 @@ use super::*;
 /// Values are published in declaration order, which the class file needs; the order the source
 /// wrote them in travels beside them.
 #[test]
+fn pass_one_retains_constructor_property_payloads_only_at_their_checked_use_site() {
+    let source = r#"
+import kotlin.reflect.KClass
+@Target(AnnotationTarget.PROPERTY)
+annotation class PropertyMark(val type: KClass<*>)
+@Target(AnnotationTarget.PROPERTY, AnnotationTarget.VALUE_PARAMETER, AnnotationTarget.PROPERTY_GETTER)
+annotation class Other(val text: String)
+class Token
+class Subject(
+    @PropertyMark(Token::class) @param:Other("parameter") @get:Other("getter") val first: Int,
+    @Other("default parameter") val second: Int,
+    @property:Other("property") val third: Int
+)
+"#;
+    let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+        crate::toolchain::jvm_classpath_jars_for(source),
+    ));
+    let mut diagnostics = DiagSink::new();
+    let analysis = analyze_source_set_with_features(
+        &[SourceInput::kotlin(source).with_file_stem("ConstructorPropertyAnnotations")],
+        crate::frontend::PlatformProvider::jvm(Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        )),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    let index = analysis.streamed.as_ref().expect("Pass 1").module.index();
+    let subject = index
+        .classifier_declaration(crate::types::type_name("Subject"))
+        .expect("stable subject declaration");
+    let applications = |sibling| {
+        let property = index
+            .owned_declaration(subject, crate::fir::DeclarationKind::Property, sibling)
+            .expect("stable constructor property");
+        index.declaration_applied_annotations(property)
+    };
+    assert_eq!(
+        applications(0),
+        [crate::types::ResolvedAnnotation {
+            annotation: crate::types::type_name("PropertyMark"),
+            arguments: vec![(
+                "type".to_owned(),
+                crate::types::AnnotationValue::Class(Ty::obj("Token"))
+            )],
+            facts: Default::default(),
+        }]
+    );
+    assert!(applications(1).is_empty());
+    assert_eq!(
+        applications(2),
+        [crate::types::ResolvedAnnotation {
+            annotation: crate::types::type_name("Other"),
+            arguments: vec![(
+                "text".to_owned(),
+                crate::types::AnnotationValue::string("property")
+            )],
+            facts: Default::default(),
+        }]
+    );
+}
+
+#[test]
 fn pass_one_retains_checked_classifier_annotation_values_by_stable_identity() {
     let source = "annotation class Mark(val text: String, val count: Int, val enabled: Boolean)\n\
                   @Mark(count = 3, enabled = true, text = \"kept\")\n\

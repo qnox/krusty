@@ -39236,12 +39236,12 @@ impl<'a> Checker<'a> {
         let best = applicable
             .iter()
             .filter(|(_, _, _, missing_context, _, _, _, _)| !has_context || !*missing_context)
-            .map(|(rank, ..)| (rank.0, rank.1))
+            .map(|(rank, ..)| rank.0)
             .max()?;
         let nearest_receiver = applicable
             .iter()
             .filter(|(rank, _, _, missing_context, _, _, _, _)| {
-                (rank.0, rank.1) == best && (!has_context || !missing_context)
+                rank.0 == best && (!has_context || !missing_context)
             })
             .map(|(_, _, _, _, _, candidate, _, _)| candidate.receiver_rank)
             .min()?;
@@ -39251,7 +39251,7 @@ impl<'a> Checker<'a> {
         let mut maximal = applicable
             .into_iter()
             .filter(|(rank, _, _, missing_context, _, candidate, _, _)| {
-                (rank.0, rank.1) == best
+                rank.0 == best
                     && (!has_context || !missing_context)
                     && candidate.receiver_rank == nearest_receiver
             })

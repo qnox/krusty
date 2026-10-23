@@ -83,7 +83,7 @@ from the real `kotlin` command, and refuses by name whatever it does not impleme
 [KOTLIN_TOOLCHAIN.md](KOTLIN_TOOLCHAIN.md).
 
 Gradle projects are compiled by running that project's `./gradlew`, not by reimplementing the
-Kotlin plugin. `tools/krusty-gradle` is a Gradle plugin (`id("krusty")`, sources under
+Kotlin plugin. `tools/krusty-gradle` is a Gradle plugin (`id("dev.krustythecompiler")`, sources under
 `src/main/kotlin`). A build applies both its selected `org.jetbrains.kotlin.jvm` 2.4.x plugin and
 `krusty`; source sets, `kotlin {}`, compiler options, and `KotlinJvmCompile` stay. Source checkouts
 can use `--include-build`; releases include a portable local Maven repository with the implementation
@@ -91,7 +91,8 @@ and plugin-marker publications. The Kotlin JVM plugin still owns source sets, `p
 compiler options, classpaths, friend paths,
 and compile outputs. The public Kotlin task is disabled and depends on a typed, cacheable replacement
 task whose `ExecOperations` and `FileSystemOperations` are injected by Gradle. The replacement execs
-the krusty binary (`-Pkrusty.binary` or `KRUSTY_BIN`) with the task's complete `.kt` and same-module
+the krusty binary (`-Pkrusty.binary`, `KRUSTY_BIN`, or else the plugin release's own compiler,
+downloaded once into the Gradle user home and checked against the release's `SHA256SUMS`) with the task's complete `.kt` and same-module
 `.java` sources and normalized structured compiler options. kotlinc and the Kotlin compile daemon
 are not started. An Android project (`com.android.base`, with AGP 9's built-in Kotlin or with
 `org.jetbrains.kotlin.android`) is replaced the same way, per variant: an Android variant is no Java
@@ -117,9 +118,12 @@ reject the build, so neither is replaced and neither joins `krustyCompile`.
 (`kotlin_dsl_build_src_compiles_through_krusty` in `crates/krusty-build/src/gradle.rs`.)
 
 The adapter derives Kotlin semantics from `KotlinBasePlugin.pluginVersion`. It reads the experimental
-Build Tools API `compilerVersion` property behind the two exact KGP/BTA opt-ins only to reject an
+Build Tools API `compilerVersion` property behind the two exact KGP/BTA opt-ins only to detect an
 override which would make those semantics diverge; it does not use the experimental compiler path.
-A pre-release, RC, or dev suffix is a different version and is rejected. `allWarningsAsErrors` is
+Such an override, a pre-release, RC, or dev suffix included, is a different compiler: the compile is
+reported and left to kotlinc, as is any request the adapter cannot derive krusty's arguments from
+(a free argument that reaches a plugin-owned one, an argument file, an unsupported structured
+option). `allWarningsAsErrors` is
 forwarded as `-Werror`; an explicit `-Werror` alongside it is the same idempotent policy and is
 forwarded exactly once.
 
