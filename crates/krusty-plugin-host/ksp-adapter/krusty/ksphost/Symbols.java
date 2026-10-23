@@ -104,7 +104,7 @@ final class Symbols {
     }
 
     // A classpath classifier (`put_library_class` in `src/ksp/protocol.rs`): a class's header with
-    // no declarations, then its package, parent and origin.
+    // no declarations, then its package, parent, origin and whether its annotations are complete.
     static LibraryClass readLibraryClass(DataInputStream in, Classpath classpath)
             throws IOException {
         Symbols symbols = new Symbols(classpath);
@@ -128,6 +128,7 @@ final class Symbols {
         declaration.packageName = new Name(Wire.readString(in));
         declaration.parent = Wire.readBoolean(in) ? Wire.readString(in) : null;
         declaration.origin = in.readByte() == 0 ? Origin.KOTLIN_LIB : Origin.JAVA_LIB;
+        declaration.annotationsComplete = Wire.readBoolean(in);
         return declaration;
     }
 

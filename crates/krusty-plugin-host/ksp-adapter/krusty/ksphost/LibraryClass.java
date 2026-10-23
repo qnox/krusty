@@ -35,6 +35,9 @@ final class LibraryClass implements KSClassDeclaration {
     // The qualified name of the classifier this one is nested in, or null.
     String parent;
     Origin origin;
+    // False when krusty could not read every annotation the declaration states; the query is then
+    // refused.
+    boolean annotationsComplete = true;
     // Each is null when krusty could not describe it; the query is then refused.
     Set<Modifier> modifiers;
     List<KSTypeParameter> typeParameters;
@@ -168,6 +171,9 @@ final class LibraryClass implements KSClassDeclaration {
 
     @Override
     public Sequence<KSAnnotation> getAnnotations() {
+        if (!annotationsComplete) {
+            throw library("annotations krusty cannot read");
+        }
         return Nodes.sequence(annotations);
     }
 

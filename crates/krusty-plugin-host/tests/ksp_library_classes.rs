@@ -208,11 +208,15 @@ fn logged(name: &str, library: Option<KspLibraryClass>) -> String {
         KspOrigin::KotlinLib => "KOTLIN_LIB",
         KspOrigin::JavaLib => "JAVA_LIB",
     };
-    let annotations: Vec<String> = class
-        .annotations
-        .iter()
-        .map(|annotation| logged_annotation(annotation, origin))
-        .collect();
+    // The host refuses the annotations of a declaration whose annotations krusty cannot read.
+    let annotations: Vec<String> = match library.annotations_complete {
+        true => class
+            .annotations
+            .iter()
+            .map(|annotation| logged_annotation(annotation, origin))
+            .collect(),
+        false => vec!["<refused>".to_string()],
+    };
     format!(
         "{name} -> {kind} {} simple={} package={} parent={} origin={} modifiers={} \
          typeParameters=[{}] supertypes={} annotations={}",

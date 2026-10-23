@@ -15743,7 +15743,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Retention(AnnotationRetention)` and `Target(AnnotationTarget)`. A Java class's
   `java.lang.Deprecated` is `kotlin.Deprecated("Deprecated in Java")`. A repeated Kotlin annotation
   is each of its applications, never the container the compiler stores them in, and that
-  container (`kotlin.internal.RequireKotlin.Container`) finds nothing by name. An annotation
+  container (`kotlin.internal.RequireKotlin.Container`) finds nothing by name. A container whose
+  value is not an array of annotations leaves the declaration's annotations unanswered rather
+  than listing the rest. An annotation
   read from a class file lists the values it records, then its class's other defaults; a nested
   default is `SYNTHETIC`. A typealias
   name (`kotlin.io.Serializable`) and an unknown name find nothing, but a supertype written as one
@@ -15758,7 +15760,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`crates/krusty-plugin-host/tests/ksp.rs`, `library_classes_are_what_ksp2_reports`;
   `crates/krusty-plugin-host/tests/ksp_library_classes.rs`,
   `library_classes_are_the_headers_ksp2_reports`; `src/jvm/jvm_libraries/declaration_headers.rs`,
-  `an_unreadable_generic_signature_is_not_a_nongeneric_class`.)
+  `an_unreadable_generic_signature_is_not_a_nongeneric_class`,
+  `a_container_holding_a_value_that_is_not_an_annotation_is_unreadable`.)
 
 ## 8. Success criteria for the PoC
 

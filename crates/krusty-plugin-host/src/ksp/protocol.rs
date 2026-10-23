@@ -159,7 +159,8 @@ fn put_class(payload: &mut Vec<u8>, class: &KspClass) {
 }
 
 /// A classpath classifier: its header as a class's, then its package, the qualified name of the
-/// classifier it is nested in if any, and its origin (0 Kotlin, 1 Java).
+/// classifier it is nested in if any, its origin (0 Kotlin, 1 Java), and whether its annotations
+/// are complete.
 fn put_library_class(payload: &mut Vec<u8>, library: &KspLibraryClass) {
     put_class(payload, &library.class);
     put_str(payload, &library.package_name);
@@ -170,6 +171,7 @@ fn put_library_class(payload: &mut Vec<u8>, library: &KspLibraryClass) {
         KspOrigin::KotlinLib => 0,
         KspOrigin::JavaLib => 1,
     });
+    payload.push(u8::from(library.annotations_complete));
 }
 
 /// A function: its name, kind (0 top-level, 1 member, 2 static, 3 primary constructor,

@@ -85,6 +85,7 @@ impl KspLibraries<'_> {
                 annotations: header
                     .annotations
                     .iter()
+                    .flatten()
                     .map(|annotation| annotations.ksp_annotation(annotation, false, true, false))
                     .collect(),
                 modifiers: modifiers(header, self.converts_lambdas(class, header)),
@@ -99,6 +100,7 @@ impl KspLibraries<'_> {
             package_name: class.package().replace('/', "."),
             parent: class.nested_owner().map(qualified_name),
             origin,
+            annotations_complete: header.annotations.is_some(),
         }
     }
 }

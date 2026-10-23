@@ -96,7 +96,7 @@ impl JvmLibraries {
                 ),
                 supertypes,
             }),
-            annotations: Vec::new(),
+            annotations: Some(Vec::new()),
         })
     }
 
@@ -136,7 +136,7 @@ impl JvmLibraries {
                 && kind == TypeKind::Class,
             is_value: false,
             signature: java_signature(class),
-            annotations: class.annotations.iter().map(kotlin_annotation).collect(),
+            annotations: Some(class.annotations.iter().map(kotlin_annotation).collect()),
         }
     }
 }
@@ -175,25 +175,30 @@ impl JvmLibraries {
                 .annotations
                 .iter()
                 .filter(|annotation| !is_compiler_written(annotation.annotation))
-                .flat_map(|annotation| self.applications(annotation))
-                .collect(),
+                .map(|annotation| self.applications(annotation))
+                .collect::<Option<Vec<_>>>()
+                .map(|applications| applications.into_iter().flatten().collect()),
         }
     }
 
     /// The applications an annotation of a Kotlin class file stands for: the repeated ones a
-    /// generated container holds, each on its own, or the annotation itself.
-    fn applications(&self, annotation: &ResolvedAnnotation) -> Vec<ResolvedAnnotation> {
+    /// generated container holds, each on its own, or the annotation itself. `None` for a
+    /// container whose value is not an array of annotations, which is no evidence of what the
+    /// declaration repeats.
+    fn applications(&self, annotation: &ResolvedAnnotation) -> Option<Vec<ResolvedAnnotation>> {
         let container = self
             .cp
             .find_name(annotation.annotation)
             .is_some_and(|class| is_repeatable_container(&class));
-        let repeated = match annotation.arguments.as_slice() {
-            [(_, AnnotationValue::Array(values))] if container => values,
-            _ => return vec![annotation.clone()],
+        if !container {
+            return Some(vec![annotation.clone()]);
+        }
+        let [(_, AnnotationValue::Array(repeated))] = annotation.arguments.as_slice() else {
+            return None;
         };
         repeated
             .iter()
-            .filter_map(|value| match value {
+            .map(|value| match value {
                 AnnotationValue::Annotation {
                     internal,
                     values,
@@ -477,5 +482,59 @@ mod tests {
         assert_eq!(header.signature, None);
         assert_eq!(header.kind, TypeKind::Class);
         assert_eq!(header.access, ClassifierAccess::Public);
+    }
+
+    fn repeatable_container(values: Vec<AnnotationValue>) -> ResolvedAnnotation {
+        ResolvedAnnotation {
+            annotation: type_name("kotlin/internal/RequireKotlin").nested_child("Container"),
+            arguments: vec![("value".to_string(), AnnotationValue::Array(values))],
+            facts: Default::default(),
+            written: None,
+        }
+    }
+
+    fn require_kotlin(version: &str) -> AnnotationValue {
+        AnnotationValue::Annotation {
+            internal: type_name("kotlin/internal/RequireKotlin"),
+            values: vec![("version".to_string(), AnnotationValue::string(version))],
+            written: None,
+        }
+    }
+
+    #[test]
+    fn a_repeatable_container_stands_for_each_application_it_holds() {
+        let Some(libraries) = libraries() else {
+            return;
+        };
+        let container = repeatable_container(vec![require_kotlin("1.2"), require_kotlin("1.3")]);
+        let applications = libraries
+            .applications(&container)
+            .expect("a well-formed container");
+        let versions: Vec<&[(String, AnnotationValue)]> = applications
+            .iter()
+            .map(|application| application.arguments.as_slice())
+            .collect();
+        assert_eq!(
+            versions,
+            [
+                &[("version".to_string(), AnnotationValue::string("1.2"))][..],
+                &[("version".to_string(), AnnotationValue::string("1.3"))][..],
+            ]
+        );
+        assert!(applications.iter().all(|application| {
+            application.annotation == type_name("kotlin/internal/RequireKotlin")
+        }));
+    }
+
+    #[test]
+    fn a_container_holding_a_value_that_is_not_an_annotation_is_unreadable() {
+        let Some(libraries) = libraries() else {
+            return;
+        };
+        let mixed = repeatable_container(vec![require_kotlin("1.2"), AnnotationValue::Int(3)]);
+        assert_eq!(libraries.applications(&mixed), None);
+        let mut not_an_array = repeatable_container(Vec::new());
+        not_an_array.arguments = vec![("value".to_string(), require_kotlin("1.2"))];
+        assert_eq!(libraries.applications(&not_an_array), None);
     }
 }

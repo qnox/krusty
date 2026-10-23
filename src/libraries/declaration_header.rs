@@ -34,8 +34,9 @@ pub struct DeclarationHeader {
     /// signature that cannot be read.
     pub signature: Option<HeaderSignature>,
     /// The annotations the declaration states, in class-file order. A Java annotation class's
-    /// meta-annotations are their Kotlin counterparts.
-    pub annotations: Vec<ResolvedAnnotation>,
+    /// meta-annotations are their Kotlin counterparts. `None` when the class file records them in
+    /// a form that cannot be read, such as a malformed repeatable container.
+    pub annotations: Option<Vec<ResolvedAnnotation>>,
 }
 
 impl DeclarationHeader {

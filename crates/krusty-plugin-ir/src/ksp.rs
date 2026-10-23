@@ -101,6 +101,9 @@ pub struct KspLibraryClass {
     /// The qualified name of the classifier this one is nested in.
     pub parent: Option<String>,
     pub origin: KspOrigin,
+    /// Whether `class.annotations` lists every annotation the declaration states; when not, the
+    /// host refuses the query.
+    pub annotations_complete: bool,
 }
 
 /// Where a library classifier was declared, which is what `KSNode.origin` reports.
