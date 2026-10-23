@@ -366,3 +366,20 @@ fn fixed_context_constrains_a_function_values_expected_context_type() {
         "BuilderFixedContextConstraintsRun",
     );
 }
+
+/// An `if` without `else` is a `Unit` statement, but the builder call in its branch still
+/// constrains the builder variable of an inferred property type.
+#[test]
+fn a_builder_call_in_an_if_without_else_infers_the_builder_variable() {
+    common::expect_box_same_as_kotlinc(
+        "val f = run {\n\
+         \x20   sequence {\n\
+         \x20       if (true) {\n\
+         \x20           yield(\"OK\")\n\
+         \x20       }\n\
+         \x20   }.toList()\n\
+         }\n\
+         fun box(): String = f[0]\n",
+        "BuilderIfWithoutElse",
+    );
+}

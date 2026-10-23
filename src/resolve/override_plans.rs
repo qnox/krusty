@@ -1459,8 +1459,7 @@ fn enum_entry_override_plans(
                 | DeclarationKind::TypeAlias
                 | DeclarationKind::Constructor
                 | DeclarationKind::Accessor
-                | DeclarationKind::Initializer
-                | DeclarationKind::Script => {}
+                | DeclarationKind::Initializer => {}
             }
         }
         properties.sort_by_key(|edge| edge.depth);
@@ -1560,8 +1559,7 @@ pub(crate) fn publish_checked_local_override_plans(
                             | crate::fir::DeclarationKind::TypeAlias
                             | crate::fir::DeclarationKind::Constructor
                             | crate::fir::DeclarationKind::Accessor
-                            | crate::fir::DeclarationKind::Initializer
-                            | crate::fir::DeclarationKind::Script => {}
+                            | crate::fir::DeclarationKind::Initializer => {}
                         }
                     }
                     publish_inherited_interface_property_plans(

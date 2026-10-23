@@ -115,6 +115,7 @@ pub(crate) struct ClassDeclarationRecord {
     local_classifiers: crate::fx_hash::HashSet<TypeName>,
     enum_entry_bodies: crate::fx_hash::HashSet<TypeName>,
     is_enum: bool,
+    is_script: bool,
 }
 
 /// A target's renaming of classifier identities after the record was built: the JVM gives local
@@ -288,6 +289,7 @@ impl ClassDeclarationRecord {
             local_classifiers: &self.local_classifiers,
             enum_entry_bodies: &self.enum_entry_bodies,
             is_enum: self.is_enum,
+            is_script: self.is_script,
             annotations_in_metadata: options.annotations_in_metadata,
         }
     }
@@ -943,8 +945,9 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         // primary record either (its `Class.constructor` entries are the secondaries). Every other
         // class keeps its (possibly implicit) primary record — an `enum class` without a declared
         // constructor still records the implicit private one. An anonymous object's constructor (an
-        // enum entry body's too) is not callable.
+        // enum entry body's too) is not callable, and neither is a script's: its host constructs it.
         emit_primary_ctor: !c.is_interface
+            && !c.is_script
             && !c.is_anonymous_object
             && !c.is_enum_entry
             && (c.has_primary_ctor || c.secondary_ctors.is_empty()),
@@ -982,6 +985,7 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         local_classifiers: local_classifiers::names(ir),
         enum_entry_bodies: local_classifiers::enum_entry_bodies(ir),
         is_enum: c.is_enum,
+        is_script: c.is_script,
     })
 }
 
