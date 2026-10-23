@@ -125,6 +125,9 @@ fn layouts_that_could_overwrite_kotlincs_output_are_refused_before_anything_is_w
         let alias = layout.root.join("alias");
         std::os::unix::fs::symlink(&layout.reference, &alias).expect("link the reference");
         cases.push((alias.join("classes"), record.clone()));
+        // A missing directory, its parent, then the link: only resolving in order finds the
+        // reference.
+        cases.push((layout.root.join("missing/../alias/classes"), record.clone()));
     }
     for (destination, record) in &cases {
         assert_eq!(
@@ -166,6 +169,8 @@ fn layouts_that_could_overwrite_kotlincs_output_are_refused_before_anything_is_w
     assert_eq!(layout.reference_files(), before);
     assert!(!record.exists());
     assert!(!destination.exists());
+    assert!(!layout.reference.join("classes").exists());
+    assert!(!layout.root.join("missing").exists());
     assert!(!jar.exists());
 }
 
@@ -174,11 +179,15 @@ fn each_run_replaces_the_record_with_its_own_outcome() {
     let layout = Layout::new("fresh");
     let record = layout.root.join("records/compileKotlin.json");
     let destination = layout.root.join("krusty");
+    // verify-compile owns its output directory: an earlier run's class does not survive.
+    std::fs::create_dir_all(destination.join("app")).expect("an earlier output");
+    std::fs::write(destination.join("app/Removed.class"), b"earlier").expect("an earlier class");
     let (status, _) = layout.verify(&record, &layout.kotlinc(&destination));
     assert_eq!(status, Some(0));
     let compiled = std::fs::read_to_string(&record).expect("record");
     assert!(compiled.contains("\"status\": \"compiled\""), "{compiled}");
     assert!(destination.join("app/Point.class").is_file());
+    assert!(!destination.join("app/Removed.class").exists());
 
     // The sources are gone: the record says so, rather than keeping the earlier result.
     let without_sources = vec![
