@@ -178,6 +178,9 @@ pub struct BackendModuleFacts {
     file_annotations: HashMap<crate::fir::SourceFileId, Box<[crate::types::ResolvedAnnotation]>>,
     /// The dispatch shape of every named class, for a target that numbers slots itself.
     classes: super::class_tables::module_classes::ModuleClasses,
+    /// Each dependency classifier the module's own classes stand behind, with the file of every
+    /// source class that can be an instance of it, body-local ones included.
+    dependency_implementors: HashMap<TypeName, Box<[crate::fir::SourceFileId]>>,
 }
 
 impl BackendModuleFacts {
@@ -193,6 +196,7 @@ impl BackendModuleFacts {
         let mut inherited_defaults = HashMap::default();
         let mut source_declarations = HashMap::default();
         let mut generated_classifiers = Vec::new();
+        let mut source_supertypes = HashMap::default();
         for raw in 0..index.declaration_count() {
             let declaration = crate::fir::DeclarationId::from_raw(
                 u32::try_from(raw).expect("too many stable declarations for a packed id"),
@@ -200,6 +204,26 @@ impl BackendModuleFacts {
             let Some(classifier) = index.classifier_header(declaration) else {
                 continue;
             };
+            let instantiable = index.declaration_header(declaration).is_some_and(|header| {
+                !header.flags.has(crate::fir::DeclarationFlags::INTERFACE)
+                    && !header
+                        .flags
+                        .has(crate::fir::DeclarationFlags::ANNOTATION_CLASS)
+                    && !header.flags.has(crate::fir::DeclarationFlags::ABSTRACT)
+            });
+            source_supertypes.insert(
+                classifier.classifier,
+                (
+                    instantiable
+                        .then(|| index.declaration_anchor(declaration))
+                        .flatten()
+                        .map(|anchor| anchor.source),
+                    classifier
+                        .declared_supertypes()
+                        .filter_map(|ty| ty.get().non_null().obj_internal())
+                        .collect::<Box<[_]>>(),
+                ),
+            );
             if index.is_body_local_declaration(declaration) {
                 body_local_classifiers.insert(classifier.classifier);
                 continue;
@@ -386,6 +410,7 @@ impl BackendModuleFacts {
                 .map(|(source, applications)| (source, Box::from(applications)))
                 .collect(),
             classes: Default::default(),
+            dependency_implementors: dependency_implementors(&source_supertypes),
         })
     }
 
@@ -422,6 +447,7 @@ impl BackendModuleFacts {
             source_declarations: HashMap::default(),
             file_annotations: HashMap::default(),
             classes: Default::default(),
+            dependency_implementors: HashMap::default(),
         })
     }
 
@@ -479,6 +505,14 @@ impl BackendModuleFacts {
         self.inherited_defaults.get(&classifier).map(Box::as_ref)
     }
 
+    /// The declaring file of each source class of the module, whichever file declares it, that
+    /// can be an instance of the dependency classifier `dependency`.
+    pub fn dependency_implementors(&self, dependency: TypeName) -> &[crate::fir::SourceFileId] {
+        self.dependency_implementors
+            .get(&dependency)
+            .map_or(&[], |implementors| &implementors[..])
+    }
+
     /// `source`'s checked file-annotation applications, empty when it declares none.
     pub fn file_annotations(
         &self,
@@ -488,6 +522,34 @@ impl BackendModuleFacts {
             .get(&source)
             .map_or(&[], |applications| &applications[..])
     }
+}
+
+/// For each dependency classifier a source class reaches through its own and its source
+/// supertypes' declarations, the file of each instantiable source class that reaches it.
+fn dependency_implementors(
+    source_supertypes: &HashMap<TypeName, (Option<crate::fir::SourceFileId>, Box<[TypeName]>)>,
+) -> HashMap<TypeName, Box<[crate::fir::SourceFileId]>> {
+    let mut implementors: HashMap<TypeName, Vec<crate::fir::SourceFileId>> = HashMap::default();
+    for (&class, (instantiable, _)) in source_supertypes {
+        let Some(file) = *instantiable else {
+            continue;
+        };
+        let mut seen = HashSet::default();
+        let mut pending = vec![class];
+        while let Some(current) = pending.pop() {
+            if !seen.insert(current) {
+                continue;
+            }
+            match source_supertypes.get(&current) {
+                Some((_, supertypes)) => pending.extend(supertypes.iter().copied()),
+                None => implementors.entry(current).or_default().push(file),
+            }
+        }
+    }
+    implementors
+        .into_iter()
+        .map(|(dependency, classes)| (dependency, classes.into_boxed_slice()))
+        .collect()
 }
 
 /// A declared source companion's exact field spelling and classifier identity. The stable name-tree

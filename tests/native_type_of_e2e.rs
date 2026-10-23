@@ -8,7 +8,7 @@
 use super::common::{
     expect_box_ok_files_with_stdlib, expect_box_ok_with_stdlib,
     expect_box_run_with_stdlib_diverging, expect_native_box, expect_native_decline,
-    expect_native_sources, kotlin_native_box,
+    expect_native_sources, expect_native_sources_decline, kotlin_native_box,
 };
 
 fn both(source: &str, stem: &str) {
@@ -178,6 +178,80 @@ fn a_program_s_own_ktype_is_read_through_its_overrides() {
          }\n",
         "TypeOfOwnKType",
     );
+}
+
+#[test]
+fn a_program_s_own_anonymous_ktype_is_read_through_its_overrides() {
+    both(
+        "import kotlin.reflect.KClassifier\n\
+         import kotlin.reflect.KType\n\
+         import kotlin.reflect.KTypeProjection\n\
+         import kotlin.reflect.typeOf\n\
+         fun nullable(): KType = object : KType {\n\
+         \x20   override val annotations: List<Annotation> get() = emptyList()\n\
+         \x20   override val classifier: KClassifier? get() = Long::class\n\
+         \x20   override val arguments: List<KTypeProjection> get() = emptyList()\n\
+         \x20   override val isMarkedNullable: Boolean get() = true\n\
+         }\n\
+         fun read(type: KType): String = \"${type.classifier == Long::class}/${type.isMarkedNullable}\"\n\
+         fun box(): String {\n\
+         \x20   val mine = read(nullable())\n\
+         \x20   if (mine != \"true/true\") return \"fail mine: $mine\"\n\
+         \x20   val runtime = read(typeOf<Long>())\n\
+         \x20   if (runtime != \"true/false\") return \"fail runtime: $runtime\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "TypeOfOwnAnonymousKType",
+    );
+}
+
+#[test]
+fn a_ktype_another_file_implements_declines_its_member_reads() {
+    // The reading file cannot name another file's override, and the runtime reads only its own
+    // objects, so the member read declines rather than reach the runtime with the program's
+    // object. Both a named class and an object expression are found in the other file.
+    let named = (
+        "Def",
+        "import kotlin.reflect.KClassifier\n\
+         import kotlin.reflect.KType\n\
+         import kotlin.reflect.KTypeProjection\n\
+         class Flipped(val base: KType) : KType {\n\
+         \x20   override val annotations: List<Annotation> get() = emptyList()\n\
+         \x20   override val classifier: KClassifier? get() = Int::class\n\
+         \x20   override val arguments: List<KTypeProjection> get() = emptyList()\n\
+         \x20   override val isMarkedNullable: Boolean get() = !base.isMarkedNullable\n\
+         }\n\
+         fun mine(base: KType): KType = Flipped(base)\n",
+    );
+    let anonymous = (
+        "Def",
+        "import kotlin.reflect.KClassifier\n\
+         import kotlin.reflect.KType\n\
+         import kotlin.reflect.KTypeProjection\n\
+         fun mine(base: KType): KType = object : KType {\n\
+         \x20   override val annotations: List<Annotation> get() = emptyList()\n\
+         \x20   override val classifier: KClassifier? get() = Int::class\n\
+         \x20   override val arguments: List<KTypeProjection> get() = emptyList()\n\
+         \x20   override val isMarkedNullable: Boolean get() = !base.isMarkedNullable\n\
+         }\n",
+    );
+    let user = (
+        "Use",
+        "import kotlin.reflect.KType\n\
+         import kotlin.reflect.typeOf\n\
+         fun read(type: KType): String = \"${type.classifier == Int::class}/${type.isMarkedNullable}\"\n\
+         fun box(): String {\n\
+         \x20   val mine = read(mine(typeOf<String>()))\n\
+         \x20   if (mine != \"true/true\") return \"fail mine: $mine\"\n\
+         \x20   val runtime = read(typeOf<Int>())\n\
+         \x20   if (runtime != \"true/false\") return \"fail runtime: $runtime\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+    );
+    for def in [named, anonymous] {
+        expect_box_ok_files_with_stdlib(&[def, user], "Def");
+        expect_native_sources_decline(&[def, user], "another file implements `KType`");
+    }
 }
 
 #[test]

@@ -308,9 +308,11 @@ impl BodyLowering<'_, '_, '_> {
     }
 
     /// `t.classifier` and `t.isMarkedNullable`. `KType` is an open interface, so the receiver may
-    /// be a program's own implementation: each class of this file implementing it is dispatched
-    /// to through its override, and only what remains reaches the runtime, which reads the static
-    /// object after checking the receiver is one and fails loudly on anything else.
+    /// be a program's own implementation. When every class of the module that can be one is
+    /// declared in this file, each is dispatched to through its override, and only what remains
+    /// reaches the runtime, which reads the static object after checking the receiver is one and
+    /// fails loudly on anything else. A class of another file has no override this file can name,
+    /// so a read in a module whose other files implement `KType` declines.
     pub(super) fn type_of_member(
         &mut self,
         member: KTypeMember,
@@ -327,28 +329,43 @@ impl BodyLowering<'_, '_, '_> {
             }
         };
         let ktype = crate::types::type_name("kotlin/reflect/KType");
-        let implementors = if self.file.implements_dependency(ktype) {
+        let module_implementors = self.file.module_facts.dependency_implementors(ktype);
+        if module_implementors
+            .iter()
+            .any(|&file| file != self.file.source)
+        {
+            return Err(declined!(
+                "a `KType` member read where another file implements `KType`"
+            ));
+        }
+        let mut implementors = Vec::with_capacity(module_implementors.len());
+        if !module_implementors.is_empty() {
             let getter = self
                 .file
                 .callables
                 .property(target)
                 .ok_or("a `KType` member without its property")?
                 .getter;
-            let declared = self.file.implementors_of(ktype);
-            let arms: Vec<_> = declared
-                .iter()
-                .filter_map(|&class| self.external_property_getter_slot(class, getter, ret))
+            let declared: Vec<_> = self
+                .file
+                .implementors_of(ktype)
+                .into_iter()
+                .filter(|&class| !self.file.ir.classes[class as usize].is_abstract)
                 .collect();
-            if arms.len() != declared.len() {
+            implementors.extend(
+                declared
+                    .iter()
+                    .filter_map(|&class| self.external_property_getter_slot(class, getter, ret)),
+            );
+            // Every instantiable implementor of the module is a class of this file, and each must
+            // be an arm: one reached only through a supertype has no override this names.
+            if implementors.len() != module_implementors.len() {
                 return Err(declined!(
                     "a `KType` member read where this file implements `KType` with a class whose \
                      override cannot be dispatched to"
                 ));
             }
-            arms
-        } else {
-            Vec::new()
-        };
+        }
         let object = self.reference(receiver)?;
         if self.terminated {
             return Ok(None);

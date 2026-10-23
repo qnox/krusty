@@ -95,13 +95,19 @@ pub fn expect_native_box(src: &str, stem: &str, expected: &str) {
 /// point is that emitting the program would be WRONG, that difference is the whole test.
 #[allow(dead_code)]
 pub fn expect_native_decline(src: &str, stem: &str, reason: &str) {
+    expect_native_sources_decline(&[(stem, src)], reason);
+}
+
+/// [`expect_native_decline`] for a program of several files (`(stem, text)`).
+pub fn expect_native_sources_decline(sources: &[(&str, &str)], reason: &str) {
     let Some(target) = krusty::native::NativeTarget::host() else {
         return;
     };
     if !krusty::native::can_link(target) {
         return;
     }
-    match native_box_outcome(src, stem, target) {
+    let stem = sources.first().map(|(stem, _)| *stem).unwrap_or("module");
+    match native_sources_outcome(sources, target) {
         NativeBox::Unavailable => {}
         NativeBox::Declined(said) => assert!(
             said.contains(reason),
