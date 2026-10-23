@@ -748,10 +748,8 @@ fn generic_signature(signature: &mut super::IrGenericSig, names: &HashMap<TypeNa
 }
 
 fn spelled(spelling: &mut crate::spelling::Spelled, names: &HashMap<TypeName, TypeName>) {
-    spelling
-        .alias
-        .iter_mut()
-        .for_each(|value| name(value, names));
+    // An alias is never a local class, and an actualized expect's abbreviation keeps naming the
+    // expect class the target realizes, so only the classifiers below an abbreviation move.
     for (value, spelling) in &mut spelling.alias_args {
         *value = ty(*value, names);
         spelled(spelling, names);

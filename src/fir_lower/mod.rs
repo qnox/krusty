@@ -145,12 +145,45 @@ pub(super) fn resolved_parameter_identity(
 /// Declarations a per-file lowering pass must visit: this source's anchors, in declaration-id
 /// order, plus inline-payload declarations copied in from another source. Scanning the whole
 /// module for each file was quadratic.
+/// Whether `declaration` is, or belongs to, an `expect` classifier. One survives actualization
+/// only where an `actual typealias` actualized it: common code types it as its own classifier,
+/// and every target realizes the alias's target, so nothing of the `expect` is lowered.
+pub(super) fn within_actualized_expect(
+    index: &ResolvedModuleIndex,
+    declaration: crate::fir::DeclarationId,
+) -> bool {
+    std::iter::successors(Some(declaration), |&current| {
+        index.declaration_anchor(current)?.owner
+    })
+    .any(|current| {
+        index
+            .declaration_header(current)
+            .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::EXPECT))
+    })
+}
+
+/// Whether `target` is what the `actual typealias` of `expect` names.
+pub(super) fn actualizes_expect(
+    index: &ResolvedModuleIndex,
+    expect: crate::types::TypeName,
+    target: crate::types::TypeName,
+) -> bool {
+    index
+        .type_alias_by_identity(expect)
+        .is_some_and(|alias| alias.target == target)
+}
+
 pub(super) fn declarations_for_lowering(
     index: &ResolvedModuleIndex,
     source: crate::fir::SourceFileId,
     inline_payload: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
 ) -> Vec<crate::fir::DeclarationId> {
-    let mut ids = index.declarations_in_source(source).to_vec();
+    let mut ids = index
+        .declarations_in_source(source)
+        .iter()
+        .copied()
+        .filter(|&declaration| !within_actualized_expect(index, declaration))
+        .collect::<Vec<_>>();
     if inline_payload.is_empty() {
         return ids;
     }

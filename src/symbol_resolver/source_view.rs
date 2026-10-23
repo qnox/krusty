@@ -108,6 +108,13 @@ impl<'a> SymbolResolver<'a> {
 }
 
 impl SymbolSource for ResolverSource<'_> {
+    fn actualized_expect(&self, internal: TypeName) -> Option<TypeName> {
+        match self {
+            Self::Direct(source) => source.actualized_expect(internal),
+            Self::Memoized(source) => source.actualized_expect(internal),
+        }
+    }
+
     fn sees_function(&self, function: &crate::libraries::FunctionInfo) -> bool {
         match self {
             Self::Direct(source) => source.sees_function(function),

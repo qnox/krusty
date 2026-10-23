@@ -56,6 +56,9 @@ pub(super) fn checked_ir_file<'a>(
     };
     // Each class's declarations are recorded here, before any target lowers them.
     crate::metadata::class_declarations::record_all(&mut ir);
+    // Common code typed an `expect` classifier as its own; every target realizes the classifier
+    // the `actual typealias` actualizing it names, so the file names that one from here on.
+    ir.actualize_expects(module_facts.actualized_expects());
     Some(CheckedIrFile {
         ir,
         kind: CheckedIrUnitKind::Source,

@@ -15348,6 +15348,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   actualized by the leaf, and compares the exact errors of a common reference to a leaf
   function, property, class, object, type alias and import; `crates/krusty-cli/src/cli/fragments.rs`
   unit tests; the `compiler/testData/cli/jvm/hmpp` cases and `kt77220` in the CLI corpus.)
+- **Common code types an alias-actualized `expect` class as its own classifier.** With
+  `expect open class Lock()` in common and `actual typealias Lock = ReentrantLock` in the leaf, a
+  common source does not see the alias, so `Lock` stays the `expect` class there: a common call of
+  a member only the target declares is kotlinc's `unresolved reference`, and a common `Lock` is not
+  a `ReentrantLock` (a return-type mismatch). A leaf source sees the alias and types `Lock` as the
+  target, and checking compares the two classifiers through the alias. Lowering skips the `expect`
+  declarations; at the backend boundary (`IrFile::actualize_expects`) every occurrence is renamed to
+  the target, which is exact because kotlinc requires an actual typealias to pass its own type
+  parameters in order. Before the rename, each declared occurrence (members, constructors,
+  supertypes, top-level functions and properties) is abbreviated by the `expect` class, as kotlinc
+  writes the expansion of the alias, and a function or field whose receiver, value parameter or
+  result is such an occurrence records its JVM signature: kotlinc derives the reader's descriptor
+  from the `expect` class id (`Lp/Lock;`), which differs from the physical one. A leaf occurrence
+  spelled through the alias records no signature. A common class extending the `expect` class keeps
+  it as its declared superclass while its constructor delegates to the target's.
+  (`tests/fragment_arguments_e2e.rs` compares exit code, stderr and every class file with kotlinc,
+  including koin's `Lockable = Any` and generic `ThreadLocal<T>` shapes.)
 - **A supertype missing from the classpath is `MISSING_DEPENDENCY_SUPERCLASS`.** As kotlinc's
   `FirMissingDependencySupertype*` checkers, a classpath classifier naming a supertype that no
   source or classpath entry provides makes every use that depends on that hierarchy an error:

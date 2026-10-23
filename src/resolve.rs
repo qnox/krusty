@@ -34672,6 +34672,13 @@ impl<'a> CheckerModuleSymbols<'a> {
 }
 
 impl SymbolSource for CheckerModuleSymbols<'_> {
+    fn actualized_expect(&self, internal: TypeName) -> Option<TypeName> {
+        match self {
+            Self::Legacy(source) => source.actualized_expect(internal),
+            Self::Streamed(source) => source.actualized_expect(internal),
+        }
+    }
+
     fn sees_function(&self, function: &crate::libraries::FunctionInfo) -> bool {
         match self {
             Self::Legacy(source) => source.sees_function(function),
@@ -35606,8 +35613,11 @@ impl crate::assignable::TypeOracle for Checker<'_> {
         supertypes
     }
 
+    /// A platform source types an `expect` classifier as the target of the `actual typealias`
+    /// actualizing it, so the two are one classifier there.
     fn same_class_name(&self, a: TypeName, b: TypeName) -> bool {
-        a == b
+        let actualized = |name| self.module.actualized_expect(name).unwrap_or(name);
+        a == b || actualized(a) == actualized(b)
     }
 
     fn type_param_variance(&self, internal: TypeName, index: usize) -> crate::types::TypeVariance {

@@ -58,6 +58,7 @@ mod enum_switch_whens;
 pub(crate) use enum_switch_whens::EnumSwitchWhen;
 mod emitted_body_roots;
 mod enums;
+mod expect_actualization;
 mod expression_provenance;
 pub(crate) use emitted_body_roots::emitted_body_roots;
 mod field_flags;

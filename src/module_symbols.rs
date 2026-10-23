@@ -1276,6 +1276,15 @@ fn source_property(
 }
 
 impl SymbolSource for ModuleSymbols<'_> {
+    fn actualized_expect(&self, internal: TypeName) -> Option<TypeName> {
+        self.syms
+            .source_fragments
+            .actualizes_expect(self.source_file, internal)
+            .then(|| self.type_alias_binding(internal))
+            .flatten()
+            .map(|alias| alias.target)
+    }
+
     fn sees_function(&self, function: &FunctionInfo) -> bool {
         self.syms.source_fragments.sees(
             self.source_file,
