@@ -255,13 +255,7 @@ pub(crate) fn publish_module(index: &mut ResolvedModuleIndex, table: &SymbolTabl
                     DeclarationKind::Classifier | DeclarationKind::EnumEntry
                 ) && !header.flags.has(DeclarationFlags::LOCAL_CLASS)
             });
-        let declarations = owners.flat_map(|owner| {
-            index
-                .owned_declarations(owner)
-                .iter()
-                .copied()
-                .collect::<Vec<_>>()
-        });
+        let declarations = owners.flat_map(|owner| index.owned_declarations(owner).to_vec());
         select(index, &source, declarations)
     };
     publish(index, selected);

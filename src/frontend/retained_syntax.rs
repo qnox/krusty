@@ -696,9 +696,6 @@ fn remap_declarations(file: &mut File, expressions: &HashMap<ExprId, ExprId>) {
             Decl::Property(property) => remap_property(property, expressions),
         }
     }
-    file.script_body = file
-        .script_body
-        .and_then(|body| expressions.get(&body).copied());
     for (_, arguments) in &mut file.file_annotations {
         for argument in arguments {
             *argument = mapped_expr(expressions, *argument);

@@ -54,8 +54,8 @@ jobs:
           tool: just
       - name: lint
         run: just lint
-      # The ignored tests start a real host: the pinned kotlinc 2.4.20 classpath from Maven Central
-      # on the runner's JDK, with the adapter compiled by it. Both stay in krusty's cache.
+      # The ignored tests start real compiler-plugin and KSP hosts from their pinned toolchains
+      # on the runner's JDK. The toolchains and compiled adapters stay in krusty's cache.
       - name: cache plugin host runtime
         uses: actions/cache@v6
         with:
@@ -495,6 +495,10 @@ jobs:
         if: matrix.target == 'native'
         id: native_box
         continue-on-error: true
+        # Complete migration runs exceeded the former 600-second corpus budget. Keep ordinary
+        # and focused deadlines unchanged; a corpus timeout still fails this row.
+        env:
+          KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS: "1800"
         run: |
           chmod +x conformance-bin
           just native-conformance-run "$PWD/conformance-bin" "${{ matrix.version }}" native-pct.txt
@@ -598,13 +602,14 @@ jobs:
       - name: run non-box conformance ${{ matrix.version }}
         if: matrix.target == 'jvm'
         env:
+          # Required serialization/reference CLI toolchains can be cold. Keep the local
+          # 120-second default; this complete CI pass includes their provisioning and compilation.
+          KRUSTY_CONFORMANCE_TIMEOUT_SECONDS: "600"
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
           KRUSTY_RECORD_CLASS_DUMPS: "0"
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}
           KRUSTY_CLASS_DUMP_COMPILE_MISSING: ${{ steps.recorded-mode.outputs.compile_missing }}
           KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
-          KRUSTY_KSP_E2E: "1"
-          KRUSTY_REQUIRE_KSP_E2E: "1"
           KRUSTY_REQUIRE_SERIALIZATION_CONFORMANCE: "1"
         run: just conformance-regressions "$PWD/conformance-bin" "${{ matrix.version }}"
       - name: save recorded kotlinc bytes (${{ matrix.version }})
@@ -649,7 +654,7 @@ jobs:
   # which fails this aggregate too.
   ci-and-conformance:
     name: ci-and-conformance
-    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools]
+    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, bazel]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -662,6 +667,7 @@ jobs:
           GRADLE_PLUGIN_RESULT: ${{ needs.build-gradle-plugin.result }}
           GRADLE_RESULT: ${{ needs.gradle.result }}
           BUILD_TOOLS_RESULT: ${{ needs.build-tools.result }}
+          BAZEL_RESULT: ${{ needs.bazel.result }}
         run: |
           echo "ci: $CI_RESULT"
           echo "lint: $LINT_RESULT"
@@ -670,14 +676,16 @@ jobs:
           echo "build-gradle-plugin: $GRADLE_PLUGIN_RESULT"
           echo "gradle: $GRADLE_RESULT"
           echo "build-tools: $BUILD_TOOLS_RESULT"
+          echo "bazel: $BAZEL_RESULT"
           if [ "$CI_RESULT" != success ] \
             || [ "$LINT_RESULT" != success ] \
             || [ "$CONFORMANCE_RESULT" != success ] \
             || [ "$KLIB_CONFORMANCE_RESULT" != success ] \
             || [ "$GRADLE_PLUGIN_RESULT" != success ] \
             || [ "$GRADLE_RESULT" != success ] \
-            || [ "$BUILD_TOOLS_RESULT" != success ]; then
-            echo "lint, coverage, conformance (including KLIB semantics), every Gradle gate, and every build-tools lane must succeed" >&2
+            || [ "$BUILD_TOOLS_RESULT" != success ] \
+            || [ "$BAZEL_RESULT" != success ]; then
+            echo "lint, coverage, conformance (including KLIB semantics), every Gradle gate, every build-tools lane, and every Bazel lane must succeed" >&2
             exit 1
           fi
 
@@ -821,6 +829,7 @@ jobs:
           chmod +x krusty krusty-build-tests
           tests="kotlin_compiler_slice_compiles_through_krusty kotlin_dsl_build_src_compiles_through_krusty"
           tests="$tests serialization_plugin_compiles_through_krusty kapt_project_compiles_through_krusty"
+          tests="$tests oss_corpus_init_script_applies_the_packaged_plugin"
           if [ "${{ matrix.ksp }}" = true ]; then
             tests="$tests ksp2_generated_sources_compile_through_krusty"
           fi
@@ -831,6 +840,36 @@ jobs:
           fi
           KRUSTY_GRADLE_BIN=$(command -v gradle) \
             ./krusty-build-tests --ignored $tests
+
+  # Build Kotlin with the Bazel module the release would publish, as a consumer depends on it,
+  # with the toolchain's compiler and an override, in action and worker mode.
+  bazel:
+    needs: [build-tool-bins]
+    strategy:
+      fail-fast: false
+      matrix:
+        bazel: [8.4.2, 9.3.1]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - uses: actions/download-artifact@v8
+        with:
+          name: tool-bins
+      - name: build the packaged Bazel module with Bazel ${{ matrix.bazel }}
+        env:
+          USE_BAZEL_VERSION: ${{ matrix.bazel }}
+        run: |
+          set -euo pipefail
+          chmod +x krusty
+          kotlin=$(just max-version)
+          curl -fsSLo "$RUNNER_TEMP/kotlin-stdlib.jar" \
+            "https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/$kotlin/kotlin-stdlib-$kotlin.jar"
+          scripts/bazel-smoke.sh "$PWD/krusty" "$RUNNER_TEMP/kotlin-stdlib.jar"
 
   # Build the release binaries per OS/arch only after coverage proves that this master commit is
   # still the publishable tip. Superseded master runs keep all validation but do not occupy six
@@ -903,13 +942,15 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, build-tool-bins, build-release]
+    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, bazel, build-tool-bins, build-release]
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     # Shorter than the release lock's TTL, so a lock that outlives it belongs to a dead job.
     timeout-minutes: 20
     permissions:
       contents: write
+      # Dispatches the pages workflow, which regenerates the Bazel registry.
+      actions: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -959,10 +1000,22 @@ jobs:
           ver=$(just version)
           echo "ver=$ver"  >> "$GITHUB_OUTPUT"
           echo "tag=v$ver" >> "$GITHUB_OUTPUT"
+      # The Gradle plugin downloads its release's compiler and checks it against this file.
+      - name: checksum the compiler archives
+        if: steps.tip.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          ver=${{ steps.v.outputs.ver }}
+          (cd dist && sha256sum krusty-"$ver"-*.tar.gz krusty-"$ver"-*.zip > "krusty-$ver-SHA256SUMS")
+          test "$(wc -l < "dist/krusty-$ver-SHA256SUMS")" -eq 6
       - name: package Zed extension
         if: steps.tip.outputs.publish == 'true'
         shell: bash
         run: just package-zed
+      # The Bazel module of this release, naming the SHA-256 of each compiler archive above.
+      - name: package Bazel module
+        if: steps.tip.outputs.publish == 'true'
+        run: scripts/package-bazel-module.sh "${{ steps.v.outputs.ver }}" dist
       - name: publish
         if: steps.tip.outputs.publish == 'true'
         uses: softprops/action-gh-release@v3
@@ -974,6 +1027,64 @@ jobs:
           generate_release_notes: true
           files: dist/**
           fail_on_unmatched_files: true
+      # The Gradle Plugin Portal gets every published release under the same version. A Portal
+      # version is immutable, and the release lock above already publishes each version once. It
+      # runs before the commit is recorded, so a failed upload leaves the release to a rerun.
+      - uses: actions/setup-java@v6.1.0
+        if: steps.tip.outputs.publish == 'true'
+        with:
+          distribution: zulu
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v6
+        if: steps.tip.outputs.publish == 'true'
+        with:
+          cache-provider: basic
+      # The maintainer's krusty signing subkey (`gpg --armor --export-secret-subkeys <id>!`) signs
+      # every published artifact. SIGNING_KEY_ID, its 8-hex-digit short id, is optional: without
+      # it the id is read from the key itself.
+      - name: signing key id
+        id: signing
+        if: steps.tip.outputs.publish == 'true'
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          SIGNING_KEY_ID: ${{ secrets.SIGNING_KEY_ID }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$SIGNING_KEY_ID" ]]; then
+            id=$SIGNING_KEY_ID
+          elif [[ -n "$SIGNING_KEY" ]]; then
+            id=$(scripts/signing-key-id.sh <<< "$SIGNING_KEY")
+          else
+            id=
+          fi
+          echo "signing key: ${id:-none}"
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+      - name: publish the Gradle plugin to the Gradle Plugin Portal
+        if: steps.tip.outputs.publish == 'true'
+        env:
+          GRADLE_PUBLISH_KEY: ${{ secrets.GRADLE_PUBLISH_KEY }}
+          GRADLE_PUBLISH_SECRET: ${{ secrets.GRADLE_PUBLISH_SECRET }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyId: ${{ steps.signing.outputs.id }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$GRADLE_PUBLISH_KEY" || -z "$GRADLE_PUBLISH_SECRET" ]]; then
+            echo "GRADLE_PUBLISH_KEY/GRADLE_PUBLISH_SECRET are not set; skipping the Plugin Portal"
+            exit 0
+          fi
+          if [[ -z "$ORG_GRADLE_PROJECT_signingInMemoryKey" ]]; then
+            echo "SIGNING_KEY is not set; refusing to publish an unsigned plugin" >&2
+            exit 1
+          fi
+          tools/krusty-gradle/gradlew --no-daemon -p tools/krusty-gradle \
+            -PkrustyPluginVersion="${{ steps.v.outputs.ver }}" publishPlugins
+      # Rebuild the site, whose Bazel registry is generated from the releases, so it lists this one.
+      - name: refresh the Bazel registry
+        if: steps.tip.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run pages.yml --ref master
       - name: record the published commit
         if: steps.tip.outputs.publish == 'true'
         run: scripts/release-publisher.sh record

@@ -307,18 +307,14 @@ fn full_local_conformance_uses_target_owned_focused_passes() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let runner = fs::read_to_string(root.join("run-tests.sh")).expect("read run-tests.sh");
     for required in [
+        "--exact kotlin_box_ir_jvm_conformance::kotlin_codegen_box_conformance --test-threads=1",
         "run-tests.sh: conformance native-focused",
         "KRUSTY_REQUIRE_NATIVE_CONFORMANCE=1",
         "kotlin_box_native_conformance:: --skip kotlin_box_native_conformance::kotlin_codegen_box_native_conformance",
-        "run-tests.sh: conformance native-multimodule",
-        "KRUSTY_MULTIMODULE_CONFORMANCE_RUNNER=native",
         "run-tests.sh: conformance wasm-focused",
         "KRUSTY_REQUIRE_WASM_JS_CONFORMANCE=1",
         "KRUSTY_REQUIRE_WASM_WASI_CONFORMANCE=1",
         "kotlin_box_wasm_conformance:: --skip kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_js_conformance --skip kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_wasi_conformance",
-        "run-tests.sh: conformance wasm-multimodule",
-        "KRUSTY_MULTIMODULE_CONFORMANCE_RUNNER=wasm",
-        "multimodule_conformance_cases:: --test-threads=1",
         "--skip kotlin_codegen_box_conformance --skip kotlin_box_native_conformance:: --skip kotlin_box_wasm_conformance::",
     ] {
         assert!(
@@ -326,6 +322,10 @@ fn full_local_conformance_uses_target_owned_focused_passes() {
             "the canonical full gate must preserve target ownership ({required})"
         );
     }
+    assert!(
+        !runner.contains("KRUSTY_MULTIMODULE_CONFORMANCE_RUNNER"),
+        "owned module graphs belong to the normal box inventory, not a second runner"
+    );
 
     let justfile = fs::read_to_string(root.join("justfile")).expect("read justfile");
     for recipe in ["conformance-all-plain", "conformance-one"] {
@@ -337,7 +337,6 @@ fn full_local_conformance_uses_target_owned_focused_passes() {
         for required in [
             "target-conformance-regressions.sh native",
             "target-conformance-regressions.sh wasm",
-            "KRUSTY_MULTIMODULE_CONFORMANCE_RUNNER=jvm",
             "--skip kotlin_box_native_conformance::",
             "--skip kotlin_box_wasm_conformance::",
         ] {
@@ -593,7 +592,7 @@ fn prebuilt_conformance_regressions_recipe_runs_the_script() {
 
 #[cfg(unix)]
 #[test]
-fn target_regressions_run_their_focused_module_and_shared_cases_after_provisioning() {
+fn target_regressions_run_only_their_focused_module_after_provisioning() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let (temp, binary) = regression_fixture(
         "target-ownership",
@@ -624,12 +623,10 @@ fn target_regressions_run_their_focused_module_and_shared_cases_after_provisioni
     assert_eq!(native.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(native.stdout).expect("Native stdout is UTF-8"),
-        "language=2.4.10 native=1 js=0 wasi=0 runner=native\n\
+        "language=2.4.10 native=1 js=0 wasi=0 runner=unset\n\
          kotlin_box_native_conformance::\n--skip\n\
          kotlin_box_native_conformance::kotlin_codegen_box_native_conformance\n\
-         --test-threads\n1\n\
-         language=2.4.10 native=1 js=0 wasi=0 runner=native\n\
-         multimodule_conformance_cases::\n--test-threads\n1\n"
+         --test-threads\n1\n"
     );
 
     let wasm = Command::new("bash")
@@ -648,13 +645,11 @@ fn target_regressions_run_their_focused_module_and_shared_cases_after_provisioni
     assert_eq!(wasm.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(wasm.stdout).expect("Wasm stdout is UTF-8"),
-        "language=2.4.10 native=0 js=1 wasi=1 runner=wasm\n\
+        "language=2.4.10 native=0 js=1 wasi=1 runner=unset\n\
          kotlin_box_wasm_conformance::\n--skip\n\
          kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_js_conformance\n--skip\n\
          kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_wasi_conformance\n\
-         --test-threads\n1\n\
-         language=2.4.10 native=0 js=1 wasi=1 runner=wasm\n\
-         multimodule_conformance_cases::\n--test-threads\n1\n"
+         --test-threads\n1\n"
     );
     fs::remove_dir_all(temp).expect("remove target ownership fixture");
 }
@@ -786,7 +781,7 @@ fn ci_starts_jvm_without_waiting_for_focused_klib_binaries() {
         .expect("each version's JVM row runs every non-box conformance test");
     let release = workflow
         .find(
-            "needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, build-tool-bins, build-release]",
+            "needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, bazel, build-tool-bins, build-release]",
         )
         .expect(
             "release waits on combined conformance plus the exact tested Gradle artifact and matrix",
@@ -1018,9 +1013,8 @@ fn ci_starts_jvm_without_waiting_for_focused_klib_binaries() {
         "PR and merge-group updates may auto-cancel, but each master build needs a unique group so it always finishes"
     );
     assert!(
-        workflow.contains("KRUSTY_REQUIRE_KSP_E2E: \"1\"")
-            && workflow.contains("KRUSTY_REQUIRE_SERIALIZATION_CONFORMANCE: \"1\""),
-        "matrix conformance must fail instead of self-skipping required integrations"
+        workflow.contains("KRUSTY_REQUIRE_SERIALIZATION_CONFORMANCE: \"1\""),
+        "matrix conformance must fail instead of self-skipping required serialization"
     );
 }
 

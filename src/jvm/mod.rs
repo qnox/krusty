@@ -13,6 +13,7 @@ mod bytecode;
 pub(crate) mod bytecode_passes;
 mod call_result_boundaries;
 mod capture_names;
+pub mod class_comparison;
 pub(crate) mod class_node;
 pub mod classfile;
 pub mod classpath;

@@ -71,6 +71,9 @@ fn encode_serializable_element(
 /// `write$Self` writes before the class writes its own.
 pub(super) struct InheritedElements {
     pub(super) count: usize,
+    /// The type arguments the class gives its generic superclass; its `write$Self` takes a
+    /// serializer for each.
+    pub(super) type_arguments: Vec<Ty>,
     pub(super) owner: crate::types::TypeName,
     pub(super) write_self: u32,
 }
@@ -237,13 +240,31 @@ impl SerializeBody<'_> {
             });
             let output = ir.add_expr(IrExpr::GetValue(encoder_slot));
             let descriptor = ir.add_expr(IrExpr::GetValue(2));
+            let mut args = vec![value, output, descriptor];
+            for argument in &inherited.type_arguments {
+                let Some(serializer) = super::element_serializer::element_serializer_expr_in(
+                    ir,
+                    ctx,
+                    argument,
+                    element_scope,
+                    crate::ir::Spelled::NONE,
+                ) else {
+                    bail = true;
+                    break;
+                };
+                args.push(ir.add_expr(IrExpr::TypeOp {
+                    op: crate::ir::IrTypeOp::Cast,
+                    arg: serializer,
+                    type_operand: super::class_ty(super::KSERIALIZER_FQ),
+                }));
+            }
             stmts.push(ir.add_expr(IrExpr::Call {
                 callee: Box::new(Callee::ClassStatic {
                     owner: inherited.owner,
                     function: inherited.write_self,
                 }),
                 dispatch_receiver: None,
-                args: vec![value, output, descriptor],
+                args,
             }));
         }
         // Own element `i` is written from backing field `field`; they differ after a transient

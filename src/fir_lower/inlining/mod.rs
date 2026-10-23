@@ -1,10 +1,12 @@
-//! Call-site expansion of retained checked same-module inline bodies into expression-local frames.
+//! Call-site expansion of inline bodies into expression-local frames: the retained checked bodies
+//! of same-module inline functions, and the templates of inline dependency functions
+//! ([`InlineCallee`]).
 
 use crate::fx_hash::{HashMap, HashSet};
 
 use crate::fir::{
-    CallableId, FirPropertyReferenceTarget, FirPropertyTarget, FirReferenceAdaptation,
-    FirTypeParameterRef, FirTypeSubstitution, ResolvedTy,
+    FirPropertyReferenceTarget, FirPropertyTarget, FirReferenceAdaptation, FirTypeSubstitution,
+    ResolvedTy,
 };
 use crate::ir::{
     Callee, ExprId, IrCheckedArgument, IrCheckedOperation, IrCheckedSubstitution, IrConst,
@@ -18,9 +20,11 @@ use super::BodyLowering;
 mod converted_inline_lambda;
 mod escaping_anonymous;
 mod escaping_lambda;
+mod inline_callee;
 mod lambda_splice_contract;
 mod property_accessors;
 
+pub(super) use inline_callee::InlineCallee;
 pub(super) use lambda_splice_contract::LambdaParameterBinding;
 
 #[cfg(test)]
@@ -192,35 +196,6 @@ fn directly_spliceable_invocations(
         .collect()
 }
 
-/// Build the inline expansion's semantic bindings from the checker's recorded substitutions.
-///
-/// Declaration headers are intentionally not accepted here. Whether a substitution may drive a
-/// reified operation was decided while checking the call and travels on that exact substitution;
-/// common lowering only resolves the stable module parameter identity to its template name.
-fn checked_substitution_bindings<'a>(
-    substitutions: &[FirTypeSubstitution],
-    mut module_parameter_name: impl FnMut(crate::fir::TypeParameterId) -> Option<&'a str>,
-) -> (HashMap<String, Ty>, HashMap<String, Ty>) {
-    let bindings = substitutions
-        .iter()
-        .filter_map(|substitution| match substitution.parameter {
-            FirTypeParameterRef::Module(parameter) => module_parameter_name(parameter)
-                .map(|name| (name.to_owned(), substitution.value.get())),
-            FirTypeParameterRef::External { .. } => None,
-        })
-        .collect::<HashMap<_, _>>();
-    let reified_bindings = substitutions
-        .iter()
-        .filter(|substitution| substitution.reified)
-        .filter_map(|substitution| match substitution.parameter {
-            FirTypeParameterRef::Module(parameter) => module_parameter_name(parameter)
-                .map(|name| (name.to_owned(), substitution.reified_runtime.get())),
-            FirTypeParameterRef::External { .. } => None,
-        })
-        .collect::<HashMap<_, _>>();
-    (bindings, reified_bindings)
-}
-
 impl BodyLowering<'_> {
     /// Declare an omitted parameter's local, initialized by a copy of the declaration's checked
     /// default. The copy reads the expansion's preceding parameter locals and moves its own locals
@@ -304,9 +279,11 @@ impl BodyLowering<'_> {
         Some(copy)
     }
 
+    /// Expand a call of `inline_callee`, whose body is `function`'s in this file, over the call's
+    /// operands.
     pub(super) fn inline_same_file_call(
         &mut self,
-        target: CallableId,
+        inline_callee: &InlineCallee,
         function: crate::ir::FunId,
         operands: &[Option<ExprId>],
         inline_lambdas: &[Option<ExprId>],
@@ -315,14 +292,9 @@ impl BodyLowering<'_> {
     ) -> Option<ExprId> {
         let template = self.ir.functions.get(function as usize)?.body?;
         let close_line = self.ir.fn_close_lines.get(&function).copied();
+        let frame = inline_callee.frame(self.index)?;
         // The name its inline frames are opened under.
-        let callee = self.index.callable_name(target)?.to_owned();
-        let callable = self.index.callable(target)?;
-        let source_owner = self
-            .index
-            .enclosing_classifier(callable.declaration)
-            .map(|classifier| classifier.classifier);
-        let callee_source = self.index.declaration_anchor(callable.declaration)?.source;
+        let callee = frame.name.clone();
         let caller_source_name = match self.body.debug_name() {
             Some(name) => name.to_owned(),
             None => match self.expansion_enclosure {
@@ -336,8 +308,11 @@ impl BodyLowering<'_> {
                     | crate::ir::IrEnclosure::Classifier(_)
                     | crate::ir::IrEnclosure::PropertyAccessor { .. },
                 ) => String::new(),
-                // Function and lambda bodies always publish their source spelling. Decline the
-                // expansion if that checked provenance is absent instead of inventing one.
+                Some(crate::ir::IrEnclosure::Lambda(_)) if self.allows_empty_inline_caller_name => {
+                    String::new()
+                }
+                // A named function, or a lambda without a checked nameless root context, must
+                // retain its source spelling. Never invent one when that provenance is absent.
                 Some(crate::ir::IrEnclosure::Function(_) | crate::ir::IrEnclosure::Lambda(_)) => {
                     return None
                 }
@@ -352,10 +327,11 @@ impl BodyLowering<'_> {
         if operands.len() != parameter_count as usize || inline_lambdas.len() != operands.len() {
             return None;
         }
-        let (bindings, reified_bindings) =
-            checked_substitution_bindings(substitutions, |parameter| {
-                self.index.type_parameter_semantic_name(parameter)
-            });
+        let index = self.index;
+        let (bindings, reified_bindings) = inline_callee
+            .substitution_bindings(substitutions, |parameter| {
+                index.type_parameter_semantic_name(parameter)
+            })?;
         // Only a reified parameter's argument is known inside the expanded body at run time. A
         // dependency's reified operation that mentions an ordinary parameter of this declaration
         // keeps that parameter, exactly as the declaration's own emitted body would: `typeOf`
@@ -671,7 +647,8 @@ impl BodyLowering<'_> {
         }
         crate::trace_compiler!(
             "lower",
-            "inline target={target:?} substitutions={substitutions:?} bindings={bindings:?}"
+            "inline callee={} substitutions={substitutions:?} bindings={bindings:?}",
+            frame.name
         );
         let result_ty = ty_subst_keep_unbound(self.ir.functions[function as usize].ret, &bindings);
 
@@ -748,8 +725,7 @@ impl BodyLowering<'_> {
             .collect::<Vec<_>>();
         copies.sort_by_key(|&(_, copy)| copy);
         for &(source, copy) in &copies {
-            self.ir
-                .record_inline_copy_owner(copy, function, source_owner, callee_source);
+            frame.record_copy(self.ir, copy, function);
             // A compiler temporary's synthetic zero is refreshed after its type specializes.
             // A deferred source local carries explicit declaration provenance instead: its
             // semantic type specializes normally, and each backend selects its physical zero.
@@ -898,6 +874,29 @@ impl BodyLowering<'_> {
             &anonymous_owned_substitution_edges,
             &reified_bindings,
         )?;
+        // A lambda or anonymous class the copied body declares is specialized per call site under
+        // the module declaration that declares it. A dependency template declares neither: one
+        // that would need either specialization is not a template this expansion understands.
+        // A template constructs a dependency class by the provider's constructor identity; only a
+        // construction without one names a class the copied body would declare.
+        let module_callee = match frame.module {
+            Some(module) => Some(module),
+            None if escaping_lambda_plan.is_empty()
+                && !escaping_copies.iter().any(|(source, copy)| {
+                    !protected.contains(source)
+                        && matches!(
+                            self.ir.expr(*copy),
+                            IrExpr::New {
+                                external_target: None,
+                                ..
+                            }
+                        )
+                }) =>
+            {
+                None
+            }
+            None => return None,
+        };
         // A function-value conversion between an inline parameter and its lambda is a
         // callable reference stored in a local. The invocation reads that local, so the
         // splice below never sees the lambda. Retarget the invocation when that local is
@@ -938,25 +937,27 @@ impl BodyLowering<'_> {
         // `new` reuses the declaration class, whose reified parameter is erased. This is the final
         // fallible specialization: both lambda transformations above have already been preflighted,
         // and every operation after it commits without declining the containing expansion.
-        if let Err(failure) = escaping_anonymous::specialize(
-            self.ir,
-            escaping_copies
-                .iter()
-                .filter(|(source, _)| !protected.contains(source))
-                .map(|(_, copy)| *copy),
-            &bindings,
-            &reified_bindings,
-            &escaping_anonymous::CallSite {
-                caller_declaration,
-                caller: self.expansion_enclosure,
-                caller_is_default: self.in_default_argument,
-                caller_source_name: &caller_source_name,
-                inline_callee: target,
-                inline_callee_source_name: &callee,
-            },
-        ) {
-            *malformed_anonymous = Some(failure);
-            return None;
+        if let Some(module_callee) = module_callee {
+            if let Err(failure) = escaping_anonymous::specialize(
+                self.ir,
+                escaping_copies
+                    .iter()
+                    .filter(|(source, _)| !protected.contains(source))
+                    .map(|(_, copy)| *copy),
+                &bindings,
+                &reified_bindings,
+                &escaping_anonymous::CallSite {
+                    caller_declaration,
+                    caller: self.expansion_enclosure,
+                    caller_is_default: self.in_default_argument,
+                    caller_source_name: &caller_source_name,
+                    inline_callee: module_callee,
+                    inline_callee_source_name: &callee,
+                },
+            ) {
+                *malformed_anonymous = Some(failure);
+                return None;
+            }
         }
         let mut directly_spliced_implementations = HashSet::default();
         for invocation in inline_invocations {
@@ -999,21 +1000,25 @@ impl BodyLowering<'_> {
                 self.ir.inline_only_fns.remove(&function);
             }
         }
-        let inlined_escaping_implementations = escaping_lambda::apply(
-            self.ir,
-            escaping_lambda_plan,
-            &bindings,
-            &reified_bindings,
-            caller_declaration,
-            self.expansion_enclosure,
-            self.in_default_argument,
-            &caller_source_name,
-            function,
-            source_owner,
-            callee_source,
-            target,
-            &callee,
-        );
+        let inlined_escaping_implementations = match (module_callee, frame.source()) {
+            (Some(module_callee), Some((source_owner, callee_source))) => escaping_lambda::apply(
+                self.ir,
+                escaping_lambda_plan,
+                &bindings,
+                &reified_bindings,
+                caller_declaration,
+                self.expansion_enclosure,
+                self.in_default_argument,
+                &caller_source_name,
+                function,
+                source_owner,
+                callee_source,
+                module_callee,
+                &callee,
+            ),
+            // The plan is empty: a dependency template declares no lambda.
+            _ => Default::default(),
+        };
         // Consuming a source lambda implementation is the only irreversible part of escaping
         // inline-lambda specialization. Commit it only after every transformation that can decline
         // this expansion has succeeded; otherwise the original call still needs that body.
@@ -1076,7 +1081,7 @@ impl BodyLowering<'_> {
             self.next_temporary += 1;
             slot
         });
-        let label = format!("$fir_inline${}_{}", target.raw(), self.next_temporary);
+        let label = frame.return_label(self.next_temporary);
         for found in returns {
             self.ir.exprs[found.returned as usize] = super::inline_returns::frame_exit(
                 self.ir,
@@ -1130,8 +1135,7 @@ impl BodyLowering<'_> {
         let value = match result_slot {
             None => {
                 let unit = self.ir.add_expr(IrExpr::UnitInstance);
-                self.ir
-                    .record_inline_copy_owner(unit, function, source_owner, callee_source);
+                frame.record_copy(self.ir, unit, function);
                 if let Some(line) = close_line {
                     self.ir.expr_source_lines.insert(unit, line);
                 }
@@ -2205,53 +2209,8 @@ fn tail_statement_block_chain(
 
 #[cfg(test)]
 mod expansion_mode_tests {
-    use super::{checked_substitution_bindings, supplied_operand_plan};
-    use crate::fir::{FirTypeParameterRef, FirTypeSubstitution, ResolvedTy, TypeParameterId};
-    use crate::types::{InlineExpansionMode, Ty};
-
-    #[test]
-    fn checked_substitution_flag_alone_selects_reified_bindings() {
-        let ordinary = TypeParameterId::from_raw(3);
-        let reified = TypeParameterId::from_raw(7);
-        let substitutions = [
-            FirTypeSubstitution {
-                parameter: FirTypeParameterRef::Module(ordinary),
-                reified: false,
-                value: ResolvedTy::new(Ty::String).unwrap(),
-                reified_runtime: ResolvedTy::new(Ty::String).unwrap(),
-                additional_bounds: Box::new([]),
-            },
-            FirTypeSubstitution {
-                parameter: FirTypeParameterRef::Module(reified),
-                reified: true,
-                value: ResolvedTy::new(Ty::Int).unwrap(),
-                reified_runtime: ResolvedTy::new(Ty::Int).unwrap(),
-                additional_bounds: Box::new([]),
-            },
-        ];
-
-        let (bindings, reified_bindings) =
-            checked_substitution_bindings(&substitutions, |parameter| {
-                if parameter == ordinary {
-                    Some("T")
-                } else if parameter == reified {
-                    Some("R")
-                } else {
-                    None
-                }
-            });
-
-        assert_eq!(
-            bindings,
-            [("T".into(), Ty::String), ("R".into(), Ty::Int)]
-                .into_iter()
-                .collect()
-        );
-        assert_eq!(
-            reified_bindings,
-            [("R".into(), Ty::Int)].into_iter().collect()
-        );
-    }
+    use super::supplied_operand_plan;
+    use crate::types::InlineExpansionMode;
 
     #[test]
     fn a_missing_mode_declines_a_lambda_instead_of_copying_it() {

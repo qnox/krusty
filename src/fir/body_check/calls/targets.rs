@@ -27,7 +27,7 @@ pub(super) struct ExternalCallTarget<'a> {
     pub(super) semantic_role: Option<crate::types::SemanticCallRole>,
     pub(super) overridden_declarations: &'a [crate::types::OverriddenDeclaration],
     pub(super) suspend: bool,
-    pub(super) can_inline: bool,
+    pub(super) inline: crate::libraries::InlineKind,
     pub(super) inline_plan: Option<&'a crate::libraries::InlineBodyPlan>,
     pub(super) inline_receiver_parameter: Option<usize>,
     /// Unsubstituted type-parameter receiver the inline plan stores as its erased bound.

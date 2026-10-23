@@ -20,16 +20,22 @@ mod captured_receiver_names_e2e;
 mod cast_line_break_e2e;
 #[path = "cast_operand_reread_e2e.rs"]
 mod cast_operand_reread_e2e;
+#[path = "class_comparison_e2e.rs"]
+mod class_comparison_e2e;
 #[path = "classfile_low_priority_annotation_e2e.rs"]
 mod classfile_low_priority_annotation_e2e;
 #[path = "common/mod.rs"]
 mod common_core;
+#[path = "jvm_conformance_deadline_e2e.rs"]
+mod jvm_conformance_deadline_e2e;
 #[cfg(test)]
 pub(crate) use common_core::server_pool::Pool as ServerPool;
 #[path = "common/compiler_plugin_fixture.rs"]
 mod compiler_plugin_fixture;
 #[path = "common/e2e.rs"]
 mod e2e_support;
+#[path = "generic_serializable_parent_e2e.rs"]
+mod generic_serializable_parent_e2e;
 #[path = "common/inner_class_rows.rs"]
 mod inner_class_rows_support;
 #[path = "common/reference_box.rs"]
@@ -140,6 +146,8 @@ mod backtick_keyword_identifier_e2e;
 mod bare_accessor_and_setter_bridge_e2e;
 #[path = "bazel_cli_contract_e2e.rs"]
 mod bazel_cli_contract_e2e;
+#[path = "bazel_module_release_e2e.rs"]
+mod bazel_module_release_e2e;
 #[path = "block_slot_reuse_e2e.rs"]
 mod block_slot_reuse_e2e;
 #[path = "boolean_literal_equality_e2e.rs"]
@@ -1331,6 +1339,8 @@ mod klib_semantic_e2e;
 mod kotlin_fun_java_sam_param_e2e;
 #[path = "kotlin_native_provisioning_e2e.rs"]
 mod kotlin_native_provisioning_e2e;
+#[path = "kotlin_script_e2e.rs"]
+mod kotlin_script_e2e;
 #[path = "kotlinc_argument_conformance_e2e.rs"]
 mod kotlinc_argument_conformance_e2e;
 #[path = "krusty_dep_dir_e2e.rs"]
@@ -1577,6 +1587,8 @@ mod module_override_boxed_result_e2e;
 mod mpp_expect_actual_e2e;
 #[path = "mpp_requires_the_feature_e2e.rs"]
 mod mpp_requires_the_feature_e2e;
+#[path = "native_conformance_deadline_e2e.rs"]
+mod native_conformance_deadline_e2e;
 #[path = "nested_block_comment_e2e.rs"]
 mod nested_block_comment_e2e;
 #[path = "nested_class_annotation_scope_e2e.rs"]
@@ -1619,6 +1631,8 @@ mod primary_constructor_newline_e2e;
 mod primitive_explicit_equals_e2e;
 #[path = "primitive_hash_code_e2e.rs"]
 mod primitive_hash_code_e2e;
+#[path = "projected_member_extension_invoke_e2e.rs"]
+mod projected_member_extension_invoke_e2e;
 #[path = "public_inline_property_access_e2e.rs"]
 mod public_inline_property_access_e2e;
 #[path = "receiver_type_line_break_e2e.rs"]

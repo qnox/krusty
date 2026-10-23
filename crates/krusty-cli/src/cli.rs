@@ -24,6 +24,7 @@ mod fragments;
 mod language_features;
 mod warning_policy;
 
+pub use arguments::CLASSPATH_SEPARATOR;
 use arguments::{
     apply, collect_sources, finish_jvm_target, finish_language_settings, finish_warning_policy,
     take_reference_version, unsupported, ParsedSettings,
@@ -77,7 +78,7 @@ pub struct Options {
     pub module_name: String,
     /// Standard per-compilation language/API versions and their finalized feature baseline.
     pub language_settings: LanguageSettings,
-    /// Inputs krusty skips (Kotlin scripts), each reported once.
+    /// Arguments krusty skips, each reported once.
     pub ignored: Vec<String>,
     /// kotlinc's own command-line syntax errors (`Invalid argument: -foo`), in its words. Any one
     /// stops the invocation before compiling, exactly as kotlinc does.
@@ -355,7 +356,7 @@ fn read(argv: impl IntoIterator<Item = String>, reading: Reading) -> Options {
         return opts;
     }
     for source in &tokenized.free {
-        collect_sources(source, &mut opts.sources, &mut opts.ignored);
+        collect_sources(source, &mut opts.sources);
     }
     let fragments = fragments::check(&parsed.fragments, &tokenized.free);
     if let Some(refusal) = fragments.unsupported {
@@ -481,7 +482,8 @@ impl Options {
     }
 
     /// The classpath to drive resolution with: the user's `-cp` entries plus kotlinc's implicit
-    /// standard library and JDK modules, unless their corresponding `-no-*` option disables them.
+    /// standard library (with the script runtime beside it) and JDK modules, unless their
+    /// corresponding `-no-*` option disables them.
     /// Kept out of `parse` so parsing stays env-independent.
     pub fn effective_classpath(&self) -> Result<Vec<PathBuf>, String> {
         let mut cp = self.classpath.clone();
@@ -492,6 +494,14 @@ impl Options {
             })?;
             if !cp.contains(&stdlib) {
                 cp.push(stdlib);
+            }
+            // kotlinc puts its distribution's script runtime beside the standard library: it holds
+            // the template a `.kts` script extends.
+            if let Some(script_runtime) = krusty::jvm::kotlin_dist_jar("kotlin-script-runtime.jar")
+            {
+                if !cp.contains(&script_runtime) {
+                    cp.push(script_runtime);
+                }
             }
             if !self.no_reflect {
                 let reflect = krusty::jvm::kotlin_dist_jar("kotlin-reflect.jar").ok_or_else(|| {
@@ -707,7 +717,7 @@ Common options (kotlinc-compatible):
                         reproduce this supported kotlinc release (default: the newest)
   -help                 print this help and exit
 
-Sources may be .kt files or directories (scanned recursively). Kotlin scripts are not yet compiled.
+Sources may be .kt, .kts or .java files, or directories (scanned recursively).
 Arguments are parsed by kotlinc's rules for the selected release. A kotlinc argument krusty does not
 implement is an error, as are invalid values; an unknown option is kotlinc's own error or warning.
 krusty never compiles a command line into anything other than what kotlinc would produce.";
@@ -1116,15 +1126,16 @@ mod tests {
 
     #[test]
     fn source_inputs_follow_shared_batch_capabilities() {
-        let o = parse_args(&["main.kt", "script.kts", "Ignored.java"]);
+        let o = parse_args(&["main.kt", "script.kts", "Other.java"]);
         assert_eq!(
             o.sources,
-            vec!["main.kt".to_string(), "Ignored.java".to_string()]
+            vec![
+                "main.kt".to_string(),
+                "script.kts".to_string(),
+                "Other.java".to_string()
+            ]
         );
-        assert_eq!(
-            o.ignored,
-            vec!["script.kts (script compilation is not supported yet)".to_string()]
-        );
+        assert!(o.ignored.is_empty());
     }
 
     /// One well-formed spelling of an argument: `-name` for a boolean, `-name=value` otherwise,

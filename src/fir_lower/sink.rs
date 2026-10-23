@@ -26,7 +26,7 @@ use super::{
         predeclare_properties,
     },
     tailrec::{finish_tailrec_body, Frame as TailrecFrame},
-    FirLoweringFailure, LocalCallableLoweringContext,
+    FileLoweringContext, FirLoweringFailure,
 };
 
 #[cfg(test)]
@@ -169,7 +169,7 @@ pub struct CommonIrBodySink<'a> {
     source: SourceFileId,
     ir: &'a mut IrFile,
     failure: Option<FirFileLoweringFailure>,
-    local_callables: LocalCallableLoweringContext,
+    lowering_context: FileLoweringContext,
     inline_payload_declarations: crate::fx_hash::HashSet<DeclarationId>,
     materialized_inline_callables: crate::fx_hash::HashSet<CallableId>,
 }
@@ -184,7 +184,7 @@ impl<'a> CommonIrBodySink<'a> {
             source,
             ir,
             failure: None,
-            local_callables: LocalCallableLoweringContext::default(),
+            lowering_context: FileLoweringContext::default(),
             inline_payload_declarations: crate::fx_hash::HashSet::default(),
             materialized_inline_callables: crate::fx_hash::HashSet::default(),
         };
@@ -281,6 +281,17 @@ impl<'a> CommonIrBodySink<'a> {
 
     pub(crate) fn ir_mut(&mut self) -> &mut IrFile {
         self.ir
+    }
+
+    /// Supply the templates a checked call of an inline dependency function expands from. Without
+    /// a source, such a call stays a call of the dependency function.
+    pub fn provide_dependency_templates(
+        &mut self,
+        templates: std::rc::Rc<dyn super::DependencyInlineTemplates>,
+    ) {
+        self.lowering_context
+            .dependency_templates
+            .provide(templates);
     }
 
     /// Add body-local callables/properties whose pending-free signatures were published by the
@@ -1489,7 +1500,7 @@ impl<'a> CommonIrBodySink<'a> {
                 body,
                 index,
                 self.ir,
-                &mut self.local_callables,
+                &mut self.lowering_context,
             );
         }
         if anchor.kind == DeclarationKind::Accessor {
@@ -1508,7 +1519,7 @@ impl<'a> CommonIrBodySink<'a> {
                     body,
                     index,
                     self.ir,
-                    &mut self.local_callables,
+                    &mut self.lowering_context,
                     function,
                 );
             }
@@ -1517,7 +1528,7 @@ impl<'a> CommonIrBodySink<'a> {
                 body,
                 index,
                 self.ir,
-                &mut self.local_callables,
+                &mut self.lowering_context,
             );
         }
         if anchor.kind == DeclarationKind::Property {
@@ -1526,19 +1537,19 @@ impl<'a> CommonIrBodySink<'a> {
                 body,
                 index,
                 self.ir,
-                &mut self.local_callables,
+                &mut self.lowering_context,
             );
         }
         if matches!(
             anchor.kind,
-            DeclarationKind::Initializer | DeclarationKind::EnumEntry | DeclarationKind::Script
+            DeclarationKind::Initializer | DeclarationKind::EnumEntry
         ) {
             return accept_non_callable_body(
                 declaration,
                 body,
                 index,
                 self.ir,
-                &mut self.local_callables,
+                &mut self.lowering_context,
             );
         }
         let default_fragment = body.is_default_fragment();
@@ -1586,7 +1597,7 @@ impl<'a> CommonIrBodySink<'a> {
             .and_then(|root| body.statement(*root))
             .map_or(OriginId::from_raw(0), |statement| statement.origin);
         let expected_result = self.ir.functions[function as usize].ret;
-        let lowered = lower_body_with_context(body, index, self.ir, &mut self.local_callables)
+        let lowered = lower_body_with_context(body, index, self.ir, &mut self.lowering_context)
             .map_err(FirFileLoweringFailure::Body)?;
         let result = lowered
             .result_type

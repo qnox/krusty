@@ -55,8 +55,7 @@ pub(super) fn classifier_record(
         .properties
         .iter()
         .map(|property| {
-            let mut published = published_property(identities, property, member, enclosing);
-            builtin_realizations::realize_member_property(identity, &mut published);
+            let published = published_property(identities, property, member, enclosing);
             (property.declaration.name.clone(), published)
         })
         .collect::<Vec<_>>();
@@ -131,6 +130,12 @@ pub(super) fn published_constructor(
     builtin_realizations::realize_constructor(
         identity,
         classifier.compiler_builtin_owner,
+        &mut member,
+    );
+    builtin_realizations::realize_array_constructor(
+        identity,
+        classifier.compiler_builtin_owner,
+        &classifier.shape,
         &mut member,
     );
     identities.assign_constructor(
