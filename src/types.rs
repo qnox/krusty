@@ -45,6 +45,8 @@ pub use crate::inline_parameter_modifier::{InlineExpansionMode, InlineParameterM
 use crate::name_tree::{NameId, NameTree};
 use interning::ShardedInterner;
 mod primitive_arrays;
+mod raw_erasure;
+pub(crate) use raw_erasure::{formal_erasures, raw_member_type};
 mod thin_handles;
 mod ty_kind;
 mod ty_table;
@@ -1549,7 +1551,13 @@ impl Ty {
                 if args.is_empty() {
                     base
                 } else if self.is_raw_application() {
-                    diagnostic_rendering::raw_type(&base, &base, &args, render)
+                    diagnostic_rendering::raw_type(
+                        &base,
+                        &base,
+                        &args,
+                        diagnostic_rendering::RawNullability::NOT_NULL,
+                        render,
+                    )
                 } else {
                     let arguments = args
                         .iter()
@@ -1579,6 +1587,9 @@ impl Ty {
                     matches!(self.kind(), TyKind::Nullable(_)),
                     type_parameter,
                 )
+            }
+            TyKind::Nullable(inner) if inner.is_raw_application() => {
+                diagnostic_rendering::nullable_raw_type(inner, render, platform_upper_bound)
             }
             TyKind::Nullable(inner) => intersection::spell_nullable(inner, render, true),
             TyKind::PlatformNullable(inner) => diagnostic_rendering::platform_type(

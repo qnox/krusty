@@ -98,6 +98,7 @@ pub(super) fn platform_type(
             &render(Ty::obj_name(lower_owner)),
             &render(Ty::obj_name(upper_owner)),
             &arguments,
+            RawNullability::PLATFORM,
             render,
         );
     }
@@ -139,13 +140,58 @@ pub(super) fn platform_type(
     format!("{face}<{arguments}>!")
 }
 
+/// Render an `@Nullable` Java raw occurrence: both faces of its interval are nullable.
+pub(super) fn nullable_raw_type(
+    inner: Ty,
+    render: impl Fn(Ty) -> String,
+    platform_upper_bound: &dyn Fn(Ty) -> Ty,
+) -> String {
+    let TyKind::Obj(lower_owner, arguments) = inner.kind() else {
+        return format!("{}?", render(inner));
+    };
+    let upper_owner = platform_upper_bound(inner)
+        .obj_internal()
+        .unwrap_or(lower_owner);
+    raw_type(
+        &render(Ty::obj_name(lower_owner)),
+        &render(Ty::obj_name(upper_owner)),
+        &arguments,
+        RawNullability::NULLABLE,
+        render,
+    )
+}
+
+/// Which faces of a Java raw interval are nullable. An unannotated occurrence has a nullable upper
+/// face only; `@NotNull` makes neither nullable and `@Nullable` both.
+#[derive(Clone, Copy)]
+pub(super) struct RawNullability {
+    pub(super) lower: bool,
+    pub(super) upper: bool,
+}
+
+impl RawNullability {
+    pub(super) const NOT_NULL: Self = Self {
+        lower: false,
+        upper: false,
+    };
+    pub(super) const PLATFORM: Self = Self {
+        lower: false,
+        upper: true,
+    };
+    pub(super) const NULLABLE: Self = Self {
+        lower: true,
+        upper: true,
+    };
+}
+
 /// Render a Java raw occurrence as kotlinc spells its flexible interval: the lower bound applies
-/// each formal's erasure, and the nullable upper bound stars every argument
+/// each formal's erasure, and the upper bound stars every argument
 /// (`(Box<CharSequence!>..Box<*>?)`).
 pub(super) fn raw_type(
     lower: &str,
     upper: &str,
     arguments: &[Ty],
+    nullability: RawNullability,
     render: impl Fn(Ty) -> String,
 ) -> String {
     let erased = arguments
@@ -154,5 +200,10 @@ pub(super) fn raw_type(
         .collect::<Vec<_>>()
         .join(", ");
     let stars = vec!["*"; arguments.len()].join(", ");
-    format!("({lower}<{erased}>..{upper}<{stars}>?)")
+    let mark = |nullable: bool| if nullable { "?" } else { "" };
+    format!(
+        "({lower}<{erased}>{}..{upper}<{stars}>{})",
+        mark(nullability.lower),
+        mark(nullability.upper)
+    )
 }

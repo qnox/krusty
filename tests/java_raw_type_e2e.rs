@@ -108,3 +108,180 @@ fn javac_classes() -> std::path::PathBuf {
         .expect("pooled javac compiles the Java fixture")
         .0
 }
+
+const NOT_NULL: &str = "package org.jetbrains.annotations;\n\
+    import java.lang.annotation.*;\n\
+    @Retention(RetentionPolicy.CLASS)\n\
+    @Target({ElementType.METHOD, ElementType.FIELD, ElementType.PARAMETER})\n\
+    public @interface NotNull { String value() default \"\"; }\n";
+
+const NULLABLE: &str = "package org.jetbrains.annotations;\n\
+    import java.lang.annotation.*;\n\
+    @Retention(RetentionPolicy.CLASS)\n\
+    @Target({ElementType.METHOD, ElementType.FIELD, ElementType.PARAMETER})\n\
+    public @interface Nullable { String value() default \"\"; }\n";
+
+/// A nullability annotation on a raw occurrence moves the interval's faces: `@NotNull` makes the
+/// upper face non-null, `@Nullable` the lower face nullable too.
+const ANNOTATED: &str = "import org.jetbrains.annotations.*;\n\
+    public class Annotated {\n\
+    \x20   public static class Box<T extends CharSequence> { public T get() { return null; } }\n\
+    \x20   @SuppressWarnings(\"rawtypes\") public static @NotNull Box notNull() { return new Box<String>(); }\n\
+    \x20   @SuppressWarnings(\"rawtypes\") public static @Nullable Box nullable() { return null; }\n\
+    }\n";
+
+const ANNOTATED_REJECTED: &str = "fun notNull(): Int = Annotated.notNull()\n\
+    fun nullable(): Int = Annotated.nullable()\n";
+
+/// Each face's nullability is published in the inferred results' metadata.
+const ANNOTATED_ACCEPTED: &str = "fun notNull() = Annotated.notNull()\n\
+    fun nullable() = Annotated.nullable()\n\
+    fun box(): String = if (notNull().get() == null && nullable() == null) \"OK\" else \"fail\"\n";
+
+#[test]
+fn an_annotated_java_raw_type_reports_its_faces_like_kotlinc() {
+    let classes = annotated_classes();
+    let result = common::compiler_diagnostics(
+        &[("AnnotatedRaw.kt", ANNOTATED_REJECTED)],
+        std::slice::from_ref(&classes),
+    );
+    let mismatch = |line, column, actual: &str| common::CompilerError {
+        file: "AnnotatedRaw.kt".to_string(),
+        line,
+        column,
+        message: format!("return type mismatch: expected 'Int', actual '{actual}'."),
+    };
+    let expected = vec![
+        mismatch(1, 22, "(Annotated.Box<CharSequence!>..Annotated.Box<*>)"),
+        mismatch(2, 23, "(Annotated.Box<CharSequence!>?..Annotated.Box<*>?)"),
+    ];
+    assert_eq!(
+        common::compiler_errors(&result.reference_stderr),
+        expected,
+        "kotlinc's diagnostics changed",
+    );
+    let mut krusty = common::compiler_errors(&result.krusty_stderr);
+    krusty.extend(common::compiler_errors(&result.krusty_stdout));
+    assert_eq!(krusty, expected);
+}
+
+#[test]
+fn an_annotated_java_raw_type_publishes_its_faces_like_kotlinc() {
+    let classes = annotated_classes();
+    common::assert_classes_identical_to_kotlinc_against_jdk(
+        "AnnotatedJavaRawType",
+        ANNOTATED_ACCEPTED,
+        &["AnnotatedJavaRawTypeKt"],
+        &[classes],
+    );
+}
+
+fn annotated_classes() -> std::path::PathBuf {
+    common::javac_compile(
+        &[
+            (
+                "org/jetbrains/annotations/NotNull.java".to_string(),
+                NOT_NULL.to_string(),
+            ),
+            (
+                "org/jetbrains/annotations/Nullable.java".to_string(),
+                NULLABLE.to_string(),
+            ),
+            ("Annotated.java".to_string(), ANNOTATED.to_string()),
+        ],
+        &[],
+    )
+    .expect("pooled javac compiles the annotated Java fixture")
+    .0
+}
+
+/// A raw receiver's members are erased whole, after the receiver's own formals are substituted:
+/// an inherited `List<P> nested()` is a raw `List` (so any element can be added), while the
+/// inherited `put(P)` still takes `C`'s erasure. Method formals erase to their bounds and are no
+/// longer inferred. An exact receiver and a static generic method keep ordinary inference.
+const FAMILY: &str = "import java.util.*;\n\
+    public class Family {\n\
+    \x20   public static class Parent<P> {\n\
+    \x20       private final List<P> items = new ArrayList<P>();\n\
+    \x20       public List<P> nested() { return items; }\n\
+    \x20       public void put(P p) { items.add(p); }\n\
+    \x20   }\n\
+    \x20   public static class Child<C extends CharSequence> extends Parent<C> {\n\
+    \x20       public <U> U echo(U u) { return u; }\n\
+    \x20       public <U extends CharSequence> U bounded(U u) { return u; }\n\
+    \x20       public static <U> U staticEcho(U u) { return u; }\n\
+    \x20       public Map<String, C> map() { return new HashMap<String, C>(); }\n\
+    \x20       public Rec<?> rec() { return null; }\n\
+    \x20   }\n\
+    \x20   public static class Rec<T extends Comparable<T>> { public void set(T t) {} }\n\
+    \x20   @SuppressWarnings(\"rawtypes\") public static Child child() { return new Child<String>(); }\n\
+    \x20   @SuppressWarnings(\"rawtypes\") public static Rec rec() { return new Rec<String>(); }\n\
+    }\n";
+
+const FAMILY_REJECTED: &str = "fun inheritedPut() = Family.child().put(1)\n\
+    fun echo(): String = Family.child().echo(\"x\")\n\
+    fun bounded(): String = Family.child().bounded(\"x\")\n\
+    fun explicit(): Int = Family.child().echo<String>(\"x\")\n\
+    fun nested(): Int = Family.child().nested()\n\
+    fun map(): Int = Family.child().map()\n\
+    fun recursive() = Family.rec().set(Any())\n\
+    fun projected(): Int = Family.child().rec()\n\
+    fun exactNested(c: Family.Child<String>): Int = c.nested()\n\
+    fun exactEcho(c: Family.Child<String>): Int = c.echo(\"x\")\n\
+    fun staticEcho(): Int = Family.Child.staticEcho(\"x\")\n";
+
+const FAMILY_ACCEPTED: &str = "fun box(): String {\n\
+    \x20   val child = Family.child()\n\
+    \x20   child.nested().add(1)\n\
+    \x20   child.nested().add(\"s\")\n\
+    \x20   child.put(\"p\")\n\
+    \x20   val echoed: Any? = child.echo(\"e\")\n\
+    \x20   val bounded: CharSequence = child.bounded(\"bb\")\n\
+    \x20   val explicit: Any? = child.echo<String>(\"x\")\n\
+    \x20   val exact: String = Family.Child<String>().echo(\"exact\")\n\
+    \x20   val static: String = Family.Child.staticEcho(\"st\")\n\
+    \x20   Family.rec().set(\"r\")\n\
+    \x20   Family.rec().set(2)\n\
+    \x20   val size = child.nested().size + child.map().size\n\
+    \x20   return if (size == 3 && echoed == \"e\" && bounded.length == 2 && explicit == \"x\" &&\n\
+    \x20       exact.length == 5 && static.length == 2) \"OK\" else \"size $size\"\n\
+    }\n";
+
+#[test]
+fn a_java_raw_member_is_erased_like_kotlinc() {
+    common::assert_errors_match_kotlinc(
+        &[("Family.java", FAMILY), ("main.kt", FAMILY_REJECTED)],
+        &[],
+    );
+}
+
+#[test]
+fn a_java_raw_member_compiles_like_kotlinc() {
+    common::assert_classes_identical_to_kotlinc_against_jdk(
+        "JavaRawMember",
+        FAMILY_ACCEPTED,
+        &["JavaRawMemberKt"],
+        &[family_classes()],
+    );
+}
+
+#[test]
+fn a_java_raw_member_runs_like_kotlinc() {
+    let krusty =
+        common::java_interop_box("JavaRawMember", &[("Family.java", FAMILY)], FAMILY_ACCEPTED);
+    assert_eq!(krusty, "OK");
+    assert_eq!(
+        common::kotlinc_box_files_result_with_classpath(
+            &[("JavaRawMember.kt", FAMILY_ACCEPTED)],
+            "JavaRawMemberKt",
+            &[family_classes()],
+        ),
+        krusty
+    );
+}
+
+fn family_classes() -> std::path::PathBuf {
+    common::javac_compile(&[("Family.java".to_string(), FAMILY.to_string())], &[])
+        .expect("pooled javac compiles the Java fixture")
+        .0
+}

@@ -64,7 +64,7 @@ impl JvmLibraries {
         // Read only declaration headers here: a raw occurrence is met while a classifier's members
         // are being built, so asking for a complete classifier record could re-enter that build.
         if let Some(signature) = self.cp.builtin_class_signature_name(internal) {
-            return Some(kotlin_formal_erasures(
+            return Some(crate::types::formal_erasures(
                 &signature.formals,
                 &signature.formal_bounds,
             ));
@@ -86,7 +86,7 @@ impl JvmLibraries {
                     .and_then(|entry| entry.outer.as_deref())
                     .and_then(|outer| self.cp.find_name(type_name(outer)));
             }
-            return Some(kotlin_formal_erasures(&formals, &bounds));
+            return Some(crate::types::formal_erasures(&formals, &bounds));
         }
         let mut chain = vec![class];
         while let Some(outer) = chain
@@ -108,77 +108,6 @@ impl JvmLibraries {
             formals.extend(own);
             bounds.extend(own_bounds);
         }
-        Some(
-            (0..formals.len())
-                .map(|index| java_formal_erasure(&formals, &bounds, index, &mut Vec::new()))
-                .collect(),
-        )
+        Some(crate::types::formal_erasures(&formals, &bounds))
     }
-}
-
-/// A Java formal's erasure as Kotlin's raw types read it: its first bound, flexible, with a
-/// formal that bound names erased in turn (`B extends A` erases through `A`) and an argument
-/// that names one of the classifier's formals starred (`T extends Comparable<T>` erases to
-/// `Comparable<*>!`). An unbounded formal erases to `Any!`; a cycle stops at `Any!`.
-fn java_formal_erasure(
-    formals: &[String],
-    bounds: &[Vec<Ty>],
-    index: usize,
-    visiting: &mut Vec<usize>,
-) -> Ty {
-    let any = Ty::platform_nullable(Ty::obj("kotlin/Any"));
-    if visiting.contains(&index) {
-        return any;
-    }
-    let Some(&bound) = bounds.get(index).and_then(|bounds| bounds.first()) else {
-        return any;
-    };
-    visiting.push(index);
-    let erased = match bound.non_null().kind() {
-        TyKind::TyParam(name, _) => match formals.iter().position(|formal| *formal == *name) {
-            Some(named) => java_formal_erasure(formals, bounds, named, visiting),
-            None => any,
-        },
-        TyKind::Obj(..) => Ty::platform_nullable(star_formal_arguments(bound.non_null(), formals)),
-        _ => bound,
-    };
-    visiting.pop();
-    erased
-}
-
-/// A Kotlin formal's erasure: its first declared bound with formal-naming arguments starred, or
-/// `Any?` when it declares none or is bounded by another formal.
-fn kotlin_formal_erasures(formals: &[String], bounds: &[Vec<Ty>]) -> Vec<Ty> {
-    (0..formals.len())
-        .map(
-            |index| match bounds.get(index).and_then(|bounds| bounds.first()) {
-                Some(&bound) if !matches!(bound.non_null().kind(), TyKind::TyParam(..)) => {
-                    bound.rewrap_nullability(star_formal_arguments(bound.non_null(), formals))
-                }
-                _ => Ty::nullable(Ty::obj("kotlin/Any")),
-            },
-        )
-        .collect()
-}
-
-fn star_formal_arguments(bound: Ty, formals: &[String]) -> Ty {
-    let TyKind::Obj(name, arguments) = bound.kind() else {
-        return bound;
-    };
-    if arguments.is_empty() {
-        return bound;
-    }
-    Ty::obj_args_name(
-        name,
-        &arguments
-            .iter()
-            .map(|argument| {
-                if crate::types::ty_mentions_param(*argument, formals) {
-                    Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")))
-                } else {
-                    *argument
-                }
-            })
-            .collect::<Vec<_>>(),
-    )
 }

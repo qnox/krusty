@@ -815,11 +815,14 @@ pub(crate) enum Expansion {
 }
 
 /// A Java raw occurrence, as kotlinc's JVM serializer writes a raw type: the flexible interval
-/// from each formal's erasure (`Box<CharSequence!>`) up to the nullable all-star application of the
+/// from each formal's erasure (`Box<CharSequence!>`) up to the all-star application of the
 /// provider's upper face (`Box<*>?`), both faces marked with `JvmProtoBuf.is_raw` (field 101).
+/// `faces` is the nullability of the lower and upper face: an unannotated occurrence's upper face
+/// only, both for `@Nullable`, neither for `@NotNull`.
 fn encode_raw_type(
     strings: &mut StringTable<'_>,
     (owner, arguments): (TypeName, &[Ty]),
+    (lower_nullable, upper_nullable): (bool, bool),
     spelled: &Spelled,
     type_parameters: &TypeParameters,
     expansion: Expansion,
@@ -828,9 +831,10 @@ fn encode_raw_type(
         .iter()
         .map(|argument| argument.raw_binding_read())
         .collect::<Vec<_>>();
+    let nullability = |nullable: bool, ty: Ty| if nullable { Ty::nullable(ty) } else { ty };
     let mut message = encode_type_with_parameter(
         strings,
-        Ty::obj_args_name(owner, &erasures),
+        nullability(lower_nullable, Ty::obj_args_name(owner, &erasures)),
         Spelled::NONE,
         type_parameters,
         None,
@@ -843,7 +847,7 @@ fn encode_raw_type(
     let stars = vec![Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any"))); arguments.len()];
     let mut upper = encode_type_with_parameter(
         strings,
-        Ty::nullable(Ty::obj_args_name(upper_owner, &stars)),
+        nullability(upper_nullable, Ty::obj_args_name(upper_owner, &stars)),
         Spelled::NONE,
         type_parameters,
         None,
@@ -905,6 +909,7 @@ fn encode_type_with_parameter(
         return encode_raw_type(
             strings,
             (owner, &arguments),
+            (nullable, nullable || flexible),
             spelled,
             type_parameters,
             expansion,

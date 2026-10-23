@@ -139,11 +139,16 @@ argument per formal: a Java formal erases to its first bound, flexible, through 
 mapped collection such as raw `List`) to `Any?`. A member read through a raw receiver binds each
 formal to its erasure (`Box.raw().get()` is `CharSequence!`). A raw target accepts any application
 of its classifier; a raw source supplies only its lower bound, so a raw `List` is not a
-`List<String>`. Signatures write the raw classifier, and diagnostics render the interval
-(`tests/java_raw_type_e2e.rs`, `tests/java_class_formal_bound_e2e.rs`). Known gap: kotlinc also
-erases a raw member's nested generic types (`List<T>` read through a raw receiver is a raw `List`,
-and `set(T)` with `T extends Comparable<T>` takes a raw `Comparable`); krusty substitutes the
-erasure inside them instead (`(Mutable)List<Any!>!`, `Comparable<*>!`).
+`List<String>`. A member read through a raw receiver is erased whole, after the receiver's own
+formals are substituted: every generic application in its signature is raw (`List<P>` is
+`(MutableList<Any?>..List<*>?)`, a recursive `Comparable<T>` bound a raw `Comparable`), each
+method formal reads as its bound's erasure with nothing left to infer (`<U> U echo(U)` returns
+`Any!`, even with an explicit type argument), and a raw type's supertypes are raw over the
+substituted arguments (`Child<C extends CharSequence> extends Parent<C>` read raw makes the
+inherited `put(P)` take `CharSequence!` and `nested()` a raw `List`). A `@NotNull` raw occurrence
+has a non-null upper face and a `@Nullable` one a nullable lower face. Signatures write the raw
+classifier, and diagnostics and metadata spell the interval as kotlinc does
+(`tests/java_raw_type_e2e.rs`, `tests/java_class_formal_bound_e2e.rs`).
 
 Static methods of **nested** Java classes resolve through all three kotlinc-accepted spellings —
 `Outer.Bus.notify(x)` with `Outer` imported, `Bus.notify(x)` with `import pkg.Outer.Bus`, and the

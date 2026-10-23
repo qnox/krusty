@@ -14,8 +14,9 @@ ordinary-body category cannot retry it and turn the target decline into an ordin
 - ✅ A Java raw occurrence carries one `RawProjection(erasure)` argument per formal (SPEC §5), so it
   is a complete application for the subtype relation, renders and publishes as kotlinc's flexible
   raw interval, and binds a raw receiver's formals to their erasures.
-- Open: erase a raw member's nested generic types the way kotlinc does (raw `List` for `List<T>`,
-  raw `Comparable` for a recursive bound).
+- ✅ Members read through a raw receiver are erased whole (nested applications, method formals,
+  inherited members over raw supertypes), and annotated raw occurrences keep their face
+  nullability.
 
 ## Shared-target plugin model identity
 
