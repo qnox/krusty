@@ -651,7 +651,9 @@ fn complete_class_members(
 
     let plain_data_class = plain_data_class(ir, class_id);
     if plain_data_class {
-        let cached_descriptor = if is_generic {
+        // The descriptor serves the missing-field check, which a class with no `$serializer` (a
+        // polymorphic base) does not make.
+        let cached_descriptor = if is_generic && serializer.is_some() {
             let descriptor_elements = wire
                 .iter()
                 .enumerate()

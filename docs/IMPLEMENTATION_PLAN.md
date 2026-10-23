@@ -9,6 +9,13 @@ KLIB dependency-emission categories have disjoint declaration-owned roots before
 An authenticated intrinsic wrapper keeps that ownership when its body transaction declines; the
 ordinary-body category cannot retry it and turn the target decline into an ordinary-closure error.
 
+## Constructor parameter annotation pool order
+
+The JVM constructor header seeder carries retained checked applications rather than descriptor-only
+projections. Encode their complete values at the existing retention-ordered visit boundary; keep
+source target selection and semantic annotation publication outside the writer. This is independent
+of the cross-file publication and configured default-target-mode follow-ups.
+
 ## Constructor-property annotation publication
 
 Publish checked PROPERTY-targeted constructor-parameter applications by stable property identity,
@@ -5594,6 +5601,10 @@ non-inline callers, still reads the field directly. Test:
   181/181/182; Native's counts are unchanged by the shared tables.
 - Known gap: `x as? C` on a value smart-cast earlier in the body lowers to a `When` with no
   checked type, which Wasm declines rather than infer one.
+- Nullable scalar assertions decline when the operand is a reference but the checked result has
+  a scalar carrier. Existing reference assertions remain unchanged; scalar unboxing and typed
+  null failures are separate work. The same Wasm contract tests cover both hosts and all four
+  scalar carriers against the JVM oracle.
 - Wasm consumes the published declaration-result provenance of a generic call beneath its
   checked result coercion. This preserves separate declared and selected types without inventing
   missing facts; it does not yet supply generic scalar boxing or a canonical dependency-call ABI.

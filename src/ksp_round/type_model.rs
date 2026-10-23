@@ -18,30 +18,37 @@ pub(super) struct TypeParameterScope {
 #[derive(Clone)]
 struct ScopedTypeParameter {
     identity: TyParamName,
+    id: u32,
     owner: String,
     name: String,
 }
 
+/// Hands out the round-unique [`KspTypeParameter::id`]s.
+#[derive(Default)]
+pub(super) struct TypeParameterIds(std::cell::Cell<u32>);
+
 impl TypeParameterScope {
     /// This scope with `owner`'s parameters added: each resolved identity and the name it was
-    /// declared with, in declaration order.
+    /// declared with, in declaration order. Each gets a fresh id from `ids`.
     pub(super) fn with<'a>(
         &self,
+        ids: &TypeParameterIds,
         owner: &str,
         parameters: impl IntoIterator<Item = (&'a str, &'a str)>,
     ) -> TypeParameterScope {
         let mut scope = self.clone();
         scope
             .parameters
-            .extend(
-                parameters
-                    .into_iter()
-                    .map(|(identity, name)| ScopedTypeParameter {
-                        identity: TyParamName::new(identity),
-                        owner: owner.to_string(),
-                        name: name.to_string(),
-                    }),
-            );
+            .extend(parameters.into_iter().map(|(identity, name)| {
+                let id = ids.0.get();
+                ids.0.set(id + 1);
+                ScopedTypeParameter {
+                    identity: TyParamName::new(identity),
+                    id,
+                    owner: owner.to_string(),
+                    name: name.to_string(),
+                }
+            }));
         scope
     }
 
@@ -66,11 +73,31 @@ impl TypeParameterScope {
                     .find(|parameter| parameter.identity == identity)?;
                 Some(KspType {
                     declaration: KspTypeDeclaration::TypeParameter {
+                        id: parameter.id,
                         owner: parameter.owner.clone(),
                         name: parameter.name.clone(),
                     },
                     nullable: false,
                     arguments: Vec::new(),
+                })
+            }
+            // A function type is the `kotlin.FunctionN` classifier applied to its parameter types,
+            // a receiver first, and its return type. KSP names a suspend or context function
+            // type by classifiers the round does not describe yet.
+            TyKind::Fun(signature) if !signature.suspend && signature.context_count == 0 => {
+                let arguments = signature
+                    .params
+                    .iter()
+                    .chain([&signature.ret])
+                    .map(|ty| self.ty(*ty).map(KspTypeArgument::Invariant))
+                    .collect::<Option<_>>()?;
+                Some(KspType {
+                    declaration: KspTypeDeclaration::Class(format!(
+                        "kotlin.Function{}",
+                        signature.params.len()
+                    )),
+                    nullable: false,
+                    arguments,
                 })
             }
             _ => None,
@@ -98,22 +125,30 @@ impl TypeParameterScope {
         })
     }
 
-    /// A declared type parameter named `name` with `variance` and its upper `bounds` in written
-    /// order.
+    /// The type parameter this scope declares with the resolved `identity`, with `variance`,
+    /// `reified` and its upper `bounds` in written order.
     pub(super) fn type_parameter(
         &self,
-        name: &str,
+        identity: &str,
         variance: TypeVariance,
+        is_reified: bool,
         bounds: impl IntoIterator<Item = Ty>,
     ) -> Option<KspTypeParameter> {
+        let identity = TyParamName::new(identity);
+        let declared = self
+            .parameters
+            .iter()
+            .rev()
+            .find(|parameter| parameter.identity == identity)?;
         Some(KspTypeParameter {
-            name: name.to_string(),
+            id: declared.id,
+            name: declared.name.clone(),
             variance: match variance {
                 TypeVariance::Invariant => KspVariance::Invariant,
                 TypeVariance::Out => KspVariance::Out,
                 TypeVariance::In => KspVariance::In,
             },
-            is_reified: false,
+            is_reified,
             bounds: bounds
                 .into_iter()
                 .map(|bound| self.ty(bound))

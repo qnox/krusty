@@ -32,6 +32,8 @@ pub(crate) use common_core::server_pool::Pool as ServerPool;
 mod compiler_plugin_fixture;
 #[path = "common/e2e.rs"]
 mod e2e_support;
+#[path = "generic_serializable_parent_e2e.rs"]
+mod generic_serializable_parent_e2e;
 #[path = "common/inner_class_rows.rs"]
 mod inner_class_rows_support;
 #[path = "common/reference_box.rs"]
