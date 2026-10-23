@@ -629,7 +629,9 @@ impl Emitter<'_> {
         }
         let marker_start = u16::try_from(scratch.bytes.len())
             .map_err(|_| "an inline lambda's code is too long")?;
+        let caller_type_parameters = self.type_parameter_function.replace(impl_fn);
         let result = self.emit_fn_body_inline(inline_body, &parameter_slots, &mut scratch);
+        self.type_parameter_function = caller_type_parameters;
         self.return_finalizers = caller_finalizers;
         self.protected_regions = caller_regions;
         self.frame = caller_frame;

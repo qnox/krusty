@@ -704,3 +704,10 @@ so source candidates, opaque callable lookup and module-qualified serialized-dec
 retain the same operation.
 No Kotlin metadata encoding or declaration identity changes. The actual Native stdlib regression
 checks both declaration forms through all three views, with and without platform authority.
+
+## Reference-array cast bound evidence
+
+Compatible JVM array casts read the existing IR generic signatures and exact recorded non-local
+and lambda bound declarations. They introduce no Kotlin metadata encoding or provider lookup.
+Expected components use declaration-primary erasure; actual components retain the complete
+intersection of declared bounds. Backend wrapper names do not replace Kotlin classifier identity.

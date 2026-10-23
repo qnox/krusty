@@ -5649,3 +5649,11 @@ write the dependency libraries itself; kotlinc only supplies the expected progra
   module's KLIB with this backend, the dependent compilation reads it through the KLIB library
   provider, and Native links and runs `box()`; the expected-failure ratchet records each case until
   it runs.
+
+## Compatible JVM reference-array casts
+
+The JVM array-cast boundary consumes checked semantic types, declaration-owned bounds and the
+same frozen classifier inventory used for invocation ownership. It reuses core subtyping without
+JVM owner aliases. Scratch inline-lambda emission scopes its declaration context explicitly.
+Unknown/cyclic formal evidence never proves compatibility; normal written-cast behavior remains.
+This prerequisite is separate from checked local-call argument preparation (#2554).
