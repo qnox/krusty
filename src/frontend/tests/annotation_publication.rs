@@ -50,6 +50,7 @@ class Subject(
                 crate::types::AnnotationValue::Class(Ty::obj("Token"))
             )],
             facts: Default::default(),
+            written: written("PropertyMark", None, &[0]),
         }]
     );
     assert!(applications(1).is_empty());
@@ -62,6 +63,11 @@ class Subject(
                 crate::types::AnnotationValue::string("property")
             )],
             facts: Default::default(),
+            written: written(
+                "Other",
+                Some(crate::types::PropertyAnnotationSite::Property),
+                &[0],
+            ),
         }]
     );
 }
