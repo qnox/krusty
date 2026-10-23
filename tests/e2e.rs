@@ -1313,6 +1313,8 @@ mod java_source_field_initializer_e2e;
 mod java_source_interop_e2e;
 mod java_static_modules;
 java_static_modules::declare!();
+#[path = "initializer_lambda_return_e2e.rs"]
+mod initializer_lambda_return_e2e;
 #[path = "java_supertype_type_arguments_e2e.rs"]
 mod java_supertype_type_arguments_e2e;
 #[path = "java_type_use_nullability_e2e.rs"]

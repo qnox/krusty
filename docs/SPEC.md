@@ -11552,6 +11552,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reads a constructor parameter which is not a property has nothing to read there and keeps the
   file unsupported.
   Test: `tests/serializable_init_replay_e2e.rs`.
+- **A labelled return to a lambda is allowed in a class initializer.** An `init` block or a
+  property initializer has no declaration a `return` could leave, so kotlinc reports `'return' is
+  prohibited here.` for a return that targets it, inside a lambda or not. A return labelled with an
+  enclosing lambda (`step { if (id < 0) return@step }`) leaves only that lambda and is accepted.
+  krusty rejected both, because it checked the declaration before resolving the return's target.
+  Test: `tests/initializer_lambda_return_e2e.rs`.
 - **A serializable abstract class is serialized polymorphically.** kotlinc gives a non-generic,
   non-sealed abstract `@Serializable` class no `$serializer`: `Companion.serializer()` returns
   `new PolymorphicSerializer(C::class, new Annotation[0])`, cached in a `$cachedSerializer$delegate`
