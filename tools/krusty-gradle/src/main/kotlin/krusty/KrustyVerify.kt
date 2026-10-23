@@ -4,8 +4,8 @@ import org.gradle.api.DefaultTask
 import org.gradle.api.GradleException
 import org.gradle.api.Project
 import org.gradle.api.Task
+import org.gradle.api.file.Directory
 import org.gradle.api.file.DirectoryProperty
-import org.gradle.api.file.FileSystemOperations
 import org.gradle.api.file.RegularFile
 import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.invocation.Gradle
@@ -70,9 +70,25 @@ private const val RECORD_INPUT = "krusty.record:"
 /** The input naming why the compilation that follows it is left to kotlinc. */
 private const val UNSUPPORTED_INPUT = "krusty.unsupported:"
 
-/** Report [compilation] as left to kotlinc without asking krusty, for [reason]. */
-internal fun reportUnsupported(report: TaskProvider<Task>, compilation: String, reason: String) {
-    report.configure { inputs.property(UNSUPPORTED_INPUT + compilation, reason) }
+/** The input naming kotlinc's output of the unsupported compilation that follows it. */
+private const val UNSUPPORTED_REFERENCE_INPUT = "krusty.unsupported-reference:"
+
+/**
+ * Report [kotlinTask]'s compilation as left to kotlinc without asking krusty, for [reason]. The
+ * report runs after that compilation, so it describes what the build compiled, and its record is
+ * proven apart from kotlinc's output as every record is.
+ */
+internal fun reportUnsupported(report: TaskProvider<Task>, kotlinTask: KotlinJvmCompile, reason: String) {
+    report.configure {
+        inputs.property(UNSUPPORTED_INPUT + kotlinTask.path, reason)
+        // The location alone, not the task output's value: Gradle 7 refuses to read that before the
+        // task has run, and dependsOn orders the two.
+        inputs.property(
+            UNSUPPORTED_REFERENCE_INPUT + kotlinTask.path,
+            kotlinTask.destinationDirectory.get().asFile.absolutePath,
+        )
+        dependsOn(kotlinTask)
+    }
 }
 
 private fun registerVerifyReport(root: Project, binary: Provider<RegularFile>) {
@@ -81,8 +97,6 @@ private fun registerVerifyReport(root: Project, binary: Provider<RegularFile>) {
         description = "Compiles every Kotlin/JVM compilation with kotlinc and with krusty, and reports " +
             "what krusty compiles and how its classes differ from kotlinc's"
         this.binary.set(binary)
-        reportDirectory.set(root.layout.buildDirectory.dir("reports/krusty-verify"))
-        unsupportedRecords.set(root.layout.buildDirectory.dir("krusty/verify-unsupported"))
         gradleVersion.set(root.gradle.gradleVersion)
         jdk.set(System.getProperty("java.version"))
         shareNames.set(
@@ -230,7 +244,6 @@ abstract class KrustyVerifyCompileTask @Inject constructor(
 /** The root `krustyVerify` task: the build's verify report, from every compilation's record. */
 abstract class KrustyVerifyReportTask @Inject constructor(
     private val execOperations: ExecOperations,
-    private val fileSystemOperations: FileSystemOperations,
 ) : DefaultTask() {
     @get:Internal
     abstract val binary: RegularFileProperty
@@ -245,11 +258,16 @@ abstract class KrustyVerifyReportTask @Inject constructor(
     @get:Input
     abstract val shareNames: Property<Boolean>
 
+    /**
+     * The records of compilations left to kotlinc without asking krusty. Fixed, like the report's
+     * directory, in the root project's own build directory: nothing here is deleted, and krusty
+     * proves each record apart from kotlinc's output and the report before it writes either.
+     */
     @get:Internal
-    abstract val unsupportedRecords: DirectoryProperty
+    val unsupportedRecords: Provider<Directory> = project.layout.buildDirectory.dir("krusty/verify-unsupported")
 
-    @get:OutputDirectory
-    abstract val reportDirectory: DirectoryProperty
+    @get:Internal
+    val reportDirectory: Provider<Directory> = project.layout.buildDirectory.dir("reports/krusty-verify")
 
     init {
         outputs.upToDateWhen { false }
@@ -258,26 +276,26 @@ abstract class KrustyVerifyReportTask @Inject constructor(
     @TaskAction
     fun report() {
         val executable = binary.get().asFile.absolutePath
-        // Only this invocation's records and report: nothing an earlier one wrote survives it.
-        fileSystemOperations.delete { delete(reportDirectory) }
+        // Only this invocation's records go into the report, each replaced by its own run; krusty
+        // replaces the report's files itself once it has proven every record apart from them.
         val unsupported = unsupportedRecords.get().asFile
-        fileSystemOperations.delete { delete(unsupported) }
         // The compilations' contributions, from projects whose plugin classloader may not be this one.
         val contributed = inputs.properties.toSortedMap()
         fun contributions(prefix: String) = contributed.filterKeys { it.startsWith(prefix) }
             .map { (name, value) -> name.removePrefix(prefix) to value.toString() }
+        val references = contributions(UNSUPPORTED_REFERENCE_INPUT).toMap()
         val unsupportedRecordFiles = contributions(UNSUPPORTED_INPUT).mapIndexed { index, (compilation, reason) ->
             val record = File(unsupported, "records/$index.json")
             exec(
                 executable,
                 listOf(
                     "verify-compile",
-                    "--reference", File(unsupported, "reference").absolutePath,
+                    "--reference", references.getValue(compilation),
                     "--record", record.absolutePath,
                     "--compilation", compilation,
                     "--unsupported", reason,
                 ),
-            )
+            ).lines().filter(String::isNotBlank).forEach(logger::lifecycle)
             record
         }
         // Every current compilation's verify task ran in this build and wrote its record; a missing

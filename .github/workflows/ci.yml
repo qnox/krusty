@@ -831,6 +831,7 @@ jobs:
           tests="$tests serialization_plugin_compiles_through_krusty kapt_project_compiles_through_krusty"
           tests="$tests verify_task_reports_krusty_against_kotlinc verify_task_reports_only_the_current_invocation"
           tests="$tests verify_task_reports_an_unsupported_kotlin_gradle_plugin verify_task_reports_projects_that_each_load_the_plugin"
+          tests="$tests verify_task_reports_kotlin_dsl_compiles_after_kotlinc_compiles_them"
           tests="$tests oss_corpus_init_script_applies_the_packaged_plugin"
           if [ "${{ matrix.ksp }}" = true ]; then
             tests="$tests ksp2_generated_sources_compile_through_krusty"

@@ -161,7 +161,7 @@ private fun replaceKotlinJvmCompiles(
             if (verifyReport != null && kotlinDsl && kotlinTask !is KaptGenerateStubs && sourceSetName != null) {
                 reportUnsupported(
                     verifyReport,
-                    kotlinTask.path,
+                    kotlinTask,
                     "krusty: the project applies kotlin-dsl, whose compiles stay with kotlinc",
                 )
             }

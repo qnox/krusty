@@ -301,6 +301,99 @@ fn verify_task_reports_projects_that_each_load_the_plugin() {
     let _ = std::fs::remove_dir_all(&fixture.root);
 }
 
+/// A kotlin-dsl project's compiles stay with kotlinc and are reported unsupported, but only once
+/// kotlinc has compiled them in this build. The report's directory and the unsupported records'
+/// are the root build's own: krustyVerify replaces its report and records there without removing
+/// anything else.
+#[test]
+#[ignore = "downloads Gradle and the Kotlin Gradle plugin"]
+fn verify_task_reports_kotlin_dsl_compiles_after_kotlinc_compiles_them() {
+    let fixture =
+        IntegrationFixture::new("krusty-verify-kotlin-dsl", write_kotlin_dsl_verify_build);
+    let root = &fixture.root;
+    let report_dir = root.join("build/reports/krusty-verify");
+    let unsupported = root.join("build/krusty/verify-unsupported");
+    for run in 0..2 {
+        let output = fixture
+            .build()
+            .tasks(["krustyVerify"])
+            .run_output()
+            .unwrap_or_else(|error| panic!("{error}"));
+        let reason = "unsupported, left to kotlinc: krusty: the project applies kotlin-dsl, whose compiles stay with kotlinc";
+        let reports = output
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("krusty verify: "))
+            .map(without_measurements)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reports,
+            [
+                format!("krusty verify: :compileKotlin: {reason}"),
+                format!("krusty verify: :compileTestKotlin: {reason}"),
+                "krusty verify: 0/2 compilations compiled (0 byte-identical), 0 failed, 2 unsupported; n/a of classes byte-identical".to_string(),
+            ],
+            "{output}"
+        );
+        // kotlinc compiled the kotlin-dsl project's classes and its precompiled script plugin.
+        for class in ["fixture/Greeting.class", "Fixture_greetingPlugin.class"] {
+            assert!(
+                root.join("build/classes/kotlin/main").join(class).is_file(),
+                "{class}\n{output}"
+            );
+        }
+        for record in ["records/0.json", "records/1.json"] {
+            assert!(unsupported.join(record).is_file(), "{record}");
+        }
+        assert!(report_dir.join("krusty-verify-issue.md").is_file());
+        if run == 0 {
+            std::fs::write(report_dir.join("kept.txt"), "kept").expect("a file beside the report");
+            std::fs::write(unsupported.join("kept.txt"), "kept")
+                .expect("a file beside the records");
+        } else {
+            for directory in [&report_dir, &unsupported] {
+                assert_eq!(
+                    std::fs::read_to_string(directory.join("kept.txt")).expect("the kept file"),
+                    "kept"
+                );
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+fn write_kotlin_dsl_verify_build(root: &Path, plugin_version: &str, kgp_version: &str) {
+    write_verify_build(root, plugin_version, kgp_version);
+    std::fs::remove_dir_all(root.join("src")).expect("remove the Kotlin/JVM sources");
+    let write = |rel: &str, body: &str| {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(path, body.replace("PLUGIN_VERSION", plugin_version)).expect("write");
+    };
+    // kotlin-dsl selects the Kotlin Gradle plugin embedded in Gradle.
+    write(
+        "build.gradle.kts",
+        r#"
+plugins {
+    `kotlin-dsl`
+    id("dev.krustythecompiler") version "PLUGIN_VERSION"
+}
+
+repositories {
+    mavenCentral()
+}
+"#,
+    );
+    write(
+        "src/main/kotlin/fixture/Greeting.kt",
+        "package fixture\n\nobject Greeting {\n    const val TEXT = \"hello\"\n}\n",
+    );
+    write(
+        "src/main/kotlin/fixture.greeting.gradle.kts",
+        "tasks.register(\"greet\") {\n    doLast { println(fixture.Greeting.TEXT) }\n}\n",
+    );
+}
+
 fn write_projects_build(root: &Path, plugin_version: &str, kgp_version: &str) {
     write_verify_build(root, plugin_version, kgp_version);
     let write = |rel: &str, body: &str| {
