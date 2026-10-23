@@ -15,7 +15,8 @@ import kotlin.sequences.Sequence;
 // Where a source declaration writes a type: a supertype, a bound or a type argument. The type is
 // the resolved one; how it was written is not served yet.
 final class SourceTypeReference implements KSTypeReference {
-    private final KSNode parent;
+    // Set after construction for a parameter's type, which is read before its parameter.
+    KSNode parent;
     SourceType type;
 
     SourceTypeReference(KSNode parent) {

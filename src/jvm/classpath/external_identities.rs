@@ -72,6 +72,11 @@ impl Classpath {
             dependency_callable: None,
             direct_c_function: None,
             klib_body_companion_receiver: None,
+            klib_body_type_parameters: Box::new([]),
+            klib_body_declaration_modifiers: None,
+            klib_body_class_contract: None,
+            klib_body_vararg_index: None,
+            klib_body_parameter_defaults: None,
         });
         self.external_callable_ids
             .borrow_mut()

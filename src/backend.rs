@@ -5,12 +5,16 @@
 pub(crate) mod class_tables;
 pub(crate) mod coroutines;
 pub(crate) mod counted_loops;
+mod dependency_accessor;
+mod dependency_call_shape;
 mod dependency_facts;
 mod dependency_metadata;
+mod dependency_signature;
 mod entry;
 pub(crate) mod local_properties;
 mod module_facts;
 
+pub(crate) use dependency_call_shape::{DependencyCallShape, DependencyExportCall};
 #[cfg(test)]
 pub(crate) use dependency_facts::referenced_dependencies;
 pub use dependency_facts::{
@@ -25,6 +29,9 @@ pub(crate) use dependency_metadata::{
 pub use dependency_metadata::{
     DependencyExportSignatures, DependencyMemberReceiver, DependencyMetadata,
     SingletonExtensionUnreadReceiver, SingletonMemberReceiver,
+};
+pub(crate) use dependency_signature::{
+    instantiate_dependency_signature, DependencyFunctionSignature,
 };
 
 /// The parameter form [`Entry::selected`] reports beside the selected function.
@@ -117,6 +124,12 @@ pub trait Backend {
     /// serialized KLIB body. Such a call is admitted only when the target's ordinary dependency
     /// registry can realize the frozen provider handle directly.
     fn realizes_bodyless_dependency_support(&self) -> bool {
+        false
+    }
+
+    /// A positive target implementation of a provider-authenticated declaration. This does not
+    /// authorize common folding or replace a retained dependency export.
+    fn realizes_dependency_intrinsic(&self, _operation: BackendCompilerIntrinsic) -> bool {
         false
     }
 

@@ -543,6 +543,143 @@ void kt_assert_failed_to_throw(KRef message, const KType *expected, KRef was) {
     kt_assert_fail(kt_string_plus(text, outcome));
 }
 
+/* ---- `kotlin.Result` ------------------------------------------------------------------------- */
+
+/* A failed `Result` holds `Result.Failure(exception)`: what `createFailure` makes and every
+   reader of a `Result` tells apart from a successful value by its type. A successful `Result` is
+   its value itself -- the class is a value class over `Any?` -- so this is the only object the
+   runtime has to provide for it. */
+typedef struct KResultFailure {
+    KObjectHeader header;
+    KRef exception;
+} KResultFailure;
+
+static const uint32_t kt_result_failure_offsets[] = {offsetof(KResultFailure, exception)};
+
+static kt_boolean kt_result_failure_equals(KRef self, KRef other) {
+    if (other == NULL || other->header.type != &kt_type_result_failure) {
+        return false;
+    }
+    return kt_equals(((const KResultFailure *)self)->exception,
+                     ((const KResultFailure *)other)->exception);
+}
+
+static kt_int kt_result_failure_hash_code(KRef self) {
+    return kt_hash_code(((const KResultFailure *)self)->exception);
+}
+
+/* `Failure($exception)`, as the data the class prints. */
+static KRef kt_result_failure_to_string(KRef self) {
+    KRef text = kt_to_string(((const KResultFailure *)self)->exception);
+    if (kt_raised()) {
+        return NULL;
+    }
+    text = kt_string_plus(kt_string_utf8("Failure(", 8), text);
+    return kt_string_plus(text, kt_string_utf8(")", 1));
+}
+
+static const kt_fn kt_result_failure_vtable[] = {(kt_fn)kt_result_failure_equals,
+                                                 (kt_fn)kt_result_failure_hash_code,
+                                                 (kt_fn)kt_result_failure_to_string};
+
+const KType kt_type_result_failure = {KT_NAMED("kotlin.Result.", "Failure"),
+                                      .instance_size = sizeof(KResultFailure),
+                                      .reference_count = 1,
+                                      .reference_offsets = kt_result_failure_offsets,
+                                      .super = &kt_type_any,
+                                      .vtable = kt_result_failure_vtable,
+                                      .vtable_length = 3};
+
+KRef kt_result_failure_new(KRef exception) {
+    KResultFailure *failure =
+        (KResultFailure *)kt_gc_allocate(&kt_type_result_failure, sizeof(KResultFailure));
+    failure->exception = exception;
+    return (KRef)failure;
+}
+
+/* A `Result` where a position holds it as `Any` or a type parameter: a box of its own type around
+   the value, so `is Result` and its `toString` answer as the class's. */
+typedef struct KResultBox {
+    KObjectHeader header;
+    KRef value;
+} KResultBox;
+
+static const uint32_t kt_result_box_offsets[] = {offsetof(KResultBox, value)};
+
+static kt_boolean kt_result_box_equals(KRef self, KRef other) {
+    if (other == NULL || other->header.type != &kt_type_result) {
+        return false;
+    }
+    return kt_equals(((const KResultBox *)self)->value, ((const KResultBox *)other)->value);
+}
+
+static kt_int kt_result_box_hash_code(KRef self) {
+    return kt_hash_code(((const KResultBox *)self)->value);
+}
+
+/* `Success(value)` or the failure's own `Failure(exception)`. */
+static KRef kt_result_box_to_string(KRef self) {
+    KRef value = ((const KResultBox *)self)->value;
+    if (value != NULL && value->header.type == &kt_type_result_failure) {
+        return kt_to_string(value);
+    }
+    KRef text = kt_to_string(value);
+    if (kt_raised()) {
+        return NULL;
+    }
+    text = kt_string_plus(kt_string_utf8("Success(", 8), text);
+    return kt_string_plus(text, kt_string_utf8(")", 1));
+}
+
+static const kt_fn kt_result_box_vtable[] = {(kt_fn)kt_result_box_equals,
+                                             (kt_fn)kt_result_box_hash_code,
+                                             (kt_fn)kt_result_box_to_string};
+
+const KType kt_type_result = {KT_NAMED("kotlin.", "Result"),
+                              .instance_size = sizeof(KResultBox),
+                              .reference_count = 1,
+                              .reference_offsets = kt_result_box_offsets,
+                              .super = &kt_type_any,
+                              .vtable = kt_result_box_vtable,
+                              .vtable_length = 3};
+
+KRef kt_result_box(KRef value) {
+    KResultBox *box = (KResultBox *)kt_gc_allocate(&kt_type_result, sizeof(KResultBox));
+    box->value = value;
+    return (KRef)box;
+}
+
+KRef kt_result_unbox(KRef box) { return ((const KResultBox *)box)->value; }
+
+/* kotlin-test's `checkResultIsFailure`: the exception a failed `result` holds when it is an
+   instance of `expected`, and otherwise an assertion failure naming what happened instead. A NULL
+   `expected` is the class-less overload `assertFails` reaches, which any exception satisfies. */
+KRef kt_check_result_is_failure(KRef expected, KRef message, KRef result) {
+    /* The class's own parameter is a `Result`, which a caller holding it generically passes boxed. */
+    if (result != NULL && result->header.type == &kt_type_result) {
+        result = kt_result_unbox(result);
+    }
+    KRef was = result != NULL && result->header.type == &kt_type_result_failure
+                   ? ((const KResultFailure *)result)->exception
+                   : NULL;
+    if (expected == NULL) {
+        if (was != NULL) {
+            return was;
+        }
+        kt_assert_fail(kt_string_plus(
+            kt_assert_prefix(message),
+            kt_string_utf8("Expected an exception to be thrown, but was completed successfully.",
+                           67)));
+        return NULL;
+    }
+    const KType *type = kt_class_type(expected);
+    if (was != NULL && kt_is_instance(was, type)) {
+        return was;
+    }
+    kt_assert_failed_to_throw(message, type, was);
+    return NULL;
+}
+
 /* The report `assertEquals` and `assertSame` share: `Expected <expected>, actual <actual>` and then
    `tail`, or NULL when rendering an operand raised. Built in pieces because rendering either
    operand may itself allocate, and the text so far has to stay reachable across that — the same

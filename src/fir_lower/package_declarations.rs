@@ -291,8 +291,7 @@ pub(super) fn publish(
             | DeclarationKind::EnumEntry
             | DeclarationKind::Constructor
             | DeclarationKind::Accessor
-            | DeclarationKind::Initializer
-            | DeclarationKind::Script => {}
+            | DeclarationKind::Initializer => {}
         }
     }
     ir.package_functions

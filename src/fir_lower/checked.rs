@@ -655,7 +655,7 @@ impl BodyLowering<'_> {
                 semantic_role,
                 overridden_declarations,
                 suspend,
-                can_inline,
+                inline,
                 inline_plan,
                 extension_receiver_parameter,
             } => {
@@ -673,7 +673,7 @@ impl BodyLowering<'_> {
                     semantic_role: *semantic_role,
                     overridden_declarations,
                     suspend: *suspend,
-                    can_inline: *can_inline,
+                    inline: *inline,
                     inline_plan: inline_plan.as_deref(),
                     substitutions: &call.substitutions,
                     extension_receiver_parameter: *extension_receiver_parameter,

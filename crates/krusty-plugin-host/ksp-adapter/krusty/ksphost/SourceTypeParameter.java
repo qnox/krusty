@@ -19,16 +19,16 @@ import java.util.List;
 import java.util.Set;
 import kotlin.sequences.Sequence;
 
-// A type parameter a source classifier declares.
+// A type parameter a source classifier or function declares.
 final class SourceTypeParameter implements KSTypeParameter {
-    private final SourceClass owner;
+    private final KSDeclaration owner;
     private final Name name;
     private final Name qualifiedName;
     private final Variance variance;
     private final boolean reified;
     final List<KSTypeReference> bounds = new ArrayList<>();
 
-    SourceTypeParameter(SourceClass owner, String name, Variance variance, boolean reified) {
+    SourceTypeParameter(KSDeclaration owner, String name, Variance variance, boolean reified) {
         this.owner = owner;
         this.name = new Name(name);
         this.qualifiedName = new Name(owner.getQualifiedName().asString() + "." + name);

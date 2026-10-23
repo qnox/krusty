@@ -35,6 +35,7 @@ impl std::fmt::Display for InconsistentClassifier {
 /// enclosing class puts in scope.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ClassTypeParameters {
+    formals: Vec<Ty>,
     names: Vec<String>,
     bounds: Vec<Vec<Ty>>,
     variances: Vec<TypeVariance>,
@@ -58,6 +59,12 @@ impl ClassTypeParameters {
         let enclosing =
             semantic_bounds_with_identities(&class.type_params, &outer, identities.by_id());
         let mut scope = Self {
+            formals: super::type_signatures::declared_formal_types(
+                &class.type_params,
+                &outer,
+                &identities,
+            )
+            .into_vec(),
             names: identities.formals().to_vec(),
             bounds: class
                 .type_params
@@ -82,6 +89,7 @@ impl ClassTypeParameters {
             enclosing,
         };
         if let Some(captured) = captured {
+            scope.formals.extend(captured.formals.iter().copied());
             scope.names.extend(captured.names.iter().cloned());
             scope.bounds.extend(captured.bounds.iter().cloned());
             scope.variances.extend(captured.variances.iter().copied());
@@ -98,6 +106,15 @@ impl ClassTypeParameters {
     /// parameter, for normalizing its constructors and members.
     pub(crate) fn identities(&self) -> &TypeParameterIdentities {
         &self.identities
+    }
+
+    pub(crate) fn klib_body_parameters(&self) -> crate::libraries::KlibBodyClassParameters {
+        crate::libraries::KlibBodyClassParameters {
+            formals: self.formals.clone().into_boxed_slice(),
+            bounds: self.bounds.clone().into_boxed_slice(),
+            variances: self.variances.clone().into_boxed_slice(),
+            own_count: self.own,
+        }
     }
 }
 

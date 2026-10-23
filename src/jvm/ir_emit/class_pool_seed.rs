@@ -72,16 +72,10 @@ fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_>, cw: &mut ClassWriter) {
                     .annotations
                     .map(crate::jvm::classfile::split_declaration_annotations)
                     .unwrap_or_default();
-                let types = |annotations: Vec<crate::ir::AppliedAnnotation>| -> Vec<String> {
-                    annotations
-                        .iter()
-                        .map(|annotation| format!("L{};", annotation.internal))
-                        .collect()
-                };
                 crate::jvm::classfile::SeedCtorParameter {
                     ann_kind: parameter.nullability,
-                    visible_ann_types: types(visible),
-                    invisible_ann_types: types(invisible),
+                    visible_annotations: visible,
+                    invisible_annotations: invisible,
                 }
             })
             .collect();
