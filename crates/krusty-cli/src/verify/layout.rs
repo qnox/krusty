@@ -53,11 +53,11 @@ pub fn check_layout(
     Ok(())
 }
 
-/// Refuse a record that is one of the report files `verify-report` replaces in `out`: it would be
-/// removed before it is read.
+/// Refuse a record file that is one of the report files `verify-report` replaces in `out`, under
+/// any spelling or link: it would be removed before it is read.
 pub fn check_report_layout(out: &Path, records: &[PathBuf]) -> Result<(), String> {
     let reports = super::REPORT_FILES.map(|name| resolved(&out.join(name)));
-    for record in records.iter().filter(|record| !record.is_dir()) {
+    for record in records {
         if reports.contains(&resolved(record)) {
             return Err(format!(
                 "record {} is a report verify-report writes to --out {}",
@@ -246,7 +246,7 @@ mod tests {
         let out = root.join("report");
         let record = root.join("records/../report/krusty-verify.md");
         assert_eq!(
-            check_report_layout(&out, &[root.join("main.json"), root.join("kotlinc")]),
+            check_report_layout(&out, &[root.join("main.json"), root.join("records/a.json")]),
             Ok(())
         );
         assert_eq!(

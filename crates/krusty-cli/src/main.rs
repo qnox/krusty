@@ -307,7 +307,11 @@ fn run_verify_report(argv: &[String]) {
         eprintln!("error: {error}");
         std::process::exit(2);
     };
-    if let Err(error) = verify::check_report_layout(&arguments.out, &arguments.records) {
+    // Every input is known and kept apart from the reports before any report is removed.
+    let files = arguments
+        .record_files()
+        .unwrap_or_else(|error| fail(format!("cannot list the records: {error}")));
+    if let Err(error) = verify::check_report_layout(&arguments.out, &files) {
         fail(error);
     }
     // An earlier invocation's report never survives this one, even when this one fails.
@@ -319,9 +323,6 @@ fn run_verify_report(argv: &[String]) {
             }
         }
     }
-    let files = arguments
-        .record_files()
-        .unwrap_or_else(|error| fail(format!("cannot list the records: {error}")));
     let records = files
         .iter()
         .map(|file| {
