@@ -137,7 +137,6 @@ pub enum DeclarationKind {
     Constructor,
     Accessor,
     Initializer,
-    Script,
 }
 
 /// A declaration identity allocated while Pass-1 syntax is live. The range exists only in the

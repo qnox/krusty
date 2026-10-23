@@ -356,6 +356,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 &delegate_args,
                 &target_params,
                 forwarded,
+                None,
                 &mut sctor,
             );
             target_jvm_tys.splice(0..0, forwarded.iter().copied());

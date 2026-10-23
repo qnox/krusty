@@ -36,6 +36,7 @@ use crate::types::{Ty, Visibility};
 pub(super) enum T {
     DemoBox,
     Int,
+    IntArray,
     Double,
     Boolean,
     String,
@@ -55,6 +56,7 @@ impl T {
         match self {
             T::DemoBox => "Box",
             T::Int => "Int",
+            T::IntArray => "IntArray",
             T::Double => "Double",
             T::Boolean => "Boolean",
             T::String => "String",
@@ -429,6 +431,28 @@ impl Body {
                 operator,
                 operand,
                 argument,
+            },
+        )
+    }
+
+    /// `try { body } catch (parameter: Throwable) { handler(parameter) }` typed `ty`.
+    pub(super) fn try_catch(
+        &mut self,
+        body: KlibIrExprId,
+        handler: impl FnOnce(&mut Self, &KlibIrSymbol) -> KlibIrExprId,
+        ty: T,
+    ) -> KlibIrExprId {
+        let (parameter, symbol) = self.variable_with(T::Throwable, None, 0, "CATCH_PARAMETER");
+        let KlibIrStatement::Variable(parameter) = parameter else {
+            unreachable!("a variable declaration")
+        };
+        let result = handler(self, &symbol);
+        self.expr(
+            ty,
+            KlibIrExprKind::Try {
+                result: body,
+                catches: vec![crate::metadata::klib_ir::tree::KlibIrCatch { parameter, result }],
+                finally: None,
             },
         )
     }

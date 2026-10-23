@@ -21,11 +21,28 @@ pub(super) fn is_jvm_field(c: &IrClass, property: &str) -> bool {
     !c.is_companion && c.property_has_jvm_field(property)
 }
 
+/// Whether a script class stores one of its constructor parameters in this field. kotlinc
+/// publishes no nullability for the field or for the constructor parameter it stores.
+pub(super) fn is_script_parameter_field(c: &IrClass, field_index: usize) -> bool {
+    let field_index = Some(field_index as u32);
+    c.is_script
+        && c.ctor_args
+            .iter()
+            .any(|argument| argument.is_field && argument.field_index == field_index)
+        && c.properties
+            .iter()
+            .all(|property| property.backing_field != field_index)
+}
+
 /// The access a backing field publishes when it is not simply private: a `@JvmField` field takes
 /// its property's visibility, and a `lateinit` one its setter's, since kotlinc exposes the field of
 /// a `lateinit var` as the property's storage (`internal` has no JVM spelling and is public).
 pub(super) fn jvm_field_visibility(c: &IrClass, field_index: usize) -> Option<u16> {
     let field = &c.fields[field_index];
+    if is_script_parameter_field(c, field_index) {
+        // kotlinc keeps a script's constructor parameters in package-private fields.
+        return Some(0x0000);
+    }
     let visibility = if is_jvm_field(c, &field.name) {
         c.properties
             .iter()
@@ -113,4 +130,5 @@ pub(super) fn publishes_field_nullability(c: &IrClass, field_index: usize) -> bo
     field_index >= super::captured_storage::constructor_prefix_fields(c)
         && !field.is_compiler_generated()
         && !field.is_lateinit()
+        && !is_script_parameter_field(c, field_index)
 }

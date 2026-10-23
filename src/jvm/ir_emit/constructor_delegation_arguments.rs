@@ -9,7 +9,7 @@ use super::*;
 
 impl Emitter<'_> {
     /// Push `this`, the forwarded owner prefix (an enum's `name, ordinal`), and the adapted
-    /// delegation arguments. An argument that cannot carry the operand stack (a handler, a
+    /// delegation arguments, those on `operand_line` when one is given. An argument that cannot carry the operand stack (a handler, a
     /// suspension, a loop transfer, or a branching inline splice that takes a literal) cannot run
     /// with the uninitialized `this` on it, so such an argument list is first spilled to
     /// temporaries. Other branching arguments keep the prefix on the stack, as kotlinc does.
@@ -18,6 +18,7 @@ impl Emitter<'_> {
         arguments: &[crate::ir::ExprId],
         declared: &[Ty],
         forwarded_prefix: &[Ty],
+        operand_line: Option<u32>,
         code: &mut CodeBuilder,
     ) {
         if arguments.len() != declared.len() {
@@ -46,6 +47,9 @@ impl Emitter<'_> {
         for &ty in forwarded_prefix {
             load(ty, slot, code);
             slot += slot_words(ty);
+        }
+        if let Some(line) = operand_line {
+            code.mark_line(line);
         }
         for (index, &argument) in arguments.iter().enumerate() {
             let source = match &spilled {

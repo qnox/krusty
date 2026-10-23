@@ -30,10 +30,14 @@ final class SourceClass implements KSClassDeclaration {
     private final Name qualifiedName;
     private final ClassKind kind;
     private final int line;
-    private final boolean declarationsComplete;
+    boolean declarationsComplete;
     final List<KSAnnotation> annotations = new ArrayList<>();
     final List<KSDeclaration> declarations = new ArrayList<>();
-    private PrimaryConstructor primaryConstructor;
+    SourceFunction primaryConstructor;
+    // Each is null when krusty could not describe it; the query is then refused.
+    Set<Modifier> modifiers;
+    List<KSTypeParameter> typeParameters;
+    List<KSTypeReference> superTypes;
 
     SourceClass(
             SourceFile file,
@@ -41,21 +45,13 @@ final class SourceClass implements KSClassDeclaration {
             String simpleName,
             String qualifiedName,
             ClassKind kind,
-            int line,
-            boolean declarationsComplete) {
+            int line) {
         this.file = file;
         this.owner = owner;
         this.simpleName = new Name(simpleName);
         this.qualifiedName = new Name(qualifiedName);
         this.kind = kind;
         this.line = line;
-        this.declarationsComplete = declarationsComplete;
-    }
-
-    PrimaryConstructor addPrimaryConstructor() {
-        primaryConstructor = new PrimaryConstructor(this);
-        declarations.add(primaryConstructor);
-        return primaryConstructor;
     }
 
     SourceFile file() {
@@ -78,7 +74,11 @@ final class SourceClass implements KSClassDeclaration {
 
     @Override
     public Sequence<KSTypeReference> getSuperTypes() {
-        throw Nodes.notImplemented("KSClassDeclaration.superTypes");
+        if (superTypes == null) {
+            throw Nodes.notImplemented(
+                    "KSClassDeclaration.superTypes of a classifier with a supertype it cannot describe");
+        }
+        return Nodes.sequence(superTypes);
     }
 
     @Override
@@ -123,7 +123,11 @@ final class SourceClass implements KSClassDeclaration {
 
     @Override
     public List<KSTypeParameter> getTypeParameters() {
-        throw Nodes.notImplemented("KSClassDeclaration.typeParameters");
+        if (typeParameters == null) {
+            throw Nodes.notImplemented(
+                    "KSClassDeclaration.typeParameters of a classifier with a bound it cannot describe");
+        }
+        return typeParameters;
     }
 
     @Override
@@ -153,7 +157,11 @@ final class SourceClass implements KSClassDeclaration {
 
     @Override
     public Set<Modifier> getModifiers() {
-        throw Nodes.notImplemented("KSClassDeclaration.modifiers");
+        if (modifiers == null) {
+            throw Nodes.notImplemented(
+                    "KSClassDeclaration.modifiers of a classifier without a recorded modifier list");
+        }
+        return modifiers;
     }
 
     @Override

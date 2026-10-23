@@ -250,7 +250,9 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                         if path.extension().and_then(|e| e.to_str()) == Some("java") {
                             return Err(Refusal::JavaSources(format!("{value} is a Java source")));
                         }
-                        if !krusty::source::is_batch_compilable_path(&path) {
+                        // A script compiles against a script definition the action does not
+                        // describe, so the worker leaves it to the reference compiler.
+                        if krusty::source::kind(&path) != Some(krusty::source::SourceKind::Kotlin) {
                             return Err(Refusal::Unsupported(format!(
                                 "--srcs {value}: krusty's batch compiler accepts only .kt sources"
                             )));
@@ -1103,8 +1105,9 @@ mod tests {
         assert!(matches!(by_count, Refusal::JavaSources(_)), "{by_count:?}");
     }
 
-    /// The batch CLI silently ignores scripts and unknown path kinds. A worker cannot inherit that
-    /// compatibility behavior: Bazel would receive a successful jar missing a declared source.
+    /// The batch CLI silently ignores unknown path kinds. A worker cannot inherit that
+    /// compatibility behavior: Bazel would receive a successful jar missing a declared source. A
+    /// script is refused as well, since the action does not describe its script definition.
     #[test]
     fn every_declared_source_must_be_batch_compilable_kotlin() {
         for source in ["A.kts", "README", "generated/source.txt"] {

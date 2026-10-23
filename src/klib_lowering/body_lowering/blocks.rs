@@ -17,7 +17,7 @@ use crate::types::Ty;
 
 use super::super::decline::KlibBodyDeclineReason;
 
-impl BodyLowering<'_, '_, '_> {
+impl BodyLowering<'_> {
     /// The function's body. Checked FIR lowering lowers a block body as the source block, typed
     /// by its checked type, inside the callable's own block; both are the callable's scope. A
     /// function whose result is not `Unit` must not reach the end of its body: the body is typed
@@ -41,6 +41,16 @@ impl BodyLowering<'_, '_, '_> {
         self.ir.callable_scopes.insert(source);
         self.ir.callable_scopes.insert(body);
         Ok(body)
+    }
+
+    /// A parameter's default, lowered as checked FIR lowers the source default: a value of the
+    /// parameter's declared type, which may read the parameters before it.
+    pub(in super::super) fn default_value(
+        mut self,
+        default: KlibIrExprId,
+        declared: Ty,
+    ) -> Lowered<ExprId> {
+        self.declared_operand(default, declared)
     }
 
     /// Whether `statement` is a loop whose condition is the constant `true` and whose lowered
@@ -122,15 +132,19 @@ impl BodyLowering<'_, '_, '_> {
     /// Whether `id` is an expression of the source, rather than a statement (an assignment, a
     /// loop or a jump), and so a block's value when it ends one.
     pub(super) fn is_source_expression(&self, id: KlibIrExprId) -> bool {
-        !matches!(
-            self.arena.expr(id).kind,
+        match &self.arena.expr(id).kind {
             KlibIrExprKind::Return { .. }
-                | KlibIrExprKind::Break { .. }
-                | KlibIrExprKind::Continue { .. }
-                | KlibIrExprKind::SetValue { .. }
-                | KlibIrExprKind::While(_)
-                | KlibIrExprKind::DoWhile(_)
-        )
+            | KlibIrExprKind::Break { .. }
+            | KlibIrExprKind::Continue { .. }
+            | KlibIrExprKind::SetValue { .. }
+            | KlibIrExprKind::While(_)
+            | KlibIrExprKind::DoWhile(_) => false,
+            KlibIrExprKind::Block {
+                origin: Some(origin),
+                ..
+            } => origin != "FOR_LOOP",
+            _ => true,
+        }
     }
 
     fn is_jump_statement(&self, statement: &KlibIrStatement) -> bool {
@@ -157,7 +171,7 @@ impl BodyLowering<'_, '_, '_> {
     /// The checker's syntactic divergence of a source expression: a jump or `throw`, a block
     /// ending in one, an `if` with an `else` all of whose branches diverge, and a call with a
     /// diverging argument. A subjectless `when` is not read as diverging.
-    fn diverges(&self, id: KlibIrExprId) -> bool {
+    pub(super) fn diverges(&self, id: KlibIrExprId) -> bool {
         match &self.arena.expr(id).kind {
             KlibIrExprKind::Throw(_)
             | KlibIrExprKind::Return { .. }

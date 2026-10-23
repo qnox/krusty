@@ -149,6 +149,10 @@ impl super::IrClass {
     /// The line a primary constructor's delegating call is at: where a lowering re-anchored it, or
     /// otherwise where kotlinc builds it — the declaration's start, annotations included.
     pub fn primary_delegation_line(&self) -> Option<u32> {
+        // A script's constructor is its statements; the delegation has no source line of its own.
+        if self.is_script {
+            return None;
+        }
         [
             self.primary_ctor_lines.rebuilt_body_line,
             self.decl_start_line,

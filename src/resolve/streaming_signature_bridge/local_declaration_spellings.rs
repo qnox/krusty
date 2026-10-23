@@ -193,8 +193,7 @@ pub(super) fn publish_checked_local_declaration_spellings(
                 | DeclarationKind::TypeAlias
                 | DeclarationKind::Constructor
                 | DeclarationKind::Accessor
-                | DeclarationKind::Initializer
-                | DeclarationKind::Script => false,
+                | DeclarationKind::Initializer => false,
             };
             if complete {
                 index.publish_declaration_spellings(declaration, DeclaredSpellings::default());
@@ -261,8 +260,7 @@ pub(super) fn publish_checked_local_declaration_spellings(
             DeclarationKind::Accessor => Some(DeclaredSpellings::default()),
             DeclarationKind::EnumEntry
             | DeclarationKind::TypeAlias
-            | DeclarationKind::Initializer
-            | DeclarationKind::Script => continue,
+            | DeclarationKind::Initializer => continue,
         };
         match record {
             Some(record) => index.publish_declaration_spellings(declaration, record),

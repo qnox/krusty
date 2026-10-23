@@ -97,7 +97,8 @@ and plugin-marker publications. The Kotlin JVM plugin still owns source sets, `p
 compiler options, classpaths, friend paths,
 and compile outputs. The public Kotlin task is disabled and depends on a typed, cacheable replacement
 task whose `ExecOperations` and `FileSystemOperations` are injected by Gradle. The replacement execs
-the krusty binary (`-Pkrusty.binary` or `KRUSTY_BIN`) with the task's complete `.kt` and same-module
+the krusty binary (`-Pkrusty.binary`, `KRUSTY_BIN`, or else the plugin release's own compiler,
+downloaded once into the Gradle user home and checked against the release's `SHA256SUMS`) with the task's complete `.kt` and same-module
 `.java` sources and normalized structured compiler options. kotlinc and the Kotlin compile daemon
 are not started. An Android project (`com.android.base`, with AGP 9's built-in Kotlin or with
 `org.jetbrains.kotlin.android`) is replaced the same way, per variant: an Android variant is no Java

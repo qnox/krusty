@@ -14,11 +14,17 @@
 mod body_lowering;
 mod body_unit;
 mod callee_facts;
+mod class_headers;
+mod constructor_bounds;
+mod constructor_calls;
 mod decline;
 mod function_lowering;
+mod inline_templates;
 mod ir_builtins;
 mod klib_types;
 mod local_values;
+mod lowering_checkpoint;
+mod primitive_calls;
 #[cfg(test)]
 mod tests;
 
@@ -27,3 +33,4 @@ pub use body_unit::DependencyBodyUnit;
 pub(crate) use body_unit::EmittedDependencyCallable;
 pub use callee_facts::KlibCalleeFacts;
 pub use decline::{KlibBodyDecline, KlibBodyDeclineReason};
+pub use inline_templates::{lower_inline_template, KlibInlineTemplate, TemplateCallees};

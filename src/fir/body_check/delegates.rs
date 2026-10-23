@@ -872,7 +872,7 @@ fn selected_delegate_call(
                     semantic_role: None,
                     overridden_declarations: Box::new([]),
                     suspend: false,
-                    can_inline: false,
+                    inline: crate::libraries::InlineKind::None,
                     inline_plan: None,
                     extension_receiver_parameter: None,
                 },
@@ -981,7 +981,7 @@ fn selected_delegate_call(
                     semantic_role: callable.semantic_role,
                     overridden_declarations: callable.overridden_declarations.clone(),
                     suspend: callable.suspend,
-                    can_inline: callable.inline.can_inline(),
+                    inline: callable.inline,
                     inline_plan: super::inline_body_plan::publish(
                         callable.inline_body_plan.as_deref(),
                         Some(0),
@@ -1087,7 +1087,7 @@ fn selected_delegate_call(
                         semantic_role: None,
                         overridden_declarations: Box::new([]),
                         suspend: *suspend,
-                        can_inline: inline.can_inline(),
+                        inline: *inline,
                         inline_plan: super::inline_body_plan::publish(
                             inline_body_plan.as_deref(),
                             None,

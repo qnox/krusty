@@ -1,7 +1,7 @@
 //! Selection and provenance of one package's `.kotlin_builtins` fragment.
 //!
 //! Parsed bytes are reusable across classpaths. Compiler authority is not: it belongs to the exact
-//! selected input entry paired with this compilation's common stdlib KLIB.
+//! selected input entry that is this compilation's stdlib.
 
 use super::*;
 
@@ -156,15 +156,28 @@ impl Classpath {
         self.selected_builtins_file_for_package(package).file
     }
 
-    /// Selected declaration bytes and whether that exact input is the paired stdlib.
+    /// Selected declaration bytes and whether that exact input is the compilation's stdlib.
     pub(super) fn compiler_builtin_package(
         &self,
         package: TypeName,
     ) -> (std::sync::Arc<BuiltinsFile>, bool) {
         let selected = self.selected_builtins_file_for_package(package);
         let compiler_builtin_owner = self
-            .paired_stdlib_entry()
+            .builtins_stdlib_entry()
             .is_some_and(|expected| selected.owner == Some(expected));
         (selected.file, compiler_builtin_owner)
+    }
+
+    /// The input whose `.kotlin_builtins` declarations are the compiler's builtins. A Kotlin
+    /// distribution's stdlib is identified by its paired common KLIB, so an earlier copy cannot
+    /// claim it. A dependency-resolved stdlib (`kotlin-stdlib-2.3.20.jar` from a repository) has no
+    /// sibling KLIB; like kotlinc, its builtins are then those of the entry that wins selection of
+    /// the `kotlin` package fragment.
+    fn builtins_stdlib_entry(&self) -> Option<usize> {
+        if self.common_expectation_klib().is_some() {
+            return self.paired_stdlib_entry();
+        }
+        self.selected_builtins_file_for_package(crate::types::wk::kotlin_package())
+            .owner
     }
 }

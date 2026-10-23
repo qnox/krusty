@@ -37,6 +37,7 @@ pub struct GradleBuild {
     root: PathBuf,
     plugin_project: PathBuf,
     plugin_repository: Option<PathBuf>,
+    init_script: Option<PathBuf>,
     gradle: PathBuf,
     krusty_binary: PathBuf,
     tasks: Vec<String>,
@@ -60,6 +61,7 @@ impl GradleBuild {
             root,
             plugin_project: plugin_project.into(),
             plugin_repository: None,
+            init_script: None,
             gradle,
             krusty_binary: krusty_binary.into(),
             tasks: vec!["krustyCompile".to_string()],
@@ -101,6 +103,12 @@ impl GradleBuild {
         self
     }
 
+    /// Run with a Gradle init script, as a build that does not apply the plugin itself is driven.
+    pub fn init_script(mut self, script: impl Into<PathBuf>) -> Self {
+        self.init_script = Some(script.into());
+        self
+    }
+
     /// Arguments passed to `./gradlew`. `--include-build` supplies the `krusty` plugin. This crate
     /// is not on that command line.
     pub fn arguments(&self) -> Vec<String> {
@@ -112,6 +120,10 @@ impl GradleBuild {
             args.push("--configuration-cache".to_string());
         }
         args.push("--console=plain".to_string());
+        if let Some(script) = &self.init_script {
+            args.push("--init-script".to_string());
+            args.push(script.display().to_string());
+        }
         if let Some(repository) = &self.plugin_repository {
             args.push(format!(
                 "-Pkrusty.plugin.repository={}",
@@ -1540,6 +1552,50 @@ tasks.register<JavaExec>("runJvm") {
         );
     }
 
+    /// The corpus comparison applies the plugin to an unmodified build through
+    /// `scripts/oss-corpus/krusty.init.gradle`, resolving it from the packaged Maven repository by
+    /// the published coordinates and plugin id. A build that applies only `kotlin("jvm")` must
+    /// then compile its main sources through krusty, with no compile reported as left to kotlinc.
+    #[test]
+    #[ignore = "downloads Gradle and the Kotlin Gradle plugin"]
+    fn oss_corpus_init_script_applies_the_packaged_plugin() {
+        let fixture = IntegrationFixture::new("krusty-corpus-init", write_corpus_build);
+        let root = &fixture.root;
+        let repository = fixture.plugin_project.join("repository");
+        assert!(
+            repository.is_dir(),
+            "the init script resolves the packaged plugin; KRUSTY_GRADLE_PLUGIN_PROJECT must name \
+             an unpacked distribution with a repository, not {}",
+            fixture.plugin_project.display()
+        );
+        std::env::set_var("KRUSTY_PLUGIN_REPOSITORY", &repository);
+        std::env::set_var("KRUSTY_PLUGIN_VERSION", &fixture.plugin_version);
+        let init_script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/oss-corpus/krusty.init.gradle");
+        let output = GradleBuild::new(root, repository_plugin_project(), &fixture.proxy)
+            .plugin_repository(&repository)
+            .init_script(init_script)
+            .no_daemon(true)
+            .tasks([":classes"])
+            .run_output()
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        let reports = output
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("krusty: "))
+            .collect::<Vec<_>>();
+        assert_eq!(reports, Vec::<&str>::new(), "{output}");
+        let runs = invocations(&std::fs::read_to_string(&fixture.log).expect("invocation log"));
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert_eq!(source_names(&runs[0]), ["App.kt"], "{runs:?}");
+        assert!(root
+            .join("build/classes/kotlin/main/app/AppKt.class")
+            .is_file());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// `kotlin("plugin.serialization")` reaches krusty exactly as kotlinc receives it — the Kotlin
     /// Gradle plugin's compiler-plugin classpath as `-Xplugin` — whether the build applies it before
     /// krusty (`:model`) or after (`:app`). The generated serializers are then exercised at run time
@@ -2764,6 +2820,43 @@ tasks.register("greet") {
     }
 }
 "#,
+        );
+    }
+
+    fn write_corpus_build(root: &Path, _plugin_version: &str, kgp_version: &str) {
+        let write = |rel: &str, body: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            std::fs::write(path, body.replace("KGP_VERSION", kgp_version)).expect("write");
+        };
+        write(
+            "settings.gradle.kts",
+            r#"
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "corpus-consumer"
+"#,
+        );
+        write(
+            "build.gradle.kts",
+            r#"
+plugins {
+    kotlin("jvm") version "KGP_VERSION"
+}
+
+repositories {
+    mavenCentral()
+}
+"#,
+        );
+        write(
+            "src/main/kotlin/app/App.kt",
+            "package app\n\nfun greeting() = \"hello\"\n",
         );
     }
 

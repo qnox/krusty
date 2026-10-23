@@ -164,6 +164,11 @@ fn stamps_the_release_and_every_compiler_checksum_into_the_module() {
         .output()
         .expect("run tar");
     assert_eq!(String::from_utf8(stamped.stdout).unwrap(), expected);
+    assert_eq!(
+        fs::read_to_string(dist.join(format!("krusty-bazel-{VERSION}.MODULE.bazel"))).unwrap(),
+        expected,
+        "the registry's copy of MODULE.bazel is the archive's"
+    );
 
     assert_eq!(
         fs::read_to_string(dist.join(format!("krusty-bazel-{VERSION}.tar.gz.sha256"))).unwrap(),
@@ -231,6 +236,18 @@ fn the_release_job_packages_the_module_before_publishing() {
     let publish = position("softprops/action-gh-release");
     assert!(collect < package && version < package && package < publish);
     assert!(steps[package].contains("if: steps.tip.outputs.publish == 'true'"));
+
+    // The site's Bazel registry is generated from the releases, so it is rebuilt after this one
+    // is published, and before the commit is recorded, so a failed dispatch is retried.
+    let refresh = position("run: gh workflow run pages.yml --ref master");
+    let record = position("release-publisher.sh record");
+    assert!(publish < refresh && refresh < record);
+    assert!(steps[refresh].contains("if: steps.tip.outputs.publish == 'true'"));
+    assert!(job.contains("    permissions:\n      contents: write\n      # Dispatches the pages workflow, which regenerates the Bazel registry.\n      actions: write\n"));
+    let pages =
+        fs::read_to_string(root().join(".github/workflows/pages.yml")).expect("read pages.yml");
+    assert!(pages.contains("  workflow_dispatch:\n"));
+    assert!(pages.contains("        run: node scripts/bazel-registry.mjs dist/bazel-registry\n"));
 }
 
 #[test]

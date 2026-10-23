@@ -12,12 +12,14 @@ use super::cached_serializer::{
     serial_info_annotations,
 };
 use super::element_serializer::{element_serializer_expr, unsupported_element_serializer};
+use super::serial_elements::type_parameter_identities;
 use super::{
     class_ty, complete_frontend_serializer_accessor, kserializer_of, serializer_accessor_owner,
 };
+use crate::fx_hash::HashMap;
 use crate::ir::{ClassId, ExprId, IrConst, IrExpr, IrFile, IrTypeOp, IrTypeParameter};
 use crate::plugins::PluginContext;
-use crate::types::{Ty, TypeName};
+use crate::types::{ty_subst_keep_unbound, Ty, TypeName};
 
 const SEALED_CLASS_SERIALIZER_FQ: &str = "kotlinx/serialization/SealedClassSerializer";
 
@@ -40,7 +42,7 @@ pub(super) fn sealed_class_serializer(
         .collect();
     let sub_serializers: Vec<ExprId> = subclasses
         .iter()
-        .map(|&subclass| subclass_serializer(ir, ctx, subclass))
+        .map(|&subclass| subclass_serializer(ir, ctx, class_name, subclass))
         .collect();
     let kclass_array = ir.add_expr(IrExpr::Vararg {
         array_type: Ty::obj_args("kotlin/Array", &[class_ty("kotlin/reflect/KClass")]),
@@ -102,22 +104,44 @@ fn concrete_subclasses(ir: &IrFile, class_id: ClassId) -> Vec<TypeName> {
 
 /// A subclass's serializer, as kotlinc derives an element's: a non-generic class's
 /// `$serializer.INSTANCE` and an object's `ObjectSerializer`. A generic class's `$serializer` is
-/// constructed directly, over a `PolymorphicSerializer` of each type parameter's representative
-/// upper bound.
-fn subclass_serializer(ir: &mut IrFile, ctx: &PluginContext, subclass: TypeName) -> ExprId {
+/// constructed directly, over one serializer per type parameter: the generic sealed base's own
+/// `typeSerial<j>` when the parameter is the base's `j`-th type argument, else a
+/// `PolymorphicSerializer` of the parameter's representative upper bound.
+fn subclass_serializer(
+    ir: &mut IrFile,
+    ctx: &PluginContext,
+    base: TypeName,
+    subclass: TypeName,
+) -> ExprId {
     if local_generic_serializable_class(ir, ctx, subclass) {
-        let bounds: Vec<Ty> =
+        let formals: Vec<(String, Ty)> =
             ir.class_signature_name(subclass)
                 .map_or_else(Vec::new, |signature| {
                     signature
                         .type_params
                         .iter()
-                        .map(representative_upper_bound)
+                        .map(|parameter| {
+                            (
+                                parameter.semantic_name.clone(),
+                                representative_upper_bound(parameter),
+                            )
+                        })
                         .collect()
                 });
-        let arguments: Vec<ExprId> = bounds
+        let base_arguments = base_type_arguments(ir, base, subclass);
+        let arguments: Vec<ExprId> = formals
             .iter()
-            .map(|&bound| type_parameter_serializer(ir, subclass, bound))
+            .map(|(identity, bound)| {
+                match base_arguments
+                    .iter()
+                    .position(|argument| argument.ty_param_name() == Some(identity.as_str()))
+                {
+                    // The base's `serializer(typeSerial0, …)` is a companion member: its
+                    // serializers follow `this`.
+                    Some(j) => ir.add_expr(IrExpr::GetValue(1 + j as u32)),
+                    None => type_parameter_serializer(ir, subclass, *bound),
+                }
+            })
             .collect();
         let descriptor = format!(
             "({})V",
@@ -127,6 +151,40 @@ fn subclass_serializer(ir: &mut IrFile, ctx: &PluginContext, subclass: TypeName)
     }
     let ty = Ty::obj_name(subclass);
     element_serializer_expr(ir, ctx, &ty).unwrap_or_else(|| unsupported_element_serializer(ir, ty))
+}
+
+/// The type arguments `subclass` gives the generic sealed `base`, in terms of the subclass's own
+/// type parameters. A subclass reached through intermediate sealed classes composes each step's
+/// arguments along its declared inheritance path, as kotlinc's plugin walks it from the leaf up to
+/// the base; none when no path of this file's classes reaches the base.
+fn base_type_arguments(ir: &IrFile, base: TypeName, subclass: TypeName) -> Vec<Ty> {
+    let Some(subclass_id) = local_class(ir, subclass) else {
+        return Vec::new();
+    };
+    for supertype in ir.classes[subclass_id as usize].supertypes.iter() {
+        let Some(parent) = supertype.kotlin_class_internal() else {
+            continue;
+        };
+        if parent == base {
+            return supertype.type_args().to_vec();
+        }
+        let Some(parent_id) = local_class(ir, parent) else {
+            continue;
+        };
+        let through_parent = base_type_arguments(ir, base, parent);
+        if through_parent.is_empty() {
+            continue;
+        }
+        let bindings: HashMap<String, Ty> = type_parameter_identities(ir, parent_id)
+            .into_iter()
+            .zip(supertype.type_args().iter().copied())
+            .collect();
+        return through_parent
+            .into_iter()
+            .map(|argument| ty_subst_keep_unbound(argument, &bindings))
+            .collect();
+    }
+    Vec::new()
 }
 
 /// kotlinc's representative upper bound of a type parameter: its first bound that is a class

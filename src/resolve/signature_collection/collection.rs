@@ -153,16 +153,6 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     diags,
                 );
             }
-            if let Some(script_body) = file.script_body {
-                resolve_local_type_parameter_annotation_inventory(
-                    file,
-                    [script_body],
-                    names,
-                    &mut table.resolved_annotations,
-                    &mut annotation_resolution,
-                    diags,
-                );
-            }
         }
     }
     // A target-less optional expectation belongs to the common source set only. Its provider record

@@ -21,6 +21,13 @@ pub(in super::super) struct EscapingLambdaPlan {
     functions: HashSet<crate::ir::FunId>,
 }
 
+impl EscapingLambdaPlan {
+    /// Whether no lambda escapes the expansion.
+    pub(in super::super) fn is_empty(&self) -> bool {
+        self.roots.is_empty() && self.functions.is_empty()
+    }
+}
+
 struct PlannedRoot {
     copy: ExprId,
     implementation: crate::ir::FunId,
