@@ -23,6 +23,8 @@ mod tests {
                 // collection and body checking host them, so the facade takes the selection.
                 "plugins",
                 "resolve",
+                // The definition a script compiles against shapes its parsed script class.
+                "script_definitions",
                 "source",
                 "trace_compiler",
             ],
@@ -41,6 +43,9 @@ mod tests {
                 "diag",
                 "features",
                 "kt_string",
+                // A script's class takes its template and constructor parameters from its
+                // definition, which is plain syntax: qualified names and parameter spellings.
+                "script_definitions",
                 "token",
                 "types",
                 "wide_stack",

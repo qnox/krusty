@@ -17,6 +17,14 @@ descriptors. This changes only JVM constant-pool visit order; checked payloads, 
 metadata remain unchanged. Strict whole-class comparisons cover both source input orders and mixed
 runtime/binary retention with nested annotations, arrays, class literals and nullable parameters.
 
+## Constructor-property annotation publication order
+
+The stable property index receives checked applied-annotation payloads only after every source
+annotation class has published its target policy. Per-file checking releases its TypeInfo while
+retaining just folded values, explicit use sites and the property identity until that partition.
+This changes semantic publication order, not annotation encoding; whole-class oracle checks retain
+the same Kotlin metadata and physical annotation attributes in both source input orders.
+
 ## Declared JVM vararg array types
 
 The generic signature reader decodes each `ValueParameter.type`/`type_id` independently of its
@@ -878,6 +886,8 @@ The approved #2459 Native/Wasm outcome reset changes no metadata encoding or dec
 authority. It records known implementation debt for small follow-ups, pinned to exact loaded
 manifest blobs and effective releases. JVM/applicability and fatal-outcome policies remain
 unchanged; see [KLIB inline migration](KLIB_INLINE_MIGRATION.md).
+
+## Wasm nullable assertions
 
 Nullable assertion emission consumes the existing checked operand and result types; it adds no
 metadata field or nullability rewrite. A Wasm reference-to-scalar assertion declines until its

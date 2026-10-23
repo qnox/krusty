@@ -288,6 +288,18 @@ pub fn native_image(
     sources: &[(&str, &str)],
     target: krusty::native::NativeTarget,
 ) -> Result<Vec<u8>, NativeBox> {
+    let objects = native_objects(sources, target)?;
+    let object_refs: Vec<&[u8]> = objects.iter().map(Vec::as_slice).collect();
+    krusty::native::link_program(&object_refs, target)
+        .map_err(|error| NativeBox::Failed(format!("link: {error}")))
+}
+
+/// Compile `sources` with the native code generator into one object per file, or say why there
+/// are none.
+pub fn native_objects(
+    sources: &[(&str, &str)],
+    target: krusty::native::NativeTarget,
+) -> Result<Vec<Vec<u8>>, NativeBox> {
     use krusty::diag::DiagSink;
     use krusty::native::{CraneliftBackend, Entry};
 
@@ -332,17 +344,11 @@ pub fn native_image(
             "the backend emitted nothing".to_string(),
         ));
     }
-    let objects: Vec<Vec<u8>> = artifacts
+    Ok(artifacts
         .into_iter()
         .filter(|(name, _)| name.ends_with(".o"))
         .map(|(_, object)| object)
-        .collect();
-    let object_refs: Vec<&[u8]> = objects.iter().map(Vec::as_slice).collect();
-    let image = match krusty::native::link_program(&object_refs, target) {
-        Ok(image) => image,
-        Err(error) => return Err(NativeBox::Failed(format!("link: {error}"))),
-    };
-    Ok(image)
+        .collect())
 }
 
 /// Run a linked image with `arguments` and `input` on standard input, and an empty environment.

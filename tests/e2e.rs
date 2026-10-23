@@ -20,6 +20,8 @@ mod captured_receiver_names_e2e;
 mod cast_line_break_e2e;
 #[path = "cast_operand_reread_e2e.rs"]
 mod cast_operand_reread_e2e;
+#[path = "class_comparison_e2e.rs"]
+mod class_comparison_e2e;
 #[path = "classfile_low_priority_annotation_e2e.rs"]
 mod classfile_low_priority_annotation_e2e;
 #[path = "common/mod.rs"]
@@ -1337,6 +1339,8 @@ mod klib_semantic_e2e;
 mod kotlin_fun_java_sam_param_e2e;
 #[path = "kotlin_native_provisioning_e2e.rs"]
 mod kotlin_native_provisioning_e2e;
+#[path = "kotlin_script_e2e.rs"]
+mod kotlin_script_e2e;
 #[path = "kotlinc_argument_conformance_e2e.rs"]
 mod kotlinc_argument_conformance_e2e;
 #[path = "krusty_dep_dir_e2e.rs"]
@@ -1627,6 +1631,8 @@ mod primary_constructor_newline_e2e;
 mod primitive_explicit_equals_e2e;
 #[path = "primitive_hash_code_e2e.rs"]
 mod primitive_hash_code_e2e;
+#[path = "projected_member_extension_invoke_e2e.rs"]
+mod projected_member_extension_invoke_e2e;
 #[path = "public_inline_property_access_e2e.rs"]
 mod public_inline_property_access_e2e;
 #[path = "receiver_type_line_break_e2e.rs"]

@@ -1763,9 +1763,10 @@ KRef kt_class_simple_name(KRef self) {
 /* ---- typeOf --------------------------------------------------------------------------------- */
 
 /* `typeOf<T>()`: a `kotlin.reflect.KType`. The generator knows the whole type at the site, so each
-   distinct one is a STATIC object it emits once per file, laid out as below, and this side only
-   reads it. Nothing here allocates one, and the collector never sees one: the object lives in no
-   chunk, and neither do the descriptors and argument objects it points at.
+   distinct one is a STATIC object, laid out as below, and this side only reads it: one per program
+   for a type every file names alike, which the linker folds to one copy, else one per file. Nothing
+   here allocates one, and the collector never sees one: the object lives in no chunk, and neither
+   do the descriptors, the static `KClass` and the argument objects it points at.
 
    A projection's variance is Kotlin/Native's own encoding (`KVarianceMapper`): -1 for a star, 0
    invariant, 1 `in`, 2 `out`. A star carries no type. */
@@ -1780,6 +1781,9 @@ struct KTypeOfObject {
     KObjectHeader header;
     /* The class the type names. A type parameter is never one: the generator declines it. */
     const KType *classifier;
+    /* Its static `KClass`, what `classifier` answers every time, as the JVM's `Reflection` answers
+       the class's one cached `KClass`. */
+    const KClass *classifier_class;
     kt_long nullable;
     kt_long argument_count;
     KTypeOfArgument arguments[];
@@ -1810,7 +1814,14 @@ const KType kt_type_ktype_impl = {KT_NAMED("kotlin.reflect.", "KTypeImpl"),
                                   .interfaces = kt_ktype_interfaces,
                                   .interface_count = 1};
 
+/* The static object `self` is. The generator dispatches a program's own `KType` implementations
+   to their overrides before calling here, so anything else is one it could not see, which this
+   side refuses rather than read as an object it is not. */
 static const KTypeOfObject *kt_ktype_of(KRef self) {
+    if (self->header.type != &kt_type_ktype_impl) {
+        KT_FAIL("krusty: a `KType` member of an implementation this program's runtime did not "
+                "build\n");
+    }
     return (const KTypeOfObject *)self;
 }
 
@@ -1819,7 +1830,7 @@ KRef kt_ktype_classifier(KRef self) {
         kt_null_receiver();
         return NULL;
     }
-    return kt_class_literal(kt_ktype_of(self)->classifier);
+    return (KRef)kt_ktype_of(self)->classifier_class;
 }
 
 kt_boolean kt_ktype_is_marked_nullable(KRef self) {
@@ -1831,8 +1842,8 @@ kt_boolean kt_ktype_is_marked_nullable(KRef self) {
 }
 
 /* Structural, as `KTypeImpl.equals` is: the same classifier, the same nullability, and the same
-   projections in order. Two sites, or two files, emit two objects for one type, so identity would
-   be the wrong answer. */
+   projections in order. A program-wide type is one object, so identity answers it at once; one
+   naming a class only its file describes is that file's own object, compared field by field. */
 static kt_boolean kt_ktype_same(const KTypeOfObject *left, const KTypeOfObject *right) {
     if (left == right) {
         return 1;
@@ -1855,6 +1866,9 @@ static kt_boolean kt_ktype_same(const KTypeOfObject *left, const KTypeOfObject *
 }
 
 static kt_boolean kt_ktype_equals(KRef self, KRef other) {
+    if (self == other) {
+        return 1;
+    }
     if (other == NULL || other->header.type != &kt_type_ktype_impl) {
         return 0;
     }

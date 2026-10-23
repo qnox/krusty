@@ -201,6 +201,7 @@ pub(super) fn predeclare_properties(
                         flags: header.flags,
                         initializer: None,
                         has_constant_initializer: false,
+                        script_effect: false,
                         delegate: None,
                         delegate_plan: None,
                         getter: None,
@@ -350,6 +351,16 @@ pub(super) fn finalize_properties(
         // As with companion-block functions, the classifier receiver is retained in the stable
         // property shape solely for associated lookup. Checked FIR has already erased it as a value
         // receiver, so common IR must expose a receiverless top-level realization.
+        if let Some(effect) = script_effect_statement(&property)? {
+            // A script that ends with an effect keeps no `$$result`: the expression is the last
+            // statement of its initialization.
+            initialization
+                .entry(effect.class)
+                .or_default()
+                .push((effect.order, effect.initializer));
+            ir.checked_properties.remove(&property_id);
+            continue;
+        }
         let extension_receiver = (!property.flags.has(crate::fir::DeclarationFlags::COMPANION))
             .then_some(shape.extension_receiver)
             .flatten()
@@ -1267,7 +1278,7 @@ fn materialize_member_property(
                 flags: IrfFlags::default()
                     .with_has_default(has_default)
                     .with_is_final(!property.flags.has(DeclarationFlags::MUTABLE))
-                    .with_is_private(true)
+                    .with_is_private(!property.flags.has(DeclarationFlags::SCRIPT_RESULT))
                     .with_is_lateinit(property.flags.has(DeclarationFlags::LATEINIT)),
             });
         }
@@ -1834,6 +1845,29 @@ fn top_level_accessors(
     crate::ir::IrStaticAccessors { getter, setter }
 }
 
+/// A script's final expression that is an effect, of type `Unit` or `Nothing`: kotlinc evaluates
+/// it as the script's last statement rather than keeping it in `$$result`.
+struct ScriptEffect {
+    class: crate::ir::ClassId,
+    order: u32,
+    initializer: ExprId,
+}
+
+/// The [`ScriptEffect`] a script's `$$result` property stands for, if its value is one.
+fn script_effect_statement(
+    property: &IrCheckedProperty,
+) -> Result<Option<ScriptEffect>, FirFileLoweringFailure> {
+    if !property.script_effect {
+        return Ok(None);
+    }
+    let failure = || FirFileLoweringFailure::UnsupportedPropertyShape(property.declaration);
+    Ok(Some(ScriptEffect {
+        class: property.class.ok_or_else(failure)?,
+        order: property.initialization_order.ok_or_else(failure)?,
+        initializer: property.initializer.ok_or_else(failure)?,
+    }))
+}
+
 fn merge_class_initialization(
     ir: &mut IrFile,
     mut initialization: HashMap<crate::ir::ClassId, Vec<(u32, ExprId)>>,
@@ -2167,6 +2201,11 @@ pub(super) fn accept_property_body(
             .property(property_id)
             .is_some_and(|property| !property.mutable)
         && super::metadata_constants::has_constant_initializer(&body, index, declared_ty);
+    let script_effect = anchor.kind == DeclarationKind::Property
+        && index
+            .declaration_header(property_declaration)
+            .is_some_and(|header| header.flags.has(DeclarationFlags::SCRIPT_RESULT))
+        && body_result_is_effect(&body);
     let lowered = lower_body_with_context(body, index, ir, local_callables)
         .map_err(FirFileLoweringFailure::Body)?;
     if !lowered.defaults.is_empty() {
@@ -2209,6 +2248,7 @@ pub(super) fn accept_property_body(
     if has_constant_initializer {
         property.has_constant_initializer = true;
     }
+    property.script_effect |= script_effect;
     if let Some(storage) = lowered.property_storage_type {
         if property.storage_ty.replace(storage).is_some() {
             return Err(FirFileLoweringFailure::MissingProperty(declaration));
@@ -2343,6 +2383,22 @@ pub(super) fn accept_inline_accessor_template(
         ));
     }
     Ok(())
+}
+
+/// Whether a body's checked value is an effect: of type `Unit`, or `Nothing` (or `Nothing?`).
+fn body_result_is_effect(body: &FirBody) -> bool {
+    let value = body
+        .roots()
+        .last()
+        .and_then(|root| body.statement(*root))
+        .and_then(|statement| match statement.kind {
+            crate::fir::FirStatementKind::Expression(expression) => body.expr(expression),
+            _ => None,
+        })
+        .map(|expression| expression.ty.get());
+    value.is_some_and(|ty| {
+        matches!(ty, Ty::Unit | Ty::Nothing | Ty::Null) || ty == Ty::nullable(Ty::Nothing)
+    })
 }
 
 fn body_value(

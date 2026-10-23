@@ -20,7 +20,6 @@ pub enum BodyKind {
     EnumEntry,
     Constructor,
     Initializer,
-    Script,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -117,6 +116,12 @@ impl DeclarationFlags {
     /// class's copy-visibility annotations during signature collection; other generated members
     /// keep the visibility recorded in their inventory stub.
     pub const DATA_CLASS_COPY: u64 = 1 << 45;
+    /// The class a Kotlin script compiles to.
+    pub const SCRIPT: u64 = 1 << 46;
+    /// The `$$result` property of a script class, holding the value of the script's last
+    /// expression. kotlinc keeps it in a public field, and keeps no property for a value of type
+    /// `Unit` or `Nothing`: the expression is then an ordinary statement.
+    pub const SCRIPT_RESULT: u64 = 1 << 47;
 
     pub const fn with(mut self, flag: u64, enabled: bool) -> Self {
         if enabled {

@@ -67,7 +67,6 @@ impl ProductionSignatureSemantics<'_> {
             | crate::fir::DeclarationKind::Accessor
             | crate::fir::DeclarationKind::Initializer
             | crate::fir::DeclarationKind::EnumEntry
-            | crate::fir::DeclarationKind::Script
             | crate::fir::DeclarationKind::Constructor => None,
         }
     }

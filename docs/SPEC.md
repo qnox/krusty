@@ -1685,9 +1685,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   no such choice. Pass 1 also publishes a constructor property's checked PROPERTY applications,
   including folded class literals, under its stable property identity before plugin constructor
   selection. Parameter- and accessor-targeted applications must not enter that property payload.
+  Partition constructor-property applications only after annotation policies from every source
+  file are available: declaring a property-only annotation in a later input must not select a
+  stale value-parameter default. Preserve only checked values, explicit sites and stable property
+  identities between the per-file fold and publication, not syntax or complete checker state.
   `frontend::tests::annotation_publication::pass_one_retains_constructor_property_payloads_only_at_their_checked_use_site`
   covers default and explicit sites; the unchanged property-level custom serializer runtime
   regression exercises the resulting selected constructor through common IR.
+  `constructor_property_payloads_do_not_depend_on_annotation_policy_file_order` checks stable
+  payloads in both input orders, with strict whole-class kotlinc coverage in
+  `property_accessor_annotation_e2e::constructor_property_annotations_match_kotlinc_in_both_source_orders`.
   Retention stays SEMANTIC through lowering (one ordered list per parameter) and is
   split into the two JVM attributes at emission via `split_declaration_annotations`, so the two
   halves cannot diverge. GAP: an annotation WITH ARGUMENTS is left out of
@@ -3972,6 +3979,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the postponed call, so `fun f() = produce { onSend.send("x") }` inside the dispatch receiver's
   class still infers `Channel<Any?>`. Test: `tests/builder_inference_receivers_e2e.rs`
   (`a_member_extension_argument_infers_the_builder_variable`); box: `inference/pcla/issues/kt47744.kt`.
+- **A member-extension `invoke` keeps its own type parameters open while its receiver is
+  matched.** `operator fun <T> Key<in List<T>>.invoke(vararg values: T)` declared in an implicit
+  dispatch receiver (the shape of the scripting API's `PropertiesCollection` builders) is selected
+  for `items("a", "b")` on a `Key<List<String>>` by matching the declared receiver with the
+  method's `T` still a variable; substituting it away first matched no candidate. A generic
+  extension `invoke` commits its type-variable intersections like any generic call. A vararg is
+  packed as an array of its substituted element: `Array<out E>` stays projected, any other
+  reference array is `Array<E>` and a primitive array stays primitive, so `T = Int` packs an
+  `Integer[]`. An inapplicable invoke is reported with kotlinc's diagnostics, never assumed
+  selected. Test: `tests/projected_member_extension_invoke_e2e.rs`.
 - **A local class member's lambda reads the class's captured builder receiver.** In
   `build outerBuild@ { class L { fun m() { build innerBuild@ { this@outerBuild.f(x) } } } }`
   (KT-49160) the member's checked body resolves `this@outerBuild` to the receiver the local class
@@ -12463,23 +12480,39 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reified parameter inside a lambda class regenerated per call site, and a use-site projection
   written in a typealias (`typealias T<Y> = MutableMap<in Y, …>` loses its `in`).
 - **On Native, `typeOf<T>()` is a static `KType` object the generator emits.** The target stdlib's
-  body only throws, so the call is never made. Inline specialization has already substituted a
+  body only throws, so the call is never made, and never expanded from that body either: a
+  dependency inline intrinsic whose body only throws (`typeOf`, `enumEntries`) keeps its checked
+  call for the target to realize, whatever template its KLIB serializes. Inline specialization has already substituted a
   reified parameter, and the frontend has already approximated an intersection to its common
   supertype (`K : A, K : B` reified from `a is A && a is B` describes `kotlin.Any`, as both
-  kotlinc backends print). Each distinct type in a file is one static object wearing the
-  runtime's `kotlin.reflect.KTypeImpl` descriptor, which implements the `KType` marker. It holds
-  the classifier's descriptor, the nullability, and one projection per argument in
-  Kotlin/Native's variance encoding (`-1` star, `0` invariant, `1` `in`, `2` `out`), each pointing
-  at the argument's own object. The runtime answers from that layout:
-  - `equals` is structural, so two sites or two files naming one type are equal; `hashCode`
-    follows `KTypeImpl`'s `(classifier * 31 + arguments) * 31 + isMarkedNullable` shape.
+  kotlinc backends print). Each distinct type is one static object wearing the runtime's
+  `kotlin.reflect.KTypeImpl` descriptor, which implements the `KType` marker. It holds the
+  classifier's descriptor and its static `KClass`, the nullability, and one projection per
+  argument in Kotlin/Native's variance encoding (`-1` star, `0` invariant, `1` `in`, `2` `out`),
+  each pointing at the argument's own object. A type whose classifier and arguments all have
+  program-wide descriptors is one object for the whole program: every file naming it emits it
+  under a symbol spelled from the type, in a COMDAT group of its own, and the linker keeps the
+  first group. A type naming a file's own class (a local class) is that file's object. The
+  runtime answers from that layout:
+  - `equals` is structural, so two sites or two files naming one type are equal, and identical
+    objects answer at once; `hashCode` follows `KTypeImpl`'s
+    `(classifier * 31 + arguments) * 31 + isMarkedNullable` shape. Identity (`===`) is not part
+    of the contract: the JVM builds a new `KType` per call, Native shares one.
   - `toString` prints what Kotlin/Native's `KTypeImpl` prints: the qualified name (the simple
     name of a local class, `???` for an anonymous one), then `<…>` with `*`, `in ` and `out `
     projections, then `?`. A function type is its `kotlin.FunctionN` class with the parameters
     and result as invariant arguments (`kotlin.Function0<kotlin.Unit>`, where the JVM prints
     `() -> kotlin.Unit`).
-  - `classifier` is the class literal of the type's class; a mapped collection interface is the
-    runtime's marker for it. `isMarkedNullable` is the stored nullability.
+  - `classifier` is the type's class's one static `KClass`, never a new object per read, as the
+    JVM's `Reflection` hands out the class's cached `KClass`; a mapped collection interface is
+    the runtime's marker for it, and only a marker that is exactly that interface: `Iterator`'s
+    marker also marks `MutableIterator`, so `typeOf<MutableIterator<X>>()` declines rather than
+    equal and print as `Iterator<X>` (kotlinc-native tells them apart). `isMarkedNullable` is the
+    stored nullability.
+  - `KType` is an open interface, so a read of `classifier` or `isMarkedNullable` reaches a
+    program's own implementation first: each class of the file implementing `KType` is matched
+    by descriptor and called through its override, and only the rest reaches the runtime, which
+    checks the receiver is a `KTypeImpl` and fails loudly otherwise instead of reading it as one.
   - Declined: a type naming a type parameter (its classifier is a `KTypeParameter`), a `suspend`
     function type, a classifier without a runtime descriptor, and `KType.arguments`, whose
     `KTypeProjection` objects this target does not build.
@@ -15844,6 +15877,52 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   offsets, lines and columns as kotlinc. Verified against kotlinc 2.4.20.
   (`crates/krusty-plugin-host/tests/module_ir.rs`,
   `krusty_measures_a_file_with_carriage_returns_as_kotlinc_reads_it`.)
+- **Kotlin scripts (`.kts`) compile like kotlinc's standard script definition.** A script is the
+  class named after its file (`build.gradle.kts` → `Build_gradle`, `my-script.kts` →
+  `My_script`) extending `kotlin.script.templates.standard.ScriptTemplateWithArgs`. Its constructor
+  takes `args: Array<String>`, passes it to the template and stores it in a package-private final
+  field that `@Metadata` does not list; its statements run in the constructor in source order. The
+  constructor's first line entry sits at the script's start: the last token of its file header
+  (file annotations, package, imports), else the file's start or the first non-blank character
+  after a shebang line. Declarations become members; classes nest in the script class. A script
+  ending with an expression statement keeps its value in the public `$$result` field and getter,
+  typed as the statement it is (`if` without `else` and a non-exhaustive `when` are `Unit`; `x++`
+  is a value). A `Unit`, `Nothing` or `Nothing?` value keeps no property, and only `$$result` may
+  have type `Nothing`. A script's own declarations are reached lexically; a template member
+  (`args`, `hashCode()`) is read through the template type, with a `checkcast` to it. A delegated
+  script property has no dispatch receiver: its delegate gets `null` as `thisRef` and a
+  `KProperty0`. A static `main(String[])` calls `RunnerKt.runCompiledScript` and follows the
+  declared members, unless the script declares a function named `main`. `@Metadata` sets the
+  script flag (`xi` 52), lists no supertypes and no constructor, and records an explicit field
+  descriptor for a property typed by a script class. No class in a script file carries nullability
+  annotations. kotlinc adds `kotlin-script-runtime.jar` beside the standard library to every
+  compilation, and so does the `krusty` CLI. When the template is not on the classpath (`-no-stdlib`
+  without the script runtime, or an editor module that lacks it), the script class extends nothing:
+  its constructor takes no arguments, has no line entry for the script's start, and a template
+  member such as `args` is an unresolved reference. Not yet supported: a class that uses the script
+  instance (kotlinc makes it implicitly inner), top-level destructuring, type aliases declared in a
+  script, and a template-typed implicit receiver for extension calls such as `run { }`. Verified
+  against kotlinc 2.4.21 and kotlinc's own script test corpus. (`tests/kotlin_script_e2e.rs`.)
+- **A script's constructor parameters keep the definition's types.** The standard definition
+  names `kotlin.Array<kotlin.String>` by qualified identity, so a script importing its own
+  `String` or `Array` still takes `String[]` and reads `args` through the template.
+  (`tests/kotlin_script_e2e.rs`, `imports_do_not_rebind_the_template_parameter_type_like_kotlinc`.)
+- **An initializer has no function to return from.** A `return` in an `init` block (of a class or
+  an enum entry) or a property initializer (top-level, member, or script) is `'return' is
+  prohibited here.`, as kotlinc reports it. (`tests/diagnostics_language_parity_e2e.rs`,
+  `an_initializer_return_is_prohibited_like_kotlinc`.)
+- **A script `return` ends the script, except in its result position.** kotlinc reads the
+  statement a script ends with, when no declaration follows it, as the script's result. A `return`
+  there is prohibited when that statement is an expression in kotlinc's tree: an expression
+  statement (the `$$result` initializer), a `return` statement, or a `for` loop, which kotlinc
+  builds as a block. A `while` or `do`-`while` loop or an assignment in that position, or a
+  `return` followed only by declarations, ends the script. (`tests/diagnostics_language_parity_e2e.rs`,
+  `a_script_return_is_prohibited_in_its_result_position_like_kotlinc`.)
+- **An `if` without `else` is a `Unit` statement whose branch still constrains inference.** An
+  inferred property type such as `val f = run { sequence { if (c) { yield("OK") } }.toList() }`
+  keeps the branch's builder call as a constraint on the builder variable (`List<String>`), while
+  the `if` itself has type `Unit`. (`tests/builder_inference_receivers_e2e.rs`; box:
+  `coroutines/suspendFunctionAsCoroutine/ifExpressionInsideCoroutine_1_3.kt`.)
 - **A KSP class header is what KSP2 reports.** A krusty-hosted KSP processor reads a classifier's
   header as KSP2 2.3.12 reports it. `modifiers` are the modifier keywords the declaration wrote,
   with the classifier kind words (`data`, `enum`, `annotation`, `fun`, `inner`, `value`), and never

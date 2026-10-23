@@ -474,6 +474,16 @@ pub(super) fn mapped_collection_descriptor(collection: MappedCollection) -> Opti
     }
 }
 
+/// The runtime marker that is exactly one of Kotlin's mapped collection interfaces, or `None` where
+/// the marker an `is` check tests stands for another interface too.
+pub(super) fn exact_collection_descriptor(collection: MappedCollection) -> Option<&'static str> {
+    match collection.kind {
+        // `kt_type_iterator_interface` is what `MutableIterator` is tested by as well.
+        CollectionKind::Iterator if collection.mutable => None,
+        _ => mapped_collection_descriptor(collection),
+    }
+}
+
 /// Runtime marker descriptors for dependency interfaces in one class's declared interface graph.
 ///
 /// Same-file interfaces have descriptors emitted from their own declarations. Dependency

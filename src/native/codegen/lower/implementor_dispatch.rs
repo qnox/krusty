@@ -77,6 +77,47 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         })
     }
 
+    /// The slot of `class`'s getter overriding the dependency property whose getter is
+    /// `overridden`, answering `declared`: the class registers the overridden declaration's
+    /// identity at the slot of its own accessor. `None` where the override's representation is not the declaration's, which a
+    /// direct dispatch could not reconcile.
+    pub(super) fn external_property_getter_slot(
+        &self,
+        class: ClassId,
+        overridden: crate::fir::ExternalCallableId,
+        declared: Ty,
+    ) -> Option<ImplementorArm> {
+        let target = crate::fir::ResolvedPropertyOverrideTarget::External(overridden);
+        let ir = self.file.ir;
+        let mut at = Some(class);
+        let implementation = loop {
+            let id = at?;
+            if let Some(edge) = ir
+                .property_overrides
+                .get(&ir.classes[id as usize].fq_name)
+                .into_iter()
+                .flatten()
+                .find(|edge| edge.overridden == target)
+            {
+                break edge.implementation_type;
+            }
+            at = self.file.model.layout(id).superclass;
+        };
+        if self.carrier(implementation) != self.carrier(declared) {
+            return None;
+        }
+        let slot = self
+            .file
+            .model
+            .slot(class, &crate::native::classes::SlotKey::Getter(target))?;
+        Some(ImplementorArm {
+            class,
+            slot,
+            params: Vec::new(),
+            ret: implementation,
+        })
+    }
+
     pub(super) fn dispatch_by_implementor_with(
         &mut self,
         implementors: &[ImplementorArm],
