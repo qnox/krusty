@@ -40,6 +40,10 @@ jobs:
         run: scripts/check-attribution.sh "$RANGE"
       - name: validate pinned IntelliJ patch
         run: scripts/check-intellij-patch.sh
+      # The release job runs tools/krusty-gradle's wrapper with the signing key, without setup-gradle's
+      # wrapper validation; every committed wrapper is checked here instead.
+      - name: validate Gradle wrappers
+        run: scripts/check-gradle-wrappers.sh
       - name: outcome manifests only shrink
         env:
           BASE: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
@@ -829,6 +833,9 @@ jobs:
           chmod +x krusty krusty-build-tests
           tests="kotlin_compiler_slice_compiles_through_krusty kotlin_dsl_build_src_compiles_through_krusty"
           tests="$tests serialization_plugin_compiles_through_krusty kapt_project_compiles_through_krusty"
+          tests="$tests verify_task_reports_krusty_against_kotlinc verify_task_reports_only_the_current_invocation"
+          tests="$tests verify_task_reports_an_unsupported_kotlin_gradle_plugin verify_task_reports_projects_that_each_load_the_plugin"
+          tests="$tests verify_task_reports_kotlin_dsl_compiles_after_kotlinc_compiles_them"
           tests="$tests oss_corpus_init_script_applies_the_packaged_plugin"
           if [ "${{ matrix.ksp }}" = true ]; then
             tests="$tests ksp2_generated_sources_compile_through_krusty"
@@ -1036,8 +1043,8 @@ jobs:
           distribution: zulu
           java-version: '17'
       # No setup-gradle here: it injects an init script into every Gradle build, and these builds
-      # hold the signing key and publishing credentials. The wrapper's pinned distribution
-      # checksum stands in for its wrapper validation.
+      # hold the signing key and publishing credentials. The lint job validates the wrapper jar,
+      # whose properties pin the distribution's checksum.
       # The maintainer's krusty signing subkey (`gpg --armor --export-secret-subkeys <id>!`) signs
       # every published artifact. SIGNING_KEY_ID, its 8-hex-digit short id, is optional: without
       # it the id is read from the key itself.

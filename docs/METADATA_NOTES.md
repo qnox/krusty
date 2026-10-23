@@ -1,5 +1,12 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Nested JVM signature argument layout
+
+Common classifier applications store own arguments before captured enclosing arguments. JVM
+generic signatures render enclosing segments first, with each segment reading its own semantic
+argument range. Declaration variance and raw/Nothing decisions use the same own-first layout.
+Kotlin metadata's existing inner-type split and the physical JVM descriptors remain unchanged.
+
 Wasm's erased-reference binary equality realization uses the already checked operator and the
 runtime GC representation. It changes no metadata, callable identity, or provider authorization;
 explicit dependency `Any.equals` realization remains a separate authenticated-callable contract.

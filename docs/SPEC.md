@@ -27,6 +27,12 @@ whole-module architecture or plugin contract to fight.
 
 ## 2. Scope (what the PoC compiles)
 
+Nested JVM generic signatures keep each argument attached to its declaring classifier. A semantic
+`Inner<I, O>` application renders as `Outer<O>.Inner<I>`; deeper segments preserve their own
+parameter order. Wildcards and raw/Nothing decisions read the corresponding declaration variance
+in semantic own-first order. `tests/nested_signature_argument_layout_e2e.rs` compares the complete
+source and dependency ABI for declared/inferred returns, unequal arities and mixed variance.
+
 The configured constructor-property annotation default sites apply to Native KLIB metadata as well
 as JVM attributes. The unchanged class-surface fixture's annotated constructor property carries its
 property annotation in current mode and not in older first-only mode. Both are compared with live

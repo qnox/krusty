@@ -51,11 +51,13 @@ lint: versioning-tests release-tests fmt-check clippy-baseline-check
 versioning-tests:
     bash scripts/test-versioning.sh
 
-# The release job's signing key id selection, against keys generated in a throwaway keyring, and
-# its Maven Central upload, against a stand-in Gradle build and Central Portal.
+# The release job's signing key id selection, against keys generated in a throwaway keyring, its
+# Maven Central upload, against a stand-in Gradle build and Central Portal, and the Gradle wrapper
+# check it depends on, against stand-in published checksums.
 release-tests:
     bash scripts/test-signing-key-id.sh
     bash scripts/test-publish-maven-central.sh
+    bash scripts/test-check-gradle-wrappers.sh
 
 # Run the LSP package without coverage instrumentation.
 test-lsp:
