@@ -126,9 +126,7 @@ final class Symbols {
         if (in.readInt() != 0) {
             throw new IOException("a library class lists no declarations");
         }
-        if (readOptionalString(in) != null) {
-            throw new IOException("a library class has no JVM signature yet");
-        }
+        declaration.jvmSignature = readOptionalString(in);
         declaration.packageName = new Name(Wire.readString(in));
         declaration.parent = readOptionalString(in);
         declaration.origin = in.readByte() == 0 ? Origin.KOTLIN_LIB : Origin.JAVA_LIB;

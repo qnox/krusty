@@ -11,6 +11,9 @@ pub trait PlatformAbi {
     /// The suffix the platform appends to a function's name for its mangling signature.
     fn mangle_suffix(&self, signature: &str) -> String;
 
+    /// The suffix an `internal` member of the module `module_name` has after its name.
+    fn internal_suffix(&self, module_name: &str) -> String;
+
     /// The name of the getter of the property `property`.
     fn getter_name(&self, property: &str) -> String;
 

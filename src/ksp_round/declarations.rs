@@ -7,7 +7,7 @@ use krusty_plugin_ir::{
 };
 
 use super::annotations::Placement;
-use super::platform_names::FunctionNaming;
+use super::platform_names::{FunctionNaming, NamingSite};
 use super::type_model::{class_type, TypeParameterScope};
 use super::{Owner, Source, Subject};
 use crate::ast::{
@@ -15,7 +15,7 @@ use crate::ast::{
     SecondaryCtor,
 };
 use crate::frontend::{FrontendClassSig, FrontendDeclarationId};
-use crate::types::{ResolvedAnnotation, Ty, Visibility};
+use crate::types::{wk, ResolvedAnnotation, Ty, Visibility};
 
 /// What a classifier's declarations are built from.
 pub(super) struct ClassHeader<'a> {
@@ -29,6 +29,17 @@ pub(super) struct ClassHeader<'a> {
 }
 
 impl ClassHeader<'_> {
+    /// Whether the class names its properties' accessors as the properties: an annotation class
+    /// or a `@JvmRecord` class does.
+    fn bare_accessors(&self) -> bool {
+        self.kind == KspClassKind::AnnotationClass
+            || self
+                .signature
+                .applied_annotations
+                .iter()
+                .any(|annotation| annotation.annotation == wk::jvm_record())
+    }
+
     /// The classifier applied to a star for each of its type parameters, which is what KSP
     /// reports a constructor returns.
     fn star_projected(&self) -> KspType {
@@ -245,7 +256,12 @@ impl Source<'_> {
             &FunctionNaming {
                 name: &function.name,
                 annotations: self.applied(declaration),
-                internal: function.visibility == Visibility::Internal,
+                site: NamingSite {
+                    internal: function.visibility == Visibility::Internal,
+                    member: is_member,
+                    bare_accessors: false,
+                    generated: false,
+                },
             },
             &jvm_parameters,
             jvm_result,
@@ -351,7 +367,12 @@ impl Source<'_> {
             &FunctionNaming {
                 name: "<init>",
                 annotations: self.applied(declaration),
-                internal: false,
+                site: NamingSite {
+                    internal: false,
+                    member: true,
+                    bare_accessors: false,
+                    generated: false,
+                },
             },
             parameters,
             Some(header.class_ty()),
@@ -370,7 +391,12 @@ impl Source<'_> {
             &FunctionNaming {
                 name: &name,
                 annotations: &[],
-                internal: false,
+                site: NamingSite {
+                    internal: false,
+                    member: true,
+                    bare_accessors: false,
+                    generated: true,
+                },
             },
             parameters,
             result,
@@ -383,7 +409,7 @@ impl Source<'_> {
         property: &mut KspProperty,
         ty: Option<Ty>,
         declaration: Option<FrontendDeclarationId>,
-        internal: bool,
+        site: NamingSite,
     ) {
         let Some(platform) = self.platform else {
             return;
@@ -394,21 +420,11 @@ impl Source<'_> {
             })
         };
         property.jvm_signature = ty.and_then(|ty| platform.type_signature(ty));
-        property.getter.jvm_name = platform.accessor_name(
-            &property.name,
-            false,
-            ty,
-            accessor_annotations(false),
-            internal,
-        );
+        property.getter.jvm_name =
+            platform.accessor_name(&property.name, false, ty, accessor_annotations(false), site);
         if let Some(setter) = &mut property.setter {
-            setter.jvm_name = platform.accessor_name(
-                &property.name,
-                true,
-                ty,
-                accessor_annotations(true),
-                internal,
-            );
+            setter.jvm_name =
+                platform.accessor_name(&property.name, true, ty, accessor_annotations(true), site);
         }
     }
 
@@ -521,7 +537,15 @@ impl Source<'_> {
             &mut described,
             resolved,
             declaration,
-            property.visibility == Visibility::Internal,
+            NamingSite {
+                internal: property.visibility == Visibility::Internal,
+                member: matches!(owner, Owner::Class { .. }),
+                bare_accessors: match owner {
+                    Owner::Class { header, .. } => header.bare_accessors(),
+                    _ => false,
+                },
+                generated: false,
+            },
         );
         Ok(described)
     }
@@ -580,7 +604,12 @@ impl Source<'_> {
             &mut described,
             header.constructor_property(index),
             declaration,
-            parameter.visibility == Visibility::Internal,
+            NamingSite {
+                internal: parameter.visibility == Visibility::Internal,
+                member: true,
+                bare_accessors: header.bare_accessors(),
+                generated: false,
+            },
         );
         Ok(described)
     }
@@ -923,7 +952,13 @@ impl Source<'_> {
                 crate::types::type_name("kotlin/enums/EnumEntries"),
                 &[header.class_ty()],
             );
-            self.add_jvm_names(&mut entries, Some(entries_ty), None, false);
+            let site = NamingSite {
+                internal: false,
+                member: true,
+                bare_accessors: false,
+                generated: true,
+            };
+            self.add_jvm_names(&mut entries, Some(entries_ty), None, site);
             members.push(KspDeclaration::Property(Box::new(entries)));
         }
         members

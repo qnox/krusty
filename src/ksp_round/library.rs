@@ -8,6 +8,7 @@ use krusty_plugin_ir::{
 };
 
 use super::annotations::{short_name, Annotations};
+use super::platform_names;
 use super::type_model::{class_type, qualified_name, TypeParameterIds, TypeParameterScope};
 use crate::frontend::SourceSetAnalysis;
 use crate::libraries::{
@@ -106,8 +107,11 @@ impl KspLibraries<'_> {
                     .and_then(|signature| super_types(class, &signature.supertypes, &scope)),
                 declarations: Vec::new(),
                 declarations_complete: false,
-                // A library class's JVM signature is not described yet.
-                jvm_signature: None,
+                // A builtin classifier is its semantic type: `kotlin.Unit` is `V`.
+                jvm_signature: platform_names::type_signature(
+                    self.analysis,
+                    Ty::obj_name(class).canonical_semantic(),
+                ),
             },
             package_name: class.package().replace('/', "."),
             parent: class.nested_owner().map(qualified_name),

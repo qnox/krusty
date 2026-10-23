@@ -103,6 +103,8 @@ final class HostResolver implements Resolver {
             signature = ((SourceClass) declaration).jvmSignature;
         } else if (declaration instanceof SourceFunction) {
             signature = ((SourceFunction) declaration).jvmSignature;
+        } else if (declaration instanceof LibraryClass) {
+            signature = ((LibraryClass) declaration).jvmSignature;
         } else if (declaration instanceof SourceProperty) {
             signature = ((SourceProperty) declaration).jvmSignature;
         }

@@ -65,4 +65,50 @@ fun topLevel(value: Holder<String>): Shape? = null
 
 val topProperty: Map<Int, String> = emptyMap()
 
+internal fun internalTop(value: Int) {}
+
+internal val internalTopProperty: Int = 1
+
+internal var internalTopVar: Int = 1
+
+fun Meters.extension(): Int = value
+
+fun Meters.extensionWith(other: Meters): Meters = other
+
+fun String.toMeters(): Meters = Meters(length)
+
+fun consume(result: Result<Int>) {}
+
+fun consumeBoth(result: Result<Int>, meters: Meters) {}
+
+fun produce(): Result<Int> = Result.success(1)
+
+val Meters.doubled: Int get() = value * 2
+
+var Meters.stored: Meters
+    get() = this
+    set(value) {}
+
+val String.asMeters: Meters get() = Meters(length)
+
+fun topMeters(): Meters = Meters(1)
+
+val metersProperty: Meters = Meters(1)
+
+annotation class Ann(val x: Int, @get:JvmName("named") val y: String)
+
+@JvmRecord
+data class Rec(val a: Int, val meters: Meters)
+
+class Internals {
+    internal fun hiddenMeters(meters: Meters) {}
+
+    internal fun hiddenResult(): Meters = Meters(1)
+
+    internal var hiddenProperty: Meters = Meters(1)
+
+    @JvmName("visible")
+    internal fun renamed() {}
+}
+
 typealias Alias = Holder<String>

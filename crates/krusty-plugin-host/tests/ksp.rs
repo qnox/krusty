@@ -126,11 +126,32 @@ fn run(
     dependencies: &[PathBuf],
     outputs: &KspOutputs,
 ) -> Result<Run, HostError> {
+    run_in_module(
+        runtime,
+        env,
+        processor,
+        sources,
+        dependencies,
+        outputs,
+        "main",
+    )
+}
+
+/// [`run`] for the module `module_name`.
+fn run_in_module(
+    runtime: &KspRuntime,
+    env: &Environment,
+    processor: &Path,
+    sources: &[PathBuf],
+    dependencies: &[PathBuf],
+    outputs: &KspOutputs,
+    module_name: &str,
+) -> Result<Run, HostError> {
     let mut host = KspHost::start(runtime, env, &mut std::io::stderr())?;
     let providers = host.load(&KspLoad {
         processor_classpath: &[processor.to_path_buf()],
         options: &[],
-        module_name: "main",
+        module_name,
         outputs,
         language_version: "2.3",
         api_version: "2.3",
@@ -169,7 +190,7 @@ fn run(
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect();
-        let round = krusty::ksp_round::ksp_round(&analysis, &paths, "main")
+        let round = krusty::ksp_round::ksp_round(&analysis, &paths, module_name)
             .unwrap_or_else(|refusal| panic!("{refusal}"));
         let outcome = host.round(&round, &KspLibraries::new(&analysis))?;
         run.log.extend(outcome.log);
@@ -328,8 +349,17 @@ fn jvm_signatures_are_what_ksp2_reports() {
         resources: out.join("resources"),
     };
     let sources = [fixtures().join("signatures/Signatures.kt")];
-    let run = run(&runtime, &env, &processor, &sources, &[], &outputs)
-        .unwrap_or_else(|error| panic!("{error}"));
+    // A module name with punctuation, which an internal member's suffix makes a Java identifier.
+    let run = run_in_module(
+        &runtime,
+        &env,
+        &processor,
+        &sources,
+        &[],
+        &outputs,
+        "sig-module.core",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(run.generated, Vec::<String>::new());
     let expected: Vec<String> = std::fs::read_to_string(fixtures().join("signatures.expected"))
         .unwrap()

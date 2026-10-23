@@ -14,6 +14,13 @@ impl PlatformAbi for JvmLibraries {
         crate::jvm::inline_class::mangle_suffix(signature)
     }
 
+    fn internal_suffix(&self, module_name: &str) -> String {
+        format!(
+            "${}",
+            crate::jvm::internal_names::sanitize_module_name(module_name)
+        )
+    }
+
     fn getter_name(&self, property: &str) -> String {
         crate::names::property_getter_name(property)
     }
