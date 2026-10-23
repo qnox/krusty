@@ -190,8 +190,17 @@ fn run_verify_compile(argv: &[String]) {
         krusty_millis: None,
         krusty_peak_rss_bytes: None,
     };
-    if arguments.unsupported.is_empty() {
-        let opts = cli::parse(arguments.kotlinc_arguments.clone());
+    let opts = cli::parse(arguments.kotlinc_arguments.clone());
+    // Nothing is written, and the previous record is not removed, until the layout is proven safe.
+    if let Err(error) = verify::check_layout(&arguments.reference, &opts.dest, &arguments.record) {
+        eprintln!("error: {error}");
+        std::process::exit(2);
+    }
+    // A record left by an earlier invocation never stands in for this one, even if this one fails.
+    let _ = std::fs::remove_file(&arguments.record);
+    if !opts.sources.iter().any(|source| source.ends_with(".kt")) {
+        record.outcome = verify::Outcome::NoSources;
+    } else if arguments.unsupported.is_empty() {
         record.outcome = match refusals(&opts) {
             Err(report) => verify::Outcome::Failed {
                 errors: error_lines(&report),
@@ -273,6 +282,15 @@ fn run_verify_report(argv: &[String]) {
         eprintln!("error: {error}");
         std::process::exit(2);
     };
+    // An earlier invocation's report never survives this one, even when this one fails.
+    for name in verify::REPORT_FILES {
+        let path = arguments.out.join(name);
+        if let Err(error) = std::fs::remove_file(&path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                fail(format!("cannot remove {}: {error}", path.display()));
+            }
+        }
+    }
     let files = arguments
         .record_files()
         .unwrap_or_else(|error| fail(format!("cannot list the records: {error}")));
@@ -296,17 +314,18 @@ fn run_verify_report(argv: &[String]) {
         platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
     };
     let issue_url = verify::issue_url(&records, &environment, arguments.share_names);
+    let [html, markdown, issue] = verify::REPORT_FILES;
     let outputs = [
         (
-            "krusty-verify.html",
+            html,
             verify::render_html(&records, &environment, &issue_url),
         ),
         (
-            "krusty-verify.md",
+            markdown,
             verify::render_markdown(&records, &environment, &issue_url),
         ),
         (
-            "krusty-verify-issue.md",
+            issue,
             verify::issue_body(&records, &environment, arguments.share_names, true),
         ),
     ];
@@ -322,13 +341,10 @@ fn run_verify_report(argv: &[String]) {
             .unwrap_or_else(|error| fail(format!("cannot write {}: {error}", path.display())));
     }
     println!("{}", verify::summary_line(&verify::Summary::of(&records)));
-    println!(
-        "report: {}",
-        arguments.out.join("krusty-verify.html").display()
-    );
+    println!("report: {}", arguments.out.join(html).display());
     println!(
         "submit it to help prioritize krusty: open the report's issue button, or paste {} into {}",
-        arguments.out.join("krusty-verify-issue.md").display(),
+        arguments.out.join(issue).display(),
         verify::NEW_ISSUE_URL,
     );
 }

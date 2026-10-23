@@ -19,6 +19,7 @@ pub struct Environment {
 /// The totals over every record of a build.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Summary {
+    /// Compilations with Kotlin sources.
     pub compilations: usize,
     /// Compilations krusty compiled, identical or not.
     pub compiled: usize,
@@ -26,6 +27,8 @@ pub struct Summary {
     pub identical_compilations: usize,
     pub failed: usize,
     pub unsupported: usize,
+    /// Compilations without Kotlin sources, which neither compiler compiled.
+    pub no_sources: usize,
     /// kotlinc's classes in the compiled compilations.
     pub classes: usize,
     pub identical_classes: usize,
@@ -44,7 +47,10 @@ pub struct Summary {
 impl Summary {
     pub fn of(records: &[CompilationRecord]) -> Summary {
         let mut summary = Summary {
-            compilations: records.len(),
+            compilations: records
+                .iter()
+                .filter(|record| record.outcome != Outcome::NoSources)
+                .count(),
             ..Summary::default()
         };
         for record in records {
@@ -56,6 +62,7 @@ impl Summary {
             match &record.outcome {
                 Outcome::Unsupported { .. } => summary.unsupported += 1,
                 Outcome::Failed { .. } => summary.failed += 1,
+                Outcome::NoSources => summary.no_sources += 1,
                 Outcome::Compiled { comparison } => {
                     summary.compiled += 1;
                     if comparison.is_identical() {
@@ -122,6 +129,7 @@ pub fn record_line(record: &CompilationRecord) -> String {
             format!("unsupported, left to kotlinc: {}", reasons.join("; "))
         }
         Outcome::Failed { errors } => format!("krusty failed with {} error(s)", errors.len()),
+        Outcome::NoSources => "no Kotlin sources".to_string(),
         Outcome::Compiled { comparison } => format!(
             "{} of {} classes byte-identical{}",
             comparison.identical_classes,
@@ -143,8 +151,13 @@ pub fn record_line(record: &CompilationRecord) -> String {
 
 /// One line saying how krusty did on a whole build.
 pub fn summary_line(summary: &Summary) -> String {
+    let without_sources = if summary.no_sources > 0 {
+        format!(", {} without Kotlin sources", summary.no_sources)
+    } else {
+        String::new()
+    };
     format!(
-        "krusty verify: {}/{} compilations compiled ({} byte-identical), {} failed, {} unsupported; {} of classes byte-identical",
+        "krusty verify: {}/{} compilations compiled ({} byte-identical), {} failed, {} unsupported{without_sources}; {} of classes byte-identical",
         summary.compiled,
         summary.compilations,
         summary.identical_compilations,
@@ -230,6 +243,7 @@ mod tests {
                 errors: vec!["error".to_string()],
             }),
             record(Outcome::Unsupported { reasons: vec![] }),
+            record(Outcome::NoSources),
         ]);
         assert_eq!(
             summary,
@@ -239,6 +253,7 @@ mod tests {
                 identical_compilations: 1,
                 failed: 1,
                 unsupported: 1,
+                no_sources: 1,
                 classes: 12,
                 identical_classes: 9,
                 differences: BTreeMap::from([
@@ -255,6 +270,10 @@ mod tests {
         assert_eq!(
             summary.ranked_differences(),
             vec![("missing", 1), ("instructions", 1), ("line-numbers", 1)]
+        );
+        assert_eq!(
+            summary_line(&summary),
+            "krusty verify: 2/4 compilations compiled (1 byte-identical), 1 failed, 1 unsupported, 1 without Kotlin sources; 75.0% of classes byte-identical"
         );
     }
 

@@ -41,6 +41,9 @@ pub enum Outcome {
     Failed { errors: Vec<String> },
     /// krusty compiled it; how its output compares with kotlinc's.
     Compiled { comparison: OutputComparison },
+    /// The compilation has no Kotlin sources this time, so neither compiler compiled anything.
+    /// Recorded so a report never carries an earlier invocation's result for it.
+    NoSources,
 }
 
 /// `krusty verify-compile [options] -- <kotlinc arguments>`.
