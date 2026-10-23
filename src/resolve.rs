@@ -50089,7 +50089,9 @@ impl<'a> Checker<'a> {
                                         .expr_span(*b)
                                         .is_some_and(|span| selected.contains(&span))
                                 });
-                        if selected {
+                        if selected && self.file.script_class == Some(d) {
+                            self.check_script_statement(scope, *b);
+                        } else if selected {
                             self.check_initializer_block(scope, *b);
                         }
                     }

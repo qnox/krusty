@@ -47,8 +47,8 @@ impl Parser<'_> {
         let mut body_props = Vec::new();
         let mut init_order = Vec::new();
         let mut type_aliases = Vec::new();
-        // The expression statement the script ends with, if it ends with one.
-        let mut trailing_expression = None;
+        // The statement the script ends with, if no declaration follows it.
+        let mut trailing_statement = None;
         loop {
             self.skip_newlines();
             if self.at(TokenKind::Eof) {
@@ -76,7 +76,7 @@ impl Parser<'_> {
                 }
                 continue;
             }
-            trailing_expression = None;
+            trailing_statement = None;
             if self.at_script_member_declaration() {
                 let modifiers = self.parse_member_decl_prefix();
                 if self.parse_and_register_nested_classifier(name, &modifiers, true) {
@@ -95,9 +95,7 @@ impl Parser<'_> {
             }
             let statement = self.parse_stmt();
             let span = self.file.stmt_spans[statement.0 as usize];
-            if let Stmt::Expr(expression) = self.file.stmt(statement) {
-                trailing_expression = Some((*expression, span));
-            }
+            trailing_statement = Some(statement);
             let block = self.file.add_expr(
                 Expr::Block {
                     stmts: vec![statement],
@@ -107,6 +105,14 @@ impl Parser<'_> {
             );
             init_order.push(ClassInit::Block(block));
         }
+        self.file.script_last_statement = trailing_statement;
+        let trailing_expression =
+            trailing_statement.and_then(|statement| match self.file.stmt(statement) {
+                Stmt::Expr(expression) => {
+                    Some((*expression, self.file.stmt_spans[statement.0 as usize]))
+                }
+                _ => None,
+            });
         if let Some((expression, span)) = trailing_expression {
             // kotlinc keeps the value of the script's last expression in the `$$result` property.
             // The checker types its initializer as the statement it is, and lowering keeps no

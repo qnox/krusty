@@ -152,10 +152,31 @@ impl Checker<'_> {
         self.finish_executable_root(body);
     }
 
-    /// Type-check an `init` block, or a script statement, which kotlinc compiles to one. Neither has
-    /// a function to return from, so a `return` in it is prohibited.
+    /// Type-check an `init` block. It has no function to return from, so a `return` in it is
+    /// prohibited.
     pub(super) fn check_initializer_block(&mut self, scope: &CheckerScope<'_>, body: ExprId) {
         self.with_ret_allowed(Ty::Unit, false, |checker| {
+            checker.check_executable_body(scope, body);
+        });
+    }
+
+    /// Type-check one script statement. A `return` ends the script, except in the statement the
+    /// script ends with, which kotlinc reads as its result: there a `return` is prohibited when the
+    /// statement is an expression in kotlinc's tree. That includes a `return` statement and a `for`
+    /// loop, which kotlinc builds as a block, but not a `while` loop or an assignment. A trailing
+    /// expression statement is the `$$result` property's initializer, checked as one.
+    pub(super) fn check_script_statement(&mut self, scope: &CheckerScope<'_>, body: ExprId) {
+        let Expr::Block { stmts, .. } = self.file.expr(body) else {
+            unreachable!("the parser wraps each script statement in a block")
+        };
+        let result_position = stmts.iter().any(|statement| {
+            self.file.script_last_statement == Some(*statement)
+                && matches!(
+                    self.file.stmt(*statement),
+                    Stmt::Return(..) | Stmt::For { .. } | Stmt::ForEach { .. }
+                )
+        });
+        self.with_ret_allowed(Ty::Unit, !result_position, |checker| {
             checker.check_executable_body(scope, body);
         });
     }

@@ -1561,6 +1561,9 @@ pub struct File {
     /// The initializer of the script class's `$$result` property: the expression the script ends
     /// with. It is checked as the statement it is written as, so an `if` without `else` is `Unit`.
     pub script_result: Option<ExprId>,
+    /// The statement a Kotlin script ends with, when no declaration follows it. kotlinc reads it as
+    /// the script's result position, where a `return` is prohibited.
+    pub script_last_statement: Option<StmtId>,
     /// Top-level declarations carrying the `expect` modifier (multiplatform headers), each paired
     /// with the span of the KEYWORD that introduced it. Stable compact-header actualization
     /// excludes a matched declaration subtree before signature collection; an unmatched `expect`

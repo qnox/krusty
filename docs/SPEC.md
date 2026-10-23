@@ -15680,9 +15680,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `String` or `Array` still takes `String[]` and reads `args` through the template.
   (`tests/kotlin_script_e2e.rs`, `imports_do_not_rebind_the_template_parameter_type_like_kotlinc`.)
 - **An initializer has no function to return from.** A `return` in an `init` block (of a class or
-  an enum entry), a property initializer (top-level or member), or a script statement, the script's
-  final `$$result` expression included, is `'return' is prohibited here.`, as kotlinc reports it.
-  (`tests/diagnostics_language_parity_e2e.rs`.)
+  an enum entry) or a property initializer (top-level, member, or script) is `'return' is
+  prohibited here.`, as kotlinc reports it. (`tests/diagnostics_language_parity_e2e.rs`,
+  `an_initializer_return_is_prohibited_like_kotlinc`.)
+- **A script `return` ends the script, except in its result position.** kotlinc reads the
+  statement a script ends with, when no declaration follows it, as the script's result. A `return`
+  there is prohibited when that statement is an expression in kotlinc's tree: an expression
+  statement (the `$$result` initializer), a `return` statement, or a `for` loop, which kotlinc
+  builds as a block. A `while` or `do`-`while` loop or an assignment in that position, or a
+  `return` followed only by declarations, ends the script. (`tests/diagnostics_language_parity_e2e.rs`,
+  `a_script_return_is_prohibited_in_its_result_position_like_kotlinc`.)
 - **An `if` without `else` is a `Unit` statement whose branch still constrains inference.** An
   inferred property type such as `val f = run { sequence { if (c) { yield("OK") } }.toList() }`
   keeps the branch's builder call as a constraint on the builder variable (`List<String>`), while
