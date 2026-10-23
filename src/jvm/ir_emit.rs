@@ -146,6 +146,7 @@ mod return_emission;
 mod safe_calls;
 mod sam_wrapper_class;
 mod scalar_coercion;
+mod script_main;
 mod shared_cell_declaration;
 mod signature_formatter;
 mod singleton_instance;
@@ -831,7 +832,8 @@ fn attach_synth_nullability(
         .map(|parameter| nullability_annotation(parameter.nullability))
         .collect();
     let ctor_desc = primary_ctor_descriptor(ir, c);
-    if ctor_params.iter().any(|p| p.is_some()) {
+    // kotlinc annotates none of a script's constructor parameters.
+    if !c.is_script && ctor_params.iter().any(|p| p.is_some()) {
         cw.set_method_nullability("<init>", &ctor_desc, None, &ctor_params);
     }
     // HOISTED companion properties: the delegating accessors annotate like ordinary accessors
@@ -1114,7 +1116,7 @@ fn register_sealed_subtypes(cw: &mut ClassWriter, ir: &IrFile, c: &IrClass, emit
         return;
     }
     let self_identity = c.fq_name_id();
-    let subs = crate::metadata::class_declarations::sorted_sealed_subclasses(c);
+    let subs = c.sorted_sealed_subclasses();
     if subs.is_empty() {
         return;
     }
@@ -1181,7 +1183,10 @@ fn new_classifier_writer(
     if let Some(signature) = &signature {
         cw.set_signature(signature);
     }
-    cw.set_nullability_annotations(!crate::metadata::local_classifiers::is_local(ir, c));
+    // kotlinc publishes no nullability in a script's classes either.
+    cw.set_nullability_annotations(
+        !crate::metadata::local_classifiers::is_local(ir, c) && !ir.is_script(),
+    );
     cw
 }
 
@@ -2684,7 +2689,8 @@ fn emit_class(
         // would be dead code after `athrow` (which the verifier rejects without a frame).
         if !init_diverges {
             // The trailing `return` goes back on the class-declaration line, closing the ctor's table.
-            if !ctor_lines.is_empty() {
+            // A script has no declaration line: its `return` follows the last statement's.
+            if !ctor_lines.is_empty() && !c.is_script {
                 // A closing `init` line still pending owns a `nop` before the return's line.
                 let line = primary_constructor_line(ir, c);
                 ctor.mark_line(line);
@@ -2784,8 +2790,25 @@ fn emit_class(
         }
     } // end `if c.has_primary_ctor`
 
+    // kotlinc adds a script's `main` with the script's own members, so it precedes every member
+    // a later lowering adds: the lifted local functions and lambdas, bridges, and accessors.
+    // A script that declares a function named `main` gets no generated one, whatever its shape.
+    let mut script_main = c.is_script
+        && !c.methods.iter().any(|&function| {
+            !ir.lifted_functions.contains_key(&function)
+                && ir.functions[function as usize].name == "main"
+        });
     for member in after_primary {
+        if script_main
+            && matches!(member, SourceOrderedMember::Function(function) if ir.lifted_functions.contains_key(&function))
+        {
+            script_main::emit(&fq_name, opts.param_assertions, &mut cw);
+            script_main = false;
+        }
         emit_scheduled_member(&member_emission, member, &mut cw);
+    }
+    if script_main {
+        script_main::emit(&fq_name, opts.param_assertions, &mut cw);
     }
     // The exact serialization-plugin deserialization constructor emits after every declared member
     // (`write$Self$main` included) and before `<clinit>`, which is kotlinc's member order for it.

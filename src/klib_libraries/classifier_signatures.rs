@@ -30,6 +30,10 @@ pub(super) struct SignedConstructor {
 
 /// A class joined with its identity, its validated shape, and its signed members.
 pub(super) struct SignedClassifier {
+    /// Authenticated serialization container facts, retained for inherited reference signing.
+    pub(super) signature: KlibPublicIdSignature,
+    pub(super) expect: bool,
+    pub(super) native_interop_library: bool,
     /// This declaration belongs to the explicitly selected platform stdlib input.
     pub(super) compiler_builtin_owner: bool,
     /// The class's shape without its callables.
@@ -254,6 +258,9 @@ pub(super) fn sign_package_classes(
         published.push((
             identity,
             SignedClassifier {
+                signature: metadata_class_signature(around, *own),
+                expect: class.is_expect,
+                native_interop_library,
                 compiler_builtin_owner,
                 shape,
                 module: module.map(str::to_owned),

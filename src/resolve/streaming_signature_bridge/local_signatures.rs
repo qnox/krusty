@@ -1090,10 +1090,7 @@ fn publish_checked_local_signatures_selected(
         }
         if matches!(
             anchor.kind,
-            DeclarationKind::EnumEntry
-                | DeclarationKind::TypeAlias
-                | DeclarationKind::Initializer
-                | DeclarationKind::Script
+            DeclarationKind::EnumEntry | DeclarationKind::TypeAlias | DeclarationKind::Initializer
         ) {
             continue;
         }
@@ -1610,8 +1607,7 @@ fn publish_checked_local_signatures_selected(
                 DeclarationKind::Classifier
                 | DeclarationKind::EnumEntry
                 | DeclarationKind::TypeAlias
-                | DeclarationKind::Initializer
-                | DeclarationKind::Script => {}
+                | DeclarationKind::Initializer => {}
             }
             continue;
         }
@@ -2253,8 +2249,7 @@ fn publish_checked_local_signatures_selected(
             DeclarationKind::Classifier
             | DeclarationKind::EnumEntry
             | DeclarationKind::TypeAlias
-            | DeclarationKind::Initializer
-            | DeclarationKind::Script => {}
+            | DeclarationKind::Initializer => {}
         }
     }
     for (declaration, classifier, delegations) in deferred_interface_delegations {

@@ -36,12 +36,19 @@ pub(super) const METADATA_PUBLIC_ABI_FLAG: i32 = 1 << 7;
 /// function other code can inline: one that is not private and not a member of a private class.
 /// Only the function's own class counts: a public class nested in a private one still marks its
 /// inline members' objects.
+/// A script's class also sets `METADATA_SCRIPT_FLAG`.
 pub(super) fn class_xi(ir: &crate::ir::IrFile, class: &crate::ir::IrClass) -> i32 {
     const JVM_IR_AND_STABLE_ABI: i32 = 48;
-    if in_public_inline_scope(ir, class.enclosure) {
-        JVM_IR_AND_STABLE_ABI | METADATA_PUBLIC_ABI_FLAG
+    const METADATA_SCRIPT_FLAG: i32 = 4;
+    let xi = if class.is_script {
+        JVM_IR_AND_STABLE_ABI | METADATA_SCRIPT_FLAG
     } else {
         JVM_IR_AND_STABLE_ABI
+    };
+    if in_public_inline_scope(ir, class.enclosure) {
+        xi | METADATA_PUBLIC_ABI_FLAG
+    } else {
+        xi
     }
 }
 

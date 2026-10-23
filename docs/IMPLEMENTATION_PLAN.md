@@ -5,6 +5,39 @@ front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
 
+KLIB dependency-emission categories have disjoint declaration-owned roots before lowering begins.
+An authenticated intrinsic wrapper keeps that ownership when its body transaction declines; the
+ordinary-body category cannot retry it and turn the target decline into an ordinary-closure error.
+
+## Constructor parameter annotation pool order
+
+The JVM constructor header seeder carries retained checked applications rather than descriptor-only
+projections. Encode their complete values at the existing retention-ordered visit boundary; keep
+source target selection and semantic annotation publication outside the writer. This is independent
+of the cross-file publication and configured default-target-mode follow-ups.
+
+## Constructor-property annotation publication
+
+Publish checked PROPERTY-targeted constructor-parameter applications by stable property identity,
+so plugin constructor selection sees the same folded payload as common IR. Keep parameter and
+accessor sites separate. Pure serialization runtime fixtures explicitly supply the compile-time
+JDK image, without putting that image on the runtime jar classpath or changing no-JDK tests.
+Constructor-plan discovery uses source declarations, not the optional spelling sidecar. Checked
+constructor-property values and explicit sites remain in a private pending record until every
+file has published its annotation policies; no syntax or full TypeInfo is retained across files.
+Forward and reverse input orders must publish the same property payload and class bytes.
+The configured param-property default-target mode is a separate semantic follow-up (#2542).
+
+## String operation authority publication
+
+The shared StringPlus operation requires the existing selected-stdlib authority for both member
+and nullable-extension declarations. Member normalization happens before callable identity
+publication, replacing the late source-only realization; the body view projects the existing
+normalized member operation rather than losing it. An actual-archive regression checks both
+forms through source, opaque identity and module-qualified dependency views, and repeats the same
+archive as an ordinary dependency. This provider correction is independent of KLIB inline-body
+expansion and adds no backend capabilities, outcome allowances or metadata fields.
+
 ## Phase 0 — Foundations  ✅
 - ✅ Cargo project (lib + bin), local `cargo test`/`cargo run`. Toolchain: rustc 1.96 + gcc linker.
 - ✅ `token.rs`: token kinds, `Span { lo:u32, hi:u32 }`, keyword table (types are idents, not kw).
@@ -5275,8 +5308,17 @@ regress.
     hosts. A literal-lambda call's route is planned before it is emitted
     (`bytecode_inline_call::lambda_route`): the port, or the splice for a named shape it does not
     own yet, never one after the other. Still on the splice: lambdas that suspend (until the
-    coroutine transformer runs on inlined bytecode), value-class adapters other than an unboxed non-null value class, non-local returns,
-    materialized lambdas and callee shapes of later stages; callable references are not ported.
+    coroutine transformer runs on inlined bytecode), value-class adapters other than an unboxed non-null value class, non-local
+    `break`/`continue`, materialized lambdas and callee shapes of later stages; callable references
+    are not ported.
+  - ✓ 3c. Non-local returns are marked (`$$$$$NON_LOCAL_RETURN$$$$$`) and stay returns of the
+    caller, with the inlined function's `finally` bodies copied in front of each one
+    (`inliner::finally_blocks`, `InternalFinallyBlockInliner`) and the caller's own `finally`
+    blocks run in front of it where the inlined code is written (`generateAndInsertFinallyBlocks`).
+    Open: kotlinc keeps a `line N: 0` entry for dead code after an unconditional non-local return,
+    which krusty's code builder does not represent; non-local `break`/`continue` through a
+    `finally` still go through the splice, which skips the `finally` (a lock held by `withLock`
+    stays held).
 - ◐ 4. `AnonymousObjectTransformer`: anonymous objects and crossinline lambdas in an inlined body
   are regenerated as `$$inlined$` classes.
   - ◐ 4a. Anonymous objects of a classpath inline body with no lambda arguments, inlined into a
@@ -5569,6 +5611,10 @@ non-inline callers, still reads the field directly. Test:
   181/181/182; Native's counts are unchanged by the shared tables.
 - Known gap: `x as? C` on a value smart-cast earlier in the body lowers to a `When` with no
   checked type, which Wasm declines rather than infer one.
+- Nullable scalar assertions decline when the operand is a reference but the checked result has
+  a scalar carrier. Existing reference assertions remain unchanged; scalar unboxing and typed
+  null failures are separate work. The same Wasm contract tests cover both hosts and all four
+  scalar carriers against the JVM oracle.
 - Wasm consumes the published declaration-result provenance of a generic call beneath its
   checked result coercion. This preserves separate declared and selected types without inventing
   missing facts; it does not yet supply generic scalar boxing or a canonical dependency-call ABI.
@@ -5588,14 +5634,112 @@ non-inline callers, still reads the field directly. Test:
   provider normalization. This producer change does not enable ordinary-body or inline-accessor
   emission; those consumers remain separate work.
 
+## Prepared KLIB inline return frames  🚧
+
+- Successful dependency-template expansion records the final common IR root as an external-inline
+  region. The real kotlinc-native producer/consumer test verifies both explicit-argument and
+  default-argument reified calls, including membership in the ordinary inline-region inventory.
+- Branch-local returns in prepared stdlib inline bodies use an exact serialized block target,
+  anonymous result storage and a labelled structural exit; sole-tail returns keep their direct
+  value path. Both paths reject repeated enclosing target declarations. A block target never
+  becomes a readable local, and a value frame must prove it cannot fall through.
+- Structural regression tests cover successful stores/exits and malformed targets, ghost value
+  reads and missing results. The shared `INLINE_NULL_CHECK_RETURNS` module graph covers nullable
+  reference/scalar arguments, one evaluation and both null-failure paths against pinned kotlinc.
+- Inherited-reference bindings are integrated; the original `repeat` caller is a distinct shared
+  positive, and the unsupported `compareBy` factory retains the required-template rejection
+  contract. Exact header inventories pass for every manifest release.
+- Native range-builder roles accept both checked extension-receiver operand layouts through one
+  representation path, rejecting malformed coordinates rather than retrying by spelling.
+- Prefix/postfix increment blocks retain their ordered serialized statements and snapshot mutable
+  reads. Selected collection properties retain their normalized identity across accessor spellings;
+  authenticated size-only `Array<T>` constructors lower to common array allocation, with the
+  constructor role preserved through provider normalization. Initializer locals take slots before
+  the containing declaration, matching checked FIR and preventing slot aliasing.
+- Initializer lambdas carry an explicit nameless-caller context into source and dependency inline
+  expansion. Named local functions reset that fact; missing named-function provenance still fails.
+- The exact stdlib collection sizing helper preserves its generic declaration and eager operands.
+  Native descriptors expose the selected virtual Collection.size getter independently of iterator
+  inheritance; plain Iterable inputs return the default without iteration.
+- The selected stdlib `CharSequence.trim(): CharSequence` extension carries an authenticated
+  provider operation. Native realizes only receivers proven to use its contiguous String or
+  StringBuilder storage; an arbitrary CharSequence still declines before entering the runtime.
+  `INLINE_TEXT_TRIM` is one shared dependency graph for whitespace, Unicode and empty inputs.
+- Remaining: publish collection-role facts for inherited iterators, validate every supported
+  KLIB lane and remove the inline-template draft's new conformance regressions before landing.
+- Ordinary generic headers authenticate the exact provider-frozen formal types and every full
+  bound, including recursive/forward bounds, without prepared-inline erasure. Reification and
+  parameter roles must agree independently of the flattened operand types.
+- The frozen body declaration contract now retains known inline/suspend/external/modality facts
+  and independent property externality. Ordinary raw headers reject disagreement with those facts;
+  selected variants with unknown or conflicting contracts cannot coalesce. Structural emitted-use
+  admission now requires known eligible top-level/extension contracts and exact transitive provider
+  declarations. Ordinary closure failure is fatal; intrinsic support retains its separate proof.
+  Native property access routes the exact accessor export through the canonical call ABI. Complete
+  target-specific default-wrapper/enum-root inventory and inline-accessor substitution flow remain
+  unfinished; no all-arena/default scan or helper-name algorithm was added.
+- Dependency graph preparation and actual common body lowering share one exact builtin call
+  disposition. Common operations need neither an emitted callee body nor a provider handle;
+  selected source declarations, ambiguous contracts and previous external exports retain their
+  declaration obligations. Missing non-builtin provider realizations remain failures.
+- Provider-normalized scalar unary and array/string-length operations now retain their effective
+  member realization through both frozen views. One common capability authenticates exact raw
+  class/member headers, accessor membership and provider-owned class formals before either closure
+  walk stops; actual lowering consumes that same proof. Private array-length implementations are
+  not made public or given helper-name exceptions. Ordinary instance bodies remain unsupported;
+  target array representation and all existing-pass preservation gates still need validation.
+- Constructor provider lookup now preserves the exact declaring-class contract through both frozen
+  views, including class formals, full bounds and variance. Invocation types remain `Unit` and do not
+  gain function-owned generic parameters. Shared raw constructor authentication now checks direct
+  membership, complete class bounds, visibility, parameter roles, declared defaults and packed
+  varargs. Ordinary and prepared body lowering instantiate all class arguments together and retain
+  explicit external constructor handles instead of exporting constructor bodies as top-level
+  functions. Caller-bound proof is separate from casts/spreads; dependency planning walks only
+  executed constructor/call expressions, leaving intrinsic-root authority call-only.
+  Constructor absence, missing provider capability and contradictory kind/handle facts retain
+  distinct fail-closed diagnostics and empty-unit rollback; no stdlib absence assertion is waived.
+  Full actual-KLIB release and Native/Wasm runtime preservation remain landing gates for this path.
+- Wasm selected accessors join exact frozen getter/setter identities to the canonical dependency
+  export ABI. Receiver-shape validation is shared with Native; target coercion remains local.
+  Ordinary calls and property operations use the stored declared signature, never a specialized
+  call's carriers. Preserve source/serialized extension coordinates and strict generic-accessor
+  refusal until checked property substitutions exist. Validate both Wasm hosts after the JVM oracle
+  and retain the full Native/Wasm preservation gates.
+- Declaration-owned vararg positions survive provider and frozen handoffs separately from
+  call-site specialization. Raw/prepared headers authenticate the exact packed-array element and
+  regular-value slot, including context/extension coordinates; dispatch markers are rejected.
+  Serialized listed/spread operands lower to the existing common Vararg node without changing
+  dependency call arity. Header and source-IR round-trip tests cover this common boundary; complete
+  Native/Wasm preservation and generic target representation remain separate landing gates.
+  Ordinary-unit reference spreads need normalized subtype evidence for covariance; the real
+  Kotlin/Native producer leaves the narrower array uncast. No widening shortcut is admitted.
+- Native dependency exports retain one emitted IR signature for both wrapper definitions and
+  imports. Exact checked generic instantiation validates source operand roles independently of
+  the canonical ABI; arguments/results use the existing target boxing and conversion boundary.
+  The shared generic dependency fixture covers repeated Int/String/Long instantiations and
+  source/serialized extension calls with argument and callee effects.
+- Remaining: validate the declared-ABI path across the conformance gates, replace ordinary
+  helper-algorithm adapters with serialized dependency bodies, and close their exact call graphs.
+  Header support alone does not widen executable roots; Wasm generic representation is unfinished.
+
 ## Declaration-owned list storage construction  🚧
 
 - Authenticate stdlib factory generic signatures at the provider boundary and freeze a typed
   empty/singleton/packed storage plan. JVM alias expansion stays in the JVM provider.
 - Replace Native's factory spelling/physical-array matcher with consumption of that exact plan;
   preserve singleton-array identity, readonly sharing and mutable copying through existing E2Es.
-- Validate actual JVM and all target-KLIB declarations plus malformed-contract negatives. The
-  inline-template branch still needs to use the same positive capability in its dependency graph.
+- Validate actual JVM and all target-KLIB declarations plus malformed-contract negatives.
+- The inline-template branch shares Native's positive storage projection between emitted roots,
+  both closure walks and emission. Target leaves authenticate external headers and retain generic
+  formals; previously emitted bodies keep their distinct export contract. Unit regressions cover
+  primitive/reference calls and malformed/conflicting declarations. Full preservation surveys and
+  the remaining Wasm call/export and generic representation gates still block that branch.
+- Share the same target-owned operation plan for the authenticated StringPlus member and nullable
+  extension. Preserve their separate/source and flattened/serialized operand roles, with exact
+  provider/raw-header and target-handle negative tests. Algorithm adapters remain non-capabilities;
+  pin Native extension-reference operands/effects in target ABI E2Es after the JVM oracle and rerun
+  preservation. A new shared Any?-typed concatenation case still needs Wasm string-template support
+  before it joins the portable box inventory; no failure allowance is added for it.
 
 ## KLIB writer — krusty compiles a module to a Kotlin library  ◐
 
@@ -5628,3 +5772,10 @@ write the dependency libraries itself; kotlinc only supplies the expected progra
   module's KLIB with this backend, the dependent compilation reads it through the KLIB library
   provider, and Native links and runs `box()`; the expected-failure ratchet records each case until
   it runs.
+
+## KLIB inline migration debt
+
+The maintainer approved #2459's remaining Native/Wasm conformance regressions as a one-time
+baseline transition, with exact per-release loaded-blob proof and normal shrink-only checks
+afterward. This is not an all-backend support claim. Small capability follow-ups #2520–#2525
+restore measured cases independently; see [KLIB inline migration](KLIB_INLINE_MIGRATION.md).

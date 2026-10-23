@@ -175,6 +175,9 @@ pub struct IrCheckedProperty {
     /// Kotlin metadata's `HAS_CONSTANT`: an immutable property of a `const val` type whose checked
     /// initializer is a constant to kotlinc's serializer (see `fir_lower::metadata_constants`).
     pub has_constant_initializer: bool,
+    /// A script's `$$result` whose checked initializer is an effect, of type `Unit` or `Nothing`.
+    /// kotlinc evaluates it as the script's last statement and keeps no property for it.
+    pub script_effect: bool,
     pub delegate: Option<ExprId>,
     pub delegate_plan: Option<crate::fir::FirPropertyDelegatePlan>,
     pub getter: Option<ExprId>,

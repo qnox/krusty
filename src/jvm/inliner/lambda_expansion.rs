@@ -290,7 +290,7 @@ pub(super) fn expand(
     context: &Context<'_>,
     invokes: Vec<Option<usize>>,
     lines: &mut dyn SourceLines,
-) -> Result<MethodNode, InlineError> {
+) -> Result<Expanded, InlineError> {
     let mut out = node.clone();
     out.nodes = Vec::with_capacity(node.nodes.len());
     out.local_variables = Vec::new();
@@ -356,14 +356,23 @@ pub(super) fn expand(
     let lambda_blocks = out.try_catch_blocks.len();
     out.try_catch_blocks
         .extend(node.try_catch_blocks.iter().cloned());
-    super::try_blocks::order_around_finally_blocks(&mut out, lambda_blocks);
     for local in &node.local_variables {
         let mut local = local.clone();
         sorter.visit_local(&mut local);
         out.local_variables.push(local);
     }
     out.max_locals = sorter.max_locals();
-    Ok(out)
+    Ok(Expanded {
+        node: out,
+        lambda_blocks,
+    })
+}
+
+/// A body with its lambdas expanded.
+pub(super) struct Expanded {
+    pub node: MethodNode,
+    /// How many of its try/catch blocks, first in its table, come from the lambdas.
+    pub lambda_blocks: usize,
 }
 
 /// One `invoke` of a lambda, being replaced by the lambda's body.
@@ -535,7 +544,11 @@ fn inline_lambda(
         inline_only: false,
         inline_markers: false,
     };
-    let mut node = expand(&node, &context, invokes, &mut CallerLines)?;
+    let Expanded {
+        mut node,
+        lambda_blocks,
+    } = expand(&node, &context, invokes, &mut CallerLines)?;
+    super::try_blocks::order_around_finally_blocks(&mut node, lambda_blocks);
     preparation::remove_closure_assertions(&mut node)?;
     let mut node = remap_lambda(&node, lambda, host, value_param_shift)?;
     let end = node.new_label();

@@ -2359,7 +2359,7 @@ fn cross_file_private_context_function_cannot_reach_lowering() {
 }
 
 #[test]
-fn compiler_does_not_emit_kotlin_scripts() {
+fn compiler_lowers_a_kotlin_script_as_its_class() {
     let source = "val value = 1";
     let mut diags = DiagSink::new();
     let inputs = [SourceInput::kotlin_script(source).with_file_stem("Script")];
@@ -2372,10 +2372,13 @@ fn compiler_does_not_emit_kotlin_scripts() {
     );
     let outputs = emit_analyzed(analysis, &stems, &RecordingBackend, "main", &mut diags);
 
-    assert!(outputs.is_empty());
+    assert_eq!(emitted_diagnostics(&diags), []);
     assert_eq!(
-        emitted_diagnostics(&diags),
-        [(0, "Kotlin scripts can be analyzed but cannot be emitted")]
+        outputs
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["Script.out", "module.out"]
     );
 }
 

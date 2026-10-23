@@ -104,11 +104,21 @@ pub enum ExternalCallableKind {
 pub struct KlibBodyCallable<'a> {
     name: &'a str,
     kind: ExternalCallableKind,
+    visibility: crate::types::Visibility,
+    semantic_role: Option<crate::types::SemanticCallRole>,
     params: &'a [Ty],
     ret: Ty,
     parameter_identities: &'a [crate::fir::ResolvedParameterIdentity],
     context_count: usize,
+    /// Declaration-owned packed parameter position, including contexts and extension receiver.
+    vararg_index: Option<usize>,
+    parameter_defaults: Option<super::ParamFlags>,
+    generic_signature: Option<&'a super::GenericSig>,
+    type_parameters: &'a [Ty],
+    reified_type_parameter_ordinals: &'a [u32],
     compiler_intrinsic: Option<CompilerIntrinsic>,
+    declaration_modifiers: Option<super::KlibBodyDeclarationModifiers>,
+    class_contract: Option<&'a super::KlibBodyClassContract>,
     /// Exact singleton dispatch receiver selected for this call edge. Common KLIB body lowering
     /// uses its semantic type to validate and consume the serialized receiver; target storage
     /// remains outside this target-free contract.
@@ -117,34 +127,79 @@ pub struct KlibBodyCallable<'a> {
     /// primitive, so later phases cannot reconstruct the classifier from the type.
     singleton_classifier: Option<TypeName>,
     companion_receiver: Option<&'a KlibBodyCompanionReceiver>,
+    /// The provider-normalized namespace that declares the callable. Metadata is authoritative
+    /// for it: a serialized body must name the same owner.
+    declaration_owner: Option<crate::types::SemanticCallableOwner>,
     identity: &'a KlibDependencyCallable,
+}
+
+/// The declared shape of a selected callable that its KLIB body is lowered against.
+pub(crate) struct KlibBodyCallableShape<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) kind: ExternalCallableKind,
+    pub(crate) visibility: crate::types::Visibility,
+    pub(crate) semantic_role: Option<crate::types::SemanticCallRole>,
+    pub(crate) params: &'a [Ty],
+    pub(crate) ret: Ty,
+    pub(crate) parameter_identities: &'a [crate::fir::ResolvedParameterIdentity],
+    pub(crate) context_count: usize,
+    pub(crate) vararg_index: Option<usize>,
+    pub(crate) parameter_defaults: Option<super::ParamFlags>,
+    pub(crate) generic_signature: Option<&'a super::GenericSig>,
+    pub(crate) type_parameters: &'a [Ty],
+    pub(crate) reified_type_parameter_ordinals: &'a [u32],
+    pub(crate) compiler_intrinsic: Option<CompilerIntrinsic>,
+    pub(crate) declaration_modifiers: Option<super::KlibBodyDeclarationModifiers>,
+    pub(crate) class_contract: Option<&'a super::KlibBodyClassContract>,
 }
 
 impl<'a> KlibBodyCallable<'a> {
     pub(crate) fn new(
-        name: &'a str,
-        kind: ExternalCallableKind,
-        params: &'a [Ty],
-        ret: Ty,
-        parameter_identities: &'a [crate::fir::ResolvedParameterIdentity],
-        context_count: usize,
-        compiler_intrinsic: Option<CompilerIntrinsic>,
-        singleton_dispatch: Option<Ty>,
-        singleton_classifier: Option<TypeName>,
+        shape: KlibBodyCallableShape<'a>,
+        singleton: Option<SingletonDispatch>,
         companion_receiver: Option<&'a KlibBodyCompanionReceiver>,
+        declaration_owner: Option<SemanticCallableOwner>,
         identity: Option<&'a KlibDependencyCallable>,
     ) -> Option<Self> {
-        Some(Self {
+        let KlibBodyCallableShape {
             name,
             kind,
+            visibility,
+            semantic_role,
             params,
             ret,
             parameter_identities,
             context_count,
+            vararg_index,
+            parameter_defaults,
+            generic_signature,
+            type_parameters,
+            reified_type_parameter_ordinals,
             compiler_intrinsic,
-            singleton_dispatch,
-            singleton_classifier,
+            declaration_modifiers,
+            class_contract,
+        } = shape;
+        Some(Self {
+            name,
+            kind,
+            visibility,
+            semantic_role,
+            params,
+            ret,
+            parameter_identities,
+            context_count,
+            vararg_index,
+            parameter_defaults,
+            generic_signature,
+            type_parameters,
+            reified_type_parameter_ordinals,
+            compiler_intrinsic,
+            declaration_modifiers,
+            class_contract,
+            singleton_dispatch: singleton.map(SingletonDispatch::ty),
+            singleton_classifier: singleton.map(|dispatch| dispatch.classifier),
             companion_receiver,
+            declaration_owner,
             identity: identity?,
         })
     }
@@ -168,12 +223,32 @@ impl<'a> KlibBodyCallable<'a> {
         self.kind
     }
 
+    pub(crate) fn visibility(self) -> crate::types::Visibility {
+        self.visibility
+    }
+
+    pub(crate) fn semantic_role(self) -> Option<crate::types::SemanticCallRole> {
+        self.semantic_role
+    }
+
     pub(crate) fn params(self) -> &'a [Ty] {
         self.params
     }
 
     pub(crate) fn ret(self) -> Ty {
         self.ret
+    }
+
+    pub(crate) fn generic_signature(self) -> Option<&'a super::GenericSig> {
+        self.generic_signature
+    }
+
+    pub(crate) fn type_parameters(self) -> &'a [Ty] {
+        self.type_parameters
+    }
+
+    pub(crate) fn reified_type_parameter_ordinals(self) -> &'a [u32] {
+        self.reified_type_parameter_ordinals
     }
 
     pub(crate) fn parameter_identities(self) -> &'a [crate::fir::ResolvedParameterIdentity] {
@@ -184,12 +259,28 @@ impl<'a> KlibBodyCallable<'a> {
         self.context_count
     }
 
+    pub(crate) fn vararg_index(self) -> Option<usize> {
+        self.vararg_index
+    }
+
+    pub(crate) fn parameter_defaults(self) -> Option<super::ParamFlags> {
+        self.parameter_defaults
+    }
+
     pub(crate) fn compiler_intrinsic(self) -> Option<CompilerIntrinsic> {
         self.compiler_intrinsic
     }
 
     pub(crate) fn singleton_dispatch(self) -> Option<Ty> {
         self.singleton_dispatch
+    }
+
+    pub(crate) fn declaration_modifiers(self) -> Option<super::KlibBodyDeclarationModifiers> {
+        self.declaration_modifiers
+    }
+
+    pub(crate) fn class_contract(self) -> Option<&'a super::KlibBodyClassContract> {
+        self.class_contract
     }
 
     pub(crate) fn singleton_classifier(self) -> Option<TypeName> {
@@ -202,17 +293,31 @@ impl<'a> KlibBodyCallable<'a> {
     pub(crate) fn same_declaration_contract(self, other: Self) -> bool {
         self.name == other.name
             && self.kind == other.kind
+            && self.visibility == other.visibility
+            && self.semantic_role == other.semantic_role
             && self.params == other.params
             && self.ret == other.ret
             && self.parameter_identities == other.parameter_identities
             && self.context_count == other.context_count
+            && self.vararg_index == other.vararg_index
+            && self.parameter_defaults == other.parameter_defaults
+            && self.generic_signature == other.generic_signature
+            && self.type_parameters == other.type_parameters
+            && self.reified_type_parameter_ordinals == other.reified_type_parameter_ordinals
             && self.compiler_intrinsic == other.compiler_intrinsic
+            && self.declaration_modifiers == other.declaration_modifiers
+            && self.class_contract == other.class_contract
             && self.companion_receiver == other.companion_receiver
+            && self.declaration_owner == other.declaration_owner
             && self.identity == other.identity
     }
 
     pub(crate) fn companion_receiver(self) -> Option<&'a KlibBodyCompanionReceiver> {
         self.companion_receiver
+    }
+
+    pub(crate) fn declaration_owner(self) -> Option<crate::types::SemanticCallableOwner> {
+        self.declaration_owner
     }
 
     pub(crate) fn signature(self) -> &'a KlibDeclarationSignature {
@@ -250,6 +355,14 @@ pub struct ExternalCallableRealization {
     /// It is separate from source parameters because source lookup names the declaration through
     /// the classifier without a value receiver.
     pub(crate) klib_body_companion_receiver: Option<KlibBodyCompanionReceiver>,
+    /// Declaration-owned formal types, frozen before normalized full bounds can deepen their
+    /// finite self/forward references. Empty for declarations without KLIB generic body facts.
+    pub(crate) klib_body_type_parameters: Box<[Ty]>,
+    /// Known declaration implementation modifiers; absent for providers without KLIB body facts.
+    pub(crate) klib_body_declaration_modifiers: Option<super::KlibBodyDeclarationModifiers>,
+    pub(crate) klib_body_class_contract: Option<super::KlibBodyClassContract>,
+    pub(crate) klib_body_vararg_index: Option<usize>,
+    pub(crate) klib_body_parameter_defaults: Option<crate::libraries::ParamFlags>,
 }
 
 impl ExternalCallableRealization {
@@ -259,16 +372,30 @@ impl ExternalCallableRealization {
     pub fn klib_body_callable(&self) -> Option<KlibBodyCallable<'_>> {
         let singleton = self.callable.singleton_dispatch.as_deref().copied();
         KlibBodyCallable::new(
-            &self.callable.name,
-            self.kind,
-            &self.callable.params,
-            self.callable.ret,
-            &self.parameter_identities,
-            self.callable.context_count,
-            self.callable.compiler_intrinsic,
-            singleton.map(SingletonDispatch::ty),
-            singleton.map(|dispatch| dispatch.classifier),
+            KlibBodyCallableShape {
+                name: &self.callable.name,
+                kind: self.kind,
+                visibility: self.callable.visibility,
+                semantic_role: self.callable.semantic_role,
+                params: &self.callable.params,
+                ret: self.callable.ret,
+                parameter_identities: &self.parameter_identities,
+                context_count: self.callable.context_count,
+                vararg_index: self.klib_body_vararg_index,
+                parameter_defaults: self.klib_body_parameter_defaults,
+                generic_signature: self.callable.generic_sig.as_deref(),
+                type_parameters: &self.klib_body_type_parameters,
+                reified_type_parameter_ordinals: &self.callable.reified_type_parameter_ordinals,
+                compiler_intrinsic: self
+                    .callable
+                    .compiler_intrinsic
+                    .or(self.callable.member_realization.compiler_intrinsic()),
+                declaration_modifiers: self.klib_body_declaration_modifiers,
+                class_contract: self.klib_body_class_contract.as_ref(),
+            },
+            singleton,
             self.klib_body_companion_receiver.as_ref(),
+            self.declaration_owner,
             self.dependency_callable.as_ref(),
         )
     }
@@ -417,6 +544,7 @@ impl LibraryCallable {
         );
         callable.physical_name = member.physical_name.clone();
         callable.reflection_name = Some("<init>".to_string());
+        callable.semantic_role = member.semantic_role;
         callable.physical_params = member.physical_params.clone();
         callable.physical_parameter_plan = member.physical_parameter_plan.clone();
         callable.member_realization = member.realization;

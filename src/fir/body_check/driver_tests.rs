@@ -283,48 +283,6 @@ fn local_classifier_property_reference_streams_with_captured_type_arguments() {
 }
 
 #[test]
-fn script_body_streams_as_one_checked_body_unit() {
-    let mut diagnostics = DiagSink::new();
-    let mut analysis = crate::frontend::analyze_source_set_with_features(
-        &[SourceInput::kotlin_script("val value = 1\nvalue + 2\n").with_file_stem("BuildScript")],
-        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
-        &LangFeatures::new(),
-        &mut diagnostics,
-    );
-    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-
-    let streamed = analysis.streamed.take().expect("Pass 1 must finalize");
-    let ordinary = streamed.ordinary_body_work(&analysis.files[0], SourceFileId::from_raw(0));
-    let (index, mut inline_bodies, _default_arguments, mut sources) = streamed.module.into_parts();
-    let info = analysis.types[0].as_ref().expect("checked script");
-    let mut sink = RecordingSink::default();
-    let work = ordinary.into_iter().next().expect("script body work unit");
-    assert_eq!(work.kind, BodyKind::Script);
-
-    check_and_dispatch_body(
-        crate::fir::BodyCheckUnit {
-            file: &analysis.files[0],
-            info,
-            source: SourceFileId::from_raw(0),
-            index: &index,
-        },
-        work,
-        sources.origins_mut(),
-        &mut inline_bodies,
-        &mut sink,
-    )
-    .expect("script body must become checked FIR");
-
-    assert_eq!(sink.0.len(), 1);
-    assert!(inline_bodies.is_empty());
-    let root = root_expression(&sink.0[0].1);
-    assert!(matches!(
-        sink.0[0].1.expr(root).map(|expression| &expression.kind),
-        Some(FirExprKind::Block { .. })
-    ));
-}
-
-#[test]
 fn class_init_block_uses_its_stable_body_unit_anchor() {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(

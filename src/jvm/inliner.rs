@@ -17,15 +17,17 @@
 //!
 //! A `$default` bridge's mask header is expanded for the call's constant masks before the body is
 //! inlined ([`expand_default_masks`]), and an omitted inline lambda parameter's default lambda is
-//! inlined from its class ([`load_default_lambda`]). `finally` rewriting is a later stage of the
-//! port (see "JVM unified inliner" in `docs/IMPLEMENTATION_PLAN.md`). Bodies on this route do not
-//! fall back to the legacy byte splicer.
+//! inlined from its class ([`load_default_lambda`]). A lambda's non-local `return` stays a return
+//! of the caller, with the inlined function's `finally` blocks copied in front of it
+//! (`InternalFinallyBlockInliner`, see `finally_blocks`). Bodies on this route do not fall back to
+//! the legacy byte splicer.
 
 mod anonymous_object;
 mod callee_shape;
 mod class_roles;
 mod default_lambda;
 mod default_masks;
+mod finally_blocks;
 mod finally_markers;
 mod functional_arguments;
 mod lambda_expansion;
@@ -67,6 +69,7 @@ pub(crate) use object_regeneration::{AnonymousObjects, ObjectLambda, Regenerated
 pub(crate) use parameters::{Binding, Parameter, Parameters};
 pub(crate) use preparation::reads_local;
 pub(in crate::jvm) use reified::has_reified_markers;
+pub(crate) use returns::{is_non_local_return_marker, non_local_return_marker};
 
 /// Why a body could not be inlined.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -160,11 +163,15 @@ pub(in crate::jvm) fn inline(
         inline_only,
         inline_markers: true,
     };
-    let mut node = lambda_expansion::expand(&node, &context, invokes, call.lines)?;
+    let lambda_expansion::Expanded {
+        mut node,
+        lambda_blocks,
+    } = lambda_expansion::expand(&node, &context, invokes, call.lines)?;
     preparation::remove_closure_assertions(&mut node)?;
     let mut node = parameters.remap(&node, frame_base)?;
     let end = node.new_label();
     node.nodes.push(Node::Label(end));
+    finally_blocks::inline_finally_blocks(&mut node, lambda_blocks)?;
     returns::process_returns(&mut node, end);
     // The declaration retains finally markers for an inliner; the finished caller never executes
     // them as ordinary runtime calls.
