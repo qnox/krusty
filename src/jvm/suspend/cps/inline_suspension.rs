@@ -18,6 +18,7 @@
 //! that would otherwise be emitted with no continuation to pass.
 
 use super::super::is_suspension_point;
+use super::super::lambda_placement::retained_in_an_object;
 use crate::fx_hash::HashSet;
 use crate::ir::{for_each_child, Callee, ExprId, IrExpr, IrFile};
 use crate::jvm::inline_parameters::is_inline_parameter;
@@ -323,8 +324,8 @@ fn operand_spliceable(ir: &IrFile, expression: ExprId, child: ExprId, spliceable
 
 /// The arguments of `call` bound to an inline parameter, the only literals the method inliner
 /// expands in place; a `noinline` literal or any other operand stays an ordinary value. Neither
-/// is a suspend literal of a function that is not itself suspend: such a body cannot invoke it,
-/// only hand it to an object it constructs, whose method runs the literal in its own frame.
+/// is a suspend literal the callee's body hands to an object it constructs, whose method runs the
+/// literal in its own frame: the only thing a function that is not itself suspend can do with one.
 fn inline_parameter_arguments(ir: &IrFile, call: ExprId) -> Vec<ExprId> {
     let IrExpr::Call { args, .. } = &ir.exprs[call as usize] else {
         return Vec::new();
@@ -333,8 +334,11 @@ fn inline_parameter_arguments(ir: &IrFile, call: ExprId) -> Vec<ExprId> {
     args.iter()
         .enumerate()
         .filter(|&(parameter, _)| is_inline_parameter(ir, call, parameter) == Some(true))
+        .filter(|&(parameter, &argument)| {
+            !is_suspend_literal(ir, argument)
+                || suspending_callee && !retained_in_an_object(ir, call, parameter)
+        })
         .map(|(_, &argument)| argument)
-        .filter(|&argument| suspending_callee || !is_suspend_literal(ir, argument))
         .collect()
 }
 

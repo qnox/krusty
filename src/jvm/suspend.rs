@@ -49,6 +49,7 @@ pub(crate) use emission_facts::{
 use emission_facts::{MachineOutputs, MachineSubject};
 mod get_or_create;
 mod intrinsic_probes;
+pub(crate) mod lambda_placement;
 mod live_scopes;
 use live_scopes::{
     live_temp_scopes, merge_live_temps, reconcile_positional_spill_locals, ScopeWalk,

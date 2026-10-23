@@ -12,6 +12,7 @@ use crate::ir::{ExprId, IrExpr, IrFile};
 
 use super::super::append_continuation;
 use super::super::cps::TransformedSuspension;
+use super::super::lambda_placement::retained_in_an_object;
 use super::{owned_suspensions, Route, Subject};
 
 /// The suspension points of a suspend lambda's placed bodies.
@@ -94,18 +95,19 @@ fn placed_suspensions(
     Some(placed)
 }
 
-/// Whether the lambda value `value` is passed to a suspend inline call, which invokes it in its
-/// own body: the caller's lowering takes the body's suspension points where the call places it.
-/// A function that is not suspend cannot invoke a suspend lambda, only pass it to an object it
-/// constructs, so the body lands in that object's method wherever the call is written.
+/// Whether the lambda value `value` is passed to a suspend inline call that invokes it in its own
+/// body: the caller's lowering takes the body's suspension points where the call places it. A
+/// suspend callee whose body hands the lambda to an object it constructs places it in that object's
+/// method, as does every function that is not suspend, which cannot invoke a suspend lambda.
 fn placed_in_suspend_frame(ir: &IrFile, value: ExprId, suspend_set: &HashSet<u32>) -> bool {
     ir.exprs.iter().enumerate().any(|(call, expression)| {
-        matches!(expression, IrExpr::Call { args, .. } if args.contains(&value))
-            && super::super::is_suspension_point(
-                ir,
-                ExprId::try_from(call).expect("IR expression index exceeds ExprId"),
-                suspend_set,
-            )
+        let call = ExprId::try_from(call).expect("IR expression index exceeds ExprId");
+        let IrExpr::Call { args, .. } = expression else {
+            return false;
+        };
+        args.iter().enumerate().any(|(position, &argument)| {
+            argument == value && !retained_in_an_object(ir, call, position)
+        }) && super::super::is_suspension_point(ir, call, suspend_set)
     })
 }
 

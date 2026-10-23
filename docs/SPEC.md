@@ -6815,7 +6815,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `access$…$lambda$0` bridge is written for it, nor the continuation its lowering prepared, unless
   a call keeps it as a value. A library object without the `$$forInline` copy keeps the lambda as a
   value. Nested objects (the `FlowCollector` that `Flow.map`'s object creates) are not regenerated
-  yet. Test: `tests/crossinline_suspend_object_e2e.rs`.
+  yet. Where a call to a `suspend inline` factory places such a lambda is read from the body the
+  emitter splices (its `$$forInline` copy, or its `$default` bridge) before coroutine lowering:
+  a lambda the body invokes runs in the caller's frame and its suspensions are the caller's, and a
+  lambda the body only passes to a regenerated object's constructor runs in the object's method,
+  so the caller's machine ignores it. A factory that is not suspend can only do the latter. A body
+  that is unavailable, uses a lambda any other way, or both invokes it and hands it to an object is
+  refused (`cannot tell where … places its suspend lambdas`). Test:
+  `tests/crossinline_suspend_object_e2e.rs`.
 
 - **A lambda inlined into a classpath inline body runs on an empty operand stack.** kotlinc's
   `MethodInliner` brackets each inlined lambda with `InlineMarker.beforeInlineCall` /
