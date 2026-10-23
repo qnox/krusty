@@ -236,7 +236,9 @@ fn an_unsupported_record_touches_no_compiler_output() {
     std::fs::create_dir_all(&default_output).expect("an unrelated output");
     std::fs::write(default_output.join("Kept.class"), b"someone else's").expect("sentinel");
     let record = layout.root.join("records/unsupported.json");
-    let output = Command::new(common::krusty_binary())
+    // KRUSTY_BIN may be relative to the test's own directory, which this run leaves.
+    let krusty = std::path::absolute(common::krusty_binary()).expect("the krusty binary");
+    let output = Command::new(krusty)
         .current_dir(&layout.root)
         .arg("verify-compile")
         .arg("--reference")
