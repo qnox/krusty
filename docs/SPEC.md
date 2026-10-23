@@ -1,6 +1,7 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
 **Status:** PoC / experiment. NOT a production Kotlin compiler.
+
 **Goal:** demonstrate that a **linear, data-oriented, per-file streaming pipeline** compiles a
 useful subset of Kotlin to JVM bytecode with a **working-set bounded by a single file**, instead of
 the whole-module FIR+IR graph that makes `kotlinc` memory scale with module size.
@@ -1666,6 +1667,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   attribute at the annotated source parameter. krusty sized it from the source list and wrote `1`,
   describing a different parameter list; `set_method_param_annotations` now derives the count from the
   descriptor (`descriptor_param_count`) and pads.
+  Primary-constructor parameter annotations reserve their complete checked type and argument payload
+  at the constructor header visit, before body constants. Visit every runtime-retained parameter
+  application before binary-retained applications, preserving each parameter's existing synthesized
+  nullability position. Reuse the ordinary annotation encoder, including nested, array and
+  class-literal values. Strict whole-class regressions live in `property_accessor_annotation_e2e`.
   The frontend never CHECKED a function's value-parameter annotations on either the top-level
   (`check_fun`) or the member path, so no application was recorded and lowering had nothing to read;
   constructor parameters were already recorded and only lacked a consumer. Both function paths now
@@ -15743,6 +15749,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   query only, and the build falls back to KSP2.
   (`crates/krusty-plugin-host/tests/ksp.rs`, `class_headers_are_what_ksp2_reports`;
   `ksp_round` unit test `a_header_has_its_written_modifiers_type_parameters_and_supertypes`.)
+- **KSP members are listed as KSP2 lists them.** A file lists its functions and properties in
+  source order, then its classifiers and type aliases in source order. A class lists its
+  constructor properties, then its properties and functions interleaved in source order, then a
+  data class's `componentN` (`final operator override public`) and `copy` (`final`, the
+  visibility of the generated declaration, every parameter with a default: `public` under 2.3,
+  the primary constructor's with `@ConsistentCopyVisibility`), then its primary and secondary constructors, then its nested classes
+  and enum entries in source order, then an enum class's `values`, `valueOf` (static,
+  `final java_static public`) and, where the language has them, `entries`. A constructor is named
+  `<init>`, returns its class applied to stars and has its class's type parameters; it is `final`
+  with its written visibility, an implicit one also `public`, and an enum class's always
+  `private`. Types come from the resolved declarations, an inferred one included: a vararg
+  parameter's type is its element type, a function type is its `kotlin.FunctionN` classifier, and
+  a parameter of an overriding function has the default a function it overrides declares. An
+  interface function without a body is abstract; an `external` one is not. A `vararg val`
+  constructor parameter's property keeps the `vararg` modifier and has the array type (an
+  `IntArray` for `Int`), while the parameter has the element type. A primary constructor has the annotations written
+  on it. A top-level extension property has its resolved receiver. A type krusty cannot describe,
+  a member extension property's receiver and type, a generic property's type parameters, and whether an override of a library
+  function's parameter has a default are refused for that query only. A body krusty does not
+  describe fully (an enum entry's body, a nested type alias) says its list is incomplete.
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `members_and_their_types_are_what_ksp2_reports` and
+  `declarations_are_in_the_order_ksp2_lists_them`; `ksp_round` unit tests
+  `members_and_their_types_are_listed_in_ksps_order` and
+  `declarations_are_in_ksps_order_with_the_members_the_language_contributes`.)
 
 ## 8. Success criteria for the PoC
 
@@ -20444,6 +20474,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   compilation with `krusty: the wasm backend does not support <construct> yet` and writes nothing.
   Tests: `wasm::codegen::tests`, and the `wasm-js`/`wasm-wasi` box lanes
   (`tests/kotlin_box_wasm_conformance.rs`).
+
+- **Wasm nullable scalar assertions require an unboxing contract.** `ref.as_non_null` retains a
+  reference; it cannot produce the checked i32, i64, f32 or f64 result of a nullable scalar's `!!`.
+  Such an assertion declines with `a not-null assertion requiring a scalar reference conversion`,
+  before an invalid module is emitted. Reference-to-reference assertions retain their existing
+  path. This does not claim scalar unboxing or typed null-exception support. Tests:
+  `wasm_nullable_scalar_assertions_decline_without_an_unboxing_contract` and
+  `wasm_nullable_reference_assertions_keep_their_existing_carrier`, both using the JVM oracle.
 
 - **Wasm classes are WasmGC struct subtypes dispatched through shared class tables.** A class's
   instance is a struct whose first field is its dispatch table, followed by its superclasses'

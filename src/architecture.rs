@@ -825,18 +825,17 @@ mod tests {
         // It describes a module's declaration headers to a KSP host: the parsed declarations and
         // what their annotations resolved to. It never checks a body, lowers or reaches a backend.
         // Its tests analyze sources against an empty platform.
-        assert_allowed_crate_modules(
-            "src/ksp_round.rs",
-            &[
-                "ast",
-                "diag",
-                "features",
-                "frontend",
-                "fx_hash",
-                "libraries",
-                "types",
-            ],
-        );
+        let allowed = [
+            "ast",
+            "diag",
+            "features",
+            "frontend",
+            "fx_hash",
+            "libraries",
+            "types",
+        ];
+        assert_allowed_crate_modules("src/ksp_round.rs", &allowed);
+        assert_allowed_crate_modules_in_tree("src/ksp_round", &allowed);
     }
 
     #[test]
