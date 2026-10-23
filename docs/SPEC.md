@@ -11469,13 +11469,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc reads them from the superclass's class metadata: its `propertiesNamesInProgramOrder` list
   orders them (the property records themselves are not in declaration order), each property's
   metadata types it, and the element is required exactly when it is a primary-constructor parameter
-  without a default (a body property, `lateinit` included, is optional). The superclass's own
-  serializable superclasses come first, transitively. The subclass calls the superclass's public
-  `write$Self` and delegates to its deserialization constructor, whose parameters are the inherited
-  elements. krusty reads the same list (field 18000) and constructor flags; a dependency superclass
-  whose element carries annotations, that publishes no order for its stored properties, or that is
-  generic, declines the file rather than guess. (A superclass in another file of the same module is
-  not handled yet and declines too.)
+  without a default (a body property, `lateinit` included, is optional). The list names every
+  element in wire order, the inherited ones first, so krusty writes it that way too and reads a
+  class's own elements as the names after the inherited prefix; the superclass's own serializable
+  superclasses come first, transitively. The subclass calls the superclass's public `write$Self`
+  and delegates to its deserialization constructor, whose parameters are the inherited elements.
+  krusty reads the same list (field 18000) and constructor flags, and trusts the annotation only
+  when the classfile has the generated members: a public static `write$Self(self, output,
+  descriptor)` and a public constructor taking the `seen` masks, one value per listed element and
+  the marker. A dependency superclass compiled without the plugin, whose element or element type
+  carries annotations (`List<@Serializable(with = S::class) Item>` serializes with `S`), that
+  publishes no order for its stored properties, or that is generic, declines the file rather than
+  guess. (A superclass in another file of the same module is not handled yet and declines too.)
   Test: `tests/serializable_parent_dependency_e2e.rs`.
 - **A serializable abstract class is serialized polymorphically.** kotlinc gives a non-generic,
   non-sealed abstract `@Serializable` class no `$serializer`: `Companion.serializer()` returns

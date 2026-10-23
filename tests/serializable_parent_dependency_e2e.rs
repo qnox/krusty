@@ -6,9 +6,15 @@
 //! metadata types it, and the superclass's primary constructor says which ones the input must
 //! contain. The subclass's `write$Self` calls the superclass's public `write$Self` and its
 //! deserialization constructor delegates to the superclass's, which stores the inherited elements.
-//! Each compiler builds the library itself.
+//! The list starts with the elements a class inherits, so `Middle`'s names `Base`'s too.
+//! Each compiler builds the library itself, and krusty also compiles against kotlinc's library.
+//!
+//! A superclass whose classfile lacks the generated members (it was compiled without the plugin),
+//! or whose element types carry annotations the record does not describe, declines.
 
-use super::compiler_plugin_fixture::{assert_same_classes_and_box, PluginFixture};
+use super::compiler_plugin_fixture::{
+    assert_same_classes, assert_same_classes_and_box, PluginFixture,
+};
 use super::serialization_companion_byte_parity_e2e::plugin_and_runtime;
 
 const LIBRARY: &[(&str, &str)] = &[(
@@ -25,12 +31,18 @@ const LIBRARY: &[(&str, &str)] = &[(
      @Serializable\n\
      abstract class Shape(val name: String)\n\
      @Serializable\n\
-     open class Middle(val m: Int) : Base(m, tags = listOf(\"m\"))\n",
+     open class Middle(val m: Int) : Base(m, tags = listOf(\"m\"))\n\
+     @Serializable\n\
+     open class EmptyOpen\n\
+     @Serializable\n\
+     abstract class EmptyAbstract\n",
 )];
 
 const MAIN: &str = "import kotlinx.serialization.Serializable\n\
                     import kotlinx.serialization.json.Json\n\
                     import lib.Base\n\
+                    import lib.EmptyAbstract\n\
+                    import lib.EmptyOpen\n\
                     import lib.Middle\n\
                     import lib.Shape\n\
                     @Serializable\n\
@@ -39,6 +51,10 @@ const MAIN: &str = "import kotlinx.serialization.Serializable\n\
                     class Square(val side: Double) : Shape(\"sq\")\n\
                     @Serializable\n\
                     class Leaf(val l: Long) : Middle(2)\n\
+                    @Serializable\n\
+                    class FromOpen(val o: Int) : EmptyOpen()\n\
+                    @Serializable\n\
+                    class FromAbstract(val a: Int) : EmptyAbstract()\n\
                     fun box(): String {\n\
                     \x20   val child = Json.encodeToString(Child.serializer(), Child(\"c\"))\n\
                     \x20   if (child != \"{\\\"zeta\\\":1,\\\"tags\\\":[\\\"x\\\"],\\\"b\\\":\\\"c\\\"}\") return child\n\
@@ -49,6 +65,11 @@ const MAIN: &str = "import kotlinx.serialization.Serializable\n\
                     \x20   if (Json.decodeFromString(Square.serializer(), square).name != \"sq\") return \"square\"\n\
                     \x20   val leaf = Json.encodeToString(Leaf.serializer(), Leaf(9))\n\
                     \x20   if (leaf != \"{\\\"zeta\\\":2,\\\"tags\\\":[\\\"m\\\"],\\\"m\\\":2,\\\"l\\\":9}\") return leaf\n\
+                    \x20   val fromOpen = Json.encodeToString(FromOpen.serializer(), FromOpen(3))\n\
+                    \x20   if (fromOpen != \"{\\\"o\\\":3}\") return fromOpen\n\
+                    \x20   if (Json.decodeFromString(FromOpen.serializer(), fromOpen).o != 3) return \"open\"\n\
+                    \x20   val fromAbstract = Json.encodeToString(FromAbstract.serializer(), FromAbstract(4))\n\
+                    \x20   if (Json.decodeFromString(FromAbstract.serializer(), fromAbstract).a != 4) return fromAbstract\n\
                     \x20   try {\n\
                     \x20       val incomplete = Json.decodeFromString(Child.serializer(), \"{\\\"b\\\":\\\"d\\\"}\")\n\
                     \x20       return incomplete.b\n\
@@ -69,6 +90,7 @@ fn subclasses_inherit_the_elements_a_dependency_parent_publishes() {
     let fixture = PluginFixture::new("serializable-parent-dependency");
     let reference_lib = fixture.kotlinc("lib", LIBRARY, &runtime, &switches);
     let krusty_lib = fixture.krusty("lib", LIBRARY, &runtime, &switches);
+    assert_same_classes(&reference_lib, &krusty_lib);
     let sources = [("Main.kt", MAIN)];
     let mut reference_cp = runtime.clone();
     reference_cp.push(reference_lib);
@@ -77,4 +99,95 @@ fn subclasses_inherit_the_elements_a_dependency_parent_publishes() {
     let reference = fixture.kotlinc("main", &sources, &reference_cp, &switches);
     let krusty = fixture.krusty("main", &sources, &krusty_cp, &switches);
     assert_same_classes_and_box(&reference, &krusty, &krusty_cp);
+    let on_reference_lib =
+        fixture.krusty("main-on-kotlinc-lib", &sources, &reference_cp, &switches);
+    assert_same_classes_and_box(&reference, &on_reference_lib, &reference_cp);
+}
+
+const PLAIN_LIBRARY: &[(&str, &str)] = &[(
+    "Plain.kt",
+    "package plain\n\
+     import kotlinx.serialization.Serializable\n\
+     @Serializable\n\
+     open class Plain\n",
+)];
+
+const PLAIN_MAIN: &str = "import kotlinx.serialization.Serializable\n\
+                          @Serializable\n\
+                          class Sub(val x: Int) : plain.Plain()\n";
+
+/// `@Serializable` on a class compiled without the plugin gives it no `write$Self` and no
+/// deserialization constructor, so a subclass has nothing to call and declines.
+#[test]
+fn a_parent_compiled_without_the_plugin_declines() {
+    let (plugin, runtime) = plugin_and_runtime()
+        .expect("the serialization plugin and runtime must be available to this regression");
+    let switches = vec![format!("-Xplugin={}", plugin.display())];
+    let fixture = PluginFixture::new("serializable-parent-without-plugin");
+    let library = fixture.krusty("lib", PLAIN_LIBRARY, &runtime, &[]);
+    let mut classpath = runtime.clone();
+    classpath.push(library);
+    let diagnostics =
+        fixture.krusty_rejects("main", &[("Main.kt", PLAIN_MAIN)], &classpath, &switches);
+    assert_eq!(
+        diagnostics,
+        "<fixture>/main/src/Main.kt:1:1: error: krusty: this construct is not yet supported by the IR backend\n\
+         krusty: 1 error(s)\n"
+    );
+}
+
+const TYPE_USE_LIBRARY: &[(&str, &str)] = &[(
+    "Tagged.kt",
+    "package tagged\n\
+     import kotlinx.serialization.KSerializer\n\
+     import kotlinx.serialization.Serializable\n\
+     import kotlinx.serialization.descriptors.PrimitiveKind\n\
+     import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor\n\
+     import kotlinx.serialization.encoding.Decoder\n\
+     import kotlinx.serialization.encoding.Encoder\n\
+     class Item(val v: Int)\n\
+     object ItemSerializer : KSerializer<Item> {\n\
+     \x20   override val descriptor = PrimitiveSerialDescriptor(\"Item\", PrimitiveKind.INT)\n\
+     \x20   override fun serialize(encoder: Encoder, value: Item) = encoder.encodeInt(value.v)\n\
+     \x20   override fun deserialize(decoder: Decoder) = Item(decoder.decodeInt())\n\
+     }\n\
+     @Serializable\n\
+     open class Tagged(\n\
+     \x20   val items: List<@Serializable(with = ItemSerializer::class) Item>,\n\
+     \x20   val groups: Map<String, List<@Serializable(with = ItemSerializer::class) Item>>,\n\
+     )\n",
+)];
+
+const TYPE_USE_MAIN: &str = "import kotlinx.serialization.Serializable\n\
+                             @Serializable\n\
+                             class Grouped(val n: Int) : tagged.Tagged(listOf(), mapOf())\n";
+
+/// An element whose type names its own serializer, directly in a type argument or nested deeper,
+/// is serialized by that serializer, which the published record does not carry; the subclass
+/// declines rather than serialize the element with the type's ordinary serializer.
+#[test]
+fn a_parent_element_with_a_type_use_serializer_declines() {
+    let (plugin, runtime) = plugin_and_runtime()
+        .expect("the serialization plugin and runtime must be available to this regression");
+    let switches = vec![format!("-Xplugin={}", plugin.display())];
+    let fixture = PluginFixture::new("serializable-parent-type-use");
+    let reference_lib = fixture.kotlinc("lib", TYPE_USE_LIBRARY, &runtime, &switches);
+    let krusty_lib = fixture.krusty("lib", TYPE_USE_LIBRARY, &runtime, &switches);
+    assert_same_classes(&reference_lib, &krusty_lib);
+    let sources = [("Main.kt", TYPE_USE_MAIN)];
+    let mut reference_cp = runtime.clone();
+    reference_cp.push(reference_lib);
+    fixture.kotlinc("main", &sources, &reference_cp, &switches);
+    let mut krusty_cp = runtime.clone();
+    krusty_cp.push(krusty_lib);
+    assert_eq!(
+        fixture.krusty_rejects("main", &sources, &krusty_cp, &switches),
+        "<fixture>/main/src/Main.kt:1:1: error: krusty: this construct is not yet supported by the IR backend\n\
+         krusty: 1 error(s)\n"
+    );
+    assert_eq!(
+        fixture.krusty_rejects("main-on-kotlinc-lib", &sources, &reference_cp, &switches),
+        "<fixture>/main-on-kotlinc-lib/src/Main.kt:1:1: error: krusty: this construct is not yet supported by the IR backend\n\
+         krusty: 1 error(s)\n"
+    );
 }

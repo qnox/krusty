@@ -124,6 +124,36 @@ impl PluginFixture {
         classpath: &[PathBuf],
         switches: &[String],
     ) -> PathBuf {
+        let (code, diagnostics) = self.run_krusty(unit, sources, classpath, switches);
+        assert_eq!(code, Some(0), "krusty rejected {unit}: {diagnostics}");
+        self.dir.join(unit).join("krusty")
+    }
+
+    /// Build `sources` with the krusty binary, which must reject them; its diagnostics, with the
+    /// fixture directory spelled `<fixture>` and without the `info:` notes it prints first.
+    pub fn krusty_rejects(
+        &self,
+        unit: &str,
+        sources: &[(&str, &str)],
+        classpath: &[PathBuf],
+        switches: &[String],
+    ) -> String {
+        let (code, diagnostics) = self.run_krusty(unit, sources, classpath, switches);
+        assert_eq!(code, Some(1), "krusty must reject {unit}: {diagnostics}");
+        diagnostics
+            .lines()
+            .filter(|line| !line.starts_with("info: "))
+            .map(|line| line.replace(&*self.dir.to_string_lossy(), "<fixture>") + "\n")
+            .collect()
+    }
+
+    fn run_krusty(
+        &self,
+        unit: &str,
+        sources: &[(&str, &str)],
+        classpath: &[PathBuf],
+        switches: &[String],
+    ) -> (Option<i32>, String) {
         let files = self.write(sources, unit);
         let out = self.dir.join(unit).join("krusty");
         let mut command = Command::new(common::krusty_binary());
@@ -137,18 +167,25 @@ impl PluginFixture {
             .args(files)
             .output()
             .expect("run krusty");
-        assert_eq!(
+        (
             result.status.code(),
-            Some(0),
-            "krusty rejected {unit}: {}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-        out
+            String::from_utf8_lossy(&result.stderr).into_owned(),
+        )
     }
 }
 
 /// Every class kotlinc emitted, and no other, with identical bytes; then `box()` on krusty's output.
 pub fn assert_same_classes_and_box(reference: &Path, krusty: &Path, runtime: &[PathBuf]) {
+    let actual = assert_same_classes(reference, krusty);
+    let box_class = common::find_box_class(&actual).expect("a class declaring box()");
+    assert_eq!(
+        common::run_box(&actual, &box_class, runtime).as_deref(),
+        Some("OK")
+    );
+}
+
+/// Every class kotlinc emitted, and no other, with identical bytes; krusty's classes.
+pub fn assert_same_classes(reference: &Path, krusty: &Path) -> Vec<(String, Vec<u8>)> {
     let expected = classes_in(reference);
     let actual = classes_in(krusty);
     assert_eq!(
@@ -159,9 +196,5 @@ pub fn assert_same_classes_and_box(reference: &Path, krusty: &Path, runtime: &[P
     for ((name, actual), (_, expected)) in actual.iter().zip(&expected) {
         assert!(actual == expected, "{name}.class differs from kotlinc's");
     }
-    let box_class = common::find_box_class(&actual).expect("a class declaring box()");
-    assert_eq!(
-        common::run_box(&actual, &box_class, runtime).as_deref(),
-        Some("OK")
-    );
+    actual
 }

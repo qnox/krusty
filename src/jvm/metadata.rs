@@ -14,6 +14,7 @@ mod property_declarations;
 mod property_identity;
 mod realization_facts;
 mod serialization_program_order;
+pub use serialization_program_order::SerialElementName;
 mod since_kotlin;
 mod string_table;
 mod type_aliases;
@@ -1177,8 +1178,8 @@ pub struct KotlinMeta {
     /// `Class.sealedSubclassFqName` (field 16), as JVM internal names.
     pub sealed_subclasses: Vec<String>,
     /// The serialization plugin's `propertiesNamesInProgramOrder` (field 18000): an open or
-    /// abstract serializable class's own serial element names in declaration order.
-    pub serial_element_names: Box<[Box<str>]>,
+    /// abstract serializable class's serial elements in wire order, inherited ones first.
+    pub serial_element_names: Box<[SerialElementName]>,
     /// The `@JvmInline value class` shape (fields 17-19), if this is one.
     pub inline: Option<InlineClass>,
     /// For a MULTI-FILE FACADE (`@Metadata(k = 4)`): the part class internal names its `d1` lists —

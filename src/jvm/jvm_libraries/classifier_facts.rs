@@ -157,6 +157,11 @@ pub(super) fn serializable_class_elements(
         return None;
     }
     let meta = &class.meta;
+    // The annotation says the class asked for a generated serializer; only the generated members
+    // themselves say the plugin ran and what they take.
+    if !has_generated_parent_abi(&class.methods, classifier, meta.serial_element_names.len()) {
+        return None;
+    }
     // Without the list a class with stored properties gives no element order to follow.
     if meta.serial_element_names.is_empty()
         && meta
@@ -170,17 +175,28 @@ pub(super) fn serializable_class_elements(
         .constructors
         .iter()
         .find(|constructor| constructor.primary);
-    let elements = meta
+    // The list starts with the elements the class inherits, which its superclasses' records
+    // describe; the class declares the rest.
+    let own = meta
         .serial_element_names
         .iter()
-        .map(|name| {
+        .position(|element| {
+            meta.class_properties
+                .iter()
+                .any(|property| property.name.as_str() == &*element.name)
+        })
+        .unwrap_or(meta.serial_element_names.len());
+    let elements = meta.serial_element_names[own..]
+        .iter()
+        .map(|element| {
+            let name = &element.name;
             let property = meta
                 .class_properties
                 .iter()
                 .find(|property| property.name.as_str() == &**name)?;
-            // Annotations on the element (a serial name, a serializer of its own) change its wire
-            // shape, and this record carries none.
-            if property.annotation_method.is_some() {
+            // Annotations on the element or inside its type (a serial name, a serializer of its
+            // own) change its wire shape, and this record carries none.
+            if property.annotation_method.is_some() || element.annotated_type {
                 return None;
             }
             let ty = shape
@@ -225,6 +241,46 @@ pub(super) fn serializable_class_elements(
         elements,
         superclass: superclass.filter(|ty| ty.kotlin_class_internal() != Some(any)),
     })
+}
+
+/// Whether `methods` hold the members the serialization plugin generates on an inheritable class
+/// that has no type parameters and `elements` serial elements: a public static `write$Self(self,
+/// output, descriptor)` and a public deserialization constructor taking the `seen` masks, one
+/// value per element and the marker.
+fn has_generated_parent_abi(
+    methods: &[crate::jvm::classreader::MethodSig],
+    classifier: TypeName,
+    elements: usize,
+) -> bool {
+    const PUBLIC_STATIC: u16 = 0x0001 | 0x0008;
+    let write_self = format!(
+        "(L{};Lkotlinx/serialization/encoding/CompositeEncoder;Lkotlinx/serialization/descriptors/SerialDescriptor;)V",
+        classifier.render()
+    );
+    let has_write_self = methods.iter().any(|method| {
+        method.name == "write$Self"
+            && method.access & PUBLIC_STATIC == PUBLIC_STATIC
+            && method.descriptor == write_self
+    });
+    let masks = elements / 32 + 1;
+    let has_constructor = methods.iter().any(|method| {
+        method.name == "<init>"
+            && method.access & 0x0001 != 0
+            && crate::jvm::names::parse_method_descriptor(&method.descriptor).is_some_and(
+                |(parameters, result)| {
+                    result == "V"
+                        && parameters.len() == masks + elements + 1
+                        && parameters[..masks]
+                            .iter()
+                            .all(|parameter| *parameter == "I")
+                        && parameters.last()
+                            == Some(
+                                &"Lkotlinx/serialization/internal/SerializationConstructorMarker;",
+                            )
+                },
+            )
+    });
+    has_write_self && has_constructor
 }
 
 /// Whether `internal` is, transitively, a subtype of `target` (a superclass or implemented interface,
