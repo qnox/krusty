@@ -1035,10 +1035,9 @@ jobs:
         with:
           distribution: zulu
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@v6
-        if: steps.tip.outputs.publish == 'true'
-        with:
-          cache-provider: basic
+      # No setup-gradle here: it injects an init script into every Gradle build, and these builds
+      # hold the signing key and publishing credentials. The wrapper's pinned distribution
+      # checksum stands in for its wrapper validation.
       # The maintainer's krusty signing subkey (`gpg --armor --export-secret-subkeys <id>!`) signs
       # every published artifact. SIGNING_KEY_ID, its 8-hex-digit short id, is optional: without
       # it the id is read from the key itself.
@@ -1053,7 +1052,8 @@ jobs:
           if [[ -n "$SIGNING_KEY_ID" ]]; then
             id=$SIGNING_KEY_ID
           elif [[ -n "$SIGNING_KEY" ]]; then
-            id=$(scripts/signing-key-id.sh <<< "$SIGNING_KEY")
+            # A pipe, not a here-string, which an older bash backs with a temporary file.
+            id=$(printf '%s\n' "$SIGNING_KEY" | scripts/signing-key-id.sh)
           else
             id=
           fi
