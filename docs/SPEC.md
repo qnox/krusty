@@ -11539,6 +11539,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and can read only the receiver, so its locals are renumbered from above every constructor's
   values.
   Test: `tests/serializable_parent_same_module_e2e.rs`.
+- **A serializable class's `init` blocks run in its deserialization constructor.** kotlinc runs
+  each `init` block there too, at its place among the property initializers, after the
+  superclass delegation and the constructor properties' stores. A block that reads a constructor
+  property reads it off the object the constructor has already stored, and its locals move above
+  the constructor's parameters (the marker included), as a copied default's do. kotlinc copies the
+  block's statements into the constructor itself, so a block's local stays in the
+  `LocalVariableTable` through the constructor's return and is listed ahead of `this`, as a
+  generated constructor's other body locals are. The seen-bit test
+  of an optional element that follows a block is attributed to the class's start line, like its
+  store. krusty skipped the blocks, so a decoded object missed their side effects. A block that
+  reads a constructor parameter which is not a property has nothing to read there and keeps the
+  file unsupported.
+  Test: `tests/serializable_init_replay_e2e.rs`.
 - **A serializable abstract class is serialized polymorphically.** kotlinc gives a non-generic,
   non-sealed abstract `@Serializable` class no `$serializer`: `Companion.serializer()` returns
   `new PolymorphicSerializer(C::class, new Annotation[0])`, cached in a `$cachedSerializer$delegate`

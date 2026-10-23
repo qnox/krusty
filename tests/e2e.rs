@@ -48,6 +48,8 @@ mod reference_compiler_support;
 mod reference_recording_support;
 #[path = "common/reference_targets.rs"]
 mod reference_targets_support;
+#[path = "serializable_init_replay_e2e.rs"]
+mod serializable_init_replay_e2e;
 #[path = "serializable_parent_dependency_e2e.rs"]
 mod serializable_parent_dependency_e2e;
 #[path = "serializable_parent_same_module_e2e.rs"]

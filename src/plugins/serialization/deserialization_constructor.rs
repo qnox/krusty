@@ -476,8 +476,12 @@ pub(super) fn complete_deserialization_constructor(
         (delegate, args)
     });
     let this = ir.add_expr(IrExpr::GetValue(0));
+    let mut read_field = |ir: &mut IrFile, field: usize| own_field_read(ir, class_id, field);
+    // Each store keeps its property's place among the class's initializers, so the `init` blocks
+    // can run between them as they do in the primary constructor.
     let mut body_stmts = Vec::with_capacity(named_fields.len());
     for (field, (field_name, field_ty)) in named_fields.iter().enumerate() {
+        let order = super::property_default::field_initialization_order(ir, class_id, field);
         let element = elements
             .fields()
             .iter()
@@ -517,30 +521,12 @@ pub(super) fn complete_deserialization_constructor(
             Some(element) => optional[element],
             None => !ir.classes[class_id as usize].fields[field].is_lateinit(),
         };
-        // The default reads an earlier property off the object, which this constructor has
-        // already stored, as kotlinc does. Its own locals move above the constructor's parameters
-        // (the marker included).
         let default = applies_default.then(|| {
-            let mut read_argument = |ir: &mut IrFile, field: usize| {
-                let receiver = ir.add_expr(IrExpr::GetValue(0));
-                Some(ir.add_expr(IrExpr::GetField {
-                    receiver,
-                    class: class_id,
-                    index: u32::try_from(field).ok()?,
-                }))
-            };
             super::property_default::default_in_frame(
                 ir,
                 class_id,
                 field,
-                super::property_default::DefaultFrame {
-                    first_free_local: u32::try_from(mask_count + wire.len() + 2)
-                        .expect("a constructor's parameters fit u32"),
-                    read_field: &mut read_argument,
-                    receiver: Some(0),
-                    property_line: None,
-                    read_line: None,
-                },
+                constructor_frame(mask_count, wire.len(), &mut read_field),
             )
             // A default reading a constructor parameter that is not a property has no argument
             // here. Keep an explicit plugin-owned residual so the file is declined with the
@@ -566,7 +552,7 @@ pub(super) fn complete_deserialization_constructor(
                     ir, class_id, this, field, field_name, value,
                 ))
             });
-            body_stmts.extend(store);
+            body_stmts.extend(store.map(|store| (order, store)));
             continue;
         };
         let seen = ir.add_expr(IrExpr::GetValue((element / 32 + 1) as u32));
@@ -590,12 +576,68 @@ pub(super) fn complete_deserialization_constructor(
             stmts: vec![store_argument],
             value: None,
         });
-        body_stmts.push(ir.add_expr(IrExpr::When {
+        let applied = ir.add_expr(IrExpr::When {
             branches: vec![(Some(absent), defaulted), (None, supplied)],
-        }));
+        });
+        // kotlinc attributes the seen-bit test to the class's start line, as it does the store;
+        // after an `init` block that line is no longer current.
+        let start_line = ir.classes[class_id as usize].decl_start_line;
+        if start_line != 0 {
+            ir.expr_lines.insert(applied, start_line);
+        }
+        body_stmts.push((order, applied));
     }
+    // The class's `init` blocks run in this constructor too, each at its place among the property
+    // initializers, as kotlinc runs them. A constructor property is stored before any of them.
+    let initializers = ir
+        .checked_class_initializers
+        .iter()
+        .filter(|initializer| initializer.class == class_id)
+        .map(|initializer| (initializer.initialization_order, initializer.body))
+        .collect::<Vec<_>>();
+    for (order, initializer) in initializers {
+        let block = super::property_default::initializer_block_in_frame(
+            ir,
+            class_id,
+            initializer,
+            constructor_frame(mask_count, wire.len(), &mut read_field),
+        )
+        // A block reading a constructor parameter that is not a property has nothing to read here.
+        // Decline the file rather than build a constructor that skips the block.
+        .unwrap_or_else(|| {
+            ir.add_expr(IrExpr::PluginPlaceholder {
+                plugin: "serialization",
+                kind: "deserialization-initializer",
+                exprs: Vec::new(),
+                data: vec![owner],
+                types: Vec::new(),
+            })
+        });
+        // kotlinc copies the block's statements into the constructor itself, so its locals stay in
+        // scope through the constructor's end rather than the block's.
+        // A block in statement position discards its value, so that value is one more statement.
+        let mut pending = vec![block];
+        let mut statements = Vec::new();
+        while let Some(statement) = pending.pop() {
+            match &ir.exprs[statement as usize] {
+                IrExpr::Block { stmts, value } => {
+                    pending.extend(value.iter().chain(stmts.iter().rev()));
+                }
+                _ => statements.push(statement),
+            }
+        }
+        body_stmts.extend(
+            statements
+                .into_iter()
+                .map(|statement| (Some(order), statement)),
+        );
+    }
+    body_stmts.sort_by_key(|(order, _)| *order);
     let body = ir.add_expr(IrExpr::Block {
-        stmts: body_stmts,
+        stmts: body_stmts
+            .into_iter()
+            .map(|(_, statement)| statement)
+            .collect(),
         value: None,
     });
     let constructor = &mut ir.classes[class_id as usize].secondary_ctors[ordinal as usize];
@@ -612,6 +654,34 @@ pub(super) fn complete_deserialization_constructor(
     // `DefaultConstructorMarker` accessor. The serialization constructor itself retains
     // only `SerializationConstructorMarker`, matching kotlinc's nestmate call target.
     constructor.vc_params = has_value_field;
+}
+
+/// Read property (by FIELD index) of the object the deserialization constructor builds.
+fn own_field_read(ir: &mut IrFile, class_id: ClassId, field: usize) -> Option<crate::ir::ExprId> {
+    let receiver = ir.add_expr(IrExpr::GetValue(0));
+    Some(ir.add_expr(IrExpr::GetField {
+        receiver,
+        class: class_id,
+        index: u32::try_from(field).ok()?,
+    }))
+}
+
+/// The deserialization constructor's frame for a copied class-body initializer: an earlier property
+/// is read off the object, which this constructor has already stored, as kotlinc does, and the
+/// initializer's own locals move above the constructor's parameters (the marker included).
+fn constructor_frame<'a>(
+    mask_count: usize,
+    element_count: usize,
+    read_field: &'a mut dyn FnMut(&mut IrFile, usize) -> Option<crate::ir::ExprId>,
+) -> super::property_default::DefaultFrame<'a> {
+    super::property_default::DefaultFrame {
+        first_free_local: u32::try_from(mask_count + element_count + 2)
+            .expect("a constructor's parameters fit u32"),
+        read_field,
+        receiver: Some(0),
+        property_line: None,
+        read_line: None,
+    }
 }
 
 /// Store property `field`'s default. kotlinc attributes the DEFAULT VALUE to the property's own
