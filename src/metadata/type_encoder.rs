@@ -814,6 +814,52 @@ pub(crate) enum Expansion {
     AsSpelled,
 }
 
+/// A Java raw occurrence, as kotlinc's JVM serializer writes a raw type: the flexible interval
+/// from each formal's erasure (`Box<CharSequence!>`) up to the nullable all-star application of the
+/// provider's upper face (`Box<*>?`), both faces marked with `JvmProtoBuf.is_raw` (field 101).
+fn encode_raw_type(
+    strings: &mut StringTable<'_>,
+    (owner, arguments): (TypeName, &[Ty]),
+    spelled: &Spelled,
+    type_parameters: &TypeParameters,
+    expansion: Expansion,
+) -> Result<Pb, TypeEncodeError> {
+    let erasures = arguments
+        .iter()
+        .map(|argument| argument.raw_binding_read())
+        .collect::<Vec<_>>();
+    let mut message = encode_type_with_parameter(
+        strings,
+        Ty::obj_args_name(owner, &erasures),
+        Spelled::NONE,
+        type_parameters,
+        None,
+        expansion,
+    )?;
+    let upper_owner = spelled
+        .flexible_upper_bound
+        .and_then(Ty::obj_internal)
+        .unwrap_or(owner);
+    let stars = vec![Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any"))); arguments.len()];
+    let mut upper = encode_type_with_parameter(
+        strings,
+        Ty::nullable(Ty::obj_args_name(upper_owner, &stars)),
+        Spelled::NONE,
+        type_parameters,
+        None,
+        expansion,
+    )?;
+    upper.field_varint(JVM_TYPE_IS_RAW, 1);
+    message.field_varint(JVM_TYPE_IS_RAW, 1);
+    let capability = strings.local("kotlin.jvm.PlatformType");
+    message.field_varint(4, capability as u64);
+    strings.put_type(&mut message, 5, 8, &upper); // Type.flexible_upper_bound(_id) = 5 / 8
+    Ok(message)
+}
+
+/// `JvmProtoBuf.is_raw`, the JVM extension of `Type` marking both faces of a raw type.
+const JVM_TYPE_IS_RAW: u32 = 101;
+
 pub(crate) fn encode_indexed_type_parameter(
     strings: &mut StringTable<'_>,
     ty: Ty,
@@ -855,6 +901,15 @@ fn encode_type_with_parameter(
         TyKind::PlatformNullable(inner) => (false, true, inner),
         _ => (false, spelled.flexible_upper_bound.is_some(), ty),
     };
+    if let (TyKind::Obj(owner, arguments), true) = (base.kind(), base.is_raw_application()) {
+        return encode_raw_type(
+            strings,
+            (owner, &arguments),
+            spelled,
+            type_parameters,
+            expansion,
+        );
+    }
     if flexible {
         // A provider has already normalized the exact upper face. Encode the lower first, then the
         // upper, and intern the capability last, matching kotlinc's string-table visitation order.
@@ -1073,7 +1128,8 @@ fn encode_type_with_parameter(
         | TyKind::PlatformNullable(_)
         | TyKind::InProjection(_)
         | TyKind::OutProjection(_)
-        | TyKind::StarProjection(_) => return Err(TypeEncodeError::NonMetadataType(ty)),
+        | TyKind::StarProjection(_)
+        | TyKind::RawProjection(_) => return Err(TypeEncodeError::NonMetadataType(ty)),
     }
     Ok(message)
 }

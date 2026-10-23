@@ -8,6 +8,17 @@ Goal: emit `@kotlin.Metadata` so krusty output is consumable as a **Kotlin** lib
 need only the signatures, already matched in Phase 5a). This is the single largest remaining piece —
 effectively a re-implementation of `kotlinx-metadata-jvm`'s writer.
 
+## Java raw type arguments
+
+A Java raw occurrence is a complete application of `RawProjection` arguments, one per formal.
+kotlinc 2.4.21 writes it (`fun f() = Raw.box()` for
+`class Box<T extends CharSequence>`) as a flexible `Type`: the lower face applies each erasure
+(`Box<CharSequence!>`, itself a `PlatformType` flexible argument), `flexible_type_capabilities_id`
+is `kotlin.jvm.PlatformType`, the upper face is the nullable all-star application of the read-only
+face (`Box<*>?`, `List<*>?` for a raw `java.util.List` whose lower face is `MutableList<Any?>`),
+and both faces carry the JVM extension `JvmProtoBuf.is_raw` (field 101) set to true. Strings
+intern lower, upper, then the capability (`tests/java_raw_type_e2e.rs`).
+
 ## Shared-target compiler/plugin model artifacts
 
 The Rust compiler/plugin model tracks checkout identity as a Cargo input, so a shared target cannot

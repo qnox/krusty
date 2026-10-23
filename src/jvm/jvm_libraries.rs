@@ -32,6 +32,7 @@ mod parameter_plans;
 mod provider_normalization;
 #[cfg(test)]
 mod provider_normalization_tests;
+mod raw_types;
 use provider_normalization::normalize_tail;
 mod return_types;
 use return_types::{java_collection_return_lower_bound, metadata_declared_nonnull_return};
@@ -184,6 +185,7 @@ impl JvmLibraries {
     /// declaration and its type-parameter metadata.
     fn semanticize_jvm_type(&self, ty: Ty) -> Ty {
         match ty.kind() {
+            TyKind::Obj(_, args) if args.is_empty() => self.java_raw_occurrences(ty),
             TyKind::Obj(internal, args) => {
                 let args = args
                     .iter()
@@ -1376,17 +1378,23 @@ impl JvmLibraries {
                         }),
                 );
                 if uses_java_type_semantics {
+                    // A descriptor names a generic classifier bare whether or not the source
+                    // applied it; only a method without a generic `Signature` wrote it raw.
+                    let raw = |ty: Ty| match m.signature {
+                        Some(_) => ty,
+                        None => self.java_raw_occurrences(ty),
+                    };
                     for (index, parameter) in params.iter_mut().enumerate() {
-                        *parameter = java_type_nullability(
+                        *parameter = raw(java_type_nullability(
                             java_collection_return_lower_bound(*parameter),
                             m.parameter_nullability.get(index).copied().flatten(),
-                        );
+                        ));
                     }
                     params.drain(..constructor_enclosing_prefix);
-                    ret = java_type_nullability(
+                    ret = raw(java_type_nullability(
                         java_collection_return_lower_bound(ret),
                         m.return_nullability,
-                    );
+                    ));
                 }
                 // Kotlin metadata defines the SOURCE declarations. The class file only realizes
                 // those declarations physically. An unmatched method in a Kotlin class is compiler
@@ -3428,7 +3436,11 @@ impl JvmLibraries {
                 let field_ty = if ci.meta.is_present() {
                     field_ty
                 } else {
-                    java_field_type(field_ty, field.access, field.nullability)
+                    self.java_raw_occurrences(java_field_type(
+                        field_ty,
+                        field.access,
+                        field.nullability,
+                    ))
                 };
                 let visibility = if field.access & 0x0001 != 0 {
                     Visibility::Public

@@ -749,6 +749,7 @@ impl Ty {
             TyKind::TyParam(name, bound) => bindings
                 .get(name.as_str())
                 .copied()
+                .map(Ty::raw_binding_read)
                 .map(|binding| {
                     if bound.upper_bound_admits_null() {
                         binding
@@ -775,6 +776,7 @@ impl Ty {
             TyKind::InProjection(inner) => Ty::in_projection(inner.substitute_erased(bindings)),
             TyKind::OutProjection(inner) => Ty::out_projection(inner.substitute_erased(bindings)),
             TyKind::StarProjection(inner) => Ty::star_projection(inner.substitute_erased(bindings)),
+            TyKind::RawProjection(inner) => Ty::raw_projection(inner.substitute_erased(bindings)),
             TyKind::Obj(internal, arguments) if !arguments.is_empty() => {
                 let arguments = arguments
                     .iter()
@@ -893,6 +895,34 @@ impl Ty {
 
     pub fn star_projection(upper_bound: Ty) -> Ty {
         Ty::intern(TyKind::StarProjection(upper_bound))
+    }
+
+    /// One argument of a Java raw type occurrence; see [`TyKind::RawProjection`].
+    pub fn raw_projection(erased: Ty) -> Ty {
+        Ty::intern(TyKind::RawProjection(erased))
+    }
+
+    /// Whether this is one argument of a Java raw type occurrence.
+    pub fn is_raw_projection(self) -> bool {
+        matches!(self.kind(), TyKind::RawProjection(_))
+    }
+
+    /// The type a formal bound to this argument reads as. A Java raw argument is read through its
+    /// erasure (`Box.raw().get()` is the `CharSequence!` bound of `Box<T extends CharSequence>`);
+    /// every other argument is itself.
+    pub fn raw_binding_read(self) -> Ty {
+        match self.kind() {
+            TyKind::RawProjection(erased) => erased,
+            _ => self,
+        }
+    }
+
+    /// Whether this is a Java raw type occurrence: an application whose arguments are all
+    /// [`TyKind::RawProjection`]s. A raw occurrence is written without arguments, so renderers
+    /// that spell Java's view of it drop them.
+    pub fn is_raw_application(self) -> bool {
+        matches!(self.kind(), TyKind::Obj(_, arguments)
+            if !arguments.is_empty() && arguments.iter().all(|argument| argument.is_raw_projection()))
     }
 
     /// `A & B & …`. See [`intersection::canonical`].
@@ -1156,7 +1186,8 @@ impl Ty {
             TyKind::Intersection(parts) => parts.iter().any(|part| part.mentions_marker(marker)),
             TyKind::InProjection(inner)
             | TyKind::OutProjection(inner)
-            | TyKind::StarProjection(inner) => inner.mentions_marker(marker),
+            | TyKind::StarProjection(inner)
+            | TyKind::RawProjection(inner) => inner.mentions_marker(marker),
             TyKind::Obj(_, args) => args.iter().any(|a| a.mentions_marker(marker)),
             TyKind::Fun(signature) => {
                 signature.ret.mentions_marker(marker)
@@ -1175,7 +1206,8 @@ impl Ty {
             | TyKind::PlatformNullable(inner)
             | TyKind::InProjection(inner)
             | TyKind::OutProjection(inner)
-            | TyKind::StarProjection(inner) => inner.mentions_ty_param(),
+            | TyKind::StarProjection(inner)
+            | TyKind::RawProjection(inner) => inner.mentions_ty_param(),
             TyKind::Obj(_, args) => args.iter().any(|a| a.mentions_ty_param()),
             TyKind::Fun(signature) => {
                 signature.ret.mentions_ty_param()
@@ -1213,7 +1245,8 @@ impl Ty {
             | TyKind::PlatformNullable(inner)
             | TyKind::InProjection(inner)
             | TyKind::OutProjection(inner)
-            | TyKind::StarProjection(inner) => inner.type_parameter_occurrence_bound(name),
+            | TyKind::StarProjection(inner)
+            | TyKind::RawProjection(inner) => inner.type_parameter_occurrence_bound(name),
             TyKind::Obj(_, arguments) => arguments
                 .iter()
                 .find_map(|argument| argument.type_parameter_occurrence_bound(name)),
@@ -1344,6 +1377,7 @@ impl Ty {
             TyKind::InProjection(inner) => Ty::in_projection(inner.canonical_semantic()),
             TyKind::OutProjection(inner) => Ty::out_projection(inner.canonical_semantic()),
             TyKind::StarProjection(inner) => Ty::star_projection(inner.canonical_semantic()),
+            TyKind::RawProjection(inner) => Ty::raw_projection(inner.canonical_semantic()),
             TyKind::Intersection(parts) => Ty::intersection(
                 &parts
                     .iter()
@@ -1514,6 +1548,8 @@ impl Ty {
                 });
                 if args.is_empty() {
                     base
+                } else if self.is_raw_application() {
+                    diagnostic_rendering::raw_type(&base, &base, &args, render)
                 } else {
                     let arguments = args
                         .iter()
@@ -1565,6 +1601,7 @@ impl Ty {
                 _ => format!("out {}", render(inner)),
             },
             TyKind::StarProjection(_) => "*".to_string(),
+            TyKind::RawProjection(erased) => render(erased),
             TyKind::DefinitelyNotNull(inner) => format!("{} & Any", render(inner)),
             TyKind::Intersection(parts) => parts
                 .iter()
@@ -1597,7 +1634,8 @@ impl Ty {
             | TyKind::PlatformNullable(inner)
             | TyKind::InProjection(inner)
             | TyKind::OutProjection(inner)
-            | TyKind::StarProjection(inner) => {
+            | TyKind::StarProjection(inner)
+            | TyKind::RawProjection(inner) => {
                 inner.contains_distinct_classifier_with_segment(classifier)
             }
             _ => false,
@@ -1631,6 +1669,7 @@ impl Ty {
             TyKind::InProjection(inner) => format!("in {}", inner.name()),
             TyKind::OutProjection(inner) => format!("out {}", inner.name()),
             TyKind::StarProjection(_) => "*".to_string(),
+            TyKind::RawProjection(erased) => erased.name(),
             TyKind::TyParam(name, _) => name.to_string(),
             TyKind::DefinitelyNotNull(inner) => format!("{} & Any", inner.name()),
             TyKind::Intersection(parts) => parts
@@ -1948,7 +1987,8 @@ pub(crate) fn ty_mentions_param(ty: Ty, names: &[String]) -> bool {
         | TyKind::PlatformNullable(inner)
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner)
-        | TyKind::StarProjection(inner) => ty_mentions_param(inner, names),
+        | TyKind::StarProjection(inner)
+        | TyKind::RawProjection(inner) => ty_mentions_param(inner, names),
         _ => false,
     }
 }
@@ -1974,7 +2014,8 @@ pub(crate) fn ty_mentions_any_param(ty: Ty) -> bool {
         | TyKind::PlatformNullable(inner)
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner)
-        | TyKind::StarProjection(inner) => ty_mentions_any_param(inner),
+        | TyKind::StarProjection(inner)
+        | TyKind::RawProjection(inner) => ty_mentions_any_param(inner),
         _ => false,
     }
 }

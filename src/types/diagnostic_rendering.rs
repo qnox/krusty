@@ -89,6 +89,18 @@ pub(super) fn platform_type(
         ty.source_name_with_classifier_in(context, type_parameter, classifier, platform_upper_bound)
     };
     let upper = platform_upper_bound(inner);
+    if let (TyKind::Obj(lower_owner, arguments), true) = (inner.kind(), inner.is_raw_application())
+    {
+        // A raw occurrence is already flexible; its interval spells both bounds, and a mapped
+        // collection's read-only face is the upper one.
+        let upper_owner = upper.obj_internal().unwrap_or(lower_owner);
+        return raw_type(
+            &render(Ty::obj_name(lower_owner)),
+            &render(Ty::obj_name(upper_owner)),
+            &arguments,
+            render,
+        );
+    }
     let (TyKind::Obj(lower_owner, arguments), TyKind::Obj(upper_owner, _)) =
         (inner.kind(), upper.kind())
     else {
@@ -125,4 +137,22 @@ pub(super) fn platform_type(
         .collect::<Vec<_>>()
         .join(", ");
     format!("{face}<{arguments}>!")
+}
+
+/// Render a Java raw occurrence as kotlinc spells its flexible interval: the lower bound applies
+/// each formal's erasure, and the nullable upper bound stars every argument
+/// (`(Box<CharSequence!>..Box<*>?)`).
+pub(super) fn raw_type(
+    lower: &str,
+    upper: &str,
+    arguments: &[Ty],
+    render: impl Fn(Ty) -> String,
+) -> String {
+    let erased = arguments
+        .iter()
+        .map(|argument| render(*argument))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let stars = vec!["*"; arguments.len()].join(", ");
+    format!("({lower}<{erased}>..{upper}<{stars}>?)")
 }

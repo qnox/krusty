@@ -9,6 +9,14 @@ KLIB dependency-emission categories have disjoint declaration-owned roots before
 An authenticated intrinsic wrapper keeps that ownership when its body transaction declines; the
 ordinary-body category cannot retry it and turn the target decline into an ordinary-closure error.
 
+## Java raw type applications
+
+- ✅ A Java raw occurrence carries one `RawProjection(erasure)` argument per formal (SPEC §5), so it
+  is a complete application for the subtype relation, renders and publishes as kotlinc's flexible
+  raw interval, and binds a raw receiver's formals to their erasures.
+- Open: erase a raw member's nested generic types the way kotlinc does (raw `List` for `List<T>`,
+  raw `Comparable` for a recursive bound).
+
 ## Shared-target plugin model identity
 
 The compiler/plugin IR crate records the existing checkout build input in Rust dep-info. Switching

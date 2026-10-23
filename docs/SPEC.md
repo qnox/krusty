@@ -125,10 +125,25 @@ Public Java instance fields are valid value-qualified property reads. Selection 
 classifier/property hierarchy for Java source stubs, compiled dependencies, and source/module
 subclasses: the nearest declaration wins, a private or static same-named field hides an inherited
 instance field, and an actual field wins over synthetic JavaBean getter discovery. Generic field
-types are substituted from the applied receiver; a raw receiver uses the descriptor-erased type.
+types are substituted from the applied receiver; a raw receiver reads each formal as its erasure.
 Resolution carries the exact declaring owner, field name, and opaque physical descriptor through the
 ordinary property-read node, including nullable safe-call lowering, rather than reclassifying the
 receiver by origin during lowering or emission.
+
+A Java raw type occurrence (`Box` naming `class Box<T extends CharSequence>`, or a raw
+non-static member class capturing its enclosing formals) is kotlinc's flexible interval
+`(Box<CharSequence!>..Box<*>?)`. The JVM provider spells it as one `RawProjection(erasure)`
+argument per formal: a Java formal erases to its first bound, flexible, through formal chains
+(`B extends A`) and with formal-naming arguments starred (`T extends Comparable<T>` erases to
+`Comparable<*>!`); an unbounded Java formal erases to `Any!`, a Kotlin-declared one (including a
+mapped collection such as raw `List`) to `Any?`. A member read through a raw receiver binds each
+formal to its erasure (`Box.raw().get()` is `CharSequence!`). A raw target accepts any application
+of its classifier; a raw source supplies only its lower bound, so a raw `List` is not a
+`List<String>`. Signatures write the raw classifier, and diagnostics render the interval
+(`tests/java_raw_type_e2e.rs`, `tests/java_class_formal_bound_e2e.rs`). Known gap: kotlinc also
+erases a raw member's nested generic types (`List<T>` read through a raw receiver is a raw `List`,
+and `set(T)` with `T extends Comparable<T>` takes a raw `Comparable`); krusty substitutes the
+erasure inside them instead (`(Mutable)List<Any!>!`, `Comparable<*>!`).
 
 Static methods of **nested** Java classes resolve through all three kotlinc-accepted spellings —
 `Outer.Bus.notify(x)` with `Outer` imported, `Bus.notify(x)` with `import pkg.Outer.Bus`, and the
