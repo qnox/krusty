@@ -947,14 +947,20 @@ jobs:
     runs-on: ubuntu-latest
     # Shorter than the release lock's TTL, so a lock that outlives it belongs to a dead job.
     timeout-minutes: 25
+    # The publishing secrets live in this environment, which only master may deploy to, so a
+    # branch that edits this workflow cannot read them.
+    environment: release
     permissions:
       contents: write
       # Dispatches the pages workflow, which regenerates the Bazel registry.
       actions: write
     steps:
+      # No persisted token: the Gradle builds below run third-party code next to the signing key.
+      # Only the steps that push get the token.
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
       # Master runs overlap, so two release jobs can run at once and an older commit can reach
       # this job after a newer one. A concurrency group would cancel a queued release, and with it
       # the whole run, so publishing takes a lock held in a ref instead. Under it, only the tip of
@@ -962,6 +968,8 @@ jobs:
       # latest-release marker and the badges never move backwards.
       - name: take the release lock
         id: lock
+        env:
+          RELEASE_TOKEN: ${{ github.token }}
         run: echo "lock=$(scripts/release-publisher.sh acquire)" >> "$GITHUB_OUTPUT"
       - name: publish only the newest master commit
         id: tip
@@ -1109,6 +1117,8 @@ jobs:
         run: gh workflow run pages.yml --ref master
       - name: record the published commit
         if: steps.tip.outputs.publish == 'true'
+        env:
+          RELEASE_TOKEN: ${{ github.token }}
         run: scripts/release-publisher.sh record
       # Badges: the max version's JVM case/byte reports and Native case report, each published to
       # its own gist file.
@@ -1187,4 +1197,6 @@ jobs:
           color: blue
       - name: drop the release lock
         if: always() && steps.lock.outputs.lock != ''
+        env:
+          RELEASE_TOKEN: ${{ github.token }}
         run: scripts/release-publisher.sh release "${{ steps.lock.outputs.lock }}"
