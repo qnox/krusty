@@ -5602,6 +5602,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   through the caller's own `finally` and through `ReentrantReadWriteLock.write`, and kotlinc's bytes
   for the conditional ones) and `ir::lambda_exits::tests`.
 
+- **A lambda's non-local `break`/`continue` runs every `finally` it leaves, as kotlinc copies
+  them.** kotlinc's `visitBreakContinue` ends the lambda's method with a marked return naming the
+  loop (`nonLocalReturnLabel`) when the loop is outside it, so a library inline function's own
+  `finally` (`withLock`'s `unlock`, `synchronized`'s `monitorexit`) is copied in front of the jump
+  as in front of a return. Where the inlined code is written into the code that holds the loop, the
+  marked return becomes the jump to the loop behind that code's `finally` blocks between the call
+  and the loop; written into an enclosing lambda's node instead, it stays a marked return of that
+  node. A loop is named by its position among the loops open where the outermost lambda is
+  written, then those each nested lambda opens. A return of an enclosing inline expansion
+  (`return@outer` inside `withLock`, in `ownRun outer@ { ... }`), which lowering makes a `break` of
+  the expansion's return frame carrying its result, is the same jump: the node returns the result
+  behind a marker naming the frame (`result$N`), the inlined function's `finally` is copied around
+  it as around a returned value, and the code that holds the frame stores it as the frame's result
+  before the jump. One literal can leave by a return, a jump and a frame return at once; each is
+  recorded separately (`ir::lambda_exits::LambdaExit`) and none reroutes the others. Tests:
+  `tests/inline_non_local_jump_finally_e2e.rs` (`break`, `continue`, labeled outer loops, nested
+  `withLock`/`synchronized`, the caller's and the lambda's own `finally`, against kotlinc's run and
+  bytes; one `withLock` literal with `return@outer` beside a `break` and beside a `continue`,
+  against kotlinc's run, unlock log and hold count) and `ir::lambda_exits::tests`.
+
 - **A same-module inline call with function arguments is inlined from the compiled body too.**
   A literal lambda or callable reference passed to an inline parameter (one that is function-typed
   and not `noinline`) replaces the compiled body's `invoke`s, exactly as a library callee's

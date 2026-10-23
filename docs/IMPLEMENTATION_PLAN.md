@@ -5316,17 +5316,26 @@ regress.
     hosts. A literal-lambda call's route is planned before it is emitted
     (`bytecode_inline_call::lambda_route`): the port, or the splice for a named shape it does not
     own yet, never one after the other. Still on the splice: lambdas that suspend (until the
-    coroutine transformer runs on inlined bytecode), value-class adapters other than an unboxed non-null value class, non-local
-    `break`/`continue`, materialized lambdas and callee shapes of later stages; callable references
+    coroutine transformer runs on inlined bytecode), value-class adapters other than an unboxed non-null value class,
+    materialized lambdas and callee shapes of later stages; callable references
     are not ported.
   - ✓ 3c. Non-local returns are marked (`$$$$$NON_LOCAL_RETURN$$$$$`) and stay returns of the
     caller, with the inlined function's `finally` bodies copied in front of each one
     (`inliner::finally_blocks`, `InternalFinallyBlockInliner`) and the caller's own `finally`
     blocks run in front of it where the inlined code is written (`generateAndInsertFinallyBlocks`).
     Open: kotlinc keeps a `line N: 0` entry for dead code after an unconditional non-local return,
-    which krusty's code builder does not represent; non-local `break`/`continue` through a
-    `finally` still go through the splice, which skips the `finally` (a lock held by `withLock`
-    stays held).
+    which krusty's code builder does not represent.
+  - ✓ 3d. A non-local `break`/`continue` is a marked return naming its loop (kotlinc's
+    `nonLocalReturnLabel`), so the inlined function's `finally` bodies are copied in front of it,
+    and is written into the caller as the jump to the loop behind the caller's `finally` blocks it
+    leaves (`ir_emit::non_local_jumps`). A lock held by `withLock` is released on `break`. A
+    return of an enclosing inline expansion is the frame's `break` carrying its result
+    (`result$N`). Open: kotlinc parks a value returned through a library `finally` inside a
+    same-module inline lambda below the callee's catch local (it compiles that lambda as a method
+    first), krusty above it, so such code differs from kotlinc in slot order only (also for a
+    plain non-local `return`); a jump out of a library lambda nested in a same-module inline
+    lambda whose result is discarded fails to emit (`ownRun { x.let { break } }`, also before
+    this port).
 - ◐ 4. `AnonymousObjectTransformer`: anonymous objects and crossinline lambdas in an inlined body
   are regenerated as `$$inlined$` classes.
   - ◐ 4a. Anonymous objects of a classpath inline body with no lambda arguments, inlined into a
