@@ -81,10 +81,14 @@ public class VerifyMojo extends AbstractMojo {
             List<File> pluginClasspath = pluginClasspath(kotlin);
             String jdkHome = System.getProperty("java.home");
             try {
-                verify(krusty, records, verification, KotlinCompilation.of(project, kotlin, "compile",
-                        project.getCompileClasspathElements(), pluginClasspath, jdkHome));
-                verify(krusty, records, verification, KotlinCompilation.of(project, kotlin, "test-compile",
-                        project.getTestClasspathElements(), pluginClasspath, jdkHome));
+                for (KotlinCompilation compilation : KotlinCompilation.of(project, kotlin, "compile",
+                        project.getCompileClasspathElements(), pluginClasspath, jdkHome)) {
+                    verify(krusty, records, verification, compilation);
+                }
+                for (KotlinCompilation compilation : KotlinCompilation.of(project, kotlin, "test-compile",
+                        project.getTestClasspathElements(), pluginClasspath, jdkHome)) {
+                    verify(krusty, records, verification, compilation);
+                }
             } catch (DependencyResolutionRequiredException e) {
                 throw new MojoExecutionException("cannot read " + project.getArtifactId() + "'s classpath", e);
             }
@@ -104,20 +108,20 @@ public class VerifyMojo extends AbstractMojo {
 
     private void verify(File krusty, File records, Verification verification, KotlinCompilation compilation)
             throws MojoExecutionException {
-        if (compilation == null) return;
         if (compilation.hasKotlinSources() && !compilation.reference.isDirectory()) {
             throw new MojoExecutionException(compilation.reference + " holds no kotlinc output; run "
                     + "test-compile in the same build, as in 'mvn test-compile krusty:verify'");
         }
-        File destination = new File(project.getBuild().getDirectory(), "krusty-verify/" + compilation.sourceSet + "/classes");
-        deleteTree(destination);
+        // Nothing is deleted or written here: verify-compile proves its destination and record apart
+        // from kotlinc's output before it clears or writes either.
+        File destination = new File(project.getBuild().getDirectory(), "krusty-verify/" + compilation.outputName + "/classes");
         List<String> command = new ArrayList<>();
         command.add(krusty.getAbsolutePath());
         command.add("verify-compile");
         command.add("--kotlin-outputs-only");
         command.add("--reference");
         command.add(compilation.reference.getAbsolutePath());
-        File record = new File(records, compilation.name.replace(':', '_') + ".json");
+        File record = new File(records, compilation.name.replace(':', '_').replace('@', '_') + ".json");
         command.add("--record");
         command.add(record.getAbsolutePath());
         command.add("--compilation");
@@ -129,9 +133,10 @@ public class VerifyMojo extends AbstractMojo {
                 .filter(argument -> argument.startsWith("-Xkotlin-reference-version="))
                 .map(argument -> argument.substring(argument.indexOf('=') + 1))
                 .findFirst().orElse(""));
+        File reasons = null;
         if (!compilation.unsupported.isEmpty()) {
-            File reasons = new File(project.getBuild().getDirectory(), "krusty-verify/" + compilation.sourceSet + ".unsupported");
-            write(reasons, String.join("\n", compilation.unsupported) + "\n");
+            // Outside the build's directories, which verify-compile has not checked yet.
+            reasons = temporary(String.join("\n", compilation.unsupported) + "\n");
             command.add("--unsupported-from");
             command.add(reasons.getAbsolutePath());
         }
@@ -141,7 +146,11 @@ public class VerifyMojo extends AbstractMojo {
         command.add(destination.getAbsolutePath());
         for (File source : compilation.sources) command.add(source.getAbsolutePath());
         getLog().info("krusty: verifying " + compilation.name);
-        run(command);
+        try {
+            run(command);
+        } finally {
+            if (reasons != null) reasons.delete();
+        }
         verification.records.add(record);
     }
 
@@ -149,7 +158,9 @@ public class VerifyMojo extends AbstractMojo {
         File out = new File(records.getParentFile(), "report");
         if (current.isEmpty()) {
             // An earlier build's report must not stand for this one.
-            deleteTree(out);
+            for (String name : List.of("krusty-verify.html", "krusty-verify.md", "krusty-verify-issue.md")) {
+                new File(out, name).delete();
+            }
             getLog().warn("krusty: no kotlin-maven-plugin compilation ran, so there is nothing to report");
             return;
         }
@@ -220,18 +231,13 @@ public class VerifyMojo extends AbstractMojo {
         }
     }
 
-    private static void write(File file, String text) throws MojoExecutionException {
+    private static File temporary(String text) throws MojoExecutionException {
         try {
-            Files.createDirectories(file.getParentFile().toPath());
+            File file = Files.createTempFile("krusty-verify-", ".unsupported").toFile();
             Files.writeString(file.toPath(), text, StandardCharsets.UTF_8);
+            return file;
         } catch (IOException e) {
-            throw new MojoExecutionException("cannot write " + file, e);
+            throw new MojoExecutionException("cannot write the unsupported reasons", e);
         }
-    }
-
-    private static void deleteTree(File file) {
-        File[] children = file.listFiles();
-        if (children != null) for (File child : children) deleteTree(child);
-        file.delete();
     }
 }

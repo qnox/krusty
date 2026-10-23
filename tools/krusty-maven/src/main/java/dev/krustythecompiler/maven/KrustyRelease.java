@@ -39,7 +39,21 @@ final class KrustyRelease {
         return source == null ? null : source.getImplementationVersion();
     }
 
+    /**
+     * The installs of this JVM, one at a time: a parallel build runs the goal on several threads,
+     * and a second {@link FileChannel#lock()} on one file from the same JVM throws rather than
+     * waits. The file lock then orders installs across JVMs.
+     */
+    private static final Object INSTALL = new Object();
+
     static File compiler(String release, String releases, File cache, boolean offline)
+            throws MojoExecutionException {
+        synchronized (INSTALL) {
+            return installed(release, releases, cache, offline);
+        }
+    }
+
+    private static File installed(String release, String releases, File cache, boolean offline)
             throws MojoExecutionException {
         String triple = hostTriple();
         boolean windows = triple.endsWith("windows-msvc");

@@ -30,6 +30,8 @@ final class KotlinCompilation {
 
     final String name;
     final String sourceSet;
+    /** Where krusty writes, under the project's {@code krusty-verify} directory. */
+    final String outputName;
     final File reference;
     final List<File> sources;
     /** kotlinc's arguments other than the sources and {@code -d}. */
@@ -37,24 +39,39 @@ final class KotlinCompilation {
     /** Why krusty cannot be given this request, when the plugin cannot derive it. */
     final List<String> unsupported;
 
-    private KotlinCompilation(String name, String sourceSet, File reference, List<File> sources,
-            List<String> arguments, List<String> unsupported) {
+    private KotlinCompilation(String name, String sourceSet, String outputName, File reference,
+            List<File> sources, List<String> arguments, List<String> unsupported) {
         this.name = name;
         this.sourceSet = sourceSet;
+        this.outputName = outputName;
         this.reference = reference;
         this.sources = sources;
         this.arguments = arguments;
         this.unsupported = unsupported;
     }
 
-    /** The project's compilation that kotlin-maven-plugin's {@code goal} runs, or null when none does. */
-    static KotlinCompilation of(MavenProject project, Plugin kotlin, String goal, List<String> classpath,
+    /**
+     * The project's compilations that kotlin-maven-plugin's {@code goal} runs, one per execution. Two
+     * executions of one goal write into one output directory, where kotlinc's output of each cannot
+     * be told apart, so each is then unsupported rather than compared against the other's classes.
+     */
+    static List<KotlinCompilation> of(MavenProject project, Plugin kotlin, String goal, List<String> classpath,
             List<File> pluginClasspath, String jdkHome) {
-        PluginExecution execution = kotlin.getExecutions().stream()
-                .filter(candidate -> candidate.getGoals().contains(goal))
-                .findFirst()
-                .orElse(null);
-        if (execution == null) return null;
+        List<PluginExecution> executions = new ArrayList<>();
+        for (PluginExecution execution : kotlin.getExecutions()) {
+            if (execution.getGoals().contains(goal)) executions.add(execution);
+        }
+        List<KotlinCompilation> compilations = new ArrayList<>();
+        boolean shared = executions.size() > 1;
+        for (PluginExecution execution : executions) {
+            compilations.add(of(project, kotlin, goal, execution, shared ? executions.size() : 0, classpath,
+                    pluginClasspath, jdkHome));
+        }
+        return compilations;
+    }
+
+    private static KotlinCompilation of(MavenProject project, Plugin kotlin, String goal, PluginExecution execution,
+            int sharing, List<String> classpath, List<File> pluginClasspath, String jdkHome) {
         Xpp3Dom configuration = merged(execution.getConfiguration(), kotlin.getConfiguration());
         boolean test = goal.equals("test-compile");
         File output = new File(test ? project.getBuild().getTestOutputDirectory() : project.getBuild().getOutputDirectory());
@@ -74,6 +91,10 @@ final class KotlinCompilation {
         sources.sort(null);
 
         List<String> unsupported = new ArrayList<>();
+        if (sharing > 0) {
+            unsupported.add("krusty: kotlin-maven-plugin runs " + sharing + " executions of '" + goal
+                    + "' into one output directory, so kotlinc's output of each cannot be told apart");
+        }
         List<String> arguments = new ArrayList<>(values(configuration, "args"));
         List<String> libraries = new ArrayList<>();
         for (String element : classpath) {
@@ -125,8 +146,10 @@ final class KotlinCompilation {
         arguments.add("-Xkotlin-reference-version=" + kotlin.getVersion());
         arguments.add("-no-stdlib");
         arguments.add("-no-reflect");
-        return new KotlinCompilation(project.getArtifactId() + ":" + goal, test ? "test" : "main", output, sources,
-                arguments, unsupported);
+        String sourceSet = test ? "test" : "main";
+        String name = project.getArtifactId() + ":" + goal + (sharing > 0 ? "@" + execution.getId() : "");
+        String outputName = sharing > 0 ? sourceSet + "-" + execution.getId() : sourceSet;
+        return new KotlinCompilation(name, sourceSet, outputName, output, sources, arguments, unsupported);
     }
 
     private static Xpp3Dom merged(Object execution, Object plugin) {
