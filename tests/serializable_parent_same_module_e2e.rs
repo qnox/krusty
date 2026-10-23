@@ -115,7 +115,7 @@ const ACCOUNT: &str = "package bank\n\
                        @Serializable\n\
                        open class Account {\n\
                        \x20   val id: Int = 7\n\
-                       \x20   val code: Int = id + 1\n\
+                       \x20   val code: Int = 8\n\
                        \x20   var label: String\n\
                        \x20   constructor(label: String) { this.label = label }\n\
                        \x20   constructor() : this(\"none\")\n\
