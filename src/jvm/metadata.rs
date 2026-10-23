@@ -13,6 +13,7 @@ mod inline_class;
 mod property_declarations;
 mod property_identity;
 mod realization_facts;
+mod serialization_program_order;
 mod since_kotlin;
 mod string_table;
 mod type_aliases;
@@ -1175,6 +1176,9 @@ pub struct KotlinMeta {
     pub companion_name: Option<String>,
     /// `Class.sealedSubclassFqName` (field 16), as JVM internal names.
     pub sealed_subclasses: Vec<String>,
+    /// The serialization plugin's `propertiesNamesInProgramOrder` (field 18000): an open or
+    /// abstract serializable class's own serial element names in declaration order.
+    pub serial_element_names: Box<[Box<str>]>,
     /// The `@JvmInline value class` shape (fields 17-19), if this is one.
     pub inline: Option<InlineClass>,
     /// For a MULTI-FILE FACADE (`@Metadata(k = 4)`): the part class internal names its `d1` lists —
@@ -1209,6 +1213,7 @@ impl Default for KotlinMeta {
             class_qualified_name: None,
             companion_name: None,
             sealed_subclasses: Vec::new(),
+            serial_element_names: Box::default(),
             inline: None,
             multifile_parts: Vec::new(),
             package: None,
@@ -1412,7 +1417,8 @@ pub fn decode_metadata_within(
             None
         },
         companion_name: class_identity::companion_name(&ctx),
-        sealed_subclasses: sealed_subclasses(&ctx),
+        sealed_subclasses: class_identity::sealed_subclasses(&ctx),
+        serial_element_names: serialization_program_order::serial_element_names(&ctx),
         inline: inline_class::inline_class(&ctx),
         multifile_parts: Vec::new(),
         package,
@@ -2280,60 +2286,6 @@ fn ctor_params(ctx: &MetaCtx) -> MetadataResult<Vec<MetaConstructor>> {
         }
     }
     Ok(out)
-}
-
-/// The direct subclasses of a `sealed` class, from its `@Metadata` — `Class.sealedSubclassFqName` (field
-/// 16, a repeated `QualifiedName` index). Returned as JVM internal names (`lib/D$A`), so an exhaustive
-/// `when` over a CLASSPATH sealed subject can be proven exhaustive the same way a same-module one is. Only
-/// a sealed class records these, so a non-empty result also implies `is_sealed`.
-fn sealed_subclasses(ctx: &MetaCtx) -> Vec<String> {
-    let records = ctx.records;
-    let d2 = ctx.d2;
-    let mut out = Vec::new();
-    let push_id = |id: usize, out: &mut Vec<String>| {
-        if let Some(name) = resolve_class_name(records, d2, id) {
-            // A metadata class name spells a nested type with `.` (`lib/D.A`) and the package with `/`;
-            // the JVM internal name uses `$` for nesting (`lib/D$A`). Convert only after the last `/`.
-            let internal = match name.rfind('/') {
-                Some(slash) => {
-                    format!("{}{}", &name[..=slash], name[slash + 1..].replace('.', "$"))
-                }
-                None => name.replace('.', "$"),
-            };
-            if !out.contains(&internal) {
-                out.push(internal);
-            }
-        }
-    };
-    let mut pb = Pb::new(ctx.msg);
-    while !pb.at_end() {
-        let Some(tag) = pb.varint() else { break };
-        match (tag >> 3, tag & 7) {
-            // sealedSubclassFqName = 16, unpacked repeated varint.
-            (16, 0) => {
-                if let Some(id) = pb.varint() {
-                    push_id(id as usize, &mut out);
-                }
-            }
-            // packed repeated form.
-            (16, 2) => {
-                if let Some(n) = pb.varint() {
-                    if let Some(bytes) = pb.bytes(n as usize) {
-                        let mut ip = Pb::new(bytes);
-                        while let Some(id) = ip.varint() {
-                            push_id(id as usize, &mut out);
-                        }
-                    }
-                }
-            }
-            (_, w) => {
-                if pb.skip(w).is_none() {
-                    break;
-                }
-            }
-        }
-    }
-    out
 }
 
 /// The `index`-th `Type` in a `TypeTable` message (field 1, repeated), plus whether the table's

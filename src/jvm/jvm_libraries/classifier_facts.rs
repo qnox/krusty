@@ -132,6 +132,123 @@ pub(super) fn generated_serializer_singleton(
     candidates.next().is_none().then_some(singleton)
 }
 
+/// The serial elements of `classifier`, a `@Serializable` class whose serializer the plugin
+/// generated, read from the class's metadata as kotlinc's plugin reads them for a subclass: the
+/// plugin's program-order list names the elements, each property's metadata gives its type, and
+/// the primary constructor says which parameters have no default and so must be present.
+pub(super) fn serializable_class_elements(
+    libraries: &JvmLibraries,
+    classifier: TypeName,
+) -> Option<crate::types::SerializableClassElements> {
+    let shape = SymbolSource::classifier(libraries, classifier)?;
+    if shape.kind != crate::libraries::TypeKind::Class {
+        return None;
+    }
+    let serializable = type_name("kotlinx/serialization/Serializable");
+    let generated = shape.annotations.iter().any(|annotation| {
+        annotation.annotation == serializable
+            && !annotation.arguments.iter().any(|(name, _)| name == "with")
+    });
+    if !generated {
+        return None;
+    }
+    let class = libraries.cp.find_name(classifier)?;
+    if class.this_class != classifier {
+        return None;
+    }
+    let meta = &class.meta;
+    // Without the list a class with stored properties gives no element order to follow.
+    if meta.serial_element_names.is_empty()
+        && meta
+            .class_properties
+            .iter()
+            .any(|property| property.field.is_some())
+    {
+        return None;
+    }
+    let primary = meta
+        .constructors
+        .iter()
+        .find(|constructor| constructor.primary);
+    let elements = meta
+        .serial_element_names
+        .iter()
+        .map(|name| {
+            let property = meta
+                .class_properties
+                .iter()
+                .find(|property| property.name.as_str() == &**name)?;
+            // Annotations on the element (a serial name, a serializer of its own) change its wire
+            // shape, and this record carries none.
+            if property.annotation_method.is_some() {
+                return None;
+            }
+            let ty = shape
+                .declared_callables
+                .get(&**name)?
+                .properties()
+                .first()?
+                .ty;
+            let optional = primary
+                .and_then(|constructor| {
+                    let index = constructor
+                        .params
+                        .names
+                        .iter()
+                        .position(|parameter| parameter.as_str() == &**name)?;
+                    Some(
+                        constructor
+                            .params
+                            .defaults
+                            .as_slice()
+                            .get(index)
+                            .copied()
+                            .unwrap_or(false),
+                    )
+                })
+                .unwrap_or(true);
+            Some(crate::types::SerializableElement {
+                name: name.clone(),
+                ty,
+                optional,
+            })
+        })
+        .collect::<Option<Box<[_]>>>()?;
+    let superclass = shape.supertype_templates.iter().copied().find(|supertype| {
+        supertype
+            .kotlin_class_internal()
+            .and_then(|name| SymbolSource::classifier(libraries, name))
+            .is_some_and(|supertype| supertype.kind == crate::libraries::TypeKind::Class)
+    });
+    let any = type_name("kotlin/Any");
+    Some(crate::types::SerializableClassElements {
+        elements,
+        superclass: superclass.filter(|ty| ty.kotlin_class_internal() != Some(any)),
+    })
+}
+
+/// Whether `internal` is, transitively, a subtype of `target` (a superclass or implemented interface,
+/// at any depth). Names are normalized to their JVM spelling so a Kotlin built-in (`kotlin/collections/
+/// MutableMap`) and its `java/util/Map` realization compare equal.
+pub(super) fn class_implements_name(cp: &Classpath, internal: TypeName, target: TypeName) -> bool {
+    let target = crate::jvm::jvm_class_map::to_jvm_type_name(target);
+    let mut seen = crate::fx_hash::HashSet::default();
+    let mut q = std::collections::VecDeque::new();
+    q.push_back(crate::jvm::jvm_class_map::to_jvm_type_name(internal));
+    while let Some(name) = q.pop_front() {
+        if name == target {
+            return true;
+        }
+        if !seen.insert(name) {
+            continue;
+        }
+        if let Some(ci) = cp.find_name(name) {
+            q.extend(ci.interfaces.iter_ids().chain(ci.super_class));
+        }
+    }
+    false
+}
+
 impl crate::types::ClassifierFactSource for JvmLibraries {
     fn classifier_annotations(
         &self,
@@ -173,6 +290,13 @@ impl crate::types::ClassifierFactSource for JvmLibraries {
         type_parameters: usize,
     ) -> bool {
         SymbolSource::has_serialization_serializer_accessor(self, companion, type_parameters)
+    }
+
+    fn serializable_class_elements(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::types::SerializableClassElements> {
+        SymbolSource::serializable_class_elements(self, classifier)
     }
 
     fn serialization_companion(&self, classifier: TypeName) -> Option<(Box<str>, TypeName)> {

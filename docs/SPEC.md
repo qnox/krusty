@@ -11463,9 +11463,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constructor before storing its own fields. A generic superclass's elements are typed by the
   subclass's type arguments, and the subclass hands the parent's `write$Self` one serializer per
   type argument after the descriptor (`StringSerializer.INSTANCE` for `Envelope<String>`, the
-  subclass's own `typeSerial0` for `Outcome<T>`). (A superclass from another module is not handled
-  yet.)
+  subclass's own `typeSerial0` for `Outcome<T>`).
   Test: `tests/serializable_inheritance_e2e.rs`.
+- **A serializable superclass from a dependency contributes the elements its metadata publishes.**
+  kotlinc reads them from the superclass's class metadata: its `propertiesNamesInProgramOrder` list
+  orders them (the property records themselves are not in declaration order), each property's
+  metadata types it, and the element is required exactly when it is a primary-constructor parameter
+  without a default (a body property, `lateinit` included, is optional). The superclass's own
+  serializable superclasses come first, transitively. The subclass calls the superclass's public
+  `write$Self` and delegates to its deserialization constructor, whose parameters are the inherited
+  elements. krusty reads the same list (field 18000) and constructor flags; a dependency superclass
+  whose element carries annotations, that publishes no order for its stored properties, or that is
+  generic, declines the file rather than guess. (A superclass in another file of the same module is
+  not handled yet and declines too.)
+  Test: `tests/serializable_parent_dependency_e2e.rs`.
 - **A serializable abstract class is serialized polymorphically.** kotlinc gives a non-generic,
   non-sealed abstract `@Serializable` class no `$serializer`: `Companion.serializer()` returns
   `new PolymorphicSerializer(C::class, new Annotation[0])`, cached in a `$cachedSerializer$delegate`

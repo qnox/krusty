@@ -1,6 +1,6 @@
 //! Construction of the synthetic constructor used by serialization deserialization.
 
-use super::serial_elements::{SerialElements, WireElement};
+use super::serial_elements::{SerialElements, SerialParent, WireElement};
 use super::{class_ty, value_class_underlying};
 use crate::ir::{
     Callee, ClassId, CtorDelegateTarget, DeclarationAnnotations, IrConst, IrExpr, IrFile,
@@ -392,9 +392,7 @@ pub(super) fn complete_deserialization_constructor(
     // default or a body property's initializer.
     let optional = wire
         .iter()
-        .map(|element| {
-            super::property_default::checked_default(ir, element.class, element.field).is_some()
-        })
+        .map(|element| element.optional)
         .collect::<Vec<_>>();
     // The class's own element `i` is wire element `offset + i`, after the inherited ones.
     let offset = elements.inherited_count();
@@ -417,16 +415,49 @@ pub(super) fn complete_deserialization_constructor(
     // A serializable superclass's own deserialization constructor stores the inherited elements:
     // it takes the same seen masks, those elements' arguments and the marker.
     let parent_delegation = elements.parent().map(|parent| {
-        let parent_ordinal = ir
-            .generated_secondary_constructor(
-                parent,
-                IrSecondaryConstructorRole::SerializationDeserialization,
-            )
-            .expect("a serializable superclass declares its deserialization constructor");
-        let target_params = ir.classes[parent as usize].secondary_ctors[parent_ordinal as usize]
-            .params
-            .clone();
         let parent_masks = self::mask_count(offset);
+        let (owner, target_params, target) = match parent {
+            SerialParent::Local(parent) => {
+                let parent_ordinal = ir
+                    .generated_secondary_constructor(
+                        parent,
+                        IrSecondaryConstructorRole::SerializationDeserialization,
+                    )
+                    .expect("a serializable superclass declares its deserialization constructor");
+                let target_params = ir.classes[parent as usize].secondary_ctors
+                    [parent_ordinal as usize]
+                    .params
+                    .clone();
+                let target = crate::ir::IrConstructorTarget {
+                    ordinal: parent_ordinal + 1,
+                    access: crate::ir::IrConstructorAccess::Unrestricted,
+                };
+                (
+                    ir.classes[parent as usize].fq_name_id(),
+                    target_params,
+                    target,
+                )
+            }
+            // A superclass compiled apart from this file declared the same constructor over its
+            // elements, which are the inherited ones.
+            SerialParent::External(parent) => {
+                let target_params = std::iter::repeat_n(Ty::Int, parent_masks)
+                    .chain(
+                        wire[..offset]
+                            .iter()
+                            .map(|element| deserialization_parameter_ty(element.ty)),
+                    )
+                    .chain(std::iter::once(class_ty(
+                        "kotlinx/serialization/internal/SerializationConstructorMarker",
+                    )))
+                    .collect();
+                (
+                    parent,
+                    target_params,
+                    crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
+                )
+            }
+        };
         // `this` is slot 0; masks occupy 1..=mask_count; element arguments follow them, then the
         // marker.
         let first_element = 1 + mask_count;
@@ -437,12 +468,9 @@ pub(super) fn complete_deserialization_constructor(
             .map(|slot| ir.add_expr(IrExpr::GetValue(slot as u32)))
             .collect::<Vec<_>>();
         let delegate = CtorDelegateTarget::Super {
-            owner: ir.classes[parent as usize].fq_name_id(),
+            owner,
             target_params,
-            target: crate::ir::IrConstructorTarget {
-                ordinal: parent_ordinal + 1,
-                access: crate::ir::IrConstructorAccess::Unrestricted,
-            },
+            target,
             default_masks: vec![],
         };
         (delegate, args)

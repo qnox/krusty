@@ -12,7 +12,7 @@ mod semantic_callable_owner;
 pub use classifier_declarations::{
     ClassifierDeclarationFacts, ClassifierDeclarationKind, DeclaredValueClass,
     GeneratedClassifierFact, GeneratedClassifierKind, GeneratedClassifierPurpose,
-    SerializationGeneratedMemberStatuses,
+    SerializableClassElements, SerializableElement, SerializationGeneratedMemberStatuses,
 };
 pub use deprecation::{
     DeclaredDeprecation, DeprecatedDeclaration, DeprecatedSinceKotlin, Deprecation,
@@ -2201,6 +2201,15 @@ pub trait ClassifierFactSource {
     /// this only from a declaration/classifier record; consumers must not manufacture the plugin's
     /// nested-class spelling and probe it.
     fn generated_serializer_singleton(&self, _classifier: TypeName) -> Option<TypeName> {
+        None
+    }
+
+    /// The serial elements of `classifier`, a `@Serializable` class whose serializer the
+    /// serialization plugin generated, as a subclass compiled apart from it inherits them.
+    fn serializable_class_elements(
+        &self,
+        _classifier: TypeName,
+    ) -> Option<SerializableClassElements> {
         None
     }
 

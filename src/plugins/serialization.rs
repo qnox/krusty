@@ -20,8 +20,11 @@ mod deserialization_constructor;
 mod deserialize_body;
 pub(super) mod element_serializer;
 mod enum_serializer;
+mod external_parent;
 mod external_serializer;
 mod intrinsic_serializer;
+pub use external_parent::ExternalSerializableParents;
+pub(crate) use external_parent::{external_serializable_parents, inherited_element_types};
 pub use external_serializer::ExternalSerializer;
 pub(crate) use external_serializer::{custom_class_serializer, generated_external_serializer};
 mod generated_classifier;
@@ -212,19 +215,27 @@ impl SerializationPlugin {
             serialized_class: class_id,
             fields: &properties.fields,
             elements: elements.fields(),
-            inherited: elements
-                .parent()
-                .map(|parent| serialize_body::InheritedElements {
+            inherited: elements.parent().map(|parent| {
+                let (owner, write_self) = match parent {
+                    serial_elements::SerialParent::Local(parent) => {
+                        let owner = ir.classes[parent as usize].fq_name_id();
+                        let write_self = ir
+                            .generated_function(
+                                owner,
+                                crate::ir::IrGeneratedFunctionRole::SerializationWriteSelf,
+                            )
+                            .expect("a serializable superclass declares its write$Self");
+                        (owner, Some(write_self))
+                    }
+                    serial_elements::SerialParent::External(owner) => (owner, None),
+                };
+                serialize_body::InheritedElements {
                     count: elements.inherited_count(),
                     type_arguments: elements.parent_type_arguments().to_vec(),
-                    write_self: ir
-                        .generated_function(
-                            ir.classes[parent as usize].fq_name_id(),
-                            crate::ir::IrGeneratedFunctionRole::SerializationWriteSelf,
-                        )
-                        .expect("a serializable superclass declares its write$Self"),
-                    owner: ir.classes[parent as usize].fq_name_id(),
-                }),
+                    write_self,
+                    owner,
+                }
+            }),
             field_defaults: &properties.constant_defaults,
             nested_serializers: &properties.nested_serializers,
             type_parameter_serializers: *type_parameter_serializers,
@@ -1426,6 +1437,17 @@ impl IrPlugin for SerializationPlugin {
             }
             let properties = SerializedProperties::of(ir, class_id);
             let elements = SerialElements::of(ctx, ir, class_id);
+            if let Some(superclass) = elements.undescribed_parent() {
+                // The inherited elements are unknown, so the generated members cannot write,
+                // describe or store them; the file is declined rather than miscompiled.
+                ir.add_expr(IrExpr::PluginPlaceholder {
+                    plugin: "serialization",
+                    kind: "undescribed-serializable-superclass",
+                    exprs: Vec::new(),
+                    data: vec![superclass],
+                    types: Vec::new(),
+                });
+            }
             if cached_serializer::is_polymorphic_base(&ir.classes[class_id as usize]) {
                 let type_parameter_identities =
                     type_parameter_serializers::identities(ir, class_id);

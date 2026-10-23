@@ -630,6 +630,18 @@ impl crate::types::ClassifierFactSource for CheckedBackendClassifiers<'_> {
         self.dependencies.generated_serializer_singleton(classifier)
     }
 
+    fn serializable_class_elements(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::types::SerializableClassElements> {
+        // A source classifier of this module is described from its own checked declaration, which
+        // this frozen view does not retain.
+        if self.module.classifier(classifier).is_some() || self.module.is_body_local(classifier) {
+            return None;
+        }
+        self.dependencies.serializable_class_elements(classifier)
+    }
+
     fn has_serialization_serializer_accessor(
         &self,
         companion: TypeName,
