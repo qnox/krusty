@@ -169,7 +169,7 @@ fn run(
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect();
-        let round = krusty::ksp_round::ksp_round(&analysis, &paths)
+        let round = krusty::ksp_round::ksp_round(&analysis, &paths, "main")
             .unwrap_or_else(|refusal| panic!("{refusal}"));
         let outcome = host.round(&round, &KspLibraries::new(&analysis))?;
         run.log.extend(outcome.log);
@@ -307,6 +307,31 @@ fn mapped_names_are_what_ksp2_reports() {
         .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(run.generated, Vec::<String>::new());
     let expected: Vec<String> = std::fs::read_to_string(fixtures().join("names.expected"))
+        .unwrap()
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(run.log, expected);
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn jvm_signatures_are_what_ksp2_reports() {
+    let (runtime, env) = runtime();
+    let processor = processor(&runtime, "Signatures", "signatures.SignaturesProvider");
+    let out = scratch("ksp-outputs-signatures");
+    let outputs = KspOutputs {
+        kotlin: out.join("kotlin"),
+        java: out.join("java"),
+        classes: out.join("classes"),
+        resources: out.join("resources"),
+    };
+    let sources = [fixtures().join("signatures/Signatures.kt")];
+    let run = run(&runtime, &env, &processor, &sources, &[], &outputs)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(run.generated, Vec::<String>::new());
+    let expected: Vec<String> = std::fs::read_to_string(fixtures().join("signatures.expected"))
         .unwrap()
         .lines()
         .filter(|line| !line.starts_with('#'))

@@ -15,7 +15,7 @@ use crate::protocol::{malformed, put_list, put_str, read_frame, utf8, write_fram
 
 use super::{GeneratedKind, KspGenerated, KspLoad, KspOutcome};
 
-pub(crate) const PROTOCOL: u32 = 6;
+pub(crate) const PROTOCOL: u32 = 7;
 
 const HELLO: u8 = 0;
 const LOAD: u8 = 1;
@@ -167,6 +167,9 @@ fn put_class(payload: &mut Vec<u8>, class: &KspClass) {
     });
     payload.push(u8::from(class.declarations_complete));
     put_list(payload, &class.declarations, put_declaration);
+    put_option(payload, &class.jvm_signature, |payload, text| {
+        put_str(payload, text)
+    });
 }
 
 /// A classpath classifier: its header as a class's, then its package, the qualified name of the
@@ -187,7 +190,7 @@ fn put_library_class(payload: &mut Vec<u8>, library: &KspLibraryClass) {
 
 /// A function: its name, kind (0 top-level, 1 member, 2 static, 3 primary constructor,
 /// 4 secondary constructor), whether it is abstract, its line, annotations, modifiers, type
-/// parameters, extension receiver, parameters and return type.
+/// parameters, extension receiver, parameters, return type, JVM signature and JVM name.
 fn put_function(payload: &mut Vec<u8>, function: &KspFunction) {
     put_str(payload, &function.name);
     payload.push(match function.kind {
@@ -207,6 +210,12 @@ fn put_function(payload: &mut Vec<u8>, function: &KspFunction) {
     put_type_slot(payload, &function.extension_receiver);
     put_list(payload, &function.parameters, put_parameter);
     put_option(payload, &function.return_type, put_type);
+    put_option(payload, &function.jvm_signature, |payload, text| {
+        put_str(payload, text)
+    });
+    put_option(payload, &function.jvm_name, |payload, text| {
+        put_str(payload, text)
+    });
 }
 
 fn put_property(payload: &mut Vec<u8>, property: &KspProperty) {
@@ -222,10 +231,13 @@ fn put_property(payload: &mut Vec<u8>, property: &KspProperty) {
     put_option(payload, &property.ty, put_type);
     put_accessor(payload, &property.getter);
     put_option(payload, &property.setter, put_accessor);
+    put_option(payload, &property.jvm_signature, |payload, text| {
+        put_str(payload, text)
+    });
 }
 
-/// An accessor: whether the source wrote it, its modifiers and annotations, and a setter's
-/// parameter name and annotations.
+/// An accessor: whether the source wrote it, its modifiers and annotations, a setter's parameter
+/// name and annotations, and its JVM name.
 fn put_accessor(payload: &mut Vec<u8>, accessor: &KspAccessor) {
     payload.push(u8::from(accessor.written));
     put_modifiers(payload, &accessor.modifiers);
@@ -238,6 +250,9 @@ fn put_accessor(payload: &mut Vec<u8>, accessor: &KspAccessor) {
             put_annotations(payload, annotations);
         },
     );
+    put_option(payload, &accessor.jvm_name, |payload, text| {
+        put_str(payload, text)
+    });
 }
 
 /// A parameter: its name, its type and a flags byte (bit 0 `val`, 1 `var`, 2 vararg, 3 default,
@@ -528,6 +543,8 @@ mod tests {
                 annotations: Vec::new(),
             }],
             return_type: None,
+            jvm_signature: Some("(I)V".into()),
+            jvm_name: None,
         };
         let round = KspRound {
             files: vec![KspFile {
@@ -571,6 +588,7 @@ mod tests {
                     }]),
                     declarations: vec![KspDeclaration::Function(constructor)],
                     declarations_complete: true,
+                    jvm_signature: Some("Lp/A;".into()),
                 })],
                 declarations_complete: false,
             }],
@@ -621,8 +639,14 @@ mod tests {
         expected.extend(b"FINAL");
         expected.extend([0, 0, 0, 0, 0, 1, 0, 0, 0, 1, b'x', 1]);
         expected.extend(&t);
-        // Its flags, no annotations, and no return type.
+        // Its flags, no annotations, no return type, its JVM signature and no JVM name.
         expected.extend([0b1001, 0, 0, 0, 0, 0]);
+        expected.extend([1, 0, 0, 0, 4]);
+        expected.extend(b"(I)V");
+        expected.push(0);
+        // The classifier's JVM signature.
+        expected.extend([1, 0, 0, 0, 5]);
+        expected.extend(b"Lp/A;");
         let mut frame = (expected.len() as u32).to_be_bytes().to_vec();
         frame.extend(expected);
         assert_eq!(framed, frame);

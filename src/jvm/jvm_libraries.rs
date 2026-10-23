@@ -29,6 +29,7 @@ mod mapped_builtin_member_status;
 mod object_methods;
 mod override_slots;
 mod parameter_plans;
+mod platform_abi;
 mod provider_normalization;
 #[cfg(test)]
 mod provider_normalization_tests;
@@ -4865,6 +4866,10 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         classifier: TypeName,
     ) -> Option<crate::libraries::DeclarationHeader> {
         self.classpath_declaration_header(classifier)
+    }
+
+    fn abi(&self) -> Option<&dyn crate::libraries::PlatformAbi> {
+        Some(self)
     }
 
     fn platform_class(&self, classifier: TypeName) -> Option<TypeName> {

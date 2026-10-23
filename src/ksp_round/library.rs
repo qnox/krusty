@@ -106,6 +106,8 @@ impl KspLibraries<'_> {
                     .and_then(|signature| super_types(class, &signature.supertypes, &scope)),
                 declarations: Vec::new(),
                 declarations_complete: false,
+                // A library class's JVM signature is not described yet.
+                jvm_signature: None,
             },
             package_name: class.package().replace('/', "."),
             parent: class.nested_owner().map(qualified_name),

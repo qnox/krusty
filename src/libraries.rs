@@ -31,6 +31,7 @@ mod member_records;
 mod metadata_normalization;
 mod param_flags;
 pub(crate) mod physical_parameter_plan;
+mod platform_abi;
 mod platform_contract;
 mod property_producer;
 mod provider_override;
@@ -71,6 +72,7 @@ pub use enhanced_nullability::{enhance_from_overridden, EnhancedResult, TypeEnha
 pub use inline_kind::InlineKind;
 pub use param_flags::ParamFlags;
 pub use physical_parameter_plan::PhysicalParameterSlot;
+pub use platform_abi::PlatformAbi;
 pub use platform_contract::{
     PlatformInitializationError, PlatformSourceHeaderInput, SourceHeaderError,
 };
@@ -439,6 +441,11 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// The declaration of a library classifier as its source language states it, for a consumer
     /// that shows declarations. `None` for a classifier this provider does not declare.
     fn declaration_header(&self, _classifier: TypeName) -> Option<DeclarationHeader> {
+        None
+    }
+
+    /// The names this platform gives declarations in its binary interface, if it has one.
+    fn abi(&self) -> Option<&dyn PlatformAbi> {
         None
     }
 

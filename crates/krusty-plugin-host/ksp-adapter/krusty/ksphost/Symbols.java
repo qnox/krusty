@@ -100,6 +100,7 @@ final class Symbols {
         declaration.declarationsComplete = Wire.readBoolean(in);
         sourceClasses.put(qualifiedName, declaration);
         readDeclarations(in, file, declaration, declaration.declarations);
+        declaration.jvmSignature = readOptionalString(in);
         return declaration;
     }
 
@@ -125,8 +126,11 @@ final class Symbols {
         if (in.readInt() != 0) {
             throw new IOException("a library class lists no declarations");
         }
+        if (readOptionalString(in) != null) {
+            throw new IOException("a library class has no JVM signature yet");
+        }
         declaration.packageName = new Name(Wire.readString(in));
-        declaration.parent = Wire.readBoolean(in) ? Wire.readString(in) : null;
+        declaration.parent = readOptionalString(in);
         declaration.origin = in.readByte() == 0 ? Origin.KOTLIN_LIB : Origin.JAVA_LIB;
         declaration.annotationsComplete = Wire.readBoolean(in);
         return declaration;
@@ -173,6 +177,8 @@ final class Symbols {
             function.parameters.add(parameter);
         }
         function.returnType = Wire.readBoolean(in) ? readReference(in, function) : null;
+        function.jvmSignature = readOptionalString(in);
+        function.jvmName = readOptionalString(in);
         if (kind == 3 && owner != null) {
             owner.primaryConstructor = function;
         }
@@ -199,6 +205,7 @@ final class Symbols {
         if (readAccessor(in, property.getter)) {
             throw new IOException("a getter has no parameter");
         }
+        property.getter.jvmName = readOptionalString(in);
         if (Wire.readBoolean(in)) {
             SourceAccessor.Setter setter = new SourceAccessor.Setter(property);
             if (!readAccessor(in, setter)) {
@@ -206,18 +213,24 @@ final class Symbols {
             }
             setter.parameter = new SetterParameter(setter, Wire.readString(in));
             readAnnotations(in, setter.parameter, setter.parameter.annotations);
+            setter.jvmName = readOptionalString(in);
             property.setter = setter;
         }
+        property.jvmSignature = readOptionalString(in);
         return property;
     }
 
     // An accessor up to its parameter (`put_accessor` in `src/ksp/protocol.rs`): whether it has
-    // one, which follows.
+    // one, which follows with its JVM name.
     private boolean readAccessor(DataInputStream in, SourceAccessor accessor) throws IOException {
         accessor.written = Wire.readBoolean(in);
         accessor.modifiers = readModifiers(in);
         readAnnotations(in, accessor, accessor.annotations);
         return Wire.readBoolean(in);
+    }
+
+    private static String readOptionalString(DataInputStream in) throws IOException {
+        return Wire.readBoolean(in) ? Wire.readString(in) : null;
     }
 
     private void readAnnotations(DataInputStream in, KSNode parent, List<KSAnnotation> into)
