@@ -107,7 +107,7 @@ impl IrClass {
             .map(|(ordinal, parameter)| {
                 let ty = crate::types::stored_value_ty(parameter.ty.get());
                 if script {
-                    script_implicit_receiver_field(ty)
+                    script_implicit_receiver_field(ordinal, ty)
                 } else {
                     IrField::new(format!("$context_receiver_{ordinal}"), ty).with_is_final(true)
                 }
@@ -246,16 +246,8 @@ impl IrClass {
     }
 }
 
-/// The private field kotlinc keeps a script's implicit receiver in, named after its classifier:
-/// `$$implicitReceiver_Project`.
-fn script_implicit_receiver_field(ty: crate::types::Ty) -> IrField {
-    let classifier = ty
-        .non_null()
-        .obj_internal()
-        .expect("a script's implicit receiver is a classifier type");
-    IrField::new(
-        format!("$$implicitReceiver_{}", classifier.nested_segment_ref()),
-        ty,
-    )
-    .with_is_final(true)
+/// The field a script keeps its implicit receiver `ordinal` in. Its constructor parameter's
+/// [`IrCtorParameterProvenance::ScriptReceiver`] identifies it, and each backend spells it.
+fn script_implicit_receiver_field(ordinal: usize, ty: crate::types::Ty) -> IrField {
+    IrField::new(format!("<script receiver {ordinal}>"), ty).with_is_final(true)
 }

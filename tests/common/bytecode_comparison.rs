@@ -1,6 +1,6 @@
 //! Shared differential class-building and disassembly helpers.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct ReferenceComparison {
     pub reference: String,
@@ -585,6 +585,27 @@ pub fn classes_against_kotlinc_module_without_script_runtime(
     classes_against_kotlinc(sources, 0, false)
 }
 
+/// Compile `sources` as one module with every script compiled against `script_definition`.
+fn compile_scripts_with_definition(
+    sources: &[(&str, &str)],
+    cp_jars: &[PathBuf],
+    jdk_modules: &Path,
+    script_definition: &krusty::script_definitions::ScriptDefinition,
+) -> Option<Vec<(String, Vec<u8>)>> {
+    use super::common_core::source_set_compile::{compile_inputs, source_inputs, source_stems};
+    let stems = source_stems(sources);
+    let inputs = source_inputs(sources, &stems, 0, Some(script_definition));
+    compile_inputs(
+        &inputs,
+        &stems,
+        cp_jars,
+        Some(jdk_modules),
+        None,
+        None,
+        &krusty::language_settings::LanguageSettings::default(),
+    )
+}
+
 /// Kotlin scripts compiled against a script template of their own. Each compiler first builds the
 /// `template` sources, which declare the template class `template_class` and its compilation
 /// configuration, against the scripting libraries. kotlinc then compiles `scripts` with
@@ -674,16 +695,11 @@ pub fn script_classes_against_kotlinc(
     let mut script_classpath = vec![krusty_template, stdlib];
     script_classpath.extend(krusty::jvm::kotlin_dist_jar("kotlin-script-runtime.jar"));
     script_classpath.extend(scripting);
-    let krusty = super::common_core::source_set_compile::compile_scripts_with_definition(
-        scripts,
-        &script_classpath,
-        Some(&jdk),
-        definition,
-    )
-    .expect("krusty accepted the scripts")
-    .into_iter()
-    .filter(|(_, bytes)| bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]))
-    .collect();
+    let krusty = compile_scripts_with_definition(scripts, &script_classpath, &jdk, definition)
+        .expect("krusty accepted the scripts")
+        .into_iter()
+        .filter(|(_, bytes)| bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]))
+        .collect();
     let _ = std::fs::remove_dir_all(root);
     ClassSets {
         reference: reference_classes,

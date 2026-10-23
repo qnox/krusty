@@ -75,27 +75,7 @@ pub(crate) fn compile_source_set(
     )
 }
 
-/// Compile `sources` as one module with every script compiled against `script_definition`.
-pub(crate) fn compile_scripts_with_definition(
-    sources: &[(&str, &str)],
-    cp_jars: &[PathBuf],
-    jdk_modules: Option<&std::path::Path>,
-    script_definition: &krusty::script_definitions::ScriptDefinition,
-) -> Option<Vec<(String, Vec<u8>)>> {
-    let stems = source_stems(sources);
-    let inputs = source_inputs(sources, &stems, 0, Some(script_definition));
-    compile_inputs(
-        &inputs,
-        &stems,
-        cp_jars,
-        jdk_modules,
-        None,
-        None,
-        &krusty::language_settings::LanguageSettings::default(),
-    )
-}
-
-fn source_stems(sources: &[(&str, &str)]) -> Vec<String> {
+pub(crate) fn source_stems(sources: &[(&str, &str)]) -> Vec<String> {
     sources
         .iter()
         .map(|(name, _)| {
@@ -109,7 +89,7 @@ fn source_stems(sources: &[(&str, &str)]) -> Vec<String> {
 
 /// A `.java` source joins the module as Java and a `.kts` source as a script, the way kotlinc
 /// reads a path it is given.
-fn source_inputs<'a>(
+pub(crate) fn source_inputs<'a>(
     sources: &[(&str, &'a str)],
     stems: &'a [String],
     common: usize,
@@ -141,7 +121,7 @@ fn source_inputs<'a>(
         .collect()
 }
 
-fn compile_inputs(
+pub(crate) fn compile_inputs(
     inputs: &[SourceInput<'_>],
     stems: &[String],
     cp_jars: &[PathBuf],
