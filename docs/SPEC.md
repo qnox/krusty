@@ -19855,6 +19855,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   property at that index has its own declared type. Test:
   `tests/vararg_constructor_property_e2e.rs`.
 
+- **Dependent callable bounds wait for their own call variables.** Argument-only inference cannot
+  reject `B : Marker<A>` against `Marked<Int>` while this call's `A` has no input evidence yet.
+  Explicit and expected-result bindings complete the call before the existing final bound check.
+  Concrete bounds and universally quantified caller variables remain early checks, including a
+  concrete bound beside an unresolved dependent bound. An unresolved relation does not prove a
+  nullable-formal reduction. This adds no declaration-bound propagation or recursive inference
+  loop. Tests: `symbol_resolver::generic_inference::tests` and
+  `tests/dependent_constructor_bounds_e2e.rs`.
+
 - **Shared diagnostic text uses the Kotlin frontend's emitted wording.** Template extraction is an
   audit lead, not proof that a source construct emits that template: tests compile the same source
   with krusty and kotlinc and compare their complete diagnostics. The verified messages are
