@@ -64,11 +64,11 @@ impl JvmSignatureFormatter<'_> {
             return Some(false);
         }
         let chain = self.classifier_signature_chain(owner)?;
-        let declared = chain.iter().map(|(_, variances)| variances.len()).sum();
+        let declared = chain.iter().map(|segment| segment.variances.len()).sum();
         let arguments = self.classifier_usage_arguments(owner, arguments, declared)?;
         let variances = chain
             .iter()
-            .flat_map(|(_, variances)| variances.iter().copied());
+            .flat_map(|segment| segment.variances.iter().copied());
         for (variance, argument) in variances.zip(arguments) {
             if makes_raw(variance, *argument) {
                 return Some(true);

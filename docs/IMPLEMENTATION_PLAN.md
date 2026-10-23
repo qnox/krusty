@@ -5,6 +5,14 @@ front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
 
+## Nested JVM generic applications
+
+Retain an argument range for each classifier segment in the common own-first layout. Render
+segments outer-first without reordering arguments within a segment; use the semantic ordering
+for declaration variance and raw/Nothing admission too. Source and reference-built dependency
+fixtures compare complete ABI inventories for declared/inferred results, unequal segment arities,
+three nesting levels and mixed declaration variance.
+
 ## Local-call checked vararg signature
 
 Retain the checker's complete applied value-parameter list on local calls and consume it when
