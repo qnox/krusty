@@ -16007,6 +16007,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `library_classes_are_the_headers_ksp2_reports`; `src/jvm/jvm_libraries/declaration_headers.rs`,
   `an_unreadable_generic_signature_is_not_a_nongeneric_class`,
   `a_container_holding_a_value_that_is_not_an_annotation_is_unreadable`.)
+- **KSP maps names between Kotlin and the JVM by kotlinc's class map.** `mapKotlinNameToJava` and
+  `mapJavaNameToKotlin` answer what kotlinc's `JavaToKotlinClassMap` does for the classifier the
+  name resolves to on the module's classpath. A mapped builtin, a read-only or mutable collection
+  and a primitive map to their JVM class (`kotlin.Int` to `java.lang.Integer`,
+  `kotlin.collections.MutableMap.MutableEntry` to `java.util.Map.Entry`), and a number type's,
+  `String`'s or `Enum`'s companion to its `kotlin.jvm.internal` companion class. `kotlin.Nothing`
+  maps to `java.lang.Void`, but not back. A function classifier maps to its numbered
+  `kotlin.jvm.functions` interface, or to `FunctionN` beyond arity 22, and a `KFunctionN` to
+  `kotlin.reflect.KFunction`; the reverse reads only a numbered interface. The other way, a JVM
+  class maps to the read-only collection. `Unit`, an array, a typealias, a source class, an
+  unmapped class and an unknown name map to nothing.
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `mapped_names_are_what_ksp2_reports`;
+  `crates/krusty-plugin-host/tests/ksp_library_classes.rs`, `mapped_names_are_what_ksp2_reports`.)
 
 ## 8. Success criteria for the PoC
 

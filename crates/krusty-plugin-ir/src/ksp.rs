@@ -122,6 +122,19 @@ pub trait KspClasspath {
     /// The classifier KSP's `Resolver.getClassDeclarationByName` finds by `qualified_name`
     /// (`pkg.Outer.Inner`), or `None` when the classpath declares none.
     fn class(&self, qualified_name: &str) -> Option<KspLibraryClass>;
+
+    /// The name `mapping` gives the classifier `qualified_name` names, or `None` when the name
+    /// denotes no classifier or the classifier is not mapped.
+    fn mapped_name(&self, mapping: KspNameMapping, qualified_name: &str) -> Option<String>;
+}
+
+/// Which way a name is mapped between Kotlin and the JVM, by kotlinc's class map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KspNameMapping {
+    /// `Resolver.mapKotlinNameToJava`: the JVM class a Kotlin classifier is on the platform.
+    KotlinToJava,
+    /// `Resolver.mapJavaNameToKotlin`: the Kotlin classifier a JVM class is read as.
+    JavaToKotlin,
 }
 
 /// One declaration of a file or a classifier body.
