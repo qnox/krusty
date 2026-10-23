@@ -23,7 +23,8 @@
 #
 # Environment: RELEASE_SHA (default $GITHUB_SHA), RELEASE_REMOTE (origin), RELEASE_BRANCH
 # (master), RELEASE_LOCK_TTL seconds (1800), RELEASE_LOCK_WAIT seconds (900),
-# RELEASE_LOCK_POLL seconds (10).
+# RELEASE_LOCK_POLL seconds (10), RELEASE_TOKEN (a token that may push refs/krusty/*; the release
+# job checks out without persisted credentials, so only this script's pushes are authenticated).
 set -euo pipefail
 
 remote=${RELEASE_REMOTE:-origin}
@@ -35,8 +36,15 @@ ttl=${RELEASE_LOCK_TTL:-1800}
 wait_limit=${RELEASE_LOCK_WAIT:-900}
 poll=${RELEASE_LOCK_POLL:-10}
 
+# The header actions/checkout would have persisted, set for this process's Git commands only.
+if [ -n "${RELEASE_TOKEN:-}" ]; then
+  export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+  GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$RELEASE_TOKEN" | base64 | tr -d '\n')"
+  export GIT_CONFIG_VALUE_0
+fi
+
 usage() {
-  sed -n '19,26p' "$0" >&2
+  sed -n '19,27p' "$0" >&2
   exit 2
 }
 

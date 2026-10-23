@@ -391,3 +391,74 @@ fn release_job_adds_no_injection_path_to_secret_bearing_steps() {
         "a SHA-256 checksum: {checksum}"
     );
 }
+
+#[test]
+fn the_push_token_reaches_git_without_being_persisted() {
+    let remote = Remote::new("token");
+    let first = remote.push_commit("first");
+    let token = [("RELEASE_TOKEN", "release-token-for-tests")];
+
+    let acquire = remote.publisher(&first, &["acquire"], &token);
+    assert_eq!(acquire.status.code(), Some(0), "{acquire:?}");
+    assert_eq!(acquire.stderr, b"");
+    let lock = text(acquire.stdout).trim().to_owned();
+    let record = remote.publisher(&first, &["record"], &token);
+    assert_eq!(record.status.code(), Some(0), "{record:?}");
+    assert_eq!(record.stderr, b"");
+    let release = remote.publisher(&first, &["release", &lock], &token);
+    assert_eq!(release.status.code(), Some(0), "{release:?}");
+    assert_eq!(release.stderr, b"");
+    assert_eq!(
+        remote.remote_ref(RELEASED_REF).as_deref(),
+        Some(first.as_str())
+    );
+    assert_eq!(remote.remote_ref(LOCK_REF), None);
+
+    let config = fs::read_to_string(remote.root.join("work/.git/config")).expect("read config");
+    assert!(
+        !config.contains("extraheader"),
+        "the token lives only in the publisher's environment: {config}"
+    );
+}
+
+#[test]
+fn release_job_holds_its_credentials_in_the_release_environment() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workflow = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci.yml");
+    let job = release_job(&workflow);
+    assert!(
+        !workflow[..workflow.len() - job.len()].contains("secrets."),
+        "only the release job, which runs in the release environment, reads secrets"
+    );
+    assert!(
+        job.lines().any(|line| line == "    environment: release"),
+        "the publishing secrets are deployable to master only"
+    );
+
+    let steps = steps(job);
+    assert!(
+        steps[0].starts_with("uses: actions/checkout@")
+            && steps[0].contains("\n          persist-credentials: false\n"),
+        "the checkout leaves no token in .git/config for later steps: {}",
+        steps[0]
+    );
+    let with_token: Vec<&str> = steps
+        .iter()
+        .filter(|step| step.contains("github.token"))
+        .map(|step| {
+            step.lines()
+                .find_map(|line| line.trim().strip_prefix("run: "))
+                .unwrap_or_else(|| panic!("a step given the token runs a command: {step}"))
+        })
+        .collect();
+    assert_eq!(
+        with_token,
+        [
+            r#"echo "lock=$(scripts/release-publisher.sh acquire)" >> "$GITHUB_OUTPUT""#,
+            "gh workflow run pages.yml --ref master",
+            "scripts/release-publisher.sh record",
+            r#"scripts/release-publisher.sh release "${{ steps.lock.outputs.lock }}""#,
+        ],
+        "only the steps that push or dispatch get the token"
+    );
+}
