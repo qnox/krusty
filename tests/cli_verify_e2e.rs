@@ -299,18 +299,20 @@ fn verify_report_refuses_a_record_among_its_reports_and_removes_nothing() {
     }
     let records = layout.root.join("records");
     std::fs::create_dir_all(&records).expect("records directory");
-    std::os::unix::fs::symlink(out.join("krusty-verify.md"), records.join("a.json"))
-        .expect("link in the records directory");
-    std::os::unix::fs::symlink(out.join("krusty-verify.md"), layout.root.join("alias.json"))
-        .expect("link");
-    for (argument, refused) in [
-        (out.join("krusty-verify.md"), out.join("krusty-verify.md")),
-        (
+    let mut cases = vec![(out.join("krusty-verify.md"), out.join("krusty-verify.md"))];
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(out.join("krusty-verify.md"), records.join("a.json"))
+            .expect("link in the records directory");
+        std::os::unix::fs::symlink(out.join("krusty-verify.md"), layout.root.join("alias.json"))
+            .expect("link");
+        cases.push((
             layout.root.join("alias.json"),
             layout.root.join("alias.json"),
-        ),
-        (records.clone(), records.join("a.json")),
-    ] {
+        ));
+        cases.push((records.clone(), records.join("a.json")));
+    }
+    for (argument, refused) in cases {
         let output = Command::new(common::krusty_binary())
             .arg("verify-report")
             .arg("--out")
@@ -359,6 +361,7 @@ fn verify_report_refuses_a_record_among_its_reports_and_removes_nothing() {
                 *text
             );
         }
+        #[cfg(unix)]
         assert_eq!(
             std::fs::read_to_string(records.join("a.json")).expect("the linked record"),
             record
