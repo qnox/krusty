@@ -60155,7 +60155,10 @@ impl<'a> Checker<'a> {
                     bound_represented = Some(Ty::out_projection(rt.non_null()));
                 }
                 if let Some(ty) = self.libraries.class_literal_type() {
-                    if let Some(represented) = unbound.and_then(Ty::kotlin_class_internal) {
+                    if let Some(represented) = unbound
+                        .map(crate::types::stored_value_ty)
+                        .and_then(Ty::kotlin_class_internal)
+                    {
                         self.class_literal_targets.insert(e, represented);
                     }
                     let ty = unbound

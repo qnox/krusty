@@ -8,7 +8,9 @@ use super::type_model::{qualified_name, TypeParameterScope};
 use super::{Source, Subject};
 use crate::ast::AnnotationRef;
 use crate::frontend::{FrontendSymbols, SourceSetAnalysis};
-use crate::types::{AnnotationValue, PropertyAnnotationSite, ResolvedAnnotation, TypeName};
+use crate::types::{
+    stored_value_ty, AnnotationValue, PropertyAnnotationSite, ResolvedAnnotation, Ty, TypeName,
+};
 
 /// Which of the applications written on a declaration KSP shows on one of the nodes it makes of
 /// it. A primary constructor's `val` parameter is a parameter and a property, and an annotation
@@ -131,17 +133,21 @@ impl<'a> Annotations<'a> {
         annotation: &ResolvedAnnotation,
         written: bool,
     ) -> Option<KspAnnotationArguments> {
-        let defaults = self
-            .element_defaults(annotation.annotation)?
+        let (defaults_read, defaults) = self.element_defaults(annotation.annotation)?;
+        let defaults = defaults
             .iter()
             .map(|(name, value)| {
                 Some(KspArgument {
                     name: name.clone(),
-                    value: self.value(value, false)?,
+                    value: self.value(value, false, defaults_read)?,
                     written: false,
                 })
             })
             .collect::<Option<Vec<_>>>()?;
+        let read = match annotation.written {
+            Some(_) => ValueSource::Source,
+            None => ValueSource::ClassFile,
+        };
         // An annotation read from a class file records no written order: every value it has is
         // listed, in declaration order.
         let order = match &annotation.written {
@@ -158,7 +164,7 @@ impl<'a> Annotations<'a> {
                 let (name, value) = annotation.arguments.get(position)?;
                 Some(KspArgument {
                     name: name.clone(),
-                    value: self.value(value, written)?,
+                    value: self.value(value, written, read)?,
                     written,
                 })
             })
@@ -180,10 +186,13 @@ impl<'a> Annotations<'a> {
         })
     }
 
-    /// The defaults of the elements of the annotation class `class` in declaration order: the
-    /// published ones of the module's own, or those a library's declaration carries. `None` when
-    /// one of them is not known.
-    fn element_defaults(&self, class: TypeName) -> Option<Vec<(String, AnnotationValue)>> {
+    /// The defaults of the elements of the annotation class `class` in declaration order, and
+    /// where they were read: the published ones of the module's own, or those a library's
+    /// declaration carries. `None` when one of them is not known.
+    fn element_defaults(
+        &self,
+        class: TypeName,
+    ) -> Option<(ValueSource, Vec<(String, AnnotationValue)>)> {
         if let Some(source) = self.symbols.classes.get(&class) {
             // Pass 1 publishes the folded defaults of a class that declares any.
             if !source
@@ -191,12 +200,12 @@ impl<'a> Annotations<'a> {
                 .iter()
                 .any(|(_, has_default)| *has_default)
             {
-                return Some(Vec::new());
+                return Some((ValueSource::Source, Vec::new()));
             }
             return self
                 .analysis
                 .annotation_element_defaults(source.stable_declaration?)
-                .map(<[_]>::to_vec);
+                .map(|defaults| (ValueSource::Source, defaults.to_vec()));
         }
         // A library class has the element defaults its class file records. A Kotlin `vararg val`
         // element declared without one materializes an omitted empty array, and KSP2 lists that
@@ -204,7 +213,7 @@ impl<'a> Annotations<'a> {
         let library = self.symbols.libraries.classifier(class)?;
         let application = library.annotation_application()?;
         let parameters = &application.parameters;
-        parameters
+        let defaults = parameters
             .names
             .iter()
             .enumerate()
@@ -218,14 +227,21 @@ impl<'a> Annotations<'a> {
                     .then(|| Some((name.clone(), AnnotationValue::Array(Vec::new())))),
                 },
             )
-            .collect()
+            .collect::<Option<_>>()?;
+        Some((ValueSource::ClassFile, defaults))
     }
 
-    /// The type a class literal denotes, as KSP describes it: the classifier applied to a star for
-    /// each of its type parameters. The value records no array's element type, so an array class
-    /// literal is not described.
-    fn class_literal(&self, ty: crate::types::Ty) -> Option<krusty_plugin_ir::KspType> {
-        let class = ty.kotlin_class_internal()?;
+    /// The type a class literal denotes, as KSP describes it. One written in source is the
+    /// classifier applied to a star for each of its type parameters; its value records no array's
+    /// element type, so an array class literal is not described. One read from a class file names
+    /// the JVM class it records as it is read in Kotlin, with no type arguments but an array's
+    /// element.
+    fn class_literal(&self, ty: Ty, read: ValueSource) -> Option<krusty_plugin_ir::KspType> {
+        let scope = TypeParameterScope::default();
+        if read == ValueSource::ClassFile {
+            return scope.ty(ty);
+        }
+        let class = stored_value_ty(ty).kotlin_class_internal()?;
         if class == crate::types::type_name("kotlin/Array") {
             return None;
         }
@@ -238,16 +254,16 @@ impl<'a> Annotations<'a> {
                 .type_params()
                 .len(),
         };
-        let mut described = TypeParameterScope::default().ty(ty)?;
+        let mut described = scope.ty(ty)?;
         if described.arguments.is_empty() {
             described.arguments = vec![krusty_plugin_ir::KspTypeArgument::Star; arity];
         }
         Some(described)
     }
 
-    /// `value` as KSP hands it over; a nested annotation is written when `written` says the
-    /// argument holding it is.
-    fn value(&self, value: &AnnotationValue, written: bool) -> Option<KspValue> {
+    /// `value`, read from where `read` says, as KSP hands it over; a nested annotation is written
+    /// when `written` says the argument holding it is.
+    fn value(&self, value: &AnnotationValue, written: bool, read: ValueSource) -> Option<KspValue> {
         Some(match value {
             AnnotationValue::Int(value) => KspValue::Int(*value),
             AnnotationValue::Byte(value) => KspValue::Byte(*value),
@@ -263,7 +279,7 @@ impl<'a> Annotations<'a> {
                 class: qualified_name(*class),
                 entry: entry.clone(),
             },
-            AnnotationValue::Class(ty) => KspValue::Type(self.class_literal(*ty)?),
+            AnnotationValue::Class(ty) => KspValue::Type(self.class_literal(*ty, read)?),
             AnnotationValue::Annotation {
                 internal,
                 values,
@@ -282,11 +298,18 @@ impl<'a> Annotations<'a> {
             AnnotationValue::Array(values) => KspValue::Array(
                 values
                     .iter()
-                    .map(|value| self.value(value, written))
+                    .map(|value| self.value(value, written, read))
                     .collect::<Option<_>>()?,
             ),
         })
     }
+}
+
+/// Where an annotation value was read: folded from source, or from a class file.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ValueSource {
+    Source,
+    ClassFile,
 }
 
 fn use_site(annotation: &ResolvedAnnotation) -> Option<PropertyAnnotationSite> {
