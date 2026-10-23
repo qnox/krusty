@@ -130,20 +130,23 @@ internal fun registerVerifyCompile(
 ): TaskProvider<KrustyVerifyCompileTask> {
     kotlinTask.outputs.upToDateWhen { false }
     kotlinTask.outputs.doNotCacheIf("the build verifies krusty against kotlinc's full compile") { true }
+    val recordFile = project.layout.buildDirectory.file("krusty/verify/${kotlinTask.name}.json")
     val verify = project.tasks.register("${kotlinTask.name}KrustyVerify", KrustyVerifyCompileTask::class.java) {
         description = "Compiles what ${kotlinTask.path} compiles with krusty and compares it with kotlinc's classes"
         compilationPath.set(kotlinTask.path)
         kotlinTask.sourceSetName.orNull?.let(sourceSet::set)
         reference.set(kotlinTask.destinationDirectory)
         krustyClasses.set(project.layout.buildDirectory.dir("krusty/verify/${kotlinTask.name}/classes"))
-        record.set(project.layout.buildDirectory.file("krusty/verify/${kotlinTask.name}.json"))
+        record.set(recordFile)
         taskTimings.set(timings)
         usesService(timings)
         dependsOn(kotlinTask)
         configure()
     }
     report.configure {
-        inputs.property(RECORD_INPUT + kotlinTask.path, verify.flatMap { it.record }.map { it.asFile.absolutePath })
+        // The path alone, not the verify task's output: Gradle 7 refuses to read a task output's
+        // value before that task has run, and dependsOn orders the two.
+        inputs.property(RECORD_INPUT + kotlinTask.path, recordFile.map { it.asFile.absolutePath })
         dependsOn(verify)
     }
     return verify
