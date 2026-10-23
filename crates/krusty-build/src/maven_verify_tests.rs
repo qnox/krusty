@@ -245,11 +245,23 @@ fn maven_verify_goal_reports_krusty_against_kotlinc() {
         std::fs::read_to_string(sample.report_dir().join("krusty-verify-issue.md")).expect("issue");
     assert!(!issue.contains("sample:"), "{issue}");
     assert!(!issue.contains("Point"), "{issue}");
+    // Both compilations carry kotlinc's time, the goal's own timed kotlinc compile, whose output
+    // equals the build's.
+    let records = root.join("target/krusty-verify/records");
+    for file in ["sample_compile.json", "sample_test-compile.json"] {
+        let record = std::fs::read_to_string(records.join(file)).expect("record");
+        assert!(
+            record.lines().any(|line| line
+                .trim()
+                .strip_prefix("\"kotlinc_millis\": ")
+                .is_some_and(|millis| millis.trim_end_matches(',').parse::<u64>().is_ok())),
+            "{record}"
+        );
+    }
 
     // A second build without the sources reports only itself: each compilation afresh as having no
     // sources, and nothing from the first build or from a record no compilation of this build wrote.
     std::fs::remove_dir_all(root.join("src")).expect("remove the sources");
-    let records = root.join("target/krusty-verify/records");
     std::fs::write(records.join("removed_compile.json"), "{}").expect("an unrelated record");
     let output = sample.succeed(&["test-compile", "VERIFY"]);
     let mut expected = vec![
@@ -284,6 +296,32 @@ fn maven_verify_goal_reports_krusty_against_kotlinc() {
         "{issue}"
     );
     assert!(!issue.contains("peak memory"), "{issue}");
+}
+
+/// The goal times kotlinc by compiling each compilation once more; output other than the build's
+/// means it did not compile what the build compiled, and the goal fails rather than report that
+/// compile's time.
+#[test]
+#[ignore = "downloads Maven plugins and the Kotlin compiler"]
+fn maven_verify_goal_fails_when_its_kotlinc_compile_differs_from_the_build() {
+    let sample = Sample::new("kotlinc-differs", "", EXECUTIONS, ALL_OPEN);
+    sample.succeed(&["test-compile"]);
+    let class = sample.root.join("target/classes/app/Point.class");
+    let mut bytes = std::fs::read(&class).expect("kotlinc's class");
+    bytes.push(0);
+    std::fs::write(&class, bytes).expect("a class kotlinc would not write");
+    let (success, output) = sample.maven(&["VERIFY"]);
+    assert!(!success, "{output}");
+    let errors = output
+        .lines()
+        .filter(|line| line.starts_with("[ERROR] Failed to execute goal"))
+        .collect::<Vec<_>>();
+    assert_eq!(errors.len(), 1, "{output}");
+    assert!(
+        errors[0].ends_with(": kotlinc as krusty:verify runs it wrote [app/Point.class] of sample:compile differently from the build; krusty:verify reads kotlin-maven-plugin's configuration incompletely -> [Help 1]"),
+        "{output}"
+    );
+    assert!(!sample.root.join("target/krusty-verify/records").exists());
 }
 
 /// A build whose own output directory is where the goal would write, or reaches it through a

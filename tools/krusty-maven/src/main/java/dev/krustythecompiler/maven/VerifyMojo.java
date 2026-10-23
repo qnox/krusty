@@ -8,6 +8,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -67,6 +68,8 @@ public class VerifyMojo extends AbstractMojo {
     private static final class Verification {
         final Set<File> records = ConcurrentHashMap.newKeySet();
         final AtomicInteger finished = new AtomicInteger();
+        /** kotlinc by Kotlin release, loaded once so later compilations run it warm, as the build does. */
+        final Map<String, Kotlinc> kotlinc = new ConcurrentHashMap<>();
     }
 
     private static final String VERIFICATION = Verification.class.getName();
@@ -129,10 +132,11 @@ public class VerifyMojo extends AbstractMojo {
         command.add("--source-set");
         command.add(compilation.sourceSet);
         command.add("--kotlin-version");
-        command.add(compilation.arguments.stream()
-                .filter(argument -> argument.startsWith("-Xkotlin-reference-version="))
-                .map(argument -> argument.substring(argument.indexOf('=') + 1))
-                .findFirst().orElse(""));
+        command.add(compilation.kotlinVersion);
+        if (compilation.hasKotlinSources() && compilation.unsupported.isEmpty()) {
+            command.add("--kotlinc-millis");
+            command.add(Long.toString(kotlinc(verification, compilation.kotlinVersion).time(compilation)));
+        }
         File reasons = null;
         if (!compilation.unsupported.isEmpty()) {
             // Outside the build's directories, which verify-compile has not checked yet.
@@ -178,10 +182,25 @@ public class VerifyMojo extends AbstractMojo {
         run(command);
     }
 
+    private Kotlinc kotlinc(Verification verification, String version) throws MojoExecutionException {
+        Kotlinc loaded = verification.kotlinc.get(version);
+        if (loaded != null) return loaded;
+        synchronized (verification.kotlinc) {
+            loaded = verification.kotlinc.get(version);
+            if (loaded == null) {
+                CollectRequest collect = new CollectRequest(new org.eclipse.aether.graph.Dependency(
+                        new DefaultArtifact("org.jetbrains.kotlin", "kotlin-compiler-embeddable", "jar", version),
+                        "runtime"), project.getRemotePluginRepositories());
+                loaded = new Kotlinc(resolve(collect, "kotlinc " + version));
+                verification.kotlinc.put(version, loaded);
+            }
+            return loaded;
+        }
+    }
+
     /** The resolved jars of kotlin-maven-plugin's own dependencies, which carry its compiler plugins. */
     private List<File> pluginClasspath(Plugin kotlin) throws MojoExecutionException {
-        List<File> jars = new ArrayList<>();
-        if (kotlin.getDependencies().isEmpty()) return jars;
+        if (kotlin.getDependencies().isEmpty()) return new ArrayList<>();
         CollectRequest collect = new CollectRequest();
         for (Dependency dependency : kotlin.getDependencies()) {
             collect.addDependency(new org.eclipse.aether.graph.Dependency(new DefaultArtifact(dependency.getGroupId(),
@@ -189,13 +208,18 @@ public class VerifyMojo extends AbstractMojo {
                     dependency.getType() == null ? "jar" : dependency.getType(), dependency.getVersion()), "runtime"));
         }
         collect.setRepositories(project.getRemotePluginRepositories());
+        return resolve(collect, "kotlin-maven-plugin's dependencies");
+    }
+
+    private List<File> resolve(CollectRequest collect, String what) throws MojoExecutionException {
+        List<File> jars = new ArrayList<>();
         try {
             for (ArtifactResult result : repositorySystem.resolveDependencies(session.getRepositorySession(),
                     new DependencyRequest(collect, null)).getArtifactResults()) {
                 jars.add(result.getArtifact().getFile());
             }
         } catch (DependencyResolutionException e) {
-            throw new MojoExecutionException("cannot resolve kotlin-maven-plugin's dependencies", e);
+            throw new MojoExecutionException("cannot resolve " + what, e);
         }
         return jars;
     }

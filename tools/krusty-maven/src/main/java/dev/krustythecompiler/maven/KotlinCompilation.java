@@ -28,21 +28,27 @@ final class KotlinCompilation {
             "sam-with-receiver", "org.jetbrains.kotlin.samWithReceiver",
             "kotlinx-serialization", "org.jetbrains.kotlinx.serialization");
 
+    /** krusty's argument selecting the kotlinc release whose output it reproduces. */
+    private static final String REFERENCE_VERSION = "-Xkotlin-reference-version=";
+
     final String name;
     final String sourceSet;
+    /** The Kotlin release of kotlin-maven-plugin, whose kotlinc compiled the build. */
+    final String kotlinVersion;
     /** Where krusty writes, under the project's {@code krusty-verify} directory. */
     final String outputName;
     final File reference;
     final List<File> sources;
-    /** kotlinc's arguments other than the sources and {@code -d}. */
+    /** krusty's arguments other than the sources and {@code -d}: kotlinc's, and the reference release. */
     final List<String> arguments;
     /** Why krusty cannot be given this request, when the plugin cannot derive it. */
     final List<String> unsupported;
 
-    private KotlinCompilation(String name, String sourceSet, String outputName, File reference,
+    private KotlinCompilation(String name, String sourceSet, String kotlinVersion, String outputName, File reference,
             List<File> sources, List<String> arguments, List<String> unsupported) {
         this.name = name;
         this.sourceSet = sourceSet;
+        this.kotlinVersion = kotlinVersion;
         this.outputName = outputName;
         this.reference = reference;
         this.sources = sources;
@@ -143,13 +149,14 @@ final class KotlinCompilation {
                 arguments.add("plugin:" + id + ":" + option.substring(colon + 1));
             }
         }
-        arguments.add("-Xkotlin-reference-version=" + kotlin.getVersion());
+        arguments.add(REFERENCE_VERSION + kotlin.getVersion());
         arguments.add("-no-stdlib");
         arguments.add("-no-reflect");
         String sourceSet = test ? "test" : "main";
         String name = project.getArtifactId() + ":" + goal + (sharing > 0 ? "@" + execution.getId() : "");
         String outputName = sharing > 0 ? sourceSet + "-" + execution.getId() : sourceSet;
-        return new KotlinCompilation(name, sourceSet, outputName, output, sources, arguments, unsupported);
+        return new KotlinCompilation(name, sourceSet, kotlin.getVersion(), outputName, output, sources, arguments,
+                unsupported);
     }
 
     private static Xpp3Dom merged(Object execution, Object plugin) {
@@ -198,6 +205,13 @@ final class KotlinCompilation {
             arguments.add(name);
             arguments.add(value);
         }
+    }
+
+    /** kotlinc's arguments other than the sources and {@code -d}: krusty's, without the reference release. */
+    List<String> kotlincArguments() {
+        List<String> kotlinc = new ArrayList<>(arguments);
+        kotlinc.removeIf(argument -> argument.startsWith(REFERENCE_VERSION));
+        return kotlinc;
     }
 
     boolean hasKotlinSources() {

@@ -17,8 +17,10 @@ Once the last project of the build is done, it writes a report to the top-level 
 `target/krusty-verify/report/`: which compilations krusty compiles, which it leaves to kotlinc and
 why (an unsupported compiler plugin or kotlinc argument is reported as unsupported, not as a
 failure), krusty's errors, how many classes are byte-identical to kotlinc's and how the others
-differ, and krusty's compile time and peak memory. Maven does not time kotlin-maven-plugin's
-goals, so the report has no kotlinc time.
+differ, and krusty's and kotlinc's compile time and krusty's peak memory. Maven tells a goal
+nothing of an earlier mojo's time, so the goal compiles each compilation once more with
+kotlin-maven-plugin's kotlinc, in the same JVM, and times that. That compile must write exactly the
+build's classes, or the goal fails.
 
 Please submit the report: its button opens a prefilled GitHub issue, or paste
 `krusty-verify-issue.md`. It holds totals, difference kinds and unsupported requests with paths
