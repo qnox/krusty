@@ -141,7 +141,9 @@ formal to its erasure (`Box.raw().get()` is `CharSequence!`). A raw target accep
 of its classifier; a raw source supplies only its lower bound, so a raw `List` is not a
 `List<String>`. A member read through a raw receiver is erased whole, after the receiver's own
 formals are substituted: every generic application in its signature is raw (`List<P>` is
-`(MutableList<Any?>..List<*>?)`, a recursive `Comparable<T>` bound a raw `Comparable`), each
+`(MutableList<Any?>..List<*>?)`, a recursive `Comparable<T>` bound a raw `Comparable`) while an
+array keeps its shape around a raw-read component (`String[]` stays `Array<String!>`, `List<C>[]`
+is an array of raw `List`), each
 method formal reads as its bound's erasure with nothing left to infer (`<U> U echo(U)` returns
 `Any!`, even with an explicit type argument), and a raw type's supertypes are raw over the
 substituted arguments (`Child<C extends CharSequence> extends Parent<C>` read raw makes the

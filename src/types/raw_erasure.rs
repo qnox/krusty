@@ -85,12 +85,25 @@ pub(crate) type DeclaredFormals = (Vec<String>, Vec<Vec<Ty>>);
 
 /// `ty` as a member signature reads it through a raw receiver, once the receiver's formals are
 /// bound to their erasures: every generic application becomes raw (`List<CharSequence!>` is a raw
-/// `List`, `Comparable<*>` a raw `Comparable`). `formals_of` supplies a classifier's declared
+/// `List`, `Comparable<*>` a raw `Comparable`), while an array keeps its shape around a raw-read
+/// component. `formals_of` supplies a classifier's declared
 /// formals and bounds; a classifier it does not know keeps its application.
 pub(crate) fn raw_member_type(
     ty: Ty,
     formals_of: &dyn Fn(TypeName) -> Option<DeclaredFormals>,
 ) -> Ty {
+    if let (true, Some(element)) = (ty.is_reference_array(), ty.array_elem()) {
+        // An array is not a generic application to erase: it keeps its shape and the use-site
+        // projection of its component, and only the component is read raw (`String[]` stays an
+        // array of `String!`, `List<C>[]` becomes an array of raw `List`).
+        let element = match element.kind() {
+            TyKind::OutProjection(inner) => Ty::out_projection(raw_member_type(inner, formals_of)),
+            TyKind::InProjection(inner) => Ty::in_projection(raw_member_type(inner, formals_of)),
+            TyKind::StarProjection(_) => element,
+            _ => raw_member_type(element, formals_of),
+        };
+        return Ty::obj_args_name(super::wk::array(), &[element]);
+    }
     match ty.kind() {
         TyKind::Obj(name, arguments) if !arguments.is_empty() && !ty.is_raw_application() => {
             match formals_of(name) {

@@ -285,3 +285,84 @@ fn family_classes() -> std::path::PathBuf {
         .expect("pooled javac compiles the Java fixture")
         .0
 }
+
+/// An array in a raw member's signature keeps its shape: only its component is read raw.
+/// `String[]` stays an array of `String!`, `List<C>[]` is an array of raw `List` (so any element
+/// can be added), a formal-typed `C[]` reads `C`'s erasure, and a primitive array is unchanged. The
+/// exact receiver keeps its applied component. The accepted program reads elements into inferred
+/// locals: a platform element stored to a declared non-null local takes a null check whose JVM
+/// shape is a separate, receiver-independent difference.
+const ARRAYS: &str = "import java.util.*;\n\
+    public class Arrays2 {\n\
+    \x20   public static class Holder<C extends CharSequence> {\n\
+    \x20       public String[] names() { return new String[] { \"name\" }; }\n\
+    \x20       @SuppressWarnings(\"unchecked\") public List<C>[] nestedArray() {\n\
+    \x20           return new List[] { new ArrayList<C>() };\n\
+    \x20       }\n\
+    \x20       @SuppressWarnings(\"unchecked\") public C[] own() { return (C[]) new CharSequence[] { \"own\" }; }\n\
+    \x20       public int[] ints() { return new int[] { 7 }; }\n\
+    \x20   }\n\
+    \x20   @SuppressWarnings(\"rawtypes\") public static Holder holder() { return new Holder<String>(); }\n\
+    }\n";
+
+const ARRAYS_REJECTED: &str = "fun names(): Int = Arrays2.holder().names()[0]\n\
+    fun nested(): Int = Arrays2.holder().nestedArray()[0]\n\
+    fun own(): Int = Arrays2.holder().own()[0]\n\
+    fun ints(): String = Arrays2.holder().ints()[0]\n\
+    fun exactNames(h: Arrays2.Holder<String>): Int = h.names()[0]\n\
+    fun exactNested(h: Arrays2.Holder<String>): Int = h.nestedArray()[0]\n";
+
+const ARRAYS_ACCEPTED: &str = "fun box(): String {\n\
+    \x20   val holder = Arrays2.holder()\n\
+    \x20   val name = holder.names()[0]\n\
+    \x20   val nested = holder.nestedArray()[0]\n\
+    \x20   nested.add(1)\n\
+    \x20   nested.add(\"s\")\n\
+    \x20   val own = holder.own()[0]\n\
+    \x20   val int: Int = holder.ints()[0]\n\
+    \x20   val exact = Arrays2.Holder<String>().names()[0]\n\
+    \x20   return if (name.length == 4 && nested.size == 2 && own.length == 3 && int == 7 &&\n\
+    \x20       exact == \"name\") \"OK\" else \"name $name nested $nested own $own int $int\"\n\
+    }\n";
+
+#[test]
+fn a_java_raw_member_array_keeps_its_component_like_kotlinc() {
+    common::assert_errors_match_kotlinc(
+        &[("Arrays2.java", ARRAYS), ("main.kt", ARRAYS_REJECTED)],
+        &[],
+    );
+}
+
+#[test]
+fn a_java_raw_member_array_compiles_like_kotlinc() {
+    common::assert_classes_identical_to_kotlinc_against_jdk(
+        "JavaRawMemberArray",
+        ARRAYS_ACCEPTED,
+        &["JavaRawMemberArrayKt"],
+        &[arrays_classes()],
+    );
+}
+
+#[test]
+fn a_java_raw_member_array_runs_like_kotlinc() {
+    let krusty = common::java_interop_box(
+        "JavaRawMemberArray",
+        &[("Arrays2.java", ARRAYS)],
+        ARRAYS_ACCEPTED,
+    );
+    assert_eq!(krusty, "OK");
+    assert_eq!(
+        common::kotlinc_box_files_result_with_classpath(
+            &[("JavaRawMemberArray.kt", ARRAYS_ACCEPTED)],
+            "JavaRawMemberArrayKt",
+            &[arrays_classes()],
+        ),
+        krusty
+    );
+}
+
+fn arrays_classes() -> std::path::PathBuf {
+    common::javac_compile(&[("Arrays2.java".to_string(), ARRAYS.to_string())], &[])
+        .expect("pooled javac compiles the Java fixture")
+        .0
+}
