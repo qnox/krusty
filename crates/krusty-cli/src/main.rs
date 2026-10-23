@@ -198,7 +198,11 @@ fn run_verify_compile(argv: &[String]) {
     }
     // A record left by an earlier invocation never stands in for this one, even if this one fails.
     let _ = std::fs::remove_file(&arguments.record);
-    if !opts.sources.iter().any(|source| source.ends_with(".kt")) {
+    // A request without kotlinc arguments is one the build tool already knows krusty does not
+    // support; one with arguments but no Kotlin source compiles nothing.
+    if !arguments.kotlinc_arguments.is_empty()
+        && !opts.sources.iter().any(|source| source.ends_with(".kt"))
+    {
         record.outcome = verify::Outcome::NoSources;
     } else if arguments.unsupported.is_empty() {
         record.outcome = match refusals(&opts) {
