@@ -1,0 +1,13 @@
+# What KSP2 2.3.12 (KSPJvmMain) logs with Headers.kt over headers/: each classifier's modifiers,
+# type parameters and supertypes.
+w: [ksp] INTERFACE headers.Named modifiers= typeParameters=[] supertypes=kotlin.Any
+w: [ksp] CLASS headers.Base modifiers=ABSTRACT typeParameters=[T qualified=headers.Base.T variance=INVARIANT reified=false bounds=kotlin.Any; I qualified=headers.Base.I variance=CONTRAVARIANT reified=false bounds=kotlin.Any?] supertypes=headers.Named, java.io.Serializable
+w: [ksp] CLASS headers.Middle modifiers=OPEN typeParameters=[E qualified=headers.Middle.E variance=COVARIANT reified=false bounds=kotlin.CharSequence?] supertypes=headers.Base<kotlin.collections.List<headers.Middle.E [type parameter of headers.Middle]>, kotlin.String>, kotlin.Comparable<headers.Middle<*>>
+w: [ksp] INTERFACE headers.Shape modifiers=SEALED typeParameters=[S qualified=headers.Shape.S variance=INVARIANT reified=false bounds=kotlin.Number & kotlin.Comparable<headers.Shape.S [type parameter of headers.Shape]>] supertypes=headers.Named
+w: [ksp] CLASS headers.Hidden modifiers=PRIVATE typeParameters=[] supertypes=headers.Shape<kotlin.Int>
+w: [ksp] ANNOTATION_CLASS headers.Marker modifiers=ANNOTATION,INTERNAL typeParameters=[] supertypes=kotlin.Annotation
+w: [ksp] ENUM_CLASS headers.Color modifiers=ENUM typeParameters=[] supertypes=kotlin.Enum<headers.Color>
+w: [ksp] CLASS headers.Outer modifiers= typeParameters=[] supertypes=kotlin.Any
+w: [ksp] INTERFACE headers.Action modifiers=FUN typeParameters=[] supertypes=kotlin.Function0<kotlin.Unit>
+w: [ksp] CLASS headers.Outer.In modifiers=INNER typeParameters=[X qualified=headers.Outer.In.X variance=INVARIANT reified=false bounds=kotlin.Any?] supertypes=headers.Named, kotlin.Comparable<headers.Outer.In.X [type parameter of headers.Outer.In]?>
+w: [ksp] OBJECT headers.Outer.Single modifiers=DATA typeParameters=[] supertypes=kotlin.Any

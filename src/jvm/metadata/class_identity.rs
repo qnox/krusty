@@ -91,6 +91,60 @@ pub(super) fn companion_name(ctx: &MetaCtx) -> Option<String> {
     None
 }
 
+/// The direct subclasses of a `sealed` class, from its `@Metadata` — `Class.sealedSubclassFqName` (field
+/// 16, a repeated `QualifiedName` index). Returned as JVM internal names (`lib/D$A`), so an exhaustive
+/// `when` over a CLASSPATH sealed subject can be proven exhaustive the same way a same-module one is. Only
+/// a sealed class records these, so a non-empty result also implies `is_sealed`.
+pub(super) fn sealed_subclasses(ctx: &MetaCtx) -> Vec<String> {
+    let records = ctx.records;
+    let d2 = ctx.d2;
+    let mut out = Vec::new();
+    let push_id = |id: usize, out: &mut Vec<String>| {
+        if let Some(name) = resolve_class_name(records, d2, id) {
+            // A metadata class name spells a nested type with `.` (`lib/D.A`) and the package with `/`;
+            // the JVM internal name uses `$` for nesting (`lib/D$A`). Convert only after the last `/`.
+            let internal = match name.rfind('/') {
+                Some(slash) => {
+                    format!("{}{}", &name[..=slash], name[slash + 1..].replace('.', "$"))
+                }
+                None => name.replace('.', "$"),
+            };
+            if !out.contains(&internal) {
+                out.push(internal);
+            }
+        }
+    };
+    let mut pb = Pb::new(ctx.msg);
+    while !pb.at_end() {
+        let Some(tag) = pb.varint() else { break };
+        match (tag >> 3, tag & 7) {
+            // sealedSubclassFqName = 16, unpacked repeated varint.
+            (16, 0) => {
+                if let Some(id) = pb.varint() {
+                    push_id(id as usize, &mut out);
+                }
+            }
+            // packed repeated form.
+            (16, 2) => {
+                if let Some(n) = pb.varint() {
+                    if let Some(bytes) = pb.bytes(n as usize) {
+                        let mut ip = Pb::new(bytes);
+                        while let Some(id) = ip.varint() {
+                            push_id(id as usize, &mut out);
+                        }
+                    }
+                }
+            }
+            (_, w) => {
+                if pb.skip(w).is_none() {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::metadata_classifier_name;

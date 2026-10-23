@@ -127,29 +127,29 @@ fn version_warnings(settings: &LanguageSettings) -> Vec<CliWarning> {
     warnings
 }
 
-/// Split a classpath string on the platform separator (`:` on Unix).
+/// The separator `-classpath` entries are split on: `;` on Windows, `:` elsewhere, as kotlinc.
+pub const CLASSPATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
+
+/// Split a classpath string on the platform separator.
 fn split_classpath(v: &str) -> Vec<PathBuf> {
-    let sep = if cfg!(windows) { ';' } else { ':' };
-    v.split(sep)
+    v.split(CLASSPATH_SEPARATOR)
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .collect()
 }
 
-pub(super) fn collect_sources(path: &str, out: &mut Vec<String>, ignored: &mut Vec<String>) {
+pub(super) fn collect_sources(path: &str, out: &mut Vec<String>) {
     let p = std::path::Path::new(path);
     if p.is_dir() {
         if let Ok(rd) = std::fs::read_dir(p) {
             let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
             entries.sort();
             for e in entries {
-                collect_sources(&e.to_string_lossy(), out, ignored);
+                collect_sources(&e.to_string_lossy(), out);
             }
         }
     } else if krusty::source::is_batch_compilable_path(p) {
         out.push(path.to_string());
-    } else if krusty::source::kind(p).is_some() {
-        ignored.push(format!("{path} (script compilation is not supported yet)"));
     }
 }
 

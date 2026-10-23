@@ -22,23 +22,35 @@ macro_rules! source {
 }
 
 /// The adapter's sources, by path below `ksp-adapter/`.
-const SOURCES: [(&str, &str); 18] = [
+const SOURCES: [(&str, &str); 30] = [
     source!("AnnotationTypeReference.java"),
     source!("ClassType.java"),
+    source!("Classpath.java"),
     source!("CodeGen.java"),
+    source!("ConstantValue.java"),
     source!("Host.java"),
     source!("HostResolver.java"),
     source!("LibraryClass.java"),
+    source!("LibraryTypeAlias.java"),
     source!("Logger.java"),
     source!("Name.java"),
     source!("Nodes.java"),
     source!("NotImplemented.java"),
     source!("Parameter.java"),
-    source!("PrimaryConstructor.java"),
     source!("Session.java"),
+    source!("SetterParameter.java"),
+    source!("SourceAccessor.java"),
     source!("SourceAnnotation.java"),
     source!("SourceClass.java"),
     source!("SourceFile.java"),
+    source!("SourceFunction.java"),
+    source!("SourceProperty.java"),
+    source!("SourceType.java"),
+    source!("SourceTypeAlias.java"),
+    source!("SourceTypeArgument.java"),
+    source!("SourceTypeParameter.java"),
+    source!("SourceTypeReference.java"),
+    source!("SourceValueArgument.java"),
     source!("Symbols.java"),
     source!("Wire.java"),
 ];

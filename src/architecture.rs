@@ -23,6 +23,8 @@ mod tests {
                 // collection and body checking host them, so the facade takes the selection.
                 "plugins",
                 "resolve",
+                // The definition a script compiles against shapes its parsed script class.
+                "script_definitions",
                 "source",
                 "trace_compiler",
             ],
@@ -41,6 +43,9 @@ mod tests {
                 "diag",
                 "features",
                 "kt_string",
+                // A script's class takes its template and constructor parameters from its
+                // definition, which is plain syntax: qualified names and parameter spellings.
+                "script_definitions",
                 "token",
                 "types",
                 "wide_stack",
@@ -327,6 +332,14 @@ mod tests {
             if path.ends_with("java_stub.rs") {
                 let mut allowed = allowed.to_vec();
                 allowed.push("java_source");
+                assert_allowed_crate_modules_in_file(&path, &allowed);
+            } else if path.ends_with("src/jvm/array_casts.rs") {
+                // Array-cast realization reuses the core subtype relation over checked types and
+                // the frozen classifier inventory. Its oracle cannot resolve declarations or
+                // infer bindings; keep this dependency local rather than duplicating subtyping
+                // or admitting semantic selection throughout the JVM backend.
+                let mut allowed = allowed.to_vec();
+                allowed.push("assignable");
                 assert_allowed_crate_modules_in_file(&path, &allowed);
             } else {
                 assert_allowed_crate_modules_in_file(&path, &allowed);
@@ -840,18 +853,17 @@ mod tests {
         // It describes a module's declaration headers to a KSP host: the parsed declarations and
         // what their annotations resolved to. It never checks a body, lowers or reaches a backend.
         // Its tests analyze sources against an empty platform.
-        assert_allowed_crate_modules(
-            "src/ksp_round.rs",
-            &[
-                "ast",
-                "diag",
-                "features",
-                "frontend",
-                "fx_hash",
-                "libraries",
-                "types",
-            ],
-        );
+        let allowed = [
+            "ast",
+            "diag",
+            "features",
+            "frontend",
+            "fx_hash",
+            "libraries",
+            "types",
+        ];
+        assert_allowed_crate_modules("src/ksp_round.rs", &allowed);
+        assert_allowed_crate_modules_in_tree("src/ksp_round", &allowed);
     }
 
     #[test]
@@ -927,6 +939,9 @@ mod tests {
                 "metadata",
                 "parser",
                 "plugins",
+                // A script compiles against its definition, a public compilation input like the
+                // plugin selection.
+                "script_definitions",
                 "source",
                 "symbol_resolver",
                 "symbol_source",

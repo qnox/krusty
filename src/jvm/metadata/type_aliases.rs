@@ -317,7 +317,11 @@ fn occurrence_annotations(
 
 /// The alias a `Type` was spelled as: its `abbreviated_type` (f13) and that message's
 /// `type_alias_name` (f12), resolved to a fully-qualified identity.
-fn parse_type_alias_name(body: &[u8], records: &[Rec], d2: &[String]) -> Option<TypeName> {
+pub(super) fn parse_type_alias_name(
+    body: &[u8],
+    records: &[Rec],
+    d2: &[String],
+) -> Option<TypeName> {
     let mut pb = Pb::new(body);
     while !pb.at_end() {
         let tag = pb.varint()?;

@@ -4,6 +4,11 @@
 //! krusty's compiler builds it from checked code; `krusty-plugin-host` frames it for the JVM host that
 //! runs the plugins. It has no dependencies, so the compiler takes none from the host.
 
+// Cargo otherwise accepts a sibling checkout's older source mtimes as proof that its typed model
+// is unchanged. Track the workspace's existing identity in dep-info; standalone consumers need
+// not define it, and repeated builds of the same checkout remain cached.
+const _: Option<&str> = option_env!("KRUSTY_BUILD_CHECKOUT");
+
 mod identity;
 mod ksp;
 mod module;
@@ -12,7 +17,13 @@ pub use identity::{
     CallableIdentity, CallableKind, ClassName, Classifier, TypeArgument, TypeIdentity,
     TypeParameterOwner,
 };
-pub use ksp::{KspAnnotation, KspClass, KspClassKind, KspFile, KspParameter, KspRound};
+pub use ksp::{
+    KspAccessor, KspAnnotation, KspAnnotationArguments, KspArgument, KspClass, KspClassKind,
+    KspClasspath, KspDeclaration, KspFile, KspFunction, KspFunctionKind, KspLibraryClass,
+    KspModifier, KspOrigin, KspParameter, KspProperty, KspRound, KspType, KspTypeAlias,
+    KspTypeArgument, KspTypeDeclaration, KspTypeParameter, KspTypeSlot, KspUseSite, KspValue,
+    KspVariance,
+};
 pub use module::{
     BodyIr, CallIr, Callee, Constant, ExpressionIr, ExpressionKind, FileIr, FunctionIr, ModuleIr,
     ParameterIr, Span, StatementIr, ValueId, VariableIr, Visibility,

@@ -71,8 +71,13 @@ fn encode_serializable_element(
 /// `write$Self` writes before the class writes its own.
 pub(super) struct InheritedElements {
     pub(super) count: usize,
+    /// The type arguments the class gives its generic superclass; its `write$Self` takes a
+    /// serializer for each.
+    pub(super) type_arguments: Vec<Ty>,
     pub(super) owner: crate::types::TypeName,
-    pub(super) write_self: u32,
+    /// The superclass's `write$Self` in this file; `None` for a superclass compiled apart from
+    /// it, whose public `write$Self` takes the same arguments.
+    pub(super) write_self: Option<u32>,
 }
 
 /// What `write$Self` writes: the serialized class's fields, its elements and its type-parameter
@@ -237,13 +242,47 @@ impl SerializeBody<'_> {
             });
             let output = ir.add_expr(IrExpr::GetValue(encoder_slot));
             let descriptor = ir.add_expr(IrExpr::GetValue(2));
-            stmts.push(ir.add_expr(IrExpr::Call {
-                callee: Box::new(Callee::ClassStatic {
+            let mut args = vec![value, output, descriptor];
+            for argument in &inherited.type_arguments {
+                let Some(serializer) = super::element_serializer::element_serializer_expr_in(
+                    ir,
+                    ctx,
+                    argument,
+                    element_scope,
+                    crate::ir::Spelled::NONE,
+                ) else {
+                    bail = true;
+                    break;
+                };
+                args.push(ir.add_expr(IrExpr::TypeOp {
+                    op: crate::ir::IrTypeOp::Cast,
+                    arg: serializer,
+                    type_operand: super::class_ty(super::KSERIALIZER_FQ),
+                }));
+            }
+            let callee = match inherited.write_self {
+                Some(function) => Callee::ClassStatic {
                     owner: inherited.owner,
-                    function: inherited.write_self,
-                }),
+                    function,
+                },
+                None => {
+                    let owner = inherited.owner.render();
+                    let type_serializers = "Lkotlinx/serialization/KSerializer;"
+                        .repeat(inherited.type_arguments.len());
+                    Callee::Static {
+                        owner: inherited.owner,
+                        name: "write$Self".to_string(),
+                        descriptor: format!(
+                            "(L{owner};Lkotlinx/serialization/encoding/CompositeEncoder;Lkotlinx/serialization/descriptors/SerialDescriptor;{type_serializers})V"
+                        ),
+                        inline: InlineKind::None,
+                    }
+                }
+            };
+            stmts.push(ir.add_expr(IrExpr::Call {
+                callee: Box::new(callee),
                 dispatch_receiver: None,
-                args: vec![value, output, descriptor],
+                args,
             }));
         }
         // Own element `i` is written from backing field `field`; they differ after a transient

@@ -99,6 +99,23 @@ impl Emitter<'_> {
             }
             _ => self.emit_type_op_operand(arg, code),
         };
+        if matches!(op, IrTypeOp::Cast | IrTypeOp::CastNonNull)
+            && semantic_arg.non_null().is_reference_array()
+            && crate::jvm::array_casts::compatible(
+                semantic_arg,
+                type_operand,
+                &crate::jvm::array_casts::TypeParameters::at(
+                    self.ir,
+                    [self.function, self.type_parameter_function],
+                    self.static_owner,
+                    self.classifiers,
+                ),
+                &self.dispatch_classifiers,
+            )
+        {
+            self.emit_implicit_coercion(arg, type_operand, physical_arg, code);
+            return;
+        }
         match op {
             IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf if type_operand.is_nullable() => {
                 if physical_arg.is_jvm_scalar() {

@@ -86,7 +86,6 @@ pub(super) fn source_signature_expression(file: &File, stub: &DeclarationStub) -
         | super::DeclarationKind::TypeAlias
         | super::DeclarationKind::Constructor
         | super::DeclarationKind::Accessor
-        | super::DeclarationKind::Initializer
-        | super::DeclarationKind::Script => None,
+        | super::DeclarationKind::Initializer => None,
     }
 }

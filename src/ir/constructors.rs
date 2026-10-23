@@ -149,6 +149,10 @@ impl super::IrClass {
     /// The line a primary constructor's delegating call is at: where a lowering re-anchored it, or
     /// otherwise where kotlinc builds it — the declaration's start, annotations included.
     pub fn primary_delegation_line(&self) -> Option<u32> {
+        // A script's constructor is its statements; the delegation has no source line of its own.
+        if self.is_script {
+            return None;
+        }
         [
             self.primary_ctor_lines.rebuilt_body_line,
             self.decl_start_line,
@@ -195,6 +199,9 @@ pub enum IrCtorParameterProvenance {
     Continuation,
     /// The dispatch receiver a generated continuation constructor stores.
     ContinuationDispatchReceiver,
+    /// A script's implicit receiver, numbered in its definition's order, which a script takes
+    /// after its template's parameters.
+    ScriptReceiver { ordinal: u32 },
 }
 
 /// A constructor parameter that carries a value a local or anonymous class captures from its

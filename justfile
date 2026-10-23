@@ -45,11 +45,17 @@ ci: lint coverage-gate
 # Lint gate (enforced locally + in CI + by the pre-commit hook): formatting must be clean, and
 # clippy must introduce NO new findings beyond the frozen baseline (clippy-baseline.tsv). Existing
 # findings are tolerated; any new one fails. Identical behaviour everywhere — it's plain cargo + sh.
-lint: versioning-tests fmt-check clippy-baseline-check
+lint: versioning-tests release-tests fmt-check clippy-baseline-check
 
 # Cheap release-version contracts, without a compiler build or reference-toolchain download.
 versioning-tests:
     bash scripts/test-versioning.sh
+
+# The release job's signing key id selection, against keys generated in a throwaway keyring, and
+# its Maven Central upload, against a stand-in Gradle build and Central Portal.
+release-tests:
+    bash scripts/test-signing-key-id.sh
+    bash scripts/test-publish-maven-central.sh
 
 # Run the LSP package without coverage instrumentation.
 test-lsp:

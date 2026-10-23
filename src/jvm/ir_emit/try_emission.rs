@@ -565,29 +565,6 @@ impl Emitter<'_> {
         }
     }
 
-    /// The loop a `break`/`continue` leaves: its continue target, its exit target, and the
-    /// finalizer depth at its entry.
-    ///
-    /// A LABELED transfer names the loop the checker bound it to, and only that loop answers. There
-    /// is deliberately no fallback to the innermost loop: a label the emitter's loop stack does not
-    /// carry means the transfer and its loop disagree about which loop this is, and jumping to the
-    /// innermost one would emit a program that branches somewhere the source never wrote. `None`
-    /// instead, so the caller fails the file closed.
-    pub(super) fn loop_transfer_target(
-        &self,
-        label: &Option<String>,
-    ) -> Option<(Label, Label, usize)> {
-        let entry = match label {
-            Some(l) => self
-                .loop_stack
-                .iter()
-                .rev()
-                .find(|(_, _, sl, _)| sl.as_deref() == Some(l.as_str())),
-            None => self.loop_stack.last(),
-        };
-        entry.map(|(cont, end, _, depth)| (*cont, *end, *depth))
-    }
-
     /// Leave the loop `label` names, running every `finally` between here and it first.
     ///
     /// Kotlin executes a finalizer when control leaves its `try` by ANY route, not only by `return`.
@@ -608,65 +585,90 @@ impl Emitter<'_> {
         brk: bool,
         code: &mut CodeBuilder,
     ) {
-        let Some((cont, end, depth)) = self.loop_transfer_target(label) else {
-            self.run.set_emit_error(format!(
-                "{} names a loop that is not open here: {}",
-                if brk { "break" } else { "continue" },
-                label.as_deref().unwrap_or("<unlabeled>"),
-            ));
-            return;
+        // A LABELED transfer names the loop the checker bound it to, and only that loop answers.
+        // There is deliberately no fallback to the innermost loop: a label no open loop carries
+        // means the transfer and its loop disagree about which loop this is, and jumping to the
+        // innermost one would emit a program that branches somewhere the source never wrote.
+        let (cont, end, depth) = match self.loop_transfer_target(label) {
+            Some(super::non_local_jumps::LoopTransferTarget::Own(cont, end, depth)) => {
+                (cont, end, depth)
+            }
+            Some(super::non_local_jumps::LoopTransferTarget::Outer(position)) => {
+                self.emit_non_local_loop_jump(transfer, position, brk, code);
+                return;
+            }
+            None => {
+                self.run.set_emit_error(format!(
+                    "{} names a loop that is not open here: {}",
+                    if brk { "break" } else { "continue" },
+                    label.as_deref().unwrap_or("<unlabeled>"),
+                ));
+                return;
+            }
         };
         let target = if brk { end } else { cont };
         self.mark_expression_start(transfer, code);
         let transfer_line = code.current_line();
         code.nop();
+        if self.emit_transfer_finalizers(depth, code) {
+            self.finish_loop_transfer(label, target, brk, transfer_line, code);
+        }
+        self.reopen_finally_segments(code);
+    }
+
+    /// Jump to `target` of the loop `label` names, once the `finally` blocks the transfer leaves
+    /// have run, with the result an inline-return frame carries on the stack.
+    pub(super) fn finish_loop_transfer(
+        &mut self,
+        label: &Option<String>,
+        target: Label,
+        brk: bool,
+        transfer_line: Option<u16>,
+        code: &mut CodeBuilder,
+    ) {
         // Every break to an inline-return frame leaves that result on the stack. A path that
         // skips `finally` and a path that never entered it (`setup() ?: return false` beside
         // `return block()`) meet at the same label, and kotlinc's landing use is the store, not
         // another load.
-        let survives = self.emit_transfer_finalizers(depth, code);
-        if survives {
-            if brk && !code.is_dead() {
-                if let Some(label) = label {
-                    if let Some(&(value, ty)) = self.inline_return_frame_results.get(label) {
-                        // A generic return specialized to `Unit` stores `kotlin.Unit.INSTANCE`
-                        // and leaves it there. kotlinc does not carry that reference across
-                        // `finally`: a later read is its own `getstatic`, and a discarded call
-                        // never reloads the slot. A primitive result is carried so every path
-                        // into the landing label has it on the stack.
-                        let carries = slot_words(ty) > 0
-                            && ty != Ty::obj("kotlin/Unit")
-                            && !self.discarded_inline_results.contains(&value);
-                        if carries {
-                            let slot = self.activate_inline_return_frame_result(value, ty);
-                            load(ty, slot, code);
-                            if self
-                                .label_stack_resident_values
-                                .insert(target, value)
-                                .is_some_and(|existing| existing != value)
-                            {
-                                self.run.set_emit_error(
-                                    "an inline-return label receives different stack-carried values"
-                                        .to_string(),
-                                );
-                            }
+        if brk && !code.is_dead() {
+            if let Some(label) = label {
+                if let Some(&(value, ty)) = self.inline_return_frame_results.get(label) {
+                    // A generic return specialized to `Unit` stores `kotlin.Unit.INSTANCE`
+                    // and leaves it there. kotlinc does not carry that reference across
+                    // `finally`: a later read is its own `getstatic`, and a discarded call
+                    // never reloads the slot. A primitive result is carried so every path
+                    // into the landing label has it on the stack.
+                    let carries = slot_words(ty) > 0
+                        && ty != Ty::obj("kotlin/Unit")
+                        && !self.discarded_inline_results.contains(&value);
+                    if carries {
+                        let slot = self.activate_inline_return_frame_result(value, ty);
+                        load(ty, slot, code);
+                        if self
+                            .label_stack_resident_values
+                            .insert(target, value)
+                            .is_some_and(|existing| existing != value)
+                        {
+                            self.run.set_emit_error(
+                                "an inline-return label receives different stack-carried values"
+                                    .to_string(),
+                            );
                         }
                     }
                 }
             }
-            // A transfer's finalizer copies run under their own source lines. Restore the line
-            // `mark_expression_start` already checked — the mapped output line of an inline copy —
-            // at the physical jump, as return emission restores it at `xreturn`. A dead jump is
-            // the finalizer's own exit; marking it lets goto cleanup thread this transfer into
-            // that copy.
-            if !code.is_dead() {
-                if let Some(line) = transfer_line {
-                    code.mark_line(u32::from(line));
-                }
-            }
-            code.goto(target);
         }
-        self.reopen_finally_segments(code);
+        // A transfer's finalizer copies run under their own source lines. Restore the line
+        // `mark_expression_start` already checked — the mapped output line of an inline copy —
+        // at the physical jump, as return emission restores it at `xreturn`. A dead jump is
+        // the finalizer's own exit; marking it lets goto cleanup thread this transfer into
+        // that copy.
+        if !code.is_dead() {
+            if let Some(line) = transfer_line {
+                code.mark_line(u32::from(line));
+            }
+        }
+        code.goto(target);
     }
 }
 

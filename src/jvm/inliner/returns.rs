@@ -1,6 +1,12 @@
 //! The inlined body's returns: kotlinc's `LocalReturnsNormalizer`, which leaves each return with
 //! only its value on the stack, and `processReturns`, which turns each into a jump to the end of
 //! the inlined code.
+//!
+//! A lambda's non-local `return` leaves the function the lambda is written in, not the inlined
+//! one. kotlinc marks it with a call to `$$$$$NON_LOCAL_RETURN$$$$$` just before the return
+//! (`generateGlobalReturnFlag`), and both passes leave a marked return as it is: it stays a return
+//! of the caller, in front of which the inlined function's `finally` blocks are copied
+//! (`finally_blocks`), and the marker goes when the code is written into its caller.
 
 use crate::jvm::method_node::{stack_shapes, Category, Insn, LabelId, MethodNode, Node};
 
@@ -12,8 +18,52 @@ const RETURN: u8 = 0xb1;
 const GOTO: u8 = 0xa7;
 const NOP: u8 = 0x00;
 
-fn is_return(insn: &Insn) -> bool {
+const INVOKESTATIC: u8 = 0xb8;
+/// kotlinc's `NON_LOCAL_RETURN`, the owner of the marker call in front of a non-local return.
+const NON_LOCAL_RETURN: &str = "$$$$$NON_LOCAL_RETURN$$$$$";
+
+pub(super) fn is_return(insn: &Insn) -> bool {
     matches!(insn, Insn::Op(0xac..=0xb1))
+}
+
+/// The marker kotlinc places in front of a non-local return, named after what the return leaves.
+/// A return that leaves the function it is finally written into has the empty name: every such
+/// return krusty writes leaves that one function. A `break` or `continue` of a loop outside the
+/// lambda names the loop (kotlinc's `nonLocalReturnLabel`).
+pub(crate) fn non_local_return_marker(name: String) -> Node {
+    Node::Insn(Insn::Method {
+        op: INVOKESTATIC,
+        owner: NON_LOCAL_RETURN.to_string(),
+        name,
+        desc: "()V".to_string(),
+        interface: false,
+    })
+}
+
+/// Whether `node` is the marker of a non-local return.
+pub(crate) fn is_non_local_return_marker(node: &Node) -> bool {
+    non_local_return_name(node).is_some()
+}
+
+/// The name of `node`, if it is the marker of a non-local return.
+pub(crate) fn non_local_return_name(node: &Node) -> Option<&str> {
+    match node {
+        Node::Insn(Insn::Method {
+            op: INVOKESTATIC,
+            owner,
+            name,
+            ..
+        }) if owner == NON_LOCAL_RETURN => Some(name),
+        _ => None,
+    }
+}
+
+/// kotlinc's `isMarkedReturn`: whether the node at `at` is a return right behind the marker.
+pub(super) fn is_marked_return(nodes: &[Node], at: usize) -> bool {
+    matches!(&nodes[at], Node::Insn(insn) if is_return(insn))
+        && at
+            .checked_sub(1)
+            .is_some_and(|before| is_non_local_return_marker(&nodes[before]))
 }
 
 /// Before a return that finds more than its value on the stack, store the value to a fresh local,
@@ -27,7 +77,7 @@ pub(super) fn normalize_local_returns(node: &mut MethodNode) -> Result<(), Inlin
         let (Node::Insn(insn @ Insn::Op(op)), Some(stack)) = (entry, &shapes[at]) else {
             continue;
         };
-        if !is_return(insn) {
+        if !is_return(insn) || is_marked_return(&node.nodes, at) {
             continue;
         }
         if opcode.is_some_and(|known| known != *op) {
@@ -82,11 +132,16 @@ pub(super) fn normalize_local_returns(node: &mut MethodNode) -> Result<(), Inlin
     Ok(())
 }
 
-/// Replace every return with `nop; goto end` and place a fresh label after the jump.
+/// Replace every return with `nop; goto end` and place a fresh label after the jump. A marked
+/// return stays, with the fresh label after it.
 pub(super) fn process_returns(node: &mut MethodNode, end: LabelId) {
     let mut at = 0;
     while at < node.nodes.len() {
-        if matches!(&node.nodes[at], Node::Insn(insn) if is_return(insn)) {
+        if is_marked_return(&node.nodes, at) {
+            let after = node.new_label();
+            node.nodes.insert(at + 1, Node::Label(after));
+            at += 2;
+        } else if matches!(&node.nodes[at], Node::Insn(insn) if is_return(insn)) {
             let after = node.new_label();
             node.nodes.splice(
                 at..=at,

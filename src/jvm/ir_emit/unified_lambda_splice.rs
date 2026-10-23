@@ -217,7 +217,6 @@ impl Emitter<'_> {
         &mut self,
         call: &bytecode_inline_call::ClasspathInlineCall<'_, '_>,
         positions: &[usize],
-        route: bytecode_inline_call::SpliceReason,
         base: u16,
         code: &mut CodeBuilder,
     ) -> InlineCallOutcome {
@@ -230,7 +229,11 @@ impl Emitter<'_> {
             Ok((params, UnifiedSplice::Planned(plan))) => (params, plan),
             Ok((_, UnifiedSplice::UnsupportedHost))
                 if !call.target.inline_only
-                    && !matches!(route, bytecode_inline_call::SpliceReason::NonLocalJump) =>
+                    && !positions.iter().any(|&position| {
+                        call.args
+                            .get(position)
+                            .is_some_and(|&argument| self.literal_jumps_out(argument))
+                    }) =>
             {
                 crate::trace_compiler!(
                     "splice",
@@ -860,10 +863,11 @@ mod tests {
         emit_box_calling_shape(host, false, false)
     }
 
-    /// [`emit_box_calling`] with a lambda that leaves its caller, or a private `@InlineOnly` host.
+    /// [`emit_box_calling`] with a lambda that leaves by a `break` of its caller's loop, or a
+    /// private `@InlineOnly` host.
     fn emit_box_calling_shape(
         host: Vec<u8>,
-        non_local_return: bool,
+        non_local_jump: bool,
         inline_only: bool,
     ) -> (bool, Option<String>, Option<String>) {
         let mut ir = IrFile::default();
@@ -880,7 +884,7 @@ mod tests {
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
-        let exit = non_local_return.then(|| ir.add_expr(IrExpr::Return(None)));
+        let exit = non_local_jump.then(|| ir.add_expr(IrExpr::Break { label: None }));
         let inline_body = ir.add_expr(IrExpr::Block {
             stmts: exit.into_iter().collect(),
             value: None,

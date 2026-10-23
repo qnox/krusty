@@ -103,7 +103,6 @@ impl SignatureConstraintExtractor {
                 bind_child(child, target_child, ty.targs.len() as u32, self);
             }
         }
-        drop(bind_child);
         if !arguments.is_empty() {
             let root_origin = origin(ty.span);
             return self.graph.add_written_type_application(

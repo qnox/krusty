@@ -94,7 +94,9 @@ pub(super) fn publish_generated_classifier_facts(
             is_abstract: false,
             is_final: true,
             captures_outer: false,
-            compiler_generated: true,
+            // kotlinc marks the `$serializer` synthetic but not the companion it adds: another
+            // file's `InnerClasses` entry for it is `public static final`.
+            compiler_generated: false,
         });
     }
 }

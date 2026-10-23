@@ -84,9 +84,7 @@ fn property_for_work<'a>(
     let declaration = match work.kind {
         BodyKind::Initializer | BodyKind::Delegate => work.declaration,
         BodyKind::Getter | BodyKind::Setter => index.declaration_anchor(work.declaration)?.owner?,
-        BodyKind::Function | BodyKind::EnumEntry | BodyKind::Constructor | BodyKind::Script => {
-            return None
-        }
+        BodyKind::Function | BodyKind::EnumEntry | BodyKind::Constructor => return None,
     };
     let property = match active {
         Some(active) => active.property(file, declaration)?,
@@ -108,7 +106,7 @@ fn property_body_root(property: &PropDecl, kind: BodyKind) -> Option<crate::ast:
             .as_ref()
             .and_then(|setter| setter.body.as_ref())
             .and_then(fun_body_root),
-        BodyKind::Function | BodyKind::EnumEntry | BodyKind::Constructor | BodyKind::Script => None,
+        BodyKind::Function | BodyKind::EnumEntry | BodyKind::Constructor => None,
     }
 }
 
@@ -149,18 +147,7 @@ fn class_initialization_parameters<'a>(
     index: &ResolvedModuleIndex,
     active: Option<&ActiveSourceDeclarations>,
 ) -> Result<Vec<CheckedBodyParameter<'a>>, CheckedBodyDriverFailure> {
-    let class = match active {
-        Some(active) => active
-            .class(file, class_declaration)
-            .map(|(_, class)| class),
-        None => index
-            .declaration_anchor(class_declaration)
-            .filter(|anchor| anchor.kind == DeclarationKind::Classifier)
-            .and_then(|_| index.declaration_range(class_declaration))
-            .and_then(|range| class_at_anchor(file, range)),
-    }
-    .ok_or(CheckedBodyDriverFailure::MissingBody)?;
-    class
+    initialized_class(file, class_declaration, index, active)?
         .props
         .iter()
         .map(|parameter| {
@@ -179,11 +166,76 @@ fn class_initialization_parameters<'a>(
                 span: parameter.span,
                 context_kind: crate::types::ContextParameterKind::None,
                 inline_modifier: crate::types::InlineParameterModifier::None,
-                name_binding: if parameter.is_property {
+                // A script's statements see its template's members, not its own parameters.
+                name_binding: if parameter.is_property || parameter.is_script_parameter {
                     super::CheckedBodyParameterNameBinding::PhysicalOnly
                 } else {
                     super::CheckedBodyParameterNameBinding::Lexical
                 },
+            })
+        })
+        .collect()
+}
+
+fn initialized_class<'a>(
+    file: &'a File,
+    class_declaration: DeclarationId,
+    index: &ResolvedModuleIndex,
+    active: Option<&ActiveSourceDeclarations>,
+) -> Result<&'a crate::ast::ClassDecl, CheckedBodyDriverFailure> {
+    match active {
+        Some(active) => active
+            .class(file, class_declaration)
+            .map(|(_, class)| class),
+        None => index
+            .declaration_anchor(class_declaration)
+            .filter(|anchor| anchor.kind == DeclarationKind::Classifier)
+            .and_then(|_| index.declaration_range(class_declaration))
+            .and_then(|range| class_at_anchor(file, range)),
+    }
+    .ok_or(CheckedBodyDriverFailure::MissingBody)
+}
+
+/// The implicit receivers a script's statements read. kotlinc passes them to the constructor after
+/// the template's parameters, and a statement reads the constructor parameter, not the field the
+/// script's members read. They have no source name: a statement reaches one only as an implicit
+/// receiver.
+fn script_statement_receivers<'a>(
+    file: &'a File,
+    info: &TypeInfo,
+    class_declaration: DeclarationId,
+    index: &ResolvedModuleIndex,
+    active: Option<&ActiveSourceDeclarations>,
+) -> Result<Vec<CheckedBodyParameter<'a>>, CheckedBodyDriverFailure> {
+    let script = index
+        .declaration_header(class_declaration)
+        .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::SCRIPT));
+    if !script {
+        return Ok(Vec::new());
+    }
+    initialized_class(file, class_declaration, index, active)?
+        .context_params
+        .iter()
+        .enumerate()
+        .map(|(ordinal, receiver)| {
+            let ty = info
+                .resolved_type(&receiver.ty)
+                .ok_or(CheckedBodyDriverFailure::ParameterShapeMismatch)?;
+            let ty = crate::fir::ResolvedTy::new(ty).map_err(|error| {
+                CheckedBodyDriverFailure::Check(BodyCheckFailure {
+                    span: Some(receiver.ty.span),
+                    kind: BodyCheckFailureKind::UnpublishableType(error),
+                })
+            })?;
+            Ok(CheckedBodyParameter {
+                name: "",
+                ty,
+                span: receiver.ty.span,
+                context_kind: crate::types::ContextParameterKind::None,
+                inline_modifier: crate::types::InlineParameterModifier::None,
+                name_binding: super::CheckedBodyParameterNameBinding::ScriptReceiver(
+                    u32::try_from(ordinal).expect("too many script receivers"),
+                ),
             })
         })
         .collect()
@@ -346,7 +398,11 @@ fn check_and_dispatch_body_in_session_with_source(
                     .owner
                     .and_then(|owner| enclosing_classifier_declaration(index, owner))
                     .ok_or(CheckedBodyDriverFailure::MissingBody)?;
-                let parameters = class_initialization_parameters(file, info, class, index, active)?;
+                let mut parameters =
+                    class_initialization_parameters(file, info, class, index, active)?;
+                parameters.extend(script_statement_receivers(
+                    file, info, class, index, active,
+                )?);
                 let body = check_expression_body_with_parameters_in_session(
                     unit,
                     work.owner,
@@ -380,22 +436,6 @@ fn check_and_dispatch_body_in_session_with_source(
                 session,
                 active,
             )
-        }
-        BodyKind::Script => {
-            let root = file
-                .script_body
-                .ok_or(CheckedBodyDriverFailure::MissingBody)?;
-            let body = check_expression_body_with_parameters_in_session(
-                unit,
-                work.owner,
-                root,
-                &[],
-                origins,
-                session,
-            )
-            .map_err(CheckedBodyDriverFailure::Check)?;
-            ordinary_sink.accept(work.owner, body);
-            Ok(())
         }
         BodyKind::EnumEntry => check_and_dispatch_enum_entry(
             EnumEntryBodySource {
@@ -730,8 +770,7 @@ fn check_and_dispatch_property_body(
                 | BodyKind::Setter
                 | BodyKind::Function
                 | BodyKind::EnumEntry
-                | BodyKind::Constructor
-                | BodyKind::Script => None,
+                | BodyKind::Constructor => None,
             },
         },
         CheckedBodySignature {
@@ -768,7 +807,7 @@ fn check_and_dispatch_property_body(
             super::delegates::property_delegate_plan(file, info, index, root, property.is_var)
                 .map_err(CheckedBodyDriverFailure::Check)?,
         ),
-        BodyKind::Function | BodyKind::EnumEntry | BodyKind::Constructor | BodyKind::Script => {
+        BodyKind::Function | BodyKind::EnumEntry | BodyKind::Constructor => {
             return Err(CheckedBodyDriverFailure::UnsupportedBodyKind(work.kind));
         }
     }

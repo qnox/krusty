@@ -258,16 +258,12 @@ pub(super) fn is_polymorphic_base(class: &crate::ir::IrClass) -> bool {
         && !class.is_interface
         && !class.is_enum
         && !class.is_object
-        && class.type_params.is_empty()
 }
 
 /// [`is_polymorphic_base`] for the frontend's view of a source class, which decides whether a
 /// `$serializer` classifier is published at all. A sealed class publishes none either way.
 pub(super) fn frontend_is_polymorphic_base(ctx: &crate::plugins::FrontendClassContext<'_>) -> bool {
-    ctx.is_abstract
-        && !ctx.is_sealed
-        && ctx.kind == crate::libraries::TypeKind::Class
-        && ctx.type_parameters.type_params.is_empty()
+    ctx.is_abstract && !ctx.is_sealed && ctx.kind == crate::libraries::TypeKind::Class
 }
 
 /// `Reflection.getOrCreateKotlinClass(<classifier>.class)`: the `KClass` literal kotlinc passes to
@@ -336,6 +332,36 @@ pub(super) fn add_polymorphic_serializer(
         ir.classes[class_id as usize].decl_end_line;
 }
 
+/// A generic polymorphic base's `Companion.serializer(typeSerial…)`: a new
+/// `PolymorphicSerializer(<class>::class, <serial-info annotations>)` for an abstract class, or a
+/// new `SealedClassSerializer` for a sealed one, on every call. Nothing is cached.
+pub(super) fn add_generic_polymorphic_serializer_accessor(
+    ir: &mut IrFile,
+    ctx: &crate::plugins::PluginContext,
+    class_id: ClassId,
+    class_name: TypeName,
+) {
+    if ir.classes[class_id as usize].is_sealed {
+        super::sealed_serializer::add_sealed_serializer_accessor(ir, ctx, class_id);
+        return;
+    }
+    let serial_info_unsupported = super::annotations::class_has_serial_info(ctx, ir, class_id);
+    let annotations = serial_info_annotations(ir, class_name, serial_info_unsupported);
+    let serializer = polymorphic_serializer(ir, class_name, annotations);
+    let serializer = ir.add_expr(IrExpr::TypeOp {
+        op: IrTypeOp::Cast,
+        arg: serializer,
+        type_operand: class_ty(super::KSERIALIZER_FQ),
+    });
+    let ret = ir.add_expr(IrExpr::Return(Some(serializer)));
+    let body = ir.add_expr(IrExpr::Block {
+        stmts: vec![ret],
+        value: None,
+    });
+    let owner = super::serializer_accessor_owner(ir, class_id);
+    super::complete_frontend_serializer_accessor(ir, owner, body);
+}
+
 /// `new ObjectSerializer(<serial name>, <object>.INSTANCE, <serial-info annotations>)`.
 ///
 /// Typed retained annotation facts identify `@SerialInfo` applications. Runtime annotation
@@ -398,7 +424,8 @@ pub(super) fn local_serializable_object(
     .then_some(class_id)
 }
 
-/// A generic `@Serializable` class declared in this file with its generated serializer: an element
+/// A generic `@Serializable` class declared in this file with its generated `$serializer` (not a
+/// sealed or abstract one, which has none): an element
 /// typed by it constructs that serializer class from the type arguments' serializers
 /// (`new G$$serializer(IntSerializer.INSTANCE)`), where a non-generic class reads a singleton.
 pub(super) fn local_generic_serializable_class(
@@ -409,7 +436,11 @@ pub(super) fn local_generic_serializable_class(
     ir.classes
         .iter()
         .position(|class| {
-            class.fq_name_id() == classifier && !class.is_object && !class.type_params.is_empty()
+            class.fq_name_id() == classifier
+                && !class.is_object
+                && !class.type_params.is_empty()
+                && !class.is_sealed
+                && !is_polymorphic_base(class)
         })
         .is_some_and(|index| {
             let class_id = index as ClassId;
@@ -428,9 +459,7 @@ pub(super) fn local_polymorphic_serializable_class(
     ir.classes
         .iter()
         .position(|class| {
-            class.fq_name_id() == classifier
-                && (class.is_sealed || is_polymorphic_base(class))
-                && class.type_params.is_empty()
+            class.fq_name_id() == classifier && (class.is_sealed || is_polymorphic_base(class))
         })
         .is_some_and(|index| {
             let class_id = index as ClassId;

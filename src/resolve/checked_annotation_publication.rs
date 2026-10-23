@@ -15,6 +15,7 @@ pub(crate) fn publish_checked_declaration_annotations(
     table: &mut SymbolTable,
     diags: &mut DiagSink,
 ) {
+    let mut constructor_properties = Vec::new();
     for (file_index, file) in files.iter().enumerate() {
         let declarations = table
             .classes
@@ -76,11 +77,7 @@ pub(crate) fn publish_checked_declaration_annotations(
                         .is_some()
                 })
                 .filter_map(|annotation| info.applied_annotation(annotation))
-                .map(|annotation| crate::types::ResolvedAnnotation {
-                    annotation: annotation.internal,
-                    arguments: annotation.values.clone(),
-                    facts: annotation.facts,
-                })
+                .map(crate::types::AppliedAnnotation::resolved)
                 .collect::<Vec<_>>();
             let fully_checked = class
                 .annotations
@@ -152,7 +149,17 @@ pub(crate) fn publish_checked_declaration_annotations(
             else {
                 continue;
             };
-            publish_classifier_member_annotations(index, owner, class, &info);
+            publish_classifier_member_annotations(
+                index,
+                owner,
+                class,
+                &info,
+                file.property_annotation_default_target_mode,
+                &mut constructor_properties,
+            );
+            if let Some(defaults) = info.annotation_element_defaults(internal) {
+                index.publish_annotation_element_defaults(owner, defaults.to_vec());
+            }
         }
         let source = crate::fir::SourceFileId::from_raw(file_index as u32);
         for &(ordinal, declaration, _) in &top_level {
@@ -177,15 +184,24 @@ pub(crate) fn publish_checked_declaration_annotations(
                 stable,
                 checked_applications(&info, annotations),
             );
-            if let Decl::Property(property) = file.decl(declaration) {
-                publish_accessor_annotations(index, stable, property, &info);
+            match file.decl(declaration) {
+                Decl::Fun(function) => {
+                    publish_parameter_annotations(index, stable, &function.params, &info);
+                }
+                Decl::Property(property) => {
+                    publish_accessor_annotations(index, stable, property, &info);
+                }
+                Decl::Class(_) => {}
             }
         }
     }
+    for property in constructor_properties {
+        property.publish(index);
+    }
 }
 
-/// The non-local top-level functions and properties of `file` whose own or accessor annotations
-/// Pass 1 bound, each with its position among the file's declarations, the sibling ordinal of its
+/// The non-local top-level functions and properties of `file` whose own, value-parameter or
+/// accessor annotations Pass 1 bound, each with its position among the file's declarations, the sibling ordinal of its
 /// stable identity.
 fn top_level_annotated_declarations(
     table: &SymbolTable,
@@ -201,7 +217,9 @@ fn top_level_annotated_declarations(
         .filter(|(_, declaration)| !file.is_local_declaration(**declaration))
         .filter_map(|(ordinal, &declaration)| {
             let span = match file.decl(declaration) {
-                Decl::Fun(function) if function.annotations.iter().any(resolved) => function.span,
+                Decl::Fun(function) if function_annotations(function).any(resolved) => {
+                    function.span
+                }
                 Decl::Property(property) if property_annotations(property).any(&resolved) => {
                     property.span
                 }
@@ -210,6 +228,16 @@ fn top_level_annotated_declarations(
             Some((u32::try_from(ordinal).ok()?, declaration, span))
         })
         .collect()
+}
+
+/// A function's own annotations, then those of its value parameters.
+fn function_annotations(function: &FunDecl) -> impl Iterator<Item = &crate::ast::AnnotationRef> {
+    function.annotations.iter().chain(
+        function
+            .params
+            .iter()
+            .flat_map(|parameter| &parameter.annotations),
+    )
 }
 
 /// A property's own annotations, then those written on its getter and setter.
@@ -236,12 +264,40 @@ fn checked_applications<'a>(
     annotations
         .into_iter()
         .filter_map(|annotation| info.applied_annotation(annotation))
-        .map(|annotation| crate::types::ResolvedAnnotation {
-            annotation: annotation.internal,
-            arguments: annotation.values.clone(),
-            facts: annotation.facts,
-        })
+        .map(crate::types::AppliedAnnotation::resolved)
         .collect()
+}
+
+/// Retain checked values and declaration policy, not syntax or TypeInfo. Select destinations only
+/// after every source annotation classifier has published its target policy.
+struct PendingConstructorPropertyAnnotations {
+    declaration: crate::fir::DeclarationId,
+    host: crate::types::PropertyAnnotationHost,
+    mode: crate::types::PropertyAnnotationDefaultTargetMode,
+    applications: Vec<(
+        Option<crate::types::PropertyAnnotationSite>,
+        crate::types::AppliedAnnotation,
+    )>,
+}
+
+impl PendingConstructorPropertyAnnotations {
+    fn publish(self, index: &mut crate::fir::ResolvedModuleIndex) {
+        let applications: Vec<_> = self
+            .applications
+            .into_iter()
+            .filter_map(|(explicit_site, annotation)| {
+                let targets = index
+                    .annotation_targets()
+                    .semantic(annotation.internal)
+                    .unwrap_or(annotation.targets);
+                let sites = targets.property_declaration_sites(self.host, self.mode, explicit_site);
+                sites
+                    .contains(crate::types::PropertyAnnotationSite::Property)
+                    .then(|| annotation.resolved())
+            })
+            .collect();
+        index.publish_declaration_applied_annotations(self.declaration, applications);
+    }
 }
 
 /// Publish the checked annotations of the members `class` declares under their stable identities
@@ -251,6 +307,8 @@ fn publish_classifier_member_annotations(
     owner: crate::fir::DeclarationId,
     class: &ClassDecl,
     info: &TypeInfo,
+    default_target_mode: crate::types::PropertyAnnotationDefaultTargetMode,
+    constructor_properties: &mut Vec<PendingConstructorPropertyAnnotations>,
 ) {
     for (method_index, method) in class.methods.iter().enumerate() {
         let Some(declaration) = u32::try_from(method_index)
@@ -263,6 +321,7 @@ fn publish_classifier_member_annotations(
             declaration,
             checked_applications(info, &method.annotations),
         );
+        publish_parameter_annotations(index, declaration, &method.params, info);
     }
     for (property_index, property) in class.body_props.iter().enumerate() {
         // A constructor property shares the owner and kind, and numbers its siblings among the
@@ -323,6 +382,24 @@ fn publish_classifier_member_annotations(
         else {
             continue;
         };
+        constructor_properties.push(PendingConstructorPropertyAnnotations {
+            declaration,
+            host: crate::types::PropertyAnnotationHost {
+                constructor_parameter: true,
+                has_backing_field: class.kind != crate::ast::ClassKind::Annotation,
+            },
+            mode: default_target_mode,
+            applications: parameter
+                .annotations
+                .iter()
+                .filter_map(|annotation| {
+                    Some((
+                        annotation.property_site,
+                        info.applied_annotation(annotation)?.clone(),
+                    ))
+                })
+                .collect(),
+        });
         publish_property_accessor_applications(
             index,
             declaration,
@@ -331,18 +408,36 @@ fn publish_classifier_member_annotations(
             info,
         );
     }
-    let constructors = class
-        .primary_ctor_annotations
+    // A primary constructor's own annotations are written before `constructor`; one without them
+    // still has value parameters whose annotations are published.
+    let primary = std::iter::once((
+        0,
+        class
+            .primary_ctor_annotations
+            .as_deref()
+            .unwrap_or_default(),
+        class
+            .props
+            .iter()
+            .map(|parameter| parameter.annotations.as_slice())
+            .collect::<Vec<_>>(),
+    ));
+    let secondary = class
+        .secondary_ctors
         .iter()
-        .map(|annotations| (0, annotations))
-        .chain(
-            class
-                .secondary_ctors
-                .iter()
-                .enumerate()
-                .map(|(index, constructor)| (index + 1, &constructor.annotations)),
-        );
-    for (sibling, annotations) in constructors {
+        .enumerate()
+        .map(|(index, constructor)| {
+            (
+                index + 1,
+                constructor.annotations.as_slice(),
+                constructor
+                    .params
+                    .iter()
+                    .map(|parameter| parameter.annotations.as_slice())
+                    .collect(),
+            )
+        });
+    for (sibling, annotations, parameters) in primary.chain(secondary) {
         let Some(declaration) = u32::try_from(sibling).ok().and_then(|sibling| {
             index.owned_declaration(owner, DeclarationKind::Constructor, sibling)
         }) else {
@@ -351,6 +446,36 @@ fn publish_classifier_member_annotations(
         index.publish_declaration_applied_annotations(
             declaration,
             checked_applications(info, annotations),
+        );
+        for (position, annotations) in parameters.into_iter().enumerate() {
+            let Ok(position) = u32::try_from(position) else {
+                continue;
+            };
+            index.publish_parameter_applied_annotations(
+                declaration,
+                position,
+                checked_applications(info, annotations),
+            );
+        }
+    }
+}
+
+/// Publish the checked annotations written on each of `parameters`, the value parameters of the
+/// function `declaration`.
+fn publish_parameter_annotations(
+    index: &mut crate::fir::ResolvedModuleIndex,
+    declaration: crate::fir::DeclarationId,
+    parameters: &[Param],
+    info: &TypeInfo,
+) {
+    for (position, parameter) in parameters.iter().enumerate() {
+        let Ok(position) = u32::try_from(position) else {
+            continue;
+        };
+        index.publish_parameter_applied_annotations(
+            declaration,
+            position,
+            checked_applications(info, &parameter.annotations),
         );
     }
 }
@@ -547,7 +672,7 @@ fn classifier_has_resolved_annotations(
         || class
             .methods
             .iter()
-            .any(|method| method.annotations.iter().any(resolved))
+            .any(|method| function_annotations(method).any(resolved))
         || class
             .body_props
             .iter()
@@ -560,22 +685,32 @@ fn classifier_has_resolved_annotations(
         || class
             .props
             .iter()
-            .any(|parameter| parameter.is_property && parameter.annotations.iter().any(resolved))
-        || class
-            .secondary_ctors
-            .iter()
-            .any(|constructor| constructor.annotations.iter().any(resolved))
+            .any(|parameter| parameter.annotations.iter().any(resolved))
+        || class.secondary_ctors.iter().any(|constructor| {
+            constructor
+                .annotations
+                .iter()
+                .chain(
+                    constructor
+                        .params
+                        .iter()
+                        .flat_map(|parameter| &parameter.annotations),
+                )
+                .any(resolved)
+        })
+        || class.is_annotation()
+            && class
+                .props
+                .iter()
+                .any(|parameter| parameter.default.is_some())
 }
 
 impl Checker<'_> {
-    /// `include_value_parameters` is false for the classifier-annotation fragment. That fragment
-    /// retains a method's own annotation arguments and releases value-parameter annotation syntax,
-    /// so walking those parameters asserts on a complete pass.
+    /// Check a function's own annotations and those of its value parameters.
     pub(super) fn fold_function_annotation_applications(
         &mut self,
         scope: &CheckerScope<'_>,
         function: &FunDecl,
-        include_value_parameters: bool,
         declaration_target: &'static str,
     ) -> usize {
         let suppression_depth =
@@ -589,18 +724,16 @@ impl Checker<'_> {
                 declaration_target,
             );
         }
-        if include_value_parameters {
-            for parameter in &function.params {
-                for (annotation, arguments) in
-                    parameter.annotations.iter().zip(&parameter.annotation_args)
-                {
-                    self.check_non_property_annotation_application(
-                        scope,
-                        annotation,
-                        arguments,
-                        "value parameter",
-                    );
-                }
+        for parameter in &function.params {
+            for (annotation, arguments) in
+                parameter.annotations.iter().zip(&parameter.annotation_args)
+            {
+                self.check_non_property_annotation_application(
+                    scope,
+                    annotation,
+                    arguments,
+                    "value parameter",
+                );
             }
         }
         suppression_depth
@@ -636,6 +769,7 @@ impl Checker<'_> {
         &mut self,
         scope: &CheckerScope<'_>,
         class: &ClassDecl,
+        owner: Option<TypeName>,
     ) {
         for (annotation, arguments) in class.annotations.iter().zip(&class.annotation_args) {
             if self.has_bound_annotation(annotation) {
@@ -643,13 +777,13 @@ impl Checker<'_> {
             }
         }
         let diagnostics_before_members = self.diags.diags.len();
+        if let Some(owner) = owner.filter(|_| class.is_annotation()) {
+            self.fold_annotation_element_defaults(scope, class, owner);
+        }
         for method in &class.methods {
-            if method
-                .annotations
-                .iter()
-                .any(|annotation| self.has_bound_annotation(annotation))
+            if function_annotations(method).any(|annotation| self.has_bound_annotation(annotation))
             {
-                self.fold_method_annotations_in_temporary_scope(scope, method, false);
+                self.fold_method_annotations_in_temporary_scope(scope, method);
             }
         }
         for property in &class.body_props {
@@ -662,8 +796,9 @@ impl Checker<'_> {
             );
         }
         // A constructor `val`/`var` is a property: fold exactly its Pass-1-bound applications, as
-        // a body property's, so publication never binds a name Pass 1 left unbound.
-        for parameter in class.props.iter().filter(|parameter| parameter.is_property) {
+        // a body property's, so publication never binds a name Pass 1 left unbound. A plain
+        // constructor parameter's are folded the same way.
+        for parameter in &class.props {
             let bound = self.bound_annotation_spans(&parameter.annotations);
             if !bound.is_empty() {
                 self.check_selected_constructor_parameter_annotations(
@@ -691,7 +826,61 @@ impl Checker<'_> {
                 }
             }
         }
+        for parameter in class
+            .secondary_ctors
+            .iter()
+            .flat_map(|constructor| &constructor.params)
+        {
+            for (annotation, arguments) in
+                parameter.annotations.iter().zip(&parameter.annotation_args)
+            {
+                if self.has_bound_annotation(annotation) {
+                    self.check_non_property_annotation_application(
+                        scope,
+                        annotation,
+                        arguments,
+                        "value parameter",
+                    );
+                }
+            }
+        }
         self.diags.diags.truncate(diagnostics_before_members);
+    }
+
+    /// Fold the default of every element the annotation class `owner` declares in `class`. A
+    /// default is a constant like an argument, checked against the element's declared type. The
+    /// class's body unit checks the defaults again and reports what is wrong with them, so an
+    /// element whose default does not fold leaves the class without published defaults.
+    fn fold_annotation_element_defaults(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        class: &ClassDecl,
+        owner: TypeName,
+    ) {
+        let Some((elements, _, _)) = self.annotation_shape(owner) else {
+            return;
+        };
+        if elements.len() != class.props.len()
+            || elements
+                .iter()
+                .zip(&class.props)
+                .any(|((name, _), parameter)| *name != parameter.name)
+        {
+            return;
+        }
+        let mut defaults = Vec::new();
+        for ((name, declared), parameter) in elements.into_iter().zip(&class.props) {
+            let Some(default) = parameter.default else {
+                continue;
+            };
+            self.check_annotation_argument_value(scope, default, declared);
+            let Some(value) = self.fold_annotation_value(default, Some(declared)) else {
+                return;
+            };
+            defaults.push((name, value));
+        }
+        self.applied_annotations
+            .record_element_defaults(owner, defaults);
     }
 
     /// Fold a top-level function's or property's annotations for the declaration-annotation
@@ -705,12 +894,10 @@ impl Checker<'_> {
         let diagnostics_before = self.diags.diags.len();
         match file.decl(declaration) {
             Decl::Fun(function) => {
-                if function
-                    .annotations
-                    .iter()
+                if function_annotations(function)
                     .any(|annotation| self.has_bound_annotation(annotation))
                 {
-                    self.fold_method_annotations_in_temporary_scope(scope, function, false);
+                    self.fold_method_annotations_in_temporary_scope(scope, function);
                 }
             }
             Decl::Property(property) => self.fold_property_annotations(
@@ -755,7 +942,6 @@ impl Checker<'_> {
         &mut self,
         class_scope: &CheckerScope<'_>,
         function: &FunDecl,
-        include_value_parameters: bool,
     ) {
         let method_scope = class_scope.child(ScopeKind::Function { receiver: None });
         let type_parameters = method_scope
@@ -774,12 +960,8 @@ impl Checker<'_> {
         method_scope.declare_tparams(&function.type_params, &type_parameters, |name| {
             function.reified_type_params.contains(name)
         });
-        let suppression_depth = self.fold_function_annotation_applications(
-            &method_scope,
-            function,
-            include_value_parameters,
-            "function",
-        );
+        let suppression_depth =
+            self.fold_function_annotation_applications(&method_scope, function, "function");
         self.active_lexical_policies.truncate(suppression_depth);
     }
 
@@ -788,15 +970,18 @@ impl Checker<'_> {
         internal: TypeName,
         arguments: &[ExprId],
         nested_call: Option<ExprId>,
-    ) -> Option<(
-        Vec<(String, crate::types::AnnotationValue)>,
-        crate::types::AnnotationSemanticFacts,
-    )> {
+    ) -> Option<FoldedAnnotationValues> {
         let (elements, parameters, policy) = self.annotation_shape(internal)?;
         let argument_names = self.annotation_argument_names(arguments, nested_call);
         let parameter_indices = self
             .annotation_argument_parameter_indices(&parameters, arguments, &argument_names)
             .ok()?;
+        let mut written = Vec::with_capacity(parameter_indices.len());
+        for &index in &parameter_indices {
+            if !written.contains(&index) {
+                written.push(index);
+            }
+        }
         let mut values = Vec::with_capacity(arguments.len());
         let mut facts = crate::types::AnnotationSemanticFacts::default();
         for ((&argument, index), argument_name) in
@@ -862,13 +1047,21 @@ impl Checker<'_> {
             }
         }
         values.sort_by_key(|(index, _, _)| *index);
-        Some((
-            values
+        let order = written
+            .into_iter()
+            .map(|index| {
+                let position = values.iter().position(|(slot, _, _)| *slot == index)?;
+                u16::try_from(position).ok()
+            })
+            .collect::<Option<_>>()?;
+        Some(FoldedAnnotationValues {
+            values: values
                 .into_iter()
                 .map(|(_, name, value)| (name, value))
                 .collect(),
             facts,
-        ))
+            order,
+        })
     }
 
     /// Normalize declaration semantics while the selected argument identity is still available.
@@ -936,12 +1129,20 @@ impl Checker<'_> {
         )
     }
 
+    /// Fold one application written with `use_site` (`@get:A`, or `None` when unprefixed) and
+    /// naming its class `short_name`.
     pub(super) fn fold_annotation_application(
         &mut self,
         internal: TypeName,
         arguments: &[ExprId],
+        use_site: Option<crate::types::PropertyAnnotationSite>,
+        short_name: &str,
     ) -> Option<crate::types::AppliedAnnotation> {
-        let (values, mut facts) = self.fold_annotation_values(internal, arguments, None)?;
+        let FoldedAnnotationValues {
+            values,
+            mut facts,
+            order,
+        } = self.fold_annotation_values(internal, arguments, None)?;
         facts.optional_expectation = self.is_optional_expectation_classifier(internal);
         let module_retention = self.module.annotation_retention(internal);
         let classifier = self.resolver().classifier(internal)?;
@@ -952,10 +1153,24 @@ impl Checker<'_> {
             internal,
             values,
             facts,
+            written: Box::new(crate::types::WrittenAnnotation {
+                short_name: short_name.into(),
+                use_site,
+                order,
+            }),
             retention,
             targets,
+            property_sites: None,
         })
     }
+}
+
+/// One application's folded values in declaration order, with the order the source wrote them.
+pub(super) struct FoldedAnnotationValues {
+    pub(super) values: Vec<(String, crate::types::AnnotationValue)>,
+    pub(super) facts: crate::types::AnnotationSemanticFacts,
+    /// See [`crate::types::WrittenAnnotation::order`].
+    pub(super) order: Box<[u16]>,
 }
 
 /// Folding one checked annotation argument to the typed value the annotation records.
@@ -1030,7 +1245,7 @@ impl Checker<'_> {
             } if name == "class" => {
                 AnnotationValue::Class(Ty::obj_name(self.class_literal_targets.get(&e).copied()?))
             }
-            Expr::Call { args, .. } => match self.expr_lowers.get(&e) {
+            Expr::Call { callee, args } => match self.expr_lowers.get(&e) {
                 Some(ExprLowering::CompilerSynthetic(
                     SyntheticKind::PrimitiveVararg(_)
                     | SyntheticKind::ReferenceVararg
@@ -1053,8 +1268,21 @@ impl Checker<'_> {
                         return Some(value);
                     }
                     let internal = self.expr_types[e.0 as usize].kotlin_class_internal()?;
-                    let (values, _) = self.fold_annotation_values(internal, args, Some(e))?;
-                    AnnotationValue::Annotation { internal, values }
+                    let short_name = match self.file.expr(*callee) {
+                        Expr::Name(name) | Expr::Member { name, .. } => name.as_str().into(),
+                        _ => return None,
+                    };
+                    let FoldedAnnotationValues { values, order, .. } =
+                        self.fold_annotation_values(internal, args, Some(e))?;
+                    AnnotationValue::Annotation {
+                        internal,
+                        values,
+                        written: Some(Box::new(crate::types::WrittenAnnotation {
+                            short_name,
+                            use_site: None,
+                            order,
+                        })),
+                    }
                 }
             },
             _ => self.folded_library_constant(e, expected)?,

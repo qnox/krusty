@@ -48,7 +48,11 @@ pub(super) fn accept_non_callable_body(
                         declaration,
                     ))?;
             let roots = lowered.roots.into_vec();
-            ir.initializer_blocks.insert(initializer_block);
+            // A script's statements are its class's initializers, but no `init { … }` encloses
+            // them, so they have no boundary lines of their own.
+            if !ir.classes[class as usize].is_script {
+                ir.initializer_blocks.insert(initializer_block);
+            }
             let body = effect_block(roots, origin, ir);
             ir.checked_class_initializers
                 .push(IrCheckedClassInitializer {
@@ -95,14 +99,6 @@ pub(super) fn accept_non_callable_body(
                 )
                 .is_some()
             {
-                return Err(FirFileLoweringFailure::DuplicateNonCallableBody(
-                    declaration,
-                ));
-            }
-        }
-        DeclarationKind::Script => {
-            let body = effect_block(lowered.roots.into_vec(), origin, ir);
-            if ir.checked_script_body.replace(body).is_some() {
                 return Err(FirFileLoweringFailure::DuplicateNonCallableBody(
                     declaration,
                 ));

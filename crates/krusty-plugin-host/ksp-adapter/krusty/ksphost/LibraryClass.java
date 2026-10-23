@@ -16,18 +16,54 @@ import com.google.devtools.ksp.symbol.KSTypeReference;
 import com.google.devtools.ksp.symbol.KSVisitor;
 import com.google.devtools.ksp.symbol.Location;
 import com.google.devtools.ksp.symbol.Modifier;
+import com.google.devtools.ksp.symbol.NonExistLocation;
 import com.google.devtools.ksp.symbol.Origin;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import kotlin.sequences.Sequence;
 
-// A classifier of the classpath, named by a source declaration. Only its name is served yet; its
-// declaration arrives with library classes.
+// A classifier of the classpath, as krusty described it when a processor first reached it: its
+// header. Its members are not served yet.
 final class LibraryClass implements KSClassDeclaration {
+    private final Classpath classpath;
+    private final Name simpleName;
     private final Name qualifiedName;
+    private final ClassKind kind;
+    final List<KSAnnotation> annotations = new ArrayList<>();
+    Name packageName;
+    // The qualified name of the classifier this one is nested in, or null.
+    String parent;
+    Origin origin;
+    // False when krusty could not read every annotation the declaration states; the query is then
+    // refused.
+    boolean annotationsComplete = true;
+    // Each is null when krusty could not describe it; the query is then refused.
+    Set<Modifier> modifiers;
+    List<KSTypeParameter> typeParameters;
+    List<KSTypeReference> superTypes;
+    // The entries of a library enum class an annotation argument named, by name, so that each is
+    // one declaration.
+    private final java.util.Map<String, LibraryClass> entries = new java.util.HashMap<>();
 
-    LibraryClass(String qualifiedName) {
+    LibraryClass(Classpath classpath, String simpleName, String qualifiedName, ClassKind kind) {
+        this.classpath = classpath;
+        this.simpleName = new Name(simpleName);
         this.qualifiedName = new Name(qualifiedName);
+        this.kind = kind;
+    }
+
+    // The entry `entry` of this enum class, as an argument naming it reaches it. krusty describes
+    // nothing of it but its name and place, so the other queries are refused.
+    LibraryClass entry(String entry) {
+        return entries.computeIfAbsent(entry, name -> {
+            LibraryClass declaration = new LibraryClass(
+                    classpath, name, qualifiedName.asString() + "." + name, ClassKind.ENUM_ENTRY);
+            declaration.packageName = packageName;
+            declaration.parent = qualifiedName.asString();
+            declaration.origin = origin;
+            return declaration;
+        });
     }
 
     private NotImplemented library(String member) {
@@ -41,7 +77,7 @@ final class LibraryClass implements KSClassDeclaration {
 
     @Override
     public ClassKind getClassKind() {
-        throw library("classKind");
+        return kind;
     }
 
     @Override
@@ -51,7 +87,10 @@ final class LibraryClass implements KSClassDeclaration {
 
     @Override
     public Sequence<KSTypeReference> getSuperTypes() {
-        throw library("superTypes");
+        if (superTypes == null) {
+            throw library("superTypes with a supertype krusty cannot describe");
+        }
+        return Nodes.sequence(superTypes);
     }
 
     @Override
@@ -86,22 +125,25 @@ final class LibraryClass implements KSClassDeclaration {
 
     @Override
     public KSName getSimpleName() {
-        throw library("simpleName");
+        return simpleName;
     }
 
     @Override
     public List<KSTypeParameter> getTypeParameters() {
-        throw library("typeParameters");
+        if (typeParameters == null) {
+            throw library("typeParameters with a bound krusty cannot describe");
+        }
+        return typeParameters;
     }
 
     @Override
     public KSName getPackageName() {
-        throw library("packageName");
+        return packageName;
     }
 
     @Override
     public KSDeclaration getParentDeclaration() {
-        throw library("parentDeclaration");
+        return parent == null ? null : classpath.classNamed(parent);
     }
 
     @Override
@@ -121,12 +163,18 @@ final class LibraryClass implements KSClassDeclaration {
 
     @Override
     public Set<Modifier> getModifiers() {
-        throw library("modifiers");
+        if (modifiers == null) {
+            throw library("modifiers of a declaration whose modifiers krusty does not derive yet");
+        }
+        return modifiers;
     }
 
     @Override
     public Sequence<KSAnnotation> getAnnotations() {
-        throw library("annotations");
+        if (!annotationsComplete) {
+            throw library("annotations krusty cannot read");
+        }
+        return Nodes.sequence(annotations);
     }
 
     @Override
@@ -151,17 +199,17 @@ final class LibraryClass implements KSClassDeclaration {
 
     @Override
     public Origin getOrigin() {
-        throw library("origin");
+        return origin;
     }
 
     @Override
     public Location getLocation() {
-        throw library("location");
+        return NonExistLocation.INSTANCE;
     }
 
     @Override
     public KSNode getParent() {
-        throw library("parent");
+        return getParentDeclaration();
     }
 
     @Override
@@ -171,6 +219,6 @@ final class LibraryClass implements KSClassDeclaration {
 
     @Override
     public String toString() {
-        return qualifiedName.getShortName();
+        return simpleName.asString();
     }
 }

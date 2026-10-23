@@ -16,6 +16,130 @@ fn assert_module_matches_kotlinc(sources: &[(&str, &str)]) {
     );
 }
 
+#[test]
+fn constructor_property_annotations_match_kotlinc_in_both_source_orders() {
+    const POLICY: &str = r#"
+import kotlin.reflect.KClass
+@Target(AnnotationTarget.PROPERTY)
+annotation class PropertyMark(val type: KClass<*>)
+@Target(AnnotationTarget.PROPERTY, AnnotationTarget.VALUE_PARAMETER, AnnotationTarget.PROPERTY_GETTER)
+annotation class Other(val text: String)
+@Target(AnnotationTarget.VALUE_PARAMETER)
+annotation class ParamOnly(val text: String)
+class Token
+"#;
+    const USE: &str = r#"
+class Subject(
+    @PropertyMark(Token::class) @param:Other("parameter") @get:Other("getter") val first: Int,
+    @ParamOnly("default parameter") val second: Int,
+    @property:Other("property") val third: Int
+)
+"#;
+    for sources in [
+        [("Subject.kt", USE), ("Marks.kt", POLICY)],
+        [("Marks.kt", POLICY), ("Subject.kt", USE)],
+    ] {
+        assert_module_matches_kotlinc(&sources);
+    }
+}
+
+#[test]
+fn constructor_parameter_annotation_values_are_seeded_by_retention_before_the_body() {
+    assert_module_matches_kotlinc(&[(
+        "ConstructorAnnotations.kt",
+        r#"
+import kotlin.reflect.KClass
+annotation class Nested(val text: String)
+@Target(AnnotationTarget.VALUE_PARAMETER)
+annotation class Visible(val text: String, val nested: Nested, val types: Array<KClass<*>>)
+@Target(AnnotationTarget.VALUE_PARAMETER)
+@Retention(AnnotationRetention.BINARY)
+annotation class Invisible(val values: IntArray, val type: KClass<*>)
+class Token
+class Subject(
+    @Invisible([3, 5], Token::class) @Visible("first", Nested("nested"), [Token::class]) val first: String,
+    @Visible("second", Nested("other"), [String::class]) @Invisible([7], String::class) val second: String?
+)
+"#,
+    )]);
+}
+
+#[test]
+fn constructor_parameter_property_default_targets_match_kotlinc() {
+    let policy = (
+        "DefaultTargetPolicies.kt",
+        r#"package defaults
+@Target(AnnotationTarget.VALUE_PARAMETER, AnnotationTarget.PROPERTY, AnnotationTarget.FIELD,
+        AnnotationTarget.PROPERTY_GETTER)
+annotation class PropertyMark(val text: String)
+@Target(AnnotationTarget.VALUE_PARAMETER, AnnotationTarget.FIELD)
+annotation class FieldMark(val text: String)
+@Target(AnnotationTarget.VALUE_PARAMETER)
+annotation class ParameterMark(val text: String)
+"#,
+    );
+    let usage = (
+        "DefaultTargetSubject.kt",
+        r#"package defaults
+class Subject(
+    @PropertyMark("both") val both: Int,
+    @FieldMark("parameter and field") val parameterAndField: Int,
+    @ParameterMark("parameter only") val parameterOnly: Int,
+    @param:PropertyMark("explicit parameter") val explicitParameter: Int,
+    @property:PropertyMark("explicit property") val explicitProperty: Int,
+    @field:PropertyMark("explicit field") val explicitField: Int,
+    @get:PropertyMark("explicit getter") val explicitGetter: Int,
+    @PropertyMark("plain parameter") plain: Int
+)
+"#,
+    );
+    assert_module_matches_kotlinc(&[policy, usage]);
+    assert_module_matches_kotlinc(&[usage, policy]);
+}
+
+#[test]
+fn configured_default_targets_in_older_and_current_language_match_kotlinc() {
+    let policies = r#"package configured
+@Target(AnnotationTarget.VALUE_PARAMETER, AnnotationTarget.PROPERTY, AnnotationTarget.FIELD)
+annotation class Mark(val text: String)
+"#;
+    let source = r#"package configured
+class Subject(
+    @Mark("default") val defaulted: Int,
+    @param:Mark("parameter") val parameterOnly: Int,
+    @property:Mark("property") val propertyOnly: Int,
+    @field:Mark("field") val fieldOnly: Int
+)
+"#;
+    for language in [
+        krusty::language_version::LanguageVersion::V2_3,
+        krusty::language_version::LanguageVersion::V2_4,
+    ] {
+        let settings = krusty::language_settings::LanguageSettings::new(language, None, &[])
+            .expect("valid language settings");
+        let classes = common::classes_against_kotlinc_lib_language_settings(
+            "ConfiguredDefaultTargets",
+            &[("Policies.kt", policies)],
+            source,
+            &settings,
+        )
+        .expect("reference compiler is provisioned");
+        assert_eq!(classes.differences(), Vec::<String>::new(), "{language:?}");
+    }
+}
+
+#[test]
+fn fieldless_annotation_properties_do_not_gain_a_default_field_application() {
+    assert_module_matches_kotlinc(&[(
+        "FieldlessDefaultTargets.kt",
+        r#"package fieldless
+@Target(AnnotationTarget.VALUE_PARAMETER, AnnotationTarget.FIELD)
+annotation class Mark(val text: String)
+annotation class Subject(@Mark("parameter only") val value: Int)
+"#,
+    )]);
+}
+
 const ANNOTATIONS: &str = "package accessors\n\
     \n\
     @Retention(AnnotationRetention.RUNTIME)\n\

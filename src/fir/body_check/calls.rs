@@ -1526,7 +1526,19 @@ impl BodyFirChecker<'_> {
                     BodyCheckFailureKind::UnsupportedCallShape,
                 )
             })?;
-            *parameter = array;
+            // A generic element is the selected one (`vararg values: T` with `T = String` packs a
+            // `String[]`); the physical slot carries only its erasure.
+            *parameter = match array.type_args().first().map(|argument| argument.kind()) {
+                Some(crate::types::TyKind::OutProjection(_)) if array.is_reference_array() => {
+                    Ty::obj_args_name(crate::types::wk::array(), &[Ty::out_projection(*parameter)])
+                }
+                // A reference array stays one when the element is a primitive: `T = Int` packs
+                // an `Integer[]`, never an `int[]`.
+                Some(_) if array.is_reference_array() => {
+                    Ty::obj_args_name(crate::types::wk::array(), &[*parameter])
+                }
+                _ => array,
+            };
         }
         if let Some(declaration) = stable_declaration {
             let callable = self

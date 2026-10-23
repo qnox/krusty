@@ -198,15 +198,15 @@ impl From<&crate::types::AnnotationValue> for AnnoValue {
                 AnnoValue::Enum(*internal, constant.clone())
             }
             AnnotationValue::Class(ty) => AnnoValue::Class(*ty),
-            AnnotationValue::Annotation { internal, values } => {
-                AnnoValue::Annotation(AppliedAnnotation {
-                    internal: *internal,
-                    values: values
-                        .iter()
-                        .map(|(name, value)| (name.clone(), AnnoValue::from(value)))
-                        .collect(),
-                })
-            }
+            AnnotationValue::Annotation {
+                internal, values, ..
+            } => AnnoValue::Annotation(AppliedAnnotation {
+                internal: *internal,
+                values: values
+                    .iter()
+                    .map(|(name, value)| (name.clone(), AnnoValue::from(value)))
+                    .collect(),
+            }),
             AnnotationValue::Array(values) => {
                 AnnoValue::Array(values.iter().map(AnnoValue::from).collect())
             }

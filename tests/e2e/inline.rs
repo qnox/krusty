@@ -82,6 +82,10 @@ mod inline_lambda_value_argument_e2e;
 mod inline_lambda_value_class_result_e2e;
 #[path = "../inline_lambda_value_return_e2e.rs"]
 mod inline_lambda_value_return_e2e;
+#[path = "../inline_non_local_jump_finally_e2e.rs"]
+mod inline_non_local_jump_finally_e2e;
+#[path = "../inline_non_local_return_finally_e2e.rs"]
+mod inline_non_local_return_finally_e2e;
 #[path = "../inline_object_regeneration_e2e.rs"]
 mod inline_object_regeneration_e2e;
 #[path = "../inline_only_extension_property_e2e.rs"]

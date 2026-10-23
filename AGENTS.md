@@ -88,6 +88,10 @@ upstream release notes, which can name an assistant that contributed upstream. T
   never retry with a different supported version. Add and validate that exact version, reject it
   explicitly, or correct a checkout-specific misconfiguration in that checkout rather than in
   krusty production code.
+- The compiler/plugin wire model must track the existing `KRUSTY_BUILD_CHECKOUT` in Cargo dep-info.
+  A shared target must not authenticate a sibling checkout's typed model by source mtimes alone.
+  Test checkout switching and unchanged-checkout reuse; do not clean the shared target to mask it.
+  Audit: `rg -n 'KRUSTY_BUILD_CHECKOUT|shared_target_rebuilds_plugin_ir' .cargo crates/krusty-plugin-ir`.
 - Record every Kotlin-semantics decision in `docs/SPEC.md` with a test.
 - Keep `docs/SPEC.md`, `docs/IMPLEMENTATION_PLAN.md`, and `docs/METADATA_NOTES.md` current.
 
