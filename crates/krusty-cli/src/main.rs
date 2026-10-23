@@ -241,7 +241,15 @@ fn run_verify_compile(argv: &[String]) {
                     Err(report) => verify::Outcome::Failed {
                         errors: error_lines(&report),
                     },
-                    Ok(_) => match verify::compare_outputs(&arguments.reference, &opts.dest) {
+                    Ok(_) => match verify::compare_outputs(
+                        &arguments.reference,
+                        &opts.dest,
+                        if arguments.kotlin_outputs_only {
+                            verify::ReferenceOutputs::KotlinOnly
+                        } else {
+                            verify::ReferenceOutputs::All
+                        },
+                    ) {
                         Ok(comparison) => verify::Outcome::Compiled { comparison },
                         Err(error) => {
                             eprintln!("error: cannot compare the outputs: {error}");

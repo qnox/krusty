@@ -427,6 +427,11 @@ final class Symbols {
         return classpath.classNamed(qualifiedName);
     }
 
+    // The module's classpath.
+    Classpath classpath() {
+        return classpath;
+    }
+
     // The classifier a resolved type or value names, which krusty found when it resolved it.
     KSClassDeclaration resolvedClass(String qualifiedName) {
         KSClassDeclaration declaration = classNamed(qualifiedName);

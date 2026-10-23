@@ -441,6 +441,16 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         None
     }
 
+    /// The platform class the classifier is mapped to, as kotlinc's class map gives it.
+    fn platform_class(&self, _classifier: TypeName) -> Option<TypeName> {
+        None
+    }
+
+    /// The classifier the platform class is read as, as kotlinc's class map gives it.
+    fn mapped_classifier(&self, _class: TypeName) -> Option<TypeName> {
+        None
+    }
+
     /// Whether this classifier is an `expect annotation class` with no declaration on the current
     /// target. It is visible in common sources and erased when that target supplies no `actual`.
     fn is_optional_expectation(&self, _classifier: TypeName) -> bool {

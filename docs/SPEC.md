@@ -2710,6 +2710,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   against its own type parameters, not their erasure; only the descriptor erases them. An
   anonymous function is signed the same way, while a lambda literal's method carries no
   `Signature` (`tests/local_function_signature_e2e.rs`).
+- **Local-call applied parameters.** Checked local calls retain every selected value parameter in
+  declaration order, including context slots but excluding extension receivers and lifted captures.
+  Generic vararg packing uses that applied array type, not the local declaration's erased array;
+  `T = Int` packs a reference `Array<Int>`, while the declaration's own parameter and generic
+  signature stay unchanged. Physical capture/default mapping and declaration-boundary coercions
+  remain separate. A mismatched checked/declaration value arity is rejected, not reconstructed.
+  Tests: `local_function_signature_e2e::local_generic_vararg_arrays_keep_the_selected_element_at_runtime`
+  and the companion strict whole-class comparison, plus checked-FIR parameter/arity units.
 - **Lifted captured value order (kotlinc's `ClosureAnnotator`).** The captured values lead a lifted
   local function's parameters in the order its closure first sees them, never by name: first the
   values its defaults and body read, in source order, then the closures of the local functions it
@@ -16037,6 +16045,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `library_classes_are_the_headers_ksp2_reports`; `src/jvm/jvm_libraries/declaration_headers.rs`,
   `an_unreadable_generic_signature_is_not_a_nongeneric_class`,
   `a_container_holding_a_value_that_is_not_an_annotation_is_unreadable`.)
+- **KSP maps names between Kotlin and the JVM by kotlinc's class map.** `mapKotlinNameToJava` and
+  `mapJavaNameToKotlin` answer what kotlinc's `JavaToKotlinClassMap` does for the classifier the
+  name resolves to on the module's classpath. A mapped builtin, a read-only or mutable collection
+  and a primitive map to their JVM class (`kotlin.Int` to `java.lang.Integer`,
+  `kotlin.collections.MutableMap.MutableEntry` to `java.util.Map.Entry`), and a primitive type's,
+  `String`'s or `Enum`'s companion to its `kotlin.jvm.internal` companion class. `kotlin.Nothing`
+  maps to `java.lang.Void`, but not back, and so does each `kotlin.concurrent.atomics` class to
+  its `java.util.concurrent.atomic` class. A function classifier maps to its numbered
+  `kotlin.jvm.functions` interface, or to `FunctionN` beyond arity 22 (a suspend function's
+  continuation counting, so from `SuspendFunction22`), and a `KFunctionN` or `KSuspendFunctionN`
+  to `kotlin.reflect.KFunction`; the reverse reads only a numbered interface. The other way, a JVM
+  class maps to the read-only collection. `Unit`, an array, a typealias, a source class, an
+  unmapped class and an unknown name map to nothing.
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `mapped_names_are_what_ksp2_reports`;
+  `crates/krusty-plugin-host/tests/ksp_library_classes.rs`, `mapped_names_are_what_ksp2_reports`.)
 
 ## 8. Success criteria for the PoC
 
@@ -21120,3 +21143,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a required erased-array `checkcast` remains. This does not establish a general non-null call
   result fact. Primitive-array and incompatible component casts keep ordinary cast behavior.
   Regression: `call_result_non_null_cast_e2e` compares complete classfiles and real JVM results.
+
+## JVM signature construction boundary
+
+Generic-signature syntax retains each written class segment's physical identity and whether its
+arguments were omitted or explicitly supplied. A declaration-owned application builder receives the
+complete outer-to-inner segment sequence before any captured-formal flattening. The same builder
+handles nested arguments, arrays, bounds, method positions and class supertypes; refusal is terminal.
+Field descriptor authentication uses physical syntax independently of the constructed semantic type.
+
+The standalone reader keeps its existing innermost-only interpretation and refuses fields whose
+outer arguments it discards. This boundary supplies lossless evidence for the raw/captured application
+follow-ups; it does not itself publish new raw or captured application semantics.
