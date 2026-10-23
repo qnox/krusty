@@ -1302,6 +1302,7 @@ mod tests {
             is_value: false,
             is_full_value: false,
             is_data: false,
+            is_script: false,
             decl_line: 0,
             decl_start_line: 0,
             decl_end_line: 0,

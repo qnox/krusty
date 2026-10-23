@@ -3231,8 +3231,7 @@ fn stable_function_signature<'a>(
             | DeclarationKind::Classifier
             | DeclarationKind::EnumEntry
             | DeclarationKind::TypeAlias
-            | DeclarationKind::Initializer
-            | DeclarationKind::Script => return None,
+            | DeclarationKind::Initializer => return None,
         }
         if let Some(name) = stub
             .lookup_name
@@ -3771,8 +3770,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 | DeclarationKind::TypeAlias
                 | DeclarationKind::Accessor
                 | DeclarationKind::Initializer
-                | DeclarationKind::EnumEntry
-                | DeclarationKind::Script => continue,
+                | DeclarationKind::EnumEntry => continue,
             }
         };
         let Some((mut parameters, mut result, mut receiver)) = signature else {
@@ -4292,8 +4290,7 @@ pub(crate) fn finalized_streamed_signature_index(
             | DeclarationKind::TypeAlias
             | DeclarationKind::Constructor
             | DeclarationKind::Accessor
-            | DeclarationKind::Initializer
-            | DeclarationKind::Script => None,
+            | DeclarationKind::Initializer => None,
         };
         let Some(parameters) = parameters else {
             failed.push(stub.id);
@@ -5422,8 +5419,7 @@ pub(crate) fn finalized_streamed_signature_index(
             | DeclarationKind::EnumEntry
             | DeclarationKind::TypeAlias
             | DeclarationKind::Accessor
-            | DeclarationKind::Initializer
-            | DeclarationKind::Script => unreachable!("callable publication filter"),
+            | DeclarationKind::Initializer => unreachable!("callable publication filter"),
         }
     }
     // A body-local classifier may expose a callable to an earlier-streamed ordinary body through

@@ -11,31 +11,42 @@
 use crate::fx_hash::HashMap;
 use std::collections::VecDeque;
 
-use super::body_lowering::{BodyLowering, LinkedCallee, LoweredFunction};
+use super::body_lowering::{
+    BodyLowering, CallLinker, LinkedAccessor, LinkedCallee, LinkedConstructor, LoweredFunction,
+};
 use super::callee_facts::{KlibCalleeFact, KlibCalleeFacts};
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
 use super::function_lowering::{
-    declare_function, function_header, function_header_with_emitted_dispatch, FunctionHeader,
+    declare_function, function_header, raw_function_header, FunctionHeader, HeaderPurpose,
 };
-use super::ir_builtins::IrBuiltinOperators;
+use super::ir_builtins::{BuiltinCallDisposition, IrBuiltinOperators};
+use super::lowering_checkpoint::LoweringCheckpoint;
 use crate::fir::ExternalCallableId;
-use crate::ir::{Callee, ExprId, FunId, IrFile};
+use crate::ir::{Callee, FunId, IrFile};
 use crate::klib_libraries::{
     KlibCalleeOrigin, KlibDeclarationBodies, KlibIntrinsicCallable, KlibIntrinsicFacts,
 };
 use crate::libraries::{KlibBodyCallable, KlibDeclarationSignature, KlibDependencyCallable};
-use crate::metadata::id_signature::KlibPublicIdSignature;
+use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
 use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrBody, KlibIrFunction, KlibIrStatement};
 use crate::metadata::klib_ir::KlibIrSymbol;
 use crate::types::{Ty, TypeName};
 
-/// A dependency declaration emitted by an earlier support unit, rebound to this compilation's
-/// opaque provider handle while retaining the semantic receiver contract frozen at emission.
+/// An exact dependency edge linked outside this support unit. Body exports, target instruction
+/// leaves and constructor calls have distinct realization contracts.
 #[derive(Clone, Copy)]
 pub(crate) struct EmittedDependencyCallable {
     target: ExternalCallableId,
+    realization: DependencyExternalRealization,
     singleton_dispatch: Option<Ty>,
     singleton_classifier: Option<TypeName>,
+}
+
+#[derive(Clone, Copy)]
+enum DependencyExternalRealization {
+    EmittedBody,
+    TargetIntrinsic(crate::libraries::CompilerIntrinsic),
+    Constructor,
 }
 
 impl EmittedDependencyCallable {
@@ -46,6 +57,7 @@ impl EmittedDependencyCallable {
     ) -> Self {
         Self {
             target,
+            realization: DependencyExternalRealization::EmittedBody,
             singleton_dispatch,
             singleton_classifier,
         }
@@ -53,6 +65,34 @@ impl EmittedDependencyCallable {
 
     pub(crate) fn target(self) -> ExternalCallableId {
         self.target
+    }
+
+    pub(crate) fn target_realization(
+        target: ExternalCallableId,
+        operation: crate::libraries::CompilerIntrinsic,
+    ) -> Self {
+        Self {
+            realization: DependencyExternalRealization::TargetIntrinsic(operation),
+            ..Self::new(target, None, None)
+        }
+    }
+
+    pub(crate) fn constructor(target: ExternalCallableId) -> Self {
+        Self {
+            realization: DependencyExternalRealization::Constructor,
+            ..Self::new(target, None, None)
+        }
+    }
+
+    fn target_intrinsic(self) -> Option<crate::libraries::CompilerIntrinsic> {
+        match self.realization {
+            DependencyExternalRealization::TargetIntrinsic(operation) => Some(operation),
+            _ => None,
+        }
+    }
+
+    fn is_constructor(self) -> bool {
+        matches!(self.realization, DependencyExternalRealization::Constructor)
     }
 
     pub(crate) fn singleton_dispatch(self) -> Option<Ty> {
@@ -106,6 +146,28 @@ struct PendingBody<'a> {
 }
 
 impl DependencyBodyUnit {
+    /// A positive capability for graph preparation, using the same classification as lowering.
+    /// Provider header evidence is not a source selection. Ambiguity, selected roots (including
+    /// recursive calls), and non-public declarations never authorize folding a declaration edge.
+    pub(crate) fn folds_common_builtin(
+        &self,
+        identity: &KlibDependencyCallable,
+        callees: &KlibCalleeFacts<'_>,
+    ) -> bool {
+        let KlibDeclarationSignature::Public(signature) = &identity.declaration else {
+            return false;
+        };
+        matches!(
+            self.builtins.call_disposition(signature, || {
+                if matches!(callees.get(identity), Some(KlibCalleeFact::Ambiguous)) {
+                    return Err(());
+                }
+                Ok(callees.is_selected(identity))
+            }),
+            Ok(BuiltinCallDisposition::Common(_))
+        )
+    }
+
     /// Whether this selected declaration has the exact scalar boundary of an instruction wrapper:
     /// a non-member whose operands are scalars of an instruction class and whose result is such a
     /// scalar or `Boolean`. This is a semantic type/receiver contract, not a declaration-name
@@ -380,7 +442,7 @@ impl DependencyBodyUnit {
 
 /// Joins the calls of the bodies being lowered to the unit's functions, declaring each callee
 /// reached for the first time and queueing its body.
-pub(super) struct Linker<'u, 's> {
+struct Linker<'u, 's> {
     functions: &'u mut HashMap<KlibDependencyCallable, FunId>,
     authenticated_singleton_dispatches: &'u mut HashMap<KlibDependencyCallable, Ty>,
     authenticated_singleton_classifiers: &'u mut HashMap<KlibDependencyCallable, TypeName>,
@@ -393,11 +455,125 @@ pub(super) struct Linker<'u, 's> {
     sources: Sources<'s>,
 }
 
-impl<'s> Linker<'_, 's> {
-    /// Whether a checked source edge selected this exact producer-resolved declaration. A body
-    /// call of such a declaration must remain a callable edge so the closed unit exports code for
-    /// the source call; an otherwise identical unselected compiler builtin may be folded.
-    pub(super) fn is_selected(
+impl CallLinker for Linker<'_, '_> {
+    fn common_primitive(
+        &self,
+        signature: &KlibDeclarationSignature,
+    ) -> Result<Option<super::primitive_calls::CommonPrimitiveCall>, KlibBodyDeclineReason> {
+        // Keep the existing public-call obligation and canonical ambiguity diagnostics. A
+        // positive primitive capability does not own selection or producer-origin failures.
+        if let KlibDeclarationSignature::Public(callee) = signature {
+            if self.requires_declaration(callee)? {
+                return Ok(None);
+            }
+        }
+        let identity = match self
+            .sources
+            .bodies
+            .callee_origin(&self.active_module, signature)
+        {
+            KlibCalleeOrigin::Exact(identity) => identity,
+            KlibCalleeOrigin::Missing => return Ok(None),
+            KlibCalleeOrigin::Ambiguous => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "ambiguous producer origin for a primitive declaration".to_owned(),
+                ))
+            }
+        };
+        let primitive = self
+            .sources
+            .callees
+            .common_primitive(&identity, self.sources.bodies)?;
+        Ok(
+            if self.sources.externals.contains_key(&identity) || &identity == self.root.identity() {
+                None
+            } else {
+                primitive
+            },
+        )
+    }
+
+    fn is_subtype(&self, sub: Ty, sup: Ty) -> bool {
+        // A support unit has no semantic model of the classes its body names.
+        sub == sup
+    }
+
+    fn link_constructor(
+        &mut self,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<LinkedConstructor, KlibBodyDeclineReason> {
+        let identity = self.callee_identity(callee)?;
+        let (_, function) = self.sources.bodies.function(&identity).ok_or_else(|| {
+            KlibBodyDeclineReason::SignatureMismatch(
+                "a constructor call has no serialized function header".to_owned(),
+            )
+        })?;
+        super::constructor_calls::require_constructor_kind(function)?;
+        if matches!(self.sources.callees.get(&identity), Some(KlibCalleeFact::Selected(callables))
+            if callables[0].kind() != crate::libraries::ExternalCallableKind::Constructor)
+        {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "a constructor call selected a non-constructor provider declaration".to_owned(),
+            ));
+        }
+        let declaration = self
+            .sources
+            .callees
+            .constructor(&identity, self.sources.bodies)?
+            // Producer lookup above already proved the serialized declaration exists. Without
+            // exact provider evidence this unit cannot realize construction; that is not a
+            // missing declaration and must not invent a constructor handle.
+            .ok_or_else(|| KlibBodyDeclineReason::UnsupportedCallee(Box::new(callee.clone())))?;
+        let target = self
+            .sources
+            .externals
+            .get(&identity)
+            .filter(|external| external.is_constructor())
+            .ok_or_else(|| {
+                KlibBodyDeclineReason::SignatureMismatch(
+                    "an authenticated constructor has no exact constructor external handle"
+                        .to_owned(),
+                )
+            })?
+            .target();
+        Ok(LinkedConstructor {
+            target,
+            declaration,
+        })
+    }
+
+    fn constructor_bound(
+        &self,
+        parameters: &super::klib_types::KlibTypeParameters,
+        argument: Ty,
+        bound: Ty,
+    ) -> bool {
+        self.sources
+            .callees
+            .constructor_bound(parameters, argument, bound)
+    }
+
+    fn singleton(&self, _classifier: TypeName) -> Result<(), KlibBodyDeclineReason> {
+        Err(KlibBodyDeclineReason::UnsupportedOperation(
+            "an object value",
+        ))
+    }
+
+    fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {
+        // A support unit links no member of a generic class.
+        (sub.kotlin_class_internal() == Some(owner)).then_some(sub)
+    }
+
+    fn link_accessor(
+        &mut self,
+        _callee: &KlibAccessorIdSignature,
+    ) -> Result<LinkedAccessor, KlibBodyDeclineReason> {
+        Err(KlibBodyDeclineReason::UnsupportedOperation(
+            "a call through a property accessor signature",
+        ))
+    }
+
+    fn requires_declaration(
         &self,
         callee: &KlibPublicIdSignature,
     ) -> Result<bool, KlibBodyDeclineReason> {
@@ -422,16 +598,15 @@ impl<'s> Linker<'_, 's> {
         }
         let selection = self.sources.callees.get(&identity);
         match selection {
-            None => Ok(false),
-            Some(KlibCalleeFact::Selected(_)) => Ok(true),
             Some(KlibCalleeFact::Ambiguous) => Err(KlibBodyDeclineReason::AmbiguousCallee(
                 Box::new(callee.clone()),
             )),
+            _ => Ok(self.sources.callees.is_selected(&identity)
+                || self.sources.externals.contains_key(&identity)),
         }
     }
 
-    /// The function a call of the public declaration `callee` invokes.
-    pub(super) fn link(
+    fn link(
         &mut self,
         ir: &mut IrFile,
         callee: &KlibPublicIdSignature,
@@ -467,8 +642,13 @@ impl<'s> Linker<'_, 's> {
             .function(&identity)
             .ok_or_else(|| callee_declined(KlibBodyDeclineReason::Unjoined))?;
         if let Some(intrinsic) = self.sources.intrinsics.get(&identity) {
-            let selected = selected_callable_for_header(selected, None, arena, declaration)
-                .map_err(&callee_declined)?;
+            let selected = selected_callable_for_header_purpose(
+                selected,
+                HeaderPurpose::External,
+                arena,
+                declaration,
+            )
+            .map_err(&callee_declined)?;
             self.cross_check_intrinsic(callee, selected, intrinsic)?;
             // A target intrinsic stays an ordinary call of its declaration; only the target's
             // emitter realizes it, through the provider fact frozen on the external handle. The
@@ -493,23 +673,39 @@ impl<'s> Linker<'_, 's> {
                 ret: intrinsic.ret(),
                 context_count: 0,
                 singleton_dispatch: None,
+                type_parameters: Vec::new(),
+                class_type_parameters: Vec::new(),
             });
         }
         if let Some(&emitted) = self.sources.externals.get(&identity) {
-            let selected = selected_callable_for_header(
-                selected,
-                emitted.singleton_dispatch(),
-                arena,
-                declaration,
-            )
-            .map_err(&callee_declined)?;
-            let header = function_header_with_emitted_dispatch(
-                selected,
-                emitted.singleton_dispatch(),
-                arena,
-                declaration,
-            )
-            .map_err(callee_declined)?;
+            if emitted.is_constructor() {
+                return Err(callee_declined(KlibBodyDeclineReason::SignatureMismatch(
+                    "a constructor external is called as a function".to_owned(),
+                )));
+            }
+            if let Some(operation) = emitted.target_intrinsic() {
+                if self
+                    .sources
+                    .callees
+                    .target_intrinsic(&identity, self.sources.bodies, &|found| found == operation)
+                    .map_err(callee_declined)?
+                    != Some(operation)
+                {
+                    return Err(callee_declined(KlibBodyDeclineReason::SignatureMismatch(
+                        "a target leaf has no matching provider declaration".to_owned(),
+                    )));
+                }
+            }
+            let purpose = if emitted.target_intrinsic().is_some() || declaration.body.is_none() {
+                HeaderPurpose::External
+            } else {
+                HeaderPurpose::Body(emitted.singleton_dispatch())
+            };
+            let selected =
+                selected_callable_for_header_purpose(selected, purpose, arena, declaration)
+                    .map_err(&callee_declined)?;
+            let header = raw_function_header(selected, purpose, arena, declaration)
+                .map_err(callee_declined)?;
             let (params, ret, context_count, extension_receiver, receiver) =
                 header.linked_signature();
             return Ok(LinkedCallee {
@@ -528,6 +724,14 @@ impl<'s> Linker<'_, 's> {
                 ret,
                 context_count,
                 singleton_dispatch: emitted.singleton_classifier(),
+                type_parameters: if emitted.target_intrinsic().is_some() {
+                    selected
+                        .and_then(|selected| selected.generic_signature())
+                        .map_or_else(Vec::new, |signature| signature.formals.clone())
+                } else {
+                    Vec::new()
+                },
+                class_type_parameters: Vec::new(),
             });
         }
         if declaration.dispatch_receiver.is_some() {
@@ -564,9 +768,13 @@ impl<'s> Linker<'_, 's> {
             ret: declaration.ret,
             context_count: ir.fn_context_counts.get(&function).copied().unwrap_or(0),
             singleton_dispatch: None,
+            type_parameters: Vec::new(),
+            class_type_parameters: Vec::new(),
         })
     }
+}
 
+impl<'s> Linker<'_, 's> {
     fn callee_identity(
         &self,
         callee: &KlibPublicIdSignature,
@@ -676,18 +884,27 @@ fn selected_callable_for_header<'callable>(
     arena: &KlibIrArena,
     function: &KlibIrFunction,
 ) -> Result<Option<KlibBodyCallable<'callable>>, KlibBodyDeclineReason> {
+    selected_callable_for_header_purpose(
+        candidates,
+        HeaderPurpose::Body(emitted_singleton_dispatch),
+        arena,
+        function,
+    )
+}
+
+fn selected_callable_for_header_purpose<'callable>(
+    candidates: Option<SelectedKlibCallables<'callable, '_>>,
+    purpose: HeaderPurpose,
+    arena: &KlibIrArena,
+    function: &KlibIrFunction,
+) -> Result<Option<KlibBodyCallable<'callable>>, KlibBodyDeclineReason> {
     let Some(candidates) = candidates else {
         return Ok(None);
     };
     let mut selected = None;
     let mut first_mismatch = None;
     let mut consider = |candidate| {
-        match function_header_with_emitted_dispatch(
-            Some(candidate),
-            emitted_singleton_dispatch,
-            arena,
-            function,
-        ) {
+        match raw_function_header(Some(candidate), purpose, arena, function) {
             Ok(_) if selected.is_none() => selected = Some(candidate),
             Ok(_) => return Some(KlibBodyDeclineReason::SignatureMismatch(
                 "more than one checked call-edge variant agrees with the serialized declaration"
@@ -721,47 +938,17 @@ fn selected_callable_for_header<'callable>(
     })
 }
 
-/// What a unit held before a lowering began. Lowering appends functions and expressions and
-/// records facts keyed by them; restoring removes exactly those.
-struct UnitCheckpoint {
-    expressions: usize,
-    functions: usize,
-}
+/// What a unit held before a lowering began: its IR ([`LoweringCheckpoint`]) and the identities
+/// joined to the functions that IR declares.
+struct UnitCheckpoint(LoweringCheckpoint);
 
 impl UnitCheckpoint {
     fn of(unit: &DependencyBodyUnit) -> Self {
-        Self {
-            expressions: unit.ir.exprs.len(),
-            functions: unit.ir.functions.len(),
-        }
+        Self(LoweringCheckpoint::of(&unit.ir))
     }
 
     fn restore(self, unit: &mut DependencyBodyUnit) {
-        let first = ExprId::try_from(self.expressions).expect("an expression id fits u32");
-        let ir = &mut unit.ir;
-        ir.exprs.truncate(self.expressions);
-        ir.logical_types.retain(|expression, _| *expression < first);
-        ir.checked_return_depths
-            .retain(|expression, _| *expression < first);
-        ir.binding_read_stability
-            .retain(|expression, _| *expression < first);
-        ir.callable_scopes.retain(|expression| *expression < first);
-        ir.negations.retain(|expression| *expression < first);
-        ir.short_circuits
-            .retain(|expression, _| *expression < first);
-        ir.written_casts.retain(|expression| *expression < first);
-        ir.whens
-            .exhaustive
-            .retain(|expression, _| *expression < first);
-        let first = FunId::try_from(self.functions).expect("a function id fits u32");
-        ir.functions.truncate(self.functions);
-        ir.fn_source_names.retain(|function, _| *function < first);
-        ir.fn_params.retain(|function, _| *function < first);
-        ir.extension_receiver_fns
-            .retain(|function| *function < first);
-        ir.fn_context_counts.retain(|function, _| *function < first);
-        ir.singleton_extension_unread_receivers
-            .retain(|function, _| *function < first);
+        let first = self.0.restore(&mut unit.ir);
         unit.functions.retain(|_, function| *function < first);
         let functions = &unit.functions;
         unit.authenticated_singleton_dispatches

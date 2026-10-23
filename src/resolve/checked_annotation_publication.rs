@@ -15,6 +15,7 @@ pub(crate) fn publish_checked_declaration_annotations(
     table: &mut SymbolTable,
     diags: &mut DiagSink,
 ) {
+    let mut constructor_properties = Vec::new();
     for (file_index, file) in files.iter().enumerate() {
         let declarations = table
             .classes
@@ -148,7 +149,13 @@ pub(crate) fn publish_checked_declaration_annotations(
             else {
                 continue;
             };
-            publish_classifier_member_annotations(index, owner, class, &info);
+            publish_classifier_member_annotations(
+                index,
+                owner,
+                class,
+                &info,
+                &mut constructor_properties,
+            );
             if let Some(defaults) = info.annotation_element_defaults(internal) {
                 index.publish_annotation_element_defaults(owner, defaults.to_vec());
             }
@@ -186,6 +193,9 @@ pub(crate) fn publish_checked_declaration_annotations(
                 Decl::Class(_) => {}
             }
         }
+    }
+    for property in constructor_properties {
+        property.publish(index);
     }
 }
 
@@ -257,6 +267,35 @@ fn checked_applications<'a>(
         .collect()
 }
 
+/// A constructor property's checked values outlive its file's annotation fold, not its syntax or
+/// TypeInfo. Partition only after every source annotation class has published its target policy.
+struct PendingConstructorPropertyAnnotations {
+    declaration: crate::fir::DeclarationId,
+    applications: Vec<(
+        Option<crate::types::PropertyAnnotationSite>,
+        crate::types::AppliedAnnotation,
+    )>,
+}
+
+impl PendingConstructorPropertyAnnotations {
+    fn publish(self, index: &mut crate::fir::ResolvedModuleIndex) {
+        let applications: Vec<_> = self
+            .applications
+            .into_iter()
+            .filter_map(|(explicit_site, annotation)| {
+                let targets = index
+                    .annotation_targets()
+                    .semantic(annotation.internal)
+                    .unwrap_or(annotation.targets);
+                let site = explicit_site.or_else(|| targets.property_declaration_site(true));
+                (site == Some(crate::types::PropertyAnnotationSite::Property))
+                    .then(|| annotation.resolved())
+            })
+            .collect();
+        index.publish_declaration_applied_annotations(self.declaration, applications);
+    }
+}
+
 /// Publish the checked annotations of the members `class` declares under their stable identities
 /// owned by `owner`: methods, body properties with their accessors, and constructors.
 fn publish_classifier_member_annotations(
@@ -264,6 +303,7 @@ fn publish_classifier_member_annotations(
     owner: crate::fir::DeclarationId,
     class: &ClassDecl,
     info: &TypeInfo,
+    constructor_properties: &mut Vec<PendingConstructorPropertyAnnotations>,
 ) {
     for (method_index, method) in class.methods.iter().enumerate() {
         let Some(declaration) = u32::try_from(method_index)
@@ -337,24 +377,19 @@ fn publish_classifier_member_annotations(
         else {
             continue;
         };
-        let applications = checked_applications(
-            info,
-            parameter.annotations.iter().filter(|annotation| {
-                info.applied_annotation(annotation).is_some_and(|applied| {
-                    // Same-file annotation policies are published after folding their uses.
-                    // Prefer that now-complete declaration policy to the earlier application.
-                    let targets = index
-                        .annotation_targets()
-                        .semantic(applied.internal)
-                        .unwrap_or(applied.targets);
-                    annotation
-                        .property_site
-                        .or_else(|| targets.property_declaration_site(true))
-                        == Some(crate::types::PropertyAnnotationSite::Property)
+        constructor_properties.push(PendingConstructorPropertyAnnotations {
+            declaration,
+            applications: parameter
+                .annotations
+                .iter()
+                .filter_map(|annotation| {
+                    Some((
+                        annotation.property_site,
+                        info.applied_annotation(annotation)?.clone(),
+                    ))
                 })
-            }),
-        );
-        index.publish_declaration_applied_annotations(declaration, applications);
+                .collect(),
+        });
         publish_property_accessor_applications(
             index,
             declaration,

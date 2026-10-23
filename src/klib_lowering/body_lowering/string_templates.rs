@@ -11,7 +11,7 @@ use crate::metadata::klib_ir::tree::{KlibIrExprId, KlibIrExprKind};
 use crate::metadata::klib_ir::KlibIrConstant;
 use crate::types::Ty;
 
-impl BodyLowering<'_, '_, '_> {
+impl BodyLowering<'_> {
     pub(super) fn string_template(&mut self, parts: &[KlibIrExprId], ty: Ty) -> Lowered<ExprId> {
         if ty != Ty::String {
             return Err(mismatch("a string template is not typed `String`"));

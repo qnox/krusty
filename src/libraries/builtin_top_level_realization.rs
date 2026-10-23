@@ -629,6 +629,9 @@ fn closed_range_contains(facts: &BuiltinFunctionDeclaration<'_>) -> Option<Compi
     if facts.kind != FnKind::Extension
         || facts.name != "contains"
         || !facts.is_operator
+        || facts.is_suspend
+        || facts.is_infix
+        || facts.ret != Ty::Boolean
         || facts.params.len() != 1
         || facts.context_count != 0
         || facts.vararg.is_some()
@@ -1217,6 +1220,39 @@ mod tests {
         let mut non_operator = string_plus(&non_operator_params, Ty::String);
         non_operator.is_operator = false;
         assert_eq!(function_realization(non_operator), None);
+    }
+
+    #[test]
+    fn range_membership_requires_a_boolean_stdlib_operator() {
+        let declaration = |ret| BuiltinFunctionDeclaration {
+            package: crate::types::wk::kotlin_ranges_package(),
+            name: "contains",
+            kind: FnKind::Extension,
+            receiver: Some(Ty::obj("kotlin/ranges/IntRange")),
+            params: &[Ty::Byte],
+            ret,
+            context_count: 0,
+            type_parameter_count: 0,
+            vararg: None,
+            is_suspend: false,
+            is_operator: true,
+            is_infix: false,
+        };
+        assert_eq!(
+            function_realization_with_stdlib_owner(declaration(Ty::Boolean), true),
+            Some(CompilerIntrinsic::ClosedRangeContains)
+        );
+        assert_eq!(
+            function_realization_with_stdlib_owner(declaration(Ty::Boolean), false),
+            None
+        );
+        assert_eq!(
+            function_realization_with_stdlib_owner(declaration(Ty::Int), true),
+            None
+        );
+        let mut suspend = declaration(Ty::Boolean);
+        suspend.is_suspend = true;
+        assert_eq!(function_realization(suspend), None);
     }
 
     #[test]
