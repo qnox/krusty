@@ -195,6 +195,9 @@ impl SingletonMemberReceiver {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DependencyExportSignatures {
     callables: HashMap<FunId, KlibDependencyCallable>,
+    /// Every visible function an interface of this file declares, abstract ones included: the
+    /// identity a dependent module's implementation of the member is recorded under.
+    interface_members: HashMap<FunId, KlibDependencyCallable>,
     member_receivers: HashMap<FunId, DependencyMemberReceiver>,
     singleton_member_receivers: HashMap<FunId, SingletonMemberReceiver>,
     singleton_extension_unread_receivers: HashMap<FunId, SingletonExtensionUnreadReceiver>,
@@ -213,6 +216,19 @@ impl DependencyExportSignatures {
         self.callables
             .iter()
             .map(|(&callable, signature)| (callable, signature))
+    }
+
+    /// The published identity of a function an interface of this file declares, with or without
+    /// a body: what another module's class implementing it names it by.
+    pub fn interface_member(&self, function: FunId) -> Option<&KlibDependencyCallable> {
+        self.interface_members.get(&function)
+    }
+
+    /// Every interface member identity this file publishes, in no particular order.
+    pub fn interface_members(&self) -> impl Iterator<Item = (FunId, &KlibDependencyCallable)> {
+        self.interface_members
+            .iter()
+            .map(|(&function, identity)| (function, identity))
     }
 
     /// Exact unread extension receiver and its separately authenticated source-evaluation effect.
@@ -241,6 +257,18 @@ impl DependencyExportSignatures {
         assert!(
             previous.is_none(),
             "one common-IR callable cannot export two KLIB declaration identities"
+        );
+    }
+
+    pub(crate) fn record_interface_member(
+        &mut self,
+        function: FunId,
+        identity: KlibDependencyCallable,
+    ) {
+        let previous = self.interface_members.insert(function, identity);
+        assert!(
+            previous.is_none(),
+            "one interface member cannot publish two KLIB declaration identities"
         );
     }
 

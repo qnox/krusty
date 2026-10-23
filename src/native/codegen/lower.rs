@@ -211,6 +211,8 @@ pub struct FileInput<'a> {
     pub unit_kind: crate::backend::CheckedIrUnitKind,
     /// Stable dependency symbols this file must export, keyed by its common-IR callable identity.
     pub dependency_exports: &'a HashMap<FunId, super::DependencyExportDefinition>,
+    /// The KLIB identities this file publishes, among them those of its interface members.
+    pub dependency_signatures: &'a crate::backend::DependencyExportSignatures,
     /// Stable dependency exports already published by preceding source modules, keyed by the exact
     /// KLIB identity the dependency provider attaches to `Callee::External`.
     pub dependency_symbols:
@@ -247,6 +249,7 @@ pub fn lower_file(
         module_name,
         unit_kind,
         dependency_exports,
+        dependency_signatures,
         dependency_symbols,
         value_classes,
         slot_plan,
@@ -330,6 +333,7 @@ pub fn lower_file(
         implemented_dependencies: implemented_dependencies(ir),
         module_name,
         unit_kind,
+        dependency_signatures,
         dependency_symbols,
     };
     // Before anything reads a shape: the walking members a class answers for decide both which
@@ -390,6 +394,7 @@ pub fn lower_file(
     };
     lowering.define_c_exports(file_init, &abi)?;
     lowering.define_dependency_exports(file_init, dependency_exports)?;
+    lowering.define_interface_identities()?;
 
     let comdat_objects = std::mem::take(&mut lowering.comdat_objects);
     let mut product = module.finish();
@@ -517,6 +522,9 @@ struct FileLowering<'a> {
     /// Exact source-module identity used only for collision-free target symbol realization.
     module_name: &'a str,
     unit_kind: crate::backend::CheckedIrUnitKind,
+    /// The KLIB identities this file publishes: what its interface members are named by in the
+    /// modules that implement them.
+    dependency_signatures: &'a crate::backend::DependencyExportSignatures,
     /// Exact declaration-identity join to code and retained ABI facts emitted for preceding source
     /// modules.
     dependency_symbols:

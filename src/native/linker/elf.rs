@@ -238,6 +238,8 @@ struct Layout {
     stubs_at: u64,
     /// Where the interface stubs start, likewise.
     interface_stubs_at: u64,
+    /// Where the interface tables start, likewise.
+    interface_tables_at: u64,
 }
 
 /// Room the layout keeps for what the linker writes itself rather than copies from an input.
@@ -250,11 +252,27 @@ struct Reserve {
     stubs: u64,
     /// Interface stubs, placed after the import stubs.
     interface_stubs: u64,
+    /// Interface tables, placed after the interface stubs.
+    interface_tables: u64,
     /// The start of the writable segment: `.dynamic` and the offset table.
     writable: u64,
 }
 
 impl Layout {
+    /// Where the bytes of the address `address` sit in the image, for an address the layout gave
+    /// file bytes.
+    fn file_offset(&self, address: u64) -> Option<u64> {
+        if (BASE..BASE + self.text_end).contains(&address) {
+            Some(address - BASE)
+        } else if (self.data_vaddr_start..self.data_vaddr_start + self.data_file_size)
+            .contains(&address)
+        {
+            Some(self.data_file_start + address - self.data_vaddr_start)
+        } else {
+            None
+        }
+    }
+
     fn new(files: &[Elf], page: u64, reserve: Reserve) -> Result<Self, ProgramLinkError> {
         for (file_index, file) in files.iter().enumerate() {
             for section in file.sections() {
@@ -299,6 +317,7 @@ impl Layout {
             data_mem_size: 0,
             stubs_at: 0,
             interface_stubs_at: 0,
+            interface_tables_at: 0,
         };
         // Executable segment: headers, then text and the import stubs, then read-only data.
         // Offsets equal virtual addresses minus BASE, since the segment is mapped from file
@@ -313,6 +332,10 @@ impl Layout {
         if reserve.interface_stubs > 0 {
             layout.interface_stubs_at = align_up(end, 16);
             end = layout.interface_stubs_at + reserve.interface_stubs;
+        }
+        if reserve.interface_tables > 0 {
+            layout.interface_tables_at = align_up(end, 8);
+            end = layout.interface_tables_at + reserve.interface_tables;
         }
         end = layout.place(files, Placement::ReadOnly, end, |at| (BASE + at, Some(at)))?;
         layout.text_end = end;
@@ -593,12 +616,14 @@ pub(super) fn link(
             headers,
             stubs: 0,
             interface_stubs: interface_stubs.size(),
+            interface_tables: interface_stubs.tables().size(),
             writable: 0,
         },
         Some(tables) => Reserve {
             headers: tables_at + tables.read_only_size(),
             stubs: tables.stubs_size(),
             interface_stubs: interface_stubs.size(),
+            interface_tables: interface_stubs.tables().size(),
             writable: tables.writable_size(),
         },
     };
@@ -619,21 +644,23 @@ pub(super) fn link(
                 .insert(import.name.clone(), tables.stub(placement, index));
         }
     }
-    let bound =
-        interface_stubs.decide(BASE + layout.interface_stubs_at, |target| match target {
-            Target::Global(name) => symbols
-                .global(name)
-                .ok_or_else(|| ProgramLinkError::UndefinedSymbol(name.clone())),
-            Target::Local(file_index, index) => symbols
-                .locals
-                .get(&(*file_index, *index))
-                .copied()
-                .ok_or_else(|| {
-                    ProgramLinkError::Unsupported(format!(
-                        "an interface implementation of input {file_index} is not loaded"
-                    ))
-                }),
-        })?;
+    let recorded = |symbols: &Symbols, target: &Target| match target {
+        Target::Global(name) => symbols
+            .global(name)
+            .ok_or_else(|| ProgramLinkError::UndefinedSymbol(name.clone())),
+        Target::Local(file_index, index) => symbols
+            .locals
+            .get(&(*file_index, *index))
+            .copied()
+            .ok_or_else(|| {
+                ProgramLinkError::Unsupported(format!(
+                    "an interface implementation of input {file_index} is not loaded"
+                ))
+            }),
+    };
+    let bound = interface_stubs.decide(BASE + layout.interface_stubs_at, |target| {
+        recorded(&symbols, target)
+    })?;
     symbols.strong.extend(bound);
     let entry = symbols
         .global("_start")
@@ -726,6 +753,13 @@ pub(super) fn link(
         }
         relocate(target.arch, &mut image, &relocations)?;
     }
+    interface_stubs.tables().write(
+        &mut image,
+        layout.interface_tables_at,
+        BASE + layout.interface_tables_at,
+        |target| recorded(&symbols, target),
+        |address| layout.file_offset(address),
+    )?;
 
     let mut program_headers = Vec::with_capacity(phdr_count as usize);
     let text = ProgramHeader::load(0x5, 0, BASE, layout.text_end, layout.text_end, layout.page);

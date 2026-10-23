@@ -6,32 +6,25 @@
 //! that function, so every call to it is a direct call. A member two functions implement, where one
 //! of them is reached from a single type, gets a stub that compares that type and jumps directly
 //! either way. Any other member gets a stub making the interface table lookup a call made before:
-//! `receiver.type.itable[number]`. A stub keeps the caller's arguments and return address as they
+//! `receiver.type.itable[index]`, at the index the link numbers it with (see
+//! [`super::interface_tables`]). A stub keeps the caller's arguments and return address as they
 //! are and jumps, so the implementation returns straight to the caller.
 
-use crate::fx_hash::{HashMap, HashSet};
+use crate::fx_hash::HashSet;
 
-use object::read::{Object, ObjectSection, ObjectSymbol, RelocationTarget};
-use object::{SymbolIndex, SymbolSection};
+use object::read::{Object, ObjectSymbol};
+use object::SymbolSection;
 
-use super::super::interface_calls::{
-    recorded_stub, stub_number, ITABLE_OFFSET, RECEIVER_TYPE_OFFSET, RECORD_SIZE,
-};
+use super::super::interface_calls::{stub_number, ITABLE_OFFSET, RECEIVER_TYPE_OFFSET};
 use super::super::target::Arch;
 use super::elf::{symbol_name, Elf};
+pub(super) use super::interface_records::Target;
+use super::interface_tables::InterfaceTables;
 use super::relocate::split_hi_lo;
 use super::ProgramLinkError;
 
 /// Each stub starts on this boundary.
 const STUB_ALIGN: u64 = 16;
-
-/// A symbol a record names: a global by name, a local by its object and index. Two references to
-/// one function are one implementation exactly when they are the same `Target`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(super) enum Target {
-    Global(String),
-    Local(usize, SymbolIndex),
-}
 
 /// What one stub does, between addresses of the linked image.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,23 +71,43 @@ fn choose(records: &[(u64, u64)]) -> Kind {
     }
 }
 
+/// Whether implementations `(type, function)` may need a table lookup: what [`choose`] answers
+/// before the addresses that can only merge two functions into one are known.
+fn may_read_a_table(records: &[(Target, Target)]) -> bool {
+    let mut functions: Vec<(&Target, usize)> = Vec::new();
+    for (_, function) in records {
+        match functions.iter_mut().find(|(known, _)| *known == function) {
+            Some((_, types)) => *types += 1,
+            None => functions.push((function, 1)),
+        }
+    }
+    match functions.as_slice() {
+        [_] => false,
+        [(_, first), (_, second)] => *first > 1 && *second > 1,
+        _ => true,
+    }
+}
+
 #[derive(Debug)]
 struct Stub {
     name: String,
-    number: u32,
-    /// Each type with an instance whose interface table holds a function at `number`, and that
-    /// function.
+    /// Each type with an instance that implements the member, and the function it implements it
+    /// with.
     records: Vec<(Target, Target)>,
+    /// The member's index in the interface tables, where its implementations may need a table.
+    index: Option<u32>,
     /// Where it starts, as an offset from the start of the stubs.
     offset: u64,
     /// What it does, once [`InterfaceStubs::decide`] has seen the addresses.
     kind: Option<Kind>,
 }
 
-/// Every interface stub the program's objects call, in a deterministic order.
+/// Every interface stub the program's objects call, in a deterministic order, and the interface
+/// tables the stubs that look a table up read.
 pub(super) struct InterfaceStubs {
     stubs: Vec<Stub>,
     size: u64,
+    tables: InterfaceTables,
 }
 
 impl InterfaceStubs {
@@ -123,74 +136,12 @@ impl InterfaceStubs {
                 "{name} (an interface stub, which only the link defines)"
             )));
         }
-        let mut records: HashMap<String, Vec<(Target, Target)>> = HashMap::default();
-        for (file_index, file) in files.iter().enumerate() {
-            for section in file.sections() {
-                let Some(name) = section.name().ok() else {
-                    continue;
-                };
-                if recorded_stub(name, 0).is_none() {
-                    continue;
-                }
-                let size = section.size();
-                if size % RECORD_SIZE != 0 {
-                    return Err(ProgramLinkError::Parse(format!(
-                        "input {file_index} has an interface implementation record section of \
-                         {size} bytes, which is not a whole number of records"
-                    )));
-                }
-                let data = section
-                    .data()
-                    .map_err(|error| ProgramLinkError::Parse(error.to_string()))?;
-                let mut fields: HashMap<u64, Target> = HashMap::default();
-                for (offset, relocation) in section.relocations() {
-                    let RelocationTarget::Symbol(index) = relocation.target() else {
-                        return Err(record_error(file_index, offset, "names no symbol"));
-                    };
-                    if relocation.addend() != 0
-                        || offset % 8 != 0
-                        || offset >= size
-                        || offset % RECORD_SIZE == 0
-                    {
-                        return Err(record_error(file_index, offset, "is not a whole field"));
-                    }
-                    let symbol = file
-                        .symbol_by_index(index)
-                        .map_err(|error| ProgramLinkError::Parse(error.to_string()))?;
-                    let target = if symbol.is_local() {
-                        Target::Local(file_index, index)
-                    } else {
-                        Target::Global(symbol_name(&symbol)?.to_string())
-                    };
-                    fields.insert(offset, target);
-                }
-                for (record, words) in data
-                    .as_chunks::<{ RECORD_SIZE as usize }>()
-                    .0
-                    .iter()
-                    .enumerate()
-                {
-                    let at = record as u64 * RECORD_SIZE;
-                    let field = |offset: u64| {
-                        fields
-                            .get(&(at + offset))
-                            .cloned()
-                            .ok_or_else(|| record_error(file_index, at + offset, "is empty"))
-                    };
-                    let number = u64::from_le_bytes(words[..8].try_into().expect("a word"));
-                    let stub = u32::try_from(number)
-                        .ok()
-                        .and_then(|number| recorded_stub(name, number))
-                        .ok_or_else(|| record_error(file_index, at, "names no member number"))?;
-                    records
-                        .entry(stub)
-                        .or_default()
-                        .push((field(8)?, field(16)?));
-                }
-            }
-        }
+        let mut records = super::interface_records::read(files)?;
         let mut names: Vec<String> = called.into_iter().collect();
         names.sort();
+        for name in &names {
+            records.refuse_unidentified_calls(name)?;
+        }
         // Every stub keeps room for the longer form, so the form can be chosen once addresses are
         // known.
         let room = align_up(
@@ -208,19 +159,51 @@ impl InterfaceStubs {
             .expect("two forms"),
             STUB_ALIGN,
         );
-        let stubs = names
+        let mut stubs = names
             .into_iter()
             .enumerate()
             .map(|(index, name)| Stub {
-                number: stub_number(&name).expect("collected as a stub"),
-                records: records.remove(&name).unwrap_or_default(),
+                records: records.implementations.remove(&name).unwrap_or_default(),
                 name,
+                index: None,
                 offset: index as u64 * room,
                 kind: None,
             })
             .collect::<Vec<_>>();
         let size = stubs.len() as u64 * room;
-        Ok(Self { stubs, size })
+        // A stub's form is chosen on addresses, which only merge implementations: one that cannot
+        // be a table lookup by its records cannot become one. So the members that may need a
+        // table are known before layout, and only those are numbered.
+        let reads_a_table = stubs
+            .iter()
+            .map(|stub| may_read_a_table(&stub.records))
+            .collect::<Vec<_>>();
+        let (tables, indices) = InterfaceTables::number(
+            stubs
+                .iter()
+                .zip(&reads_a_table)
+                .filter(|(_, reads)| **reads)
+                .map(|(stub, _)| stub.records.as_slice()),
+        )?;
+        for (stub, index) in stubs
+            .iter_mut()
+            .zip(&reads_a_table)
+            .filter(|(_, reads)| **reads)
+            .map(|(stub, _)| stub)
+            .zip(indices)
+        {
+            stub.index = Some(index);
+        }
+        Ok(Self {
+            stubs,
+            size,
+            tables,
+        })
+    }
+
+    /// The interface tables the stubs read.
+    pub(super) fn tables(&self) -> &InterfaceTables {
+        &self.tables
     }
 
     /// The bytes the stubs take, from a `STUB_ALIGN` boundary.
@@ -273,7 +256,12 @@ impl InterfaceStubs {
                     then,
                     otherwise,
                 } => compare(arch, pc, ty, then, otherwise),
-                Kind::Table => table(arch, stub.number),
+                Kind::Table => {
+                    let index = stub
+                        .index
+                        .expect("a table lookup is decided only for a numbered member");
+                    table(arch, index)
+                }
             }
             .ok_or_else(|| {
                 ProgramLinkError::RelocationOutOfRange(format!(
@@ -287,12 +275,6 @@ impl InterfaceStubs {
         }
         Ok(())
     }
-}
-
-fn record_error(file_index: usize, offset: u64, why: &str) -> ProgramLinkError {
-    ProgramLinkError::Parse(format!(
-        "input {file_index}: the interface implementation record field at {offset:#x} {why}"
-    ))
 }
 
 fn align_up(value: u64, align: u64) -> u64 {
@@ -453,7 +435,10 @@ fn table(arch: Arch, number: u32) -> Option<Vec<u8>> {
 mod tests {
     use object::SectionKind;
 
-    use super::super::super::interface_calls::implementations_section;
+    use super::super::super::interface_calls::{
+        identities_section, implementations_section, padded, DEPENDENCY_IMPLEMENTATIONS_SECTION,
+        DEPENDENCY_PROPERTIES_SECTION, RECORD_SIZE,
+    };
     use super::super::fixture::{assert_link_error, link, linked, Image, Obj};
     use super::*;
 
@@ -715,6 +700,200 @@ mod tests {
         let without = linked(Arch::X86_64, &[&program(&[(0, 0)])]);
         let text = |image: &[u8]| Image(image).program_headers()[0].p_filesz;
         assert_eq!(text(&with), text(&without));
+    }
+
+    /// The byte filling each of `typed_program`'s types before its `itable` field.
+    const TYPE_MARKS: [u8; 3] = [0xa1, 0xb2, 0xc3];
+
+    /// A program whose `_start` calls stub `kt_itf_m_0`, with functions `f`, `g` and `h`, three
+    /// `KType`-sized types, records `(number, type, function)` of module `m`, identities
+    /// `(number, identity)` module `m` names, and implementations `(identity, type, function)`
+    /// another module records by identity.
+    fn typed_program(
+        records: &[(u64, usize, usize)],
+        identities: &[(u64, &[u8])],
+        dependency: &[(&[u8], usize, usize)],
+    ) -> Obj {
+        let (mut object, text) = super::super::fixture::x86_64_start(&[
+            0xe8, 0, 0, 0, 0, 0xc3, 0xcc, 0xcc, // _start
+            0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // f
+            0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // g
+            0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // h
+        ]);
+        let stub = object.undefined("kt_itf_m_0");
+        object.reloc(text, 1, stub, -4, R_X86_64_PLT32);
+        let functions = [
+            object.local("f", text, 8),
+            object.local("g", text, 16),
+            object.local("h", text, 24),
+        ];
+        const TYPE: u64 = 168;
+        let mut marks = Vec::new();
+        for mark in TYPE_MARKS {
+            marks.extend_from_slice(&[mark; ITABLE_OFFSET as usize]);
+            marks.resize(marks.len() + (TYPE - u64::from(ITABLE_OFFSET)) as usize, 0);
+        }
+        let data = object.section(".rodata", SectionKind::ReadOnlyData, &marks, 8);
+        let types = [
+            object.local("type_a", data, 0),
+            object.local("type_b", data, TYPE),
+            object.local("type_c", data, 2 * TYPE),
+        ];
+        let mut contents = vec![0; records.len() * RECORD_SIZE as usize];
+        for (record, &(number, _, _)) in contents
+            .as_chunks_mut::<{ RECORD_SIZE as usize }>()
+            .0
+            .iter_mut()
+            .zip(records)
+        {
+            record[..8].copy_from_slice(&number.to_le_bytes());
+        }
+        let section = object.section(
+            &implementations_section("m"),
+            SectionKind::ReadOnlyDataWithRel,
+            &contents,
+            8,
+        );
+        for (index, &(_, ty, function)) in records.iter().enumerate() {
+            let at = index as u64 * RECORD_SIZE;
+            object.reloc(section, at + 8, types[ty], 0, R_X86_64_64);
+            object.reloc(section, at + 16, functions[function], 0, R_X86_64_64);
+        }
+        let mut named = Vec::new();
+        for &(number, identity) in identities {
+            named.extend_from_slice(&number.to_le_bytes());
+            named.extend_from_slice(&(identity.len() as u64).to_le_bytes());
+            named.extend_from_slice(identity);
+            named.resize(
+                named.len() + (padded(identity.len() as u64) as usize - identity.len()),
+                0,
+            );
+        }
+        object.section(
+            &identities_section("m"),
+            SectionKind::ReadOnlyData,
+            &named,
+            8,
+        );
+        let mut implemented = Vec::new();
+        let mut fields = Vec::new();
+        for &(identity, ty, function) in dependency {
+            fields.push((implemented.len() as u64, ty, function));
+            implemented.extend_from_slice(&(identity.len() as u64).to_le_bytes());
+            implemented.extend_from_slice(&[0; 16]);
+            implemented.extend_from_slice(identity);
+            implemented.resize(
+                implemented.len() + (padded(identity.len() as u64) as usize - identity.len()),
+                0,
+            );
+        }
+        let section = object.section(
+            DEPENDENCY_IMPLEMENTATIONS_SECTION,
+            SectionKind::ReadOnlyDataWithRel,
+            &implemented,
+            8,
+        );
+        for (at, ty, function) in fields {
+            object.reloc(section, at + 8, types[ty], 0, R_X86_64_64);
+            object.reloc(section, at + 16, functions[function], 0, R_X86_64_64);
+        }
+        object
+    }
+
+    /// A dependent module's type, recorded by the member's identity, is one more implementation
+    /// of the member that identity names.
+    #[test]
+    fn an_implementation_recorded_by_identity_joins_the_member_it_names() {
+        let image = linked(
+            Arch::X86_64,
+            &[&typed_program(
+                &[(0, 0, 0)],
+                &[(0, b"greet")],
+                &[(b"greet", 2, 1)],
+            )],
+        );
+        let (_, code) = stub_of(&image, 25);
+        assert_eq!(
+            &code[..3],
+            &[0x4c, 0x8d, 0x1d],
+            "two functions now implement the member, so the stub compares"
+        );
+    }
+
+    #[test]
+    fn an_identity_no_module_names_is_no_implementation() {
+        let image = linked(
+            Arch::X86_64,
+            &[&typed_program(
+                &[(0, 0, 0)],
+                &[(0, b"greet")],
+                &[(b"other", 2, 1)],
+            )],
+        );
+        let (target, _) = stub_of(&image, 0);
+        assert_eq!(target, Image(&image).entry() + 8, "only f implements it");
+    }
+
+    /// The link writes each type's table and points the type at it; a stub reads the index the
+    /// link numbered the member with.
+    #[test]
+    fn the_link_writes_the_interface_tables() {
+        let image = linked(
+            Arch::X86_64,
+            &[&typed_program(
+                &[(0, 0, 0), (0, 1, 1)],
+                &[(0, b"greet")],
+                &[(b"greet", 2, 2)],
+            )],
+        );
+        let (_, code) = stub_of(&image, 21);
+        assert_eq!(code, table(Arch::X86_64, 0).unwrap());
+        let entry = Image(&image).entry();
+        for (mark, function) in TYPE_MARKS
+            .into_iter()
+            .zip([entry + 8, entry + 16, entry + 24])
+        {
+            let ty = image
+                .windows(ITABLE_OFFSET as usize)
+                .position(|bytes| bytes.iter().all(|&byte| byte == mark))
+                .expect("the type is in the image")
+                + ITABLE_OFFSET as usize;
+            let table = u64::from_le_bytes(image[ty..ty + 8].try_into().unwrap());
+            assert_eq!(Image(&image).u64(table), function);
+        }
+    }
+
+    /// A property accessor's number has no identity, so a call through it is refused once
+    /// another module's type implements a property of the module's interfaces.
+    #[test]
+    fn a_call_through_a_property_another_module_implements_is_refused() {
+        let program = |namespaces: &[u8]| {
+            let mut object = typed_program(&[(0, 0, 0)], &[(0, b"")], &[]);
+            object.section(
+                DEPENDENCY_PROPERTIES_SECTION,
+                SectionKind::ReadOnlyData,
+                namespaces,
+                8,
+            );
+            object
+        };
+        let named = |namespace: &[u8]| {
+            let mut entry = (namespace.len() as u64).to_le_bytes().to_vec();
+            entry.extend_from_slice(namespace);
+            entry.resize(8 + padded(namespace.len() as u64) as usize, 0);
+            entry
+        };
+        assert_link_error(
+            link(Arch::X86_64, &[&program(&named(b"m"))]),
+            ProgramLinkError::Unsupported(
+                "a call through `kt_itf_m_0`, a property of an interface another module's type \
+                 implements"
+                    .into(),
+            ),
+        );
+        let image = linked(Arch::X86_64, &[&program(&named(b"other"))]);
+        let (target, _) = stub_of(&image, 0);
+        assert_eq!(target, Image(&image).entry() + 8, "only f implements it");
     }
 
     #[test]

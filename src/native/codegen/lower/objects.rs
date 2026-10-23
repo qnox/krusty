@@ -446,8 +446,9 @@ impl<'a> FileLowering<'a> {
         self.ir.classes[class as usize].fq_name().replace('/', ".")
     }
 
-    /// Define a `KType` and the two tables it points at, byte for byte as `krusty_rt.h` declares
-    /// the struct. Every emitted type goes through here — a class, a lambda, a captured-variable
+    /// Define a `KType` and the tables it points at, byte for byte as `krusty_rt.h` declares the
+    /// struct, except its interface table, which the link writes from the implementation records
+    /// (see `native::interface_calls`). Every emitted type goes through here — a class, a lambda, a captured-variable
     /// holder — so the descriptor the collector reads and the layout the code uses are written by
     /// one piece of code.
     pub(super) fn define_type_descriptor(
@@ -502,24 +503,6 @@ impl<'a> FileLowering<'a> {
             .define_data(table, &description)
             .map_err(|error| format!("defining `kt_vtable_{base}` ({error})"))?;
 
-        let interface_table = if itable.is_empty() {
-            None
-        } else {
-            let id = self.declare_local_data(&format!("kt_itable_{base}"), false)?;
-            let mut description = DataDescription::new();
-            description.define(vec![0; itable.len() * 8].into_boxed_slice());
-            description.set_align(8);
-            for (index, function) in itable.iter().enumerate() {
-                let func_ref = self
-                    .module
-                    .declare_func_in_data(*function, &mut description);
-                description.write_function_addr(index as u32 * 8, func_ref);
-            }
-            self.module
-                .define_data(id, &description)
-                .map_err(|error| format!("defining `kt_itable_{base}` ({error})"))?;
-            Some(id)
-        };
         if instantiable {
             self.record_interface_implementations(descriptor, base, itable)?;
         }
@@ -602,7 +585,6 @@ impl<'a> FileLowering<'a> {
             (ktype::REFERENCE_OFFSETS, references),
             (ktype::SUPER, Some(superclass)),
             (ktype::VTABLE, Some(table)),
-            (ktype::ITABLE, interface_table),
             (ktype::INTERFACES, implemented),
             (
                 ktype::REFERENCE_TARGET,
@@ -762,6 +744,9 @@ impl<'a> FileLowering<'a> {
         }
         let walk = self.define_walk_members(class, &base)?;
         let (qualified_name, simple_name, class_names) = self.reflection_names(class);
+        if instantiable {
+            self.record_dependency_implementations(descriptor, &base, class, (&vtable, &itable))?;
+        }
         self.define_type_descriptor(
             descriptor,
             &base,

@@ -82,11 +82,28 @@ interfaces with one or two implementations, but ahead of time and without deopti
   a direct call;
 - two functions implement it, and one of them is reached from a single type: the stub compares the
   receiver's type with that type and jumps directly to either function;
-- otherwise: the stub reads `receiver.type.itable[n]` and jumps through it.
+- otherwise: the stub reads `receiver.type.itable[i]` and jumps through it.
 
 A stub never makes a frame: it jumps, so the implementation returns straight to the caller. The
 records are what makes this sound, so every type descriptor with instances writes them; a
 descriptor that is only ever a supertype (an interface, an abstract or sealed class) writes none.
+
+A member number means something only in the module that numbered it. Each module therefore also
+names, per number, the KLIB declaration identity of every interface function standing there
+(section `.kt_interface_identities.<module>`), and a class of a dependent module that implements a
+dependency's interface records its implementation by that identity
+(`.kt_interface_dependency_implementations`), its own override or the dependency's exported
+default. The link joins the two, so a dependency's stub sees every implementation in the program.
+A property accessor's number has no identity yet: a class implementing a property of another
+module's interface records only that module, and the link refuses a program that calls such an
+accessor through its stub rather than miss the implementation.
+
+The interface tables are the link's as well. Only a member whose stub looks a table up needs an
+entry, so the link numbers just those members, program-wide, each at the lowest index that no
+other such member holds in a table of a type implementing it, builds each type's table from the
+records, and points the type's `KType.itable` at it; the code generator leaves the field empty.
+Two members no type implements both share an index, so a table is as short as the members its
+type actually reaches through a table lookup.
 
 ### Importing from shared libraries: Go's split
 
