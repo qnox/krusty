@@ -12480,7 +12480,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reified parameter inside a lambda class regenerated per call site, and a use-site projection
   written in a typealias (`typealias T<Y> = MutableMap<in Y, …>` loses its `in`).
 - **On Native, `typeOf<T>()` is a static `KType` object the generator emits.** The target stdlib's
-  body only throws, so the call is never made. Inline specialization has already substituted a
+  body only throws, so the call is never made, and never expanded from that body either: a
+  dependency inline intrinsic whose body only throws (`typeOf`, `enumEntries`) keeps its checked
+  call for the target to realize, whatever template its KLIB serializes. Inline specialization has already substituted a
   reified parameter, and the frontend has already approximated an intersection to its common
   supertype (`K : A, K : B` reified from `a is A && a is B` describes `kotlin.Any`, as both
   kotlinc backends print). Each distinct type in a file is one static object wearing the
