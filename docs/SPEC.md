@@ -12485,20 +12485,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   call for the target to realize, whatever template its KLIB serializes. Inline specialization has already substituted a
   reified parameter, and the frontend has already approximated an intersection to its common
   supertype (`K : A, K : B` reified from `a is A && a is B` describes `kotlin.Any`, as both
-  kotlinc backends print). Each distinct type in a file is one static object wearing the
-  runtime's `kotlin.reflect.KTypeImpl` descriptor, which implements the `KType` marker. It holds
-  the classifier's descriptor, the nullability, and one projection per argument in
-  Kotlin/Native's variance encoding (`-1` star, `0` invariant, `1` `in`, `2` `out`), each pointing
-  at the argument's own object. The runtime answers from that layout:
-  - `equals` is structural, so two sites or two files naming one type are equal; `hashCode`
-    follows `KTypeImpl`'s `(classifier * 31 + arguments) * 31 + isMarkedNullable` shape.
+  kotlinc backends print). Each distinct type is one static object wearing the runtime's
+  `kotlin.reflect.KTypeImpl` descriptor, which implements the `KType` marker. It holds the
+  classifier's descriptor and its static `KClass`, the nullability, and one projection per
+  argument in Kotlin/Native's variance encoding (`-1` star, `0` invariant, `1` `in`, `2` `out`),
+  each pointing at the argument's own object. A type whose classifier and arguments all have
+  program-wide descriptors is one object for the whole program: every file naming it emits it
+  under a symbol spelled from the type, in a COMDAT group of its own, and the linker keeps the
+  first group. A type naming a file's own class (a local class) is that file's object. The
+  runtime answers from that layout:
+  - `equals` is structural, so two sites or two files naming one type are equal, and identical
+    objects answer at once; `hashCode` follows `KTypeImpl`'s
+    `(classifier * 31 + arguments) * 31 + isMarkedNullable` shape. Identity (`===`) is not part
+    of the contract: the JVM builds a new `KType` per call, Native shares one.
   - `toString` prints what Kotlin/Native's `KTypeImpl` prints: the qualified name (the simple
     name of a local class, `???` for an anonymous one), then `<…>` with `*`, `in ` and `out `
     projections, then `?`. A function type is its `kotlin.FunctionN` class with the parameters
     and result as invariant arguments (`kotlin.Function0<kotlin.Unit>`, where the JVM prints
     `() -> kotlin.Unit`).
-  - `classifier` is the class literal of the type's class; a mapped collection interface is the
-    runtime's marker for it. `isMarkedNullable` is the stored nullability.
+  - `classifier` is the type's class's one static `KClass`, never a new object per read, as the
+    JVM's `Reflection` hands out the class's cached `KClass`; a mapped collection interface is
+    the runtime's marker for it. `isMarkedNullable` is the stored nullability.
   - Declined: a type naming a type parameter (its classifier is a `KTypeParameter`), a `suspend`
     function type, a classifier without a runtime descriptor, and `KType.arguments`, whose
     `KTypeProjection` objects this target does not build.

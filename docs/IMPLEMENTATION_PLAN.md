@@ -4173,7 +4173,8 @@ Remaining:
   `reifiedTypeArgumentWithIntersectionTypeAsTypeArgument`).
 - Typealias use-site projections (`typeAliasedType`).
 
-Native: `typeOf<T>()` is a static `KType` object per distinct type in a file, read by the runtime's
+Native: `typeOf<T>()` is a static `KType` object per distinct type, folded to one per program by
+COMDAT group where every file can name the type, read by the runtime's
 `KTypeImpl` descriptor for `equals`, `hashCode`, `toString`, `classifier` and `isMarkedNullable`
 (`native::codegen::lower::type_of`). A reified flow intersection records the common supertype of
 all its constituents. Remaining on Native: `KType.arguments` and `KTypeProjection`, a classifier that

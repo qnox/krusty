@@ -297,6 +297,8 @@ pub fn lower_file(
         imports: imported_functions::ImportedFunctions::new(imported_abis),
         data_imports: HashMap::default(),
         type_of_objects: HashMap::default(),
+        static_classes: HashMap::default(),
+        comdat_objects: Vec::new(),
         strings: HashMap::default(),
         string_objects: HashMap::default(),
         classes: Vec::new(),
@@ -384,8 +386,21 @@ pub fn lower_file(
     lowering.define_c_exports(file_init, &abi)?;
     lowering.define_dependency_exports(file_init, dependency_exports)?;
 
-    let object = module
-        .finish()
+    let comdat_objects = std::mem::take(&mut lowering.comdat_objects);
+    let mut product = module.finish();
+    for data in comdat_objects {
+        use cranelift_object::object::write::{Comdat, SymbolSection};
+        let symbol = product.data_symbol(data);
+        let SymbolSection::Section(section) = product.object.symbol(symbol).section else {
+            return Err("a program-wide static object without its own section".into());
+        };
+        product.object.add_comdat(Comdat {
+            kind: cranelift_object::object::ComdatKind::Any,
+            symbol,
+            sections: vec![section],
+        });
+    }
+    let object = product
         .emit()
         .map_err(|error| format!("object emission ({error})"))?;
     Ok(Lowered {
@@ -421,6 +436,10 @@ struct FileLowering<'a> {
     data_imports: HashMap<String, DataId>,
     /// The static `KType` object of each distinct type a `typeOf` in this file names.
     type_of_objects: HashMap<Ty, DataId>,
+    /// The static `KClass` of each descriptor a `typeOf` classifier names.
+    static_classes: HashMap<DataId, DataId>,
+    /// The program-wide static objects this file emits, each the COMDAT group of its own section.
+    comdat_objects: Vec<DataId>,
     /// String literal data, deduplicated by content.
     strings: HashMap<Vec<u8>, DataId>,
     /// The interned string OBJECT for each distinct literal text — one slot per text, filled on

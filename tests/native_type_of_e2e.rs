@@ -6,7 +6,8 @@
 //! on the JVM; the one whose text differs there says what each backend prints.
 
 use super::common::{
-    expect_box_ok_with_stdlib, expect_box_run_with_stdlib_diverging, expect_native_box,
+    expect_box_ok_files_with_stdlib, expect_box_ok_with_stdlib,
+    expect_box_run_with_stdlib_diverging, expect_native_box, expect_native_sources,
 };
 
 fn both(source: &str, stem: &str) {
@@ -114,4 +115,38 @@ fn a_reified_intersection_describes_its_common_supertype() {
          }\n",
         "TypeOfIntersection",
     );
+}
+
+#[test]
+fn files_naming_one_type_share_its_object_and_its_class() {
+    // Portable: the files' types are equal, hash alike and name one classifier.
+    let declarations = (
+        "Declarations",
+        "import kotlin.reflect.KType\n\
+         import kotlin.reflect.typeOf\n\
+         class C\n\
+         fun here(): KType = typeOf<Map<String, List<C?>>>()\n\
+         fun local(): KType { class L; return typeOf<List<L>>() }\n",
+    );
+    let portable = "import kotlin.reflect.typeOf\n\
+         fun box(): String {\n\
+         \x20   val there = typeOf<Map<String, List<C?>>>()\n\
+         \x20   if (here() != there || here().hashCode() != there.hashCode()) return \"fail equal\"\n\
+         \x20   if (here().classifier != there.classifier) return \"fail classifier\"\n\
+         \x20   if (local() != local()) return \"fail local\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    expect_box_ok_files_with_stdlib(&[declarations, ("Use", portable)], "Declarations");
+    // Native: one object and one `KClass` for the program, whichever file names them, where the
+    // JVM builds a new `KType` per call. A local class's type is its file's own object.
+    let shared = "import kotlin.reflect.typeOf\n\
+         fun box(): String {\n\
+         \x20   val there = typeOf<Map<String, List<C?>>>()\n\
+         \x20   if (here() !== there) return \"fail object\"\n\
+         \x20   if (here().classifier !== there.classifier) return \"fail class\"\n\
+         \x20   if (typeOf<C>().classifier !== typeOf<C>().classifier) return \"fail class read\"\n\
+         \x20   if (local() !== local()) return \"fail local\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    expect_native_sources(&[declarations, ("Use", shared)], "OK");
 }
