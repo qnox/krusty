@@ -933,6 +933,11 @@ checks both declaration forms through all three views, with and without platform
 
 ## Reference-array cast bound evidence
 
+Dependent callable-bound validation uses semantic formal identities and the existing completed
+binding map. Deferring unresolved call-owned relations changes neither generic declaration
+metadata nor emitted signatures; a reference-built dependency and a source declaration use the
+same rule. Caller-owned formals and concrete upper bounds remain immediately constraining.
+
 Compatible JVM array casts read the existing IR generic signatures and exact recorded non-local
 and lambda bound declarations. They introduce no Kotlin metadata encoding or provider lookup.
 Expected components use declaration-primary erasure; actual components retain the complete
