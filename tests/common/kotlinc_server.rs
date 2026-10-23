@@ -46,12 +46,16 @@ import java.lang.reflect.Field;
 public class KotlincServer {
     public static void main(String[] a) throws Exception {
         // Compiler jars for the loader — drop `-sources`/JS/WASM jars (not needed to compile plain JVM
-        // Kotlin) so the one loader holds less.
+        // Kotlin) so the one loader holds less. The scripting jars stay out as well, as they do on
+        // kotlinc's own compiler classpath: the compiler loads its scripting plugin from the
+        // distribution, and a script template on the compilation classpath must see that plugin's
+        // scripting API, not a second copy in this loader.
         File[] files = new File(a[0]).listFiles();
         ArrayList<URL> urls = new ArrayList<>();
         if (files != null) for (File f : files) {
             String n = f.getName();
-            if (n.endsWith(".jar") && !n.endsWith("-sources.jar") && !n.contains("-js") && !n.contains("-wasm"))
+            if (n.endsWith(".jar") && !n.endsWith("-sources.jar") && !n.contains("-js") && !n.contains("-wasm")
+                    && !n.contains("scripting"))
                 urls.add(f.toURI().toURL());
         }
         urls.add(new File(a[1]).toURI().toURL());

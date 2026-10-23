@@ -1,6 +1,6 @@
 //! Shared differential class-building and disassembly helpers.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct ReferenceComparison {
     pub reference: String,
@@ -583,6 +583,128 @@ pub fn classes_against_kotlinc_module_without_script_runtime(
     sources: &[(&str, &str)],
 ) -> ClassSets {
     classes_against_kotlinc(sources, 0, false)
+}
+
+/// Compile `sources` as one module with every script compiled against `script_definition`.
+fn compile_scripts_with_definition(
+    sources: &[(&str, &str)],
+    cp_jars: &[PathBuf],
+    jdk_modules: &Path,
+    script_definition: &krusty::script_definitions::ScriptDefinition,
+) -> Option<Vec<(String, Vec<u8>)>> {
+    use super::common_core::source_set_compile::{compile_inputs, source_inputs, source_stems};
+    let stems = source_stems(sources);
+    let inputs = source_inputs(sources, &stems, 0, Some(script_definition));
+    compile_inputs(
+        &inputs,
+        &stems,
+        cp_jars,
+        Some(jdk_modules),
+        None,
+        None,
+        &krusty::language_settings::LanguageSettings::default(),
+    )
+}
+
+/// Kotlin scripts compiled against a script template of their own. Each compiler first builds the
+/// `template` sources, which declare the template class `template_class` and its compilation
+/// configuration, against the scripting libraries. kotlinc then compiles `scripts` with
+/// `-script-templates template_class`, evaluating the configuration, and krusty compiles them
+/// against `definition`, the data that configuration describes, on its own build of the template.
+/// The classes compared are the scripts'.
+pub fn script_classes_against_kotlinc(
+    template: &[(&str, &str)],
+    template_class: &str,
+    scripts: &[(&str, &str)],
+    definition: &krusty::script_definitions::ScriptDefinition,
+) -> ClassSets {
+    let root = super::common_core::scratch_dir().expect("allocate script class inventory");
+    let scripting = ["kotlin-scripting-common.jar", "kotlin-scripting-jvm.jar"].map(|jar| {
+        krusty::jvm::kotlin_dist_jar(jar).expect("kotlinc ships the scripting libraries")
+    });
+    let write_sources = |directory: &str, sources: &[(&str, &str)]| {
+        sources
+            .iter()
+            .map(|(name, source)| {
+                let path = root.join(directory).join(name);
+                std::fs::create_dir_all(path.parent().expect("a source has a directory"))
+                    .expect("create source directory");
+                std::fs::write(&path, source).expect("write source");
+                path.to_string_lossy().into_owned()
+            })
+            .collect::<Vec<_>>()
+    };
+    let kotlinc = |arguments: Vec<String>| {
+        let (code, diagnostics) = super::common_core::byte_dump::with_recorded_diagnostics(|| {
+            super::common_core::kotlinc_compile(&arguments)
+                .expect("reference compiler is provisioned")
+        });
+        assert_eq!(
+            code, 0,
+            "kotlinc rejected the script fixture: {diagnostics}"
+        );
+    };
+    let classpath = |entries: &[&std::path::Path]| {
+        entries
+            .iter()
+            .map(|entry| entry.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(":")
+    };
+    let template_paths = write_sources("template", template);
+    let script_paths = write_sources("scripts", scripts);
+    let reference_template = root.join("reference-template");
+    let reference = root.join("reference");
+    let mut arguments = vec![
+        "-d".to_owned(),
+        reference_template.to_string_lossy().into_owned(),
+        "-cp".to_owned(),
+        classpath(&[&scripting[0], &scripting[1]]),
+    ];
+    arguments.extend(template_paths);
+    kotlinc(arguments);
+    let mut arguments = vec![
+        "-d".to_owned(),
+        reference.to_string_lossy().into_owned(),
+        "-script-templates".to_owned(),
+        template_class.to_owned(),
+        "-cp".to_owned(),
+        classpath(&[&reference_template, &scripting[0], &scripting[1]]),
+    ];
+    arguments.extend(script_paths);
+    kotlinc(arguments);
+    let mut reference_classes = std::collections::BTreeMap::new();
+    collect_classes(&reference, &reference, &mut reference_classes);
+
+    let jdk = super::common_core::jdk_modules();
+    let stdlib = super::common_core::stdlib_jar();
+    let mut library = vec![stdlib.clone()];
+    library.extend(scripting.iter().cloned());
+    let template_classes =
+        super::e2e_support::compile_in_process_files_common(template, 0, &library, Some(&jdk))
+            .expect("krusty accepted the script template");
+    let krusty_template = root.join("krusty-template");
+    for (name, bytes) in &template_classes {
+        if bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]) {
+            let path = krusty_template.join(format!("{name}.class"));
+            std::fs::create_dir_all(path.parent().expect("a class has a directory"))
+                .expect("create template class directory");
+            std::fs::write(path, bytes).expect("write template class");
+        }
+    }
+    let mut script_classpath = vec![krusty_template, stdlib];
+    script_classpath.extend(krusty::jvm::kotlin_dist_jar("kotlin-script-runtime.jar"));
+    script_classpath.extend(scripting);
+    let krusty = compile_scripts_with_definition(scripts, &script_classpath, &jdk, definition)
+        .expect("krusty accepted the scripts")
+        .into_iter()
+        .filter(|(_, bytes)| bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]))
+        .collect();
+    let _ = std::fs::remove_dir_all(root);
+    ClassSets {
+        reference: reference_classes,
+        krusty,
+    }
 }
 
 fn classes_against_kotlinc(
