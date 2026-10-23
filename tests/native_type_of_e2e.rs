@@ -7,7 +7,8 @@
 
 use super::common::{
     expect_box_ok_files_with_stdlib, expect_box_ok_with_stdlib,
-    expect_box_run_with_stdlib_diverging, expect_native_box, expect_native_sources,
+    expect_box_run_with_stdlib_diverging, expect_native_box, expect_native_decline,
+    expect_native_sources, kotlin_native_box,
 };
 
 fn both(source: &str, stem: &str) {
@@ -149,4 +150,65 @@ fn files_naming_one_type_share_its_object_and_its_class() {
          \x20   return \"OK\"\n\
          }\n";
     expect_native_sources(&[declarations, ("Use", shared)], "OK");
+}
+
+#[test]
+fn a_program_s_own_ktype_is_read_through_its_overrides() {
+    // `KType` is an open interface: a read through it reaches a program's implementation, not the
+    // runtime's layout.
+    both(
+        "import kotlin.reflect.KClassifier\n\
+         import kotlin.reflect.KType\n\
+         import kotlin.reflect.KTypeProjection\n\
+         import kotlin.reflect.typeOf\n\
+         class Flipped(val base: KType) : KType {\n\
+         \x20   override val annotations: List<Annotation> get() = emptyList()\n\
+         \x20   override val classifier: KClassifier? get() = Int::class\n\
+         \x20   override val arguments: List<KTypeProjection> get() = emptyList()\n\
+         \x20   override val isMarkedNullable: Boolean get() = !base.isMarkedNullable\n\
+         }\n\
+         fun read(type: KType): String = \"${type.classifier == Int::class}/${type.isMarkedNullable}\"\n\
+         fun box(): String {\n\
+         \x20   val mine = read(Flipped(typeOf<String>()))\n\
+         \x20   if (mine != \"true/true\") return \"fail mine: $mine\"\n\
+         \x20   val runtime = read(typeOf<Int>())\n\
+         \x20   if (runtime != \"true/false\") return \"fail runtime: $runtime\"\n\
+         \x20   if (typeOf<String?>().classifier != String::class) return \"fail classifier\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "TypeOfOwnKType",
+    );
+}
+
+#[test]
+fn an_iterator_type_is_not_a_mutable_iterator_type() {
+    // kotlinc-native tells the two classes apart. The runtime marks both with one `Iterator`
+    // marker, so `MutableIterator` has no descriptor of its own here and declines rather than
+    // pass for `Iterator`.
+    let both_types = "import kotlin.reflect.typeOf\n\
+         class X\n\
+         fun box(): String {\n\
+         \x20   val read = typeOf<Iterator<X>>()\n\
+         \x20   val mutable = typeOf<MutableIterator<X>>()\n\
+         \x20   return \"${read == mutable}|$read|$mutable\"\n\
+         }\n";
+    if let Some(answer) = kotlin_native_box(both_types) {
+        assert_eq!(
+            answer, "false|kotlin.collections.Iterator<X>|kotlin.collections.MutableIterator<X>",
+            "kotlinc-native's answer"
+        );
+    }
+    expect_native_decline(
+        both_types,
+        "TypeOfMutableIterator",
+        "has no runtime descriptor",
+    );
+    let read_only = "import kotlin.reflect.typeOf\n\
+         class X\n\
+         fun box(): String = \"${typeOf<Iterator<X>>()}\"\n";
+    let expected = "kotlin.collections.Iterator<X>";
+    if let Some(answer) = kotlin_native_box(read_only) {
+        assert_eq!(answer, expected, "kotlinc-native's answer");
+    }
+    expect_native_box(read_only, "TypeOfIterator", expected);
 }

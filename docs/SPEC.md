@@ -12505,7 +12505,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     `() -> kotlin.Unit`).
   - `classifier` is the type's class's one static `KClass`, never a new object per read, as the
     JVM's `Reflection` hands out the class's cached `KClass`; a mapped collection interface is
-    the runtime's marker for it. `isMarkedNullable` is the stored nullability.
+    the runtime's marker for it, and only a marker that is exactly that interface: `Iterator`'s
+    marker also marks `MutableIterator`, so `typeOf<MutableIterator<X>>()` declines rather than
+    equal and print as `Iterator<X>` (kotlinc-native tells them apart). `isMarkedNullable` is the
+    stored nullability.
+  - `KType` is an open interface, so a read of `classifier` or `isMarkedNullable` reaches a
+    program's own implementation first: each class of the file implementing `KType` is matched
+    by descriptor and called through its override, and only the rest reaches the runtime, which
+    checks the receiver is a `KTypeImpl` and fails loudly otherwise instead of reading it as one.
   - Declined: a type naming a type parameter (its classifier is a `KTypeParameter`), a `suspend`
     function type, a classifier without a runtime descriptor, and `KType.arguments`, whose
     `KTypeProjection` objects this target does not build.

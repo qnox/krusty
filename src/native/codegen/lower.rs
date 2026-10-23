@@ -1891,7 +1891,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let member = self
                     .type_of_member_of(*target)
                     .expect("checked by the guard");
-                self.type_of_member(member, *receiver)
+                self.type_of_member(member, *target, *receiver)
             }
             // `e.message`: the one field a runtime `Throwable` carries.
             IrExpr::Checked(ref checked_op)

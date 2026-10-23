@@ -1814,7 +1814,14 @@ const KType kt_type_ktype_impl = {KT_NAMED("kotlin.reflect.", "KTypeImpl"),
                                   .interfaces = kt_ktype_interfaces,
                                   .interface_count = 1};
 
+/* The static object `self` is. The generator dispatches a program's own `KType` implementations
+   to their overrides before calling here, so anything else is one it could not see, which this
+   side refuses rather than read as an object it is not. */
 static const KTypeOfObject *kt_ktype_of(KRef self) {
+    if (self->header.type != &kt_type_ktype_impl) {
+        KT_FAIL("krusty: a `KType` member of an implementation this program's runtime did not "
+                "build\n");
+    }
     return (const KTypeOfObject *)self;
 }
 

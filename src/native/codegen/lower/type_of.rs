@@ -264,12 +264,17 @@ impl FileLowering<'_> {
 
     /// The descriptor of the class a `typeOf` type names. A mapped collection interface is the
     /// runtime's marker for it whatever this file implements, since the question is which class
-    /// the type names and not which objects a check would accept.
+    /// the type names and not which objects a check would accept. Only a marker that is that
+    /// exact interface will do: `MutableIterator` and `ListIterator` have none of their own (an
+    /// `is` check of either tests the `Iterator` marker), and naming `Iterator` for them would make
+    /// two types of different classes equal and print alike.
     fn type_of_classifier(&mut self, name: TypeName, ty: Ty) -> Result<DataId, Unsupported> {
         let marker = match self.classifiers.classifier(name).and_then(|fact| fact.role) {
-            Some(crate::types::ClassifierRole::MappedCollection(collection)) => {
-                super::classifier_shapes::mapped_collection_descriptor(collection)
-            }
+            Some(crate::types::ClassifierRole::MappedCollection(collection)) => Some(
+                super::classifier_shapes::exact_collection_descriptor(collection).ok_or_else(
+                    || declined!("`typeOf` of `{ty:?}`, whose class has no runtime descriptor"),
+                )?,
+            ),
             _ if name == crate::types::wk::any() => Some("kt_type_any"),
             _ => None,
         };
@@ -302,10 +307,14 @@ impl BodyLowering<'_, '_, '_> {
         Ok(Some(self.data_address(object)))
     }
 
-    /// `t.classifier` and `t.isMarkedNullable`, read off the static object.
+    /// `t.classifier` and `t.isMarkedNullable`. `KType` is an open interface, so the receiver may
+    /// be a program's own implementation: each class of this file implementing it is dispatched
+    /// to through its override, and only what remains reaches the runtime, which reads the static
+    /// object after checking the receiver is one and fails loudly on anything else.
     pub(super) fn type_of_member(
         &mut self,
         member: KTypeMember,
+        target: crate::fir::ExternalPropertyId,
         receiver: u32,
     ) -> Result<Option<Value>, Unsupported> {
         let (symbol, ret) = match member {
@@ -317,11 +326,36 @@ impl BodyLowering<'_, '_, '_> {
                 ))
             }
         };
+        let ktype = crate::types::type_name("kotlin/reflect/KType");
+        let implementors = if self.file.implements_dependency(ktype) {
+            let getter = self
+                .file
+                .callables
+                .property(target)
+                .ok_or("a `KType` member without its property")?
+                .getter;
+            let declared = self.file.implementors_of(ktype);
+            let arms: Vec<_> = declared
+                .iter()
+                .filter_map(|&class| self.external_property_getter_slot(class, getter, ret))
+                .collect();
+            if arms.len() != declared.len() {
+                return Err(declined!(
+                    "a `KType` member read where this file implements `KType` with a class whose \
+                     override cannot be dispatched to"
+                ));
+            }
+            arms
+        } else {
+            Vec::new()
+        };
         let object = self.reference(receiver)?;
         if self.terminated {
             return Ok(None);
         }
-        self.runtime_call(symbol, &[any()], ret, &[object])
+        self.dispatch_by_implementor_with(&implementors, object, &[], ret, |body, object| {
+            body.runtime_call(symbol, &[any()], ret, &[object])
+        })
     }
 
     /// The `KType` member a dependency property read names, if it is one.
