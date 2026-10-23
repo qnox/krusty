@@ -101,6 +101,7 @@ publishing {
             scm {
                 url.set("https://github.com/qnox/krusty")
                 connection.set("scm:git:https://github.com/qnox/krusty.git")
+                developerConnection.set("scm:git:ssh://git@github.com/qnox/krusty.git")
             }
         }
     }

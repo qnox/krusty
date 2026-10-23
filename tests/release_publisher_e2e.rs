@@ -311,11 +311,18 @@ fn updates_supersede_their_ref_without_cancelling_master_validation() {
     let acquire = position("release-publisher.sh acquire");
     let check = position("release-publisher.sh check");
     let publish = position("softprops/action-gh-release");
+    let central = position("publish-maven-central.sh");
     let portal = position("publishPlugins");
     let record = position("release-publisher.sh record");
     let drop = position("release-publisher.sh release");
     assert!(
-        acquire < check && check < publish && publish < portal && portal < record && record < drop
+        acquire < check
+            && check < publish
+            && publish < central
+            && central < portal
+            && portal < record
+            && record < drop,
+        "Maven Central, which skips a version it already has, publishes before the Plugin Portal"
     );
     assert_eq!(drop, steps.len() - 1, "dropping the lock is the last step");
     assert!(
