@@ -21084,3 +21084,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a required erased-array `checkcast` remains. This does not establish a general non-null call
   result fact. Primitive-array and incompatible component casts keep ordinary cast behavior.
   Regression: `call_result_non_null_cast_e2e` compares complete classfiles and real JVM results.
+
+## JVM signature construction boundary
+
+Generic-signature syntax retains each written class segment's physical identity and whether its
+arguments were omitted or explicitly supplied. A declaration-owned application builder receives the
+complete outer-to-inner segment sequence before any captured-formal flattening. The same builder
+handles nested arguments, arrays, bounds, method positions and class supertypes; refusal is terminal.
+Field descriptor authentication uses physical syntax independently of the constructed semantic type.
+
+The standalone reader keeps its existing innermost-only interpretation and refuses fields whose
+outer arguments it discards. This boundary supplies lossless evidence for the raw/captured application
+follow-ups; it does not itself publish new raw or captured application semantics.

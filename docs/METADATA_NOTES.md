@@ -932,3 +932,14 @@ Compatible JVM array casts read the existing IR generic signatures and exact rec
 and lambda bound declarations. They introduce no Kotlin metadata encoding or provider lookup.
 Expected components use declaration-primary erasure; actual components retain the complete
 intersection of declared bounds. Backend wrapper names do not replace Kotlin classifier identity.
+
+## JVM signature segment evidence
+
+JVM `Signature` syntax now reaches an application builder as the complete written segment sequence,
+with physical identities and optional argument lists. Parsing no longer overwrites outer arguments
+before that construction boundary. The standalone policy still keeps innermost arguments and marks
+discarded outer arguments inexact for fields. Class/array erasure is computed from syntax and checked
+against the complete field descriptor independently of the builder's semantic result.
+
+This changes no Kotlin metadata wire fields or raw-type flags. Declaration-backed raw/captured
+construction remains separate from this syntax boundary.
