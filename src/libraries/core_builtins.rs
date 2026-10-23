@@ -339,6 +339,9 @@ impl EmptySymbolSource {
                 );
             }
         }
+        // These are top-level language declarations: every formal belongs to this classifier,
+        // and none is captured from an enclosing declaration.
+        classifier.own_type_parameter_count = classifier.type_params().len();
         add_core_builtin_declarations(&mut classifier, internal);
         Some(classifier)
     }
@@ -638,6 +641,7 @@ impl crate::symbol_source::SymbolSource for EmptySymbolSource {
             classifier.kind = TypeKind::Interface;
             classifier.type_parameters =
                 TypeParameters::invariant(vec!["R".to_string()], vec![Vec::new()]);
+            classifier.own_type_parameter_count = classifier.type_params().len();
             return std::rc::Rc::new(ResolvedSymbols {
                 classifier_name: Some(internal),
                 classifier_declaration: Some(ClassifierDeclaration::Ordinary(internal)),
@@ -682,6 +686,38 @@ impl crate::symbol_source::SymbolSource for EmptySymbolSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::symbol_source::SymbolSource;
+
+    #[test]
+    fn top_level_core_classifier_formals_never_capture_an_enclosing_declaration() {
+        let source = EmptySymbolSource;
+        for (owner, parameter) in [
+            ("kotlin/Array", "T"),
+            ("kotlin/Enum", "E"),
+            ("kotlin/Function", "R"),
+            ("kotlin/reflect/KProperty", "R"),
+            ("kotlin/reflect/KFunction", "R"),
+        ] {
+            let identity = crate::types::type_name(owner);
+            let declaration = source.classifier(identity).expect("core declaration");
+            assert_eq!(
+                declaration.type_params(),
+                &[parameter.to_owned()],
+                "{owner}"
+            );
+            assert_eq!(declaration.own_type_parameter_count, 1, "{owner}");
+            assert_eq!(
+                &declaration.type_params()[declaration.own_type_parameter_count..],
+                &[] as &[String],
+                "a top-level declaration has no captured classifier formals: {owner}"
+            );
+            assert_eq!(
+                declaration.type_param_bounds().len(),
+                declaration.type_params().len(),
+                "{owner}"
+            );
+        }
+    }
 
     #[test]
     fn core_any_declarations_publish_their_semantic_roles() {
