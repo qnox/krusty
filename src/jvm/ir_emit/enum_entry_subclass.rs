@@ -81,6 +81,7 @@ pub(super) fn emit_enum_entry_subclass(
             &c.super_args,
             &c.super_ctor_params,
             &enum_prefix,
+            None,
             &mut ctor,
         );
         let mut super_params = enum_prefix.to_vec();

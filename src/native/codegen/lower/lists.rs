@@ -719,8 +719,10 @@ impl BodyLowering<'_, '_, '_> {
             return None;
         }
         let property = self.file.callables.property(target)?;
-        // The selected GETTER is what decides, not the property's spelling: a dependency subtype
+        // The selected getter's declaring owner and complete shape decide: a dependency subtype
         // that declares its own `size` is reached through its own declaration, never this table.
+        // Read the selected property's normalized name, not its accessor's target spelling (for
+        // example KLIB's `<get-size>`). The property ID already joins these exact declarations.
         let getter = self.file.callables.callable(property.getter)?;
         let Some(crate::types::SemanticCallableOwner::Classifier(owner)) = getter.declaration_owner
         else {
@@ -732,7 +734,7 @@ impl BodyLowering<'_, '_, '_> {
                 getter.physical_owner,
                 getter.declaration_owner,
             ),
-            &getter.name,
+            &property.name,
             &getter.params,
             getter.ret,
         );

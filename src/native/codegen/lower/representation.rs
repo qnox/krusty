@@ -51,6 +51,39 @@ impl BodyLowering<'_, '_, '_> {
         self.unbox_value(object, classifier).map(Some)
     }
 
+    /// A construction of a library value class whose constructor only stores the value it is
+    /// given — an unsigned integer, a `Result`. This target carries the class as that value, so
+    /// the instance is the argument at the class's own type.
+    pub(super) fn value_construction(
+        &mut self,
+        internal: TypeName,
+        args: &[u32],
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        if !super::super::super::intrinsics::constructs_as_its_value(internal) {
+            return None;
+        }
+        let [argument] = args else {
+            return Some(Err(declined!(
+                "construction of `{}` from {} arguments",
+                internal.render(),
+                args.len()
+            )));
+        };
+        // The argument travels at the class's underlying type, which IS the carrier of the class:
+        // coercing it to the class itself would read a reference argument as a box of it.
+        let class = Ty::obj_name(internal);
+        let Some(underlying) = class
+            .scalar_value_repr()
+            .or_else(|| self.file.values.underlying(internal))
+        else {
+            return Some(Err(declined!(
+                "construction of `{}` with no underlying type",
+                internal.render()
+            )));
+        };
+        Some(self.coerce(*argument, underlying))
+    }
+
     /// A value of value class `classifier` put in a box of its own type — what `Any`, a type
     /// parameter or an interface holds it as. Only the value is stored: Kotlin's box runs no
     /// constructor, the value having been validated when it was made.
@@ -59,6 +92,10 @@ impl BodyLowering<'_, '_, '_> {
         value: Value,
         classifier: TypeName,
     ) -> Result<Value, Unsupported> {
+        if let Some((symbol, _)) = super::super::super::intrinsics::runtime_value_box(classifier) {
+            let boxed = self.runtime_call(symbol, &[any()], any(), &[value])?;
+            return Ok(boxed.expect("a runtime box answers a reference"));
+        }
         let class = match self.value_class(classifier)? {
             ValueClassHome::Here(class) => class,
             ValueClassHome::Module => return self.module_box_value(value, classifier),
@@ -77,6 +114,10 @@ impl BodyLowering<'_, '_, '_> {
         object: Value,
         classifier: TypeName,
     ) -> Result<Value, Unsupported> {
+        if let Some((_, symbol)) = super::super::super::intrinsics::runtime_value_box(classifier) {
+            let value = self.runtime_call(symbol, &[any()], any(), &[object])?;
+            return Ok(value.expect("a runtime unbox answers a reference"));
+        }
         let class = match self.value_class(classifier)? {
             ValueClassHome::Here(class) => class,
             ValueClassHome::Module => return self.module_unbox_value(object, classifier),

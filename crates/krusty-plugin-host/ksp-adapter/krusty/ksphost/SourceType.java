@@ -14,17 +14,17 @@ import kotlin.sequences.Sequence;
 // declaration is looked up when asked for, so a type can name a classifier of a later file.
 final class SourceType implements KSType {
     private final Symbols symbols;
-    // The classifier's qualified name, or the type parameter's owner.
+    // The classifier's qualified name, or the type parameter's name.
     private final String name;
-    // The type parameter's name, or null for a classifier.
-    private final String parameter;
+    // The type parameter's round-unique id, or -1 for a classifier.
+    private final int parameter;
     private final boolean nullable;
     final List<KSTypeArgument> arguments;
 
     SourceType(
             Symbols symbols,
             String name,
-            String parameter,
+            int parameter,
             boolean nullable,
             List<KSTypeArgument> arguments) {
         this.symbols = symbols;
@@ -36,9 +36,7 @@ final class SourceType implements KSType {
 
     @Override
     public KSDeclaration getDeclaration() {
-        return parameter == null
-                ? symbols.classNamed(name)
-                : symbols.typeParameter(name, parameter);
+        return parameter < 0 ? symbols.classNamed(name) : symbols.typeParameter(parameter);
     }
 
     @Override
@@ -120,7 +118,7 @@ final class SourceType implements KSType {
         }
         SourceType that = (SourceType) other;
         return name.equals(that.name)
-                && (parameter == null ? that.parameter == null : parameter.equals(that.parameter))
+                && parameter == that.parameter
                 && nullable == that.nullable
                 && argumentKeys().equals(that.argumentKeys());
     }
@@ -136,14 +134,14 @@ final class SourceType implements KSType {
 
     @Override
     public int hashCode() {
-        return name.hashCode() * 31 + (parameter == null ? 0 : parameter.hashCode());
+        return name.hashCode() * 31 + parameter;
     }
 
     // KSP's rendering: simple names, arguments in angle brackets, and `?` when nullable.
     @Override
     public String toString() {
         StringBuilder out = new StringBuilder();
-        out.append(parameter != null ? parameter : name.substring(name.lastIndexOf('.') + 1));
+        out.append(parameter >= 0 ? name : name.substring(name.lastIndexOf('.') + 1));
         if (!arguments.isEmpty()) {
             out.append('<');
             for (int i = 0; i < arguments.size(); i++) {

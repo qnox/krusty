@@ -622,6 +622,7 @@ pub const NO_CLASS_METADATA_VARIABLE: &str = "KRUSTY_NO_CLASS_METADATA";
 
 pub fn shipping_emit_options(
     stem: &str,
+    source_kind: crate::frontend::SourceKind,
     module_name: &str,
     class_major: Option<u16>,
     cp: std::rc::Rc<crate::jvm::classpath::Classpath>,
@@ -634,7 +635,13 @@ pub fn shipping_emit_options(
     let source_stem = stem.rsplit(['/', '\\']).next().unwrap_or(stem);
     crate::jvm::ir_emit::EmitOptions {
         class_major,
-        source_file: Some(format!("{source_stem}.kt")),
+        source_file: Some(format!(
+            "{source_stem}.{}",
+            match source_kind {
+                crate::frontend::SourceKind::KotlinScript => "kts",
+                _ => "kt",
+            }
+        )),
         // kotlinc records `classModuleName` in @Metadata unless the module is the default `main`.
         module_name: (module_name != "main").then(|| module_name.to_string()),
         // Per-invocation strategies; the CLI overrides them on the backend.
@@ -1104,16 +1111,26 @@ impl JvmBackend {
         // Suspend lowering can move a catch onto a fresh `try`. Rebuild the marker plan from the
         // declaration parameters so emission names the handler that is actually written.
         crate::jvm::reified_operations::record_catch_markers(&mut ir, &pass_facts.lambda_methods);
-        let mut emit_opts =
-            shipping_emit_options(stem, module_name, self.class_major, self.cp.clone())
-                .with_jvm_default(self.jvm_default)
-                .with_lambda_modes(self.lambda_modes)
-                .with_inline_string_concat(self.inline_string_concat)
-                .with_param_assertions(self.param_assertions)
-                .with_metadata_version(self.metadata_version)
-                .with_annotations_in_metadata(self.annotations_in_metadata)
-                .with_pre_release_metadata(self.pre_release_metadata)
-                .with_java_parameters(self.java_parameters);
+        let source_kind = if ir.is_script() {
+            crate::frontend::SourceKind::KotlinScript
+        } else {
+            crate::frontend::SourceKind::Kotlin
+        };
+        let mut emit_opts = shipping_emit_options(
+            stem,
+            source_kind,
+            module_name,
+            self.class_major,
+            self.cp.clone(),
+        )
+        .with_jvm_default(self.jvm_default)
+        .with_lambda_modes(self.lambda_modes)
+        .with_inline_string_concat(self.inline_string_concat)
+        .with_param_assertions(self.param_assertions)
+        .with_metadata_version(self.metadata_version)
+        .with_annotations_in_metadata(self.annotations_in_metadata)
+        .with_pre_release_metadata(self.pre_release_metadata)
+        .with_java_parameters(self.java_parameters);
         emit_opts.inner_class_resolver = Some(inner_class_resolver);
         emit_opts.plugins = std::rc::Rc::new(native_plugins.host(module_name));
         let run = crate::jvm::ir_emit::EmitRun::default();
@@ -1766,8 +1783,20 @@ mod tests {
     #[test]
     fn shipping_emit_options_normalize_logical_source_paths() {
         let cp = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
-        let unix = shipping_emit_options("suite/nested/Foo", "main", None, cp.clone());
-        let windows = shipping_emit_options("suite\\nested\\Bar", "main", None, cp);
+        let unix = shipping_emit_options(
+            "suite/nested/Foo",
+            crate::frontend::SourceKind::Kotlin,
+            "main",
+            None,
+            cp.clone(),
+        );
+        let windows = shipping_emit_options(
+            "suite\\nested\\Bar",
+            crate::frontend::SourceKind::Kotlin,
+            "main",
+            None,
+            cp,
+        );
 
         assert_eq!(unix.source_file.as_deref(), Some("Foo.kt"));
         assert_eq!(windows.source_file.as_deref(), Some("Bar.kt"));

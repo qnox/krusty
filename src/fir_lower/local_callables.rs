@@ -1233,12 +1233,17 @@ impl BodyLowering<'_> {
             self.index,
             self.ir,
             false,
-            capture_slots,
-            scopes,
-            self.published_local_callables.clone(),
+            super::BodyScopes {
+                capture_slots,
+                local_callable_scopes: scopes,
+                published_local_callables: self.published_local_callables.clone(),
+            },
+            self.dependency_templates,
         );
         nested.enclosure = declaration_enclosure;
         nested.expansion_enclosure = expansion_enclosure;
+        nested.allows_empty_inline_caller_name =
+            self.allows_empty_inline_caller_name && body.source_lambda().is_some();
         nested.inline_declaration = self.inline_declaration;
         nested.inline_parameter_values = inline_parameter_values;
         nested.suspend_context = suspend_context;

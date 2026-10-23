@@ -1,8 +1,8 @@
 //! Decoded KLIB IR arenas built by hand, for the tests of the code that consumes them.
 
 use super::tree::{
-    KlibIrArena, KlibIrExpr, KlibIrExprId, KlibIrExprKind, KlibIrFunction, KlibIrFunctionId,
-    KlibIrType, KlibIrTypeId, KlibIrVariable, KlibIrVariableId,
+    KlibIrArena, KlibIrClass, KlibIrClassId, KlibIrExpr, KlibIrExprId, KlibIrExprKind,
+    KlibIrFunction, KlibIrFunctionId, KlibIrType, KlibIrTypeId, KlibIrVariable, KlibIrVariableId,
 };
 
 fn next_id(length: usize) -> u32 {
@@ -10,6 +10,11 @@ fn next_id(length: usize) -> u32 {
 }
 
 impl KlibIrArena {
+    pub(crate) fn push_class(&mut self, class: KlibIrClass) -> KlibIrClassId {
+        self.classes.push(class);
+        KlibIrClassId(next_id(self.classes.len() - 1))
+    }
+
     pub(crate) fn push_type(&mut self, ty: KlibIrType) -> KlibIrTypeId {
         self.types.push(ty);
         KlibIrTypeId(next_id(self.types.len() - 1))

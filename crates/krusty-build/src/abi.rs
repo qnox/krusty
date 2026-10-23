@@ -327,15 +327,15 @@ fn abi_annotation_value(value: &krusty::types::AnnotationValue) -> AbiAnnotation
             entry: entry.clone(),
         },
         AnnotationValue::Class(ty) => AbiAnnotationValue::Class(abi_annotation_class(*ty)),
-        AnnotationValue::Annotation { internal, values } => {
-            AbiAnnotationValue::Annotation(Box::new(AbiAnnotation {
-                name: internal.render(),
-                arguments: values
-                    .iter()
-                    .map(|(name, value)| (name.clone(), abi_annotation_value(value)))
-                    .collect(),
-            }))
-        }
+        AnnotationValue::Annotation {
+            internal, values, ..
+        } => AbiAnnotationValue::Annotation(Box::new(AbiAnnotation {
+            name: internal.render(),
+            arguments: values
+                .iter()
+                .map(|(name, value)| (name.clone(), abi_annotation_value(value)))
+                .collect(),
+        })),
         AnnotationValue::Array(values) => {
             AbiAnnotationValue::Array(values.iter().map(abi_annotation_value).collect())
         }

@@ -23,6 +23,8 @@ mod tests {
                 // collection and body checking host them, so the facade takes the selection.
                 "plugins",
                 "resolve",
+                // The definition a script compiles against shapes its parsed script class.
+                "script_definitions",
                 "source",
                 "trace_compiler",
             ],
@@ -41,6 +43,9 @@ mod tests {
                 "diag",
                 "features",
                 "kt_string",
+                // A script's class takes its template and constructor parameters from its
+                // definition, which is plain syntax: qualified names and parameter spellings.
+                "script_definitions",
                 "token",
                 "types",
                 "wide_stack",
@@ -474,6 +479,14 @@ mod tests {
                 let mut budget = provider.to_vec();
                 budget.extend(["compilation_target", "diag", "frontend", "toolchain"]);
                 assert_allowed_crate_modules_in_file(&path, &budget);
+            } else if path == source_path("src/klib_libraries/serialized_references.rs") {
+                // Reference binding freezes a complete serialized signature through the shared
+                // declaration-only `member_declarations_in_hierarchy` projection before
+                // publication. This is core hierarchy reuse, not source overload selection;
+                // ordinary provider modules still cannot depend on the resolver.
+                let mut budget = provider.to_vec();
+                budget.push("symbol_resolver");
+                assert_allowed_crate_modules_in_file(&path, &budget);
             } else {
                 assert_allowed_crate_modules_in_file(&path, &provider);
             }
@@ -484,12 +497,19 @@ mod tests {
     fn klib_body_lowering_is_target_neutral() {
         // Dependency bodies lower into common IR that Native and Wasm consume alike. The tests
         // beside the lowering may also reach the frontend to lower equivalent source.
+        // A template body links its callees through the calling compilation's normalized
+        // provider (`symbol_source`) and decides the subtyping the body leaves implicit over the
+        // common class hierarchy (`assignable`, read through `symbol_resolver`'s provider
+        // oracle). All three are target-neutral semantic contracts, never a backend's.
         let allowed = [
+            "assignable",
             "fir",
             "ir",
             "klib_libraries",
             "libraries",
             "metadata",
+            "symbol_resolver",
+            "symbol_source",
             "types",
         ];
         assert_allowed_crate_modules("src/klib_lowering.rs", &allowed);
@@ -833,18 +853,17 @@ mod tests {
         // It describes a module's declaration headers to a KSP host: the parsed declarations and
         // what their annotations resolved to. It never checks a body, lowers or reaches a backend.
         // Its tests analyze sources against an empty platform.
-        assert_allowed_crate_modules(
-            "src/ksp_round.rs",
-            &[
-                "ast",
-                "diag",
-                "features",
-                "frontend",
-                "fx_hash",
-                "libraries",
-                "types",
-            ],
-        );
+        let allowed = [
+            "ast",
+            "diag",
+            "features",
+            "frontend",
+            "fx_hash",
+            "libraries",
+            "types",
+        ];
+        assert_allowed_crate_modules("src/ksp_round.rs", &allowed);
+        assert_allowed_crate_modules_in_tree("src/ksp_round", &allowed);
     }
 
     #[test]

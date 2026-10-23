@@ -595,7 +595,7 @@ fn external_default_call_keeps_only_supplied_common_operands() {
                 declared_result: None,
                 overridden_results: Box::new([]),
                 suspend: false,
-                can_inline: false,
+                inline: crate::libraries::InlineKind::None,
                 inline_plan: None,
                 extension_receiver_parameter: None,
                 semantic_role: None,

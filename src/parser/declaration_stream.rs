@@ -50,7 +50,7 @@ impl DeclarationPrelude {
 
 fn finish_unit(file: &mut File, source: &str, features: &LangFeatures, diags: &mut DiagSink) {
     apply_file_features(file, features);
-    hoist_local_classes(file, None);
+    hoist_local_classes(file);
     fixup_parenless_base_classes(file);
     super::debug_lines::attach(file, source);
     if !diags.has_errors() {
@@ -68,7 +68,7 @@ pub(crate) fn visit_declaration_units_with_features(
     features: &LangFeatures,
     mut visit: impl FnMut(File, &mut DiagSink),
 ) {
-    let mut parser = Parser::new(source, tokens, diags, features, false);
+    let mut parser = Parser::new(source, tokens, diags, features, None);
     let mut prelude = DeclarationPrelude::default();
     let mut unit_tokens = 0;
     crate::wide_stack::on_wide_stack(|| {
