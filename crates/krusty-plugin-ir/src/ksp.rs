@@ -17,9 +17,11 @@ pub struct KspFile {
     pub path: String,
     /// Dot-separated; empty for the root package.
     pub package_name: String,
-    /// Top-level classifiers in source order.
-    pub classes: Vec<KspClass>,
-    /// Whether [`Self::classes`] are every top-level declaration of the file.
+    /// Top-level declarations in KSP's order: functions and properties in source order, then
+    /// classifiers and type aliases in source order.
+    pub declarations: Vec<KspDeclaration>,
+    /// Whether [`Self::declarations`] are every top-level declaration of the file. When the round
+    /// cannot describe one, the host refuses to list declarations rather than list a part of them.
     pub declarations_complete: bool,
 }
 
@@ -40,27 +42,143 @@ pub struct KspClass {
     /// The direct supertypes in written order, `kotlin.Any` when none is written, or `None` when
     /// the round cannot describe one of them, in which case the host refuses the query.
     pub super_types: Option<Vec<KspType>>,
-    /// The primary constructor's parameters, or `None` when the classifier has no primary
-    /// constructor. KSP lists one (`<init>`) first among the declarations.
-    pub primary_constructor: Option<Vec<KspParameter>>,
-    /// Classifiers declared in this one's body, in source order.
-    pub classes: Vec<KspClass>,
-    /// Whether the primary constructor and [`Self::classes`] are every declaration KSP lists. When
-    /// the body declares anything else, the host refuses to list declarations rather than list a
-    /// part of them.
+    /// The declarations KSP lists, in its order: properties and functions in source order (the
+    /// primary constructor's properties first), a data class's `componentN` and `copy`, the
+    /// constructors (the primary one first), enum entries and nested classifiers in source order,
+    /// then an enum class's `values`, `valueOf` and `entries`.
+    pub declarations: Vec<KspDeclaration>,
+    /// Whether [`Self::declarations`] are every declaration KSP lists. When the round cannot
+    /// describe one, the host refuses to list declarations rather than list a part of them.
     pub declarations_complete: bool,
 }
 
-/// A primary-constructor parameter as `KSValueParameter` describes it.
+impl KspClass {
+    /// The primary constructor, which is among the declarations.
+    pub fn primary_constructor(&self) -> Option<&KspFunction> {
+        self.declarations
+            .iter()
+            .find_map(|declaration| match declaration {
+                KspDeclaration::Function(function)
+                    if function.kind == KspFunctionKind::PrimaryConstructor =>
+                {
+                    Some(function)
+                }
+                _ => None,
+            })
+    }
+
+    /// The classifiers declared in this one's body, enum entries included.
+    pub fn classes(&self) -> impl Iterator<Item = &KspClass> {
+        self.declarations
+            .iter()
+            .filter_map(|declaration| match declaration {
+                KspDeclaration::Class(class) => Some(class),
+                _ => None,
+            })
+    }
+}
+
+impl KspFile {
+    /// The top-level classifiers.
+    pub fn classes(&self) -> impl Iterator<Item = &KspClass> {
+        self.declarations
+            .iter()
+            .filter_map(|declaration| match declaration {
+                KspDeclaration::Class(class) => Some(class),
+                _ => None,
+            })
+    }
+}
+
+/// One declaration of a file or a classifier body.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KspDeclaration {
+    Class(KspClass),
+    Function(KspFunction),
+    Property(KspProperty),
+    TypeAlias(KspTypeAlias),
+}
+
+/// A function or constructor as `KSFunctionDeclaration` describes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KspFunction {
+    /// The name; `<init>` for a constructor.
+    pub name: String,
+    pub kind: KspFunctionKind,
+    pub is_abstract: bool,
+    /// The 1-based line of the declaration, or `None` for one the language contributes.
+    pub line: Option<u32>,
+    pub annotations: Vec<KspAnnotation>,
+    /// `None` when the round has no record of the modifiers.
+    pub modifiers: Option<Vec<KspModifier>>,
+    /// `None` when the round cannot describe one of them.
+    pub type_parameters: Option<Vec<KspTypeParameter>>,
+    pub extension_receiver: KspTypeSlot,
+    pub parameters: Vec<KspParameter>,
+    /// `None` when the round cannot describe the type.
+    pub return_type: Option<KspType>,
+}
+
+/// Where a function declares it, which KSP's `FunctionKind` and the constructor queries tell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KspFunctionKind {
+    TopLevel,
+    Member,
+    /// A function the language contributes to an enum class (`values`, `valueOf`).
+    Static,
+    PrimaryConstructor,
+    SecondaryConstructor,
+}
+
+/// A property as `KSPropertyDeclaration` describes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KspProperty {
+    pub name: String,
+    pub is_mutable: bool,
+    /// The 1-based line of the declaration, or `None` for one the language contributes.
+    pub line: Option<u32>,
+    pub annotations: Vec<KspAnnotation>,
+    /// `None` when the round has no record of the modifiers.
+    pub modifiers: Option<Vec<KspModifier>>,
+    /// `None` when the round cannot describe one of them.
+    pub type_parameters: Option<Vec<KspTypeParameter>>,
+    pub extension_receiver: KspTypeSlot,
+    /// `None` when the round cannot describe the type.
+    pub ty: Option<KspType>,
+}
+
+/// A type alias, of which the round describes only the name yet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KspTypeAlias {
+    pub simple_name: String,
+    pub qualified_name: String,
+}
+
+/// A type a declaration may or may not have, such as an extension receiver.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KspTypeSlot {
+    Absent,
+    Present(KspType),
+    /// Present, but not a type the round can describe; the host refuses the query.
+    Undescribed,
+}
+
+/// A function or constructor parameter as `KSValueParameter` describes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KspParameter {
     pub name: String,
+    /// A vararg parameter's element type; `None` when the round cannot describe the type.
+    pub ty: Option<KspType>,
     /// Written `val`: the parameter also declares a read-only property.
     pub is_val: bool,
     /// Written `var`: the parameter also declares a mutable property.
     pub is_var: bool,
     pub is_vararg: bool,
-    pub has_default: bool,
+    pub is_noinline: bool,
+    pub is_crossinline: bool,
+    /// Whether the parameter declares or inherits a default; `None` when it overrides a library
+    /// function the round cannot read the defaults of.
+    pub has_default: Option<bool>,
 }
 
 /// KSP's `ClassKind`.
@@ -117,6 +235,9 @@ pub enum KspModifier {
     Reified,
     Expect,
     Actual,
+    /// What KSP reports for a static member the language contributes, such as an enum class's
+    /// `values`.
+    JavaStatic,
 }
 
 impl KspModifier {
@@ -154,6 +275,7 @@ impl KspModifier {
             KspModifier::Reified => "REIFIED",
             KspModifier::Expect => "EXPECT",
             KspModifier::Actual => "ACTUAL",
+            KspModifier::JavaStatic => "JAVA_STATIC",
         }
     }
 }
@@ -162,6 +284,9 @@ impl KspModifier {
 /// then its name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KspTypeParameter {
+    /// Unique in the round: what a [`KspTypeDeclaration::TypeParameter`] refers to it by, since
+    /// overloads can declare type parameters with the same owner name and name.
+    pub id: u32,
     pub name: String,
     pub variance: KspVariance,
     pub is_reified: bool,
@@ -189,8 +314,13 @@ pub struct KspType {
 pub enum KspTypeDeclaration {
     /// A classifier, by qualified name: the module's own or the classpath's.
     Class(String),
-    /// A type parameter of the classifier `owner` (a qualified name).
-    TypeParameter { owner: String, name: String },
+    /// The type parameter [`KspTypeParameter::id`] `id`, named `name` and declared by `owner` (a
+    /// qualified name).
+    TypeParameter {
+        id: u32,
+        owner: String,
+        name: String,
+    },
 }
 
 /// One type argument with its use-site variance.

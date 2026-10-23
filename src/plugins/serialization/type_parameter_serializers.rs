@@ -72,6 +72,18 @@ impl<'a> TypeParameterSerializers<'a> {
         }
     }
 
+    /// The serializers a class with no `$serializer` hands its static helpers, in type-parameter
+    /// order from local `first`.
+    pub(super) fn parameters(
+        first: u32,
+        identities: &'a [&'static str],
+    ) -> TypeParameterSerializers<'a> {
+        TypeParameterSerializers {
+            storage: TypeParameterSerializerStorage::Parameters { first },
+            identities,
+        }
+    }
+
     /// The same serializers as a static helper receives them: parameter `k`'s is local
     /// `first + k`.
     pub(super) fn as_parameters(&self, first: u32) -> TypeParameterSerializers<'a> {

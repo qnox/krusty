@@ -11416,8 +11416,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   subclass's `write$Self` calls the parent's public `write$Self` before encoding its own elements
   at their shifted indices, and its deserialization constructor checks the full required mask, then
   delegates the masks, the inherited elements and the marker to the parent's deserialization
-  constructor before storing its own fields. (A superclass from another module or a generic one is
-  not handled yet.)
+  constructor before storing its own fields. A generic superclass's elements are typed by the
+  subclass's type arguments, and the subclass hands the parent's `write$Self` one serializer per
+  type argument after the descriptor (`StringSerializer.INSTANCE` for `Envelope<String>`, the
+  subclass's own `typeSerial0` for `Outcome<T>`). (A superclass from another module is not handled
+  yet.)
   Test: `tests/serializable_inheritance_e2e.rs`.
 - **A serializable abstract class is serialized polymorphically.** kotlinc gives a non-generic,
   non-sealed abstract `@Serializable` class no `$serializer`: `Companion.serializer()` returns
@@ -11429,6 +11432,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   whole mask), and the class's `$childSerializers` has no `access$get$childSerializers$cp`, which
   only a `$serializer` reads. A subclass reads its own cache after the parent's `write$Self` runs.
   Test: `tests/abstract_serializable_e2e.rs`.
+- **A generic abstract or sealed serializable class builds its serializer on every call.** kotlinc
+  gives it no `$serializer` either, but caches nothing: `Companion.serializer(typeSerial0, …)`
+  returns a new `PolymorphicSerializer(C::class, [])` for an abstract class, or a new
+  `SealedClassSerializer` for a sealed one. The class keeps a `write$Self` that takes one serializer
+  per type parameter after the descriptor, and a deserialization constructor that checks no missing
+  fields, so it has no `$cachedDescriptor`. A sealed class's generic subclass whose type parameter is
+  the sealed class's `j`-th type argument is constructed over the accessor's own `typeSerial<j>`. A
+  subclass reached through intermediate sealed classes composes each step's type arguments from the
+  leaf up to the base, as kotlinc does: for `Mid<X, Y> : Root<Y, X>` and `Leaf<V, W> : Mid<V, W>`,
+  `Root.serializer(a, b)` builds `Leaf$$serializer(b, a)`. An
+  element typed by a generic sealed class reads `serializer(…)` with its type arguments'
+  serializers; one typed by a generic abstract class reads it with
+  `UnitSerializer.INSTANCE` for each type parameter, which a `PolymorphicSerializer` never reads.
+  Both go through the child-serializer cache. Test: `tests/generic_serializable_parent_e2e.rs`.
 - **A serializable sealed class caches a `SealedClassSerializer` over its concrete subclasses.**
   A non-generic sealed `@Serializable` class gets no `$serializer`. Its `Companion.serializer()`
   returns `new SealedClassSerializer(<serial name>, C::class, [Sub::class…], [<Sub serializer>…],
@@ -11446,7 +11463,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   itself a type parameter is not supported yet: its serializer stays an unresolved plugin
   placeholder, so krusty declines the file instead of giving it another serializer. The cache's `access$…$cp` accessor follows the private primary's marker accessor. A
   sealed interface builds the same serializer in its companion's `serializer()`. An element typed
-  by a sealed class, a sealed interface or a non-generic abstract class reads that type's
+  by a sealed class, a sealed interface or an abstract class reads that type's
   `Companion.serializer()` through the child-serializer cache. Test:
   `tests/sealed_serializable_e2e.rs`.
 - **A subclass reaches a private primary constructor's accessor on the delegation line.** The
@@ -15397,6 +15414,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   its receiver is a value. File annotations' policies are resolved once per source and reach
   every checking unit. Verified against kotlinc 2.4.20. (`tests/opt_in_usage_e2e.rs`.)
 
+- **A classifier annotation reads top-level constants.** A class, object, interface or enum
+  annotation may name a top-level `const val` of the module, directly, inside a string template or
+  an array, or through another constant, wherever the constant is declared in the file: the
+  module's constant payloads are folded before declaration annotations are published, so the
+  argument folds as it does on a function. (`tests/class_annotation_attributes_e2e.rs`,
+  `a_class_annotation_folds_top_level_constants`.)
+
 - **A non-constant annotation argument is reported on the argument, by kind.** As kotlinc's
   `FirAnnotationArgumentChecker` does, each argument (or array-literal element) that does not fold
   gets one diagnostic at its own position. A class literal whose receiver failed to resolve, and any
@@ -15732,6 +15756,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   query only, and the build falls back to KSP2.
   (`crates/krusty-plugin-host/tests/ksp.rs`, `class_headers_are_what_ksp2_reports`;
   `ksp_round` unit test `a_header_has_its_written_modifiers_type_parameters_and_supertypes`.)
+- **KSP members are listed as KSP2 lists them.** A file lists its functions and properties in
+  source order, then its classifiers and type aliases in source order. A class lists its
+  constructor properties, then its properties and functions interleaved in source order, then a
+  data class's `componentN` (`final operator override public`) and `copy` (`final`, the
+  visibility of the generated declaration, every parameter with a default: `public` under 2.3,
+  the primary constructor's with `@ConsistentCopyVisibility`), then its primary and secondary constructors, then its nested classes
+  and enum entries in source order, then an enum class's `values`, `valueOf` (static,
+  `final java_static public`) and, where the language has them, `entries`. A constructor is named
+  `<init>`, returns its class applied to stars and has its class's type parameters; it is `final`
+  with its written visibility, an implicit one also `public`, and an enum class's always
+  `private`. Types come from the resolved declarations, an inferred one included: a vararg
+  parameter's type is its element type, a function type is its `kotlin.FunctionN` classifier, and
+  a parameter of an overriding function has the default a function it overrides declares. An
+  interface function without a body is abstract; an `external` one is not. A `vararg val`
+  constructor parameter's property keeps the `vararg` modifier and has the array type (an
+  `IntArray` for `Int`), while the parameter has the element type. A primary constructor has the annotations written
+  on it. A top-level extension property has its resolved receiver. A type krusty cannot describe,
+  a member extension property's receiver and type, a generic property's type parameters, and whether an override of a library
+  function's parameter has a default are refused for that query only. A body krusty does not
+  describe fully (an enum entry's body, a nested type alias) says its list is incomplete.
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `members_and_their_types_are_what_ksp2_reports` and
+  `declarations_are_in_the_order_ksp2_lists_them`; `ksp_round` unit tests
+  `members_and_their_types_are_listed_in_ksps_order` and
+  `declarations_are_in_ksps_order_with_the_members_the_language_contributes`.)
 
 ## 8. Success criteria for the PoC
 
@@ -20434,6 +20482,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `wasm::codegen::tests`, and the `wasm-js`/`wasm-wasi` box lanes
   (`tests/kotlin_box_wasm_conformance.rs`).
 
+- **Wasm nullable scalar assertions require an unboxing contract.** `ref.as_non_null` retains a
+  reference; it cannot produce the checked i32, i64, f32 or f64 result of a nullable scalar's `!!`.
+  Such an assertion declines with `a not-null assertion requiring a scalar reference conversion`,
+  before an invalid module is emitted. Reference-to-reference assertions retain their existing
+  path. This does not claim scalar unboxing or typed null-exception support. Tests:
+  `wasm_nullable_scalar_assertions_decline_without_an_unboxing_contract` and
+  `wasm_nullable_reference_assertions_keep_their_existing_carrier`, both using the JVM oracle.
+
 - **Wasm classes are WasmGC struct subtypes dispatched through shared class tables.** A class's
   instance is a struct whose first field is its dispatch table, followed by its superclasses'
   fields root first and then its own; it is declared a subtype of its superclass's struct, so
@@ -20473,3 +20529,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   source candidate and both frozen callable lookups carry the same authenticated operation;
   an ordinary dependency carries none. Test:
   `klib_libraries::tests::builtin_operations::klib_string_plus_requires_selected_stdlib_authority`.
+  On the JVM, a stdlib taken from a repository (`kotlin-stdlib-2.3.20.jar`, no Kotlin distribution
+  beside it) is the compilation's stdlib: as in kotlinc, the entry whose `kotlin` builtins win
+  classpath selection owns them, so `String?.plus` still concatenates instead of calling the
+  bodiless `kotlin.plus`. A distribution stdlib keeps its pairing with the common KLIB, and an
+  earlier copy of it gains nothing. Tests:
+  `jvm_libraries::provider_normalization_tests::a_repository_named_stdlib_owns_its_builtins`,
+  `nullable_receiver_operator_ext_e2e::nullable_string_plus_concatenates_against_a_repository_named_stdlib`.

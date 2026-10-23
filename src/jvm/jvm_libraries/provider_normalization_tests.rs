@@ -304,6 +304,51 @@ fn comparable_range_to_role(
     range_to.callable.compiler_intrinsic
 }
 
+/// The role of the builtin `String?.plus(Any?)` extension.
+fn nullable_string_plus_role(
+    libraries: &JvmLibraries,
+) -> Option<crate::libraries::CompilerIntrinsic> {
+    let symbols = libraries.symbols(SymbolNamespace::Package(type_name("kotlin")), "plus");
+    let functions = symbols.callables.functions();
+    let [plus] = functions
+        .iter()
+        .filter(|function| function.receiver == Some(Ty::nullable(Ty::String)))
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("expected one String?.plus");
+    };
+    plus.callable.compiler_intrinsic
+}
+
+/// A build tool's stdlib has its repository file name and no Kotlin distribution beside it. Its
+/// builtins are still the compiler's: `kotlin.plus` has no JVM class to call.
+#[test]
+fn a_repository_named_stdlib_owns_its_builtins() {
+    let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+        return;
+    };
+    let directory = std::env::temp_dir().join(format!(
+        "krusty-provider-repository-stdlib-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).expect("create repository directory");
+    let repository_stdlib = directory.join("kotlin-stdlib-2.3.20.jar");
+    std::fs::copy(&stdlib, &repository_stdlib).expect("copy stdlib under its repository name");
+    let libraries = initialized_libraries(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+        vec![repository_stdlib],
+    )));
+    assert_eq!(
+        nullable_string_plus_role(&libraries),
+        Some(crate::libraries::CompilerIntrinsic::StringPlus)
+    );
+    drop(libraries);
+    std::fs::remove_dir_all(directory).expect("remove repository stdlib");
+}
+
 #[test]
 fn selected_stdlib_builtins_publish_range_contains_but_an_earlier_copy_does_not() {
     let Some(stdlib) = crate::toolchain::stdlib_jar() else {
@@ -321,6 +366,10 @@ fn selected_stdlib_builtins_publish_range_contains_but_an_earlier_copy_does_not(
         comparable_range_to_role(&trusted),
         Some(crate::libraries::CompilerIntrinsic::ComparableRangeTo),
         "the selected stdlib's Comparable rangeTo carries the intrinsic role"
+    );
+    assert_eq!(
+        nullable_string_plus_role(&trusted),
+        Some(crate::libraries::CompilerIntrinsic::StringPlus)
     );
 
     let directory = std::env::temp_dir().join(format!(
@@ -363,6 +412,11 @@ fn selected_stdlib_builtins_publish_range_contains_but_an_earlier_copy_does_not(
         comparable_range_to_role(&shadowed),
         None,
         "an earlier stdlib copy's identical Comparable rangeTo has no selected-stdlib authority"
+    );
+    assert_eq!(
+        nullable_string_plus_role(&shadowed),
+        None,
+        "an earlier stdlib copy's builtins have no selected-stdlib authority"
     );
 
     drop(shadowed);

@@ -708,6 +708,10 @@ realizations; an ordinary dependency with identical metadata may not. This does 
 metadata or change source overload selection. Wasm owns the GC fields and exception tag; common IR
 keeps the selected constructor/getter identities and typed `Try` / `Throw` nodes.
 
+Nullable assertion emission consumes the existing checked operand and result types; it adds no
+metadata field or nullability rewrite. A Wasm reference-to-scalar assertion declines until its
+unboxing and typed null failure have a complete target realization.
+
 ## Authenticated String concatenation declarations
 
 The member `String.plus(Any?): String` and nullable extension `String?.plus(Any?): String`
