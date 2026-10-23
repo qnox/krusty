@@ -12,6 +12,12 @@ variance or projections; an empty target remains the existing owner-reachability
 not change metadata encoding or recover missing arguments. The unit hierarchy oracle must preserve
 its collection supertype arguments rather than supplying raw declarations for applied queries.
 
+## Shared-target compiler/plugin model artifacts
+
+The Rust compiler/plugin model tracks checkout identity as a Cargo input, so a shared target cannot
+reuse another checkout's incompatible declaration structure. No serialized plugin fields, protocol
+versions, classfile metadata or annotation payloads change.
+
 ## KLIB emission root categories
 
 KLIB dependency-root classification retains authenticated intrinsic-support ownership independently

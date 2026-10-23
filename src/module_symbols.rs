@@ -549,6 +549,7 @@ impl<'a> ModuleSymbols<'a> {
                     annotation,
                     arguments: Vec::new(),
                     facts: Default::default(),
+                    written: None,
                 })
                 .collect(),
             retention: None,

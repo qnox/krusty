@@ -20,6 +20,14 @@ ordinary-body category cannot retry it and turn the target decline into an ordin
   declaration's star projection (shared with bare class literals), and the core `Array`
   declaration publishes its `T` formal for erased-cast proofs with an empty classpath.
 
+## Shared-target plugin model identity
+
+The compiler/plugin IR crate records the existing checkout build input in Rust dep-info. Switching
+checkouts rebuilds that checkout's typed model and its consumers without cleaning shared storage;
+repeating a build in the same checkout retains cached artifacts. A two-checkout Cargo regression
+copies the real crate, changes its model API, and checks A → B → B → A → A outputs and cache reuse.
+This changes no plugin wire format or Kotlin semantics.
+
 ## Constructor parameter annotation pool order
 
 The JVM constructor header seeder carries retained checked applications rather than descriptor-only
