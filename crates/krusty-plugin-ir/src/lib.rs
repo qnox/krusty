@@ -18,9 +18,10 @@ pub use identity::{
     TypeParameterOwner,
 };
 pub use ksp::{
-    KspAnnotation, KspClass, KspClassKind, KspDeclaration, KspFile, KspFunction, KspFunctionKind,
-    KspModifier, KspParameter, KspProperty, KspRound, KspType, KspTypeAlias, KspTypeArgument,
-    KspTypeDeclaration, KspTypeParameter, KspTypeSlot, KspVariance,
+    KspAccessor, KspAnnotation, KspAnnotationArguments, KspArgument, KspClass, KspClassKind,
+    KspDeclaration, KspFile, KspFunction, KspFunctionKind, KspModifier, KspParameter, KspProperty,
+    KspRound, KspType, KspTypeAlias, KspTypeArgument, KspTypeDeclaration, KspTypeParameter,
+    KspTypeSlot, KspUseSite, KspValue, KspVariance,
 };
 pub use module::{
     BodyIr, CallIr, Callee, Constant, ExpressionIr, ExpressionKind, FileIr, FunctionIr, ModuleIr,

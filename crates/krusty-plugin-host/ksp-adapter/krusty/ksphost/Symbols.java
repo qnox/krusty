@@ -1,5 +1,6 @@
 package krusty.ksphost;
 
+import com.google.devtools.ksp.symbol.AnnotationUseSiteTarget;
 import com.google.devtools.ksp.symbol.ClassKind;
 import com.google.devtools.ksp.symbol.FunctionKind;
 import com.google.devtools.ksp.symbol.KSAnnotation;
@@ -9,6 +10,7 @@ import com.google.devtools.ksp.symbol.KSNode;
 import com.google.devtools.ksp.symbol.KSTypeArgument;
 import com.google.devtools.ksp.symbol.KSTypeParameter;
 import com.google.devtools.ksp.symbol.KSTypeReference;
+import com.google.devtools.ksp.symbol.KSValueArgument;
 import com.google.devtools.ksp.symbol.Modifier;
 import com.google.devtools.ksp.symbol.Variance;
 import java.io.DataInputStream;
@@ -132,6 +134,7 @@ final class Symbols {
                 type.parent = parameter;
             }
             parameter.type = type;
+            readAnnotations(in, parameter, parameter.annotations);
             function.parameters.add(parameter);
         }
         function.returnType = Wire.readBoolean(in) ? readReference(in, function) : null;
@@ -157,15 +160,100 @@ final class Symbols {
         property.extensionReceiver = receiver == 1 ? readReference(in, property) : null;
         property.receiverUndescribed = receiver == 2;
         property.type = Wire.readBoolean(in) ? readReference(in, property) : null;
+        property.getter = new SourceAccessor.Getter(property);
+        if (readAccessor(in, property.getter)) {
+            throw new IOException("a getter has no parameter");
+        }
+        if (Wire.readBoolean(in)) {
+            SourceAccessor.Setter setter = new SourceAccessor.Setter(property);
+            if (!readAccessor(in, setter)) {
+                throw new IOException("a setter has a parameter");
+            }
+            setter.parameter = new SetterParameter(setter, Wire.readString(in));
+            readAnnotations(in, setter.parameter, setter.parameter.annotations);
+            property.setter = setter;
+        }
         return property;
+    }
+
+    // An accessor up to its parameter (`put_accessor` in `src/ksp/protocol.rs`): whether it has
+    // one, which follows.
+    private boolean readAccessor(DataInputStream in, SourceAccessor accessor) throws IOException {
+        accessor.written = Wire.readBoolean(in);
+        accessor.modifiers = readModifiers(in);
+        readAnnotations(in, accessor, accessor.annotations);
+        return Wire.readBoolean(in);
     }
 
     private void readAnnotations(DataInputStream in, KSNode parent, List<KSAnnotation> into)
             throws IOException {
         int count = in.readInt();
         for (int i = 0; i < count; i++) {
-            String shortName = Wire.readString(in);
-            into.add(new SourceAnnotation(parent, shortName, Wire.readString(in), this));
+            into.add(readAnnotation(in, parent));
+        }
+    }
+
+    // An annotation (`put_annotation` in `src/ksp/protocol.rs`).
+    private SourceAnnotation readAnnotation(DataInputStream in, KSNode parent) throws IOException {
+        String shortName = Wire.readString(in);
+        String qualifiedName = Wire.readString(in);
+        String useSite = Wire.readString(in);
+        boolean synthetic = Wire.readBoolean(in);
+        SourceAnnotation annotation = new SourceAnnotation(
+                parent,
+                shortName,
+                qualifiedName,
+                useSite.isEmpty() ? null : AnnotationUseSiteTarget.valueOf(useSite),
+                synthetic,
+                this);
+        if (Wire.readBoolean(in)) {
+            annotation.arguments = readArguments(in, annotation);
+            annotation.defaultArguments = readArguments(in, annotation);
+        }
+        return annotation;
+    }
+
+    private List<KSValueArgument> readArguments(DataInputStream in, SourceAnnotation annotation)
+            throws IOException {
+        int count = in.readInt();
+        List<KSValueArgument> arguments = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            String name = Wire.readString(in);
+            boolean written = Wire.readBoolean(in);
+            arguments.add(new SourceValueArgument(annotation, name, readValue(in, annotation), written));
+        }
+        return arguments;
+    }
+
+    // A constant (`put_value` in `src/ksp/protocol.rs`). A nested annotation's parent is the
+    // annotation it is an argument of.
+    private ConstantValue readValue(DataInputStream in, SourceAnnotation annotation)
+            throws IOException {
+        byte tag = in.readByte();
+        switch (tag) {
+            case 0: return ConstantValue.of(Wire.readBoolean(in));
+            case 1: return ConstantValue.of(in.readByte());
+            case 2: return ConstantValue.of(in.readShort());
+            case 3: return ConstantValue.of(in.readInt());
+            case 4: return ConstantValue.of(in.readLong());
+            case 5: return ConstantValue.of(in.readChar());
+            case 6: return ConstantValue.of(Float.intBitsToFloat(in.readInt()));
+            case 7: return ConstantValue.of(Double.longBitsToDouble(in.readLong()));
+            case 8: return ConstantValue.of(Wire.readString(in));
+            case 9:
+                String enumClass = Wire.readString(in);
+                return ConstantValue.enumEntry(this, enumClass, Wire.readString(in));
+            case 10: return ConstantValue.type(readReference(in, annotation));
+            case 11: return ConstantValue.annotation(readAnnotation(in, annotation));
+            case 12:
+                int count = in.readInt();
+                List<ConstantValue> elements = new ArrayList<>(count);
+                for (int i = 0; i < count; i++) {
+                    elements.add(readValue(in, annotation));
+                }
+                return ConstantValue.array(elements);
+            default:
+                throw new IOException("unknown constant " + tag);
         }
     }
 
