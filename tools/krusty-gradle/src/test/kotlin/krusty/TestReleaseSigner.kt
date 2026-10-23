@@ -16,9 +16,19 @@ internal class TestReleaseSigner(
     keyFlags: Int = 0x02,
     /** Makes the subkey sign its own binding while naming the root as issuer, as a forger would. */
     forgeBinding: Boolean = false,
+    /** A revocation of the subkey (0x28) the certificate carries. */
+    subkeyRevocation: Revocation? = null,
+    /** A revocation of the root key (0x20) the certificate carries. */
+    rootRevocation: Revocation? = null,
 ) {
+    /** Who makes a revocation: the root, a forger naming the root, or another key naming itself. */
+    enum class Issuer { ROOT, FORGED, FOREIGN }
+
+    class Revocation(val time: Long, val reason: Int, val issuer: Issuer = Issuer.ROOT)
+
     private val rootPair = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
     private val subkeyPair = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+    private val foreignPair = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
     private val root = keyBody(rootPair, 0)
     private val subkey = keyBody(subkeyPair, subkeyCreated)
 
@@ -30,7 +40,24 @@ internal class TestReleaseSigner(
         if (keyExpiration != null) subpackets += byteArrayOf(5, 9) + u32(keyExpiration)
         subpackets += issuer(root)
         val binding = signature(0x18, if (forgeBinding) subkeyPair else rootPair, hashInput(root) + hashInput(subkey), subpackets)
-        armor("PUBLIC KEY BLOCK", packet(6, root) + packet(14, subkey) + packet(2, binding))
+        val rootSignatures = rootRevocation?.let { packet(2, revocation(0x20, it, hashInput(root))) } ?: ByteArray(0)
+        val subkeySignatures = subkeyRevocation
+            ?.let { packet(2, revocation(0x28, it, hashInput(root) + hashInput(subkey))) } ?: ByteArray(0)
+        armor(
+            "PUBLIC KEY BLOCK",
+            packet(6, root) + rootSignatures + packet(14, subkey) + packet(2, binding) + subkeySignatures,
+        )
+    }
+
+    private fun revocation(type: Int, revocation: Revocation, signed: ByteArray): ByteArray {
+        val key = when (revocation.issuer) {
+            Issuer.ROOT -> rootPair
+            Issuer.FORGED -> subkeyPair
+            Issuer.FOREIGN -> foreignPair
+        }
+        val issuer = if (revocation.issuer == Issuer.FOREIGN) issuer(keyBody(foreignPair, 0)) else issuer(root)
+        val reason = byteArrayOf(3, 29, revocation.reason.toByte(), 0)
+        return signature(type, key, signed, listOf(created(revocation.time), reason, issuer))
     }
 
     /** An armored binary-document signature over [data] made at [time], as `gpg --detach-sign` writes it. */

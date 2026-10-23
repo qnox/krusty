@@ -18,12 +18,13 @@ private const val RELEASE_ROOT_KEY = "krusty/release-root-key.asc"
 /**
  * The trust anchor for releases: an OpenPGP primary key. A release ships its `SHA256SUMS`, a
  * detached signature over it, and the public certificate of the signing subkey; the sums are
- * trusted only when this key bound that subkey for signing and the subkey was valid when it signed.
- * Rotating the subkey therefore needs no plugin change; replacing the primary key does.
+ * trusted only when this key bound that subkey for signing, the subkey was valid when it signed,
+ * and neither key is revoked for that signature. Rotating the subkey therefore needs no plugin
+ * change; replacing the primary key does.
  */
 internal class ReleaseRootKey(armoredPublicKey: String) {
-    private val root: KeyPacket = packets(dearmor(armoredPublicKey, "PUBLIC KEY BLOCK"))
-        .firstOrNull { it.tag == PUBLIC_KEY_TAG }
+    private val bundled = packets(dearmor(armoredPublicKey, "PUBLIC KEY BLOCK"))
+    private val root: KeyPacket = bundled.firstOrNull { it.tag == PUBLIC_KEY_TAG }
         ?.let { KeyPacket.parse(it.body) }
         ?: throw GradleException("the krusty release root key is not a supported OpenPGP public key")
 
@@ -31,7 +32,8 @@ internal class ReleaseRootKey(armoredPublicKey: String) {
 
     /**
      * Accepts [data] only if [armoredSignature] is a binary-document signature over it by a subkey
-     * that [armoredCertificate] binds to this root key for signing, valid when the signature was made.
+     * that [armoredCertificate] binds to this root key for signing, valid when the signature was made
+     * and revoked for it neither itself nor through the root key.
      */
     fun verify(data: ByteArray, armoredSignature: String, armoredCertificate: String, what: String) {
         val signature = packets(dearmor(armoredSignature, "SIGNATURE")).singleOrNull { it.tag == SIGNATURE_TAG }
@@ -40,58 +42,87 @@ internal class ReleaseRootKey(armoredPublicKey: String) {
         if (signature.type != BINARY_DOCUMENT) {
             throw GradleException("the signature of $what is not a binary-document signature")
         }
-        val subkey = signingSubkeys(armoredCertificate, what).firstOrNull { signature.issuedBy(it.key) }
-            ?: throw GradleException("$what is not signed by a subkey of the krusty release root key")
         val made = signature.created
             ?: throw GradleException("the signature of $what has no creation time")
-        if (made < subkey.key.created || (subkey.expires != null && made >= subkey.expires)) {
-            throw GradleException("$what was signed outside the validity of its signing subkey")
-        }
-        if (!signature.verifiedBy(subkey.key, data)) throw GradleException("the signature of $what does not match it")
-    }
-
-    /** The subkeys of [armoredCertificate] that this root key currently binds with the sign-data flag. */
-    private fun signingSubkeys(armoredCertificate: String, what: String): List<BoundSubkey> {
         val certificate = packets(dearmor(armoredCertificate, "PUBLIC KEY BLOCK"))
         val primary = certificate.firstOrNull { it.tag == PUBLIC_KEY_TAG }
         if (primary == null || !primary.body.contentEquals(root.body)) {
             throw GradleException("the signing key of $what does not belong to the krusty release root key")
         }
-        val bound = mutableListOf<BoundSubkey>()
+        // The plugin's own copy of the key may carry a revocation as well as the release's copy.
+        val keys = certifiedKeys(bundled, "the krusty release root key") + certifiedKeys(certificate, "the signing key of $what")
+        if (keys.any { it.subkey == null && it.revokes(made) }) {
+            throw GradleException("the krusty release root key is revoked for $what")
+        }
+        val subkey = keys.firstOrNull { it.subkey != null && it.signs && signature.issuedBy(it.subkey) }
+            ?: throw GradleException("$what is not signed by a subkey of the krusty release root key")
+        val key = checkNotNull(subkey.subkey)
+        if (keys.any { it.subkey != null && it.subkey.body.contentEquals(key.body) && it.revokes(made) }) {
+            throw GradleException("the subkey that signed $what is revoked for it")
+        }
+        if (made < key.created || (subkey.expires != null && made >= subkey.expires)) {
+            throw GradleException("$what was signed outside the validity of its signing subkey")
+        }
+        if (!signature.verifiedBy(key, data)) throw GradleException("the signature of $what does not match it")
+    }
+
+    /**
+     * What the root key itself says, in a transferable key, about the primary key (`subkey` null)
+     * and each subkey: the newest binding of each subkey and every revocation. A signature
+     * contributes only when it names the root as issuer and verifies against it, so a packet
+     * anyone else made can neither bind nor revoke a key.
+     */
+    private fun certifiedKeys(packets: List<Packet>, what: String): List<KeyStatement> {
+        val statements = mutableListOf<KeyStatement>()
+        // Signatures directly after the primary key are about the primary key; a user id or user
+        // attribute starts a section whose certifications krusty does not read; a subkey starts its own.
+        var section: KeyPacket? = root
         var subkey: KeyPacket? = null
         var newest: SignaturePacket? = null
         fun finish() {
             val key = subkey ?: return
             val binding = newest ?: return
-            if (binding.keyFlags?.and(SIGN_DATA) == SIGN_DATA) {
-                bound += BoundSubkey(key, binding.keyExpiration?.let { key.created + it })
-            }
+            statements += KeyStatement(
+                key,
+                signs = binding.keyFlags?.and(SIGN_DATA) == SIGN_DATA,
+                expires = binding.keyExpiration?.let { key.created + it },
+            )
         }
-        for (packet in certificate) {
+        for (packet in packets.drop(1)) {
             when (packet.tag) {
+                SIGNATURE_TAG -> {
+                    val about = section ?: continue
+                    val statement = SignaturePacket.parse(packet.body, what)
+                    if (!statement.issuedBy(root)) continue
+                    val signed = if (about === root) keyHashInput(root.body) else keyHashInput(root.body) + keyHashInput(about.body)
+                    when {
+                        about === root && statement.type == KEY_REVOCATION ->
+                            if (statement.verifiedBy(root, signed)) statements += KeyStatement.revocation(null, statement)
+                        about !== root && statement.type == SUBKEY_REVOCATION ->
+                            if (statement.verifiedBy(root, signed)) statements += KeyStatement.revocation(about, statement)
+                        about !== root && statement.type == SUBKEY_BINDING -> {
+                            val created = statement.created ?: continue
+                            if (newest?.created?.let { created <= it } == true) continue
+                            if (statement.verifiedBy(root, signed)) newest = statement
+                        }
+                    }
+                }
                 PUBLIC_SUBKEY_TAG -> {
                     finish()
                     subkey = KeyPacket.parse(packet.body)
+                    section = subkey
                     newest = null
                 }
-                SIGNATURE_TAG -> {
-                    val key = subkey ?: continue
-                    val binding = SignaturePacket.parse(packet.body, "the signing key of $what")
-                    if (binding.type != SUBKEY_BINDING || !binding.issuedBy(root)) continue
-                    val created = binding.created ?: continue
-                    if (newest?.created?.let { created <= it } == true) continue
-                    if (binding.verifiedBy(root, keyHashInput(root.body) + keyHashInput(key.body))) newest = binding
-                }
-                // A user id or user attribute ends the subkey section it follows.
                 else -> {
                     finish()
                     subkey = null
+                    section = null
                     newest = null
                 }
             }
         }
         finish()
-        return bound
+        return statements
     }
 
     companion object {
@@ -107,8 +138,32 @@ internal class ReleaseRootKey(armoredPublicKey: String) {
     }
 }
 
-/** A subkey and, when its binding sets one, the epoch second its validity ends. */
-private class BoundSubkey(val key: KeyPacket, val expires: Long?)
+/**
+ * One thing the root key certified about the primary key (`subkey` null) or a subkey: a binding,
+ * with its sign-data flag and the epoch second its validity ends, or a revocation from [revokedAt].
+ */
+private class KeyStatement(
+    val subkey: KeyPacket?,
+    val signs: Boolean = false,
+    val expires: Long? = null,
+    private val revokedAt: Long? = null,
+    private val hardRevocation: Boolean = false,
+) {
+    /**
+     * Whether this revokes the key for a signature made at [made]. A key retired or superseded
+     * (RFC 9580 reasons 1 and 3) keeps the signatures it made before; any other reason, or none,
+     * means the key may be compromised and nothing it signed is trusted.
+     */
+    fun revokes(made: Long): Boolean = revokedAt != null && (hardRevocation || made >= revokedAt)
+
+    companion object {
+        fun revocation(subkey: KeyPacket?, signature: SignaturePacket): KeyStatement = KeyStatement(
+            subkey,
+            revokedAt = signature.created ?: 0,
+            hardRevocation = signature.revocationReason != SUPERSEDED && signature.revocationReason != RETIRED,
+        )
+    }
+}
 
 private const val SIGNATURE_TAG = 2
 private const val PUBLIC_KEY_TAG = 6
@@ -116,6 +171,12 @@ private const val PUBLIC_SUBKEY_TAG = 14
 
 private const val BINARY_DOCUMENT = 0x00
 private const val SUBKEY_BINDING = 0x18
+private const val KEY_REVOCATION = 0x20
+private const val SUBKEY_REVOCATION = 0x28
+
+/** The reasons for revocation that leave the signatures a key made before it in force. */
+private const val SUPERSEDED = 1
+private const val RETIRED = 3
 
 /** The key flag that lets a key sign data. */
 private const val SIGN_DATA = 0x02
@@ -214,6 +275,8 @@ internal class SignaturePacket private constructor(
     /** Seconds after the key's creation that a binding signature lets the key expire. */
     val keyExpiration: Long?,
     val keyFlags: Int?,
+    /** The reason code of a revocation, when it gives one. */
+    val revocationReason: Int?,
 ) {
     fun issuedBy(key: KeyPacket): Boolean =
         issuerFingerprints.any { it.contentEquals(key.fingerprint) } ||
@@ -271,6 +334,7 @@ internal class SignaturePacket private constructor(
                 var created: Long? = null
                 var keyExpiration: Long? = null
                 var keyFlags: Int? = null
+                var revocationReason: Int? = null
                 subpackets(hashedSubpackets) { subpacket, critical, data ->
                     when (subpacket) {
                         2 -> created = Reader(data, 0).u32().toLong() and 0xffffffffL
@@ -279,6 +343,7 @@ internal class SignaturePacket private constructor(
                         9 -> keyExpiration = (Reader(data, 0).u32().toLong() and 0xffffffffL).takeIf { it != 0L }
                         16 -> keyIds += data
                         27 -> keyFlags = data[0].toInt() and 0xff
+                        29 -> revocationReason = data[0].toInt() and 0xff
                         33 -> if (data.size == 21 && data[0].toInt() == 4) fingerprints += data.copyOfRange(1, 21)
                         // An unknown critical subpacket may restrict the signature in a way this
                         // reader cannot honor, so the signature is rejected rather than trusted.
@@ -289,7 +354,7 @@ internal class SignaturePacket private constructor(
                 subpackets(unhashedSubpackets) { subpacket, _, data -> if (subpacket == 16) keyIds += data }
                 return SignaturePacket(
                     type, algorithm, digestName, hashed, fingerprints, keyIds, left16, material,
-                    created, keyExpiration, keyFlags,
+                    created, keyExpiration, keyFlags, revocationReason,
                 )
             } catch (_: IndexOutOfBoundsException) {
                 malformed()

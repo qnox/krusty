@@ -114,4 +114,96 @@ class ReleaseSignatureTest {
             rejection { gpgRoot.verify(sums, fixture("root-key.asc"), fixture("ed25519-signing-key.asc"), what) },
         )
     }
+
+    @Test
+    fun keepsSignaturesASupersededSubkeyMadeBeforeItsRevocation() {
+        gpgRoot.verify(sums, fixture("SHA256SUMS.subkey-superseded.before.asc"), fixture("subkey-superseded-signing-key.asc"), what)
+    }
+
+    @Test
+    fun rejectsSignaturesASupersededSubkeyMadeAfterItsRevocation() {
+        assertEquals(
+            "the subkey that signed $what is revoked for it",
+            rejection {
+                gpgRoot.verify(sums, fixture("SHA256SUMS.subkey-superseded.after.asc"), fixture("subkey-superseded-signing-key.asc"), what)
+            },
+        )
+    }
+
+    @Test
+    fun rejectsEverySignatureOfACompromisedSubkey() {
+        for (made in listOf("before", "after")) {
+            assertEquals(
+                "the subkey that signed $what is revoked for it",
+                rejection {
+                    gpgRoot.verify(sums, fixture("SHA256SUMS.subkey-compromised.$made.asc"), fixture("subkey-compromised-signing-key.asc"), what)
+                },
+            )
+        }
+    }
+
+    @Test
+    fun keepsSignaturesMadeBeforeTheRootWasSuperseded() {
+        gpgRoot.verify(sums, fixture("SHA256SUMS.root-superseded.before.asc"), fixture("root-superseded-signing-key.asc"), what)
+    }
+
+    @Test
+    fun rejectsSignaturesMadeAfterTheRootWasSuperseded() {
+        assertEquals(
+            "the krusty release root key is revoked for $what",
+            rejection {
+                gpgRoot.verify(sums, fixture("SHA256SUMS.root-superseded.after.asc"), fixture("root-superseded-signing-key.asc"), what)
+            },
+        )
+    }
+
+    @Test
+    fun rejectsEverySignatureUnderACompromisedRoot() {
+        for (made in listOf("before", "after")) {
+            assertEquals(
+                "the krusty release root key is revoked for $what",
+                rejection {
+                    gpgRoot.verify(sums, fixture("SHA256SUMS.root-compromised.$made.asc"), fixture("root-compromised-signing-key.asc"), what)
+                },
+            )
+        }
+    }
+
+    @Test
+    fun honorsARootRevocationThePluginBundles() {
+        val revoked = ReleaseRootKey(fixture("revoked-root-key.root-compromised.asc"))
+
+        assertEquals(
+            "the krusty release root key is revoked for $what",
+            rejection { revoked.verify(sums, fixture("SHA256SUMS.ed25519.asc"), fixture("ed25519-signing-key.asc"), what) },
+        )
+    }
+
+    @Test
+    fun ignoresRevocationsTheRootDidNotMake() {
+        for (issuer in listOf(TestReleaseSigner.Issuer.FORGED, TestReleaseSigner.Issuer.FOREIGN)) {
+            val revocation = TestReleaseSigner.Revocation(time = 1_000_000, reason = 2, issuer = issuer)
+            val subkey = TestReleaseSigner(subkeyRevocation = revocation)
+            val root = TestReleaseSigner(rootRevocation = revocation)
+
+            subkey.rootKey.verify(sums, subkey.sign(sums), subkey.certificate, what)
+            root.rootKey.verify(sums, root.sign(sums), root.certificate, what)
+        }
+    }
+
+    @Test
+    fun honorsRevocationsTheRootMade() {
+        val revocation = TestReleaseSigner.Revocation(time = 1_000_000, reason = 2)
+        val subkey = TestReleaseSigner(subkeyRevocation = revocation)
+        val root = TestReleaseSigner(rootRevocation = revocation)
+
+        assertEquals(
+            "the subkey that signed $what is revoked for it",
+            rejection { subkey.rootKey.verify(sums, subkey.sign(sums), subkey.certificate, what) },
+        )
+        assertEquals(
+            "the krusty release root key is revoked for $what",
+            rejection { root.rootKey.verify(sums, root.sign(sums), root.certificate, what) },
+        )
+    }
 }
