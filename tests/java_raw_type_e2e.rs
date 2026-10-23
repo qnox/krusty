@@ -17,7 +17,10 @@ const RAW: &str = "import java.util.*;\n\
     \x20       public void set(T t) { held = t; }\n\
     \x20   }\n\
     \x20   public static class Plain<T> { public T value; }\n\
-    \x20   public static class Rec<T extends Comparable<T>> { public T value; }\n\
+    \x20   public static class Rec<T extends Comparable<T>> {\n\
+    \x20       public T value;\n\
+    \x20       public void set(T t) { value = t; }\n\
+    \x20   }\n\
     \x20   @SuppressWarnings(\"rawtypes\") public static Box box() { return new Box<String>(); }\n\
     \x20   @SuppressWarnings(\"rawtypes\") public static Plain plain() { return new Plain<String>(); }\n\
     \x20   @SuppressWarnings(\"rawtypes\") public static Rec rec() { return new Rec<String>(); }\n\
@@ -47,7 +50,18 @@ const ACCEPTED: &str = "fun rawBox() = Raw.box()\n\
     \x20   val p = Raw.Plain<String>()\n\
     \x20   p.value = \"v\"\n\
     \x20   val sizes = Raw.size(p) + Raw.size(Raw.Plain<Int>()) + Raw.size(Raw.plain())\n\
+    \x20   val mixed = Raw.plain()\n\
+    \x20   mixed.value = 1\n\
+    \x20   mixed.value = \"s\"\n\
+    \x20   val r = Raw.rec()\n\
+    \x20   r.set(\"c\")\n\
+    \x20   r.set(2)\n\
+    \x20   val writes = Raw.list()\n\
+    \x20   writes.add(3)\n\
+    \x20   writes.add(\"d\")\n\
     \x20   val b = Raw.box()\n\
+    \x20   b.set(StringBuilder(\"sb\"))\n\
+    \x20   b.set(null)\n\
     \x20   b.set(\"held\")\n\
     \x20   val read: CharSequence = b.get()\n\
     \x20   val star: Raw.Plain<*> = Raw.plain()\n\
@@ -55,7 +69,8 @@ const ACCEPTED: &str = "fun rawBox() = Raw.box()\n\
     \x20   val list = Raw.list()\n\
     \x20   val first: Any? = list[0]\n\
     \x20   val chars = list.size + (first as String).length\n\
-    \x20   return if (sizes == 1 && read.length == 4 && any == null && chars == 3) \"OK\"\n\
+    \x20   val wrote = mixed.value == \"s\" && r.value == 2 && writes.size == 4\n\
+    \x20   return if (sizes == 1 && read.length == 4 && any == null && chars == 3 && wrote) \"OK\"\n\
     \x20   else \"sizes $sizes read $read any $any chars $chars\"\n\
     }\n";
 
