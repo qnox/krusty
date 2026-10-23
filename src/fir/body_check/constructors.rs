@@ -920,7 +920,7 @@ impl BodyFirChecker<'_> {
                     parameter: parameter.into(),
                     reified,
                     value,
-                    reified_runtime: self.reified_substitution_runtime(reified, value, &[]),
+                    reified_runtime: self.reified_substitution_runtime(reified, value, None),
                     additional_bounds: Box::new([]),
                 })
             })
