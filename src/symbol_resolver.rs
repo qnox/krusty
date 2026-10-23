@@ -141,8 +141,10 @@ impl crate::assignable::TypeOracle for SourceOracle<'_> {
     fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
         direct_supertypes(self.0, ty)
     }
+    // A platform source sees an alias-actualized `expect` class as the alias's target.
     fn same_class_name(&self, a: TypeName, b: TypeName) -> bool {
-        a == b
+        let actualized = |name| self.0.actualized_expect(name).unwrap_or(name);
+        a == b || actualized(a) == actualized(b)
     }
     fn type_param_variance(&self, internal: TypeName, index: usize) -> crate::types::TypeVariance {
         self.0

@@ -142,12 +142,10 @@ pub(super) fn resolved_parameter_identity(
     crate::ir::IrParameterIdentity::resolved(identity)
 }
 
-/// Declarations a per-file lowering pass must visit: this source's anchors, in declaration-id
-/// order, plus inline-payload declarations copied in from another source. Scanning the whole
-/// module for each file was quadratic.
-/// Whether `declaration` is, or belongs to, an `expect` classifier. One survives actualization
-/// only where an `actual typealias` actualized it: common code types it as its own classifier,
-/// and every target realizes the alias's target, so nothing of the `expect` is lowered.
+/// Whether `declaration` is, or belongs to, an `expect` classifier an `actual typealias`
+/// actualized. Common code types one as its own classifier and every target realizes the alias's
+/// target, so nothing of the `expect` is lowered. An `@OptionalExpectation` annotation without an
+/// actual is no such classifier: it is lowered as declared.
 pub(super) fn within_actualized_expect(
     index: &ResolvedModuleIndex,
     declaration: crate::fir::DeclarationId,
@@ -159,6 +157,11 @@ pub(super) fn within_actualized_expect(
         index
             .declaration_header(current)
             .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::EXPECT))
+            && index.classifier_header(current).is_some_and(|classifier| {
+                index
+                    .type_alias_by_identity(classifier.classifier)
+                    .is_some()
+            })
     })
 }
 
@@ -173,6 +176,9 @@ pub(super) fn actualizes_expect(
         .is_some_and(|alias| alias.target == target)
 }
 
+/// Declarations a per-file lowering pass must visit: this source's anchors, in declaration-id
+/// order, plus inline-payload declarations copied in from another source. Scanning the whole
+/// module for each file was quadratic.
 pub(super) fn declarations_for_lowering(
     index: &ResolvedModuleIndex,
     source: crate::fir::SourceFileId,
