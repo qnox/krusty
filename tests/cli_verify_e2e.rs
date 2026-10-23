@@ -280,47 +280,88 @@ fn an_unsupported_record_touches_no_compiler_output() {
     assert!(default_output.join("Kept.class").is_file());
 }
 
-/// A record verify-report would replace is refused before any report is removed.
+/// A record verify-report would replace is refused before any report is removed, whether it is
+/// named directly, through a link, or as a link inside a named directory of records.
 #[test]
 fn verify_report_refuses_a_record_among_its_reports_and_removes_nothing() {
     let layout = Layout::new("report-input");
     let out = layout.root.join("report");
     std::fs::create_dir_all(&out).expect("report directory");
-    for name in [
-        "krusty-verify.html",
-        "krusty-verify.md",
-        "krusty-verify-issue.md",
-    ] {
-        std::fs::write(out.join(name), name).expect("an earlier report");
+    // A valid record, stored where verify-report writes its Markdown report.
+    let record = "{\n  \"compilation\": \":compileKotlin\",\n  \"outcome\": {\n    \"status\": \"no-sources\"\n  }\n}\n";
+    let reports = BTreeMap::from([
+        ("krusty-verify.html", "an earlier html report"),
+        ("krusty-verify.md", record),
+        ("krusty-verify-issue.md", "an earlier issue"),
+    ]);
+    for (name, text) in &reports {
+        std::fs::write(out.join(name), text).expect("an earlier report");
     }
+    let records = layout.root.join("records");
+    std::fs::create_dir_all(&records).expect("records directory");
+    std::os::unix::fs::symlink(out.join("krusty-verify.md"), records.join("a.json"))
+        .expect("link in the records directory");
     std::os::unix::fs::symlink(out.join("krusty-verify.md"), layout.root.join("alias.json"))
         .expect("link");
-    for record in [out.join("krusty-verify.md"), layout.root.join("alias.json")] {
+    for (argument, refused) in [
+        (out.join("krusty-verify.md"), out.join("krusty-verify.md")),
+        (
+            layout.root.join("alias.json"),
+            layout.root.join("alias.json"),
+        ),
+        (records.clone(), records.join("a.json")),
+    ] {
         let output = Command::new(common::krusty_binary())
             .arg("verify-report")
             .arg("--out")
             .arg(&out)
-            .arg(&record)
+            .arg(&argument)
             .output()
             .expect("run krusty verify-report");
-        assert_eq!(output.status.code(), Some(2));
         assert_eq!(
-            String::from_utf8_lossy(&output.stderr),
-            format!(
-                "error: record {} is a report verify-report writes to --out {}\n",
-                record.display(),
-                out.display()
-            )
+            (
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr).into_owned()
+            ),
+            (
+                Some(2),
+                format!(
+                    "error: record {} is a report verify-report writes to --out {}\n",
+                    refused.display(),
+                    out.display()
+                )
+            ),
+            "{}",
+            argument.display()
         );
-        for name in [
-            "krusty-verify.html",
-            "krusty-verify.md",
-            "krusty-verify-issue.md",
-        ] {
+        let mut inventory = std::fs::read_dir(&out)
+            .expect("the report directory")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .into_string()
+                    .expect("name")
+            })
+            .collect::<Vec<_>>();
+        inventory.sort();
+        assert_eq!(
+            inventory,
+            [
+                "krusty-verify-issue.md",
+                "krusty-verify.html",
+                "krusty-verify.md"
+            ]
+        );
+        for (name, text) in &reports {
             assert_eq!(
                 std::fs::read_to_string(out.join(name)).expect("the earlier report"),
-                name
+                *text
             );
         }
+        assert_eq!(
+            std::fs::read_to_string(records.join("a.json")).expect("the linked record"),
+            record
+        );
     }
 }
