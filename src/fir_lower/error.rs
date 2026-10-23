@@ -87,6 +87,12 @@ pub enum FirLoweringFailure {
     /// Checked FIR attached a declared subject identity to a subjectless `when`.
     MalformedWhenSubjectVariable(LocalValueId),
     MissingLocalCallable(FirLocalCallableRef),
+    /// Checked value parameters must match the declaration after removing captures and receiver.
+    MalformedLocalCallParameters {
+        target: FirLocalCallableRef,
+        checked: usize,
+        declared: usize,
+    },
     UnsupportedLocalCallableReference(FirLocalCallableRef),
     MissingLocalDefault {
         function: crate::ir::FunId,

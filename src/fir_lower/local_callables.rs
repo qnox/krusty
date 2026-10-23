@@ -190,6 +190,7 @@ impl BodyLowering<'_> {
         target: FirLocalCallableRef,
         extension_receiver: Option<crate::fir::FirReceiver>,
         arguments: &[crate::fir::FirCallArgument],
+        parameter_types: &[crate::fir::ResolvedTy],
     ) -> Result<(ExprId, Ty), FirLoweringFailure> {
         let (realization, external) = self.local_function(&target)?;
         let captures = if external {
@@ -222,10 +223,19 @@ impl BodyLowering<'_> {
         if realization.has_extension_receiver {
             logical_parameter_types.remove(realization.context_parameter_count as usize);
         }
+        if parameter_types.len() != logical_parameter_types.len() {
+            return Err(FirLoweringFailure::MalformedLocalCallParameters {
+                target,
+                checked: parameter_types.len(),
+                declared: logical_parameter_types.len(),
+            });
+        }
+        // Packing belongs to the checker-applied signature, not the lifted declaration's erased
+        // carrier. The declaration types below still own the local function's ABI coercions.
         let mut lowered = self.lower_arguments(arguments, |parameter| {
-            logical_parameter_types
+            parameter_types
                 .get(parameter as usize)
-                .copied()
+                .map(|ty| ty.get())
                 .ok_or(FirLoweringFailure::MissingExternalParameter { parameter })
         })?;
         // A local function is not specialized per call: its parameters keep their declared types,

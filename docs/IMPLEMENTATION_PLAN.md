@@ -5,6 +5,14 @@ front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
 
+## Local-call checked vararg signature
+
+Retain the checker's complete applied value-parameter list on local calls and consume it when
+packing varargs. The lifted declaration still owns ABI coercions, captures, extension receivers
+and defaults; reject mismatched value arity. Real-kotlinc runtime and whole-class regressions cover
+the selected Int/String array carriers. This functional slice does not implement #2554's broader
+call-owned operand-preparation/result contract or introduce the private numeric carrier prototype.
+
 KLIB dependency-emission categories have disjoint declaration-owned roots before lowering begins.
 An authenticated intrinsic wrapper keeps that ownership when its body transaction declines; the
 ordinary-body category cannot retry it and turn the target decline into an ordinary-closure error.

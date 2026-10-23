@@ -45,6 +45,11 @@ type-table forms share the same decoding path; no metadata encoding changes. Con
 packed array projection but use the readable element value type for listed-argument conversions,
 adapted references and evaluation-order spills; whole-array spreads keep the array type.
 
+Local calls retain the checker-applied value-parameter list for packing too. It may select a concrete
+reference array while the lifted local declaration still has an erased generic array descriptor.
+This changes neither that declaration's generic signature nor metadata encoding, and does not
+reconstruct selected element types from operands or physical descriptors.
+
 ## Reference (`fun f(a: Int): Int = a` in `M.kt` → class `MKt`)
 
 > The `d1` byte capture below was taken from kotlinc **1.9.24** when this format was first
