@@ -14,12 +14,14 @@ pub(crate) fn java_class(classifier: TypeName) -> Option<TypeName> {
     if let Some(class) = class_map().kotlin_to_java.get(&classifier) {
         return Some(*class);
     }
-    // A function classifier beyond the numbered runtime interfaces is the arity-erased one.
+    // A function classifier beyond the numbered runtime interfaces is the arity-erased one; a
+    // suspend function's continuation counts toward its arity.
     let function = crate::jvm::function_classifiers::classifier(classifier)
         .filter(|function| function.identity() == classifier)?;
+    let runtime_arity = function.arity() + usize::from(function.is_suspend());
     if function.is_reflective() {
         Some(type_name(KFUNCTION_INTERNAL))
-    } else if function.arity() > MAX_NUMBERED_FUNCTION_ARITY {
+    } else if runtime_arity > MAX_NUMBERED_FUNCTION_ARITY {
         Some(type_name("kotlin/jvm/functions/FunctionN"))
     } else {
         None
@@ -38,8 +40,8 @@ struct ClassMap {
 }
 
 /// The pairs `JavaToKotlinClassMap`'s `init` adds, in its order: the mapped builtins and
-/// collections, the primitive boxes, the intrinsic companions and the numbered function
-/// interfaces.
+/// collections, the primitive boxes, the intrinsic companions, the numbered function interfaces
+/// and the atomics, which map one way.
 fn class_map() -> &'static ClassMap {
     static MAP: std::sync::OnceLock<ClassMap> = std::sync::OnceLock::new();
     MAP.get_or_init(|| {
@@ -75,16 +77,14 @@ fn class_map() -> &'static ClassMap {
         ] {
             let primitive = type_name(wrapper_to_kotlin_prim(wrapper).expect("a JVM box"));
             both(primitive, type_name(wrapper));
-            // `CompanionObjectMapping`: the number types, `String` and `Enum` below.
-            if wrapper != "java/lang/Boolean" {
-                both(
-                    primitive.nested_child("Companion"),
-                    type_name_child(
-                        internal,
-                        &format!("{}CompanionObject", primitive.segment_ref()),
-                    ),
-                );
-            }
+            // `CompanionObjectMapping`: the primitives', then `String`'s and `Enum`'s below.
+            both(
+                primitive.nested_child("Companion"),
+                type_name_child(
+                    internal,
+                    &format!("{}CompanionObject", primitive.segment_ref()),
+                ),
+            );
         }
         for owner in ["kotlin/String", "kotlin/Enum"] {
             let owner = type_name(owner);
@@ -99,6 +99,20 @@ fn class_map() -> &'static ClassMap {
             both(
                 type_name_child(kotlin, &format!("Function{arity}")),
                 type_name_child(functions, &format!("Function{arity}")),
+            );
+        }
+        for (kotlin, java) in [
+            ("AtomicInt", "AtomicInteger"),
+            ("AtomicLong", "AtomicLong"),
+            ("AtomicBoolean", "AtomicBoolean"),
+            ("AtomicReference", "AtomicReference"),
+            ("AtomicIntArray", "AtomicIntegerArray"),
+            ("AtomicLongArray", "AtomicLongArray"),
+            ("AtomicArray", "AtomicReferenceArray"),
+        ] {
+            map.kotlin_to_java.insert(
+                type_name_child(type_name("kotlin/concurrent/atomics"), kotlin),
+                type_name_child(type_name("java/util/concurrent/atomic"), java),
             );
         }
         map
