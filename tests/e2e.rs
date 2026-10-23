@@ -20,6 +20,8 @@ mod captured_receiver_names_e2e;
 mod cast_line_break_e2e;
 #[path = "cast_operand_reread_e2e.rs"]
 mod cast_operand_reread_e2e;
+#[path = "class_comparison_e2e.rs"]
+mod class_comparison_e2e;
 #[path = "classfile_low_priority_annotation_e2e.rs"]
 mod classfile_low_priority_annotation_e2e;
 #[path = "common/mod.rs"]
