@@ -46,8 +46,8 @@ cat > "$root/README.md" <<README
 # krusty Maven plugin $version
 
 This is a portable local Maven repository holding the krusty Maven plugin. Unpack it beside the
-consuming build, add it as a plugin repository, and run the verify goal after kotlin-maven-plugin
-has compiled:
+consuming build, add it as a plugin repository, and load the plugin as a build extension, which
+times kotlin-maven-plugin's own compile:
 
 \`\`\`xml
 <pluginRepositories>
@@ -56,7 +56,20 @@ has compiled:
     <url>file:///path/to/krusty-maven-plugin-$version/repository</url>
   </pluginRepository>
 </pluginRepositories>
+
+<build>
+  <plugins>
+    <plugin>
+      <groupId>dev.krustythecompiler</groupId>
+      <artifactId>krusty-maven-plugin</artifactId>
+      <version>$version</version>
+      <extensions>true</extensions>
+    </plugin>
+  </plugins>
+</build>
 \`\`\`
+
+Then run the verify goal in the build that compiles:
 
 \`\`\`sh
 mvn test-compile dev.krustythecompiler:krusty-maven-plugin:$version:verify

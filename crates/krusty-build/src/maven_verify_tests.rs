@@ -3,6 +3,8 @@
 //! report counts what krusty compiled, what it does not support and how its classes compare. A
 //! second build reports only itself, an output that would overlap kotlinc's is refused before
 //! anything is written, and executions that share an output directory are reported unsupported.
+//! kotlinc's time is the build's own compile, timed by the plugin as a build extension (declared
+//! with `<extensions>true</extensions>` or in `.mvn/extensions.xml`); without it the goal fails.
 //!
 //! The plugin comes from the packaged release repository `KRUSTY_MAVEN_PLUGIN_REPOSITORY` (at
 //! `KRUSTY_MAVEN_PLUGIN_VERSION`) when set, and is otherwise installed from the checkout.
@@ -50,17 +52,41 @@ fn plugin() -> &'static (String, Option<PathBuf>) {
     })
 }
 
+/// How a sample build loads the plugin as the extension that times kotlinc.
+#[derive(Clone, Copy, PartialEq)]
+enum Extension {
+    /// Declared in the POM's plugins with `<extensions>true</extensions>`.
+    Plugin,
+    /// Listed in `.mvn/extensions.xml`.
+    Core,
+    /// Not loaded: the goal is only run from the command line.
+    Absent,
+}
+
 struct Sample {
     root: PathBuf,
+    /// Global settings naming the packaged plugin repository, which core extensions resolve from.
+    global_settings: Option<PathBuf>,
 }
 
 impl Sample {
-    /// A one-module Kotlin build: `build` goes into the POM's `<build>`, `executions` are
-    /// kotlin-maven-plugin's and `configuration` its plugin-level configuration.
+    /// A one-module Kotlin build that loads the plugin as a build extension: `build` goes into the
+    /// POM's `<build>`, `executions` are kotlin-maven-plugin's and `configuration` its plugin-level
+    /// configuration.
     fn new(name: &str, build: &str, executions: &str, configuration: &str) -> Sample {
+        Sample::loading(name, Extension::Plugin, build, executions, configuration)
+    }
+
+    fn loading(
+        name: &str,
+        extension: Extension,
+        build: &str,
+        executions: &str,
+        configuration: &str,
+    ) -> Sample {
         let root = std::env::temp_dir().join(format!("krusty-maven-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let (_, repository) = plugin();
+        let (version, repository) = plugin();
         let plugin_repositories = repository
             .as_ref()
             .map(|repository| {
@@ -71,7 +97,38 @@ impl Sample {
             })
             .unwrap_or_default();
         let kotlin = kotlin();
-        let sample = Sample { root };
+        let krusty_extension = if extension == Extension::Plugin {
+            format!(
+                "<plugin><groupId>dev.krustythecompiler</groupId><artifactId>krusty-maven-plugin</artifactId><version>{version}</version><extensions>true</extensions></plugin>"
+            )
+        } else {
+            String::new()
+        };
+        let global_settings = (extension == Extension::Core)
+            .then_some(repository.as_ref())
+            .flatten()
+            .map(|_| root.join("global-settings.xml"));
+        let sample = Sample {
+            root,
+            global_settings,
+        };
+        if extension == Extension::Core {
+            sample.write(
+                ".mvn/extensions.xml",
+                &format!(
+                    "<extensions><extension><groupId>dev.krustythecompiler</groupId><artifactId>krusty-maven-plugin</artifactId><version>{version}</version></extension></extensions>\n"
+                ),
+            );
+            if let Some(repository) = repository {
+                sample.write(
+                    "global-settings.xml",
+                    &format!(
+                        "<settings><profiles><profile><id>krusty</id><pluginRepositories><pluginRepository><id>krusty</id><url>file://{}</url></pluginRepository></pluginRepositories></profile></profiles><activeProfiles><activeProfile>krusty</activeProfile></activeProfiles></settings>\n",
+                        repository.display()
+                    ),
+                );
+            }
+        }
         sample.write(
             "pom.xml",
             &format!(
@@ -97,6 +154,7 @@ impl Sample {
     <testSourceDirectory>src/test/kotlin</testSourceDirectory>
     {build}
     <plugins>
+      {krusty_extension}
       <plugin>
         <groupId>org.jetbrains.kotlin</groupId>
         <artifactId>kotlin-maven-plugin</artifactId>
@@ -158,6 +216,10 @@ impl Sample {
             .map(str::to_string)
             .collect::<Vec<_>>();
         arguments.push(format!("-Dkrusty.binary={}", krusty.display()));
+        if let Some(settings) = &self.global_settings {
+            arguments.push("-gs".to_string());
+            arguments.push(settings.display().to_string());
+        }
         maven(
             &self.root,
             &arguments.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -245,8 +307,7 @@ fn maven_verify_goal_reports_krusty_against_kotlinc() {
         std::fs::read_to_string(sample.report_dir().join("krusty-verify-issue.md")).expect("issue");
     assert!(!issue.contains("sample:"), "{issue}");
     assert!(!issue.contains("Point"), "{issue}");
-    // Both compilations carry kotlinc's time, the goal's own timed kotlinc compile, whose output
-    // equals the build's.
+    // Both compilations carry kotlinc's time: that of the build's own compile.
     let records = root.join("target/krusty-verify/records");
     for file in ["sample_compile.json", "sample_test-compile.json"] {
         let record = std::fs::read_to_string(records.join(file)).expect("record");
@@ -254,7 +315,10 @@ fn maven_verify_goal_reports_krusty_against_kotlinc() {
             record.lines().any(|line| line
                 .trim()
                 .strip_prefix("\"kotlinc_millis\": ")
-                .is_some_and(|millis| millis.trim_end_matches(',').parse::<u64>().is_ok())),
+                .is_some_and(|millis| millis
+                    .trim_end_matches(',')
+                    .parse::<u64>()
+                    .is_ok_and(|millis| millis > 0))),
             "{record}"
         );
     }
@@ -298,30 +362,39 @@ fn maven_verify_goal_reports_krusty_against_kotlinc() {
     assert!(!issue.contains("peak memory"), "{issue}");
 }
 
-/// The goal times kotlinc by compiling each compilation once more; output other than the build's
-/// means it did not compile what the build compiled, and the goal fails rather than report that
-/// compile's time.
+/// Without the plugin loaded as a build extension nothing timed kotlinc, so the goal fails, saying
+/// how to load it; with it, a goal run without kotlin-maven-plugin's compile in the same build
+/// fails, saying so. Neither writes a record.
 #[test]
 #[ignore = "downloads Maven plugins and the Kotlin compiler"]
-fn maven_verify_goal_fails_when_its_kotlinc_compile_differs_from_the_build() {
-    let sample = Sample::new("kotlinc-differs", "", EXECUTIONS, ALL_OPEN);
-    sample.succeed(&["test-compile"]);
-    let class = sample.root.join("target/classes/app/Point.class");
-    let mut bytes = std::fs::read(&class).expect("kotlinc's class");
-    bytes.push(0);
-    std::fs::write(&class, bytes).expect("a class kotlinc would not write");
-    let (success, output) = sample.maven(&["VERIFY"]);
-    assert!(!success, "{output}");
-    let errors = output
-        .lines()
-        .filter(|line| line.starts_with("[ERROR] Failed to execute goal"))
-        .collect::<Vec<_>>();
-    assert_eq!(errors.len(), 1, "{output}");
-    assert!(
-        errors[0].ends_with(": kotlinc as krusty:verify runs it wrote [app/Point.class] of sample:compile differently from the build; krusty:verify reads kotlin-maven-plugin's configuration incompletely -> [Help 1]"),
-        "{output}"
+fn maven_verify_goal_fails_without_the_builds_kotlinc_time() {
+    let failure = |sample: &Sample, goals: &[&str]| {
+        let (success, output) = sample.maven(goals);
+        assert!(!success, "{output}");
+        let errors = output
+            .lines()
+            .filter(|line| line.starts_with("[ERROR] Failed to execute goal"))
+            .map(|line| {
+                line.split_once(" on project sample: ")
+                    .map(|(_, error)| error.to_string())
+                    .unwrap_or_else(|| line.to_string())
+            })
+            .collect::<Vec<_>>();
+        assert!(!sample.root.join("target/krusty-verify/records").exists());
+        errors
+    };
+    let absent = Sample::loading("no-extension", Extension::Absent, "", EXECUTIONS, ALL_OPEN);
+    assert_eq!(
+        failure(&absent, &["test-compile", "VERIFY"]),
+        ["krusty:verify times kotlinc from a build extension, which this build did not load: declare krusty-maven-plugin in the build's plugins with <extensions>true</extensions>, or list it in .mvn/extensions.xml -> [Help 1]"]
     );
-    assert!(!sample.root.join("target/krusty-verify/records").exists());
+
+    let separate = Sample::new("separate-compile", "", EXECUTIONS, ALL_OPEN);
+    separate.succeed(&["test-compile"]);
+    assert_eq!(
+        failure(&separate, &["VERIFY"]),
+        ["kotlin-maven-plugin's compile (execution compile) did not run in this build, so it has no kotlinc time; run it in the same build, as in 'mvn test-compile krusty:verify' -> [Help 1]"]
+    );
 }
 
 /// A build whose own output directory is where the goal would write, or reaches it through a
@@ -359,7 +432,8 @@ fn expect_refusal(sample: &Sample, reference: &Path, destination: &Path) {
         before.contains_key(Path::new("app/Point.class")),
         "{before:?}"
     );
-    let (success, output) = sample.maven(&["VERIFY"]);
+    // kotlinc compiles again, to the same bytes, so that the goal has its time.
+    let (success, output) = sample.maven(&["test-compile", "VERIFY"]);
     assert!(!success, "{output}");
     let refusal = format!(
         "[INFO] error: -d {} overlaps --reference {}; kotlinc's output, krusty's output and the record must be separate",
@@ -381,7 +455,8 @@ fn expect_refusal(sample: &Sample, reference: &Path, destination: &Path) {
 }
 
 /// Two executions of `compile` write into one output directory, where kotlinc's output of each
-/// cannot be told apart: each is reported unsupported, by its execution.
+/// cannot be told apart: each is reported unsupported, by its execution. The build loads the
+/// plugin from `.mvn/extensions.xml`.
 #[test]
 #[ignore = "downloads Maven plugins and the Kotlin compiler"]
 fn maven_verify_goal_reports_executions_sharing_an_output_as_unsupported() {
@@ -401,7 +476,7 @@ fn maven_verify_goal_reports_executions_sharing_an_output_as_unsupported() {
             <id>test-compile</id>
             <goals><goal>test-compile</goal></goals>
           </execution>"#;
-    let sample = Sample::new("shared-output", "", executions, ALL_OPEN);
+    let sample = Sample::loading("shared-output", Extension::Core, "", executions, ALL_OPEN);
     sample.write(
         "src/extra/kotlin/app/Extra.kt",
         "package app\n\nclass Extra(val point: Point)\n",

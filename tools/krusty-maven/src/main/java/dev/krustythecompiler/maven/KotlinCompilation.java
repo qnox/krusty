@@ -32,6 +32,9 @@ final class KotlinCompilation {
     private static final String REFERENCE_VERSION = "-Xkotlin-reference-version=";
 
     final String name;
+    /** kotlin-maven-plugin's goal and execution id, which identify the build's own compile. */
+    final String goal;
+    final String executionId;
     final String sourceSet;
     /** The Kotlin release of kotlin-maven-plugin, whose kotlinc compiled the build. */
     final String kotlinVersion;
@@ -44,9 +47,11 @@ final class KotlinCompilation {
     /** Why krusty cannot be given this request, when the plugin cannot derive it. */
     final List<String> unsupported;
 
-    private KotlinCompilation(String name, String sourceSet, String kotlinVersion, String outputName, File reference,
-            List<File> sources, List<String> arguments, List<String> unsupported) {
+    private KotlinCompilation(String name, String goal, String executionId, String sourceSet, String kotlinVersion,
+            String outputName, File reference, List<File> sources, List<String> arguments, List<String> unsupported) {
         this.name = name;
+        this.goal = goal;
+        this.executionId = executionId;
         this.sourceSet = sourceSet;
         this.kotlinVersion = kotlinVersion;
         this.outputName = outputName;
@@ -155,8 +160,8 @@ final class KotlinCompilation {
         String sourceSet = test ? "test" : "main";
         String name = project.getArtifactId() + ":" + goal + (sharing > 0 ? "@" + execution.getId() : "");
         String outputName = sharing > 0 ? sourceSet + "-" + execution.getId() : sourceSet;
-        return new KotlinCompilation(name, sourceSet, kotlin.getVersion(), outputName, output, sources, arguments,
-                unsupported);
+        return new KotlinCompilation(name, goal, execution.getId(), sourceSet, kotlin.getVersion(), outputName, output,
+                sources, arguments, unsupported);
     }
 
     private static Xpp3Dom merged(Object execution, Object plugin) {
@@ -205,13 +210,6 @@ final class KotlinCompilation {
             arguments.add(name);
             arguments.add(value);
         }
-    }
-
-    /** kotlinc's arguments other than the sources and {@code -d}: krusty's, without the reference release. */
-    List<String> kotlincArguments() {
-        List<String> kotlinc = new ArrayList<>(arguments);
-        kotlinc.removeIf(argument -> argument.startsWith(REFERENCE_VERSION));
-        return kotlinc;
     }
 
     boolean hasKotlinSources() {

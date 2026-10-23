@@ -8,7 +8,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -35,8 +34,9 @@ import org.eclipse.aether.resolution.DependencyResolutionException;
 /**
  * Compiles each of the build's kotlin-maven-plugin compilations with krusty beside kotlinc's output,
  * and once the last project is done writes a report of what krusty compiles, how its classes differ
- * from kotlinc's, and how long it took: {@code mvn test-compile krusty:verify}. kotlinc's classes are
- * the build's output and stay untouched; krusty writes under {@code target/krusty-verify}.
+ * from kotlinc's, and how long each compiler took: {@code mvn test-compile krusty:verify}. kotlinc's
+ * classes are the build's output and stay untouched; krusty writes under {@code target/krusty-verify}.
+ * kotlinc's time is that of the build's own compile, measured by {@link KotlincTiming}.
  */
 @Mojo(name = "verify", requiresDependencyResolution = ResolutionScope.TEST, threadSafe = true)
 public class VerifyMojo extends AbstractMojo {
@@ -68,8 +68,6 @@ public class VerifyMojo extends AbstractMojo {
     private static final class Verification {
         final Set<File> records = ConcurrentHashMap.newKeySet();
         final AtomicInteger finished = new AtomicInteger();
-        /** kotlinc by Kotlin release, loaded once so later compilations run it warm, as the build does. */
-        final Map<String, Kotlinc> kotlinc = new ConcurrentHashMap<>();
     }
 
     private static final String VERIFICATION = Verification.class.getName();
@@ -135,7 +133,7 @@ public class VerifyMojo extends AbstractMojo {
         command.add(compilation.kotlinVersion);
         if (compilation.hasKotlinSources() && compilation.unsupported.isEmpty()) {
             command.add("--kotlinc-millis");
-            command.add(Long.toString(kotlinc(verification, compilation.kotlinVersion).time(compilation)));
+            command.add(Long.toString(kotlincMillis(compilation)));
         }
         File reasons = null;
         if (!compilation.unsupported.isEmpty()) {
@@ -182,20 +180,18 @@ public class VerifyMojo extends AbstractMojo {
         run(command);
     }
 
-    private Kotlinc kotlinc(Verification verification, String version) throws MojoExecutionException {
-        Kotlinc loaded = verification.kotlinc.get(version);
-        if (loaded != null) return loaded;
-        synchronized (verification.kotlinc) {
-            loaded = verification.kotlinc.get(version);
-            if (loaded == null) {
-                CollectRequest collect = new CollectRequest(new org.eclipse.aether.graph.Dependency(
-                        new DefaultArtifact("org.jetbrains.kotlin", "kotlin-compiler-embeddable", "jar", version),
-                        "runtime"), project.getRemotePluginRepositories());
-                loaded = new Kotlinc(resolve(collect, "kotlinc " + version));
-                verification.kotlinc.put(version, loaded);
-            }
-            return loaded;
+    /** How long the build's own kotlin-maven-plugin compile of {@code compilation} took. */
+    private long kotlincMillis(KotlinCompilation compilation) throws MojoExecutionException {
+        Object millis = project.getContextValue(KotlincTiming.key(compilation.goal, compilation.executionId));
+        if (millis instanceof Long) return (Long) millis;
+        if (project.getContextValue(KotlincTiming.LOADED) == null) {
+            throw new MojoExecutionException("krusty:verify times kotlinc from a build extension, which this build "
+                    + "did not load: declare krusty-maven-plugin in the build's plugins with "
+                    + "<extensions>true</extensions>, or list it in .mvn/extensions.xml");
         }
+        throw new MojoExecutionException("kotlin-maven-plugin's " + compilation.goal + " (execution "
+                + compilation.executionId + ") did not run in this build, so it has no kotlinc time; run it in "
+                + "the same build, as in 'mvn test-compile krusty:verify'");
     }
 
     /** The resolved jars of kotlin-maven-plugin's own dependencies, which carry its compiler plugins. */
