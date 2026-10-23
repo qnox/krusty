@@ -2,6 +2,8 @@
 //! crate, so product e2e modules live behind one target to keep link time and target size bounded.
 //! External corpus/reference-toolchain suites live in `conformance.rs`.
 
+#[path = "dependent_constructor_bounds_e2e.rs"]
+mod dependent_constructor_bounds_e2e;
 #[path = "nested_signature_argument_layout_e2e.rs"]
 mod nested_signature_argument_layout_e2e;
 

@@ -162,7 +162,7 @@ shows the newest. On the command line, anything not listed here fails the build 
 | Kotlin Toolchain (`project.yaml`/`module.yaml`) | `krusty-toolchain`, built from source in `crates/krusty-toolchain`, as a drop-in for JetBrains' `kotlin` command: `show modules`, `show settings`, `show dependencies` and `task :<module>:compileJvm`. JVM modules only; a module with Java sources, a compiler setting it does not pass yet or an artifact to download is refused by name. See [docs/KOTLIN_TOOLCHAIN.md](docs/KOTLIN_TOOLCHAIN.md). |
 | Kotlin Build Tools API | `krusty-build-tools-<version>-kotlin-<kotlin>.jar` in each release, one per supported Kotlin version, stands in for `kotlin-build-tools-impl` in a build tool that loads the API from a classpath (JetBrains' Kotlin Toolchain among them). JVM toolchain and in-process execution only. See [tools/krusty-build-tools](tools/krusty-build-tools/README.md). |
 | Bazel | `krusty_jvm_library` rule from the `krusty` Bazel module each release publishes (`krusty-bazel-<version>.tar.gz`), which brings the release's compiler as a toolchain per host, and a `--persistent_worker` speaking intellij-community's `jvm-inc-builder` vocabulary. The worker accepts no compiler plugins. See [tools/krusty-bazel/README.md](tools/krusty-bazel/README.md) and [tools/krusty-bazel/intellij.md](tools/krusty-bazel/intellij.md). |
-| Maven | Not supported. |
+| Maven | Verification only: the `krusty-maven-plugin` `verify` goal, shipped as `krusty-maven-plugin-<version>.zip` in each release, compiles each kotlin-maven-plugin compilation with krusty beside kotlinc's output and reports how krusty fares; kotlinc still builds what Maven ships. See [tools/krusty-maven](tools/krusty-maven/README.md). |
 
 ### Compiler plugins
 

@@ -35,6 +35,12 @@ This changes no plugin wire format or Kotlin semantics.
 
 ## Constructor parameter annotation pool order
 
+Argument constraint solving reports only definite declaration-bound violations. A relation still
+containing a current-call formal waits for the ordinary completed-binding check, after explicit
+and expected-result context. Caller-owned variables remain fixed. Source and dependency
+constructor regressions cover dependent applied bounds and contradictory complete applications;
+the existing prior-valid-argument diagnostic and concrete-bound tests remain required.
+
 The JVM constructor header seeder carries retained checked applications rather than descriptor-only
 projections. Encode their complete values at the existing retention-ordered visit boundary; keep
 source target selection and semantic annotation publication outside the writer. This is independent

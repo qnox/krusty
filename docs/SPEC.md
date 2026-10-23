@@ -16051,6 +16051,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `library_classes_are_the_headers_ksp2_reports`; `src/jvm/jvm_libraries/declaration_headers.rs`,
   `an_unreadable_generic_signature_is_not_a_nongeneric_class`,
   `a_container_holding_a_value_that_is_not_an_annotation_is_unreadable`.)
+- **KSP maps names between Kotlin and the JVM by kotlinc's class map.** `mapKotlinNameToJava` and
+  `mapJavaNameToKotlin` answer what kotlinc's `JavaToKotlinClassMap` does for the classifier the
+  name resolves to on the module's classpath. A mapped builtin, a read-only or mutable collection
+  and a primitive map to their JVM class (`kotlin.Int` to `java.lang.Integer`,
+  `kotlin.collections.MutableMap.MutableEntry` to `java.util.Map.Entry`), and a primitive type's,
+  `String`'s or `Enum`'s companion to its `kotlin.jvm.internal` companion class. `kotlin.Nothing`
+  maps to `java.lang.Void`, but not back, and so does each `kotlin.concurrent.atomics` class to
+  its `java.util.concurrent.atomic` class. A function classifier maps to its numbered
+  `kotlin.jvm.functions` interface, or to `FunctionN` beyond arity 22 (a suspend function's
+  continuation counting, so from `SuspendFunction22`), and a `KFunctionN` or `KSuspendFunctionN`
+  to `kotlin.reflect.KFunction`; the reverse reads only a numbered interface. The other way, a JVM
+  class maps to the read-only collection. `Unit`, an array, a typealias, a source class, an
+  unmapped class and an unknown name map to nothing.
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `mapped_names_are_what_ksp2_reports`;
+  `crates/krusty-plugin-host/tests/ksp_library_classes.rs`, `mapped_names_are_what_ksp2_reports`.)
 
 ## 8. Success criteria for the PoC
 
@@ -19868,6 +19883,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   keeps `major` as `Int`. The same holds when the vararg is a later parameter and the body
   property at that index has its own declared type. Test:
   `tests/vararg_constructor_property_e2e.rs`.
+
+- **Dependent callable bounds wait for their own call variables.** Argument-only inference cannot
+  reject `B : Marker<A>` against `Marked<Int>` while this call's `A` has no input evidence yet.
+  Explicit and expected-result bindings complete the call before the existing final bound check.
+  Concrete bounds and universally quantified caller variables remain early checks, including a
+  concrete bound beside an unresolved dependent bound. An unresolved relation does not prove a
+  nullable-formal reduction. This adds no declaration-bound propagation or recursive inference
+  loop. Tests: `symbol_resolver::generic_inference::tests` and
+  `tests/dependent_constructor_bounds_e2e.rs`.
 
 - **Shared diagnostic text uses the Kotlin frontend's emitted wording.** Template extraction is an
   audit lead, not proof that a source construct emits that template: tests compile the same source
