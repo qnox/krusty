@@ -191,8 +191,11 @@ fn run_verify_compile(argv: &[String]) {
         krusty_peak_rss_bytes: None,
     };
     let opts = cli::parse(arguments.kotlinc_arguments.clone());
+    // Only a request that compiles has a destination, and only the `-d` it names: a request
+    // without kotlinc arguments must not reach the parser's default output.
+    let destination = (!arguments.kotlinc_arguments.is_empty()).then_some(opts.dest.as_path());
     // Nothing is written, and the previous record is not removed, until the layout is proven safe.
-    if let Err(error) = verify::check_layout(&arguments.reference, &opts.dest, &arguments.record) {
+    if let Err(error) = verify::check_layout(&arguments.reference, destination, &arguments.record) {
         eprintln!("error: {error}");
         std::process::exit(2);
     }
@@ -200,9 +203,9 @@ fn run_verify_compile(argv: &[String]) {
     let _ = std::fs::remove_file(&arguments.record);
     // The destination is verify's own, proven apart from kotlinc's output: an earlier run's classes
     // must not appear as krusty's.
-    if opts.dest.is_dir() {
-        if let Err(error) = std::fs::remove_dir_all(&opts.dest) {
-            eprintln!("error: cannot clear {}: {error}", opts.dest.display());
+    if let Some(destination) = destination.filter(|destination| destination.is_dir()) {
+        if let Err(error) = std::fs::remove_dir_all(destination) {
+            eprintln!("error: cannot clear {}: {error}", destination.display());
             std::process::exit(2);
         }
     }
@@ -304,6 +307,9 @@ fn run_verify_report(argv: &[String]) {
         eprintln!("error: {error}");
         std::process::exit(2);
     };
+    if let Err(error) = verify::check_report_layout(&arguments.out, &arguments.records) {
+        fail(error);
+    }
     // An earlier invocation's report never survives this one, even when this one fails.
     for name in verify::REPORT_FILES {
         let path = arguments.out.join(name);

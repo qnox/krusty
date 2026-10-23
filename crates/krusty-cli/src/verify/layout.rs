@@ -6,49 +6,67 @@ use std::path::{Component, Path, PathBuf};
 /// Refuse a layout in which compiling or recording could overwrite kotlinc's output, or in which
 /// the comparison would read krusty's own output as kotlinc's: a jar for either output, and any
 /// two of the reference, the destination and the record that are the same path or one inside the
-/// other, after resolving symbolic links and `..`.
-pub fn check_layout(reference: &Path, destination: &Path, record: &Path) -> Result<(), String> {
+/// other, after resolving symbolic links and `..`. A request that compiles nothing has no
+/// destination.
+pub fn check_layout(
+    reference: &Path,
+    destination: Option<&Path>,
+    record: &Path,
+) -> Result<(), String> {
     if reference.is_file() {
         return Err(format!(
             "--reference {} is a file; verify-compile compares class directories",
             reference.display()
         ));
     }
-    if destination.is_file()
-        || destination
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("jar"))
-    {
+    if let Some(destination) = destination.filter(|destination| {
+        destination.is_file()
+            || destination
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("jar"))
+    }) {
         return Err(format!(
             "-d {} names a jar; verify-compile compares class directories",
             destination.display()
         ));
     }
-    let reference_path = resolved(reference);
-    let destination_path = resolved(destination);
-    let record_path = resolved(record);
-    for (one, one_path, other, other_path) in [
-        ("-d", &destination_path, "--reference", &reference_path),
-        ("--record", &record_path, "--reference", &reference_path),
-        ("--record", &record_path, "-d", &destination_path),
-    ] {
-        if one_path.starts_with(other_path) || other_path.starts_with(one_path) {
+    let reference = ("--reference", reference);
+    let record = ("--record", record);
+    let mut pairs = Vec::new();
+    if let Some(destination) = destination {
+        pairs.push((("-d", destination), reference));
+    }
+    pairs.push((record, reference));
+    if let Some(destination) = destination {
+        pairs.push((record, ("-d", destination)));
+    }
+    for ((one, one_path), (other, other_path)) in pairs {
+        let (one_resolved, other_resolved) = (resolved(one_path), resolved(other_path));
+        if one_resolved.starts_with(&other_resolved) || other_resolved.starts_with(&one_resolved) {
             return Err(format!(
                 "{one} {} overlaps {other} {}; kotlinc's output, krusty's output and the record must be separate",
-                display(one, reference, destination, record),
-                display(other, reference, destination, record),
+                one_path.display(),
+                other_path.display(),
             ));
         }
     }
     Ok(())
 }
 
-fn display(option: &str, reference: &Path, destination: &Path, record: &Path) -> String {
-    match option {
-        "--reference" => reference.display().to_string(),
-        "-d" => destination.display().to_string(),
-        _ => record.display().to_string(),
+/// Refuse a record that is one of the report files `verify-report` replaces in `out`: it would be
+/// removed before it is read.
+pub fn check_report_layout(out: &Path, records: &[PathBuf]) -> Result<(), String> {
+    let reports = super::REPORT_FILES.map(|name| resolved(&out.join(name)));
+    for record in records.iter().filter(|record| !record.is_dir()) {
+        if reports.contains(&resolved(record)) {
+            return Err(format!(
+                "record {} is a report verify-report writes to --out {}",
+                record.display(),
+                out.display()
+            ));
+        }
     }
+    Ok(())
 }
 
 /// `path` made absolute and resolved component by component, as the file system will once the
@@ -97,7 +115,7 @@ mod tests {
         assert_eq!(
             check_layout(
                 &root.join("kotlinc"),
-                &root.join("krusty/classes"),
+                Some(&root.join("krusty/classes")),
                 &root.join("records/main.json")
             ),
             Ok(())
@@ -117,7 +135,7 @@ mod tests {
             root.join("krusty/../kotlinc"),
         ] {
             assert_eq!(
-                check_layout(&reference, &destination, &record),
+                check_layout(&reference, Some(&destination), &record),
                 Err(format!(
                     "-d {} overlaps --reference {}; kotlinc's output, krusty's output and the record must be separate",
                     destination.display(),
@@ -128,7 +146,7 @@ mod tests {
             );
         }
         assert_eq!(
-            check_layout(&reference, &root.join("krusty"), &reference.join("main.json")),
+            check_layout(&reference, Some(&root.join("krusty")), &reference.join("main.json")),
             Err(format!(
                 "--record {} overlaps --reference {}; kotlinc's output, krusty's output and the record must be separate",
                 reference.join("main.json").display(),
@@ -146,7 +164,7 @@ mod tests {
         let link = root.join("alias");
         std::os::unix::fs::symlink(&reference, &link).expect("link");
         assert_eq!(
-            check_layout(&reference, &link.join("classes"), &root.join("main.json")),
+            check_layout(&reference, Some(&link.join("classes")), &root.join("main.json")),
             Err(format!(
                 "-d {} overlaps --reference {}; kotlinc's output, krusty's output and the record must be separate",
                 link.join("classes").display(),
@@ -164,7 +182,7 @@ mod tests {
         std::os::unix::fs::symlink(&reference, root.join("alias")).expect("link");
         let destination = root.join("missing/../alias/classes");
         assert_eq!(
-            check_layout(&reference, &destination, &root.join("main.json")),
+            check_layout(&reference, Some(&destination), &root.join("main.json")),
             Err(format!(
                 "-d {} overlaps --reference {}; kotlinc's output, krusty's output and the record must be separate",
                 destination.display(),
@@ -180,7 +198,7 @@ mod tests {
         assert_eq!(
             check_layout(
                 &root.join("kotlinc"),
-                &root.join("out.jar"),
+                Some(&root.join("out.jar")),
                 &root.join("main.json")
             ),
             Err(format!(
@@ -192,12 +210,51 @@ mod tests {
         assert_eq!(
             check_layout(
                 &root.join("kotlinc.jar"),
-                &root.join("krusty"),
+                Some(&root.join("krusty")),
                 &root.join("main.json")
             ),
             Err(format!(
                 "--reference {} is a file; verify-compile compares class directories",
                 root.join("kotlinc.jar").display()
+            ))
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_request_without_a_destination_checks_only_the_reference_and_record() {
+        let root = scratch("record-only");
+        let reference = root.join("kotlinc");
+        assert_eq!(
+            check_layout(&reference, None, &root.join("main.json")),
+            Ok(())
+        );
+        assert_eq!(
+            check_layout(&reference, None, &reference.join("main.json")),
+            Err(format!(
+                "--record {} overlaps --reference {}; kotlinc's output, krusty's output and the record must be separate",
+                reference.join("main.json").display(),
+                reference.display()
+            ))
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_record_named_like_a_report_in_the_output_is_refused() {
+        let root = scratch("report");
+        let out = root.join("report");
+        let record = root.join("records/../report/krusty-verify.md");
+        assert_eq!(
+            check_report_layout(&out, &[root.join("main.json"), root.join("kotlinc")]),
+            Ok(())
+        );
+        assert_eq!(
+            check_report_layout(&out, std::slice::from_ref(&record)),
+            Err(format!(
+                "record {} is a report verify-report writes to --out {}",
+                record.display(),
+                out.display()
             ))
         );
         let _ = std::fs::remove_dir_all(root);
