@@ -946,7 +946,7 @@ jobs:
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     # Shorter than the release lock's TTL, so a lock that outlives it belongs to a dead job.
-    timeout-minutes: 20
+    timeout-minutes: 25
     permissions:
       contents: write
       # Dispatches the pages workflow, which regenerates the Bazel registry.
@@ -1059,6 +1059,28 @@ jobs:
           fi
           echo "signing key: ${id:-none}"
           echo "id=$id" >> "$GITHUB_OUTPUT"
+      # Maven Central goes first: it skips a version it already has, so a rerun after a failed
+      # Plugin Portal upload does not trip over Central's immutable versions.
+      - name: publish the Gradle plugin to Maven Central
+        if: steps.tip.outputs.publish == 'true'
+        env:
+          # A Central Portal user token for the verified dev.krustythecompiler namespace.
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyId: ${{ steps.signing.outputs.id }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$MAVEN_CENTRAL_USERNAME" || -z "$MAVEN_CENTRAL_PASSWORD" ]]; then
+            echo "MAVEN_CENTRAL_USERNAME/MAVEN_CENTRAL_PASSWORD are not set; skipping Maven Central"
+            exit 0
+          fi
+          if [[ -z "$ORG_GRADLE_PROJECT_signingInMemoryKey" ]]; then
+            echo "SIGNING_KEY is not set; refusing to publish an unsigned plugin" >&2
+            exit 1
+          fi
+          scripts/publish-maven-central.sh "${{ steps.v.outputs.ver }}"
       - name: publish the Gradle plugin to the Gradle Plugin Portal
         if: steps.tip.outputs.publish == 'true'
         env:
