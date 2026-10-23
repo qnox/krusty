@@ -8,6 +8,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.maven.artifact.DependencyResolutionRequiredException;
 import org.apache.maven.execution.MavenSession;
 import org.apache.maven.model.Dependency;
@@ -21,6 +24,7 @@ import org.apache.maven.plugins.annotations.ResolutionScope;
 import org.apache.maven.project.MavenProject;
 import org.apache.maven.rtinfo.RuntimeInformation;
 import org.eclipse.aether.RepositorySystem;
+import org.eclipse.aether.SessionData;
 import org.eclipse.aether.artifact.DefaultArtifact;
 import org.eclipse.aether.collection.CollectRequest;
 import org.eclipse.aether.resolution.ArtifactResult;
@@ -59,30 +63,49 @@ public class VerifyMojo extends AbstractMojo {
     @Component
     private RuntimeInformation runtime;
 
+    /** What this build's executions of the goal share: the records they wrote, and how many ran. */
+    private static final class Verification {
+        final Set<File> records = ConcurrentHashMap.newKeySet();
+        final AtomicInteger finished = new AtomicInteger();
+    }
+
+    private static final String VERIFICATION = Verification.class.getName();
+
     @Override
     public void execute() throws MojoExecutionException {
         File records = new File(session.getTopLevelProject().getBuild().getDirectory(), "krusty-verify/records");
+        Verification verification = verification();
         Plugin kotlin = project.getBuild().getPluginsAsMap().get(KotlinCompilation.KOTLIN_PLUGIN);
         if (kotlin != null) {
             File krusty = krusty();
             List<File> pluginClasspath = pluginClasspath(kotlin);
             String jdkHome = System.getProperty("java.home");
             try {
-                verify(krusty, records, KotlinCompilation.of(project, kotlin, "compile",
+                verify(krusty, records, verification, KotlinCompilation.of(project, kotlin, "compile",
                         project.getCompileClasspathElements(), pluginClasspath, jdkHome));
-                verify(krusty, records, KotlinCompilation.of(project, kotlin, "test-compile",
+                verify(krusty, records, verification, KotlinCompilation.of(project, kotlin, "test-compile",
                         project.getTestClasspathElements(), pluginClasspath, jdkHome));
             } catch (DependencyResolutionRequiredException e) {
                 throw new MojoExecutionException("cannot read " + project.getArtifactId() + "'s classpath", e);
             }
         }
-        List<MavenProject> projects = session.getProjects();
-        if (projects.get(projects.size() - 1) == project) report(records);
+        // The last project to finish, in whatever order a parallel build runs them, writes the
+        // report from exactly this build's records.
+        if (verification.finished.incrementAndGet() == session.getProjects().size()) {
+            report(records, verification.records);
+        }
     }
 
-    private void verify(File krusty, File records, KotlinCompilation compilation) throws MojoExecutionException {
-        if (compilation == null || !compilation.hasKotlinSources()) return;
-        if (!compilation.reference.isDirectory()) {
+    private Verification verification() {
+        SessionData data = session.getRepositorySession().getData();
+        data.set(VERIFICATION, null, new Verification());
+        return (Verification) data.get(VERIFICATION);
+    }
+
+    private void verify(File krusty, File records, Verification verification, KotlinCompilation compilation)
+            throws MojoExecutionException {
+        if (compilation == null) return;
+        if (compilation.hasKotlinSources() && !compilation.reference.isDirectory()) {
             throw new MojoExecutionException(compilation.reference + " holds no kotlinc output; run "
                     + "test-compile in the same build, as in 'mvn test-compile krusty:verify'");
         }
@@ -94,8 +117,9 @@ public class VerifyMojo extends AbstractMojo {
         command.add("--kotlin-outputs-only");
         command.add("--reference");
         command.add(compilation.reference.getAbsolutePath());
+        File record = new File(records, compilation.name.replace(':', '_') + ".json");
         command.add("--record");
-        command.add(new File(records, compilation.name.replace(':', '_') + ".json").getAbsolutePath());
+        command.add(record.getAbsolutePath());
         command.add("--compilation");
         command.add(compilation.name);
         command.add("--source-set");
@@ -118,14 +142,17 @@ public class VerifyMojo extends AbstractMojo {
         for (File source : compilation.sources) command.add(source.getAbsolutePath());
         getLog().info("krusty: verifying " + compilation.name);
         run(command);
+        verification.records.add(record);
     }
 
-    private void report(File records) throws MojoExecutionException {
-        if (!records.isDirectory()) {
-            getLog().warn("krusty: no kotlin-maven-plugin compilation with Kotlin sources ran, so there is nothing to report");
+    private void report(File records, Set<File> current) throws MojoExecutionException {
+        File out = new File(records.getParentFile(), "report");
+        if (current.isEmpty()) {
+            // An earlier build's report must not stand for this one.
+            deleteTree(out);
+            getLog().warn("krusty: no kotlin-maven-plugin compilation ran, so there is nothing to report");
             return;
         }
-        File out = new File(records.getParentFile(), "report");
         List<String> command = new ArrayList<>();
         command.add(krusty().getAbsolutePath());
         command.add("verify-report");
@@ -136,7 +163,7 @@ public class VerifyMojo extends AbstractMojo {
         command.add("--jdk");
         command.add(System.getProperty("java.version"));
         if (shareNames) command.add("--share-names");
-        command.add(records.getAbsolutePath());
+        current.stream().map(File::getAbsolutePath).sorted().forEach(command::add);
         run(command);
     }
 

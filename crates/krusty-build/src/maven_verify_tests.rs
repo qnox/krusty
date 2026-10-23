@@ -1,6 +1,7 @@
 //! `mvn test-compile krusty:verify` with the Maven plugin built from `tools/krusty-maven`: kotlinc
 //! compiles and ships both kotlin-maven-plugin compilations, krusty compiles each beside it, and the
-//! report counts what krusty compiled, what it does not support and how its classes compare.
+//! report counts what krusty compiled, what it does not support and how its classes compare. A
+//! second build reports only itself.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -31,26 +32,15 @@ fn maven_verify_goal_reports_krusty_against_kotlinc() {
             "install",
         ],
     );
-    let output = maven(
-        &mvn,
-        &root,
-        &[
-            "test-compile",
-            "dev.krustythecompiler:krusty-maven-plugin:0.0.0-verify-test:verify",
-            &format!("-Dkrusty.binary={}", krusty.display()),
-        ],
-    );
+    let binary = format!("-Dkrusty.binary={}", krusty.display());
+    let verify = [
+        "test-compile",
+        "dev.krustythecompiler:krusty-maven-plugin:0.0.0-verify-test:verify",
+        binary.as_str(),
+    ];
+    let output = maven(&mvn, &root, &verify);
 
-    let reports = output
-        .lines()
-        .filter_map(|line| line.strip_prefix("[INFO] "))
-        .filter(|line| {
-            line.starts_with("krusty verify: ")
-                || line.starts_with("report: ")
-                || line.starts_with("submit it")
-        })
-        .map(without_measurements)
-        .collect::<Vec<_>>();
+    let reports = report_lines(&output);
     let report_dir = root.join("target/krusty-verify/report");
     assert_eq!(
         reports,
@@ -83,7 +73,63 @@ fn maven_verify_goal_reports_krusty_against_kotlinc() {
     assert!(!issue.contains("sample:"), "{issue}");
     assert!(!issue.contains("Point"), "{issue}");
 
+    // A second build without the sources reports only itself: each compilation afresh as having no
+    // sources, and nothing from the first build or from a record no compilation of this build wrote.
+    std::fs::remove_dir_all(root.join("src")).expect("remove the sources");
+    let records = root.join("target/krusty-verify/records");
+    std::fs::write(records.join("removed_compile.json"), "{}").expect("an unrelated record");
+    let output = maven(&mvn, &root, &verify);
+    assert_eq!(
+        report_lines(&output),
+        [
+            "krusty verify: sample:compile: no Kotlin sources".to_string(),
+            "krusty verify: sample:test-compile: no Kotlin sources".to_string(),
+            "krusty verify: 0/0 compilations compiled (0 byte-identical), 0 failed, 0 unsupported, 2 without Kotlin sources; n/a of classes byte-identical".to_string(),
+            format!("report: {}", report_dir.join("krusty-verify.html").display()),
+            format!(
+                "submit it to help prioritize krusty: open the report's issue button, or paste {} into https://github.com/qnox/krusty/issues/new",
+                report_dir.join("krusty-verify-issue.md").display()
+            ),
+        ],
+        "{output}"
+    );
+    let no_sources = |goal: &str, source_set: &str| {
+        format!(
+            "{{\n  \"compilation\": \"sample:{goal}\",\n  \"source_set\": \"{source_set}\",\n  \"kotlin_version\": \"{kotlin}\",\n  \"outcome\": {{\n    \"status\": \"no-sources\"\n  }}\n}}\n"
+        )
+    };
+    for (file, goal, source_set) in [
+        ("sample_compile.json", "compile", "main"),
+        ("sample_test-compile.json", "test-compile", "test"),
+    ] {
+        assert_eq!(
+            std::fs::read_to_string(records.join(file)).expect("record"),
+            no_sources(goal, source_set)
+        );
+    }
+    let issue = std::fs::read_to_string(report_dir.join("krusty-verify-issue.md")).expect("issue");
+    assert!(issue.contains("| Compilations | 0 |\n"), "{issue}");
+    assert!(
+        issue.contains("| Without Kotlin sources | 2 |\n"),
+        "{issue}"
+    );
+    assert!(!issue.contains("peak memory"), "{issue}");
+
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The goal's report lines, without the time and memory they measured.
+fn report_lines(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| line.strip_prefix("[INFO] "))
+        .filter(|line| {
+            line.starts_with("krusty verify: ")
+                || line.starts_with("report: ")
+                || line.starts_with("submit it")
+        })
+        .map(without_measurements)
+        .collect()
 }
 
 /// Run Maven in batch mode, with `KRUSTY_MAVEN_SETTINGS` as its settings when set (a mirror for a
