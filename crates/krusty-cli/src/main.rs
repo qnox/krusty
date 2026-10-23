@@ -204,6 +204,8 @@ fn run_verify_compile(argv: &[String]) {
         && !opts.sources.iter().any(|source| source.ends_with(".kt"))
     {
         record.outcome = verify::Outcome::NoSources;
+        // Neither compiler compiled anything, so there is no time to compare.
+        record.kotlinc_millis = None;
     } else if arguments.unsupported.is_empty() {
         record.outcome = match refusals(&opts) {
             Err(report) => verify::Outcome::Failed {
