@@ -916,6 +916,9 @@ mod tests {
                 "metadata",
                 "parser",
                 "plugins",
+                // A script compiles against its definition, a public compilation input like the
+                // plugin selection.
+                "script_definitions",
                 "source",
                 "symbol_resolver",
                 "symbol_source",
