@@ -226,3 +226,101 @@ fn each_run_replaces_the_record_with_its_own_outcome() {
         "{\n  \"compilation\": \":compileKotlinDsl\",\n  \"outcome\": {\n    \"status\": \"unsupported\",\n    \"reasons\": [\n      \"kotlin-dsl compilations stay with kotlinc\"\n    ]\n  }\n}\n"
     );
 }
+
+/// A request that compiles nothing names no output, so nothing beside the record is touched: not
+/// the parser's default `krusty-out` in the working directory, which may be another build's.
+#[test]
+fn an_unsupported_record_touches_no_compiler_output() {
+    let layout = Layout::new("record-only");
+    let default_output = layout.root.join("krusty-out");
+    std::fs::create_dir_all(&default_output).expect("an unrelated output");
+    std::fs::write(default_output.join("Kept.class"), b"someone else's").expect("sentinel");
+    let record = layout.root.join("records/unsupported.json");
+    let output = Command::new(common::krusty_binary())
+        .current_dir(&layout.root)
+        .arg("verify-compile")
+        .arg("--reference")
+        .arg(&layout.reference)
+        .arg("--record")
+        .arg(&record)
+        .args([
+            "--compilation",
+            ":compileKotlinDsl",
+            "--unsupported",
+            "reason",
+        ])
+        .output()
+        .expect("run krusty verify-compile");
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        std::fs::read(default_output.join("Kept.class")).expect("the unrelated output"),
+        b"someone else's"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&record).expect("record"),
+        "{\n  \"compilation\": \":compileKotlinDsl\",\n  \"outcome\": {\n    \"status\": \"unsupported\",\n    \"reasons\": [\n      \"reason\"\n    ]\n  }\n}\n"
+    );
+
+    // A request that compiles must name krusty's output itself.
+    let (status, stderr) = layout.verify(
+        &record,
+        &[
+            "-classpath".to_string(),
+            common::stdlib_jar().display().to_string(),
+            layout.source.display().to_string(),
+        ],
+    );
+    assert_eq!(
+        (status, stderr.lines().next().map(str::to_string)),
+        (
+            Some(2),
+            Some("error: the kotlinc arguments name krusty's own output with -d".to_string())
+        )
+    );
+    assert!(default_output.join("Kept.class").is_file());
+}
+
+/// A record verify-report would replace is refused before any report is removed.
+#[test]
+fn verify_report_refuses_a_record_among_its_reports_and_removes_nothing() {
+    let layout = Layout::new("report-input");
+    let out = layout.root.join("report");
+    std::fs::create_dir_all(&out).expect("report directory");
+    for name in [
+        "krusty-verify.html",
+        "krusty-verify.md",
+        "krusty-verify-issue.md",
+    ] {
+        std::fs::write(out.join(name), name).expect("an earlier report");
+    }
+    std::os::unix::fs::symlink(out.join("krusty-verify.md"), layout.root.join("alias.json"))
+        .expect("link");
+    for record in [out.join("krusty-verify.md"), layout.root.join("alias.json")] {
+        let output = Command::new(common::krusty_binary())
+            .arg("verify-report")
+            .arg("--out")
+            .arg(&out)
+            .arg(&record)
+            .output()
+            .expect("run krusty verify-report");
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            format!(
+                "error: record {} is a report verify-report writes to --out {}\n",
+                record.display(),
+                out.display()
+            )
+        );
+        for name in [
+            "krusty-verify.html",
+            "krusty-verify.md",
+            "krusty-verify-issue.md",
+        ] {
+            assert_eq!(
+                std::fs::read_to_string(out.join(name)).expect("the earlier report"),
+                name
+            );
+        }
+    }
+}

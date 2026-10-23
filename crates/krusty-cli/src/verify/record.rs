@@ -118,6 +118,15 @@ impl VerifyCompileArguments {
         if parsed.unsupported.is_empty() && parsed.kotlinc_arguments.is_empty() {
             return Err("the kotlinc arguments follow '--'".to_string());
         }
+        // krusty's output is cleared before it compiles, so it must be one the caller names.
+        if !parsed.kotlinc_arguments.is_empty()
+            && !parsed
+                .kotlinc_arguments
+                .iter()
+                .any(|argument| argument == "-d")
+        {
+            return Err("the kotlinc arguments name krusty's own output with -d".to_string());
+        }
         Ok(parsed)
     }
 }
