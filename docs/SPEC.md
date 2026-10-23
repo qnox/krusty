@@ -11546,7 +11546,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the constructor's parameters (the marker included), as a copied default's do. kotlinc copies the
   block's statements into the constructor itself, so a block's local stays in the
   `LocalVariableTable` through the constructor's return and is listed ahead of `this`, as a
-  generated constructor's other body locals are. The seen-bit test
+  generated constructor's other body locals are. Only the `init` block itself is spliced: a nested
+  scope, an inline call's region, or any other block inside it keeps its own block and the facts
+  recorded on it, so its locals end where kotlinc's do. The seen-bit test
   of an optional element that follows a block is attributed to the class's start line, like its
   store. krusty skipped the blocks, so a decoded object missed their side effects. A block that
   reads a constructor parameter which is not a property has nothing to read there and keeps the

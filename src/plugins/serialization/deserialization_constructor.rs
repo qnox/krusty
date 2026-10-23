@@ -613,19 +613,7 @@ pub(super) fn complete_deserialization_constructor(
                 types: Vec::new(),
             })
         });
-        // kotlinc copies the block's statements into the constructor itself, so its locals stay in
-        // scope through the constructor's end rather than the block's.
-        // A block in statement position discards its value, so that value is one more statement.
-        let mut pending = vec![block];
-        let mut statements = Vec::new();
-        while let Some(statement) = pending.pop() {
-            match &ir.exprs[statement as usize] {
-                IrExpr::Block { stmts, value } => {
-                    pending.extend(value.iter().chain(stmts.iter().rev()));
-                }
-                _ => statements.push(statement),
-            }
-        }
+        let statements = initializer_statements(ir, initializer, block);
         body_stmts.extend(
             statements
                 .into_iter()
@@ -654,6 +642,43 @@ pub(super) fn complete_deserialization_constructor(
     // `DefaultConstructorMarker` accessor. The serialization constructor itself retains
     // only `SerializationConstructorMarker`, matching kotlinc's nestmate call target.
     constructor.vc_params = has_value_field;
+}
+
+/// The statements a copied `init` body contributes to the deserialization constructor.
+///
+/// Lowering wraps an initializer's roots in an effect block, one of which is the `init { … }`
+/// block itself. kotlinc copies that block's statements into the constructor, so its locals stay
+/// in scope through the constructor's return, and a block in statement position discards its
+/// value, so that value is one more statement. Every other block, such as an inline call's region
+/// or a nested scope, keeps its identity and the facts recorded on it.
+fn initializer_statements(
+    ir: &IrFile,
+    original: crate::ir::ExprId,
+    copy: crate::ir::ExprId,
+) -> Vec<crate::ir::ExprId> {
+    let (
+        IrExpr::Block {
+            stmts: sources,
+            value: None,
+        },
+        IrExpr::Block {
+            stmts: copies,
+            value: None,
+        },
+    ) = (&ir.exprs[original as usize], &ir.exprs[copy as usize])
+    else {
+        return vec![copy];
+    };
+    let mut statements = Vec::new();
+    for (source, &statement) in sources.iter().zip(copies) {
+        match &ir.exprs[statement as usize] {
+            IrExpr::Block { stmts, value } if ir.initializer_blocks.contains(source) => {
+                statements.extend(stmts.iter().chain(value.iter()).copied());
+            }
+            _ => statements.push(statement),
+        }
+    }
+    statements
 }
 
 /// Read property (by FIELD index) of the object the deserialization constructor builds.
