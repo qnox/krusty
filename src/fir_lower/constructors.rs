@@ -1531,6 +1531,13 @@ pub(super) fn accept_constructor_body(
         } else {
             class.ctor_args = declared_arguments;
         }
+        if script {
+            class
+                .ctor_args
+                .extend(crate::ir::IrClass::script_receiver_arguments(
+                    classifier_header,
+                ));
+        }
         if defaults.iter().any(Option::is_some) {
             physical_defaults.resize(synthetic_prefix_count, None);
             physical_defaults.extend(defaults.iter().skip(semantic_prefix_count).copied());

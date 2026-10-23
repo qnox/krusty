@@ -47,10 +47,14 @@ impl Emitter<'_> {
         }
         let class = self.ir.classes.get(class_id as usize)?;
         let argument = class.ctor_args.get(index as usize - 1)?;
-        // A capture read in constructor code reads its parameter, as kotlinc does, even when
-        // later code also needs the field.
+        // A capture, or a script's implicit receiver, read in constructor code reads its
+        // parameter, as kotlinc does, even when later code also needs the field.
         if !argument.is_field
-            || argument.provenance == crate::ir::IrCtorParameterProvenance::Capture
+            || matches!(
+                argument.provenance,
+                crate::ir::IrCtorParameterProvenance::Capture
+                    | crate::ir::IrCtorParameterProvenance::ScriptReceiver { .. }
+            )
         {
             return None;
         }

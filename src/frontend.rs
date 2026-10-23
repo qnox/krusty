@@ -1194,15 +1194,19 @@ where
                 .for_source(source.text)
                 .has("MultiPlatformProjects")
         });
-    let script_definition = ScriptDefinition::standard().on_classpath(|template| {
-        platform
-            .platform
-            .as_ref()
-            .is_ok_and(|platform| platform.classifier(template).is_some())
-    });
     for (index, source) in sources.iter().enumerate() {
         diags.set_file(index as u32);
         let features = project_features.for_source(source.text);
+        let script_definition = source
+            .script_definition
+            .cloned()
+            .unwrap_or_else(ScriptDefinition::standard)
+            .on_classpath(|template| {
+                platform
+                    .platform
+                    .as_ref()
+                    .is_ok_and(|platform| platform.classifier(template).is_some())
+            });
         reparse_sources.sources.push(ReparseSource {
             kind: source.kind,
             is_common: source.is_common,

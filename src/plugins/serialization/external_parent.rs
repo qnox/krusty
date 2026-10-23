@@ -1,5 +1,6 @@
 //! Serializable superclasses compiled apart from the file being lowered: in a dependency, as
-//! kotlinc's plugin reads them from the superclass's metadata.
+//! kotlinc's plugin reads them from the superclass's metadata, or in another file of the module,
+//! as the module's stable declarations describe them.
 //!
 //! A subclass's generated serializer inherits its superclass's elements: the superclass's
 //! `write$Self` writes them and its deserialization constructor stores them, and the subclass's

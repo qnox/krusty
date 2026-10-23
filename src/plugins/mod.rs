@@ -246,6 +246,39 @@ pub struct FrontendPropertyFacts {
     pub declaration_span: crate::diag::Span,
 }
 
+/// A source class as the module's checked declarations describe it once Pass 1 has finished:
+/// every file of the module can read what a plugin decides from it, so the decision is made once,
+/// by the plugin, and later phases copy it rather than re-derive it.
+pub struct FrontendDeclaredClass<'a> {
+    pub kind: crate::libraries::TypeKind,
+    /// A `value class`, which no subclass extends.
+    pub is_value: bool,
+    /// The checked applications of the class's annotations, with their folded named arguments.
+    pub applied_annotations: &'a [crate::types::ResolvedAnnotation],
+    /// The superclass as the class declares it, type arguments included; `None` for `Any`.
+    pub superclass: Option<Ty>,
+    /// The class's own properties in declaration order: primary-constructor properties first, then
+    /// the properties declared in its body.
+    pub properties: &'a [FrontendDeclaredProperty],
+}
+
+/// One property of a [`FrontendDeclaredClass`].
+pub struct FrontendDeclaredProperty {
+    pub name: Box<str>,
+    /// The checked property type.
+    pub ty: Ty,
+    /// Resolved annotation identities on the property declaration.
+    pub annotations: Box<[TypeName]>,
+    /// Whether the property stores a value: a primary-constructor property, or a body property that
+    /// is not abstract, delegated or external and either accessor-less or with a getter that
+    /// reads `field` (or an initializer or explicit backing field).
+    pub has_backing_field: bool,
+    /// A primary-constructor property's default value, or a body property's initializer.
+    pub has_default: bool,
+    /// The written type carries a type-use annotation somewhere, or its spelling is not settled.
+    pub type_annotated: bool,
+}
+
 /// An error a frontend plugin checker reports against a source declaration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrontendPluginDiagnostic {
@@ -700,6 +733,18 @@ pub trait IrPlugin {
         _ctx: &FrontendClassCheckContext<'_>,
         _diagnostics: &mut Vec<FrontendPluginDiagnostic>,
     ) {
+    }
+
+    /// The serial elements of a source class whose `write$Self` and deserialization constructor
+    /// the plugin commits to generating, published before any file is lowered so that a subclass
+    /// in another file of the module inherits them as one in a dependency would. `None` for a
+    /// class the plugin generates no such members for, or whose elements it cannot describe
+    /// exactly.
+    fn declared_serializable_elements(
+        &self,
+        _class: &FrontendDeclaredClass<'_>,
+    ) -> Option<crate::types::SerializableClassElements> {
+        None
     }
 
     /// Select the primary constructor through which the plugin's generated code constructs a class
@@ -1269,6 +1314,15 @@ impl PluginHost {
             plugin.check_frontend_class(ctx, &mut diagnostics);
         }
         diagnostics
+    }
+
+    pub fn declared_serializable_elements(
+        &self,
+        class: &FrontendDeclaredClass<'_>,
+    ) -> Option<crate::types::SerializableClassElements> {
+        self.plugins
+            .iter()
+            .find_map(|plugin| plugin.declared_serializable_elements(class))
     }
 
     pub fn plan_frontend_expressions(

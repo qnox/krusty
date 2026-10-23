@@ -5,6 +5,14 @@ front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
 
+## Local-call checked vararg signature
+
+Retain the checker's complete applied value-parameter list on local calls and consume it when
+packing varargs. The lifted declaration still owns ABI coercions, captures, extension receivers
+and defaults; reject mismatched value arity. Real-kotlinc runtime and whole-class regressions cover
+the selected Int/String array carriers. This functional slice does not implement #2554's broader
+call-owned operand-preparation/result contract or introduce the private numeric carrier prototype.
+
 KLIB dependency-emission categories have disjoint declaration-owned roots before lowering begins.
 An authenticated intrinsic wrapper keeps that ownership when its body transaction declines; the
 ordinary-body category cannot retry it and turn the target decline into an ordinary-closure error.
@@ -5818,3 +5826,15 @@ The maintainer approved #2459's remaining Native/Wasm conformance regressions as
 baseline transition, with exact per-release loaded-blob proof and normal shrink-only checks
 afterward. This is not an all-backend support claim. Small capability follow-ups #2520–#2525
 restore measured cases independently; see [KLIB inline migration](KLIB_INLINE_MIGRATION.md).
+
+## Lossless JVM signature syntax
+
+The signature reader has an application-construction boundary that retains all written class
+segments and omitted/explicit argument evidence. Syntax lives in `signature_parser`; declaration
+bound hydration and member/class publication remain in `generic_signatures`. The existing standalone
+construction policy is preserved. Owner tests constrain recursive construction, terminal refusal and
+independent physical descriptor checks.
+
+Next, declaration-header layouts (#2576) must authenticate complete captured applications and raw
+omissions for #2537/#2532. Raw scope erasure must follow symbolic inheritance specialization, as the
+reference compiler demonstrates; it cannot independently erase a superclass from its own bounds.

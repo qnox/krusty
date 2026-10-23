@@ -50,6 +50,8 @@ mod reference_recording_support;
 mod reference_targets_support;
 #[path = "serializable_parent_dependency_e2e.rs"]
 mod serializable_parent_dependency_e2e;
+#[path = "serializable_parent_same_module_e2e.rs"]
+mod serializable_parent_same_module_e2e;
 #[path = "super_call_vararg_e2e.rs"]
 mod super_call_vararg_e2e;
 #[path = "common/target_diagnostics.rs"]
@@ -496,6 +498,8 @@ mod classreader_e2e;
 mod cli_compiler_plugin_e2e;
 #[path = "cli_dropin_e2e.rs"]
 mod cli_dropin_e2e;
+#[path = "cli_verify_e2e.rs"]
+mod cli_verify_e2e;
 #[path = "closeable_use_receiver_e2e.rs"]
 mod closeable_use_receiver_e2e;
 #[path = "closure_in_class_e2e.rs"]
