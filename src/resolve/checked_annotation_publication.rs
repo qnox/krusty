@@ -967,11 +967,12 @@ impl Checker<'_> {
 
     pub(super) fn fold_annotation_values(
         &mut self,
-        internal: TypeName,
+        owner: Ty,
         arguments: &[ExprId],
         nested_call: Option<ExprId>,
     ) -> Option<FoldedAnnotationValues> {
-        let (elements, parameters, policy) = self.annotation_shape(internal)?;
+        let internal = owner.kotlin_class_internal()?;
+        let (elements, parameters, policy) = self.applied_annotation_shape(owner)?;
         let argument_names = self.annotation_argument_names(arguments, nested_call);
         let parameter_indices = self
             .annotation_argument_parameter_indices(&parameters, arguments, &argument_names)
@@ -1133,7 +1134,7 @@ impl Checker<'_> {
     /// naming its class `short_name`.
     pub(super) fn fold_annotation_application(
         &mut self,
-        internal: TypeName,
+        owner: Ty,
         arguments: &[ExprId],
         use_site: Option<crate::types::PropertyAnnotationSite>,
         short_name: &str,
@@ -1142,7 +1143,8 @@ impl Checker<'_> {
             values,
             mut facts,
             order,
-        } = self.fold_annotation_values(internal, arguments, None)?;
+        } = self.fold_annotation_values(owner, arguments, None)?;
+        let internal = owner.kotlin_class_internal()?;
         facts.optional_expectation = self.is_optional_expectation_classifier(internal);
         let module_retention = self.module.annotation_retention(internal);
         let classifier = self.resolver().classifier(internal)?;
@@ -1267,13 +1269,14 @@ impl Checker<'_> {
                     if let Some(value) = self.folded_library_constant(e, expected) {
                         return Some(value);
                     }
-                    let internal = self.expr_types[e.0 as usize].kotlin_class_internal()?;
+                    let owner = self.expr_types[e.0 as usize];
+                    let internal = owner.kotlin_class_internal()?;
                     let short_name = match self.file.expr(*callee) {
                         Expr::Name(name) | Expr::Member { name, .. } => name.as_str().into(),
                         _ => return None,
                     };
                     let FoldedAnnotationValues { values, order, .. } =
-                        self.fold_annotation_values(internal, args, Some(e))?;
+                        self.fold_annotation_values(owner, args, Some(e))?;
                     AnnotationValue::Annotation {
                         internal,
                         values,

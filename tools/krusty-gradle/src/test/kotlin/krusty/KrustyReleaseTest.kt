@@ -18,6 +18,18 @@ class KrustyReleaseTest {
     private val triple = hostTriple()
     private val executableName = if (triple.endsWith("windows-msvc")) "krusty.exe" else "krusty"
     private val archiveName = "krusty-$release-$triple." + if (triple.endsWith("windows-msvc")) "zip" else "tar.gz"
+    private val signer = TestReleaseSigner()
+
+    private fun releasedCompiler(release: String, releases: String, gradleUserHome: File, offline: Boolean): File =
+        releasedCompiler(release, releases, gradleUserHome, offline) { signer.rootKey }
+
+    /** Writes the release's `SHA256SUMS` with [text], its signature and the signing subkey's certificate. */
+    private fun writeSums(tag: File, text: String, sign: TestReleaseSigner = signer) {
+        val sums = File(tag, "krusty-$release-SHA256SUMS")
+        sums.writeText(text)
+        File(tag, "krusty-$release-SHA256SUMS.asc").writeText(sign.sign(sums.readBytes()))
+        File(tag, "krusty-$release-signing-key.asc").writeText(sign.certificate)
+    }
 
     /** A release directory laid out like a GitHub release, holding one compiler archive. */
     private fun releases(checksum: (String) -> String = { it }): File {
@@ -34,9 +46,7 @@ class KrustyReleaseTest {
         assertEquals(0, ProcessBuilder(command).inheritIO().start().waitFor())
         val sha = MessageDigest.getInstance("SHA-256").digest(archive.readBytes())
             .joinToString("") { "%02x".format(it) }
-        File(tag, "krusty-$release-SHA256SUMS").writeText(
-            "0000  krusty-lsp-$release-$triple.tar.gz\n${checksum(sha)}  $archiveName\n",
-        )
+        writeSums(tag, "0000  krusty-lsp-$release-$triple.tar.gz\n${checksum(sha)}  $archiveName\n")
         return root
     }
 
@@ -118,13 +128,48 @@ class KrustyReleaseTest {
         val home = createTempDirectory("gradle-home").toFile()
         assertFailsWith<GradleException> { releasedCompiler(release, url, home, offline = false) }
 
-        val sums = File(releases, "v$release/krusty-$release-SHA256SUMS")
         val sha = MessageDigest.getInstance("SHA-256")
             .digest(File(releases, "v$release/$archiveName").readBytes())
             .joinToString("") { "%02x".format(it) }
-        sums.writeText("$sha  $archiveName\n")
+        writeSums(File(releases, "v$release"), "$sha  $archiveName\n")
         val compiler = releasedCompiler(release, url, home, offline = false)
 
         assertEquals("#!/bin/sh\necho krusty\n", compiler.readText())
+    }
+
+    @Test
+    fun refusesAReleaseWithoutASignature() {
+        val releases = releases()
+        File(releases, "v$release/krusty-$release-SHA256SUMS.asc").delete()
+        val url = releases.toURI().toString().removeSuffix("/")
+        val home = createTempDirectory("gradle-home").toFile()
+
+        val error = assertFailsWith<GradleException> { releasedCompiler(release, url, home, offline = false) }
+
+        assertEquals(
+            "could not download $url/v$release/krusty-$release-SHA256SUMS.asc; " +
+                "set -Pkrusty.binary=<path> to use a local compiler",
+            error.message,
+        )
+        assertEquals(false, File(home, "caches/krusty/$release/$triple/$executableName").exists())
+    }
+
+    @Test
+    fun refusesSumsSignedByAKeyTheRootDidNotCertify() {
+        val releases = releases()
+        val tag = File(releases, "v$release")
+        writeSums(tag, File(tag, "krusty-$release-SHA256SUMS").readText(), TestReleaseSigner())
+        val home = createTempDirectory("gradle-home").toFile()
+
+        val error = assertFailsWith<GradleException> {
+            releasedCompiler(release, releases.toURI().toString().removeSuffix("/"), home, offline = false)
+        }
+
+        assertEquals(
+            "the signing key of krusty-$release-SHA256SUMS of the krusty $release release " +
+                "does not belong to the krusty release root key",
+            error.message,
+        )
+        assertEquals(false, File(home, "caches/krusty/$release/$triple/$executableName").exists())
     }
 }

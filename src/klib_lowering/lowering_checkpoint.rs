@@ -40,6 +40,10 @@ impl LoweringCheckpoint {
         ir.functions.truncate(self.functions);
         ir.fn_source_names.retain(|function, _| *function < first);
         ir.fn_params.retain(|function, _| *function < first);
+        ir.lambda_own_params_from
+            .retain(|function, _| *function < first);
+        ir.method_visibilities
+            .retain(|function, _| *function < first);
         ir.extension_receiver_fns
             .retain(|function| *function < first);
         ir.fn_context_counts.retain(|function, _| *function < first);

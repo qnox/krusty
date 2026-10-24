@@ -284,14 +284,39 @@ fn external_elements(
         .collect())
 }
 
+/// What decides whether the plugin generates a class's `write$Self` and deserialization
+/// constructor, which a subclass's generated members call: lowering asks it of a superclass in its
+/// own file, and the record a class publishes for subclasses in other files
+/// ([`super::declared_elements`]) asks it of the class's checked declaration.
+pub(super) struct MemberGeneration {
+    pub(super) kind: crate::libraries::TypeKind,
+    pub(super) is_value: bool,
+    pub(super) serializable: bool,
+    /// `@Serializable(with = …)`: the named serializer replaces the generated one.
+    pub(super) custom_serializer: bool,
+}
+
+impl MemberGeneration {
+    pub(super) fn generates_members(&self) -> bool {
+        self.serializable
+            && !self.custom_serializer
+            && self.kind == crate::libraries::TypeKind::Class
+            && !self.is_value
+    }
+}
+
+/// Whether a stored property with these resolved annotations is NOT a serial element.
+pub(super) fn is_transient(annotations: &[TypeName]) -> bool {
+    annotations.contains(&type_name(TRANSIENT_FQ))
+}
+
 /// `class_id`'s own elements: every backing field but a `@Transient` property's.
 fn own_fields(ir: &IrFile, class_id: ClassId) -> Vec<usize> {
     let class = &ir.classes[class_id as usize];
-    let transient_identity = type_name(TRANSIENT_FQ);
     let transient = class
         .properties
         .iter()
-        .filter(|property| property.annotations.contains(&transient_identity))
+        .filter(|property| is_transient(&property.annotations))
         .filter_map(|property| property.backing_field)
         .map(|field| field as usize)
         .collect::<Vec<_>>();
@@ -310,12 +335,25 @@ fn serializable_superclass(ctx: &PluginContext, ir: &IrFile, class_id: ClassId) 
         .iter()
         .position(|class| class.fq_name_id() == superclass)? as ClassId;
     let class = &ir.classes[parent as usize];
-    let generated = ctx.has_annotation(parent, type_name(SERIALIZABLE_FQ))
-        && custom_serializer_of(ctx, ir, parent).is_none()
-        && !class.is_enum
-        && !class.is_object
-        && !class.is_value;
-    generated.then_some(parent)
+    let kind = if class.is_annotation {
+        crate::libraries::TypeKind::Annotation
+    } else if class.is_interface {
+        crate::libraries::TypeKind::Interface
+    } else if class.is_enum {
+        crate::libraries::TypeKind::Enum
+    } else if class.is_object {
+        crate::libraries::TypeKind::Object
+    } else {
+        crate::libraries::TypeKind::Class
+    };
+    MemberGeneration {
+        kind,
+        is_value: class.is_value,
+        serializable: ctx.has_annotation(parent, type_name(SERIALIZABLE_FQ)),
+        custom_serializer: custom_serializer_of(ctx, ir, parent).is_some(),
+    }
+    .generates_members()
+    .then_some(parent)
 }
 
 /// The type arguments `class_id`'s supertype gives `parent_name`.
