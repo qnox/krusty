@@ -31,6 +31,7 @@ fn compiler_accessor(
         origin: KspDeclarationOrigin::Synthetic,
         modifiers: described.then(|| vec![KspModifier::Final, KspModifier::Public]),
         annotations,
+        returns_property_type: parameter.is_none(),
         parameter,
         jvm_name: None,
     }
@@ -79,6 +80,7 @@ impl Source<'_> {
                 annotations: getter_annotations,
                 parameter: None,
                 jvm_name: None,
+                returns_property_type: property.getter_ty.is_none(),
             }
         } else {
             compiler_accessor(modifiers, getter_annotations, None)
@@ -120,6 +122,7 @@ impl Source<'_> {
                 annotations: setter_annotations,
                 parameter: Some((parameter_name, parameter_annotations)),
                 jvm_name: None,
+                returns_property_type: false,
             },
             None => compiler_accessor(
                 modifiers,

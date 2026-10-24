@@ -16120,6 +16120,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   one declaring a generic, raw generic or collection-typed constant are refused for those
   queries. (`crates/krusty-plugin-host/tests/ksp.rs`,
   `library_annotation_members_are_what_ksp2_reports`.)
+- **A KSP source getter's return type is a reference of its own to the property's type.**
+  `KSPropertyGetter.returnType` of a source property's getter, written or made by the compiler,
+  resolves to the property's type through a reference that is not the property's own (neither
+  `===` nor `==`), whose origin is the getter's (`SYNTHETIC` for a compiler getter, `KOTLIN` for
+  a written one) and whose parent is the getter, as KSP2 2.3.12 reports. A getter that writes its
+  own return type (`get(): Long`) and a library property's getter are refused for that query.
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `getter_return_types_are_what_ksp2_reports`,
+  `the_return_type_a_getter_writes_is_refused`.)
 - **A KSP source classifier lists its members with the inherited ones as KSP2 does.**
   `getAllFunctions` lists the classifier's own functions in declaration order (a data class's
   `componentN` and `copy` among them), then each direct supertype's functions in written order

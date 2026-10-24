@@ -15,7 +15,7 @@ use crate::protocol::{malformed, put_list, put_str, read_frame, utf8, write_fram
 
 use super::{GeneratedKind, KspGenerated, KspLoad, KspOutcome};
 
-pub(crate) const PROTOCOL: u32 = 12;
+pub(crate) const PROTOCOL: u32 = 13;
 
 const HELLO: u8 = 0;
 const LOAD: u8 = 1;
@@ -286,7 +286,7 @@ fn put_property(payload: &mut Vec<u8>, property: &KspProperty) {
 }
 
 /// An accessor: its origin, its modifiers and annotations, a setter's parameter name and
-/// annotations, and its JVM name.
+/// annotations, its JVM name, and whether a getter returns the property's type.
 fn put_accessor(payload: &mut Vec<u8>, accessor: &KspAccessor) {
     put_origin(payload, accessor.origin);
     put_modifiers(payload, &accessor.modifiers);
@@ -302,6 +302,10 @@ fn put_accessor(payload: &mut Vec<u8>, accessor: &KspAccessor) {
     put_option(payload, &accessor.jvm_name, |payload, text| {
         put_str(payload, text)
     });
+    // A getter, which has no parameter, then says whether it returns the property's type.
+    if accessor.parameter.is_none() {
+        payload.push(u8::from(accessor.returns_property_type));
+    }
 }
 
 /// A parameter: its name, its type and a flags byte (bit 0 `val`, 1 `var`, 2 vararg, 3 default,

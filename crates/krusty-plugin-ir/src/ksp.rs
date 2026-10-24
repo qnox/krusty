@@ -260,6 +260,11 @@ pub struct KspAccessor {
     pub parameter: Option<(String, Vec<KspAnnotation>)>,
     /// What `Resolver.getJvmName` answers; `None` when the round cannot say.
     pub jvm_name: Option<String>,
+    /// Whether `KSPropertyGetter.returnType` is the property's type, as KSP2 serves a source
+    /// getter that writes no return type of its own: a reference of the getter's origin whose
+    /// parent is the getter. False for a setter, a getter that writes its return type and a library
+    /// getter, whose return type the host refuses.
+    pub returns_property_type: bool,
 }
 
 /// A type alias, of which the round describes only the name yet.
