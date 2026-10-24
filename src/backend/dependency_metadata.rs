@@ -198,6 +198,7 @@ pub struct DependencyExportSignatures {
     /// Every visible function an interface of this file declares, abstract ones included: the
     /// identity a dependent module's implementation of the member is recorded under.
     interface_members: HashMap<FunId, KlibDependencyCallable>,
+    interface_properties: HashMap<crate::fir::PropertyId, KlibDependencyCallable>,
     member_receivers: HashMap<FunId, DependencyMemberReceiver>,
     singleton_member_receivers: HashMap<FunId, SingletonMemberReceiver>,
     singleton_extension_unread_receivers: HashMap<FunId, SingletonExtensionUnreadReceiver>,
@@ -224,11 +225,14 @@ impl DependencyExportSignatures {
         self.interface_members.get(&function)
     }
 
-    /// Every interface member identity this file publishes, in no particular order.
-    pub fn interface_members(&self) -> impl Iterator<Item = (FunId, &KlibDependencyCallable)> {
-        self.interface_members
-            .iter()
-            .map(|(&function, identity)| (function, identity))
+    /// The published getter identity of a property an interface of this file declares, with or
+    /// without accessor bodies: what another module's class implementing the property names its
+    /// getter and setter by.
+    pub fn interface_property(
+        &self,
+        property: crate::fir::PropertyId,
+    ) -> Option<&KlibDependencyCallable> {
+        self.interface_properties.get(&property)
     }
 
     /// Exact unread extension receiver and its separately authenticated source-evaluation effect.
@@ -269,6 +273,18 @@ impl DependencyExportSignatures {
         assert!(
             previous.is_none(),
             "one interface member cannot publish two KLIB declaration identities"
+        );
+    }
+
+    pub(crate) fn record_interface_property(
+        &mut self,
+        property: crate::fir::PropertyId,
+        getter: KlibDependencyCallable,
+    ) {
+        let previous = self.interface_properties.insert(property, getter);
+        assert!(
+            previous.is_none(),
+            "one interface property cannot publish two KLIB declaration identities"
         );
     }
 

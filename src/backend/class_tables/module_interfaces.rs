@@ -153,15 +153,6 @@ impl ModuleInterfaces {
         self.fixed.get(&callable).copied()
     }
 
-    /// Every number a property accessor stands at, ascending.
-    pub(crate) fn accessor_numbers(&self) -> impl Iterator<Item = u32> + '_ {
-        self.members
-            .iter()
-            .enumerate()
-            .filter(|(_, member)| !matches!(member.key, PlanKey::Callable(_)))
-            .map(|(number, _)| number as u32)
-    }
-
     pub(crate) fn member(&self, number: u32) -> &NumberedMember {
         &self.members[number as usize]
     }

@@ -2539,7 +2539,6 @@ regressions/multimodule/inlineNarrowElementInRange.kt
 regressions/multimodule/inlineStdlibRepeat.kt
 regressions/multimodule/inlineTextTrim.kt
 regressions/multimodule/inlineUnsignedConstructionAndData.kt
-regressions/multimodule/multimoduleDependencyInterfaceProperty.kt
 regressions/objectCaptureOuterConstructorProperty.kt
 regressions/objectInsideDelegation.kt
 regressions/resolvedCallForGetOperator.kt

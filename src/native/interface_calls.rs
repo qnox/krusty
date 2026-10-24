@@ -46,8 +46,7 @@ pub(super) const ITABLE_OFFSET: u32 = 160;
 /// The prefix of the section in which an object names, for each member number of its module's
 /// interfaces, the identity of an interface function standing there; the module's namespace
 /// follows it. An entry is the number as a word, the identity's length as a word, and the
-/// identity's bytes padded to a word. A number a property accessor stands at has no identity yet,
-/// and its entry an empty one.
+/// identity's bytes padded to a word.
 pub(super) const IDENTITIES_SECTION: &str = ".kt_interface_identities";
 
 /// The section in which an object records the implementations its types supply for members of a
@@ -55,12 +54,6 @@ pub(super) const IDENTITIES_SECTION: &str = ".kt_interface_identities";
 /// as relocated words, and the identity's bytes padded to a word.
 pub(super) const DEPENDENCY_IMPLEMENTATIONS_SECTION: &str =
     ".kt_interface_dependency_implementations";
-
-/// The section in which an object names each source module whose interface properties its types
-/// implement, by namespace: an entry is the namespace's length as a word and its bytes padded to
-/// a word. A call through such a property's stub could miss those implementations, so the link
-/// refuses the program.
-pub(super) const DEPENDENCY_PROPERTIES_SECTION: &str = ".kt_interface_dependency_properties";
 
 const STUB_PREFIX: &str = "kt_itf_";
 
@@ -94,15 +87,10 @@ pub(super) fn identities_section(module_name: &str) -> String {
 /// The stub an identity entry of the section `section` names with `number`, or `None` for a
 /// section that holds no member identities.
 pub(super) fn identified_stub(section: &str, number: u32) -> Option<String> {
-    identities_namespace(section).map(|namespace| stub_in_namespace(namespace, number))
-}
-
-/// The namespace of the module whose member identities the section `section` holds.
-pub(super) fn identities_namespace(section: &str) -> Option<&str> {
-    section
+    let namespace = section
         .strip_prefix(IDENTITIES_SECTION)?
-        .strip_prefix('.')
-        .filter(|namespace| !namespace.is_empty())
+        .strip_prefix('.')?;
+    (!namespace.is_empty()).then(|| stub_in_namespace(namespace, number))
 }
 
 /// Whether the link reads `section` and does not load it: implementation records, member
@@ -111,7 +99,6 @@ pub(super) fn is_implementations_section(section: &str) -> bool {
     recorded_stub(section, 0).is_some()
         || identified_stub(section, 0).is_some()
         || section == DEPENDENCY_IMPLEMENTATIONS_SECTION
-        || section == DEPENDENCY_PROPERTIES_SECTION
 }
 
 /// The bytes that identify one interface function across modules: its declaring module and its
@@ -119,47 +106,71 @@ pub(super) fn is_implementations_section(section: &str) -> bool {
 /// that declares the member and every module implementing it compute it from the same published
 /// identity, never from a spelling.
 pub(super) fn member_identity(member: &crate::backend::KlibDependencyCallable) -> Vec<u8> {
-    fn string(bytes: &mut Vec<u8>, text: &str) {
-        bytes.extend_from_slice(&(text.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(text.as_bytes());
-    }
-    fn path(bytes: &mut Vec<u8>, segments: &[String]) {
-        bytes.extend_from_slice(&(segments.len() as u32).to_le_bytes());
-        for segment in segments {
-            string(bytes, segment);
-        }
-    }
-    fn public(
-        bytes: &mut Vec<u8>,
-        signature: &crate::metadata::id_signature::KlibPublicIdSignature,
-    ) {
-        path(bytes, signature.package().segments());
-        path(bytes, signature.declaration().segments());
-        match signature.member_id() {
-            Some(id) => {
-                bytes.push(1);
-                bytes.extend_from_slice(&id.to_le_bytes());
-            }
-            None => bytes.push(0),
-        }
-        bytes.extend_from_slice(&signature.mask().to_le_bytes());
-    }
     let mut bytes = Vec::new();
-    string(&mut bytes, &member.module);
+    identity_string(&mut bytes, &member.module);
     match &member.declaration {
         crate::libraries::KlibDeclarationSignature::Public(signature) => {
             bytes.push(0);
-            public(&mut bytes, signature);
+            identity_public(&mut bytes, signature);
         }
         crate::libraries::KlibDeclarationSignature::Accessor(accessor) => {
             bytes.push(1);
-            public(&mut bytes, accessor.property());
-            string(&mut bytes, accessor.name());
+            identity_public(&mut bytes, accessor.property());
+            identity_string(&mut bytes, accessor.name());
             bytes.extend_from_slice(&accessor.member_id().to_le_bytes());
             bytes.extend_from_slice(&accessor.mask().to_le_bytes());
         }
     }
     bytes
+}
+
+/// The bytes that identify the getter (or, with `setter`, the setter) of one interface property
+/// across modules, from the published identity of any of its accessors: the declaring module and
+/// the property's public KLIB signature. Either accessor names the same property, so a module
+/// that knows only the getter's identity and one that knows only the setter's agree. `None` for an
+/// identity that names no accessor.
+pub(super) fn property_member_identity(
+    accessor: &crate::backend::KlibDependencyCallable,
+    setter: bool,
+) -> Option<Vec<u8>> {
+    let crate::libraries::KlibDeclarationSignature::Accessor(signature) = &accessor.declaration
+    else {
+        return None;
+    };
+    let mut bytes = Vec::new();
+    identity_string(&mut bytes, &accessor.module);
+    bytes.push(2);
+    identity_public(&mut bytes, signature.property());
+    bytes.push(u8::from(setter));
+    Some(bytes)
+}
+
+fn identity_string(bytes: &mut Vec<u8>, text: &str) {
+    bytes.extend_from_slice(&(text.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(text.as_bytes());
+}
+
+fn identity_public(
+    bytes: &mut Vec<u8>,
+    signature: &crate::metadata::id_signature::KlibPublicIdSignature,
+) {
+    for segments in [
+        signature.package().segments(),
+        signature.declaration().segments(),
+    ] {
+        bytes.extend_from_slice(&(segments.len() as u32).to_le_bytes());
+        for segment in segments {
+            identity_string(bytes, segment);
+        }
+    }
+    match signature.member_id() {
+        Some(id) => {
+            bytes.push(1);
+            bytes.extend_from_slice(&id.to_le_bytes());
+        }
+        None => bytes.push(0),
+    }
+    bytes.extend_from_slice(&signature.mask().to_le_bytes());
 }
 
 /// `length` rounded up to a word: how many bytes an identity of `length` bytes takes in an entry.

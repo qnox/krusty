@@ -5,10 +5,9 @@
 //! member its interfaces declare (see `native::interface_calls`).
 
 use super::super::super::interface_calls::{
-    identities_section, implementations_section, member_identity, padded,
-    DEPENDENCY_IMPLEMENTATIONS_SECTION, DEPENDENCY_PROPERTIES_SECTION, RECORD_SIZE,
+    identities_section, implementations_section, member_identity, padded, property_member_identity,
+    DEPENDENCY_IMPLEMENTATIONS_SECTION, RECORD_SIZE,
 };
-use super::super::super::symbols::module_namespace;
 use super::*;
 use crate::backend::class_tables::module_slots::PlanKey;
 use crate::fir::ResolvedFunctionOverrideTarget;
@@ -70,8 +69,8 @@ impl FileLowering<'_> {
 impl FileLowering<'_> {
     /// Name, for the link, the KLIB identity of every function an interface of this file
     /// declares, beside its member number: what a dependent module's class implementing the member
-    /// records its implementation under (see `native::interface_calls`). Every number of the
-    /// module a property accessor stands at is named with no identity.
+    /// records its implementation under (see `native::interface_calls`); likewise every getter
+    /// and setter of a property an interface of this file declares.
     pub(super) fn define_interface_identities(&mut self) -> Result<(), Unsupported> {
         let numbers = self.slot_plan.interfaces();
         let mut entries = self
@@ -84,9 +83,28 @@ impl FileLowering<'_> {
                 Some((number, member_identity(identity)))
             })
             .chain(
-                numbers
-                    .accessor_numbers()
-                    .map(|number| (number, Vec::new())),
+                self.ir
+                    .local_property_layouts
+                    .keys()
+                    .filter_map(|property| {
+                        Some((
+                            *property,
+                            self.dependency_signatures.interface_property(*property)?,
+                        ))
+                    })
+                    .flat_map(|(property, getter)| {
+                        [
+                            (PlanKey::Getter(property), false),
+                            (PlanKey::Setter(property), true),
+                        ]
+                        .into_iter()
+                        .filter_map(move |(key, setter)| {
+                            Some((
+                                numbers.number(key)?,
+                                property_member_identity(getter, setter)?,
+                            ))
+                        })
+                    }),
             )
             .collect::<Vec<_>>();
         if entries.is_empty() {
@@ -126,7 +144,6 @@ impl FileLowering<'_> {
     ) -> Result<(), Unsupported> {
         let (vtable, itable) = tables;
         let mut implemented: Vec<(Vec<u8>, FuncId)> = Vec::new();
-        let mut property_modules = std::collections::BTreeSet::new();
         // Only a source module of this program calls a member through a stub; the members of a
         // prebuilt library's interfaces need no records.
         let source_modules: crate::fx_hash::HashSet<&str> = self
@@ -226,25 +243,12 @@ impl FileLowering<'_> {
                 })?;
                 implemented.push((identity, vtable[slot as usize]));
             }
-            // A source module publishes no identity for its interface properties' accessors, so
-            // the link is told only whose interface properties this type implements.
-            for edge in self.ir.property_overrides.get(&name).into_iter().flatten() {
-                let crate::fir::ResolvedPropertyOverrideTarget::External(target) = edge.overridden
-                else {
-                    continue;
-                };
-                if !edge.overridden_is_interface {
-                    continue;
-                }
-                if let Some(member) = self
-                    .callables
-                    .callable(target)
-                    .and_then(|fact| fact.dependency_callable.as_ref())
-                    .filter(|member| source_modules.contains(member.module.as_str()))
-                {
-                    property_modules.insert(module_namespace(&member.module));
-                }
-            }
+            self.record_dependency_property_implementations(
+                owner,
+                (vtable, itable),
+                &source_modules,
+                &mut implemented,
+            )?;
             for default in self.ir.inherited_defaults.get(&name).into_iter().flatten() {
                 let crate::fir::InheritedDefaultBody::DependencyInterfaceMethod(declaration) =
                     default.body
@@ -259,7 +263,22 @@ impl FileLowering<'_> {
                 else {
                     continue;
                 };
-                let identity = member_identity(member);
+                let identity = match &default.name {
+                    crate::fir::InheritedMemberName::Function(_) => Some(member_identity(member)),
+                    crate::fir::InheritedMemberName::PropertyGetter(_) => {
+                        property_member_identity(member, false)
+                    }
+                    crate::fir::InheritedMemberName::PropertySetter(_) => {
+                        property_member_identity(member, true)
+                    }
+                }
+                .ok_or_else(|| {
+                    declined!(
+                        "an inherited accessor default of a dependency's interface with no \
+                         accessor identity (`{}`)",
+                        self.kotlin_name(owner)
+                    )
+                })?;
                 if implemented.iter().any(|(known, _)| *known == identity) {
                     continue;
                 }
@@ -279,21 +298,6 @@ impl FileLowering<'_> {
                 implemented.push((identity, function));
             }
             current = self.model.layout(owner).superclass;
-        }
-        if !property_modules.is_empty() {
-            let mut contents = Vec::new();
-            for namespace in &property_modules {
-                contents.extend_from_slice(&(namespace.len() as u64).to_le_bytes());
-                push_padded(&mut contents, namespace.as_bytes());
-            }
-            let id = self.declare_local_data(&format!("kt_itfprop_{base}"), false)?;
-            let mut description = DataDescription::new();
-            description.define(contents.into_boxed_slice());
-            description.set_align(8);
-            description.set_custom_section(DEPENDENCY_PROPERTIES_SECTION);
-            self.module
-                .define_data(id, &description)
-                .map_err(|error| format!("defining `kt_itfprop_{base}` ({error})"))?;
         }
         if implemented.is_empty() {
             return Ok(());
@@ -323,6 +327,97 @@ impl FileLowering<'_> {
         self.module
             .define_data(id, &description)
             .map_err(|error| format!("defining `kt_itfdep_{base}` ({error})"))?;
+        Ok(())
+    }
+}
+
+impl FileLowering<'_> {
+    /// Add to `implemented` the getter and setter `owner` implements each property of another
+    /// source module's interface with, by the accessor's identity: its own override's slot in
+    /// `tables.0`, or a default of this module's interface at that property's number in `tables.1`.
+    fn record_dependency_property_implementations(
+        &mut self,
+        owner: ClassId,
+        (vtable, itable): (&[FuncId], &[FuncId]),
+        source_modules: &crate::fx_hash::HashSet<&str>,
+        implemented: &mut Vec<(Vec<u8>, FuncId)>,
+    ) -> Result<(), Unsupported> {
+        let name = self.ir.classes[owner as usize].fq_name_id();
+        for edge in self.ir.property_overrides.get(&name).into_iter().flatten() {
+            let crate::fir::ResolvedPropertyOverrideTarget::External(target) = edge.overridden
+            else {
+                continue;
+            };
+            if !edge.overridden_is_interface {
+                continue;
+            }
+            let Some(member) = self
+                .callables
+                .callable(target)
+                .and_then(|fact| fact.dependency_callable.as_ref())
+                .filter(|member| source_modules.contains(member.module.as_str()))
+            else {
+                continue;
+            };
+            if model::representation(self.values, edge.declared_type)
+                != model::representation(self.values, edge.implementation_type)
+            {
+                return Err(declined!(
+                    "a property of a dependency's interface implemented with another carrier \
+                     (`{}.{}`)",
+                    self.kotlin_name(owner),
+                    edge.name
+                ));
+            }
+            let roles = [false, true]
+                .into_iter()
+                .filter(|setter| !setter || edge.overridden_setter_value.is_some());
+            for setter in roles {
+                let identity = property_member_identity(member, setter).ok_or_else(|| {
+                    declined!(
+                        "a property of a dependency's interface with no accessor identity \
+                         (`{}.{}`)",
+                        self.kotlin_name(owner),
+                        edge.name
+                    )
+                })?;
+                if implemented.iter().any(|(known, _)| *known == identity) {
+                    continue;
+                }
+                let interface_number = match edge.implementation {
+                    crate::fir::ResolvedPropertyOverrideTarget::Module(property) => {
+                        let key = if setter {
+                            PlanKey::Setter(property)
+                        } else {
+                            PlanKey::Getter(property)
+                        };
+                        self.slot_plan.interfaces().number(key)
+                    }
+                    crate::fir::ResolvedPropertyOverrideTarget::External(_) => None,
+                };
+                let function = if let Some(number) = interface_number {
+                    itable.get(number as usize).copied()
+                } else {
+                    let key = if setter {
+                        crate::native::classes::SlotKey::Setter(edge.overridden)
+                    } else {
+                        crate::native::classes::SlotKey::Getter(edge.overridden)
+                    };
+                    self.model
+                        .slot(owner, &key)
+                        .and_then(|slot| vtable.get(slot as usize).copied())
+                }
+                .ok_or_else(|| {
+                    declined!(
+                        "an implementation of a dependency's interface property with no slot \
+                         (`{}.{}`)",
+                        self.kotlin_name(owner),
+                        edge.name
+                    )
+                })?;
+                implemented.push((identity, function));
+            }
+        }
         Ok(())
     }
 }

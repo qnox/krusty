@@ -6,18 +6,13 @@
 //! A type of a dependent module records a dependency's member by the member's KLIB identity, which
 //! the module declaring the member maps to its number; an identity no module maps is one no stub
 //! is called through, and is dropped.
-//!
-//! A property accessor's number has no identity yet. A type implementing a property of another
-//! module's interface is recorded only by that module's namespace, and a call through such an
-//! accessor's stub is refused (see [`Records::refuse_unidentified_calls`]).
 
-use crate::fx_hash::{HashMap, HashSet};
+use crate::fx_hash::HashMap;
 
 use object::read::{Object, ObjectSection, ObjectSymbol, RelocationTarget};
 
 use super::super::interface_calls::{
-    identified_stub, identities_namespace, padded, recorded_stub,
-    DEPENDENCY_IMPLEMENTATIONS_SECTION, DEPENDENCY_PROPERTIES_SECTION, RECORD_SIZE,
+    identified_stub, padded, recorded_stub, DEPENDENCY_IMPLEMENTATIONS_SECTION, RECORD_SIZE,
 };
 use super::elf::{symbol_name, Elf};
 use super::ProgramLinkError;
@@ -33,37 +28,9 @@ pub(super) enum Target {
 /// Each stub's implementations, `(type, function)`, keyed by stub symbol.
 pub(super) type Implementations = HashMap<String, Vec<(Target, Target)>>;
 
-/// What the objects record for the stubs.
-#[derive(Debug, Default)]
-pub(super) struct Records {
-    pub(super) implementations: Implementations,
-    /// The stubs of property accessors, which have no identity, by the namespace of the module
-    /// whose interface declares them.
-    unidentified: HashMap<String, String>,
-    /// The namespaces of the modules whose interface properties a type of another module
-    /// implements.
-    implemented_properties: HashSet<String>,
-}
-
-impl Records {
-    /// Refuse a call through stub `stub` that could miss an implementation: one of a property
-    /// accessor that another module's type implements, recorded by no identity.
-    pub(super) fn refuse_unidentified_calls(&self, stub: &str) -> Result<(), ProgramLinkError> {
-        match self.unidentified.get(stub) {
-            Some(namespace) if self.implemented_properties.contains(namespace) => {
-                Err(ProgramLinkError::Unsupported(format!(
-                    "a call through `{stub}`, a property of an interface another module's type \
-                     implements"
-                )))
-            }
-            _ => Ok(()),
-        }
-    }
-}
-
 /// Read every implementation the objects `files` record.
-pub(super) fn read(files: &[Elf]) -> Result<Records, ProgramLinkError> {
-    let mut records = Records::default();
+pub(super) fn read(files: &[Elf]) -> Result<Implementations, ProgramLinkError> {
+    let mut implementations = Implementations::default();
     let mut identities: HashMap<Vec<u8>, String> = HashMap::default();
     let mut by_identity: Vec<(Vec<u8>, Target, Target)> = Vec::new();
     for (file_index, file) in files.iter().enumerate() {
@@ -72,38 +39,23 @@ pub(super) fn read(files: &[Elf]) -> Result<Records, ProgramLinkError> {
                 continue;
             };
             if recorded_stub(name, 0).is_some() {
-                read_numbered(
-                    file_index,
-                    file,
-                    &section,
-                    name,
-                    &mut records.implementations,
-                )?;
+                read_numbered(file_index, file, &section, name, &mut implementations)?;
             } else if identified_stub(name, 0).is_some() {
-                read_identities(
-                    file_index,
-                    &section,
-                    name,
-                    &mut identities,
-                    &mut records.unidentified,
-                )?;
+                read_identities(file_index, &section, name, &mut identities)?;
             } else if name == DEPENDENCY_IMPLEMENTATIONS_SECTION {
                 read_by_identity(file_index, file, &section, &mut by_identity)?;
-            } else if name == DEPENDENCY_PROPERTIES_SECTION {
-                read_namespaces(file_index, &section, &mut records.implemented_properties)?;
             }
         }
     }
     for (identity, ty, function) in by_identity {
         if let Some(stub) = identities.get(&identity) {
-            records
-                .implementations
+            implementations
                 .entry(stub.clone())
                 .or_default()
                 .push((ty, function));
         }
     }
-    Ok(records)
+    Ok(implementations)
 }
 
 /// The symbol each relocation of `section` names, by the offset it patches. Every one fills a
@@ -195,9 +147,7 @@ fn read_identities(
     section: &object::read::elf::ElfSection64<'_, '_, object::LittleEndian>,
     name: &str,
     identities: &mut HashMap<Vec<u8>, String>,
-    unidentified: &mut HashMap<String, String>,
 ) -> Result<(), ProgramLinkError> {
-    let namespace = identities_namespace(name).expect("an identities section");
     let data = section_data(section)?;
     let mut at = 0;
     while at < data.len() as u64 {
@@ -214,11 +164,6 @@ fn read_identities(
             .ok()
             .and_then(|number| identified_stub(name, number))
             .ok_or_else(malformed)?;
-        if identity.is_empty() {
-            unidentified.insert(stub, namespace.to_string());
-            at = start;
-            continue;
-        }
         match identities.get(identity) {
             Some(known) if *known != stub => {
                 return Err(ProgramLinkError::Parse(format!(
@@ -269,30 +214,6 @@ fn read_by_identity(
             .and_then(|(start, length)| data.get(start..start.checked_add(length)?))
             .ok_or_else(malformed)?;
         by_identity.push((identity.to_vec(), ty, function));
-        at = start + padded(length);
-    }
-    Ok(())
-}
-
-/// The namespaces a dependency properties section names.
-fn read_namespaces(
-    file_index: usize,
-    section: &object::read::elf::ElfSection64<'_, '_, object::LittleEndian>,
-    namespaces: &mut HashSet<String>,
-) -> Result<(), ProgramLinkError> {
-    let data = section_data(section)?;
-    let mut at = 0;
-    while at < data.len() as u64 {
-        let malformed = || record_error(file_index, at, "is not a whole module namespace");
-        let length = word(data, at).ok_or_else(malformed)?;
-        let start = at + 8;
-        let namespace = usize::try_from(start)
-            .ok()
-            .zip(usize::try_from(length).ok())
-            .and_then(|(start, length)| data.get(start..start.checked_add(length)?))
-            .and_then(|bytes| std::str::from_utf8(bytes).ok())
-            .ok_or_else(malformed)?;
-        namespaces.insert(namespace.to_string());
         at = start + padded(length);
     }
     Ok(())

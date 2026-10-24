@@ -94,9 +94,9 @@ names, per number, the KLIB declaration identity of every interface function sta
 dependency's interface records its implementation by that identity
 (`.kt_interface_dependency_implementations`), its own override or the dependency's exported
 default. The link joins the two, so a dependency's stub sees every implementation in the program.
-A property accessor's number has no identity yet: a class implementing a property of another
-module's interface records only that module, and the link refuses a program that calls such an
-accessor through its stub rather than miss the implementation.
+A property's getter and setter are named by the property's own KLIB signature and the accessor's
+role, so an implementation overriding the property and one inheriting the dependency's exported
+accessor default are recorded the same way.
 
 The interface tables are the link's as well. Only a member whose stub looks a table up needs an
 entry, so the link numbers just those members, program-wide, each at the lowest index that no

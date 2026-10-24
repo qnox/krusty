@@ -139,9 +139,6 @@ impl InterfaceStubs {
         let mut records = super::interface_records::read(files)?;
         let mut names: Vec<String> = called.into_iter().collect();
         names.sort();
-        for name in &names {
-            records.refuse_unidentified_calls(name)?;
-        }
         // Every stub keeps room for the longer form, so the form can be chosen once addresses are
         // known.
         let room = align_up(
@@ -163,7 +160,7 @@ impl InterfaceStubs {
             .into_iter()
             .enumerate()
             .map(|(index, name)| Stub {
-                records: records.implementations.remove(&name).unwrap_or_default(),
+                records: records.remove(&name).unwrap_or_default(),
                 name,
                 index: None,
                 offset: index as u64 * room,
@@ -437,7 +434,7 @@ mod tests {
 
     use super::super::super::interface_calls::{
         identities_section, implementations_section, padded, DEPENDENCY_IMPLEMENTATIONS_SECTION,
-        DEPENDENCY_PROPERTIES_SECTION, RECORD_SIZE,
+        RECORD_SIZE,
     };
     use super::super::fixture::{assert_link_error, link, linked, Image, Obj};
     use super::*;
@@ -861,39 +858,6 @@ mod tests {
             let table = u64::from_le_bytes(image[ty..ty + 8].try_into().unwrap());
             assert_eq!(Image(&image).u64(table), function);
         }
-    }
-
-    /// A property accessor's number has no identity, so a call through it is refused once
-    /// another module's type implements a property of the module's interfaces.
-    #[test]
-    fn a_call_through_a_property_another_module_implements_is_refused() {
-        let program = |namespaces: &[u8]| {
-            let mut object = typed_program(&[(0, 0, 0)], &[(0, b"")], &[]);
-            object.section(
-                DEPENDENCY_PROPERTIES_SECTION,
-                SectionKind::ReadOnlyData,
-                namespaces,
-                8,
-            );
-            object
-        };
-        let named = |namespace: &[u8]| {
-            let mut entry = (namespace.len() as u64).to_le_bytes().to_vec();
-            entry.extend_from_slice(namespace);
-            entry.resize(8 + padded(namespace.len() as u64) as usize, 0);
-            entry
-        };
-        assert_link_error(
-            link(Arch::X86_64, &[&program(&named(b"m"))]),
-            ProgramLinkError::Unsupported(
-                "a call through `kt_itf_m_0`, a property of an interface another module's type \
-                 implements"
-                    .into(),
-            ),
-        );
-        let image = linked(Arch::X86_64, &[&program(&named(b"other"))]);
-        let (target, _) = stub_of(&image, 0);
-        assert_eq!(target, Image(&image).entry() + 8, "only f implements it");
     }
 
     #[test]
