@@ -5882,3 +5882,11 @@ JVM boxing-cast byte parity remains separate in #2590; the bound slice proves co
 signatures, reference runtime and exact diagnostics.
 Inferred return types of receiver-bound alias calls remain a separate signature-lookup follow-up
 in #2592; declared alias calls and direct inferred calls are covered here.
+
+Original parameter declarations now survive selected callable/member conversion independently of
+the specialized applicability signature. Constructor publication reads that same declaration shape;
+the JVM retains generic value-class boxes while concrete value-class slots keep their carriers.
+Owner tests constrain the constructor and context/extension/value round trips, and own/reference
+dependency runtime tests read both generic and concrete stored values. The selected-member record
+and conversion move out of the resolver facade, and plugin plans keep their declaration payload
+indirect, retiring two large-enum lint findings without changing the indexed FIR/IR representation.

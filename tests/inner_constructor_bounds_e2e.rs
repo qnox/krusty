@@ -141,3 +141,40 @@ fn dependency_inner_constructor_cannot_infer_away_its_enclosing_binding() {
         assert_outer_bound_rejected(&source, &[library.clone(), common::stdlib_jar()]);
     }
 }
+
+const VALUE_CLASS_DECLARATIONS: &str = r#"
+@JvmInline value class Token(val value: Int)
+class Outer<O> {
+    inner class Inner(val value: O)
+    inner class Direct(val value: Token)
+}
+"#;
+
+const VALUE_CLASS_CONSUMER: &str = r#"
+fun box(): String {
+    val outer = Outer<Token>()
+    val generic = outer.Inner(Token(17))
+    val concrete = outer.Direct(Token(23))
+    return if (generic.value.value == 17 && concrete.value.value == 23) "OK" else "wrong values"
+}
+"#;
+
+#[test]
+fn dependency_inner_constructor_keeps_generic_value_class_arguments_boxed() {
+    assert_eq!(
+        common::expect_box_run_against_kotlinc(VALUE_CLASS_DECLARATIONS, VALUE_CLASS_CONSUMER),
+        Some("OK".into()),
+    );
+}
+
+#[test]
+fn own_dependency_inner_constructor_keeps_generic_value_class_arguments_boxed() {
+    assert_eq!(
+        common::expect_box_run_against(
+            "InnerConstructorValueClassEvidence",
+            VALUE_CLASS_DECLARATIONS,
+            VALUE_CLASS_CONSUMER,
+        ),
+        Some("OK".into()),
+    );
+}

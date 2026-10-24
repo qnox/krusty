@@ -991,3 +991,9 @@ semantic outer identities. Only present normalized bindings enter the captured c
 unapplied outer does not acquire invented type arguments.
 The same complete result reaches inferred function signatures and rejected-call recovery. This
 changes no metadata schema, physical constructor descriptor or enclosing-instance ABI.
+
+Selected member records also retain pre-substitution declaration parameters in full source order
+(contexts, extension receiver, values). Metadata function normalization publishes this fact before
+specialization; callable/member projection and constructor publication carry it without recovering
+it from the specialized signature. Constructor outer-instance and default-marker slots remain
+physical inputs. This is an in-memory declaration fact, with no Kotlin metadata wire change.
