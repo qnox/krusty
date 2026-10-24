@@ -1,5 +1,17 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Class formal layouts before member publication
+
+Kotlin class metadata supplies own formals and bounds. A mapped builtin declaration supplies its
+semantic layout when applicable; Java class signatures supply the remaining declarations. Captured
+class formals come from non-static `InnerClasses` outer edges, with bound hydration before own-first
+capture/shadow renaming. Local or anonymous entries without an outer are not member capture edges.
+
+Layout reads use class headers and builtin declaration tables, not the enclosing `LibraryType` or
+its members. Physical mapped Java requests keep invariant formals independently of a Kotlin view's
+declared variance. This changes no metadata wire fields or physical descriptors. Missing lexical
+formal scopes, including unavailable enclosing-method evidence, do not license placeholder bounds.
+
 Wasm's erased-reference binary equality realization uses the already checked operator and the
 runtime GC representation. It changes no metadata, callable identity, or provider authorization;
 explicit dependency `Any.equals` realization remains a separate authenticated-callable contract.
@@ -8,11 +20,34 @@ Goal: emit `@kotlin.Metadata` so krusty output is consumable as a **Kotlin** lib
 need only the signatures, already matched in Phase 5a). This is the single largest remaining piece —
 effectively a re-implementation of `kotlinx-metadata-jvm`'s writer.
 
+## Java raw type arguments
+
+A Java raw occurrence is a complete application of `RawProjection` arguments, one per formal.
+kotlinc 2.4.21 writes it (`fun f() = Raw.box()` for
+`class Box<T extends CharSequence>`) as a flexible `Type`: the lower face applies each erasure
+(`Box<CharSequence!>`, itself a `PlatformType` flexible argument), `flexible_type_capabilities_id`
+is `kotlin.jvm.PlatformType`, the upper face is the nullable all-star application of the read-only
+face (`Box<*>?`, `List<*>?` for a raw `java.util.List` whose lower face is `MutableList<Any?>`),
+and both faces carry the JVM extension `JvmProtoBuf.is_raw` (field 101) set to true. Strings
+intern lower, upper, then the capability (`tests/java_raw_type_e2e.rs`).
+
 ## Shared-target compiler/plugin model artifacts
 
 The Rust compiler/plugin model tracks checkout identity as a Cargo input, so a shared target cannot
 reuse another checkout's incompatible declaration structure. No serialized plugin fields, protocol
 versions, classfile metadata or annotation payloads change.
+
+## Checked annotation constructor results
+
+The checked constructor overlay retains stable declaration identities while its merged inventory
+normalizes generic signatures from the classifier's formal layout. Semantic lambda parameter
+templates remain available before argument checking; physical constructor parameters and serialized
+metadata layouts are unchanged.
+
+Class-literal arguments publish their checked classifier identity before constructor selection.
+Nested annotation folding consumes that same identity for its class token; it does not rediscover
+the literal from its source spelling. This also covers deeper nested classifier arguments in
+dependency annotation payloads and preserves ordinary annotation defaults and enum entries.
 
 ## KLIB emission root categories
 
@@ -29,6 +64,12 @@ runtime/binary retention with nested annotations, arrays, class literals and nul
 
 ## Constructor-property annotation publication order
 
+Generic annotation owner syntax and its selected alias identity survive to the checking scope.
+Element substitution and nested constant folding consume the checked applied owner/constructor
+types, never an erased parameter list or a fresh lookup by annotation spelling. This changes no
+annotation wire format. JVM generic class/member `Signature` attributes use the same formatter as
+ordinary declarations, with the existing physical `KClass`-to-`Class` annotation representation.
+
 The stable property index receives checked applied-annotation payloads only after every source
 annotation class has published its target policy. Per-file checking releases its TypeInfo while
 retaining just folded values, explicit use sites and the property identity until that partition.
@@ -44,6 +85,18 @@ the vararg marker/element call facts. Reconstructing `Array<T>` from that elemen
 type-table forms share the same decoding path; no metadata encoding changes. Consumers retain the
 packed array projection but use the readable element value type for listed-argument conversions,
 adapted references and evaluation-order spills; whole-array spreads keep the array type.
+
+Local calls retain the checker-applied value-parameter list for packing too. It may select a concrete
+reference array while the lifted local declaration still has an erased generic array descriptor.
+This changes neither that declaration's generic signature nor metadata encoding, and does not
+reconstruct selected element types from operands or physical descriptors.
+
+## Nested JVM signature argument layout
+
+Common classifier applications store own arguments before captured enclosing arguments. JVM
+generic signatures render enclosing segments first, with each segment reading its own semantic
+argument range. Declaration variance and raw/Nothing decisions use the same own-first layout.
+Kotlin metadata's existing inner-type split and the physical JVM descriptors remain unchanged.
 
 ## Reference (`fun f(a: Int): Int = a` in `M.kt` → class `MKt`)
 
@@ -113,6 +166,13 @@ anonymous-object metadata at inline call sites stamps the caller's version, exac
 `tests/metadata_language_version_e2e.rs`, which diffs class, facade, `$DefaultImpls`,
 suspend-lambda, and regenerated-object `mv` values, plus the 20-byte module header, against kotlinc
 run with `-language-version 2.2`.
+
+## Interface compatibility holder table order
+
+An interface's generated compatibility holder uses the shared `InnerClasses` retained-row order
+for constant-pool publication. Its nesting relation and Kotlin metadata remain unchanged. Removing
+the earlier explicit class seed lets annotation-only references and declared children precede it
+when the ordinary table order requires that position.
 
 ## Module file — part ordering
 
@@ -716,6 +776,24 @@ Each accessor also carries the property's declaration-owned reified formal ordin
 existing schema facts, not new intrinsic markers or a metadata format change. This producer fix
 alone does not enable ordinary dependency-body or inline-accessor emission.
 
+## Serialized closure capture ownership
+
+Closure frames bind exact arena-local value symbols against their enclosing declaration's value
+environment. A lexical scan includes nested closures, while each nested lowering starts a fresh
+parameter/local/control-flow frame. The lifted declaration publishes its capture prefix,
+parameter identities, receiver ledger and private visibility; rollback removes these side facts
+with the appended functions. The serialized expression's source-form marker distinguishes a
+literal from an anonymous function. Full source naming/debug origins are not reconstructed from
+generated names or invented for dependency bodies. Official-producer tests cover raw bodies,
+prepared inline copies and runtime consumption through the existing Native closure ABI.
+The emitted-callable walk extends only selected expression roots with reached, supported closure
+implementations. It deduplicates nested implementations and projects every call through the same
+producer-origin graph as direct calls. Defaults and unrelated local declarations remain outside the
+root set, and intrinsic-authority inventories stay direct-only. The prewalk checks outer function
+class shape independently of generic argument binding; body lowering retains full capture/header
+validation in its enclosing frame. Imported constructor facts can therefore be prepared without
+claiming a target implements the imported classifier's storage or allocation.
+
 ## Ordinary KLIB generic declaration headers
 
 The KLIB body contract separately freezes known implementation modifiers from each exact signed
@@ -928,7 +1006,29 @@ checks both declaration forms through all three views, with and without platform
 
 ## Reference-array cast bound evidence
 
+Dependent callable-bound validation uses semantic formal identities and the existing completed
+binding map. Deferring unresolved call-owned relations changes neither generic declaration
+metadata nor emitted signatures; a reference-built dependency and a source declaration use the
+same rule. Caller-owned formals and concrete upper bounds remain immediately constraining.
+
 Compatible JVM array casts read the existing IR generic signatures and exact recorded non-local
 and lambda bound declarations. They introduce no Kotlin metadata encoding or provider lookup.
 Expected components use declaration-primary erasure; actual components retain the complete
 intersection of declared bounds. Backend wrapper names do not replace Kotlin classifier identity.
+
+## JVM signature segment evidence
+
+JVM `Signature` syntax now reaches an application builder as the complete written segment sequence,
+with physical identities and optional argument lists. Parsing no longer overwrites outer arguments
+before that construction boundary. The standalone policy still keeps innermost arguments and marks
+discarded outer arguments inexact for fields. Class/array erasure is computed from syntax and checked
+against the complete field descriptor independently of the builder's semantic result.
+
+This changes no Kotlin metadata wire fields or raw-type flags. Declaration-backed raw/captured
+construction remains separate from this syntax boundary.
+
+## Annotation classifier nesting
+
+JVM annotation interfaces use the same retained `InnerClasses` inventory as other declared
+classifiers. Declared children and enclosing rows remain discoverable without a method or element
+referencing them. This changes the JVM class table, not Kotlin metadata or annotation values.

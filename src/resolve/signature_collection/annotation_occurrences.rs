@@ -32,7 +32,7 @@ pub(in crate::resolve) fn resolved_header_annotation_identities(
 pub(in crate::resolve) fn compact_declaration_annotation_identities(
     headers: &crate::fir::StreamedHeaderModule,
     declaration: Option<crate::fir::DeclarationId>,
-    bindings: &HashMap<(u32, u32, u32), TypeName>,
+    bindings: &BoundAnnotations,
 ) -> Vec<TypeName> {
     streamed_resolved_declaration_annotations(
         headers,
@@ -47,7 +47,7 @@ pub(in crate::resolve) fn compact_declaration_annotation_identities(
 pub(in crate::resolve) fn declaration_annotation_identities(
     compact_headers: Option<&crate::fir::StreamedHeaderModule>,
     declaration: Option<crate::fir::DeclarationId>,
-    bindings: &HashMap<(u32, u32, u32), TypeName>,
+    bindings: &BoundAnnotations,
     source: impl FnOnce() -> Vec<TypeName>,
 ) -> Vec<TypeName> {
     match compact_headers {
@@ -68,7 +68,7 @@ pub(in crate::resolve) fn resolve_declaration_type_parameter_annotations(
     file: &File,
     declaration_start: u32,
     class_names: &ClassNames,
-    resolved: &mut HashMap<(u32, u32, u32), TypeName>,
+    resolved: &mut BoundAnnotations,
     resolution: &mut DeclarationAnnotationResolution<'_>,
     diags: &mut DiagSink,
 ) {
@@ -90,7 +90,7 @@ pub(in crate::resolve) fn resolve_declaration_type_parameter_annotations(
         if !resolution.attempted.insert(key) {
             continue;
         }
-        let Some(identity) = class_names.get_class(&annotation.name) else {
+        let Some(identity) = class_names.annotation_binding(&annotation.name) else {
             diags.error(
                 annotation.span,
                 format!("unresolved reference '{}'.", annotation.name),
@@ -204,7 +204,7 @@ pub(in crate::resolve) fn resolve_class_body_annotation_references(
     class: &ClassDecl,
     class_names: &ClassNames,
     file_index: u32,
-    resolved: &mut HashMap<(u32, u32, u32), TypeName>,
+    resolved: &mut BoundAnnotations,
 ) {
     let declaration_type_parameter_annotations = file
         .declaration_type_parameter_annotations
@@ -242,7 +242,7 @@ pub(in crate::resolve) fn resolve_class_body_annotation_references(
         if belongs_to_nested {
             continue;
         }
-        if let Some(identity) = class_names.get_class(&reference.name) {
+        if let Some(identity) = class_names.annotation_binding(&reference.name) {
             resolved.insert((file_index, reference.span.lo, reference.span.hi), identity);
         }
     }
@@ -273,7 +273,7 @@ pub(in crate::resolve) fn resolve_local_type_parameter_annotation_inventory(
     file: &File,
     roots: impl IntoIterator<Item = ExprId>,
     class_names: &ClassNames,
-    resolved: &mut HashMap<(u32, u32, u32), TypeName>,
+    resolved: &mut BoundAnnotations,
     resolution: &mut DeclarationAnnotationResolution<'_>,
     diags: &mut DiagSink,
 ) {
@@ -337,7 +337,7 @@ pub(in crate::resolve) fn resolve_declaration_type_parameter_annotation_inventor
     file: &File,
     declaration: DeclId,
     class_names: &ClassNames,
-    resolved: &mut HashMap<(u32, u32, u32), TypeName>,
+    resolved: &mut BoundAnnotations,
     resolution: &mut DeclarationAnnotationResolution<'_>,
     diags: &mut DiagSink,
     include_local_bodies: bool,
@@ -405,7 +405,7 @@ pub(in crate::resolve) fn resolve_enum_entry_type_parameter_annotation_inventory
     file: &File,
     declared: DeclaredEnumEntry<'_>,
     class_names: &ClassNames,
-    resolved: &mut HashMap<(u32, u32, u32), TypeName>,
+    resolved: &mut BoundAnnotations,
     resolution: &mut DeclarationAnnotationResolution<'_>,
     diags: &mut DiagSink,
     include_local_bodies: bool,

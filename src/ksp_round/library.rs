@@ -1,13 +1,16 @@
 //! The classifiers of the classpath as KSP shows them to a processor: the header a host asks for
 //! by name when a processor first reaches one, from the declaration header krusty's library
-//! provider reads.
+//! provider reads, and the name kotlinc's class map gives one across the JVM boundary.
 
 use krusty_plugin_ir::{
-    KspClass, KspClassKind, KspClasspath, KspLibraryClass, KspModifier, KspOrigin, KspType,
-    KspTypeDeclaration,
+    KspClass, KspClassKind, KspClasspath, KspLibraryClass, KspModifier, KspNameMapping, KspOrigin,
+    KspType, KspTypeDeclaration,
 };
 
+mod members;
+
 use super::annotations::{short_name, Annotations};
+use super::platform_names;
 use super::type_model::{class_type, qualified_name, TypeParameterIds, TypeParameterScope};
 use crate::frontend::SourceSetAnalysis;
 use crate::libraries::{
@@ -33,24 +36,23 @@ impl KspClasspath for KspLibraries<'_> {
         let header = self.analysis.symbols.libraries.declaration_header(class)?;
         Some(self.library_class(class, &header))
     }
+
+    fn mapped_name(&self, mapping: KspNameMapping, name: &str) -> Option<String> {
+        let classifier = self.analysis.library_classifier(name)?;
+        let libraries = &self.analysis.symbols.libraries;
+        let mapped = match mapping {
+            KspNameMapping::KotlinToJava => libraries.platform_class(classifier),
+            KspNameMapping::JavaToKotlin => libraries.mapped_classifier(classifier),
+        }?;
+        Some(qualified_name(mapped))
+    }
 }
 
 impl KspLibraries<'_> {
     fn library_class(&self, class: TypeName, header: &DeclarationHeader) -> KspLibraryClass {
         let qualified = qualified_name(class);
         let ids = TypeParameterIds::default();
-        let no_parameters = Vec::new();
-        let parameters = header
-            .signature
-            .as_ref()
-            .map_or(&no_parameters, |signature| &signature.type_parameters);
-        let scope = TypeParameterScope::default().with(
-            &ids,
-            &qualified,
-            parameters
-                .iter()
-                .map(|parameter| (parameter.name.as_str(), parameter.name.as_str())),
-        );
+        let scope = type_parameter_scope(&ids, &qualified, header);
         let origin = match header.language {
             DeclarationLanguage::Kotlin => KspOrigin::KotlinLib,
             DeclarationLanguage::Java => KspOrigin::JavaLib,
@@ -76,6 +78,7 @@ impl KspLibraries<'_> {
                 .collect()
         });
         let annotations = Annotations::new(self.analysis);
+        let members = self.members(class, header, &scope);
         KspLibraryClass {
             class: KspClass {
                 simple_name: short_name(class),
@@ -94,15 +97,43 @@ impl KspLibraries<'_> {
                     .signature
                     .as_ref()
                     .and_then(|signature| super_types(class, &signature.supertypes, &scope)),
-                declarations: Vec::new(),
-                declarations_complete: false,
+                declarations_complete: members.declarations.is_some(),
+                declarations: members.declarations.unwrap_or_default(),
+                // A builtin classifier is its semantic type: `kotlin.Unit` is `V`.
+                jvm_signature: platform_names::type_signature(
+                    self.analysis,
+                    Ty::obj_name(class).canonical_semantic(),
+                ),
             },
             package_name: class.package().replace('/', "."),
             parent: class.nested_owner().map(qualified_name),
             origin,
             annotations_complete: header.annotations.is_some(),
+            all_properties: members.all_properties,
+            all_functions: members.all_functions,
         }
     }
+}
+
+/// The scope naming the type parameters of the library classifier `owner` (a qualified name),
+/// whose header is `header`.
+fn type_parameter_scope(
+    ids: &TypeParameterIds,
+    owner: &str,
+    header: &DeclarationHeader,
+) -> TypeParameterScope {
+    let no_parameters = Vec::new();
+    let parameters = header
+        .signature
+        .as_ref()
+        .map_or(&no_parameters, |signature| &signature.type_parameters);
+    TypeParameterScope::default().with(
+        ids,
+        owner,
+        parameters
+            .iter()
+            .map(|parameter| (parameter.name.as_str(), parameter.name.as_str())),
+    )
 }
 
 impl KspLibraries<'_> {

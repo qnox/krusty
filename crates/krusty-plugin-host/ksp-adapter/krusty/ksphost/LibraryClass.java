@@ -24,7 +24,7 @@ import java.util.Set;
 import kotlin.sequences.Sequence;
 
 // A classifier of the classpath, as krusty described it when a processor first reached it: its
-// header. Its members are not served yet.
+// header and, where krusty describes them, its members.
 final class LibraryClass implements KSClassDeclaration {
     private final Classpath classpath;
     private final Name simpleName;
@@ -42,6 +42,16 @@ final class LibraryClass implements KSClassDeclaration {
     Set<Modifier> modifiers;
     List<KSTypeParameter> typeParameters;
     List<KSTypeReference> superTypes;
+    String jvmSignature;
+    // The declarations krusty describes, and whether they are all of them; the query is refused
+    // otherwise.
+    final List<KSDeclaration> declarations = new ArrayList<>();
+    boolean declarationsComplete;
+    KSFunctionDeclaration primaryConstructor;
+    // The properties and functions the classifier has with the inherited ones, each null when
+    // krusty does not describe them.
+    List<KSDeclaration> allProperties;
+    List<KSDeclaration> allFunctions;
     // The entries of a library enum class an annotation argument named, by name, so that each is
     // one declaration.
     private final java.util.Map<String, LibraryClass> entries = new java.util.HashMap<>();
@@ -82,7 +92,10 @@ final class LibraryClass implements KSClassDeclaration {
 
     @Override
     public KSFunctionDeclaration getPrimaryConstructor() {
-        throw library("primaryConstructor");
+        if (!declarationsComplete) {
+            throw library("primaryConstructor");
+        }
+        return primaryConstructor;
     }
 
     @Override
@@ -105,12 +118,26 @@ final class LibraryClass implements KSClassDeclaration {
 
     @Override
     public Sequence<KSFunctionDeclaration> getAllFunctions() {
-        throw library("getAllFunctions");
+        if (allFunctions == null) {
+            throw library("getAllFunctions");
+        }
+        List<KSFunctionDeclaration> functions = new ArrayList<>(allFunctions.size());
+        for (KSDeclaration function : allFunctions) {
+            functions.add((KSFunctionDeclaration) function);
+        }
+        return Nodes.sequence(functions);
     }
 
     @Override
     public Sequence<KSPropertyDeclaration> getAllProperties() {
-        throw library("getAllProperties");
+        if (allProperties == null) {
+            throw library("getAllProperties");
+        }
+        List<KSPropertyDeclaration> properties = new ArrayList<>(allProperties.size());
+        for (KSDeclaration property : allProperties) {
+            properties.add((KSPropertyDeclaration) property);
+        }
+        return Nodes.sequence(properties);
     }
 
     @Override
@@ -158,7 +185,10 @@ final class LibraryClass implements KSClassDeclaration {
 
     @Override
     public Sequence<KSDeclaration> getDeclarations() {
-        throw library("declarations");
+        if (!declarationsComplete) {
+            throw library("declarations");
+        }
+        return Nodes.sequence(declarations);
     }
 
     @Override

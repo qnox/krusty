@@ -414,6 +414,7 @@ impl BodyLowering<'_> {
         }
         if inline.can_inline()
             && self.ir.same_module_inlining() == crate::ir::SameModuleInlining::ExpandInIr
+            && !self.dependency_templates.compiler_implemented(target)
         {
             match self.dependency_templates.template(self.ir, target).cloned() {
                 Some(template) => {

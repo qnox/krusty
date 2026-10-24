@@ -15,6 +15,7 @@ mod accessors;
 mod annotations;
 mod declarations;
 mod library;
+mod platform_names;
 mod type_model;
 
 pub use library::KspLibraries;
@@ -28,14 +29,20 @@ use crate::ast::{AnnotationRef, ClassDecl, ClassKind, Decl, DeclId, File};
 use crate::frontend::{
     FrontendClassSig, FrontendDeclarationId, FrontendSymbols, Signature, SourceSetAnalysis,
 };
+use crate::types::Ty;
+use platform_names::PlatformNames;
 use type_model::{class_type, modifiers, qualified_name, TypeParameterIds, TypeParameterScope};
 
 /// The round a processor reads from `analysis`, whose files are at `paths` (one per source, in the
-/// analysis's order). `analysis` collects every file's signatures and checks no body
+/// analysis's order), for the module `module_name`. `analysis` collects every file's signatures and checks no body
 /// (`analyze_source_set_prefix_with_features(sources, 0, sources.len(), …)`). A declaration the
 /// round cannot name, such as an annotation that did not resolve, is refused by what it is and
 /// where.
-pub fn ksp_round(analysis: &SourceSetAnalysis, paths: &[String]) -> Result<KspRound, String> {
+pub fn ksp_round(
+    analysis: &SourceSetAnalysis,
+    paths: &[String],
+    module_name: &str,
+) -> Result<KspRound, String> {
     if paths.len() != analysis.files.len() {
         return Err(format!(
             "KSP needs the path of every source: {} paths were given for {} sources",
@@ -45,6 +52,7 @@ pub fn ksp_round(analysis: &SourceSetAnalysis, paths: &[String]) -> Result<KspRo
     }
     let resolved = Resolved::new(analysis);
     let ids = TypeParameterIds::default();
+    let platform = PlatformNames::new(analysis, module_name);
     let mut files = Vec::with_capacity(paths.len());
     for (index, (file, path)) in analysis.files.iter().zip(paths).enumerate() {
         let source = Source {
@@ -55,6 +63,7 @@ pub fn ksp_round(analysis: &SourceSetAnalysis, paths: &[String]) -> Result<KspRo
             symbols: &analysis.symbols,
             resolved: &resolved,
             ids: &ids,
+            platform: platform.as_ref(),
         };
         files.push(source.file()?);
     }
@@ -137,6 +146,8 @@ struct Source<'a> {
     symbols: &'a FrontendSymbols,
     resolved: &'a Resolved<'a>,
     ids: &'a TypeParameterIds,
+    /// The names the platform's binary interface gives declarations, if it has one.
+    platform: Option<&'a PlatformNames<'a>>,
 }
 
 /// A declaration a refusal names: what it is, its name and its line.
@@ -178,9 +189,9 @@ impl Source<'_> {
                         package: &package_name,
                         id,
                     };
-                    callables.push(KspDeclaration::Property(
+                    callables.push(KspDeclaration::Property(Box::new(
                         self.property(property, &owner, &root)?,
-                    ));
+                    )));
                 }
             }
         }
@@ -295,6 +306,9 @@ impl Source<'_> {
             super_types: super_types(signature, &scope),
             declarations,
             declarations_complete,
+            jvm_signature: self
+                .platform
+                .and_then(|platform| platform.type_signature(Ty::obj_name(signature.internal))),
         })
     }
 
@@ -459,7 +473,7 @@ mod tests {
             &mut diagnostics,
         );
         let paths: Vec<_> = sources.iter().map(|(path, _)| path.to_string()).collect();
-        ksp_round(&analysis, &paths)
+        ksp_round(&analysis, &paths, "main")
     }
 
     fn render(ty: &KspType) -> String {
@@ -621,6 +635,9 @@ mod tests {
                 }
                 KspDeclaration::TypeAlias(alias) => {
                     out.push(format!("{indent}KSTypeAlias {}", alias.simple_name));
+                }
+                KspDeclaration::LibraryClass(name) => {
+                    panic!("a source file declares the library classifier {name}");
                 }
             }
         }
