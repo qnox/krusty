@@ -16073,8 +16073,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constructor properties, then its properties and functions interleaved in source order, then a
   data class's `componentN` (`final operator override public`) and `copy` (`final`, the
   visibility of the generated declaration, every parameter with a default: `public` under 2.3,
-  the primary constructor's with `@ConsistentCopyVisibility`), then its primary and secondary constructors, then its nested classes
-  and enum entries in source order, then an enum class's `values`, `valueOf` (static,
+  the primary constructor's with `@ConsistentCopyVisibility`), then its inner classes in source
+  order, then its primary and secondary constructors, then its enum entries and its other nested
+  classifiers in source order, then an enum class's `values`, `valueOf` (static,
   `final java_static public`) and, where the language has them, `entries`. A constructor is named
   `<init>`, returns its class applied to stars and has its class's type parameters; it is `final`
   with its written visibility, an implicit one also `public`, and an enum class's always
@@ -16184,6 +16185,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   unmapped class and an unknown name map to nothing.
   (`crates/krusty-plugin-host/tests/ksp.rs`, `mapped_names_are_what_ksp2_reports`;
   `crates/krusty-plugin-host/tests/ksp_library_classes.rs`, `mapped_names_are_what_ksp2_reports`.)
+- **KSP describes a source declaration's JVM signature and name as KSP2 does.**
+  `mapToJvmSignature` gives a class its descriptor (a library builtin its semantic type's, so
+  `kotlin.Int` is `I`, `kotlin.Unit` `V`, `kotlin.Array` `[Ljava/lang/Object;` and a mapped class
+  its JVM class's), an enum entry its enum class's, a function or
+  constructor a method descriptor and a property its type's descriptor; a typealias has none. The
+  method descriptor has only the value parameters, without an extension receiver, a continuation
+  or an inner class's outer instance: a vararg is its element type, a type parameter its erased
+  bound, `Unit` is `V` even as a parameter, `Nothing` is `java.lang.Void` and a function type its
+  `kotlin.jvm.functions` interface. A non-null value class is its underlying type, the value class
+  itself included, and a nullable one stays the class. `getJvmName` gives a function its
+  `@JvmName`, or its name with kotlinc's mangle suffix when a value parameter's type is a value
+  class, `kotlin.Result` included, or a source class member's result is one (a constructor's
+  result counts as its class; a generated `componentN`, `copy`, `values`, `valueOf` or `entries`
+  result never mangles). Unlike kotlinc, KSP2 leaves the extension receiver out of the mangling,
+  and a top-level function's result does not mangle. An internal class member gets the module's
+  suffix (`$` and the module name made a Java identifier) after any mangle suffix, and an internal
+  top-level declaration keeps its name. An accessor is `@get:JvmName`/`@set:JvmName`, else the
+  property's bare name in an annotation class or a `@JvmRecord` class, else `get`/`set` plus the
+  property name (an `is` property's getter keeps its name and its setter drops `is`) with the same
+  suffixes, a getter taking no parameter and a setter returning nothing. A library member and any
+  other declaration are refused for now.
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `jvm_signatures_are_what_ksp2_reports`.)
 
 ## 8. Success criteria for the PoC
 
