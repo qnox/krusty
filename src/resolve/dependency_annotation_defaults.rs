@@ -115,7 +115,9 @@ fn element_default(
         AnnotationValue::Class(target) => {
             (classifier == Some(crate::types::wk::kclass())).then(|| DefaultValue::KClass(*target))
         }
-        AnnotationValue::Annotation { internal, values } => {
+        AnnotationValue::Annotation {
+            internal, values, ..
+        } => {
             if classifier != Some(*internal) {
                 return None;
             }

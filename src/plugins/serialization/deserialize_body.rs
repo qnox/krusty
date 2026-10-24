@@ -2,9 +2,8 @@
 
 use super::element_serializer::unsupported_element_serializer;
 use super::{
-    build_field_serializer_instance, class_ty, contextual_serializer_for, declared_serializer_of,
-    decode_element_method, is_nullable, property_is_contextual, value_class_underlying,
-    virtual_iface,
+    build_field_serializer_instance, class_ty, contextual_serializer_for, decode_element_method,
+    is_nullable, value_class_underlying, virtual_iface,
 };
 use crate::ir::{ClassId, ExprId, IrConst, IrExpr, IrFile, IrTypeOp};
 use crate::kt_string::KtString;
@@ -138,8 +137,7 @@ impl ElementDecode<'_> {
         let dk = ir.add_expr(IrExpr::GetValue(self.descriptor_local));
         let idxc = ir.add_expr(IrExpr::Const(IrConst::Int(k as i32)));
         let cdk = ir.add_expr(IrExpr::GetValue(self.composite_local));
-        let contextual =
-            property_is_contextual(ctx, ir, self.fields[k].class, &self.fields[k].name);
+        let contextual = self.fields[k].is_contextual(ctx, ir);
         let contextual = if contextual {
             self.cached_slot(ir, k)
                 .or_else(|| contextual_serializer_for(ir, true, &ty))
@@ -149,17 +147,10 @@ impl ElementDecode<'_> {
         let decoded = if let Some(inst) = contextual {
             // Contextual element: its cached `ContextualSerializer`, else one built here.
             self.decode_serializable(ir, k, [dk, idxc, cdk], inst)
-        } else if let Some(internal) =
-            declared_serializer_of(ctx, ir, self.fields[k].class, &self.fields[k].name)
-        {
+        } else if let Some(internal) = self.fields[k].declared_serializer(ctx, ir) {
             // An explicit per-property serializer takes precedence over the property's type, as it
             // does in `serialize` and `childSerializers`: what `X` wrote only `X` can read back.
-            let annotated = super::type_argument_serializers::declared_type_spelling(
-                ctx,
-                ir,
-                self.fields[k].class,
-                &self.fields[k].name,
-            );
+            let annotated = self.fields[k].type_spelling(ctx, ir);
             let inst = build_field_serializer_instance(
                 ir,
                 ctx,
@@ -181,12 +172,7 @@ impl ElementDecode<'_> {
                         ctx,
                         &ty,
                         self.type_parameter_serializers,
-                        &super::type_argument_serializers::declared_type_spelling(
-                            ctx,
-                            ir,
-                            self.fields[k].class,
-                            &self.fields[k].name,
-                        ),
+                        &self.fields[k].type_spelling(ctx, ir),
                     )
                 })
                 .unwrap_or_else(|| unsupported_element_serializer(ir, ty));
@@ -285,10 +271,8 @@ impl DeserializeBody<'_> {
             return;
         }
         let decodable = fields.iter().all(|element| {
-            let (declaring, pname, t) = (element.class, &element.name, &element.ty);
-            if property_is_contextual(ctx, ir, declaring, pname)
-                || declared_serializer_of(ctx, ir, declaring, pname).is_some()
-            {
+            let t = &element.ty;
+            if element.is_contextual(ctx, ir) || element.declared_serializer(ctx, ir).is_some() {
                 return true;
             }
             // A non-null primitive decodes through its own `decode<T>Element`. Every other field
@@ -305,9 +289,7 @@ impl DeserializeBody<'_> {
                 ctx,
                 t,
                 type_parameter_serializers,
-                &super::type_argument_serializers::declared_type_spelling(
-                    ctx, ir, declaring, pname,
-                ),
+                &element.type_spelling(ctx, ir),
             )
             .is_some()
         });

@@ -129,6 +129,7 @@ mod method_defaults;
 mod method_entry;
 mod method_signatures;
 mod must_inline_lambdas;
+mod non_local_jumps;
 mod non_null_operands;
 mod nullable_sam;
 mod numeric_comparison;
@@ -5118,6 +5119,8 @@ struct Emitter<'a> {
     static_owner: Option<StaticOwner>,
     /// Source or backend-generated function whose body is currently being emitted.
     function: Option<u32>,
+    /// Declaration scope of a scratch inline-lambda body, without changing emission ownership.
+    type_parameter_function: Option<u32>,
     export_private_calls: bool,
     method_exports_private_access: bool,
     /// This method is `inline`, so each copy of a `finally` is bracketed by
@@ -5130,7 +5133,7 @@ struct Emitter<'a> {
     self_companion: Option<TypeName>,
     /// Checked classifier declarations: which kind of classifier an operand's type names.
     classifiers: &'a dyn BackendClassifierSource,
-    /// Complete classifier facts used only for physical virtual-call owner selection.
+    /// One checked inventory for physical call owners and semantic array-cast leaf proofs.
     dispatch_classifiers: std::rc::Rc<crate::jvm::member_dispatch::CheckedDispatchClassifiers<'a>>,
     owner: String,
     facade: String,
@@ -5213,6 +5216,8 @@ struct Emitter<'a> {
     /// depth makes a `break`/`continue` run exactly the finalizers it leaves — those pushed inside
     /// the loop — and no outer one.
     loop_stack: Vec<(Label, Label, Option<String>, usize)>,
+    /// The loops outside an inline lambda's node, which a `break`/`continue` leaves it for.
+    non_local_jumps: non_local_jumps::NonLocalJumps,
     /// Operand-stack verification types sitting BELOW the expression currently being emitted (an
     /// arithmetic LHS held on the stack across a branchy RHS, e.g. a data-class `hashCode` accumulator
     /// `result*31 + <branchy nullable-field hash>`). Prepended to every recorded stack-map frame's stack
@@ -5316,6 +5321,7 @@ impl<'a> Emitter<'a> {
             emit_time_machines: env.emit_time_machines,
             static_owner,
             function: None,
+            type_parameter_function: None,
             export_private_calls: false,
             method_exports_private_access: false,
             finally_markers: false,
@@ -5352,6 +5358,7 @@ impl<'a> Emitter<'a> {
             machine: None,
             ret,
             loop_stack: Vec::new(),
+            non_local_jumps: Default::default(),
             open_locals: Vec::new(),
             next_inline_frame_identity: 0,
             inline_lambda_aliases: HashMap::default(),

@@ -187,6 +187,7 @@ mod tests {
                 AnnotationValue::String(KtString::from("custom")),
             )],
             facts: Default::default(),
+            written: None,
         };
         assert_eq!(
             generated_external_serializer(
@@ -210,6 +211,7 @@ mod tests {
                 AnnotationValue::String(KtString::from("custom")),
             )],
             facts: Default::default(),
+            written: None,
         };
         assert_eq!(
             generated_external_serializer(
@@ -258,6 +260,7 @@ mod tests {
             annotation: type_name(SERIAL_NAME_FQ),
             arguments: Vec::new(),
             facts: Default::default(),
+            written: None,
         };
         assert_eq!(
             generated_external_serializer(

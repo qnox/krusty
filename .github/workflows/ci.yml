@@ -946,7 +946,7 @@ jobs:
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     # Shorter than the release lock's TTL, so a lock that outlives it belongs to a dead job.
-    timeout-minutes: 20
+    timeout-minutes: 25
     permissions:
       contents: write
       # Dispatches the pages workflow, which regenerates the Bazel registry.
@@ -1035,10 +1035,9 @@ jobs:
         with:
           distribution: zulu
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@v6
-        if: steps.tip.outputs.publish == 'true'
-        with:
-          cache-provider: basic
+      # No setup-gradle here: it injects an init script into every Gradle build, and these builds
+      # hold the signing key and publishing credentials. The wrapper's pinned distribution
+      # checksum stands in for its wrapper validation.
       # The maintainer's krusty signing subkey (`gpg --armor --export-secret-subkeys <id>!`) signs
       # every published artifact. SIGNING_KEY_ID, its 8-hex-digit short id, is optional: without
       # it the id is read from the key itself.
@@ -1053,12 +1052,35 @@ jobs:
           if [[ -n "$SIGNING_KEY_ID" ]]; then
             id=$SIGNING_KEY_ID
           elif [[ -n "$SIGNING_KEY" ]]; then
-            id=$(scripts/signing-key-id.sh <<< "$SIGNING_KEY")
+            # A pipe, not a here-string, which an older bash backs with a temporary file.
+            id=$(printf '%s\n' "$SIGNING_KEY" | scripts/signing-key-id.sh)
           else
             id=
           fi
           echo "signing key: ${id:-none}"
           echo "id=$id" >> "$GITHUB_OUTPUT"
+      # Maven Central goes first: it skips a version it already has, so a rerun after a failed
+      # Plugin Portal upload does not trip over Central's immutable versions.
+      - name: publish the Gradle plugin to Maven Central
+        if: steps.tip.outputs.publish == 'true'
+        env:
+          # A Central Portal user token for the verified dev.krustythecompiler namespace.
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyId: ${{ steps.signing.outputs.id }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$MAVEN_CENTRAL_USERNAME" || -z "$MAVEN_CENTRAL_PASSWORD" ]]; then
+            echo "MAVEN_CENTRAL_USERNAME/MAVEN_CENTRAL_PASSWORD are not set; skipping Maven Central"
+            exit 0
+          fi
+          if [[ -z "$ORG_GRADLE_PROJECT_signingInMemoryKey" ]]; then
+            echo "SIGNING_KEY is not set; refusing to publish an unsigned plugin" >&2
+            exit 1
+          fi
+          scripts/publish-maven-central.sh "${{ steps.v.outputs.ver }}"
       - name: publish the Gradle plugin to the Gradle Plugin Portal
         if: steps.tip.outputs.publish == 'true'
         env:

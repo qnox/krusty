@@ -16,10 +16,12 @@ mod explicit_api;
 mod external_modifier_targets;
 mod header_validation;
 mod inline_preparation;
+mod library_classifiers;
 mod local_class_names;
 pub(crate) use local_class_names::{settle_generated_class_names, SettledGeneratedClassNames};
 mod local_function_names;
 mod no_expect_for_actual;
+mod published_declarations;
 mod retained_syntax;
 #[cfg(test)]
 pub(crate) use crate::resolve::collect_signatures;
@@ -1192,15 +1194,19 @@ where
                 .for_source(source.text)
                 .has("MultiPlatformProjects")
         });
-    let script_definition = ScriptDefinition::standard().on_classpath(|template| {
-        platform
-            .platform
-            .as_ref()
-            .is_ok_and(|platform| platform.classifier(template).is_some())
-    });
     for (index, source) in sources.iter().enumerate() {
         diags.set_file(index as u32);
         let features = project_features.for_source(source.text);
+        let script_definition = source
+            .script_definition
+            .cloned()
+            .unwrap_or_else(ScriptDefinition::standard)
+            .on_classpath(|template| {
+                platform
+                    .platform
+                    .as_ref()
+                    .is_ok_and(|platform| platform.classifier(template).is_some())
+            });
         reparse_sources.sources.push(ReparseSource {
             kind: source.kind,
             is_common: source.is_common,

@@ -12,13 +12,13 @@
 //! classes may hold collections of each other — so the cache cannot be built while the loop that
 //! creates those classes is still running.
 use super::{
-    class_ty, declared_serializer_of,
+    class_ty,
     element_serializer::{
         child_cache_element_plan, contextual_property_plan, emit_cached_element_serializer,
         ElementSerializerPlan, UnderivableChildCacheElement,
     },
-    kserializer_of, property_is_contextual, type_name, Callee, ClassId, ExprId, InlineKind,
-    IrConst, IrExpr, IrFile, IrFunction, IrTypeOp, PluginContext, Ty, TypeName,
+    kserializer_of, type_name, Callee, ClassId, ExprId, InlineKind, IrConst, IrExpr, IrFile,
+    IrFunction, IrTypeOp, PluginContext, Ty, TypeName,
 };
 
 /// One slot of the `Lazy[]` cache: a `Lazy<KSerializer<Any>>`, nullable because a property whose
@@ -228,14 +228,12 @@ pub(super) fn add_child_serializer_cache(
         elements
             .iter()
             .map(|element| {
-                let (declaring, name, ty) = (element.class, &element.name, &element.ty);
-                if declared_serializer_of(ctx, ir, declaring, name).is_some() {
+                let ty = &element.ty;
+                if element.declared_serializer(ctx, ir).is_some() {
                     return Ok(None);
                 }
-                let annotated = super::type_argument_serializers::declared_type_spelling(
-                    ctx, ir, declaring, name,
-                );
-                if property_is_contextual(ctx, ir, declaring, name) {
+                let annotated = element.type_spelling(ctx, ir);
+                if element.is_contextual(ctx, ir) {
                     return contextual_property_plan(ir, ctx, ty, &annotated);
                 }
                 child_cache_element_plan(ir, ctx, ty, &annotated)
@@ -495,15 +493,10 @@ impl ChildSerializersBody<'_> {
                     &element.serializer_ty,
                 ) {
                     cached
-                } else if property_is_contextual(ctx, ir, element.class, &element.name) {
+                } else if element.is_contextual(ctx, ir) {
                     // An uncached contextual property mentions a class type parameter, so build
                     // it where the generated `$serializer` can read that parameter's serializer.
-                    let annotated = super::type_argument_serializers::declared_type_spelling(
-                        ctx,
-                        ir,
-                        element.class,
-                        &element.name,
-                    );
+                    let annotated = element.type_spelling(ctx, ir);
                     super::element_serializer::contextual_property_serializer(
                         ir,
                         ctx,
@@ -517,17 +510,10 @@ impl ChildSerializersBody<'_> {
                             element.serializer_ty,
                         )
                     })
-                } else if let Some(internal) =
-                    declared_serializer_of(ctx, ir, element.class, &element.name)
-                {
+                } else if let Some(internal) = element.declared_serializer(ctx, ir) {
                     // Explicit per-property serializer: the selected constructor (or
                     // `X.INSTANCE`), wrapped `.nullable` for a nullable property.
-                    let annotated = super::type_argument_serializers::declared_type_spelling(
-                        ctx,
-                        ir,
-                        element.class,
-                        &element.name,
-                    );
+                    let annotated = element.type_spelling(ctx, ir);
                     let base = super::build_field_serializer_instance(
                         ir,
                         ctx,
@@ -546,12 +532,7 @@ impl ChildSerializersBody<'_> {
                     ctx,
                     &element.serializer_ty,
                     type_parameter_serializers,
-                    &super::type_argument_serializers::declared_type_spelling(
-                        ctx,
-                        ir,
-                        element.class,
-                        &element.name,
-                    ),
+                    &element.type_spelling(ctx, ir),
                 )
                 .map(|base| {
                     // A NULLABLE property's element serializer is the base one wrapped
@@ -609,11 +590,11 @@ mod tests {
         holder.ctor_param_count = 1;
         let class_id = ir.add_class(holder);
         let wire = vec![super::super::WireElement {
-            class: class_id,
-            field: 0,
+            declared: Some(class_id),
             name: "tags".to_string(),
             ty: element,
             serializer_ty: element,
+            optional: false,
         }];
         (ir, class_id, wire)
     }

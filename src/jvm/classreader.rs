@@ -1402,6 +1402,7 @@ fn read_resolved_annotation(
         annotation,
         arguments,
         facts,
+        written: None,
     })
 }
 
@@ -1496,6 +1497,7 @@ fn read_annotation_value(
             Ok(AnnotationValue::Annotation {
                 internal: nested.annotation,
                 values: nested.arguments,
+                written: None,
             })
         }
         '[' => {
@@ -1984,6 +1986,7 @@ mod tests {
                     deprecated_error: true,
                     ..Default::default()
                 },
+                written: None,
             }],
             java_annotation: true,
             ..Default::default()
@@ -2234,6 +2237,7 @@ mod tests {
                     ),
                 ],
                 facts: Default::default(),
+                written: None,
             }]
         );
     }
