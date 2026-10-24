@@ -6897,18 +6897,32 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `$continuation`, `$result` and suspension marker first. The lambda is no function of its own: no
   `access$…$lambda$0` bridge is written for it, nor the continuation its lowering prepared, unless
   a call keeps it as a value. A library object without the `$$forInline` copy keeps the lambda as a
-  value. Nested objects (the `FlowCollector` that `Flow.map`'s object creates) are not regenerated
-  yet. Where a call to a `suspend inline` factory places such a lambda is read from the body the
-  emitter splices (its `$$forInline` copy, or its `$default` bridge) before coroutine lowering:
-  a lambda the body invokes runs in the caller's frame and its suspensions are the caller's, and a
-  lambda the body only passes to a regenerated object's constructor runs in the object's method,
-  so the caller's machine ignores it. A lambda the body never uses runs in no frame, and its
-  suspensions are nobody's. A factory that is not suspend can only hand the lambda to an object.
-  Only calls an emitted root reaches are read: a stale node of a rewritten body needs no body. The
-  decision is recorded per lambda, and a lambda no emitted call decided has no placed body. A body
-  that is unavailable, uses a lambda any other way, or both invokes it and hands it to an object is
+  value. An object the copied method constructs that reads the lambda through the copy's field (the
+  `FlowCollector` that `Flow.map`'s object creates) is regenerated too, as kotlinc's
+  `MethodInliner` does: it takes the copy's next number after the continuation
+  (`…$map$1$2`, its own continuation `…$map$1$2$1`), the lambda is inlined into its methods, and
+  its continuation is rebuilt by the same transformer. A regenerated continuation drops the
+  original's `@DebugMetadata` for the new one, keeps the spill fields the original already
+  declares instead of declaring them twice, and writes `line 0` where kotlinc's transformer has no
+  call-site line. A SAM wrapper such a method constructs is not regenerated but copied into the
+  calling class (`<caller>$inlined$sam$…`, shared by its inline calls), taking no number under the
+  copy; the copy's own `InnerClasses` row keeps the original wrapper's name, as kotlinc rewrites
+  only the `new`. A multifile facade (kotlinx's `FlowKt`) only forwards to its parts, so an inline
+  body is read from the part its forwarder names (also for a plain inline function, which krusty
+  used to call through the facade); another part's private function with the same JVM name and
+  descriptor is neither that body nor the facade function's metadata. Where a call to a
+  `suspend inline` factory places such a lambda is read from the body the emitter splices (its
+  `$$forInline` copy, or its `$default` bridge) before coroutine lowering: a lambda the body
+  invokes runs in the caller's frame and its suspensions are the caller's, and a lambda the body
+  only passes to a regenerated object's constructor runs in the object's method, so the caller's
+  machine ignores it. A lambda the body never uses runs in no frame, and its suspensions are
+  nobody's. A factory that is not suspend can only hand the lambda to an object. Only calls an
+  emitted root reaches are read: a stale node of a rewritten body needs no body. The decision is
+  recorded per lambda, and a lambda no emitted call decided has no placed body. A body that is
+  unavailable, uses a lambda any other way, or both invokes it and hands it to an object is
   refused (`cannot tell where … places its suspend lambdas`). Tests:
-  `tests/crossinline_suspend_object_e2e.rs`, `src/jvm/suspend/lambda_placement.rs`.
+  `tests/crossinline_suspend_object_e2e.rs`, `tests/multifile_inline_part_splice_e2e.rs`,
+  `src/jvm/suspend/lambda_placement.rs`.
 
 - **A lambda inlined into a classpath inline body runs on an empty operand stack.** kotlinc's
   `MethodInliner` brackets each inlined lambda with `InlineMarker.beforeInlineCall` /

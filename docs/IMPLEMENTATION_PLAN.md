@@ -5463,9 +5463,12 @@ regress.
     (`anonymous_object::suspend_methods`, kotlinc's `CoroutineTransformer`): the copy takes the
     method's `$$forInline` body with the lambda inlined, the coroutine transformer builds its machine,
     and the continuation is dropped for tail calls or regenerated as the copy's next object with the
-    spill fields and `@DebugMetadata`. ☐ Objects the copied object creates in turn (kotlinx's
-    `Flow.map`: its `FlowCollector` and that collector's continuation), and krusty's own
-    `$$forInline` copy of an object's suspend method in an inline function it compiles.
+    spill fields and `@DebugMetadata`. ✅ Objects the copied method creates in turn, reading the
+    lambda through the copy's field (kotlinx's `Flow.map`: its `FlowCollector` and that collector's
+    continuation), are regenerated under the copy's name generator with the lambda inlined
+    (`anonymous_object::nested_objects`); a multifile facade's inline body is read from its part.
+    ☐ krusty's own `$$forInline` copy of an object's suspend method in an inline function it
+    compiles.
 - ☐ 5. `$default` inline functions (mask expansion) and `finally` blocks around inlined returns.
   Mask expansion and singleton default lambdas (`DefaultLambda`, with reification) are ported;
   a default lambda constructed with captured values and `finally` rewriting remain.
