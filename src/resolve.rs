@@ -48435,7 +48435,9 @@ impl<'a> Checker<'a> {
                         let field_ty =
                             (bp.receiver.is_none() && bp.context_params.is_empty()).then_some(ty);
                         if let Some(getter) = &bp.getter {
-                            self.with_ret_field(ty, field_ty, &accessor_scope, |checker| {
+                            let getter_field = field_ty
+                                .filter(|_| backing_field_binding::getter_declares_field(bp));
+                            self.with_ret_field(ty, getter_field, &accessor_scope, |checker| {
                                 match getter {
                                     FunBody::Expr(body) => {
                                         checker.check_expression_getter(
@@ -50007,7 +50009,9 @@ impl<'a> Checker<'a> {
                             .as_ref()
                             .filter(|body| self.should_check_selected_fun_body(body))
                         {
-                            self.with_ret_field(prop_ty, field_ty, scope, |c| match getter {
+                            let getter_field = field_ty
+                                .filter(|_| backing_field_binding::getter_declares_field(bp));
+                            self.with_ret_field(prop_ty, getter_field, scope, |c| match getter {
                                 FunBody::Expr(g) => {
                                     c.check_expression_getter(
                                         scope,

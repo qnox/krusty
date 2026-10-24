@@ -174,6 +174,39 @@ fun box(): String {
     common::expect_box_ok_with_stdlib(SRC, "Q");
 }
 
+/// A getter whose property declares neither a type nor an initializer infers the property's type
+/// from itself, so kotlinc gives it no backing field `field`: a property named `field` is read
+/// instead. Its setter, and a getter of a typed or initialized property, keep the backing field.
+#[test]
+fn a_getter_inferring_its_property_type_reads_a_property_named_field() {
+    const SRC: &str = "// WITH_STDLIB
+class A {
+    val field: Any = \"member\"
+    val inferred get() = field
+    val initialized = \"backing\"
+        get() = field
+    var mutable get() = field
+        set(value) {}
+}
+val nested = object {
+    inner class Inner {
+        val field: Any
+        constructor(field: Any) {
+            this.field = field
+        }
+        val property get() = field
+    }
+    override fun toString() = Inner(\"inner\").property as String
+}
+fun box(): String {
+    val a = A()
+    val values = listOf(a.inferred, a.initialized, a.mutable, nested.toString())
+    return if (values == listOf(\"member\", \"backing\", \"member\", \"inner\")) \"OK\" else \"fail: $values\"
+}
+";
+    common::expect_box_ok_with_stdlib(SRC, "A");
+}
+
 /// The `inline` modifier on a property ACCESSOR (`inline get()`, `private inline set(…)`) — accepted
 /// (erased; krusty emits an ordinary accessor) rather than misparsed as an unterminated declaration.
 #[test]
