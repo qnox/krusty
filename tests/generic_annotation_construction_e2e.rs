@@ -182,3 +182,17 @@ fn a_selected_dependency_alias_keeps_its_template_beside_an_unrelated_source_ali
     let classes = common::classes_against_kotlinc_module_cp(&sources, &[library]);
     assert_eq!(classes.differences(), Vec::<String>::new());
 }
+
+#[test]
+fn a_selected_source_alias_keeps_its_identity_before_spelling_maps_are_built() {
+    let selected = ("Selected.kt", "package selected\nannotation class Leaf<T>(val n: Int)\nannotation class Pair<X, Y>(val leaf: Leaf<Y>)\ntypealias Alias<T> = Pair<Int, T>\n");
+    let unrelated = (
+        "Unrelated.kt",
+        "package unrelated\ntypealias Alias<X, Y> = selected.Pair<X, Y>\n",
+    );
+    let usage = ("Use.kt", "package application\nimport selected.Alias\nimport selected.Leaf\n@Alias<String>(Leaf<String>(1)) class Tagged\n");
+    for sources in [[selected, unrelated, usage], [unrelated, selected, usage]] {
+        let classes = common::classes_against_kotlinc_module(&sources);
+        assert_eq!(classes.differences(), Vec::<String>::new());
+    }
+}

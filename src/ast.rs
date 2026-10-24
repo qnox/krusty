@@ -1541,6 +1541,8 @@ pub struct File {
     pub is_script: bool,
     /// Common-source role supplied by the source-set driver, not parsed from Kotlin syntax.
     pub is_common: bool,
+    /// Refined multiplatform fragment supplied by the source-set driver.
+    pub fragment: Option<crate::source::SourceFragment>,
     /// Source imports in declaration order.
     pub import_paths: Vec<ImportPath>,
     /// Classifier references that are not retained by another AST node. Import entries are candidates
