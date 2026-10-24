@@ -53,6 +53,8 @@ mod reference_compiler_support;
 mod reference_recording_support;
 #[path = "common/reference_targets.rs"]
 mod reference_targets_support;
+#[path = "serializable_default_read_lines_e2e.rs"]
+mod serializable_default_read_lines_e2e;
 #[path = "serializable_lateinit_elements_e2e.rs"]
 mod serializable_lateinit_elements_e2e;
 #[path = "serializable_parent_dependency_e2e.rs"]
