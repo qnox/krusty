@@ -72,10 +72,42 @@ abstract class Fields(val fromConstructor: Int) {
     var noField: Int
         get() = 5
         set(value) {}
+    val shadowed: Int
+        get() {
+            val field = 8
+            return field
+        }
+    val throughLambda: Int
+        get() = run { field }
+    val throughLocalFunction: Int
+        get() {
+            fun read() = field
+            return read()
+        }
+    val lambdaParameter: Int
+        get() = 9.let { field -> field }
+    val localFunctionParameter: Int
+        get() {
+            fun read(field: Int) = field
+            return read(10)
+        }
+    val throughObject: Int
+        get() = object {
+            fun read() = field
+        }.read()
+    var setterShadowed: Int
+        get() = 11
+        set(value) {
+            val field = value
+            println(field)
+        }
 
     init {
         readsField = 6
         blockReadsField = 7
+        throughLambda = 13
+        throughLocalFunction = 14
+        throughObject = 15
     }
 }
 

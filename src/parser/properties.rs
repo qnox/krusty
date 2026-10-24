@@ -278,7 +278,7 @@ impl Parser<'_> {
                 FunBody::Expr(e) | FunBody::Block(e) => Some(*e),
                 FunBody::None => None,
             })
-            .is_some_and(|e| self.expr_reads_field(e));
+            .is_some_and(|e| crate::ast::accessor_uses_backing_field(&self.file, e));
         self.pop_lexical_type_params(lexical_type_param_lens);
         PropDecl {
             is_open: false,

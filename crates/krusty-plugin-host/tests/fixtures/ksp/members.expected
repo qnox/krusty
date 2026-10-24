@@ -65,6 +65,13 @@ w: [ksp]   property late mutable=true backingField=true modifiers=LATEINIT: kotl
 w: [ksp]   property delegated mutable=false backingField=false modifiers=: kotlin.Int
 w: [ksp]   property pending mutable=false backingField=false modifiers=ABSTRACT: kotlin.Int
 w: [ksp]   property noField mutable=true backingField=false modifiers=: kotlin.Int
+w: [ksp]   property shadowed mutable=false backingField=false modifiers=: kotlin.Int
+w: [ksp]   property throughLambda mutable=false backingField=true modifiers=: kotlin.Int
+w: [ksp]   property throughLocalFunction mutable=false backingField=true modifiers=: kotlin.Int
+w: [ksp]   property lambdaParameter mutable=false backingField=false modifiers=: kotlin.Int
+w: [ksp]   property localFunctionParameter mutable=false backingField=false modifiers=: kotlin.Int
+w: [ksp]   property throughObject mutable=false backingField=true modifiers=: kotlin.Int
+w: [ksp]   property setterShadowed mutable=true backingField=false modifiers=: kotlin.Int
 w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL typeParameters= receiver=null (fromConstructor: kotlin.Int vararg=false default=false): members.Fields
 w: [ksp] CLASS members.Spelled modifiers= typeParameters= supertypes=kotlin.Any
 w: [ksp]   property fromConstructor mutable=false backingField=true modifiers=: kotlin.collections.List<kotlin.String>

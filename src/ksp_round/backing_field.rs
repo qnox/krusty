@@ -1,49 +1,20 @@
-//! `KSPropertyDeclaration.hasBackingField` for a property the source declares, as KSP2 reads it
-//! off the declaration: storage exists when an initializer, `lateinit`, `const`, an explicit
-//! backing field, a default accessor or an accessor body using `field` asks for it.
+//! `KSPropertyDeclaration.hasBackingField` for a property the source declares. Storage is the
+//! frontend's declaration fact ([`has_backing_field`]), whose getter evidence binds `field` the way
+//! the accessor body does, so a local, lambda or local-function `field` does not count.
 
-use crate::ast::{File, FunBody, PropDecl};
+use crate::ast::{has_backing_field, PropDecl};
 
-/// Whether `property` of `file` has a backing field, or `None` when the declaration alone cannot
-/// say: an `expect` or `external` property is realized elsewhere.
+/// Whether `property` has a backing field, or `None` when the declaration alone cannot say: an
+/// `expect` or `external` property is realized elsewhere.
 pub(super) fn source_property_has_backing_field(
-    file: &File,
     property: &PropDecl,
     in_interface: bool,
 ) -> Option<bool> {
     if property.is_expect || property.is_external {
         return None;
     }
-    // An interface property, abstract written or not, has no storage, and neither has an
-    // extension, a context property or a delegated one (its storage is the delegate).
-    if in_interface
-        || property.is_abstract
-        || property.receiver.is_some()
-        || !property.context_params.is_empty()
-        || property.delegate.is_some()
-    {
-        return Some(false);
-    }
-    // An accessor without a body is the default one, which reads or writes the field.
-    let uses_field = |body: Option<&FunBody>| match body {
-        Some(FunBody::Expr(body) | FunBody::Block(body)) => file.expr_uses_name(*body, "field"),
-        Some(FunBody::None) | None => true,
-    };
-    let setter_uses_field = property.is_var
-        && uses_field(
-            property
-                .setter
-                .as_ref()
-                .and_then(|setter| setter.body.as_ref()),
-        );
-    Some(
-        property.init.is_some()
-            || property.is_lateinit
-            || property.is_const
-            || property.explicit_backing_field.is_some()
-            || uses_field(property.getter.as_ref())
-            || setter_uses_field,
-    )
+    // An interface property, abstract written or not, has no storage.
+    Some(!in_interface && has_backing_field(property))
 }
 
 #[cfg(test)]
@@ -70,7 +41,7 @@ mod tests {
                 Decl::Fun(_) | Decl::Property(_) => None,
             })
             .unwrap_or_else(|| panic!("{name} parsed"));
-        source_property_has_backing_field(&file, property, in_interface)
+        source_property_has_backing_field(property, in_interface)
     }
 
     #[test]
@@ -85,10 +56,11 @@ mod tests {
             var defaultSetter: Int get() = 5
             var noField: Int get() = 5
                 set(value) {}
-            var setterWritesField: Int get() = 5
-                set(value) { field = value }
             val blockReadsField: Int get() { return field }
             val Int.extended: Int get() = this
+            val shadowed: Int get() { val field = 8; return field }
+            val throughLambda: Int get() = run { field }
+            val lambdaParameter: Int get() = 9.let { field -> field }
         }";
         let answers: Vec<(&str, Option<bool>)> = [
             "initialized",
@@ -99,9 +71,11 @@ mod tests {
             "pending",
             "defaultSetter",
             "noField",
-            "setterWritesField",
             "blockReadsField",
             "extended",
+            "shadowed",
+            "throughLambda",
+            "lambdaParameter",
         ]
         .into_iter()
         .map(|name| (name, answer(source, name, false)))
@@ -117,9 +91,11 @@ mod tests {
                 ("pending", Some(false)),
                 ("defaultSetter", Some(true)),
                 ("noField", Some(false)),
-                ("setterWritesField", Some(true)),
                 ("blockReadsField", Some(true)),
                 ("extended", Some(false)),
+                ("shadowed", Some(false)),
+                ("throughLambda", Some(true)),
+                ("lambdaParameter", Some(false)),
             ]
         );
         assert_eq!(

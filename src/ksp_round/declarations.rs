@@ -570,7 +570,6 @@ impl Source<'_> {
             getter: Some(getter),
             setter,
             has_backing_field: super::backing_field::source_property_has_backing_field(
-                self.file,
                 property,
                 matches!(owner, Owner::Class { header, .. } if header.kind == KspClassKind::Interface),
             ),
