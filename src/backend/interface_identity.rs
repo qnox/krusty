@@ -11,17 +11,17 @@
 /// public KLIB signature, in an injective encoding (each string length-prefixed). Both the module
 /// that declares the member and every module implementing it compute it from the same published
 /// identity, never from a spelling.
-pub(crate) fn member_identity(member: &crate::backend::KlibDependencyCallable) -> Vec<u8> {
+pub(crate) fn member_identity(member: &crate::libraries::KlibDependencyCallable) -> Vec<u8> {
     let mut bytes = Vec::new();
     identity_string(&mut bytes, &member.module);
     match &member.declaration {
         crate::libraries::KlibDeclarationSignature::Public(signature) => {
             bytes.push(0);
-            identity_public(&mut bytes, signature);
+            signature.write_identity(&mut bytes);
         }
         crate::libraries::KlibDeclarationSignature::Accessor(accessor) => {
             bytes.push(1);
-            identity_public(&mut bytes, accessor.property());
+            accessor.property().write_identity(&mut bytes);
             identity_string(&mut bytes, accessor.name());
             bytes.extend_from_slice(&accessor.member_id().to_le_bytes());
             bytes.extend_from_slice(&accessor.mask().to_le_bytes());
@@ -36,7 +36,7 @@ pub(crate) fn member_identity(member: &crate::backend::KlibDependencyCallable) -
 /// that knows only the getter's identity and one that knows only the setter's agree. `None` for an
 /// identity that names no accessor.
 pub(crate) fn property_member_identity(
-    accessor: &crate::backend::KlibDependencyCallable,
+    accessor: &crate::libraries::KlibDependencyCallable,
     setter: bool,
 ) -> Option<Vec<u8>> {
     let crate::libraries::KlibDeclarationSignature::Accessor(signature) = &accessor.declaration
@@ -46,7 +46,7 @@ pub(crate) fn property_member_identity(
     let mut bytes = Vec::new();
     identity_string(&mut bytes, &accessor.module);
     bytes.push(2);
-    identity_public(&mut bytes, signature.property());
+    signature.property().write_identity(&mut bytes);
     bytes.push(u8::from(setter));
     Some(bytes)
 }
@@ -54,27 +54,4 @@ pub(crate) fn property_member_identity(
 fn identity_string(bytes: &mut Vec<u8>, text: &str) {
     bytes.extend_from_slice(&(text.len() as u32).to_le_bytes());
     bytes.extend_from_slice(text.as_bytes());
-}
-
-fn identity_public(
-    bytes: &mut Vec<u8>,
-    signature: &crate::metadata::id_signature::KlibPublicIdSignature,
-) {
-    for segments in [
-        signature.package().segments(),
-        signature.declaration().segments(),
-    ] {
-        bytes.extend_from_slice(&(segments.len() as u32).to_le_bytes());
-        for segment in segments {
-            identity_string(bytes, segment);
-        }
-    }
-    match signature.member_id() {
-        Some(id) => {
-            bytes.push(1);
-            bytes.extend_from_slice(&id.to_le_bytes());
-        }
-        None => bytes.push(0),
-    }
-    bytes.extend_from_slice(&signature.mask().to_le_bytes());
 }
