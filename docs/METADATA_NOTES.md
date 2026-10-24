@@ -1022,3 +1022,8 @@ from rendered diagnostic text. Nominal function classifiers normalize through pr
 vararg elements and anonymous receiver parameters retain their declared semantic slots. Alias
 candidate diagnostics keep the unspecialized declaration signature while input recovery retains
 independent substitutions. No wire model or constructor ABI changes are required by #2587.
+
+Receiver admission distinguishes active call-owned inference variables from rigid declaration
+parameters. A satisfiable trial specializes both receiver sides before strict comparison without
+publishing new declaration facts. Alias expansion, selected constructor identity and retained
+declaration parameters remain unchanged; no metadata wire or physical ABI change is involved.

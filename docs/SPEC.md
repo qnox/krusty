@@ -21289,3 +21289,13 @@ nominal function classifiers, vararg elements and anonymous-function receiver sl
 parameter layout. Candidate messages render the alias declaration, not a failed instantiated shape.
 Tests: `dependent_constructor_bounds_e2e` and `bound_inner_alias_inference_e2e`, with complete ordered
 kotlinc diagnostic comparisons, reference-built dependencies and valid inference/runtime controls.
+
+## Postponed receiver admission
+
+Extension receiver admission retains satisfiable active builder-inference variables. Selection may
+test the receiver relation against cloned postponed frames, solve those trial bindings and require
+strict assignability after substitution. Only ordinary call commitment publishes the constraints.
+Concrete or conflicting receiver applications still fail. The same operation admits a postponed
+unbound outer receiver in a constructor reference. Tests: `builder_inference_receivers_e2e`,
+`postponed_bound_inference_e2e` and the exact wrong-receiver ledgers in
+`bound_inner_alias_inference_e2e`.

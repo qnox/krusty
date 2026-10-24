@@ -5914,3 +5914,8 @@ then rechecks only affected bodies without the rejected expected result. Normal 
 recovery share the function input layout, including contexts and anonymous receiver slots. Exact
 source/dependency diagnostics and admitted-context controls cover #2587. Explicit invalid-bound
 lambda diagnostic ordering remains a separate follow-up in #2629.
+
+Late extension admission now uses strict receiver assignability or the existing satisfiable
+postponed-frame trial. The common operation also serves unbound constructor-reference receivers;
+selection cannot commit its trial bindings. This repairs the two existing builder-inference
+regressions introduced by the alias receiver guard while retaining concrete receiver refusal.
