@@ -137,6 +137,7 @@ pub(in crate::jvm) fn load(
         captured: 0..0,
         capture_names: captured.into_iter().map(|field| Some(field.name)).collect(),
         default_class: Some(class.name.clone()),
+        suspend: false,
         node,
     })
 }

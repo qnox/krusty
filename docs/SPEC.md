@@ -6870,6 +6870,39 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A multifile call names the public facade (`MapsKt.set`); the private bit is on the part class
   the body is read from (`MapsKt__MapsKt`), and that is the method the in-place read follows.
   Tests: `tests/reified_class_regeneration_e2e.rs`, `tests/classpath_reified_inline_toplevel_e2e.rs`.
+  **A crossinline suspend lambda is inlined into the object's suspend method copy.** A classpath
+  inline function whose anonymous object invokes a `crossinline` suspend lambda from a suspend method
+  (`inline fun <T> source(crossinline produce: suspend () -> T) = object : Source<T> { override
+  suspend fun next() = produce() }`, kotlinx's `Flow.map`) is regenerated per call like any other
+  object, following kotlinc's `CoroutineTransformer`. Such a method `m` has a `m$$forInline` sibling,
+  its body before the state machine with the continuation built by a fake constructor call between
+  `mark(4)` and `mark(5)`. The copy skips `m`, takes the `$$forInline` body under the name `m`,
+  inlines the lambda in place of its `invoke`, and runs the coroutine transformer over the result
+  (`newStateMachineForNamedFunction`, the dispatch receiver being the copy). The lambda's body is
+  written as kotlinc writes a suspend lambda for inlining: each suspension point between its
+  markers passing a fake continuation, which becomes the method's own, and a primitive result
+  boxed inside the lambda (`Boxing.boxInt` once the transformer's boxing pass ran). When every
+  suspension is a tail call the copy needs no continuation: the original's class is not copied and
+  its `InnerClasses` row is dropped. Otherwise the continuation is regenerated as the copy's next
+  object (`<caller>$$inlined$<callee>$1$1`): its own fields, then the captured `this$0` re-declared,
+  then the machine's spill fields, its `@DebugMetadata` (`f` is the calling file, `l` the call's
+  line), `EnclosingMethod` the copy's method, and neither `SourceFile` nor a source map since it has
+  no lines. The copy's locals are renumbered as kotlinc's class builder sorts them, the machine's
+  `$continuation`, `$result` and suspension marker first. The lambda is no function of its own: no
+  `access$…$lambda$0` bridge is written for it, nor the continuation its lowering prepared, unless
+  a call keeps it as a value. A library object without the `$$forInline` copy keeps the lambda as a
+  value. Nested objects (the `FlowCollector` that `Flow.map`'s object creates) are not regenerated
+  yet. Where a call to a `suspend inline` factory places such a lambda is read from the body the
+  emitter splices (its `$$forInline` copy, or its `$default` bridge) before coroutine lowering:
+  a lambda the body invokes runs in the caller's frame and its suspensions are the caller's, and a
+  lambda the body only passes to a regenerated object's constructor runs in the object's method,
+  so the caller's machine ignores it. A lambda the body never uses runs in no frame, and its
+  suspensions are nobody's. A factory that is not suspend can only hand the lambda to an object.
+  Only calls an emitted root reaches are read: a stale node of a rewritten body needs no body. The
+  decision is recorded per lambda, and a lambda no emitted call decided has no placed body. A body
+  that is unavailable, uses a lambda any other way, or both invokes it and hands it to an object is
+  refused (`cannot tell where … places its suspend lambdas`). Tests:
+  `tests/crossinline_suspend_object_e2e.rs`, `src/jvm/suspend/lambda_placement.rs`.
 
 - **A lambda inlined into a classpath inline body runs on an empty operand stack.** kotlinc's
   `MethodInliner` brackets each inlined lambda with `InlineMarker.beforeInlineCall` /

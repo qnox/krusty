@@ -654,6 +654,8 @@ mod cross_file_typealias_e2e;
 mod cross_file_value_param_constructor_e2e;
 #[path = "crossinline_lambda_inlining_e2e.rs"]
 mod crossinline_lambda_inlining_e2e;
+#[path = "crossinline_suspend_object_e2e.rs"]
+mod crossinline_suspend_object_e2e;
 #[path = "ctor_lambda_return_binds_type_param_e2e.rs"]
 mod ctor_lambda_return_binds_type_param_e2e;
 #[path = "ctor_numeric_widening_e2e.rs"]

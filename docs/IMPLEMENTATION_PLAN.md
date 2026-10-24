@@ -5416,6 +5416,13 @@ regress.
     `Result`): the inline body takes the parameter unboxed (`value_classes::inline_body_slots`) and
     `invoke`'s `Object` is coerced over the Kotlin types (`checkcast` + `unbox-impl`, `box-impl`),
     the pairs then removed by RedundantBoxing with the caller's value-class descriptors.
+    ✅ A `crossinline` suspend lambda invoked from an object's suspend method
+    (`anonymous_object::suspend_methods`, kotlinc's `CoroutineTransformer`): the copy takes the
+    method's `$$forInline` body with the lambda inlined, the coroutine transformer builds its machine,
+    and the continuation is dropped for tail calls or regenerated as the copy's next object with the
+    spill fields and `@DebugMetadata`. ☐ Objects the copied object creates in turn (kotlinx's
+    `Flow.map`: its `FlowCollector` and that collector's continuation), and krusty's own
+    `$$forInline` copy of an object's suspend method in an inline function it compiles.
 - ☐ 5. `$default` inline functions (mask expansion) and `finally` blocks around inlined returns.
   Mask expansion and singleton default lambdas (`DefaultLambda`, with reification) are ported;
   a default lambda constructed with captured values and `finally` rewriting remain.
