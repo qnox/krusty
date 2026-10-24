@@ -22,7 +22,11 @@ pub(super) fn annotation_interface_member(
 ) -> (String, Option<String>) {
     let stored = crate::jvm::annotation_kclass::annotation_member_jvm_type(jvm_declared_ty(&ty));
     let descriptor = format!("(){}", type_descriptor(stored));
-    (descriptor, annotation_kclass_signature(formatter, ty))
+    let signature = annotation_kclass_signature(formatter, ty).or_else(|| {
+        let result = formatter.method_ty(&ty, super::signature_formatter::Wildcards::Suppressed)?;
+        (result != type_descriptor(stored)).then(|| format!("(){result}"))
+    });
+    (descriptor, signature)
 }
 
 fn annotation_kclass_signature(

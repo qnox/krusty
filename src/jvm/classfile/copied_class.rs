@@ -88,6 +88,23 @@ impl ClassWriter {
     /// the declaration, its annotations, then the code and its local variables. The body then
     /// passes through kotlinc's method optimizations, which every class writer applies.
     pub(crate) fn add_copied_method(&mut self, method: &ClassMethod) -> Result<(), CopyError> {
+        self.add_copied_method_at(method, BodyStage::Emitted)
+    }
+
+    /// [`Self::add_copied_method`] for a body the coroutine transformer built: kotlinc's optimizer
+    /// takes it as it takes any transformed suspend function.
+    pub(crate) fn add_copied_transformed_method(
+        &mut self,
+        method: &ClassMethod,
+    ) -> Result<(), CopyError> {
+        self.add_copied_method_at(method, BodyStage::Transformed)
+    }
+
+    fn add_copied_method_at(
+        &mut self,
+        method: &ClassMethod,
+        stage: BodyStage,
+    ) -> Result<(), CopyError> {
         if !method.exceptions.is_empty() {
             return Err(CopyError::Unsupported("an Exceptions attribute"));
         }
@@ -152,7 +169,7 @@ impl ClassWriter {
         // kotlinc's optimizing method visitor buffers the body and optimizes it before any of its
         // constants reach the class's pool, so a constant only the original body used is not
         // interned at all.
-        let node = &self.optimized_before_writing(method, node);
+        let node = &self.optimized_before_writing(method, node, stage);
         let assembled = node.assemble(self).map_err(CopyError::Assemble)?;
         info.lvt = assembled
             .local_variables
@@ -185,17 +202,46 @@ impl ClassWriter {
             identity,
             node.clone(),
             None,
-            BodyStage::Emitted,
+            stage,
             &mut pool,
         );
         if let Some(optimized) = optimized {
             self.methods[index].take_rewritten(optimized);
         }
+        self.intern_copied_frame_classes(index, &method.name, &method.desc);
         Ok(())
     }
 
+    /// Intern the classes the stack map of the copied method `index` names, where kotlinc's writer
+    /// computes the table: once the method's body is complete, before the next member.
+    fn intern_copied_frame_classes(&mut self, index: usize, name: &str, desc: &str) {
+        let method = &self.methods[index];
+        let Some(code) = method.code.clone().filter(|code| !code.is_empty()) else {
+            return;
+        };
+        let exceptions = method.exceptions.clone();
+        let labels = super::stack_maps::table_labels(&method.lnt, &method.lvt, code.len());
+        let body = super::stack_maps::Body {
+            access: method.access,
+            name,
+            descriptor: desc,
+            code: &code,
+            exceptions: &exceptions,
+            labels,
+        };
+        // A body the computation declines is caught when the class is finished.
+        if let Ok(computed) = self.compute_frames(&body) {
+            self.encode_frames(&body, &computed);
+        }
+    }
+
     /// `node`, the body of `method`, after kotlinc's optimizations; as it is when they decline it.
-    fn optimized_before_writing(&self, method: &ClassMethod, node: &MethodNode) -> MethodNode {
+    fn optimized_before_writing(
+        &self,
+        method: &ClassMethod,
+        node: &MethodNode,
+        stage: BodyStage,
+    ) -> MethodNode {
         let this = u16::from(method.access & ACC_STATIC == 0);
         let Some(arguments) = descriptors::argument_types(&method.desc) else {
             return node.clone();
@@ -209,7 +255,7 @@ impl ClassWriter {
             owner: &self.internal_name,
             value_classes: &*self.value_classes,
             parameter_slots,
-            post_coroutine: false,
+            post_coroutine: stage == BodyStage::Transformed,
             kept_for_inlining: false,
         };
         let mut optimized = node.clone();

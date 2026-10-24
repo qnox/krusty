@@ -375,6 +375,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(callable_reference_enclosures);
     copy_map!(checked_return_depths);
     copy_map!(inline_return_frames);
+    if ir.kept_start_lines.contains(&source) {
+        ir.kept_start_lines.insert(target);
+    }
     if ir.inline_cleanup_results.contains(&source) {
         ir.inline_cleanup_results.insert(target);
     }
@@ -418,6 +421,7 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(static_extension_receivers);
     copy_map!(call_inline_modifiers);
     copy_map!(suspend_calls);
+    copy_map!(suspend_lambda_placements);
     copy_map!(suspend_call_overridden_results);
     copy_map!(value_class_suspend_calls);
     copy_map!(intrinsic_suspension_points);

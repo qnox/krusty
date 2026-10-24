@@ -306,17 +306,26 @@ fn the_serialization_plugin_runs_as_krustys_native_pass() {
 }
 
 /// The Kotlin Gradle plugin hands kotlinc its default scripting plugin on every JVM compile, next to
-/// the serialization plugin when that is applied. The scripting plugin acts on script sources only,
-/// so krusty accepts it silently and emits the class set kotlinc emits for the same command line.
+/// the serialization plugin when that is applied, and passes the plugin together with the scripting
+/// libraries it loads: kotlinc's own compiler classpath does not carry them. The scripting plugin
+/// acts on script sources only, so krusty accepts it silently and emits the class set kotlinc emits
+/// for the same command line.
 #[test]
 fn kotlincs_default_scripting_plugin_is_accepted_beside_serialization() {
-    let scripting = reference_plugin_jar("kotlin-scripting-compiler.jar");
     let serialization = reference_plugin_jar("kotlinx-serialization-compiler-plugin.jar");
-    let switches = [format!(
-        "-Xplugin={},{}",
-        serialization.display(),
-        scripting.display()
-    )];
+    let plugins = std::iter::once(serialization.clone())
+        .chain(
+            [
+                "kotlin-scripting-compiler.jar",
+                "kotlin-scripting-compiler-impl.jar",
+                "kotlin-scripting-common.jar",
+                "kotlin-scripting-jvm.jar",
+            ]
+            .map(reference_plugin_jar),
+        )
+        .map(|jar| jar.display().to_string())
+        .collect::<Vec<_>>();
+    let switches = [format!("-Xplugin={}", plugins.join(","))];
     let classpath = serialization_runtime();
     let probe = Probe::new("scripting", SERIALIZABLE_PROBE);
     let compiled = probe.krusty(&classpath, &switches);
@@ -424,6 +433,22 @@ fn refusals_lists_the_arguments_and_plugins_krusty_refuses() {
             format!(
                 "krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'\n{}",
                 refused(&widget.display().to_string())
+            ),
+            String::new()
+        )
+    );
+    // So is a Kotlin release krusty does not support: kotlinc of that release compiles it.
+    assert_eq!(
+        check(&["-Xkotlin-reference-version=2.3.0".to_string()]),
+        (
+            Some(1),
+            format!(
+                "-Xkotlin-reference-version=2.3.0 names no supported Kotlin release (supported: {})\n",
+                krusty::kotlin_version::KotlinVersion::supported()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             String::new()
         )

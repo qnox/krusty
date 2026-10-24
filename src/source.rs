@@ -34,6 +34,145 @@ impl SourceKind {
     }
 }
 
+/// One fragment of a refined multiplatform hierarchy compiled as its platform leaf: the fragment a
+/// source belongs to and the fragments whose declarations it references (its own and each one it
+/// refines, directly or transitively). kotlinc analyzes every fragment as its own module, so a
+/// common source never sees a declaration of the fragments that refine it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceFragment {
+    member: u64,
+    visible: u64,
+}
+
+impl SourceFragment {
+    /// The most fragments one compilation distinguishes.
+    pub const MAX: usize = u64::BITS as usize;
+
+    /// Fragment `index` (below [`Self::MAX`]) seeing itself and the fragments `refined`.
+    pub fn new(index: usize, refined: impl IntoIterator<Item = usize>) -> Self {
+        let bit = |index: usize| {
+            assert!(
+                index < Self::MAX,
+                "fragment {index} is beyond the fragment limit"
+            );
+            1u64 << index
+        };
+        Self {
+            member: bit(index),
+            visible: refined
+                .into_iter()
+                .fold(bit(index), |visible, refined| visible | bit(refined)),
+        }
+    }
+
+    /// Whether a source in `from` sees a declaration of a source in `declared_in`. A source outside
+    /// every fragment is seen by, and sees, every source.
+    pub fn sees(from: Option<Self>, declared_in: Option<Self>) -> bool {
+        match (from, declared_in) {
+            (Some(from), Some(declared_in)) => from.visible & declared_in.member != 0,
+            _ => true,
+        }
+    }
+}
+
+/// A top-level `actual` that stands for an `expect` declared in another source.
+pub(crate) struct ExpectStandIn {
+    pub(crate) actual: crate::fir::DeclarationId,
+    /// The source declaring the `expect`.
+    pub(crate) expect_source: u32,
+}
+
+/// Each source file's [`SourceFragment`], by source index, and the `expect` each top-level
+/// `actual` stands for: a source that sees the `expect` sees the `actual` that replaces it.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SourceFragments {
+    fragments: Vec<Option<SourceFragment>>,
+    expect_sources: crate::fx_hash::HashMap<crate::fir::DeclarationId, u32>,
+    alias_sources: crate::fx_hash::HashMap<crate::types::TypeName, u32>,
+    /// The identities an `expect` classifier shares with the `actual typealias` actualizing it.
+    aliased_expects: crate::fx_hash::HashSet<crate::types::TypeName>,
+}
+
+impl SourceFragments {
+    pub fn new(fragments: impl IntoIterator<Item = Option<SourceFragment>>) -> Self {
+        Self {
+            fragments: fragments.into_iter().collect(),
+            expect_sources: Default::default(),
+            alias_sources: Default::default(),
+            aliased_expects: Default::default(),
+        }
+    }
+
+    /// Record the source of the `expect` each `actual` declaration actualizes. An
+    /// `actual typealias` stands for no `expect`: a common source types the `expect` classifier
+    /// as its own, and only the platform fragments see the alias.
+    pub(crate) fn publish_expect_sources(
+        &mut self,
+        expect_sources: impl IntoIterator<Item = ExpectStandIn>,
+        aliased_expects: impl IntoIterator<Item = crate::types::TypeName>,
+    ) {
+        self.aliased_expects.extend(aliased_expects);
+        if self.fragments.iter().any(Option::is_some) {
+            self.expect_sources.extend(expect_sources.into_iter().map(
+                |ExpectStandIn {
+                     actual,
+                     expect_source,
+                 }| (actual, expect_source),
+            ));
+        }
+    }
+
+    /// Record the source declaring each top-level `typealias` identity.
+    pub(crate) fn publish_alias_sources(
+        &mut self,
+        alias_sources: impl IntoIterator<Item = (crate::types::TypeName, u32)>,
+    ) {
+        if self.fragments.iter().any(Option::is_some) {
+            self.alias_sources.extend(alias_sources);
+        }
+    }
+
+    /// Whether source `from` sees `identity`, an `expect` classifier, as the `actual typealias`
+    /// actualizing it: a platform source does, and types the classifier as the alias's target.
+    /// A common source types it as its own classifier.
+    /// Whether an `actual typealias` actualizes the `expect` classifier `identity`.
+    pub(crate) fn is_aliased_expect(&self, identity: crate::types::TypeName) -> bool {
+        self.aliased_expects.contains(&identity)
+    }
+
+    pub(crate) fn actualizes_expect(
+        &self,
+        from: Option<u32>,
+        identity: crate::types::TypeName,
+    ) -> bool {
+        !self.aliased_expects.is_empty()
+            && self.aliased_expects.contains(&identity)
+            && self.sees_alias(from, identity)
+    }
+
+    /// Whether a reference in source `from` sees the `typealias` `identity`.
+    pub(crate) fn sees_alias(&self, from: Option<u32>, identity: crate::types::TypeName) -> bool {
+        self.sees(from, self.alias_sources.get(&identity).copied(), None)
+    }
+
+    /// Whether a reference in source `from` sees `declaration` of source `declared_in`. A
+    /// reference outside every file, or a declaration outside every source, is unrestricted; an
+    /// `actual` is seen where the `expect` it actualizes is.
+    pub(crate) fn sees(
+        &self,
+        from: Option<u32>,
+        declared_in: Option<u32>,
+        declaration: Option<crate::fir::DeclarationId>,
+    ) -> bool {
+        let declared_in = declaration
+            .and_then(|declaration| self.expect_sources.get(&declaration).copied())
+            .or(declared_in);
+        let fragment =
+            |source: Option<u32>| self.fragments.get(source? as usize).copied().flatten();
+        SourceFragment::sees(fragment(from), fragment(declared_in))
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct SourceInput<'a> {
     pub kind: SourceKind,
@@ -42,10 +181,15 @@ pub struct SourceInput<'a> {
     /// multiplatform `dependsOn`. Optional expectations without a target actual are visible only
     /// in such files.
     pub is_common: bool,
+    /// The refined multiplatform fragment this file belongs to, when the caller compiles a fragment
+    /// hierarchy as its platform leaf. A file without one sees, and is seen by, every file.
+    pub fragment: Option<SourceFragment>,
     /// Source-file stem when the caller has one. Declaration identities whose language-defined
     /// generated name is file-scoped must be assigned before signature collection, so the frontend
     /// cannot recover this later from an emitted facade name.
     pub file_stem: Option<&'a str>,
+    /// The script definition a script compiles against: kotlinc's standard one when `None`.
+    pub script_definition: Option<&'a crate::script_definitions::ScriptDefinition>,
 }
 
 impl<'a> SourceInput<'a> {
@@ -54,7 +198,9 @@ impl<'a> SourceInput<'a> {
             kind,
             text,
             is_common: false,
+            fragment: None,
             file_stem: None,
+            script_definition: None,
         }
     }
 
@@ -63,8 +209,21 @@ impl<'a> SourceInput<'a> {
         self
     }
 
+    pub fn with_fragment(mut self, fragment: SourceFragment) -> Self {
+        self.fragment = Some(fragment);
+        self
+    }
+
     pub fn with_file_stem(mut self, file_stem: &'a str) -> Self {
         self.file_stem = Some(file_stem);
+        self
+    }
+
+    pub fn with_script_definition(
+        mut self,
+        definition: &'a crate::script_definitions::ScriptDefinition,
+    ) -> Self {
+        self.script_definition = Some(definition);
         self
     }
 
