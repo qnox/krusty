@@ -536,6 +536,46 @@ fn a_common_alias_of_an_alias_actualized_expect_class_stays_the_expect_class_as_
 }
 
 #[test]
+fn common_aliases_and_bounds_of_an_alias_actualized_expect_class_match_kotlinc() {
+    let compiled = compile_sources(
+        "package p\nexpect open class Lock()\ntypealias Local = Lock\nfun <T : Lock> f(t: T): T = t\nfun g(l: Local): Local = l\nclass Box<T : Lock>(val t: T)\n",
+        ALIASED_LOCK,
+        common_and_jvm,
+    );
+    assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
+    assert_eq!(
+        (compiled.krusty.0, &compiled.krusty.2),
+        (compiled.kotlinc.0, &compiled.kotlinc.2)
+    );
+}
+
+#[test]
+fn function_types_projections_and_bounds_naming_an_alias_actualized_expect_class_match_kotlinc() {
+    let compiled = compile_sources(
+        concat!(
+            "package p\nexpect open class Lock()\n",
+            "fun a(x: (Lock) -> Lock): Lock.(Lock?) -> Lock? = { it }\n",
+            "fun b(y: MutableList<out Lock?>, z: Array<in Lock>): Array<in Lock> = z\n",
+            "suspend fun s(f: suspend (Lock) -> Lock): Lock = f(Lock())\n",
+            "class Bound<T : Lock, U>(val u: U) where U : Lock?\n",
+            "fun <T> c(t: T): T where T : Lock = t\n",
+            "val Lock.p: List<Lock>? get() = null\n",
+        ),
+        concat!(
+            "package p\nactual typealias Lock = java.util.concurrent.locks.ReentrantLock\n",
+            "fun use(l: Lock, b: Bound<Lock, Lock?>): Boolean = c(l).isLocked && ",
+            "a { it }(l, b.u) == null && b(mutableListOf(l), arrayOf<Any>(l)).size == 1 && l.p == null\n",
+        ),
+        common_and_jvm,
+    );
+    assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
+    assert_eq!(
+        (compiled.krusty.0, &compiled.krusty.2),
+        (compiled.kotlinc.0, &compiled.kotlinc.2)
+    );
+}
+
+#[test]
 fn a_platform_call_of_a_common_extension_of_an_alias_actualized_expect_class_matches_kotlinc() {
     let compiled = compile_sources(
         "package p\nexpect open class Lock()\nfun Lock.q(): Int = 1\nval Lock.p: Int get() = 2\n",

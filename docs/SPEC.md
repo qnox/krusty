@@ -15536,11 +15536,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   spelled through the alias records no signature. A common class extending the `expect` class keeps
   it as its declared superclass while its constructor delegates to the target's. A common
   `typealias Local = Lock` expands to the `expect` class too: a source expands only the aliases its
-  fragment sees. A platform call of a common extension declared on the `expect` class binds a
-  receiver of the alias target. A classifier nested in the `expect` class is realized as the
-  same-named classifier nested in the alias target; its metadata still names that target class
-  where kotlinc keeps the `expect` class's own nested identity. An `@OptionalExpectation`
-  annotation without an actual is no actualized `expect` and is lowered as declared. (`tests/fragment_arguments_e2e.rs` compares exit code,
+  fragment sees, so its occurrences, type-parameter bounds and alias expansions are abbreviated the
+  same way, inside function types (a suspend one's result is its `Continuation` argument) and under
+  stacked nullability and projections. A platform call of a common extension declared on the
+  `expect` class binds a receiver of the alias target. A classifier nested in the `expect` class is
+  realized as the same-named classifier nested in the alias target; its metadata still names that
+  target class where kotlinc keeps the `expect` class's own nested identity. An
+  `@OptionalExpectation` annotation without an actual is no actualized `expect` and is lowered as
+  declared. (`tests/fragment_arguments_e2e.rs` compares exit code,
   stderr and every class file with kotlinc, including koin's `Lockable = Any` and generic
   `ThreadLocal<T>` shapes, and every class but the facade for the nested case.)
 - **A supertype missing from the classpath is `MISSING_DEPENDENCY_SUPERCLASS`.** As kotlinc's

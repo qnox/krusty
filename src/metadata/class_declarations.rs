@@ -233,6 +233,20 @@ pub(crate) fn abbreviate_actualized_expects(
     }
 }
 
+/// [`abbreviate_actualized_expects`] over each type parameter's upper bounds.
+pub(crate) fn abbreviate_actualized_expect_bounds<Bounds: IntoIterator<Item = Ty>>(
+    parameters: impl IntoIterator<Item = Bounds>,
+    spellings: &mut Vec<Vec<crate::spelling::Spelled>>,
+    expects: &crate::fx_hash::HashMap<TypeName, TypeName>,
+) {
+    for (index, bounds) in parameters.into_iter().enumerate() {
+        if spellings.len() <= index {
+            spellings.resize_with(index + 1, Vec::new);
+        }
+        abbreviate_actualized_expects(bounds, &mut spellings[index], expects);
+    }
+}
+
 impl ClassDeclarationRecord {
     /// Abbreviate every declared occurrence of an `expect` class `expects` actualizes by alias, before
     /// the target renames the occurrence to the classifier the alias names.
@@ -258,6 +272,14 @@ impl ClassDeclarationRecord {
         };
         for property in &mut self.props {
             declared(&mut property.spellings, property.receiver, &[], property.ty);
+            abbreviate_actualized_expect_bounds(
+                property
+                    .type_params
+                    .iter()
+                    .map(|parameter| parameter.bounds.iter().map(|(bound, _)| *bound)),
+                &mut property.spellings.type_param_bounds,
+                expects,
+            );
             property
                 .spellings
                 .getter_ret
@@ -270,6 +292,26 @@ impl ClassDeclarationRecord {
                 &function.params,
                 function.ret,
             );
+            abbreviate_actualized_expect_bounds(
+                function
+                    .type_param_bounds
+                    .iter()
+                    .map(|bounds| bounds.iter().copied()),
+                &mut function.spellings.type_param_bounds,
+                expects,
+            );
+        }
+        abbreviate_actualized_expect_bounds(
+            self.type_param_bounds
+                .iter()
+                .map(|parameter| parameter.bounds.iter().map(|(bound, _)| *bound)),
+            &mut self.spellings.type_param_bounds,
+            expects,
+        );
+        for alias in &mut self.type_aliases {
+            alias
+                .expansion_spelling
+                .abbreviate_actualized_expects(alias.expansion, expects);
         }
         abbreviate_actualized_expects(
             self.ctor_params.iter().map(|(_, ty)| *ty),

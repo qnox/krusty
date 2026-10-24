@@ -35,6 +35,14 @@ impl super::IrFile {
             spellings
                 .ret
                 .abbreviate_actualized_expects(function.ret, expects);
+            crate::metadata::class_declarations::abbreviate_actualized_expect_bounds(
+                function
+                    .type_params
+                    .iter()
+                    .map(|parameter| parameter.bounds.iter().copied()),
+                &mut spellings.type_param_bounds,
+                expects,
+            );
         }
         for property in &mut self.package_properties {
             let spellings = &mut property.spellings;
@@ -49,6 +57,23 @@ impl super::IrFile {
             spellings
                 .getter_ret
                 .abbreviate_actualized_expects(property.ty, expects);
+            crate::metadata::class_declarations::abbreviate_actualized_expect_bounds(
+                property
+                    .type_params
+                    .iter()
+                    .map(|parameter| parameter.bounds.iter().copied()),
+                &mut spellings.type_param_bounds,
+                expects,
+            );
+        }
+        for alias in self
+            .package_type_aliases
+            .iter_mut()
+            .chain(self.class_type_aliases.values_mut().flatten())
+        {
+            alias
+                .expansion_spelling
+                .abbreviate_actualized_expects(alias.expansion, expects);
         }
         if nested_expects.is_empty() {
             self.remap_classifier_identities(expects);
