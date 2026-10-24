@@ -266,6 +266,10 @@ const GENERIC_MAIN: &str = "import kotlinx.serialization.Serializable\n\
                             class Both<U>(val u: U) : Couple<String, U>(\"a\", listOf(u))\n\
                             @Serializable\n\
                             class FromFixed(val x: Long) : Fixed(3)\n\
+                            @Serializable\n\
+                            open class Middle<U>(val tag: U) : Holder<U>(tag)\n\
+                            @Serializable\n\
+                            class Leaf(val l: Long) : Middle<Int>(1)\n\
                             fun box(): String {\n\
                             \x20   val named = Json.encodeToString(Named.serializer(), Named(\"s\"))\n\
                             \x20   if (named != \"{\\\"value\\\":1,\\\"n\\\":\\\"s\\\"}\") return named\n\
@@ -279,13 +283,20 @@ const GENERIC_MAIN: &str = "import kotlinx.serialization.Serializable\n\
                             \x20   val fixed = Json.encodeToString(FromFixed.serializer(), FromFixed(4))\n\
                             \x20   if (fixed != \"{\\\"value\\\":\\\"f\\\",\\\"f\\\":3,\\\"x\\\":4}\") return fixed\n\
                             \x20   if (Json.decodeFromString(FromFixed.serializer(), fixed).value != \"f\") return \"fixed\"\n\
+                            \x20   val leaf = Json.encodeToString(Leaf.serializer(), Leaf(5))\n\
+                            \x20   if (leaf != \"{\\\"value\\\":1,\\\"tag\\\":1,\\\"l\\\":5}\") return leaf\n\
+                            \x20   val decodedLeaf = Json.decodeFromString(Leaf.serializer(), \"{\\\"value\\\":2,\\\"count\\\":3,\\\"tag\\\":4,\\\"l\\\":6}\")\n\
+                            \x20   if (decodedLeaf.value != 2 || decodedLeaf.count != 3 || decodedLeaf.tag != 4 || decodedLeaf.l != 6L) return \"leaf\"\n\
+                            \x20   val middle = Json.encodeToString(Middle.serializer(Int.serializer()), Middle(7))\n\
+                            \x20   if (middle != \"{\\\"value\\\":7,\\\"tag\\\":7}\") return middle\n\
                             \x20   return \"OK\"\n\
                             }\n";
 
 /// A generic parent's elements are typed by the arguments the subclass gives it, and its
 /// `write$Self` takes one serializer per type parameter, which the subclass passes for its
 /// arguments. A library class with a generic parent inherits the parent's elements typed the same
-/// way.
+/// way, and so does a local generic class, whose own subclass sees them typed by its arguments
+/// (`Leaf : Middle<Int>` inherits `Holder`'s `value` as `Int`).
 #[test]
 fn subclasses_inherit_the_elements_of_a_generic_dependency_parent() {
     let (plugin, mut runtime) = plugin_and_runtime()

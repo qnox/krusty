@@ -11534,7 +11534,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `KSerializer` per type parameter after the descriptor, which the subclass passes for its
   arguments. Its deserialization constructor is still declared over its own type parameters (`T`
   is `Object`), so the subclass delegates with that constructor's parameter types, not its own
-  element types. A superclass in another file of the same module publishes no type parameter
+  element types. A local generic class over a dependency superclass passes those inherited
+  elements on typed over its own type parameters, and its own subclass sees them typed by its
+  arguments (`Leaf : Middle<Int>` over `Middle<U> : Holder<U>` inherits `value: Int`). A superclass
+  in another file of the same module publishes no type parameter
   names, so a subclass of a generic one there still declines.
   Test: `tests/serializable_parent_dependency_e2e.rs`.
 - **A serializable superclass in another file of the same module contributes its declared

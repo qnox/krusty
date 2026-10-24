@@ -229,11 +229,14 @@ impl SerialElements {
             let (class, field) = match source {
                 ElementSource::Field { class, field } => (class, field),
                 ElementSource::External(element) => {
+                    // An element a local superclass inherited from a dependency is typed over
+                    // that superclass's type parameters; the class sees its own arguments.
+                    let ty = ty_subst_keep_unbound(element.ty, &self.inherited_bindings);
                     wire.push(WireElement {
                         declared: None,
                         name: element.name.to_string(),
-                        ty: element.ty,
-                        serializer_ty: element.ty,
+                        ty,
+                        serializer_ty: ty,
                         optional: element.optional,
                     });
                     continue;
