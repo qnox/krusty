@@ -259,6 +259,10 @@ fn a_processor_sees_generates_and_logs_what_it_does_under_ksp2() {
         std::fs::read_to_string(outputs.kotlin.join("gen/Generated.kt")).unwrap(),
         "package gen\n\n@sample.Marker\nclass Generated {\n    class Nested\n}\n"
     );
+    assert_eq!(
+        std::fs::read_to_string(outputs.resources.join("META-INF/services/dump.Service")).unwrap(),
+        "dump.Implementation\n"
+    );
 }
 
 #[test]
