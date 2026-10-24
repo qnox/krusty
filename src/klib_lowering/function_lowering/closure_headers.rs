@@ -8,15 +8,15 @@ use crate::ir::{
 #[cfg(test)]
 mod tests;
 
-pub(in crate::klib_lowering) struct CaptureParameter {
-    pub(in crate::klib_lowering) symbol: KlibIrSymbol,
-    pub(in crate::klib_lowering) ty: Ty,
-    pub(in crate::klib_lowering) identity: IrParameterIdentity,
-    pub(in crate::klib_lowering) receiver: Option<IrCapturedReceiver>,
+pub(in super::super) struct CaptureParameter {
+    pub(in super::super) symbol: KlibIrSymbol,
+    pub(in super::super) ty: Ty,
+    pub(in super::super) identity: IrParameterIdentity,
+    pub(in super::super) receiver: Option<IrCapturedReceiver>,
 }
 
 impl FunctionHeader {
-    pub(in crate::klib_lowering) fn capture_parameter(
+    pub(in super::super) fn capture_parameter(
         &self,
         symbol: &KlibIrSymbol,
         ordinal: u32,
@@ -113,7 +113,7 @@ impl FunctionHeader {
     }
 }
 
-pub(in crate::klib_lowering) fn closure_header(
+pub(in super::super) fn closure_header(
     arena: &KlibIrArena,
     function: &KlibIrFunction,
     enclosing: &FunctionHeader,

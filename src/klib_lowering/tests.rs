@@ -6,6 +6,7 @@ use std::path::PathBuf;
 mod body_forms;
 mod callee_headers;
 mod closure_frames;
+mod closure_producers;
 mod constructor_calls;
 mod constructor_contracts;
 mod control_forms;

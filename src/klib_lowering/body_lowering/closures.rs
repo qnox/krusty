@@ -14,7 +14,7 @@ impl BodyLowering<'_> {
         source_form: Option<&str>,
     ) -> Lowered<ExprId> {
         let TyKind::Fun(signature) = ty.kind() else {
-            return Err(mismatch("a closure has a non-function type"));
+            return unsupported("a closure of a non-function type");
         };
         if signature.suspend {
             return unsupported("a suspend closure");

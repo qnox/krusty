@@ -287,6 +287,9 @@ impl<'a> BodyLowering<'a> {
                     return unsupported("a bound or reflective rich function reference");
                 }
                 let ty = self.ty(expression, "closure")?;
+                let crate::types::TyKind::Fun(signature) = ty.kind() else {
+                    return unsupported("a closure of a non-function type");
+                };
                 let invocation = match &overridden.signature {
                     crate::metadata::klib_ir::KlibIrSignature::Public(signature)
                         if overridden.kind
@@ -296,9 +299,7 @@ impl<'a> BodyLowering<'a> {
                     }
                     _ => None,
                 };
-                if !matches!(ty.kind(), crate::types::TyKind::Fun(signature)
-                    if invocation == Some(signature.params.len()))
-                {
+                if invocation != Some(signature.params.len()) {
                     return Err(mismatch(
                         "a rich closure does not override its function invocation",
                     ));
