@@ -781,10 +781,10 @@ fn ci_starts_jvm_without_waiting_for_focused_klib_binaries() {
         .expect("each version's JVM row runs every non-box conformance test");
     let release = workflow
         .find(
-            "needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, bazel, build-tool-bins, build-release]",
+            "needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-maven-plugin, maven, build-tools, bazel, build-tool-bins, build-release]",
         )
         .expect(
-            "release waits on combined conformance plus the exact tested Gradle artifact and matrix",
+            "release waits on combined conformance plus the exact tested Gradle and Maven artifacts and matrices",
         );
     assert!(
         matrix < box_run

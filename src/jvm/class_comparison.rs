@@ -14,6 +14,7 @@
 use std::collections::HashMap;
 
 use crate::jvm::class_node::{Annotation, ClassMethod, ClassNode, FieldNode};
+use crate::jvm::classreader::{read_constant_pool, C};
 use crate::jvm::method_node::{Insn, LabelId, MethodNode, Node};
 
 /// The primary way a class differs, most structural first.
@@ -139,6 +140,20 @@ pub fn compare_classes(reference: &[u8], candidate: &[u8]) -> Option<ClassDiffer
         structural_difference(&reference, &candidate)
             .unwrap_or_else(|| ClassDifference::new(DifferenceKind::ConstantPool, None)),
     )
+}
+
+/// Whether kotlinc wrote `bytes`: a class carrying `kotlin.Metadata`, which every class kotlinc
+/// emits does (lambdas, `$WhenMappings` and other synthetic classes included) and javac's do not.
+/// A class this comparison cannot read is judged by whether its constant pool names the
+/// annotation.
+pub fn is_kotlin_class(bytes: &[u8]) -> bool {
+    match ClassNode::read(bytes) {
+        Ok(class) => annotation(&class.visible_annotations, KOTLIN_METADATA).is_some(),
+        Err(_) => read_constant_pool(bytes).is_ok_and(|(pool, _)| {
+            pool.iter()
+                .any(|entry| matches!(entry, C::Utf8(text) if text == KOTLIN_METADATA))
+        }),
+    }
 }
 
 fn structural_difference(reference: &ClassNode, candidate: &ClassNode) -> Option<ClassDifference> {

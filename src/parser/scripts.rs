@@ -4,7 +4,7 @@
 //! that class directly, so every later phase sees an ordinary classifier.
 
 use super::*;
-use crate::ast::{AccessorLines, ClassInit, Decl, Expr, PropDecl, PropParam, Stmt};
+use crate::ast::{AccessorLines, ClassInit, Decl, Expr, Param, PropDecl, PropParam, Stmt};
 use crate::script_definitions::{ScriptDefinition, ScriptParameter};
 
 /// The script class kotlinc names after `file_stem`, the file name without `.kts`:
@@ -43,6 +43,7 @@ impl Parser<'_> {
             .map_or_else(|| self.script_text_start(), |token| token.span.lo);
         let declaration_index = self.file.decls.len();
         let start = Span::new(script_start, script_start);
+        self.add_default_imports(&definition.default_imports, start);
         let mut methods = Vec::new();
         let mut body_props = Vec::new();
         let mut init_order = Vec::new();
@@ -135,6 +136,11 @@ impl Parser<'_> {
             .iter()
             .map(script_constructor_parameter)
             .collect();
+        class.context_params = definition
+            .implicit_receivers
+            .iter()
+            .map(|receiver| script_implicit_receiver(receiver, start))
+            .collect();
         class.base_class = definition.template.clone();
         class.base_args = definition
             .constructor_parameters
@@ -151,6 +157,32 @@ impl Parser<'_> {
         self.file
             .adopt_hoisted_classifiers(id, declaration_index + 1);
         self.file.script_class = Some(id);
+    }
+
+    /// The definition's default imports, which the script's names see as if written before its own
+    /// imports. None has a source position, so each is placed at the script's start.
+    fn add_default_imports(&mut self, imports: &[String], at: Span) {
+        let defaults = imports.iter().map(|import| {
+            let (path, wildcard) = match import.strip_suffix(".*") {
+                Some(package) => (package, true),
+                None => (import.as_str(), false),
+            };
+            if !wildcard {
+                let mut reference = simple_type_ref(path, at);
+                reference.flags = reference.flags.with_import(true);
+                self.file.detached_type_refs.push(reference);
+            }
+            crate::ast::ImportPath {
+                segments: path
+                    .split('.')
+                    .map(|segment| (segment.to_string(), at))
+                    .collect(),
+                wildcard,
+                alias: None,
+            }
+        });
+        let defaults = defaults.collect::<Vec<_>>();
+        self.file.import_paths.splice(0..0, defaults);
     }
 
     /// Where a script without a file header starts: at the file's start, or at the first
@@ -240,6 +272,24 @@ fn script_result_property(initializer: ExprId, span: Span) -> PropDecl {
         span,
         declaration_span: span,
         name_span: Span::new(span.lo, span.lo),
+    }
+}
+
+/// An implicit receiver of a script. kotlinc's script receives each one as a constructor value
+/// whose members its body reaches like those of a context receiver, after its own.
+fn script_implicit_receiver(classifier: &str, at: Span) -> Param {
+    Param {
+        name: String::new(),
+        ty: simple_type_ref(classifier, at),
+        span: at,
+        context_kind: crate::types::ContextParameterKind::LegacyReceiver,
+        is_vararg: false,
+        vararg_span: None,
+        is_materialized_lambda: false,
+        is_crossinline: false,
+        default: None,
+        annotations: Vec::new(),
+        annotation_args: Vec::new(),
     }
 }
 

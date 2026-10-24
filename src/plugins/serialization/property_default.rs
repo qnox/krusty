@@ -10,7 +10,9 @@
 //!
 //! Both kinds of default were checked in the primary constructor's frame. There the receiver is
 //! value 0, constructor parameter `k` is value `k + 1`, and an earlier property is a constructor
-//! PARAMETER. In the generated method that property is a property of the object being built or
+//! PARAMETER. A class without a primary constructor runs a body initializer in its secondary
+//! constructors instead, where it reads only the receiver and its own locals sit above every
+//! constructor's values. In the generated method that property is a property of the object being built or
 //! written, which is where kotlinc reads it from. This module owns that re-framing, so neither
 //! method guesses at a parameter's slot.
 
@@ -43,13 +45,6 @@ fn checked_default_in_scope(ir: &IrFile, class_id: ClassId, field: usize) -> Opt
             .expect("a constructor property declaring a default retains its lowered expression");
         return Some((default, u32::try_from(parameter).ok()?));
     }
-    // A body property's initializer is composed into the primary constructor, in its frame. A class
-    // without one runs it in a secondary constructor's frame instead, which no generated member here
-    // shares.
-    if !class.has_primary_ctor {
-        return None;
-    }
-    let parameters = u32::try_from(class.ctor_args.len()).ok()?;
     // A constructor property's field was answered above, so the property whose backing field this
     // is was declared in the body.
     let initializer = ir.checked_properties.iter().find_map(|(id, property)| {
@@ -62,6 +57,17 @@ fn checked_default_in_scope(ir: &IrFile, class_id: ClassId, field: usize) -> Opt
             _ => None,
         }
     })?;
+    // A body property's initializer is composed into the primary constructor, in its frame. A class
+    // without one runs it in each secondary constructor that delegates to `super`, its locals
+    // numbered above every constructor's values; it can read no constructor parameter there, only
+    // the receiver and the captures the constructor prefix holds.
+    let parameters = if class.has_primary_ctor {
+        u32::try_from(class.ctor_args.len()).ok()?
+    } else {
+        *ir.secondary_initializer_value_bases
+            .get(&class_id)
+            .expect("a composed initializer records the values its locals are numbered above")
+    };
     Some((initializer, parameters))
 }
 
@@ -115,7 +121,12 @@ pub(super) fn default_in_frame(
         match &ir.exprs[expression as usize] {
             IrExpr::GetValue(0) => receivers.push(expression),
             IrExpr::GetValue(slot) if *slot <= parameter_count => {
-                let field = parameter_fields[*slot as usize - 1]?;
+                // A value with no constructor property behind it (a capture, or a parameter that is
+                // only an argument) is not reachable from the generated method.
+                let field = parameter_fields
+                    .get(*slot as usize - 1)
+                    .copied()
+                    .flatten()?;
                 reads.push((expression, field));
             }
             IrExpr::GetValue(_)

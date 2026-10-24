@@ -56,6 +56,9 @@ pub trait SymbolSource {
     /// Core projection of the classifier half of [`Self::symbols`]. Providers must not override this;
     /// the implementation lives here solely while call sites migrate to reading the record directly.
     fn classifier(&self, internal: TypeName) -> Option<std::sync::Arc<LibraryType>> {
+        if let Some(target) = self.actualized_expect(internal) {
+            return self.classifier(target);
+        }
         let (namespace, name) = SymbolNamespace::classifier_key(internal);
         let record = self.symbols(namespace, name);
         // A typealias occupies this source key but names its expanded classifier. Asking for the
@@ -64,6 +67,13 @@ pub trait SymbolSource {
         (record.classifier_name == Some(internal))
             .then(|| record.classifier.clone())
             .flatten()
+    }
+
+    /// The classifier an `expect` classifier `internal` stands for in the source this provider
+    /// resolves for: the target of the `actual typealias` actualizing it, where that source sees
+    /// the alias. A common source sees no alias and types the `expect` classifier as its own.
+    fn actualized_expect(&self, _internal: TypeName) -> Option<TypeName> {
+        None
     }
 
     /// Whether `name` is a package directly inside `parent` in this source.
@@ -85,6 +95,19 @@ pub trait SymbolSource {
     /// applicable callable was removed before selection.
     fn api_withheld_callable(&self, _owner: TypeName, _name: &str) -> bool {
         false
+    }
+
+    /// Whether the source this provider resolves for sees a callable it published. A refined
+    /// common fragment does not see what only a platform fragment refining it declares, members of
+    /// an `actual` class included; every other provider sees all it publishes.
+    fn sees_function(&self, _function: &crate::libraries::FunctionInfo) -> bool {
+        true
+    }
+
+    /// Whether the source this provider resolves for sees a property it published. See
+    /// [`Self::sees_function`].
+    fn sees_property(&self, _property: &crate::libraries::PropertyInfo) -> bool {
+        true
     }
 
     /// Return the complete declaration record for one `(namespace, name)` key. This is the sole
@@ -233,6 +256,24 @@ impl SymbolSource for CompositeSource<'_> {
         self.children
             .iter()
             .any(|child| child.api_withheld_callable(owner, name))
+    }
+
+    fn actualized_expect(&self, internal: TypeName) -> Option<TypeName> {
+        self.children
+            .iter()
+            .find_map(|child| child.actualized_expect(internal))
+    }
+
+    fn sees_function(&self, function: &crate::libraries::FunctionInfo) -> bool {
+        self.children
+            .iter()
+            .all(|child| child.sees_function(function))
+    }
+
+    fn sees_property(&self, property: &crate::libraries::PropertyInfo) -> bool {
+        self.children
+            .iter()
+            .all(|child| child.sees_property(property))
     }
 
     fn generated_serializer_singleton(&self, classifier: TypeName) -> Option<TypeName> {
@@ -426,6 +467,18 @@ impl SymbolSource for CachedCompositeSource<'_> {
 
     fn api_withheld_callable(&self, owner: TypeName, name: &str) -> bool {
         self.source.api_withheld_callable(owner, name)
+    }
+
+    fn actualized_expect(&self, internal: TypeName) -> Option<TypeName> {
+        self.source.actualized_expect(internal)
+    }
+
+    fn sees_function(&self, function: &crate::libraries::FunctionInfo) -> bool {
+        self.source.sees_function(function)
+    }
+
+    fn sees_property(&self, property: &crate::libraries::PropertyInfo) -> bool {
+        self.source.sees_property(property)
     }
 
     fn external_callable(

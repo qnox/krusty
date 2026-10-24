@@ -9,7 +9,7 @@ use crate::ir::{Callee, ExprId, IrExpr, IrFile};
 /// The CPS form of a logical method descriptor: append the trailing `Continuation` parameter and
 /// erase the return to `Object`. A cross-unit suspend callee is resolved by its logical signature,
 /// but the emitted invocation must name its physical CPS descriptor.
-fn cps_descriptor(logical: &str) -> String {
+pub(super) fn cps_descriptor(logical: &str) -> String {
     let close = logical
         .rfind(')')
         .unwrap_or(logical.len().saturating_sub(1));

@@ -1403,9 +1403,14 @@ impl BodyLowering<'_> {
                 target,
                 extension_receiver,
                 arguments,
+                parameter_types,
             } => {
-                let (call, declared) =
-                    self.checked_local_call(target.clone(), *extension_receiver, arguments)?;
+                let (call, declared) = self.checked_local_call(
+                    target.clone(),
+                    *extension_receiver,
+                    arguments,
+                    parameter_types,
+                )?;
                 self.declaration_result(call, Some(declared), expression.ty.get())
             }
             FirExprKind::Lambda {

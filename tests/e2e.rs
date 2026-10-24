@@ -2,6 +2,9 @@
 //! crate, so product e2e modules live behind one target to keep link time and target size bounded.
 //! External corpus/reference-toolchain suites live in `conformance.rs`.
 
+#[path = "dependent_constructor_bounds_e2e.rs"]
+mod dependent_constructor_bounds_e2e;
+
 #[path = "abstract_serializable_e2e.rs"]
 mod abstract_serializable_e2e;
 #[path = "annotation_documented_mirror_e2e.rs"]
@@ -48,8 +51,12 @@ mod reference_compiler_support;
 mod reference_recording_support;
 #[path = "common/reference_targets.rs"]
 mod reference_targets_support;
+#[path = "serializable_lateinit_elements_e2e.rs"]
+mod serializable_lateinit_elements_e2e;
 #[path = "serializable_parent_dependency_e2e.rs"]
 mod serializable_parent_dependency_e2e;
+#[path = "serializable_parent_same_module_e2e.rs"]
+mod serializable_parent_same_module_e2e;
 #[path = "super_call_vararg_e2e.rs"]
 mod super_call_vararg_e2e;
 #[path = "common/target_diagnostics.rs"]
@@ -496,6 +503,8 @@ mod classreader_e2e;
 mod cli_compiler_plugin_e2e;
 #[path = "cli_dropin_e2e.rs"]
 mod cli_dropin_e2e;
+#[path = "cli_verify_e2e.rs"]
+mod cli_verify_e2e;
 #[path = "closeable_use_receiver_e2e.rs"]
 mod closeable_use_receiver_e2e;
 #[path = "closure_in_class_e2e.rs"]
@@ -647,6 +656,8 @@ mod cross_file_typealias_e2e;
 mod cross_file_value_param_constructor_e2e;
 #[path = "crossinline_lambda_inlining_e2e.rs"]
 mod crossinline_lambda_inlining_e2e;
+#[path = "crossinline_suspend_object_e2e.rs"]
+mod crossinline_suspend_object_e2e;
 #[path = "ctor_lambda_return_binds_type_param_e2e.rs"]
 mod ctor_lambda_return_binds_type_param_e2e;
 #[path = "ctor_numeric_widening_e2e.rs"]
@@ -1284,6 +1295,8 @@ mod java_interface_mutable_collection_face_e2e;
 mod java_member_modules;
 #[path = "java_nonfinal_constant_e2e.rs"]
 mod java_nonfinal_constant_e2e;
+#[path = "java_raw_type_e2e.rs"]
+mod java_raw_type_e2e;
 #[path = "java_self_bounded_constructor_e2e.rs"]
 mod java_self_bounded_constructor_e2e;
 #[path = "local_class_capture_order_e2e.rs"]
@@ -1399,6 +1412,8 @@ mod lateinit_field_visibility_e2e;
 mod lateinit_getter_shape_e2e;
 #[path = "lateinit_local_e2e.rs"]
 mod lateinit_local_e2e;
+#[path = "lateinit_member_access_e2e.rs"]
+mod lateinit_member_access_e2e;
 #[path = "lateinit_operand_stack_e2e.rs"]
 mod lateinit_operand_stack_e2e;
 #[path = "legacy_interface_calls_e2e.rs"]

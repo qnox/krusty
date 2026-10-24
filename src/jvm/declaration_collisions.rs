@@ -1526,7 +1526,7 @@ fn qualified_type_name(ty: crate::types::Ty) -> Result<String, UndeterminedDiagn
         TyKind::Null => "null".to_string(),
         TyKind::Obj(name, arguments) => {
             let base = name.render().replace(['/', '$'], ".");
-            if arguments.is_empty() {
+            if arguments.is_empty() || ty.is_raw_application() {
                 base
             } else {
                 let arguments = arguments
@@ -1573,6 +1573,7 @@ fn qualified_type_name(ty: crate::types::Ty) -> Result<String, UndeterminedDiagn
         TyKind::InProjection(inner) => format!("in {}", qualified_type_name(inner)?),
         TyKind::OutProjection(inner) => format!("out {}", qualified_type_name(inner)?),
         TyKind::StarProjection(_) => "*".to_string(),
+        TyKind::RawProjection(inner) => qualified_type_name(inner)?,
         TyKind::Error => return Err(UndeterminedDiagnosticType::Error),
         TyKind::Pending => return Err(UndeterminedDiagnosticType::Pending),
     })

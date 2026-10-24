@@ -56,6 +56,8 @@ pub mod digest;
 pub mod driver;
 pub mod gradle;
 pub mod graph;
+#[cfg(test)]
+mod maven_verify_tests;
 pub mod model;
 pub mod store;
 

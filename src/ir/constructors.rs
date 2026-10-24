@@ -199,6 +199,9 @@ pub enum IrCtorParameterProvenance {
     Continuation,
     /// The dispatch receiver a generated continuation constructor stores.
     ContinuationDispatchReceiver,
+    /// A script's implicit receiver, numbered in its definition's order, which a script takes
+    /// after its template's parameters.
+    ScriptReceiver { ordinal: u32 },
 }
 
 /// A constructor parameter that carries a value a local or anonymous class captures from its
