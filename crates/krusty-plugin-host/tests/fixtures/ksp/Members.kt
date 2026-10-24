@@ -23,6 +23,15 @@ class MembersProcessor(private val env: SymbolProcessorEnvironment) : SymbolProc
                 .filter { it.simpleName.asString() == "spelledExtension" }
             typeAnnotations(spelled.declarations + extensions)
         }
+        for (name in listOf("members.Aliases", "members.Plain")) {
+            val aliases = resolver.getClassDeclarationByName(resolver.getKSNameFromString(name)) ?: continue
+            for (property in aliases.declarations.filterIsInstance<KSPropertyDeclaration>()) {
+                val annotations = property.type.resolve().annotations.joinToString(", ", "[", "]") {
+                    it.shortName.asString()
+                }
+                env.logger.warn("aliasAnnotations ${property.simpleName.asString()} $annotations")
+            }
+        }
         return emptyList()
     }
 

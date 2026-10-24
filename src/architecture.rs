@@ -26,6 +26,9 @@ mod tests {
                 // The definition a script compiles against shapes its parsed script class.
                 "script_definitions",
                 "source",
+                // The resolved spellings of declared types (the alias each node names and its
+                // type-use annotations), which the published declarations record.
+                "spelling",
                 "trace_compiler",
             ],
         );

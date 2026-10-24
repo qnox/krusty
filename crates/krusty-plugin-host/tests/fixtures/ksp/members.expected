@@ -78,6 +78,9 @@ w: [ksp]   property fromConstructor mutable=false backingField=true modifiers=: 
 w: [ksp]   property property mutable=false backingField=true modifiers=: kotlin.collections.Map<kotlin.String, kotlin.collections.List<kotlin.Int?>>?
 w: [ksp]   fun function kind=MEMBER abstract=false modifiers= typeParameters= receiver=null (parameter: kotlin.collections.Set<out kotlin.Number> vararg=false default=false, rest: kotlin.String vararg=true default=false): kotlin.Array<kotlin.String>
 w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL typeParameters= receiver=null (fromConstructor: kotlin.collections.List<kotlin.String> vararg=false default=false, plain: kotlin.collections.Map<kotlin.String, kotlin.Int?> vararg=false default=false): members.Spelled
+w: [ksp] CLASS members.Plain modifiers= typeParameters= supertypes=kotlin.Any
+w: [ksp]   property names mutable=false backingField=true modifiers=: kotlin.collections.List<kotlin.String>
+w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL typeParameters= receiver=null (names: kotlin.collections.List<kotlin.String> vararg=false default=false): members.Plain
 w: [ksp] typeAnnotations fromConstructor List[]<String[]>
 w: [ksp] typeAnnotations property Map[]<String[], List[]<Int[]>>
 w: [ksp] typeAnnotations function parameter Set[]<Number[]>
@@ -88,3 +91,4 @@ w: [ksp] typeAnnotations <init> plain Map[]<String[], Int[]>
 w: [ksp] typeAnnotations <init> return Spelled[]
 w: [ksp] typeAnnotations spelledExtension receiver List[]<String[]>
 w: [ksp] typeAnnotations spelledExtension return Unit[]
+w: [ksp] aliasAnnotations names []

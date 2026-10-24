@@ -118,3 +118,5 @@ class Spelled(val fromConstructor: List<String>, plain: Map<String, Int?>) {
 }
 
 fun List<String>.spelledExtension(): Unit {}
+
+class Plain(val names: List<String>)

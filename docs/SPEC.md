@@ -15948,10 +15948,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **A KSP type source spells without type-use annotations has none.** `KSType.annotations` is
   empty for a property, parameter, receiver or return type the source spells with no type-use
   annotation of its own, for each argument whose written spelling has none, and for the
-  classifier type a constructor returns, as KSP2 2.3.12 reports. A type whose spelling carries
-  one, an argument the spelling does not write, an inferred type and a library type are refused
-  for that query. (`crates/krusty-plugin-host/tests/ksp.rs`,
-  `members_and_their_types_are_what_ksp2_reports`; `src/ksp_round/type_model.rs`.)
+  classifier type a constructor returns, as KSP2 2.3.12 reports. The answer comes from the
+  frontend's resolved spelling of the declared type: a node is empty only when the source writes
+  no annotation on it and the frontend records neither an annotation nor an alias expansion's
+  annotation there. A type whose spelling carries one, an argument the spelling does not write,
+  an inferred type and a library type are refused for that query. A type that names a source
+  typealias, as a whole or in a type argument (`List<KeptString>` with `typealias KeptString =
+  @Kept String`), is left undescribed: KSP2 resolves it to the alias with the alias's own
+  arguments, which the round does not describe yet, so `KSPropertyDeclaration.type` and its
+  siblings refuse rather than report the expansion. (`crates/krusty-plugin-host/tests/ksp.rs`,
+  `members_and_their_types_are_what_ksp2_reports`, `a_type_naming_an_alias_is_refused`;
+  `src/ksp_round/type_model.rs`.)
 - **A KSP generated file's package is a directory path.** `CodeGenerator.createNewFile` turns
   each `.` of the package into a directory and does not require a Kotlin package name, so a
   processor writes a service descriptor to `META-INF.services` (`resources/META-INF/services/`), as

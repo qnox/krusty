@@ -295,6 +295,10 @@ impl Source<'_> {
             qualified_name: &qualified_name,
             type_parameters: &type_parameters,
             scope: &scope,
+            primary_spellings: signature
+                .stable_declaration
+                .and_then(|class| self.analysis.constructor_declaration(class, 0))
+                .and_then(|constructor| self.analysis.declared_type_spellings(constructor)),
         };
         let (declarations, declarations_complete) = self.class_declarations(&header)?;
         Ok(KspClass {
