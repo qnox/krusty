@@ -39,6 +39,9 @@ pub use crate::resolve::{
 /// Types carried by the public source-set analysis signatures, re-exported here so process
 /// adapters do not have to reach through the frontend boundary into source classification.
 pub use crate::source::{SourceInput, SourceKind};
+pub use crate::spelling::{
+    DeclaredSpellings as FrontendDeclaredSpellings, Spelled as FrontendSpelled,
+};
 
 /// Analysis result for a jointly compiled source set.
 ///

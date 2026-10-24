@@ -9,24 +9,30 @@ use krusty_plugin_ir::{
 
 use super::annotations::Placement;
 use super::platform_names::{FunctionNaming, NamingSite};
-use super::type_model::{class_type, TypeParameterScope};
+use super::type_model::{as_written, class_type, TypeParameterScope};
 use super::{Owner, Source, Subject};
 use crate::ast::{
-    AstEnumEntry, ClassDecl, Decl, DeclId, FunBody, FunDecl, Param, PropDecl, PropParam,
-    SecondaryCtor,
+    AstEnumEntry, ClassDecl, Decl, DeclId, File, FunBody, FunDecl, Param, PropDecl, PropParam,
+    SecondaryCtor, TypeRef,
 };
-use crate::frontend::{FrontendClassSig, FrontendDeclarationId};
+use crate::frontend::{
+    FrontendClassSig, FrontendDeclarationId, FrontendDeclaredSpellings as DeclaredSpellings,
+    FrontendSpelled as Spelled,
+};
 use crate::types::{wk, ResolvedAnnotation, Ty, Visibility};
 
 /// What a classifier's declarations are built from.
 pub(super) struct ClassHeader<'a> {
     pub(super) id: DeclId,
+    pub(super) file: &'a File,
     pub(super) class: &'a ClassDecl,
     pub(super) signature: &'a FrontendClassSig,
     pub(super) kind: KspClassKind,
     pub(super) qualified_name: &'a str,
     pub(super) type_parameters: &'a Option<Vec<KspTypeParameter>>,
     pub(super) scope: &'a TypeParameterScope,
+    /// The resolved spellings of the primary constructor's parameter types.
+    pub(super) primary_spellings: Option<&'a DeclaredSpellings>,
 }
 
 impl ClassHeader<'_> {
@@ -42,17 +48,24 @@ impl ClassHeader<'_> {
     }
 
     /// The classifier applied to a star for each of its type parameters, which is what KSP
-    /// reports a constructor returns.
+    /// reports a constructor returns, with no annotations.
     fn star_projected(&self) -> KspType {
         let mut ty = class_type(self.qualified_name);
         ty.arguments = vec![KspTypeArgument::Star; self.class.type_parameters.type_params().len()];
+        ty.unannotated = true;
         ty
     }
 
     /// The type of the property primary-constructor parameter `index` declares: the resolved
     /// slot, which for a `vararg` parameter is its array, `Array<out T>` for a reference element.
     fn constructor_property_type(&self, index: usize) -> Option<KspType> {
-        self.scope.ty(self.constructor_property(index)?)
+        let ty = self.scope.ty(self.constructor_property(index)?)?;
+        // A `vararg` property's array is not what its parameter spells.
+        let property = self.class.props.get(index)?;
+        match property.is_vararg {
+            true => Some(ty),
+            false => as_written(self.file, &property.ty, self.primary_spelled(index), ty),
+        }
     }
 
     /// [`Self::constructor_property_type`] as the resolved type.
@@ -72,7 +85,19 @@ impl ClassHeader<'_> {
 
     /// The resolved type of the primary constructor's parameter at `index`.
     fn constructor_parameter_type(&self, index: usize) -> Option<KspType> {
-        self.scope.ty(self.constructor_parameter(index)?)
+        let ty = self.scope.ty(self.constructor_parameter(index)?)?;
+        as_written(
+            self.file,
+            &self.class.props.get(index)?.ty,
+            self.primary_spelled(index),
+            ty,
+        )
+    }
+
+    /// The resolved spelling of the primary constructor's parameter at `index`.
+    fn primary_spelled(&self, index: usize) -> Option<&Spelled> {
+        self.primary_spellings
+            .map(|spellings| spellings.param(index))
     }
 
     /// [`Self::constructor_parameter_type`] as the resolved type.
@@ -230,8 +255,20 @@ impl Source<'_> {
             })
             .flatten()
             .or_else(|| function.type_params.is_empty().then(Vec::new));
+        let spellings = signature
+            .and_then(|signature| signature.stable_declaration)
+            .and_then(|declaration| self.analysis.declared_type_spellings(declaration));
         let return_type = signature
-            .and_then(|signature| scope.ty(generic.map_or(signature.ret, |generic| generic.ret)));
+            .and_then(|signature| scope.ty(generic.map_or(signature.ret, |generic| generic.ret)))
+            .and_then(|ty| match &function.ret {
+                Some(spelling) => as_written(
+                    self.file,
+                    spelling,
+                    spellings.map(|spellings| &spellings.ret),
+                    ty,
+                ),
+                None => Some(ty),
+            });
         // The resolved parameter types, parallel to the written parameters.
         let parameter_types = signature
             .map(|signature| generic.map_or(&signature.params, |generic| &generic.params))
@@ -275,7 +312,13 @@ impl Source<'_> {
             .skip(function.context_count)
         {
             let resolved = parameter_types.map(|types| types[index]);
-            let mut described = parameter_description(parameter, resolved, &scope);
+            let mut described = parameter_description(
+                self.file,
+                parameter,
+                resolved,
+                spellings.map(|spellings| spellings.param(index)),
+                &scope,
+            );
             // A member function's parameter also has the default a function it overrides
             // declares.
             if is_member && described.has_default == Some(false) {
@@ -321,7 +364,13 @@ impl Source<'_> {
             )?,
             modifiers: self.written_modifiers(function.declaration_span.lo),
             type_parameters,
-            extension_receiver: receiver_slot(receiver, &scope),
+            extension_receiver: receiver_slot(
+                self.file,
+                function.receiver.as_ref(),
+                receiver,
+                spellings.map(|spellings| &spellings.receiver),
+                &scope,
+            ),
             parameters,
             return_type,
             jvm_signature,
@@ -498,7 +547,6 @@ impl Source<'_> {
                     .map(|resolved| resolved.ty),
             ),
         };
-        let ty = resolved.and_then(|ty| scope.ty(ty));
         let declaration = match owner {
             Owner::TopLevel { id, .. } => self
                 .file
@@ -520,6 +568,19 @@ impl Source<'_> {
                         .member_property_declaration(class, position as u32, false)
                 }),
         };
+        let spellings =
+            declaration.and_then(|declaration| self.analysis.declared_type_spellings(declaration));
+        let ty = resolved
+            .and_then(|ty| scope.ty(ty))
+            .and_then(|ty| match &property.ty {
+                Some(spelling) => as_written(
+                    self.file,
+                    spelling,
+                    spellings.map(|spellings| &spellings.ret),
+                    ty,
+                ),
+                None => Some(ty),
+            });
         let modifiers = self.written_modifiers(property.declaration_span.lo);
         let (getter, setter) =
             self.written_accessors(subject, property, declaration, modifiers.as_deref())?;
@@ -537,7 +598,13 @@ impl Source<'_> {
             modifiers,
             // A generic property's type parameters are not described yet.
             type_parameters: property.type_params.is_empty().then(Vec::new),
-            extension_receiver: receiver_slot(receiver, scope),
+            extension_receiver: receiver_slot(
+                self.file,
+                property.receiver.as_ref(),
+                receiver,
+                spellings.map(|spellings| &spellings.receiver),
+                scope,
+            ),
             ty,
             getter: Some(getter),
             setter,
@@ -738,10 +805,18 @@ impl Source<'_> {
             self.analysis
                 .constructor_declaration(class, index as u32 + 1)
         });
+        let spellings =
+            declaration.and_then(|declaration| self.analysis.declared_type_spellings(declaration));
         let mut parameters = Vec::with_capacity(constructor_decl.params.len());
         for (position, parameter) in constructor_decl.params.iter().enumerate() {
             let resolved = resolved.map(|types| types[position]);
-            let mut described = parameter_description(parameter, resolved, header.scope);
+            let mut described = parameter_description(
+                self.file,
+                parameter,
+                resolved,
+                spellings.map(|spellings| spellings.param(position)),
+                header.scope,
+            );
             described.annotations = self.published_annotations(
                 subject,
                 &parameter.annotations,
@@ -876,6 +951,7 @@ impl Source<'_> {
                     },
                     nullable: false,
                     arguments: Vec::new(),
+                    unannotated: false,
                 })
             })
             .collect();
@@ -985,15 +1061,18 @@ impl Source<'_> {
 
 /// A written parameter described with its `resolved` type.
 fn parameter_description(
+    file: &File,
     parameter: &Param,
     resolved: Option<Ty>,
+    spelled: Option<&Spelled>,
     scope: &TypeParameterScope,
 ) -> KspParameter {
     KspParameter {
         name: parameter.name.clone(),
         ty: resolved
             .and_then(|ty| declared_parameter_type(ty, parameter.is_vararg))
-            .and_then(|ty| scope.ty(ty)),
+            .and_then(|ty| scope.ty(ty))
+            .and_then(|ty| as_written(file, &parameter.ty, spelled, ty)),
         is_val: false,
         is_var: false,
         is_vararg: parameter.is_vararg,
@@ -1013,12 +1092,23 @@ fn declared_parameter_type(resolved: Ty, is_vararg: bool) -> Option<Ty> {
     }
 }
 
-/// The extension receiver slot of a declaration that writes `receiver`, resolved or not.
-fn receiver_slot(receiver: Option<Option<Ty>>, scope: &TypeParameterScope) -> KspTypeSlot {
+/// The extension receiver slot of a declaration that writes `receiver`, resolved or not, as
+/// `spelling` writes it.
+fn receiver_slot(
+    file: &File,
+    spelling: Option<&TypeRef>,
+    receiver: Option<Option<Ty>>,
+    spelled: Option<&Spelled>,
+    scope: &TypeParameterScope,
+) -> KspTypeSlot {
     match receiver {
         None => KspTypeSlot::Absent,
         Some(resolved) => resolved
             .and_then(|ty| scope.ty(ty))
+            .and_then(|ty| match spelling {
+                Some(spelling) => as_written(file, spelling, spelled, ty),
+                None => Some(ty),
+            })
             .map_or(KspTypeSlot::Undescribed, KspTypeSlot::Present),
     }
 }
