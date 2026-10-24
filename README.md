@@ -91,8 +91,12 @@ plugins {
 }
 ```
 
-Kotlin/JVM, the Android Gradle plugin (AGP 9's built-in Kotlin, or `kotlin("android")`), or both
-must be applied before krusty; an Android project's Kotlin compiles are replaced per variant. `kotlin("plugin.serialization")` works in any order:
+Kotlin/JVM, Kotlin Multiplatform, the Android Gradle plugin (AGP 9's built-in Kotlin, or
+`kotlin("android")`), or a combination must be applied before krusty; an Android project's Kotlin
+compiles are replaced per variant. In a multiplatform project krusty compiles the JVM targets'
+compilations; each source set of a compilation reaches the compiler as a fragment refining the
+source sets it depends on, as kotlinc receives them. Other targets (Android included) keep their own
+compilers. `kotlin("plugin.serialization")` works in any order:
 krusty receives the Kotlin Gradle plugin's compiler-plugin classpath and options exactly as kotlinc
 would. The compiler identifies plugin jars and directories from their registrar service entries;
 a compile that requests a Kotlin compiler plugin krusty does not implement (assignment, Compose,
