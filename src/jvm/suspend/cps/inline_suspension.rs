@@ -18,8 +18,9 @@
 //! that would otherwise be emitted with no continuation to pass.
 
 use super::super::is_suspension_point;
+use super::super::lambda_placement::recorded_placement;
 use crate::fx_hash::HashSet;
-use crate::ir::{for_each_child, Callee, ExprId, IrExpr, IrFile};
+use crate::ir::{for_each_child, Callee, ExprId, InlineLambdaPlacement, IrExpr, IrFile};
 use crate::jvm::inline_parameters::is_inline_parameter;
 use crate::jvm::placed_lambda_captures::is_placed_capture;
 use crate::libraries::InlineKind;
@@ -322,16 +323,31 @@ fn operand_spliceable(ir: &IrFile, expression: ExprId, child: ExprId, spliceable
 }
 
 /// The arguments of `call` bound to an inline parameter, the only literals the method inliner
-/// expands in place; a `noinline` literal or any other operand stays an ordinary value.
+/// expands in place; a `noinline` literal or any other operand stays an ordinary value. Neither
+/// is a suspend literal the callee's body never uses, which no frame runs, nor one it hands to an
+/// object it constructs, whose method runs the literal in its own frame: the only thing a function
+/// that is not itself suspend can do with one.
 fn inline_parameter_arguments(ir: &IrFile, call: ExprId) -> Vec<ExprId> {
     let IrExpr::Call { args, .. } = &ir.exprs[call as usize] else {
         return Vec::new();
     };
+    let suspending_callee = ir.suspend_calls.contains_key(&call);
     args.iter()
         .enumerate()
         .filter(|&(parameter, _)| is_inline_parameter(ir, call, parameter) == Some(true))
+        .filter(|&(_, &argument)| {
+            !is_suspend_literal(ir, argument)
+                || suspending_callee
+                    && recorded_placement(ir, argument) == Some(InlineLambdaPlacement::Invoked)
+        })
         .map(|(_, &argument)| argument)
         .collect()
+}
+
+/// Whether `expression` is a suspend lambda literal.
+fn is_suspend_literal(ir: &IrFile, expression: ExprId) -> bool {
+    matches!(&ir.exprs[expression as usize], IrExpr::Lambda { impl_fn, .. }
+        if ir.suspend_funs.contains(impl_fn))
 }
 
 /// The suspensions of `body` that sit in the literal lambda of a call whose callee the method

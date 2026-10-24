@@ -58,6 +58,10 @@ impl IrFile {
                 self.rendered_cast_target(inner, top_level_owner, qualify_root_classifier)
             ),
             TyKind::StarProjection(_) => "*".to_string(),
+            // IR spells a raw Java occurrence by its lower bound, whose argument is the erasure.
+            TyKind::RawProjection(inner) => {
+                self.rendered_cast_target(inner, top_level_owner, qualify_root_classifier)
+            }
             TyKind::DefinitelyNotNull(inner) => format!(
                 "{} & Any",
                 self.rendered_cast_target(inner, top_level_owner, qualify_root_classifier)

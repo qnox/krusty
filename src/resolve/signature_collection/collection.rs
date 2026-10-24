@@ -71,6 +71,18 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
 
     // Pass 2: resolve signatures/properties against the now-complete type universe.
     let mut table = SymbolTable::default();
+    table.source_fragments =
+        crate::source::SourceFragments::new(files.iter().map(|file| file.fragment));
+    table
+        .source_fragments
+        .publish_alias_sources(file_type_aliases.iter().enumerate().flat_map(
+            |(source, aliases)| {
+                let package = source_package_ids[source];
+                aliases.iter().map(move |(alias, _, _)| {
+                    (crate::types::type_name_child(package, alias), source as u32)
+                })
+            },
+        ));
     table.sam_with_receiver_annotations = frontend_plugins.sam_with_receiver_annotations();
     let mut declaration_annotation_resolution_attempts = crate::fx_hash::HashSet::default();
     for file_index in 0..source_packages.len() {
@@ -4250,59 +4262,17 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
         // Resolve every alias declaration to the one authoritative expansion consumed by metadata.
         // Alias chains are structurally expanded first; the remaining classifier spellings then bind
         // through this declaration file's ordinary imports and class table.
-        let package_source = &source_packages[file_index];
         let package = source_package_ids[file_index];
-        let mut visible_aliases = Vec::new();
-        // Qualified spellings are absolute and independent of import precedence.
-        for (declaration_file_index, declaration_package) in source_packages.iter().enumerate() {
-            for (name, formals, target) in &file_type_aliases[declaration_file_index] {
-                let qualified = if declaration_package.is_empty() {
-                    name.clone()
-                } else {
-                    format!("{declaration_package}.{name}")
-                };
-                visible_aliases.push((qualified, formals.clone(), target.clone()));
-            }
-        }
-        // Star imports contribute below same-package declarations.
-        for imported_package in source_imports[file_index]
-            .iter()
-            .filter(|import| import.wildcard)
-            .map(|import| import.path.as_str())
-        {
-            for (declaration_file_index, _) in source_packages
-                .iter()
-                .enumerate()
-                .filter(|candidate| candidate.1.as_str() == imported_package)
-            {
-                visible_aliases.extend(file_type_aliases[declaration_file_index].iter().cloned());
-            }
-        }
-        // Same-package declarations outrank star imports and include aliases from sibling files.
-        for (declaration_file_index, _) in source_packages
-            .iter()
-            .enumerate()
-            .filter(|candidate| candidate.1 == package_source)
-        {
-            visible_aliases.extend(file_type_aliases[declaration_file_index].iter().cloned());
-        }
-        // Explicit imports are final and may rename the lookup spelling.
-        for import in source_imports[file_index]
-            .iter()
-            .filter(|import| !import.wildcard)
-        {
-            let spelling = &import.visible_name;
-            let imported = super::super::source_package::identity(Some(import.path.as_str()));
-            for (declaration_file_index, &declaration_package) in
-                source_package_ids.iter().enumerate()
-            {
-                for (name, formals, target) in &file_type_aliases[declaration_file_index] {
-                    if crate::types::type_name_child(declaration_package, name) == imported {
-                        visible_aliases.push((spelling.clone(), formals.clone(), target.clone()));
-                    }
-                }
-            }
-        }
+        let visible_aliases = visible_source_aliases(
+            &table,
+            SourceAliasDeclarations {
+                aliases: &file_type_aliases,
+                packages: &source_packages,
+                package_ids: &source_package_ids,
+                imports: &source_imports,
+            },
+            file_index,
+        );
         // Compact headers carry the checked type-use annotations of every compiled source. Only
         // the editor's declaration-only support sources arrive without headers: they are a
         // dependency module's API, never emitted, so no `@Metadata` consumes their spellings.

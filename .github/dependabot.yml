@@ -18,3 +18,13 @@ updates:
     groups:
       cranelift:
         patterns: ["cranelift-*"]
+
+  # The Gradle plugin build. Its lockfiles and gradle/verification-metadata.xml are committed, so an
+  # update also refreshes them (docs/ARCHITECTURE.md) before the build-gradle-plugin job passes.
+  - package-ecosystem: gradle
+    directory: "/tools/krusty-gradle"
+    schedule:
+      interval: weekly
+    groups:
+      gradle:
+        patterns: ["*"]

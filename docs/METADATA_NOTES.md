@@ -1,5 +1,17 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Class formal layouts before member publication
+
+Kotlin class metadata supplies own formals and bounds. A mapped builtin declaration supplies its
+semantic layout when applicable; Java class signatures supply the remaining declarations. Captured
+class formals come from non-static `InnerClasses` outer edges, with bound hydration before own-first
+capture/shadow renaming. Local or anonymous entries without an outer are not member capture edges.
+
+Layout reads use class headers and builtin declaration tables, not the enclosing `LibraryType` or
+its members. Physical mapped Java requests keep invariant formals independently of a Kotlin view's
+declared variance. This changes no metadata wire fields or physical descriptors. Missing lexical
+formal scopes, including unavailable enclosing-method evidence, do not license placeholder bounds.
+
 Wasm's erased-reference binary equality realization uses the already checked operator and the
 runtime GC representation. It changes no metadata, callable identity, or provider authorization;
 explicit dependency `Any.equals` realization remains a separate authenticated-callable contract.
@@ -7,6 +19,17 @@ explicit dependency `Any.equals` realization remains a separate authenticated-ca
 Goal: emit `@kotlin.Metadata` so krusty output is consumable as a **Kotlin** library (Java consumers
 need only the signatures, already matched in Phase 5a). This is the single largest remaining piece —
 effectively a re-implementation of `kotlinx-metadata-jvm`'s writer.
+
+## Java raw type arguments
+
+A Java raw occurrence is a complete application of `RawProjection` arguments, one per formal.
+kotlinc 2.4.21 writes it (`fun f() = Raw.box()` for
+`class Box<T extends CharSequence>`) as a flexible `Type`: the lower face applies each erasure
+(`Box<CharSequence!>`, itself a `PlatformType` flexible argument), `flexible_type_capabilities_id`
+is `kotlin.jvm.PlatformType`, the upper face is the nullable all-star application of the read-only
+face (`Box<*>?`, `List<*>?` for a raw `java.util.List` whose lower face is `MutableList<Any?>`),
+and both faces carry the JVM extension `JvmProtoBuf.is_raw` (field 101) set to true. Strings
+intern lower, upper, then the capability (`tests/java_raw_type_e2e.rs`).
 
 ## Shared-target compiler/plugin model artifacts
 
@@ -44,6 +67,11 @@ the vararg marker/element call facts. Reconstructing `Array<T>` from that elemen
 type-table forms share the same decoding path; no metadata encoding changes. Consumers retain the
 packed array projection but use the readable element value type for listed-argument conversions,
 adapted references and evaluation-order spills; whole-array spreads keep the array type.
+
+Local calls retain the checker-applied value-parameter list for packing too. It may select a concrete
+reference array while the lifted local declaration still has an erased generic array descriptor.
+This changes neither that declaration's generic signature nor metadata encoding, and does not
+reconstruct selected element types from operands or physical descriptors.
 
 ## Reference (`fun f(a: Int): Int = a` in `M.kt` → class `MKt`)
 
@@ -928,7 +956,23 @@ checks both declaration forms through all three views, with and without platform
 
 ## Reference-array cast bound evidence
 
+Dependent callable-bound validation uses semantic formal identities and the existing completed
+binding map. Deferring unresolved call-owned relations changes neither generic declaration
+metadata nor emitted signatures; a reference-built dependency and a source declaration use the
+same rule. Caller-owned formals and concrete upper bounds remain immediately constraining.
+
 Compatible JVM array casts read the existing IR generic signatures and exact recorded non-local
 and lambda bound declarations. They introduce no Kotlin metadata encoding or provider lookup.
 Expected components use declaration-primary erasure; actual components retain the complete
 intersection of declared bounds. Backend wrapper names do not replace Kotlin classifier identity.
+
+## JVM signature segment evidence
+
+JVM `Signature` syntax now reaches an application builder as the complete written segment sequence,
+with physical identities and optional argument lists. Parsing no longer overwrites outer arguments
+before that construction boundary. The standalone policy still keeps innermost arguments and marks
+discarded outer arguments inexact for fields. Class/array erasure is computed from syntax and checked
+against the complete field descriptor independently of the builder's semantic result.
+
+This changes no Kotlin metadata wire fields or raw-type flags. Declaration-backed raw/captured
+construction remains separate from this syntax boundary.

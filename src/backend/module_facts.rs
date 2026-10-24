@@ -183,6 +183,28 @@ pub struct BackendModuleFacts {
     /// Each dependency classifier the module's own classes stand behind, with the file of every
     /// source class that can be an instance of it, body-local ones included.
     dependency_implementors: HashMap<TypeName, Box<[crate::fir::SourceFileId]>>,
+    /// Each `expect` classifier an `actual typealias` actualizes, mapped to the alias's target.
+    /// Common code types the `expect` as its own classifier; every target realizes the target.
+    actualized_expects: HashMap<TypeName, TypeName>,
+    /// Each classifier nested in such an `expect` class, mapped to the same-named classifier
+    /// nested in the alias's target. No alias names it, so it is never abbreviated.
+    actualized_nested_expects: HashMap<TypeName, TypeName>,
+}
+
+/// The classifier an `expect` classifier stands for: the target of the `actual typealias` naming
+/// it, or, for one nested in such a class, the same-named classifier nested in that target.
+fn actualized_expect_target(
+    index: &crate::fir::ResolvedModuleIndex,
+    classifier: TypeName,
+) -> Option<TypeName> {
+    if let Some(alias) = index.type_alias_by_identity(classifier) {
+        return Some(alias.target);
+    }
+    let target = actualized_expect_target(index, classifier.nested_owner()?)?;
+    Some(crate::types::type_name_nested_child(
+        target,
+        classifier.nested_segment_ref(),
+    ))
 }
 
 impl BackendModuleFacts {
@@ -199,6 +221,8 @@ impl BackendModuleFacts {
         let mut source_declarations = HashMap::default();
         let mut generated_classifiers = Vec::new();
         let mut source_supertypes = HashMap::default();
+        let mut actualized_expects = HashMap::default();
+        let mut actualized_nested_expects = HashMap::default();
         for raw in 0..index.declaration_count() {
             let declaration = crate::fir::DeclarationId::from_raw(
                 u32::try_from(raw).expect("too many stable declarations for a packed id"),
@@ -233,6 +257,20 @@ impl BackendModuleFacts {
             let declaration_header = index.declaration_header(declaration).ok_or(
                 BackendFactError::IncompleteClassifier(classifier.classifier),
             )?;
+            // An `expect` an `actual typealias` actualized is realized as the alias target. An
+            // `@OptionalExpectation` annotation without an actual stays a classifier of its own.
+            if let Some(target) = declaration_header
+                .flags
+                .has(crate::fir::DeclarationFlags::EXPECT)
+                .then(|| actualized_expect_target(index, classifier.classifier))
+                .flatten()
+            {
+                match index.type_alias_by_identity(classifier.classifier) {
+                    Some(_) => actualized_expects.insert(classifier.classifier, target),
+                    None => actualized_nested_expects.insert(classifier.classifier, target),
+                };
+                continue;
+            }
             for generated in index.generated_classifiers(declaration) {
                 assert_eq!(
                     generated.lexical_owner, classifier.classifier,
@@ -414,6 +452,8 @@ impl BackendModuleFacts {
                 .collect(),
             classes: Default::default(),
             dependency_implementors: dependency_implementors(&source_supertypes),
+            actualized_expects,
+            actualized_nested_expects,
         })
     }
 
@@ -451,6 +491,8 @@ impl BackendModuleFacts {
             file_annotations: HashMap::default(),
             classes: Default::default(),
             dependency_implementors: HashMap::default(),
+            actualized_expects: HashMap::default(),
+            actualized_nested_expects: HashMap::default(),
         })
     }
 
@@ -472,6 +514,13 @@ impl BackendModuleFacts {
         &self,
     ) -> Option<crate::types::SerializationGeneratedMemberStatuses> {
         self.serialization_generated_member_statuses
+    }
+
+    /// Each `expect` classifier an `actual typealias` actualizes, mapped to the alias's target.
+    pub(crate) fn actualized_expects(
+        &self,
+    ) -> (&HashMap<TypeName, TypeName>, &HashMap<TypeName, TypeName>) {
+        (&self.actualized_expects, &self.actualized_nested_expects)
     }
 
     pub fn is_body_local(&self, classifier: TypeName) -> bool {
