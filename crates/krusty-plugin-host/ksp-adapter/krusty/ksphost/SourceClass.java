@@ -38,6 +38,7 @@ final class SourceClass implements KSClassDeclaration {
     Set<Modifier> modifiers;
     List<KSTypeParameter> typeParameters;
     List<KSTypeReference> superTypes;
+    String jvmSignature;
 
     SourceClass(
             SourceFile file,

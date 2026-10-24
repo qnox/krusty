@@ -59,18 +59,19 @@ fn run_script(job: &str) -> String {
 }
 
 /// The aggregate's result variables, in the order its log names them.
-const RESULT_VARIABLES: [&str; 8] = [
+const RESULT_VARIABLES: [&str; 9] = [
     "CI_RESULT",
     "LINT_RESULT",
     "CONFORMANCE_RESULT",
     "KLIB_CONFORMANCE_RESULT",
     "GRADLE_PLUGIN_RESULT",
     "GRADLE_RESULT",
+    "MAVEN_RESULT",
     "BUILD_TOOLS_RESULT",
     "BAZEL_RESULT",
 ];
 
-fn run_predicate(script: &str, results: [&str; 8]) -> std::process::Output {
+fn run_predicate(script: &str, results: [&str; 9]) -> std::process::Output {
     let mut child = Command::new("bash")
         .arg("-s")
         .env_clear()
@@ -100,7 +101,7 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
     );
     assert!(
         aggregate.contains(
-            "\n    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, bazel]\n"
+            "\n    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, maven, build-tools, bazel]\n"
         ),
         "the aggregate waits on every merge gate: {aggregate}"
     );
@@ -326,7 +327,7 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
     let release = job(&workflow, "release");
     assert!(
         release.contains(
-            "    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, bazel, build-tool-bins, build-release]\n"
+            "    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-maven-plugin, maven, build-tools, bazel, build-tool-bins, build-release]\n"
         ) && release.contains("run: scripts/release-publisher.sh check >> \"$GITHUB_OUTPUT\"\n"),
         "master release keeps its broader prerequisites and rechecks under the publisher lock: {release}"
     );
@@ -343,8 +344,8 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
 fn aggregate_passes_only_when_every_merge_gate_succeeded() {
     let workflow = workflow();
     let script = run_script(job(&workflow, AGGREGATE));
-    let run = |results: [&str; 8]| run_predicate(&script, results);
-    let success = ["success"; 8];
+    let run = |results: [&str; 9]| run_predicate(&script, results);
+    let success = ["success"; 9];
     let output = run(success);
     assert!(
         output.status.success(),
@@ -353,7 +354,7 @@ fn aggregate_passes_only_when_every_merge_gate_succeeded() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "ci: success\nlint: success\nconformance: success\nKLIB conformance: success\nbuild-gradle-plugin: success\ngradle: success\nbuild-tools: success\nbazel: success\n",
+        "ci: success\nlint: success\nconformance: success\nKLIB conformance: success\nbuild-gradle-plugin: success\ngradle: success\nmaven: success\nbuild-tools: success\nbazel: success\n",
         "the log names every dependency result"
     );
 
@@ -364,6 +365,7 @@ fn aggregate_passes_only_when_every_merge_gate_succeeded() {
         "KLIB conformance",
         "build-gradle-plugin",
         "gradle",
+        "maven",
         "build-tools",
         "bazel",
     ];
@@ -378,7 +380,7 @@ fn aggregate_passes_only_when_every_merge_gate_succeeded() {
             );
             assert_eq!(
                 String::from_utf8_lossy(&output.stderr),
-                "lint, coverage, conformance (including KLIB semantics), every Gradle gate, every build-tools lane, and every Bazel lane must succeed\n",
+                "lint, coverage, conformance (including KLIB semantics), every Gradle gate, the Maven goal, every build-tools lane, and every Bazel lane must succeed\n",
                 "{gate}={result:?}"
             );
         }

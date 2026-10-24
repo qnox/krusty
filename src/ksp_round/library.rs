@@ -1,13 +1,14 @@
 //! The classifiers of the classpath as KSP shows them to a processor: the header a host asks for
 //! by name when a processor first reaches one, from the declaration header krusty's library
-//! provider reads.
+//! provider reads, and the name kotlinc's class map gives one across the JVM boundary.
 
 use krusty_plugin_ir::{
-    KspClass, KspClassKind, KspClasspath, KspLibraryClass, KspModifier, KspOrigin, KspType,
-    KspTypeDeclaration,
+    KspClass, KspClassKind, KspClasspath, KspLibraryClass, KspModifier, KspNameMapping, KspOrigin,
+    KspType, KspTypeDeclaration,
 };
 
 use super::annotations::{short_name, Annotations};
+use super::platform_names;
 use super::type_model::{class_type, qualified_name, TypeParameterIds, TypeParameterScope};
 use crate::frontend::SourceSetAnalysis;
 use crate::libraries::{
@@ -32,6 +33,16 @@ impl KspClasspath for KspLibraries<'_> {
         let class = self.analysis.library_classifier(qualified_name)?;
         let header = self.analysis.symbols.libraries.declaration_header(class)?;
         Some(self.library_class(class, &header))
+    }
+
+    fn mapped_name(&self, mapping: KspNameMapping, name: &str) -> Option<String> {
+        let classifier = self.analysis.library_classifier(name)?;
+        let libraries = &self.analysis.symbols.libraries;
+        let mapped = match mapping {
+            KspNameMapping::KotlinToJava => libraries.platform_class(classifier),
+            KspNameMapping::JavaToKotlin => libraries.mapped_classifier(classifier),
+        }?;
+        Some(qualified_name(mapped))
     }
 }
 
@@ -96,6 +107,11 @@ impl KspLibraries<'_> {
                     .and_then(|signature| super_types(class, &signature.supertypes, &scope)),
                 declarations: Vec::new(),
                 declarations_complete: false,
+                // A builtin classifier is its semantic type: `kotlin.Unit` is `V`.
+                jvm_signature: platform_names::type_signature(
+                    self.analysis,
+                    Ty::obj_name(class).canonical_semantic(),
+                ),
             },
             package_name: class.package().replace('/', "."),
             parent: class.nested_owner().map(qualified_name),

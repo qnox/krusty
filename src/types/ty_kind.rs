@@ -47,6 +47,12 @@ pub enum TyKind {
     InProjection(Ty),
     OutProjection(Ty),
     StarProjection(Ty),
+    /// One argument of a Java raw type occurrence (`Box` written without arguments for
+    /// `class Box<T extends CharSequence>`). Kotlin reads that occurrence as the flexible type
+    /// `(Box<CharSequence!>..Box<*>?)`: the carried type is the formal's erased declaration bound,
+    /// the lower bound's argument, and the upper bound's argument is a star. Only a Java provider
+    /// produces it, from an authenticated raw occurrence and the classifier's complete formals.
+    RawProjection(Ty),
     /// A generic type-parameter reference (`T`), carrying its name and declared upper bound
     /// (`<T : CharSequence>` → bound `CharSequence`; unbounded `<T>` → bound `kotlin/Any`). The checker
     /// reasons about `T` as `T` (subtyping against the bound, substitution at instantiation); runtime

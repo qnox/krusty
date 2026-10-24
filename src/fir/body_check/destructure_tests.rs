@@ -171,6 +171,7 @@ fn generic_local_extension_component_keeps_body_local_identity_and_specialized_t
         target,
         extension_receiver: Some(receiver),
         arguments,
+        parameter_types,
     } = &body.expr(component).expect("local component call").kind
     else {
         panic!("local extension component must remain a local FIR call")
@@ -179,6 +180,7 @@ fn generic_local_extension_component_keeps_body_local_identity_and_specialized_t
     assert_eq!(target.body_depth, 0);
     assert_eq!(receiver.value, *initializer);
     assert!(arguments.is_empty());
+    assert!(parameter_types.is_empty());
 }
 
 #[test]

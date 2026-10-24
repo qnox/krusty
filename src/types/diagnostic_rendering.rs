@@ -89,6 +89,19 @@ pub(super) fn platform_type(
         ty.source_name_with_classifier_in(context, type_parameter, classifier, platform_upper_bound)
     };
     let upper = platform_upper_bound(inner);
+    if let (TyKind::Obj(lower_owner, arguments), true) = (inner.kind(), inner.is_raw_application())
+    {
+        // A raw occurrence is already flexible; its interval spells both bounds, and a mapped
+        // collection's read-only face is the upper one.
+        let upper_owner = upper.obj_internal().unwrap_or(lower_owner);
+        return raw_type(
+            &render(Ty::obj_name(lower_owner)),
+            &render(Ty::obj_name(upper_owner)),
+            &arguments,
+            RawNullability::PLATFORM,
+            render,
+        );
+    }
     let (TyKind::Obj(lower_owner, arguments), TyKind::Obj(upper_owner, _)) =
         (inner.kind(), upper.kind())
     else {
@@ -125,4 +138,72 @@ pub(super) fn platform_type(
         .collect::<Vec<_>>()
         .join(", ");
     format!("{face}<{arguments}>!")
+}
+
+/// Render an `@Nullable` Java raw occurrence: both faces of its interval are nullable.
+pub(super) fn nullable_raw_type(
+    inner: Ty,
+    render: impl Fn(Ty) -> String,
+    platform_upper_bound: &dyn Fn(Ty) -> Ty,
+) -> String {
+    let TyKind::Obj(lower_owner, arguments) = inner.kind() else {
+        return format!("{}?", render(inner));
+    };
+    let upper_owner = platform_upper_bound(inner)
+        .obj_internal()
+        .unwrap_or(lower_owner);
+    raw_type(
+        &render(Ty::obj_name(lower_owner)),
+        &render(Ty::obj_name(upper_owner)),
+        &arguments,
+        RawNullability::NULLABLE,
+        render,
+    )
+}
+
+/// Which faces of a Java raw interval are nullable. An unannotated occurrence has a nullable upper
+/// face only; `@NotNull` makes neither nullable and `@Nullable` both.
+#[derive(Clone, Copy)]
+pub(super) struct RawNullability {
+    pub(super) lower: bool,
+    pub(super) upper: bool,
+}
+
+impl RawNullability {
+    pub(super) const NOT_NULL: Self = Self {
+        lower: false,
+        upper: false,
+    };
+    pub(super) const PLATFORM: Self = Self {
+        lower: false,
+        upper: true,
+    };
+    pub(super) const NULLABLE: Self = Self {
+        lower: true,
+        upper: true,
+    };
+}
+
+/// Render a Java raw occurrence as kotlinc spells its flexible interval: the lower bound applies
+/// each formal's erasure, and the upper bound stars every argument
+/// (`(Box<CharSequence!>..Box<*>?)`).
+pub(super) fn raw_type(
+    lower: &str,
+    upper: &str,
+    arguments: &[Ty],
+    nullability: RawNullability,
+    render: impl Fn(Ty) -> String,
+) -> String {
+    let erased = arguments
+        .iter()
+        .map(|argument| render(*argument))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let stars = vec!["*"; arguments.len()].join(", ");
+    let mark = |nullable: bool| if nullable { "?" } else { "" };
+    format!(
+        "({lower}<{erased}>{}..{upper}<{stars}>{})",
+        mark(nullability.lower),
+        mark(nullability.upper)
+    )
 }

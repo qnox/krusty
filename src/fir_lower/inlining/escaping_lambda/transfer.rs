@@ -1625,6 +1625,7 @@ fn type_mentions_anonymous_class(ir: &crate::ir::IrFile, ty: Ty) -> bool {
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner)
         | TyKind::StarProjection(inner)
+        | TyKind::RawProjection(inner)
         | TyKind::TyParam(_, inner) => type_mentions_anonymous_class(ir, inner),
         TyKind::Intersection(parts) => parts
             .iter()

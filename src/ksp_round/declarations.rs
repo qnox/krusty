@@ -7,6 +7,7 @@ use krusty_plugin_ir::{
 };
 
 use super::annotations::Placement;
+use super::platform_names::{FunctionNaming, NamingSite};
 use super::type_model::{class_type, TypeParameterScope};
 use super::{Owner, Source, Subject};
 use crate::ast::{
@@ -14,7 +15,7 @@ use crate::ast::{
     SecondaryCtor,
 };
 use crate::frontend::{FrontendClassSig, FrontendDeclarationId};
-use crate::types::{Ty, Visibility};
+use crate::types::{wk, ResolvedAnnotation, Ty, Visibility};
 
 /// What a classifier's declarations are built from.
 pub(super) struct ClassHeader<'a> {
@@ -28,6 +29,17 @@ pub(super) struct ClassHeader<'a> {
 }
 
 impl ClassHeader<'_> {
+    /// Whether the class names its properties' accessors as the properties: an annotation class
+    /// or a `@JvmRecord` class does.
+    fn bare_accessors(&self) -> bool {
+        self.kind == KspClassKind::AnnotationClass
+            || self
+                .signature
+                .applied_annotations
+                .iter()
+                .any(|annotation| annotation.annotation == wk::jvm_record())
+    }
+
     /// The classifier applied to a star for each of its type parameters, which is what KSP
     /// reports a constructor returns.
     fn star_projected(&self) -> KspType {
@@ -39,25 +51,38 @@ impl ClassHeader<'_> {
     /// The type of the property primary-constructor parameter `index` declares: the resolved
     /// slot, which for a `vararg` parameter is its array, `Array<out T>` for a reference element.
     fn constructor_property_type(&self, index: usize) -> Option<KspType> {
+        self.scope.ty(self.constructor_property(index)?)
+    }
+
+    /// [`Self::constructor_property_type`] as the resolved type.
+    fn constructor_property(&self, index: usize) -> Option<Ty> {
         let (ty, _) = *self.signature.ctor_param_shapes.get(index)?;
-        let ty = if self.class.props.get(index)?.is_vararg && ty.is_reference_array() {
-            Ty::obj_args_name(
-                crate::types::wk::array(),
-                &[Ty::out_projection(ty.array_read_elem()?)],
-            )
-        } else {
-            ty
-        };
-        self.scope.ty(ty)
+        Some(
+            if self.class.props.get(index)?.is_vararg && ty.is_reference_array() {
+                Ty::obj_args_name(
+                    crate::types::wk::array(),
+                    &[Ty::out_projection(ty.array_read_elem()?)],
+                )
+            } else {
+                ty
+            },
+        )
     }
 
     /// The resolved type of the primary constructor's parameter at `index`.
     fn constructor_parameter_type(&self, index: usize) -> Option<KspType> {
+        self.scope.ty(self.constructor_parameter(index)?)
+    }
+
+    /// [`Self::constructor_parameter_type`] as the resolved type.
+    fn constructor_parameter(&self, index: usize) -> Option<Ty> {
         let (ty, _) = *self.signature.ctor_param_shapes.get(index)?;
-        self.scope.ty(declared_parameter_type(
-            ty,
-            self.class.props.get(index)?.is_vararg,
-        )?)
+        declared_parameter_type(ty, self.class.props.get(index)?.is_vararg)
+    }
+
+    /// The classifier applied to its own type parameters.
+    fn class_ty(&self) -> Ty {
+        Ty::obj_name(self.signature.internal)
     }
 }
 
@@ -73,9 +98,9 @@ impl Source<'_> {
         let mut declarations = Vec::new();
         for (index, parameter) in class.props.iter().enumerate() {
             if parameter.is_property {
-                declarations.push(KspDeclaration::Property(
+                declarations.push(KspDeclaration::Property(Box::new(
                     self.constructor_property(index, parameter, header)?,
-                ));
+                )));
             }
         }
         let mut members: Vec<(u32, KspDeclaration)> = Vec::new();
@@ -96,7 +121,11 @@ impl Source<'_> {
             };
             members.push((
                 property.span.lo,
-                KspDeclaration::Property(self.property(property, &owner, header.scope)?),
+                KspDeclaration::Property(Box::new(self.property(
+                    property,
+                    &owner,
+                    header.scope,
+                )?)),
             ));
         }
         members.sort_by_key(|(start, _)| *start);
@@ -104,6 +133,9 @@ impl Source<'_> {
         if class.is_data && header.kind == KspClassKind::Class {
             declarations.extend(self.data_members(header));
         }
+        // KSP lists inner classes with the members, before the constructors, and other nested
+        // classifiers after the enum entries.
+        self.nested_classes(header, true, &mut declarations)?;
         if let Some(primary) = self.primary_constructor(header)? {
             declarations.push(KspDeclaration::Function(primary));
         }
@@ -117,22 +149,35 @@ impl Source<'_> {
         for entry in &class.enum_entries {
             declarations.push(KspDeclaration::Class(self.enum_entry(entry, header)?));
         }
+        self.nested_classes(header, false, &mut declarations)?;
+        if header.kind == KspClassKind::EnumClass {
+            declarations.extend(self.enum_members(header));
+        }
+        Ok((declarations, complete))
+    }
+
+    /// Adds the classifiers nested in `header`'s class that are `inner` or not, in source order.
+    fn nested_classes(
+        &self,
+        header: &ClassHeader<'_>,
+        inner: bool,
+        declarations: &mut Vec<KspDeclaration>,
+    ) -> Result<(), String> {
         for &nested in &self.file.decls {
             if !self.is_member_of(nested, Some(header.id)) {
                 continue;
             }
             if let Decl::Class(nested_class) = self.file.decl(nested) {
-                declarations.push(KspDeclaration::Class(self.class(
-                    nested,
-                    nested_class,
-                    header.scope,
-                )?));
+                if nested_class.inner_of.is_some() == inner {
+                    declarations.push(KspDeclaration::Class(self.class(
+                        nested,
+                        nested_class,
+                        header.scope,
+                    )?));
+                }
             }
         }
-        if header.kind == KspClassKind::EnumClass {
-            declarations.extend(self.enum_members(header));
-        }
-        Ok((declarations, complete))
+        Ok(())
     }
 
     pub(super) fn function(
@@ -199,6 +244,28 @@ impl Source<'_> {
         });
         let is_member = matches!(owner, Owner::Class { .. });
         let declaration = signature.and_then(|signature| signature.stable_declaration);
+        let jvm_parameters: Vec<Option<Ty>> = (function.context_count..function.params.len())
+            .map(|index| {
+                let resolved = parameter_types?[index];
+                declared_parameter_type(resolved, function.params[index].is_vararg)
+            })
+            .collect();
+        let jvm_result =
+            signature.map(|signature| generic.map_or(signature.ret, |generic| generic.ret));
+        let (jvm_signature, jvm_name) = self.jvm_function(
+            &FunctionNaming {
+                name: &function.name,
+                annotations: self.applied(declaration),
+                site: NamingSite {
+                    internal: function.visibility == Visibility::Internal,
+                    member: is_member,
+                    bare_accessors: false,
+                    generated: false,
+                },
+            },
+            &jvm_parameters,
+            jvm_result,
+        );
         let mut parameters = Vec::with_capacity(function.params.len());
         for (index, parameter) in function
             .params
@@ -255,7 +322,110 @@ impl Source<'_> {
             extension_receiver: receiver_slot(receiver, &scope),
             parameters,
             return_type,
+            jvm_signature,
+            jvm_name,
         })
+    }
+
+    /// The annotations the published declaration `declaration` has.
+    fn applied(&self, declaration: Option<FrontendDeclarationId>) -> &[ResolvedAnnotation] {
+        declaration.map_or(&[], |declaration| {
+            self.analysis.declaration_annotations(declaration)
+        })
+    }
+
+    /// The JVM signature and name of a function with `parameters` and `result`.
+    fn jvm_function(
+        &self,
+        naming: &FunctionNaming<'_>,
+        parameters: &[Option<Ty>],
+        result: Option<Ty>,
+    ) -> (Option<String>, Option<String>) {
+        let Some(platform) = self.platform else {
+            return (None, None);
+        };
+        (
+            platform.function_signature(parameters, result),
+            platform.function_name(naming, parameters, result),
+        )
+    }
+
+    /// Adds the JVM signature and name of a constructor of `header`'s class with `parameters`:
+    /// KSP2 spells it returning `Unit`, and mangles its name as returning the class.
+    fn add_constructor_jvm_names(
+        &self,
+        constructor: &mut KspFunction,
+        header: &ClassHeader<'_>,
+        parameters: &[Option<Ty>],
+        declaration: Option<FrontendDeclarationId>,
+    ) {
+        let Some(platform) = self.platform else {
+            return;
+        };
+        constructor.jvm_signature = platform.function_signature(parameters, Some(Ty::Unit));
+        constructor.jvm_name = platform.function_name(
+            &FunctionNaming {
+                name: "<init>",
+                annotations: self.applied(declaration),
+                site: NamingSite {
+                    internal: false,
+                    member: true,
+                    bare_accessors: false,
+                    generated: false,
+                },
+            },
+            parameters,
+            Some(header.class_ty()),
+        );
+    }
+
+    /// Adds the JVM signature and name of a function the language contributes.
+    fn add_synthetic_jvm_names(
+        &self,
+        function: &mut KspFunction,
+        parameters: &[Option<Ty>],
+        result: Option<Ty>,
+    ) {
+        let name = function.name.clone();
+        (function.jvm_signature, function.jvm_name) = self.jvm_function(
+            &FunctionNaming {
+                name: &name,
+                annotations: &[],
+                site: NamingSite {
+                    internal: false,
+                    member: true,
+                    bare_accessors: false,
+                    generated: true,
+                },
+            },
+            parameters,
+            result,
+        );
+    }
+
+    /// Adds the JVM signature of `property`, of type `ty`, and the JVM names of its accessors.
+    fn add_jvm_names(
+        &self,
+        property: &mut KspProperty,
+        ty: Option<Ty>,
+        declaration: Option<FrontendDeclarationId>,
+        site: NamingSite,
+    ) {
+        let Some(platform) = self.platform else {
+            return;
+        };
+        let accessor_annotations = |setter: bool| {
+            declaration.map_or(&[][..], |declaration| {
+                self.analysis.accessor_annotations(declaration, setter)
+            })
+        };
+        property.jvm_signature = ty.and_then(|ty| platform.type_signature(ty));
+        property.getter.jvm_name =
+            platform.accessor_name(&property.name, false, ty, accessor_annotations(false), site);
+        if let Some(setter) = &mut property.setter {
+            setter.jvm_name =
+                platform.accessor_name(&property.name, true, ty, accessor_annotations(true), site);
+        }
     }
 
     /// Whether the member function `declaration` declares or inherits a default for its parameter
@@ -294,10 +464,10 @@ impl Source<'_> {
             line: property.decl_line,
         };
         // The extension receiver it writes, resolved or not, and its type.
-        let (receiver, ty) = match owner {
+        let (receiver, resolved) = match owner {
             Owner::TopLevel { id, .. } if property.receiver.is_some() => {
                 match self.symbols.source_extension_property((self.index, id.0)) {
-                    Some(resolved) => (Some(Some(resolved.receiver)), scope.ty(resolved.ty)),
+                    Some(resolved) => (Some(Some(resolved.receiver)), Some(resolved.ty)),
                     None => (Some(None), None),
                 }
             }
@@ -306,7 +476,7 @@ impl Source<'_> {
                 self.symbols
                     .source_props
                     .get(&(self.index, id.0))
-                    .and_then(|resolved| scope.ty(resolved.ty)),
+                    .map(|resolved| resolved.ty),
             ),
             // A member extension property is not described yet.
             Owner::Class { .. } if property.receiver.is_some() => (Some(None), None),
@@ -316,9 +486,10 @@ impl Source<'_> {
                     .signature
                     .declared_props
                     .get(&property.name)
-                    .and_then(|resolved| scope.ty(resolved.ty)),
+                    .map(|resolved| resolved.ty),
             ),
         };
+        let ty = resolved.and_then(|ty| scope.ty(ty));
         let declaration = match owner {
             Owner::TopLevel { id, .. } => self
                 .file
@@ -343,7 +514,7 @@ impl Source<'_> {
         let modifiers = self.written_modifiers(property.declaration_span.lo);
         let (getter, setter) =
             self.written_accessors(subject, property, declaration, modifiers.as_deref())?;
-        Ok(KspProperty {
+        let mut described = KspProperty {
             name: property.name.clone(),
             is_mutable: property.is_var,
             line: Some(property.decl_line),
@@ -360,7 +531,23 @@ impl Source<'_> {
             ty,
             getter,
             setter,
-        })
+            jvm_signature: None,
+        };
+        self.add_jvm_names(
+            &mut described,
+            resolved,
+            declaration,
+            NamingSite {
+                internal: property.visibility == Visibility::Internal,
+                member: matches!(owner, Owner::Class { .. }),
+                bare_accessors: match owner {
+                    Owner::Class { header, .. } => header.bare_accessors(),
+                    _ => false,
+                },
+                generated: false,
+            },
+        );
+        Ok(described)
     }
 
     /// The property a `val` or `var` primary-constructor parameter declares.
@@ -395,7 +582,7 @@ impl Source<'_> {
             written,
             modifiers.as_deref(),
         )?;
-        Ok(KspProperty {
+        let mut described = KspProperty {
             name: parameter.name.clone(),
             is_mutable: parameter.is_var,
             line: Some(parameter.decl_line),
@@ -411,7 +598,20 @@ impl Source<'_> {
             ty: header.constructor_property_type(index),
             getter,
             setter,
-        })
+            jvm_signature: None,
+        };
+        self.add_jvm_names(
+            &mut described,
+            header.constructor_property(index),
+            declaration,
+            NamingSite {
+                internal: parameter.visibility == Visibility::Internal,
+                member: true,
+                bare_accessors: header.bare_accessors(),
+                generated: false,
+            },
+        );
+        Ok(described)
     }
 
     /// The primary constructor the resolved declaration has: the one written, or the implicit one
@@ -482,14 +682,19 @@ impl Source<'_> {
             declaration.map(|declaration| self.analysis.declaration_annotations(declaration)),
             Placement::Declaration,
         )?;
-        Ok(Some(constructor(
+        let mut primary = constructor(
             header,
             KspFunctionKind::PrimaryConstructor,
             written.then_some(class.primary_ctor_lines.decl_line),
             annotations,
             Some(constructor_modifiers(header.kind, written, visibility)),
             parameters,
-        )))
+        );
+        let types: Vec<Option<Ty>> = (0..class.props.len())
+            .map(|index| header.constructor_parameter(index))
+            .collect();
+        self.add_constructor_jvm_names(&mut primary, header, &types, declaration);
+        Ok(Some(primary))
     }
 
     fn secondary_constructor(
@@ -532,7 +737,7 @@ impl Source<'_> {
             )?;
             parameters.push(described);
         }
-        Ok(constructor(
+        let mut secondary = constructor(
             header,
             KspFunctionKind::SecondaryConstructor,
             Some(constructor_decl.decl_line),
@@ -544,7 +749,17 @@ impl Source<'_> {
             )?,
             modifiers,
             parameters,
-        ))
+        );
+        let types: Vec<Option<Ty>> = constructor_decl
+            .params
+            .iter()
+            .enumerate()
+            .map(|(position, parameter)| {
+                declared_parameter_type(resolved?[position], parameter.is_vararg)
+            })
+            .collect();
+        self.add_constructor_jvm_names(&mut secondary, header, &types, declaration);
+        Ok(secondary)
     }
 
     fn enum_entry(
@@ -576,6 +791,10 @@ impl Source<'_> {
                     .enum_entry_nested_classifier_owners
                     .values()
                     .any(|body| *body == entry.span),
+            // KSP2 spells an entry as its enum class.
+            jvm_signature: self
+                .platform
+                .and_then(|platform| platform.type_signature(header.class_ty())),
         })
     }
 
@@ -607,7 +826,7 @@ impl Source<'_> {
             .iter()
             .enumerate()
             .map(|(component, (index, _))| {
-                KspDeclaration::Function(synthetic_function(
+                let mut function = synthetic_function(
                     format!("component{}", component + 1),
                     KspFunctionKind::Member,
                     vec![
@@ -618,7 +837,13 @@ impl Source<'_> {
                     ],
                     Vec::new(),
                     header.constructor_parameter_type(*index),
-                ))
+                );
+                self.add_synthetic_jvm_names(
+                    &mut function,
+                    &[],
+                    header.constructor_parameter(*index),
+                );
+                KspDeclaration::Function(function)
             })
             .collect();
         let mut owner = class_type(header.qualified_name);
@@ -638,7 +863,11 @@ impl Source<'_> {
                 })
             })
             .collect();
-        members.push(KspDeclaration::Function(synthetic_function(
+        let copy_types: Vec<Option<Ty>> = properties
+            .iter()
+            .map(|(index, _)| header.constructor_parameter(*index))
+            .collect();
+        let mut copy = synthetic_function(
             "copy".to_string(),
             KspFunctionKind::Member,
             copy_modifiers,
@@ -657,7 +886,9 @@ impl Source<'_> {
                 })
                 .collect(),
             Some(owner),
-        )));
+        );
+        self.add_synthetic_jvm_names(&mut copy, &copy_types, Some(header.class_ty()));
+        members.push(KspDeclaration::Function(copy));
         members
     }
 
@@ -673,34 +904,38 @@ impl Source<'_> {
             arguments: vec![KspTypeArgument::Invariant(enum_type.clone())],
             ..class_type(classifier)
         };
+        let mut values = synthetic_function(
+            "values".to_string(),
+            KspFunctionKind::Static,
+            modifiers.clone(),
+            Vec::new(),
+            Some(applied("kotlin.Array")),
+        );
+        self.add_synthetic_jvm_names(&mut values, &[], Some(Ty::array(header.class_ty())));
+        let mut value_of = synthetic_function(
+            "valueOf".to_string(),
+            KspFunctionKind::Static,
+            modifiers.clone(),
+            vec![KspParameter {
+                name: "value".to_string(),
+                ty: Some(class_type("kotlin.String")),
+                is_val: false,
+                is_var: false,
+                is_vararg: false,
+                is_noinline: false,
+                is_crossinline: false,
+                has_default: Some(false),
+                annotations: Vec::new(),
+            }],
+            Some(enum_type.clone()),
+        );
+        self.add_synthetic_jvm_names(&mut value_of, &[Some(Ty::String)], Some(header.class_ty()));
         let mut members = vec![
-            KspDeclaration::Function(synthetic_function(
-                "values".to_string(),
-                KspFunctionKind::Static,
-                modifiers.clone(),
-                Vec::new(),
-                Some(applied("kotlin.Array")),
-            )),
-            KspDeclaration::Function(synthetic_function(
-                "valueOf".to_string(),
-                KspFunctionKind::Static,
-                modifiers.clone(),
-                vec![KspParameter {
-                    name: "value".to_string(),
-                    ty: Some(class_type("kotlin.String")),
-                    is_val: false,
-                    is_var: false,
-                    is_vararg: false,
-                    is_noinline: false,
-                    is_crossinline: false,
-                    has_default: Some(false),
-                    annotations: Vec::new(),
-                }],
-                Some(enum_type.clone()),
-            )),
+            KspDeclaration::Function(values),
+            KspDeclaration::Function(value_of),
         ];
         if self.file.enum_entries_enabled {
-            members.push(KspDeclaration::Property(KspProperty {
+            let mut entries = KspProperty {
                 name: "entries".to_string(),
                 is_mutable: false,
                 line: None,
@@ -711,7 +946,20 @@ impl Source<'_> {
                 ty: Some(applied("kotlin.enums.EnumEntries")),
                 getter: super::accessors::compiler_getter(),
                 setter: None,
-            }));
+                jvm_signature: None,
+            };
+            let entries_ty = Ty::obj_args_name(
+                crate::types::type_name("kotlin/enums/EnumEntries"),
+                &[header.class_ty()],
+            );
+            let site = NamingSite {
+                internal: false,
+                member: true,
+                bare_accessors: false,
+                generated: true,
+            };
+            self.add_jvm_names(&mut entries, Some(entries_ty), None, site);
+            members.push(KspDeclaration::Property(Box::new(entries)));
         }
         members
     }
@@ -814,6 +1062,8 @@ fn constructor(
         extension_receiver: KspTypeSlot::Absent,
         parameters,
         return_type: Some(header.star_projected()),
+        jvm_signature: None,
+        jvm_name: None,
     }
 }
 
@@ -836,5 +1086,7 @@ fn synthetic_function(
         extension_receiver: KspTypeSlot::Absent,
         parameters,
         return_type,
+        jvm_signature: None,
+        jvm_name: None,
     }
 }
