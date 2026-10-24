@@ -51,6 +51,8 @@ mod reference_compiler_support;
 mod reference_recording_support;
 #[path = "common/reference_targets.rs"]
 mod reference_targets_support;
+#[path = "serializable_lateinit_elements_e2e.rs"]
+mod serializable_lateinit_elements_e2e;
 #[path = "serializable_parent_dependency_e2e.rs"]
 mod serializable_parent_dependency_e2e;
 #[path = "serializable_parent_same_module_e2e.rs"]
@@ -1410,6 +1412,8 @@ mod lateinit_field_visibility_e2e;
 mod lateinit_getter_shape_e2e;
 #[path = "lateinit_local_e2e.rs"]
 mod lateinit_local_e2e;
+#[path = "lateinit_member_access_e2e.rs"]
+mod lateinit_member_access_e2e;
 #[path = "lateinit_operand_stack_e2e.rs"]
 mod lateinit_operand_stack_e2e;
 #[path = "legacy_interface_calls_e2e.rs"]
