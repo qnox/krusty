@@ -214,8 +214,8 @@ impl<'a> Annotations<'a> {
         // array as its default; it lists an empty array as the default of every array element a
         // Java annotation declares without one too.
         let library = self.symbols.libraries.classifier(class)?;
-        let java = self.symbols.libraries.declaration_header(class)?.language
-            == DeclarationLanguage::Java;
+        let java =
+            self.symbols.libraries.declaration_header(class)?.language == DeclarationLanguage::Java;
         let application = library.annotation_application()?;
         let parameters = &application.parameters;
         let defaults = parameters
