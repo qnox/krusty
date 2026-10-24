@@ -1,12 +1,67 @@
 //! The declaration shape of an annotation class read from the classpath: the elements a Java
-//! `@interface` exposes as an application's parameters, and the targets an application written
-//! without a use-site prefix may land on.
+//! `@interface` exposes as an application's parameters, the defaults its elements declare, and the
+//! targets an application written without a use-site prefix may land on.
 
 use crate::jvm::classreader::{ClassInfo, MethodSig};
 use crate::libraries::{
-    AnnotationParameterPolicy, AnnotationPositionalPolicy, ParamList, Visibility,
+    AnnotationElementDefault, AnnotationParameterPolicy, AnnotationPositionalPolicy, ParamList,
+    Visibility,
 };
-use crate::types::{AnnotationTargets, Ty, TyKind};
+use crate::types::{AnnotationTargets, AnnotationValue, Ty, TyKind};
+
+/// The defaults the elements of the annotation class `class` declare, as its language reads them.
+/// A Kotlin class literal names a Kotlin class, and `java.lang.Integer::class` is `Int::class`, so
+/// a wrapper class a Kotlin annotation's `AnnotationDefault` names is the Kotlin primitive. A Java
+/// default keeps the wrapper, which `int.class` is not.
+pub(super) fn annotation_element_defaults(
+    class: &ClassInfo,
+) -> Vec<(Box<str>, AnnotationElementDefault)> {
+    let defaults = class.annotation_element_defaults.clone();
+    if !class.meta.is_present() {
+        return defaults;
+    }
+    defaults
+        .into_iter()
+        .map(|(name, default)| match default {
+            AnnotationElementDefault::Evaluated(value) => (
+                name,
+                AnnotationElementDefault::Evaluated(kotlin_value(value)),
+            ),
+            AnnotationElementDefault::Unevaluated => (name, default),
+        })
+        .collect()
+}
+
+/// `value` with each class literal naming a primitive wrapper read as the Kotlin primitive.
+fn kotlin_value(value: AnnotationValue) -> AnnotationValue {
+    match value {
+        AnnotationValue::Class(ty) => AnnotationValue::Class(
+            ty.obj_internal()
+                .filter(|_| ty.type_args().is_empty())
+                .and_then(crate::jvm::jvm_class_map::wrapper_to_kotlin_prim_name)
+                .and_then(|primitive| {
+                    crate::types::builtin_semantic(crate::types::type_name(primitive))
+                })
+                .unwrap_or(ty),
+        ),
+        AnnotationValue::Array(values) => {
+            AnnotationValue::Array(values.into_iter().map(kotlin_value).collect())
+        }
+        AnnotationValue::Annotation {
+            internal,
+            values,
+            written,
+        } => AnnotationValue::Annotation {
+            internal,
+            values: values
+                .into_iter()
+                .map(|(name, value)| (name, kotlin_value(value)))
+                .collect(),
+            written,
+        },
+        value => value,
+    }
+}
 
 /// Normalize a constructor-less annotation declaration into the common application shape while
 /// JVM descriptors and `AnnotationDefault` are still provider-owned facts. Core never reparses a

@@ -8143,7 +8143,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/classpath_jvmfield_property_type_e2e.rs`.
 - **`Unit::class` is an annotation argument naming `kotlin.Unit`.** Written as an argument or as an
   annotation parameter's default, `Unit::class` folds to a constant, and the class file records the
-  class `Lkotlin/Unit;`, never `void`. (`tests/box_regressions/unitClassLiteralAnnotationArgument.kt`.)
+  class `Lkotlin/Unit;`, never `void`. A dependency annotation's `java.lang.Integer::class` default
+  is `Int::class` to kotlinc, so a Kotlin-metadata class reads that `AnnotationDefault` as the
+  primitive and a construction loads `int`; reflection over an application still reports the
+  recorded `java.lang.Integer`. A Java annotation keeps the wrapper. Tests (JVM-specific):
+  `tests/annotation_instance_defaults_e2e.rs`.
 - **A primitive class literal is the primitive's class.** `Int::class` loads `Integer.TYPE` (the
   `int` class) before `Reflection.getOrCreateKotlinClass`, as kotlinc's `generateClassInstance`
   does for a primitive without `wrapPrimitives`. `T::class` over a reified type parameter loads the
