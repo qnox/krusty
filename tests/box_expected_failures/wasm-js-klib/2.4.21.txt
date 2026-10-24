@@ -5788,7 +5788,6 @@ regressions/objectInsideDelegation.kt
 regressions/recursiveDnnTypeInLambda.kt
 regressions/resolvedCallForGetOperator.kt
 regressions/supertypeDepth.kt
-regressions/unitClassLiteralAnnotationArgument.kt
 reified/arraysReification/jaggedArray.kt
 reified/arraysReification/jaggedDeep.kt
 reified/callChain.kt
