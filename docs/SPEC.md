@@ -16110,6 +16110,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   one declaring a generic, raw generic or collection-typed constant are refused for those
   queries. (`crates/krusty-plugin-host/tests/ksp.rs`,
   `library_annotation_members_are_what_ksp2_reports`.)
+- **A KSP source classifier lists its members with the inherited ones as KSP2 does.**
+  `getAllFunctions` lists the classifier's own functions in declaration order (a data class's
+  `componentN` and `copy` among them), then each direct supertype's functions in written order
+  as that supertype lists them, then the classifier's constructors; `getAllProperties` lists the
+  own properties, then each supertype's. A supertype's member is left out when it is private,
+  already listed, or overridden by a member listed before, as the frontend selected the override.
+  A data class's generated `equals` (`open operator override public`, parameter `other: Any?`),
+  `hashCode` and `toString` (`open public`), `SYNTHETIC` and declared by the class, take the place
+  of the member each overrides: `kotlin.Any`'s, or a superclass's that overrides it, so with no
+  superclass they follow `kotlin.Any`'s order. A classifier with no written supertype inherits
+  `kotlin.Any`'s functions and no property. A member inherited along two supertypes as different
+  declarations, one overriding the other (a superclass's `toString` and an interface's
+  `kotlin.Any.toString`), is an intersection override KSP2 declares on the classifier, and a member
+  of a supertype applied to type arguments a substituted copy; neither is described yet, so the
+  lists of such a classifier, of one with another library supertype, of an enum class, an
+  annotation class and an enum entry are refused. (`crates/krusty-plugin-host/tests/ksp.rs`,
+  `all_functions_and_properties_of_source_classifiers_are_what_ksp2_lists`,
+  `all_functions_whose_order_krusty_cannot_say_are_refused`.)
 - **KSP maps names between Kotlin and the JVM by kotlinc's class map.** `mapKotlinNameToJava` and
   `mapJavaNameToKotlin` answer what kotlinc's `JavaToKotlinClassMap` does for the classifier the
   name resolves to on the module's classpath. A mapped builtin, a read-only or mutable collection

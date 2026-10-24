@@ -15,8 +15,18 @@ use crate::ast::{
     AstEnumEntry, ClassDecl, Decl, DeclId, File, FunBody, FunDecl, Param, PropDecl, PropParam,
     SecondaryCtor, TypeRef,
 };
-use crate::frontend::{FrontendClassSig, FrontendDeclarationId};
+use crate::frontend::{FrontendClassSig, FrontendDeclarationId, OverriddenMember};
 use crate::types::{wk, ResolvedAnnotation, Ty, Visibility};
+
+/// A classifier's declarations in KSP's order.
+pub(super) struct ClassDeclarations {
+    pub(super) declarations: Vec<KspDeclaration>,
+    /// The resolved declaration of each of [`Self::declarations`] that is a member function or
+    /// property the source writes, `None` for the others.
+    pub(super) resolved: Vec<Option<FrontendDeclarationId>>,
+    /// Whether [`Self::declarations`] are every declaration KSP lists.
+    pub(super) complete: bool,
+}
 
 /// What a classifier's declarations are built from.
 pub(super) struct ClassHeader<'a> {
@@ -97,23 +107,30 @@ impl ClassHeader<'_> {
 }
 
 impl Source<'_> {
-    /// The classifier's declarations in KSP's order, and whether they are all it lists.
+    /// The classifier's declarations in KSP's order, the resolved declaration of each member
+    /// function and property among them, and whether they are all it lists.
     pub(super) fn class_declarations(
         &self,
         header: &ClassHeader<'_>,
-    ) -> Result<(Vec<KspDeclaration>, bool), String> {
+    ) -> Result<ClassDeclarations, String> {
         let class = header.class;
+        let class_declaration = header.signature.stable_declaration;
         // A nested type alias and a member of a companion block are not described yet.
         let complete = class.type_aliases.is_empty() && class.companion_block_members.is_empty();
         let mut declarations = Vec::new();
+        let mut resolved = Vec::new();
         for (index, parameter) in class.props.iter().enumerate() {
             if parameter.is_property {
                 declarations.push(KspDeclaration::Property(Box::new(
                     self.constructor_property(index, parameter, header)?,
                 )));
+                resolved.push(class_declaration.and_then(|class| {
+                    self.analysis
+                        .member_property_declaration(class, index as u32, true)
+                }));
             }
         }
-        let mut members: Vec<(u32, KspDeclaration)> = Vec::new();
+        let mut members: Vec<(u32, KspDeclaration, Option<FrontendDeclarationId>)> = Vec::new();
         for (method, function) in class.methods.iter().enumerate() {
             let owner = Owner::Class {
                 header,
@@ -122,9 +139,12 @@ impl Source<'_> {
             members.push((
                 function.span.lo,
                 KspDeclaration::Function(self.function(function, &owner, header.scope)?),
+                class_declaration
+                    .and_then(|class| self.resolved.methods.get(&(class, method as u32)))
+                    .and_then(|signature| signature.stable_declaration),
             ));
         }
-        for property in &class.body_props {
+        for (position, property) in class.body_props.iter().enumerate() {
             let owner = Owner::Class {
                 header,
                 method: None,
@@ -136,10 +156,17 @@ impl Source<'_> {
                     &owner,
                     header.scope,
                 )?)),
+                class_declaration.and_then(|class| {
+                    self.analysis
+                        .member_property_declaration(class, position as u32, false)
+                }),
             ));
         }
-        members.sort_by_key(|(start, _)| *start);
-        declarations.extend(members.into_iter().map(|(_, declaration)| declaration));
+        members.sort_by_key(|(start, _, _)| *start);
+        for (_, declaration, member) in members {
+            declarations.push(declaration);
+            resolved.push(member);
+        }
         if class.is_data && header.kind == KspClassKind::Class {
             declarations.extend(self.data_members(header));
         }
@@ -163,7 +190,12 @@ impl Source<'_> {
         if header.kind == KspClassKind::EnumClass {
             declarations.extend(self.enum_members(header));
         }
-        Ok((declarations, complete))
+        resolved.resize(declarations.len(), None);
+        Ok(ClassDeclarations {
+            declarations,
+            resolved,
+            complete,
+        })
     }
 
     /// Adds the classifiers nested in `header`'s class that are `inner` or not, in source order.
@@ -468,9 +500,12 @@ impl Source<'_> {
         }
         let (owner, _) = self.analysis.member_function_slot(declaration)?;
         let mut inherited = Some(false);
-        for overridden in self.analysis.overridden_functions(owner, declaration) {
-            match overridden.and_then(|overridden| self.member_parameter_default(overridden, index))
-            {
+        for overridden in self.analysis.overridden_members(owner, declaration) {
+            let declared = match overridden {
+                OverriddenMember::Declared(declared) => Some(declared),
+                OverriddenMember::Library { .. } => None,
+            };
+            match declared.and_then(|declared| self.member_parameter_default(declared, index)) {
                 Some(true) => return Some(true),
                 Some(false) => {}
                 None => inherited = None,
@@ -839,6 +874,9 @@ impl Source<'_> {
             jvm_signature: self
                 .platform
                 .and_then(|platform| platform.type_signature(header.class_ty())),
+            // KSP2 lists an entry's members as an anonymous class's, which is not described yet.
+            all_properties: None,
+            all_functions: None,
         })
     }
 
@@ -934,6 +972,81 @@ impl Source<'_> {
         );
         self.add_synthetic_jvm_names(&mut copy, &copy_types, Some(header.class_ty()));
         members.push(KspDeclaration::Function(copy));
+        members
+    }
+
+    /// The `equals`, `hashCode` and `toString` the compiler generates for a data class, each one
+    /// the resolved class has: a superclass's final one is inherited instead. KSP2 lists them
+    /// among the inherited members rather than the declarations.
+    pub(super) fn data_object_members(&self, header: &ClassHeader<'_>) -> Vec<KspFunction> {
+        if !header.class.is_data || header.kind != KspClassKind::Class {
+            return Vec::new();
+        }
+        let generated = |name: &str| {
+            header
+                .signature
+                .methods
+                .get(name)
+                .into_iter()
+                .flatten()
+                .any(|method| {
+                    method
+                        .stable_declaration
+                        .is_some_and(|declaration| self.analysis.is_compiler_generated(declaration))
+                })
+        };
+        let open = |operator: bool| {
+            let mut modifiers = vec![KspModifier::Open];
+            if operator {
+                modifiers.extend([KspModifier::Operator, KspModifier::Override]);
+            }
+            modifiers.push(KspModifier::Public);
+            modifiers
+        };
+        let mut members = Vec::new();
+        if generated("equals") {
+            let mut any = class_type("kotlin.Any");
+            any.nullable = true;
+            let mut equals = synthetic_function(
+                "equals".to_string(),
+                KspFunctionKind::Member,
+                open(true),
+                vec![KspParameter {
+                    name: "other".to_string(),
+                    ty: Some(any),
+                    is_val: false,
+                    is_var: false,
+                    is_vararg: false,
+                    is_noinline: false,
+                    is_crossinline: false,
+                    has_default: Some(false),
+                    annotations: Vec::new(),
+                }],
+                Some(class_type("kotlin.Boolean")),
+            );
+            self.add_synthetic_jvm_names(
+                &mut equals,
+                &[Some(Ty::nullable(Ty::obj_name(wk::any())))],
+                Some(Ty::Boolean),
+            );
+            members.push(equals);
+        }
+        for (name, result, ty) in [
+            ("hashCode", "kotlin.Int", Ty::Int),
+            ("toString", "kotlin.String", Ty::String),
+        ] {
+            if generated(name) {
+                let mut function = synthetic_function(
+                    name.to_string(),
+                    KspFunctionKind::Member,
+                    open(false),
+                    Vec::new(),
+                    Some(class_type(result)),
+                );
+                self.add_synthetic_jvm_names(&mut function, &[], Some(ty));
+                members.push(function);
+            }
+        }
         members
     }
 
