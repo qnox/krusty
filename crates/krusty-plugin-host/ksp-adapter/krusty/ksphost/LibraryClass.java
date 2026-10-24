@@ -42,6 +42,7 @@ final class LibraryClass implements KSClassDeclaration {
     Set<Modifier> modifiers;
     List<KSTypeParameter> typeParameters;
     List<KSTypeReference> superTypes;
+    String jvmSignature;
     // The entries of a library enum class an annotation argument named, by name, so that each is
     // one declaration.
     private final java.util.Map<String, LibraryClass> entries = new java.util.HashMap<>();

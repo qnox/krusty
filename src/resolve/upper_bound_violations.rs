@@ -329,7 +329,13 @@ impl Checker<'_> {
                             classifier,
                             &declaration,
                         );
-                        self.check_type_argument_bounds(&formals, &owner, &resolved, &spans);
+                        self.check_type_argument_bounds(
+                            &formals,
+                            &owner,
+                            &resolved,
+                            &spans,
+                            &classifier_argument_bindings(&declaration, &resolved),
+                        );
                     }
                 }
                 template_arguments.to_vec()
@@ -387,12 +393,31 @@ impl Checker<'_> {
 
     /// Check the written `arguments` of the application of `classifier`, whose resolved arguments
     /// (projections kept, own arguments first) are `resolved`.
-    fn check_classifier_argument_bounds(
+    pub(super) fn check_classifier_argument_bounds(
         &mut self,
         classifier: TypeName,
         declaration: &LibraryType,
         arguments: &[TypeRef],
         resolved: &[Ty],
+    ) -> bool {
+        self.check_classifier_argument_bounds_with_context(
+            classifier,
+            declaration,
+            arguments,
+            resolved,
+            &Default::default(),
+        )
+    }
+
+    /// An inner constructor's own formal bounds may refer to already selected enclosing
+    /// arguments. These are declaration bindings, not constraints to infer again.
+    pub(super) fn check_classifier_argument_bounds_with_context(
+        &mut self,
+        classifier: TypeName,
+        declaration: &LibraryType,
+        arguments: &[TypeRef],
+        resolved: &[Ty],
+        context: &crate::symbol_resolver::GSigBinds,
     ) -> bool {
         let formals = bounded_formals(declaration);
         if formals.iter().all(|formal| formal.bounds.is_empty()) {
@@ -408,7 +433,9 @@ impl Checker<'_> {
             })
             .collect::<Vec<_>>();
         let owner = classifier_type_parameter_owner(&self.fed_source(), classifier, declaration);
-        self.check_type_argument_bounds(&formals, &owner, resolved, &spans)
+        let mut bindings = context.clone();
+        bindings.extend(classifier_argument_bindings(declaration, resolved));
+        self.check_type_argument_bounds(&formals, &owner, resolved, &spans, &bindings)
     }
 
     /// Report a constructor call whose explicit type arguments violate `classifier`'s bounds;
@@ -458,13 +485,16 @@ impl Checker<'_> {
         owner: &str,
         resolved: &[Ty],
         spans: &[Option<Span>],
+        context: &crate::symbol_resolver::GSigBinds,
     ) -> bool {
         let mut violated = false;
-        let bindings = formals
-            .iter()
-            .zip(resolved)
-            .map(|(formal, argument)| (formal.identity.to_string(), *argument))
-            .collect::<crate::symbol_resolver::GSigBinds>();
+        let mut bindings = context.clone();
+        bindings.extend(
+            formals
+                .iter()
+                .zip(resolved)
+                .map(|(formal, argument)| (formal.identity.to_string(), *argument)),
+        );
         for ((formal, argument), span) in formals.iter().zip(resolved).zip(spans) {
             let Some(span) = *span else { continue };
             let actual = {
@@ -1019,6 +1049,19 @@ fn type_argument_span(argument: &TypeRef) -> Option<Span> {
 /// A type the check can decide: resolved and no longer pending inference.
 fn is_determined(ty: Ty) -> bool {
     !ty.contains_error() && !ty.mentions_pending()
+}
+
+/// Complete application bindings, including enclosing parameters used by own bounds.
+fn classifier_argument_bindings(
+    declaration: &LibraryType,
+    resolved: &[Ty],
+) -> crate::symbol_resolver::GSigBinds {
+    declaration
+        .type_params()
+        .iter()
+        .cloned()
+        .zip(resolved.iter().copied())
+        .collect()
 }
 
 /// The own formals of a classifier declaration with their declared bounds.

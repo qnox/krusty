@@ -437,6 +437,22 @@ fn refusals_lists_the_arguments_and_plugins_krusty_refuses() {
             String::new()
         )
     );
+    // So is a Kotlin release krusty does not support: kotlinc of that release compiles it.
+    assert_eq!(
+        check(&["-Xkotlin-reference-version=2.3.0".to_string()]),
+        (
+            Some(1),
+            format!(
+                "-Xkotlin-reference-version=2.3.0 names no supported Kotlin release (supported: {})\n",
+                krusty::kotlin_version::KotlinVersion::supported()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            String::new()
+        )
+    );
     // An output shape krusty does not emit is refused like an argument it does not implement.
     assert_eq!(
         check(&["-Xassertions=jvm".to_string()]),

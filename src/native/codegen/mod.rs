@@ -332,6 +332,7 @@ impl Backend for CraneliftBackend {
                 dependency_properties: &properties,
                 value_classes: &value_classes,
                 slot_plan,
+                module_facts: file.classifiers.module(),
                 source: file.source,
                 module_name: file.module_name,
                 unit_kind: file.kind,

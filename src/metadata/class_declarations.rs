@@ -218,6 +218,121 @@ impl ClassDeclarationRecord {
     }
 }
 
+/// Abbreviate each type in `types` with the spelling at the same position, growing `spellings` to
+/// hold the ones that name an actualized expect.
+pub(crate) fn abbreviate_actualized_expects(
+    types: impl IntoIterator<Item = Ty>,
+    spellings: &mut Vec<crate::spelling::Spelled>,
+    expects: &crate::fx_hash::HashMap<TypeName, TypeName>,
+) {
+    for (index, ty) in types.into_iter().enumerate() {
+        if spellings.len() <= index {
+            spellings.resize_with(index + 1, Default::default);
+        }
+        spellings[index].abbreviate_actualized_expects(ty, expects);
+    }
+}
+
+/// [`abbreviate_actualized_expects`] over each type parameter's upper bounds.
+pub(crate) fn abbreviate_actualized_expect_bounds<Bounds: IntoIterator<Item = Ty>>(
+    parameters: impl IntoIterator<Item = Bounds>,
+    spellings: &mut Vec<Vec<crate::spelling::Spelled>>,
+    expects: &crate::fx_hash::HashMap<TypeName, TypeName>,
+) {
+    for (index, bounds) in parameters.into_iter().enumerate() {
+        if spellings.len() <= index {
+            spellings.resize_with(index + 1, Vec::new);
+        }
+        abbreviate_actualized_expects(bounds, &mut spellings[index], expects);
+    }
+}
+
+impl ClassDeclarationRecord {
+    /// Abbreviate every declared occurrence of an `expect` class `expects` actualizes by alias, before
+    /// the target renames the occurrence to the classifier the alias names.
+    pub(crate) fn abbreviate_actualized_expects(
+        &mut self,
+        expects: &crate::fx_hash::HashMap<TypeName, TypeName>,
+    ) {
+        let declared = |spellings: &mut crate::spelling::DeclaredSpellings,
+                        receiver: Option<Ty>,
+                        params: &[(String, Ty)],
+                        ret: Ty| {
+            if let Some(receiver) = receiver {
+                spellings
+                    .receiver
+                    .abbreviate_actualized_expects(receiver, expects);
+            }
+            abbreviate_actualized_expects(
+                params.iter().map(|(_, ty)| *ty),
+                &mut spellings.params,
+                expects,
+            );
+            spellings.ret.abbreviate_actualized_expects(ret, expects);
+        };
+        for property in &mut self.props {
+            declared(&mut property.spellings, property.receiver, &[], property.ty);
+            abbreviate_actualized_expect_bounds(
+                property
+                    .type_params
+                    .iter()
+                    .map(|parameter| parameter.bounds.iter().map(|(bound, _)| *bound)),
+                &mut property.spellings.type_param_bounds,
+                expects,
+            );
+            property
+                .spellings
+                .getter_ret
+                .abbreviate_actualized_expects(property.ty, expects);
+        }
+        for function in &mut self.methods {
+            declared(
+                &mut function.spellings,
+                function.receiver,
+                &function.params,
+                function.ret,
+            );
+            abbreviate_actualized_expect_bounds(
+                function
+                    .type_param_bounds
+                    .iter()
+                    .map(|bounds| bounds.iter().copied()),
+                &mut function.spellings.type_param_bounds,
+                expects,
+            );
+        }
+        abbreviate_actualized_expect_bounds(
+            self.type_param_bounds
+                .iter()
+                .map(|parameter| parameter.bounds.iter().map(|(bound, _)| *bound)),
+            &mut self.spellings.type_param_bounds,
+            expects,
+        );
+        for alias in &mut self.type_aliases {
+            alias
+                .expansion_spelling
+                .abbreviate_actualized_expects(alias.expansion, expects);
+        }
+        abbreviate_actualized_expects(
+            self.ctor_params.iter().map(|(_, ty)| *ty),
+            &mut self.spellings.params,
+            expects,
+        );
+        abbreviate_actualized_expects(
+            self.supertypes.iter().copied(),
+            &mut self.supertype_spellings,
+            expects,
+        );
+        for constructor in &mut self.secondary_ctors {
+            abbreviate_actualized_expects(
+                constructor.params.iter().map(|(_, ty)| *ty),
+                &mut constructor.param_spellings,
+                expects,
+            );
+        }
+    }
+}
+
 enum CapturedParameters {
     Reserved(Vec<String>),
     NumberedOnUse(Vec<String>),

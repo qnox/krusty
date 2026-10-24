@@ -50,6 +50,9 @@ pub struct KspClass {
     /// Whether [`Self::declarations`] are every declaration KSP lists. When the round cannot
     /// describe one, the host refuses to list declarations rather than list a part of them.
     pub declarations_complete: bool,
+    /// What `Resolver.mapToJvmSignature` answers, or `None` when the round cannot say, in which
+    /// case the host refuses the query.
+    pub jvm_signature: Option<String>,
 }
 
 impl KspClass {
@@ -122,6 +125,19 @@ pub trait KspClasspath {
     /// The classifier KSP's `Resolver.getClassDeclarationByName` finds by `qualified_name`
     /// (`pkg.Outer.Inner`), or `None` when the classpath declares none.
     fn class(&self, qualified_name: &str) -> Option<KspLibraryClass>;
+
+    /// The name `mapping` gives the classifier `qualified_name` names, or `None` when the name
+    /// denotes no classifier or the classifier is not mapped.
+    fn mapped_name(&self, mapping: KspNameMapping, qualified_name: &str) -> Option<String>;
+}
+
+/// Which way a name is mapped between Kotlin and the JVM, by kotlinc's class map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KspNameMapping {
+    /// `Resolver.mapKotlinNameToJava`: the JVM class a Kotlin classifier is on the platform.
+    KotlinToJava,
+    /// `Resolver.mapJavaNameToKotlin`: the Kotlin classifier a JVM class is read as.
+    JavaToKotlin,
 }
 
 /// One declaration of a file or a classifier body.
@@ -129,7 +145,7 @@ pub trait KspClasspath {
 pub enum KspDeclaration {
     Class(KspClass),
     Function(KspFunction),
-    Property(KspProperty),
+    Property(Box<KspProperty>),
     TypeAlias(KspTypeAlias),
 }
 
@@ -151,6 +167,10 @@ pub struct KspFunction {
     pub parameters: Vec<KspParameter>,
     /// `None` when the round cannot describe the type.
     pub return_type: Option<KspType>,
+    /// What `Resolver.mapToJvmSignature` answers; `None` when the round cannot say.
+    pub jvm_signature: Option<String>,
+    /// What `Resolver.getJvmName` answers; `None` when the round cannot say.
+    pub jvm_name: Option<String>,
 }
 
 /// Where a function declares it, which KSP's `FunctionKind` and the constructor queries tell.
@@ -183,6 +203,8 @@ pub struct KspProperty {
     pub getter: KspAccessor,
     /// A `var`'s setter.
     pub setter: Option<KspAccessor>,
+    /// What `Resolver.mapToJvmSignature` answers; `None` when the round cannot say.
+    pub jvm_signature: Option<String>,
 }
 
 /// A property getter or setter as `KSPropertyAccessor` describes it.
@@ -196,6 +218,8 @@ pub struct KspAccessor {
     pub annotations: Vec<KspAnnotation>,
     /// A setter's value parameter: its name and annotations. `None` for a getter.
     pub parameter: Option<(String, Vec<KspAnnotation>)>,
+    /// What `Resolver.getJvmName` answers; `None` when the round cannot say.
+    pub jvm_name: Option<String>,
 }
 
 /// A type alias, of which the round describes only the name yet.
