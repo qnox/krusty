@@ -568,18 +568,23 @@ struct BodyFirChecker<'a> {
 }
 
 impl BodyFirChecker<'_> {
-    /// Runtime classifier of a reified type argument. Semantic `value` stays the checked type,
-    /// including an intersection; this is the one classifier a reified operation may record.
+    /// Runtime classifier of a reified type argument. Semantic `value` stays the checked type; this
+    /// is the one classifier a reified operation may record. A flow intersection is one checked
+    /// type whose primary constituent is `value`; kotlinc reifies the whole of it to the common
+    /// supertype, which inference records as `inferred` across every constituent's hierarchy.
     pub(super) fn reified_substitution_runtime(
         &self,
         reified: bool,
         value: crate::fir::ResolvedTy,
+        inferred: Option<Ty>,
     ) -> crate::fir::ResolvedTy {
         if !reified {
             return value;
         }
-        let runtime = crate::symbol_resolver::reified_runtime_type(value.get(), &|name| {
-            self.index.recorded_direct_supertypes(name)
+        let runtime = inferred.unwrap_or_else(|| {
+            crate::symbol_resolver::reified_runtime_type(value.get(), &|name| {
+                self.index.recorded_direct_supertypes(name)
+            })
         });
         if runtime == value.get() {
             return value;

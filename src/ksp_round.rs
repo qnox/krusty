@@ -636,6 +636,9 @@ mod tests {
                 KspDeclaration::TypeAlias(alias) => {
                     out.push(format!("{indent}KSTypeAlias {}", alias.simple_name));
                 }
+                KspDeclaration::LibraryClass(name) => {
+                    panic!("a source file declares the library classifier {name}");
+                }
             }
         }
     }

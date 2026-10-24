@@ -538,8 +538,21 @@ pub(super) fn complete_deserialization_constructor(
                         .expect("a constructor's parameters fit u32"),
                     read_field: &mut read_argument,
                     receiver: Some(0),
-                    property_line: None,
-                    read_line: None,
+                    // The initializer's own code is the property's, as in `write$Self`.
+                    property_line: ir
+                        .prop_decl_lines
+                        .get(&(
+                            ir.classes[class_id as usize].fq_name_id(),
+                            field_name.to_string(),
+                        ))
+                        .copied()
+                        .filter(|line| *line != 0),
+                    // A constructor property re-read off the object is the constructor's own read,
+                    // which kotlinc attributes to the class's start line. A read through the
+                    // receiver is still the initializer's own.
+                    read_line: Some(ir.classes[class_id as usize].decl_start_line)
+                        .filter(|line| *line != 0),
+                    receiver_read_line: None,
                 },
             )
             // A default reading a constructor parameter that is not a property has no argument

@@ -512,6 +512,12 @@ impl SerializeBody<'_> {
                                     .filter(|line| *line != 0),
                                 read_line: Some(ir.classes[foo_id as usize].decl_start_line)
                                     .filter(|line| *line != 0),
+                                // A read of the object being written is `write$Self`'s own, as
+                                // a re-read constructor property is.
+                                receiver_read_line: Some(
+                                    ir.classes[foo_id as usize].decl_start_line,
+                                )
+                                .filter(|line| *line != 0),
                             },
                         ) else {
                             bail = true;

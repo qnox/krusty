@@ -222,6 +222,7 @@ impl BodyLowering<'_, '_, '_> {
                 .map(|property| property.result);
         }
         if self.class_name_accessor(target).is_some()
+            || self.type_of_member_of(target).is_some()
             || self.throwable_field(target).is_some()
             || self.is_text_length(target)
             || self.external_getter_is_indices(target)

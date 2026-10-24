@@ -5,17 +5,17 @@
 use std::io::{self, Read, Write};
 
 use krusty_plugin_ir::{
-    KspAccessor, KspAnnotation, KspArgument, KspClass, KspClassKind, KspDeclaration, KspFunction,
-    KspFunctionKind, KspLibraryClass, KspModifier, KspNameMapping, KspOrigin, KspParameter,
-    KspProperty, KspRound, KspType, KspTypeArgument, KspTypeDeclaration, KspTypeParameter,
-    KspTypeSlot, KspValue, KspVariance,
+    KspAccessor, KspAnnotation, KspArgument, KspClass, KspClassKind, KspDeclaration,
+    KspDeclarationOrigin, KspFunction, KspFunctionKind, KspLibraryClass, KspMember, KspModifier,
+    KspNameMapping, KspOrigin, KspParameter, KspProperty, KspRound, KspType, KspTypeArgument,
+    KspTypeDeclaration, KspTypeParameter, KspTypeSlot, KspValue, KspVariance,
 };
 
 use crate::protocol::{malformed, put_list, put_str, read_frame, utf8, write_frame, Payload};
 
 use super::{GeneratedKind, KspGenerated, KspLoad, KspOutcome};
 
-pub(crate) const PROTOCOL: u32 = 7;
+pub(crate) const PROTOCOL: u32 = 8;
 
 const HELLO: u8 = 0;
 const LOAD: u8 = 1;
@@ -124,7 +124,8 @@ pub(crate) fn write_request(out: &mut impl Write, request: &Request) -> io::Resu
     write_frame(out, &payload)
 }
 
-/// A declaration: 0 and a classifier, 1 and a function, 2 and a property, or 3 and a type alias.
+/// A declaration: 0 and a classifier, 1 and a function, 2 and a property, 3 and a type alias, or 4
+/// and a library classifier's qualified name.
 fn put_declaration(payload: &mut Vec<u8>, declaration: &KspDeclaration) {
     match declaration {
         KspDeclaration::Class(class) => {
@@ -143,6 +144,10 @@ fn put_declaration(payload: &mut Vec<u8>, declaration: &KspDeclaration) {
             payload.push(3);
             put_str(payload, &alias.simple_name);
             put_str(payload, &alias.qualified_name);
+        }
+        KspDeclaration::LibraryClass(qualified_name) => {
+            payload.push(4);
+            put_str(payload, qualified_name);
         }
     }
 }
@@ -173,8 +178,8 @@ fn put_class(payload: &mut Vec<u8>, class: &KspClass) {
 }
 
 /// A classpath classifier: its header as a class's, then its package, the qualified name of the
-/// classifier it is nested in if any, its origin (0 Kotlin, 1 Java), and whether its annotations
-/// are complete.
+/// classifier it is nested in if any, its origin (0 Kotlin, 1 Java), whether its annotations are
+/// complete, and the members it lists with the inherited ones: its properties, then its functions.
 fn put_library_class(payload: &mut Vec<u8>, library: &KspLibraryClass) {
     put_class(payload, &library.class);
     put_str(payload, &library.package_name);
@@ -186,10 +191,43 @@ fn put_library_class(payload: &mut Vec<u8>, library: &KspLibraryClass) {
         KspOrigin::JavaLib => 1,
     });
     payload.push(u8::from(library.annotations_complete));
+    put_option(payload, &library.all_properties, |payload, members| {
+        put_members(payload, members)
+    });
+    put_option(payload, &library.all_functions, |payload, members| {
+        put_members(payload, members)
+    });
+}
+
+/// Members a classifier lists: 0 and the index of one of its own declarations, or 1, the
+/// qualified name of the classifier that declares an inherited one, and that declaration.
+fn put_members(payload: &mut Vec<u8>, members: &[KspMember]) {
+    put_list(payload, members, |payload, member| match member {
+        KspMember::Declared(index) => {
+            payload.push(0);
+            payload.extend_from_slice(&index.to_be_bytes());
+        }
+        KspMember::Inherited { owner, declaration } => {
+            payload.push(1);
+            put_str(payload, owner);
+            put_declaration(payload, declaration);
+        }
+    });
+}
+
+/// Where a declaration comes from: 0 the source, 1 the compiler, 2 a Kotlin library, 3 a Java
+/// library.
+fn put_origin(payload: &mut Vec<u8>, origin: KspDeclarationOrigin) {
+    payload.push(match origin {
+        KspDeclarationOrigin::Source => 0,
+        KspDeclarationOrigin::Synthetic => 1,
+        KspDeclarationOrigin::Library(KspOrigin::KotlinLib) => 2,
+        KspDeclarationOrigin::Library(KspOrigin::JavaLib) => 3,
+    });
 }
 
 /// A function: its name, kind (0 top-level, 1 member, 2 static, 3 primary constructor,
-/// 4 secondary constructor), whether it is abstract, its line, annotations, modifiers, type
+/// 4 secondary constructor), whether it is abstract, its origin, line, annotations, modifiers, type
 /// parameters, extension receiver, parameters, return type, JVM signature and JVM name.
 fn put_function(payload: &mut Vec<u8>, function: &KspFunction) {
     put_str(payload, &function.name);
@@ -201,6 +239,7 @@ fn put_function(payload: &mut Vec<u8>, function: &KspFunction) {
         KspFunctionKind::SecondaryConstructor => 4,
     });
     payload.push(u8::from(function.is_abstract));
+    put_origin(payload, function.origin);
     put_option(payload, &function.line, |payload, line| {
         payload.extend_from_slice(&line.to_be_bytes());
     });
@@ -221,6 +260,7 @@ fn put_function(payload: &mut Vec<u8>, function: &KspFunction) {
 fn put_property(payload: &mut Vec<u8>, property: &KspProperty) {
     put_str(payload, &property.name);
     payload.push(u8::from(property.is_mutable));
+    put_origin(payload, property.origin);
     put_option(payload, &property.line, |payload, line| {
         payload.extend_from_slice(&line.to_be_bytes());
     });
@@ -236,10 +276,10 @@ fn put_property(payload: &mut Vec<u8>, property: &KspProperty) {
     });
 }
 
-/// An accessor: whether the source wrote it, its modifiers and annotations, a setter's parameter
-/// name and annotations, and its JVM name.
+/// An accessor: its origin, its modifiers and annotations, a setter's parameter name and
+/// annotations, and its JVM name.
 fn put_accessor(payload: &mut Vec<u8>, accessor: &KspAccessor) {
-    payload.push(u8::from(accessor.written));
+    put_origin(payload, accessor.origin);
     put_modifiers(payload, &accessor.modifiers);
     put_annotations(payload, &accessor.annotations);
     put_option(
@@ -526,6 +566,7 @@ mod tests {
             name: "<init>".into(),
             kind: KspFunctionKind::PrimaryConstructor,
             is_abstract: false,
+            origin: KspDeclarationOrigin::Synthetic,
             line: None,
             annotations: Vec::new(),
             modifiers: Some(vec![KspModifier::Final]),
@@ -631,10 +672,11 @@ mod tests {
             t
         };
         expected.extend(&t);
-        // The complete declarations: a primary constructor, final, with one `val x: T = …`.
+        // The complete declarations: a primary constructor the compiler made, final, with one
+        // `val x: T = …`.
         expected.extend([1, 0, 0, 0, 1, 1, 0, 0, 0, 6]);
         expected.extend(b"<init>");
-        expected.extend([3, 0, 0, 0, 0, 0, 0]);
+        expected.extend([3, 0, 1, 0, 0, 0, 0, 0]);
         expected.extend([1, 0, 0, 0, 1, 0, 0, 0, 5]);
         expected.extend(b"FINAL");
         expected.extend([0, 0, 0, 0, 0, 1, 0, 0, 0, 1, b'x', 1]);

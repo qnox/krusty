@@ -107,6 +107,7 @@ fn member(name: &str, params: Vec<KotlinType>, is_property: bool) -> KotlinMembe
         is_operator: false,
         is_infix: false,
         is_abstract: false,
+        modality: crate::metadata::semantic::KotlinModality::Final,
         is_static: false,
         return_value_status: ReturnValueStatus::default(),
         formals: Vec::new(),

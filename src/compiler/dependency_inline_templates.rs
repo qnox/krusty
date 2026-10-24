@@ -60,4 +60,11 @@ impl DependencyInlineTemplates for KlibInlineTemplates {
             type_parameters: template.type_parameters,
         })
     }
+
+    fn compiler_implemented(&self, target: ExternalCallableId) -> bool {
+        self.platform
+            .external_callable(target)
+            .and_then(|realization| realization.callable.compiler_intrinsic)
+            .is_some_and(crate::libraries::CompilerIntrinsic::replaces_its_body)
+    }
 }

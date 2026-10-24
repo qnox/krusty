@@ -53,6 +53,8 @@ mod reference_compiler_support;
 mod reference_recording_support;
 #[path = "common/reference_targets.rs"]
 mod reference_targets_support;
+#[path = "serializable_default_read_lines_e2e.rs"]
+mod serializable_default_read_lines_e2e;
 #[path = "serializable_lateinit_elements_e2e.rs"]
 mod serializable_lateinit_elements_e2e;
 #[path = "serializable_parent_dependency_e2e.rs"]
@@ -1358,6 +1360,7 @@ mod jvm_static_functions_e2e;
 mod kclass_type_e2e;
 #[path = "klib_class_surface_e2e.rs"]
 mod klib_class_surface_e2e;
+mod klib_closure_frames_e2e;
 #[path = "klib_container_e2e.rs"]
 mod klib_container_e2e;
 #[path = "klib_semantic_e2e.rs"]
@@ -1616,6 +1619,8 @@ mod module_override_boxed_result_e2e;
 mod mpp_expect_actual_e2e;
 #[path = "mpp_requires_the_feature_e2e.rs"]
 mod mpp_requires_the_feature_e2e;
+#[path = "multifile_inline_part_splice_e2e.rs"]
+mod multifile_inline_part_splice_e2e;
 #[path = "native_conformance_deadline_e2e.rs"]
 mod native_conformance_deadline_e2e;
 #[path = "nested_block_comment_e2e.rs"]
@@ -2019,6 +2024,8 @@ mod native_throws_e2e;
 mod native_try_catch_e2e;
 #[path = "native_type_checks_e2e.rs"]
 mod native_type_checks_e2e;
+#[path = "native_type_of_e2e.rs"]
+mod native_type_of_e2e;
 #[path = "native_unsigned_e2e.rs"]
 mod native_unsigned_e2e;
 #[path = "native_value_classes_e2e.rs"]
@@ -2087,8 +2094,6 @@ mod noarg_plugin_e2e;
 mod non_field_ctor_metadata_e2e;
 #[path = "non_generic_overload_wins_e2e.rs"]
 mod non_generic_overload_wins_e2e;
-#[path = "non_reified_inline_splice_fallback_e2e.rs"]
-mod non_reified_inline_splice_fallback_e2e;
 #[path = "not_null_assert_e2e.rs"]
 mod not_null_assert_e2e;
 #[path = "nothing_call_branch_e2e.rs"]

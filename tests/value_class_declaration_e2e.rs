@@ -12,6 +12,9 @@
 
 use krusty::compilation_target::CompilationTarget;
 
+#[path = "native_value_class_parameter_diagnostics_e2e.rs"]
+mod native_parameters;
+
 use super::common::{
     front_end_diagnostics_located_for, reference_outcome, stdlib_jar, CompilerOutcome,
 };

@@ -10,6 +10,7 @@
 //! - `simple_name → internal_name` for every class in the classpath
 //! - Kotlin type aliases from `@kotlin.Metadata` `d2` arrays in `*TypeAliasesKt.class` files
 
+mod builtin_declared_members;
 mod builtin_inventory;
 mod builtin_signatures;
 use builtin_members::BuiltinPackageFunction;
@@ -36,6 +37,7 @@ mod metadata_indexes;
 mod method_bodies;
 mod method_body_cache;
 mod module_optional_annotations;
+mod multifile_part_bodies;
 mod package_facades;
 mod property_access;
 mod property_identity;
@@ -995,6 +997,16 @@ impl MetaFns {
     pub fn iter(&self) -> impl Iterator<Item = &super::metadata::MetaFn> {
         self.0.iter_fns()
     }
+
+    /// The functions a method named `jvm_name` of this class can realize, in declaration order.
+    pub fn named<'a>(
+        &'a self,
+        jvm_name: &'a str,
+    ) -> impl Iterator<Item = &'a super::metadata::MetaFn> + 'a {
+        self.0
+            .fns_named(jvm_name)
+            .map(|index| self.0.fn_at(index as usize))
+    }
 }
 
 /// The property analogue of [`MetaFns`].
@@ -1077,13 +1089,18 @@ struct BuiltinMember {
     name: String,
     generic_sig: GenericSig,
     is_property: bool,
+    is_var: bool,
     is_operator: bool,
     is_infix: bool,
     is_abstract: bool,
+    modality: crate::metadata::semantic::KotlinModality,
+    visibility: crate::types::Visibility,
     return_value_status: crate::types::ReturnValueStatus,
     ret_nullable: bool,
     annotations: Vec<crate::types::TypeName>,
     param_names: Vec<String>,
+    param_defaults: Vec<bool>,
+    vararg: Option<usize>,
 }
 
 struct BuiltinConstructor {
@@ -1170,13 +1187,18 @@ impl BuiltinsFile {
                             return_policy: Default::default(),
                         },
                         is_property: m.is_property,
+                        is_var: m.is_var,
                         is_operator: m.is_operator,
                         is_infix: m.is_infix,
                         is_abstract: m.is_abstract,
+                        modality: m.modality,
+                        visibility: m.visibility,
                         return_value_status: m.return_value_status,
                         ret_nullable: m.ret_nullable,
                         annotations: m.annotations,
                         param_names: m.param_names,
+                        param_defaults: m.param_defaults,
+                        vararg: m.vararg,
                     }
                 })
                 .collect();
@@ -2051,6 +2073,7 @@ impl Classpath {
         // copy here duplicated every part `MetaFn` (deep Strings included) — ~a third of peak heap.
         let mut fn_segments: Vec<std::sync::Arc<[super::metadata::MetaFn]>> = Vec::new();
         let mut prop_segments: Vec<std::sync::Arc<[super::metadata::MetaProp]>> = Vec::new();
+        let mut merged_parts = false;
         if let Some(ci) = &ci {
             if !ci.meta.package_functions.is_empty() {
                 fn_segments.push(ci.meta.package_functions.clone());
@@ -2066,6 +2089,7 @@ impl Classpath {
             if merge_fns || merge_props {
                 for part in &ci.meta.multifile_parts {
                     let Some(pci) = self.find(part) else { continue };
+                    merged_parts |= merge_fns;
                     if merge_fns && !pci.meta.package_functions.is_empty() {
                         fn_segments.push(pci.meta.package_functions.clone());
                     }
@@ -2077,11 +2101,13 @@ impl Classpath {
         }
         // Hash-sorted by-JVM-name lookup over the flat segment concatenation: no name copies, and
         // same-name overloads stay in declaration order (sort by `(hash, index)`), matching the old
-        // map's insertion-ordered index vecs.
+        // map's insertion-ordered index vecs. A part's private function has no facade method, so a
+        // facade's JVM name never selects it (another part may reuse its name and descriptor).
         let mut by_jvm_name: Vec<(u64, u32)> = fn_segments
             .iter()
             .flat_map(|s| s.iter())
             .enumerate()
+            .filter(|(_, f)| !(merged_parts && f.visibility == crate::types::Visibility::Private))
             .map(|(i, f)| (jvm_name_hash(&f.jvm_name), i as u32))
             .collect();
         by_jvm_name.sort_unstable();
@@ -2398,47 +2424,6 @@ impl Classpath {
         let class = file.get_name(nested)?;
         Some((jvm_outer.to_string(), simple.to_string(), class.access))
     }
-    /// Constructors declared by a classless Kotlin builtin. Their descriptor is deliberately empty:
-    /// the declaration is semantic metadata, while a backend intrinsic owns the platform realization
-    /// (`Array(size, init)` has no JVM `<init>` method).
-    pub fn builtin_constructors_name(
-        &self,
-        internal: TypeName,
-    ) -> Vec<crate::libraries::LibraryMember> {
-        let file = self.builtins_file_for_package(Self::builtins_package_for(internal));
-        let Some(class) = file.get_name(internal) else {
-            return Vec::new();
-        };
-        class
-            .constructors
-            .iter()
-            .map(|constructor| {
-                let mut member = crate::libraries::LibraryMember::new(
-                    "<init>".to_string(),
-                    constructor.params.clone(),
-                    Ty::Unit,
-                    String::new(),
-                );
-                member.visibility = constructor.visibility;
-                member.generic_sig = Some(crate::libraries::GenericSig {
-                    formals: Vec::new(),
-                    formal_bounds: Vec::new(),
-                    receiver: None,
-                    params: constructor.params.clone(),
-                    ret: Ty::obj_name(internal),
-                    return_policy: Default::default(),
-                });
-                member.call_sig = crate::libraries::CallSig::metadata_member(
-                    constructor.params.len(),
-                    constructor.param_names.clone(),
-                    constructor.param_defaults.clone(),
-                    constructor.vararg,
-                );
-                member
-            })
-            .collect()
-    }
-
     /// Whether the Kotlin builtin `internal` declares its function member `name`/`arity` with a NULLABLE
     /// return (`kotlin/collections/Map.get(K): V?`). When the mapped JVM class IS on the classpath the
     /// member that resolves such a call is the erased classpath method (`java/util/Map.get` → `Object`),
@@ -3265,27 +3250,7 @@ impl Classpath {
             }
         }
         cache_stat!(bodies, false);
-        let mut code = self.own_method_code(internal, name, descriptor, catalog_complete);
-        if code.is_none() {
-            // A multifile facade (`StandardKt`) has no method bodies — they live in its part classes,
-            // which the facade *extends* (a superclass chain: `StandardKt` → `StandardKt__StandardKt`).
-            let jvm = super::jvm_class_map::to_jvm_type_name(internal);
-            let mut cur = self.find_name(jvm).and_then(|class| class.super_class);
-            while let Some(superclass) = cur {
-                if superclass == crate::types::wk::java_object() {
-                    break;
-                }
-                if let Some(body) =
-                    self.own_method_code(superclass, name, descriptor, catalog_complete)
-                {
-                    code = Some(body);
-                    break;
-                }
-                cur = self
-                    .find_name(superclass)
-                    .and_then(|class| class.super_class);
-            }
-        }
+        let code = self.method_code_through_parts(internal, name, descriptor, catalog_complete);
         if catalog_complete {
             self.bodies.borrow_mut().insert(key, code.clone());
         }
@@ -3601,7 +3566,6 @@ impl Classpath {
             }
             for facade in &roots {
                 let facade = facade.as_str();
-                let metas = self.meta_functions(facade);
                 for cand in self.facade_statics(type_name(facade)).iter() {
                     // `facade_statics` walks a multifile superclass chain. Several roots can
                     // therefore reach the SAME physical method (`StandardKt`, its declaring
@@ -3622,10 +3586,13 @@ impl Classpath {
                     // `@JvmName`-mangled extension (`sum` → `sumOfInt`) or value-class member resolves by
                     // the source name; the JVM name is emit-only, kept on the candidate. A static with no
                     // metadata (a Java method / synthetic) keeps its JVM name as the source key.
+                    // The declaring class's metadata names it: a facade's merged parts never offer
+                    // a part's private function for the facade's forwarder of the same JVM name.
+                    let metas = self.meta_functions_name(cand.owner);
                     let source = indexed_source_name(&cand.name, |jvm_name| {
                         metas
-                            .iter()
-                            .find(|metadata| metadata.jvm_name == jvm_name)
+                            .named(jvm_name)
+                            .next()
                             .map(|metadata| metadata.kotlin_name.clone())
                     });
                     // The receiver (first-parameter) descriptor marks `facade` as an extension owner for it

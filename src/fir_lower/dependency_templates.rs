@@ -34,6 +34,12 @@ pub trait DependencyInlineTemplates {
         ir: &mut IrFile,
         target: ExternalCallableId,
     ) -> Option<DependencyInlineTemplate>;
+
+    /// Whether the compiler, not the body, gives `target` its meaning: a compiler intrinsic such
+    /// as `typeOf`, whose serialized body only throws. Its call stays the checked call each target
+    /// realizes, and is never expanded from a template. An intrinsic with a real body, which a
+    /// target may realize only in part, keeps its template.
+    fn compiler_implemented(&self, target: ExternalCallableId) -> bool;
 }
 
 /// The templates one file's lowering has asked for, each lowered at most once.
@@ -62,6 +68,13 @@ impl DependencyTemplateCache {
     /// whose dependencies are classfiles, calls every dependency function as declared.
     pub(crate) fn provides_templates(&self) -> bool {
         self.source.is_some()
+    }
+
+    /// Whether `target`'s call is the compiler's to realize rather than its body's to expand.
+    pub(crate) fn compiler_implemented(&self, target: ExternalCallableId) -> bool {
+        self.source
+            .as_ref()
+            .is_some_and(|source| source.compiler_implemented(target))
     }
 
     /// The template of `target` in `ir`, lowering it the first time it is asked for.
