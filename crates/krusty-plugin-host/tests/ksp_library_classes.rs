@@ -218,9 +218,14 @@ fn logged(name: &str, library: Option<KspLibraryClass>) -> String {
             .collect(),
         false => vec!["<refused>".to_string()],
     };
+    // The host projects the classifier with a star for each type parameter.
+    let stars = match parameters.len() {
+        0 => String::new(),
+        count => format!("<{}>", vec!["*"; count].join(", ")),
+    };
     format!(
         "{name} -> {kind} {} simple={} package={} parent={} origin={} modifiers={} \
-         typeParameters=[{}] supertypes={} annotations={}",
+         typeParameters=[{}] supertypes={} annotations={} star={}{stars} starText={}{stars}",
         class.qualified_name,
         class.simple_name,
         library.package_name,
@@ -230,6 +235,8 @@ fn logged(name: &str, library: Option<KspLibraryClass>) -> String {
         parameters.join("; "),
         super_types.join(", "),
         annotations.join("; "),
+        class.qualified_name,
+        class.simple_name,
     )
 }
 

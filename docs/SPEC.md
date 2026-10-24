@@ -15925,6 +15925,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   query only, and the build falls back to KSP2.
   (`crates/krusty-plugin-host/tests/ksp.rs`, `class_headers_are_what_ksp2_reports`;
   `ksp_round` unit test `a_header_has_its_written_modifiers_type_parameters_and_supertypes`.)
+- **A KSP classifier's star-projected type has a star per type parameter.**
+  `asStarProjectedType()` on a source or library classifier applies it to `*` for each of its type
+  parameters (`Map<*, *>`, `headers.Base<*, *>`) and to nothing when it has none; the type is not
+  nullable, and its text is the simple name with the stars (`Entry<*, *>`), as KSP2 2.3.12 reports.
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `class_headers_are_what_ksp2_reports` and
+  `library_classes_are_what_ksp2_reports`.)
 - **KSP members are listed as KSP2 lists them.** A file lists its functions and properties in
   source order, then its classifiers and type aliases in source order. A class lists its
   constructor properties, then its properties and functions interleaved in source order, then a

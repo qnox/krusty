@@ -6,16 +6,36 @@ import com.google.devtools.ksp.symbol.KSDeclaration;
 import com.google.devtools.ksp.symbol.KSType;
 import com.google.devtools.ksp.symbol.KSTypeArgument;
 import com.google.devtools.ksp.symbol.Nullability;
+import com.google.devtools.ksp.symbol.Variance;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import kotlin.sequences.Sequence;
 
-// A classifier applied to no type arguments and not nullable, such as the type an annotation names.
+// A classifier that is not nullable, applied either to no type arguments, such as the type an
+// annotation names, or to a star for each of its type parameters.
 final class ClassType implements KSType {
     private final KSClassDeclaration declaration;
+    private final List<KSTypeArgument> arguments;
 
     ClassType(KSClassDeclaration declaration) {
+        this(declaration, Collections.emptyList());
+    }
+
+    private ClassType(KSClassDeclaration declaration, List<KSTypeArgument> arguments) {
         this.declaration = declaration;
+        this.arguments = arguments;
+    }
+
+    // `declaration.asStarProjectedType()`: KSP2 applies the classifier to a star for each type
+    // parameter (`Map<*, *>`), and to nothing when it has none.
+    static ClassType starProjected(KSClassDeclaration declaration) {
+        int parameters = declaration.getTypeParameters().size();
+        List<KSTypeArgument> stars = new ArrayList<>(parameters);
+        for (int i = 0; i < parameters; i++) {
+            stars.add(new SourceTypeArgument(null, Variance.STAR));
+        }
+        return new ClassType(declaration, stars);
     }
 
     @Override
@@ -30,7 +50,7 @@ final class ClassType implements KSType {
 
     @Override
     public List<KSTypeArgument> getArguments() {
-        return Collections.emptyList();
+        return arguments;
     }
 
     @Override
@@ -95,7 +115,9 @@ final class ClassType implements KSType {
 
     @Override
     public boolean equals(Object other) {
-        return other instanceof ClassType && ((ClassType) other).declaration == declaration;
+        return other instanceof ClassType
+                && ((ClassType) other).declaration == declaration
+                && ((ClassType) other).arguments.size() == arguments.size();
     }
 
     @Override
@@ -105,6 +127,14 @@ final class ClassType implements KSType {
 
     @Override
     public String toString() {
-        return declaration.getSimpleName().asString();
+        String simple = declaration.getSimpleName().asString();
+        if (arguments.isEmpty()) {
+            return simple;
+        }
+        List<String> stars = new ArrayList<>();
+        for (KSTypeArgument argument : arguments) {
+            stars.add(argument.toString());
+        }
+        return simple + "<" + String.join(", ", stars) + ">";
     }
 }

@@ -72,6 +72,8 @@ class HeadersProcessor(private val env: SymbolProcessorEnvironment) : SymbolProc
                 .append(" bounds=").append(parameter.bounds.map { type(it) }.joinToString(" & "))
         }
         out.append("] supertypes=").append(declaration.superTypes.map { type(it) }.joinToString(", "))
+        val star = declaration.asStarProjectedType()
+        out.append(" star=").append(type(star)).append(" starText=").append(star.toString())
         env.logger.warn(out.toString())
     }
 }

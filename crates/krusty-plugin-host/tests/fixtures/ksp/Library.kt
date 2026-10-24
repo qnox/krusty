@@ -143,6 +143,8 @@ class LibraryProcessor(private val env: SymbolProcessorEnvironment) : SymbolProc
         }
         out.append("] supertypes=").append(declaration.superTypes.map { type(it) }.joinToString(", "))
             .append(" annotations=").append(declaration.annotations.map { annotation(it) }.joinToString("; "))
+        val star = declaration.asStarProjectedType()
+        out.append(" star=").append(type(star)).append(" starText=").append(star.toString())
         env.logger.warn(out.toString())
     }
 }
