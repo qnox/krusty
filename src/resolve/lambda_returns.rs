@@ -318,6 +318,18 @@ impl LambdaReturnScopes {
 }
 
 impl Checker<'_> {
+    /// Whether a return to `target` (`None` when its label names no enclosing lambda) is reported
+    /// as `'return' is prohibited here.`. A declaration that allows no return (an `init` block, a
+    /// property initializer) prohibits one that would leave it, but a labelled return to an
+    /// enclosing lambda leaves only that lambda, and kotlinc accepts it there too.
+    pub(super) fn return_is_prohibited(&self, target: Option<ReturnTarget>) -> bool {
+        match target {
+            Some(target @ ReturnTarget::Lambda(_)) => self.lambda_returns.leaves_its_frame(target),
+            Some(target) => !self.return_allowed || self.lambda_returns.leaves_its_frame(target),
+            None => !self.return_allowed,
+        }
+    }
+
     /// Join every value-return exit through the semantic source as it is recorded. Waiting until the
     /// tail is known is too late: two related labelled returns would already have collapsed to `Any`.
     pub(super) fn record_lambda_returned_type(&mut self, lambda: ExprId, returned: Ty) {

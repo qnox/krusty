@@ -11677,6 +11677,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and can read only the receiver, so its locals are renumbered from above every constructor's
   values.
   Test: `tests/serializable_parent_same_module_e2e.rs`.
+- **A serializable class's `init` blocks run in its deserialization constructor.** kotlinc runs
+  each `init` block there too, at its place among the property initializers, after the
+  superclass delegation and the constructor properties' stores. A block that reads a constructor
+  property reads it off the object the constructor has already stored, and its locals move above
+  the constructor's parameters (the marker included), as a copied default's do. kotlinc copies the
+  block's statements into the constructor itself, so a block's local stays in the
+  `LocalVariableTable` through the constructor's return and is listed ahead of `this`, as a
+  generated constructor's other body locals are. Only the `init` block itself is spliced: a nested
+  scope, an inline call's region, or any other block inside it keeps its own block and the facts
+  recorded on it, so its locals end where kotlinc's do. The seen-bit test
+  of an optional element that follows a block is attributed to the class's start line, like its
+  store. krusty skipped the blocks, so a decoded object missed their side effects. A block that
+  reads a constructor parameter which is not a property has nothing to read there and keeps the
+  file unsupported.
+  Test: `tests/serializable_init_replay_e2e.rs`.
+- **A labelled return to a lambda is allowed in a class initializer.** An `init` block or a
+  property initializer has no declaration a `return` could leave, so kotlinc reports `'return' is
+  prohibited here.` for a return that targets it, inside a lambda or not. A return labelled with an
+  enclosing lambda (`step { if (id < 0) return@step }`) leaves only that lambda and is accepted.
+  krusty rejected both, because it checked the declaration before resolving the return's target.
+  Test: `tests/initializer_lambda_return_e2e.rs`.
 - **A serializable default that reads another property keeps kotlinc's line numbers.** When
   `write$Self` or the deserialization constructor evaluates a default such as `id + 1`,
   `"n" + code` or `this.id * 2`, kotlinc marks the default's own line where it starts and keeps
