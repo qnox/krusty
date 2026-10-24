@@ -5,11 +5,17 @@ import com.google.devtools.ksp.symbol.KSClassDeclaration;
 import com.google.devtools.ksp.symbol.KSDeclaration;
 import com.google.devtools.ksp.symbol.KSType;
 import com.google.devtools.ksp.symbol.KSTypeArgument;
+import com.google.devtools.ksp.symbol.KSTypeReference;
 import com.google.devtools.ksp.symbol.Nullability;
 import com.google.devtools.ksp.symbol.Variance;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Deque;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Set;
 import kotlin.sequences.Sequence;
 
 // A classifier applied either to no type arguments, such as the type an annotation names, or to a
@@ -63,7 +69,45 @@ final class ClassType implements KSType {
 
     @Override
     public boolean isAssignableFrom(KSType that) {
-        throw Nodes.notImplemented("KSType.isAssignableFrom");
+        if (that.isMarkedNullable() && !nullable) {
+            return false;
+        }
+        KSClassDeclaration classifier = classifier(that.getDeclaration());
+        // `Nothing` is a subtype of every type; any other classifier is assignable when it is this
+        // one or inherits it, whatever its arguments, since this type's are stars.
+        return classifier.getQualifiedName().asString().equals("kotlin.Nothing")
+                || inherits(classifier);
+    }
+
+    private boolean inherits(KSClassDeclaration classifier) {
+        String target = declaration.getQualifiedName().asString();
+        Set<String> seen = new HashSet<>();
+        Deque<KSClassDeclaration> pending = new ArrayDeque<>();
+        pending.add(classifier);
+        while (!pending.isEmpty()) {
+            KSClassDeclaration next = pending.remove();
+            String name = next.getQualifiedName().asString();
+            if (name.equals(target)) {
+                return true;
+            }
+            if (!seen.add(name)) {
+                continue;
+            }
+            Iterator<KSTypeReference> supertypes = next.getSuperTypes().iterator();
+            while (supertypes.hasNext()) {
+                pending.add(classifier(supertypes.next().resolve().getDeclaration()));
+            }
+        }
+        return false;
+    }
+
+    // A type parameter's or a typealias's subtypes follow its bounds or expansion, which the host
+    // does not model yet.
+    private static KSClassDeclaration classifier(KSDeclaration declaration) {
+        if (declaration instanceof KSClassDeclaration) {
+            return (KSClassDeclaration) declaration;
+        }
+        throw Nodes.notImplemented("KSType.isAssignableFrom over a type parameter or typealias");
     }
 
     @Override
