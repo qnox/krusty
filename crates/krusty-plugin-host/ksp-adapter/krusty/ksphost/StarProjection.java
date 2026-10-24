@@ -52,8 +52,9 @@ final class StarProjection implements KSTypeArgument {
         return visitor.visitTypeArgument(this, data);
     }
 
+    // KSP2 renders a resolved argument as its variance and type.
     @Override
     public String toString() {
-        return "*";
+        return "STAR null";
     }
 }
