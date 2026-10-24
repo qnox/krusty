@@ -11540,7 +11540,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   them into the same spelled type a source property has: `List<@Serializable(with = S::class)
   Item>` serializes its items with `S`, at any depth (`Map<String, List<@Serializable(with =
   S::class) Item>>`). A type the decoder cannot read fully (a flexible or inner type, or one in
-  the type table) declines.
+  the type table) declines, and so does any other serialization annotation inside the type: a
+  type-use `@Contextual` or `@Polymorphic` wraps the element's serializer, and dropping it would
+  fall back to the type's ordinary serializer.
   A generic dependency superclass's elements are typed over its own type parameters, which its
   metadata names. A subclass inherits them typed by the arguments it gives the superclass, and
   further up the chain the arguments each class gives its own superclass are substituted the same

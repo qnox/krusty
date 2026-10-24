@@ -209,6 +209,55 @@ fn a_parent_element_type_names_its_serializers() {
     assert_same_classes_and_box(&reference, &on_reference_lib, &reference_cp);
 }
 
+const TYPE_USE_CONTEXTUAL_LIBRARY: &[(&str, &str)] = &[(
+    "Listed.kt",
+    "package listed\n\
+     import kotlinx.serialization.Contextual\n\
+     import kotlinx.serialization.Serializable\n\
+     @Serializable\n\
+     class Item(val v: Int)\n\
+     @Serializable\n\
+     open class Listed(val items: List<@Contextual Item> = emptyList())\n",
+)];
+
+const TYPE_USE_POLYMORPHIC_LIBRARY: &[(&str, &str)] = &[(
+    "Listed.kt",
+    "package listed\n\
+     import kotlinx.serialization.Polymorphic\n\
+     import kotlinx.serialization.Serializable\n\
+     @Serializable\n\
+     open class Item(val v: Int)\n\
+     @Serializable\n\
+     open class Listed(val items: List<@Polymorphic Item> = emptyList())\n",
+)];
+
+const TYPE_USE_WRAPPER_MAIN: &str = "import kotlinx.serialization.Serializable\n\
+                                     @Serializable\n\
+                                     class Child(val c: Int) : listed.Listed()\n";
+
+/// A type-use `@Contextual` asks for a `ContextualSerializer` around the element's type. `Item` is
+/// serializable, so ignoring the annotation would compile with `Item`'s generated serializer
+/// instead; the subclass declines.
+#[test]
+fn a_parent_element_type_with_a_contextual_argument_declines() {
+    assert_parent_declines(
+        "serializable-parent-type-use-contextual",
+        TYPE_USE_CONTEXTUAL_LIBRARY,
+        TYPE_USE_WRAPPER_MAIN,
+    );
+}
+
+/// A type-use `@Polymorphic` asks for a `PolymorphicSerializer` around the element's type, where
+/// `Item`'s generated serializer would otherwise be chosen; the subclass declines.
+#[test]
+fn a_parent_element_type_with_a_polymorphic_argument_declines() {
+    assert_parent_declines(
+        "serializable-parent-type-use-polymorphic",
+        TYPE_USE_POLYMORPHIC_LIBRARY,
+        TYPE_USE_WRAPPER_MAIN,
+    );
+}
+
 const OVERRIDE_LIBRARY: &[(&str, &str)] = &[(
     "Over.kt",
     "package over\n\
