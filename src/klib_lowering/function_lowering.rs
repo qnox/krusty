@@ -23,7 +23,9 @@ use crate::metadata::klib_ir::tree::{
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
 use crate::types::{Ty, TyKind, TypeName};
 
+mod class_initializers;
 mod closure_headers;
+pub(super) use class_initializers::initializer_header;
 mod declared_type_parameters;
 pub(super) use closure_headers::{closure_header, CaptureParameter};
 pub(super) mod vararg_parameters;

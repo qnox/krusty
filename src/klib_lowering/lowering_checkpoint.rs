@@ -7,6 +7,7 @@ use crate::ir::{ExprId, FunId, IrFile};
 pub(super) struct LoweringCheckpoint {
     expressions: usize,
     functions: usize,
+    classes: usize,
 }
 
 impl LoweringCheckpoint {
@@ -14,6 +15,7 @@ impl LoweringCheckpoint {
         Self {
             expressions: ir.exprs.len(),
             functions: ir.functions.len(),
+            classes: ir.classes.len(),
         }
     }
 
@@ -38,6 +40,9 @@ impl LoweringCheckpoint {
             .retain(|expression, _| *expression < first);
         let first = FunId::try_from(self.functions).expect("a function id fits u32");
         ir.functions.truncate(self.functions);
+        ir.classes.truncate(self.classes);
+        ir.class_method_owners
+            .retain(|function, _| *function < first);
         ir.fn_source_names.retain(|function, _| *function < first);
         ir.fn_params.retain(|function, _| *function < first);
         ir.lambda_own_params_from

@@ -2,6 +2,7 @@
 //! crate, so product e2e modules live behind one target to keep link time and target size bounded.
 //! External corpus/reference-toolchain suites live in `conformance.rs`.
 
+mod constructor_boxing_casts_e2e;
 #[path = "dependent_constructor_bounds_e2e.rs"]
 mod dependent_constructor_bounds_e2e;
 #[path = "nested_signature_argument_layout_e2e.rs"]
@@ -55,6 +56,8 @@ mod reference_recording_support;
 mod reference_targets_support;
 #[path = "serializable_default_read_lines_e2e.rs"]
 mod serializable_default_read_lines_e2e;
+#[path = "serializable_init_replay_e2e.rs"]
+mod serializable_init_replay_e2e;
 #[path = "serializable_lateinit_elements_e2e.rs"]
 mod serializable_lateinit_elements_e2e;
 #[path = "serializable_parent_dependency_e2e.rs"]
@@ -1332,6 +1335,8 @@ mod java_source_field_initializer_e2e;
 mod java_source_interop_e2e;
 mod java_static_modules;
 java_static_modules::declare!();
+#[path = "initializer_lambda_return_e2e.rs"]
+mod initializer_lambda_return_e2e;
 #[path = "java_supertype_type_arguments_e2e.rs"]
 mod java_supertype_type_arguments_e2e;
 #[path = "java_type_use_nullability_e2e.rs"]
@@ -1902,6 +1907,8 @@ mod native_context_parameter_sam_e2e;
 mod native_cross_file_dispatch_e2e;
 #[path = "native_cross_file_e2e.rs"]
 mod native_cross_file_e2e;
+#[path = "native_cross_file_interface_e2e.rs"]
+mod native_cross_file_interface_e2e;
 #[path = "native_data_class_array_rendering_e2e.rs"]
 mod native_data_class_array_rendering_e2e;
 #[path = "native_delegated_properties_e2e.rs"]

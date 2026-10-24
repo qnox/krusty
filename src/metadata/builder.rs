@@ -459,7 +459,8 @@ fn annotation_value_pb(st: &mut StringTable<'_>, value: &crate::ir::AnnoValue) -
                 dimensions += 1;
                 represented = element;
             }
-            let internal = represented
+            // `Unit::class` names the class `kotlin.Unit`.
+            let internal = crate::types::stored_value_ty(represented)
                 .kotlin_class_internal()
                 .expect("a checked class literal has a classifier");
             out.field_varint(1, 9);

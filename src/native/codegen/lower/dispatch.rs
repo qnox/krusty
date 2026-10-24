@@ -23,20 +23,42 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         ret: Ty,
         arguments: &[Value],
     ) -> Result<Option<Value>, Unsupported> {
+        self.dispatch_through(
+            receiver,
+            model::Dispatch::Class(slot),
+            params,
+            ret,
+            arguments,
+        )
+    }
+
+    /// A call through one of the receiver's tables: its vtable by class slot, or its interface
+    /// table by module-wide member number — `receiver.type.itable[n](receiver, args…)`. An
+    /// interface table is as long as the highest number the receiver's class implements, and a
+    /// call names a member through a type the receiver has, so the index is always inside it.
+    pub(super) fn dispatch_through(
+        &mut self,
+        receiver: Value,
+        through: model::Dispatch,
+        params: &[Ty],
+        ret: Ty,
+        arguments: &[Value],
+    ) -> Result<Option<Value>, Unsupported> {
         self.null_check(receiver)?;
         let flags = trusted();
         let ty = self
             .builder
             .ins()
             .load(types::I64, flags, receiver, TYPE_OFFSET);
-        let vtable = self
-            .builder
-            .ins()
-            .load(types::I64, flags, ty, ktype::VTABLE as i32);
+        let (table, index) = match through {
+            model::Dispatch::Class(slot) => (ktype::VTABLE, slot),
+            model::Dispatch::Interface(number) => (ktype::ITABLE, number),
+        };
+        let table = self.builder.ins().load(types::I64, flags, ty, table as i32);
         let function = self
             .builder
             .ins()
-            .load(types::I64, flags, vtable, (slot * 8) as i32);
+            .load(types::I64, flags, table, (index * 8) as i32);
         let mut all_params = vec![any()];
         all_params.extend_from_slice(params);
         let signature = self.file.signature_of(&all_params, ret)?;
@@ -149,7 +171,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             .and_then(|receiver| ir.class_id_by_name(receiver))
             .ok_or_else(unknown)?;
         let key = model::function_key(ir, declaring, fid);
-        let Some(slot) = self.file.model.slot(class, &key) else {
+        let Some(slot) = self.file.dispatch_of(class, &key) else {
             return Err(declined!("a virtual call with no dispatch slot (`{name}`)"));
         };
         // The ABI is the DECLARATION's, not the call site's: every override fills this slot with a
@@ -164,7 +186,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if self.terminated {
             return Ok(None);
         }
-        self.dispatch(object, slot, &carried, ret, &arguments)
+        self.dispatch_through(object, slot, &carried, ret, &arguments)
     }
 
     /// `super.p` and `super.p = v` — the named class's own realization of a PROPERTY.

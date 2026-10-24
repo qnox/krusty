@@ -73,6 +73,14 @@ pub(super) fn declarations(
         let constructor = facts
             .authenticates_constructor(&identity, bodies)
             .map_err(|reason| format!("an invalid constructor declaration: {reason:?}"))?;
+        if constructor {
+            if let Some(callees) = facts
+                .constructor_initialization_callees(&identity, bodies)
+                .map_err(|reason| format!("an invalid class initialization: {reason:?}"))?
+            {
+                pending.extend(callees);
+            }
+        }
         let primitive = facts
             .common_primitive(&identity, bodies)
             .map_err(|reason| format!("an invalid common primitive declaration: {reason:?}"))?;
