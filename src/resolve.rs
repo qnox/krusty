@@ -53353,10 +53353,8 @@ impl<'a> Checker<'a> {
         // shape, and checking either eagerly can publish diagnostics for an interpretation that
         // overload selection never chooses. Checked arguments are skipped to avoid duplicate work.
         for &arg in args {
-            if !matches!(
-                self.file.expr(arg),
-                Expr::Lambda { .. } | Expr::CallableRef { .. }
-            ) && self.expr_types[arg.0 as usize] == Ty::Error
+            if !self.file.is_callable_syntax(arg)
+                && self.expr_types[arg.0 as usize] == Ty::Error
                 && self.postponed_context_sensitive_name(scope, arg).is_none()
                 && !self.postponed_empty_reference_array_factory(scope, arg)
             {
@@ -53410,10 +53408,8 @@ impl<'a> Checker<'a> {
         let partial: Vec<Option<Ty>> = args
             .iter()
             .map(|&arg| {
-                (!matches!(
-                    self.file.expr(arg),
-                    Expr::Lambda { .. } | Expr::CallableRef { .. }
-                ) && self.postponed_context_sensitive_name(scope, arg).is_none())
+                (!self.file.is_callable_syntax(arg)
+                    && self.postponed_context_sensitive_name(scope, arg).is_none())
                 .then(|| self.expr(scope, arg))
             })
             .collect();
@@ -53442,7 +53438,7 @@ impl<'a> Checker<'a> {
                         ),
                         None => Ty::Error,
                     },
-                    Expr::CallableRef { .. } => expectation
+                    Expr::CallableRef { .. } if self.file.is_callable_syntax(arg) => expectation
                         .and_then(|expectation| expectation.callable_type)
                         .map(|expected| self.expr_expected(scope, arg, expected))
                         .unwrap_or(Ty::Error),
@@ -63166,10 +63162,7 @@ impl<'a> Checker<'a> {
         self.contextualize_constructor_arrays(scope, call, internal, args, arg_names);
         for &argument in args {
             if self.expr_types[argument.0 as usize] == Ty::Error
-                && !matches!(
-                    self.file.expr(argument),
-                    Expr::Lambda { .. } | Expr::CallableRef { .. }
-                )
+                && !self.file.is_callable_syntax(argument)
             {
                 self.expr(scope, argument);
             }
@@ -63223,11 +63216,8 @@ impl<'a> Checker<'a> {
         let partial = args
             .iter()
             .map(|&argument| {
-                (!matches!(
-                    self.file.expr(argument),
-                    Expr::Lambda { .. } | Expr::CallableRef { .. }
-                ))
-                .then(|| self.expr_types[argument.0 as usize])
+                (!self.file.is_callable_syntax(argument))
+                    .then(|| self.expr_types[argument.0 as usize])
             })
             .collect::<Vec<_>>();
         let declarations = self.eager_lambda_constructors(

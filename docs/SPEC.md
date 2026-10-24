@@ -19882,6 +19882,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/generic_annotation_construction_e2e.rs`. Written inner applications check own bounds with
   their enclosing arguments retained; `tests/where_bound_arguments_e2e.rs` covers construction.
 
+- **Class literals are ordinary call arguments.** The parser's `::class` marker distinguishes a
+  class literal from a callable reference. Argument
+  collection checks the literal's nominal `KClass` type before selection instead of postponing it
+  for a function shape. Its selected classifier remains available when a nested annotation value
+  is folded, including a deeper nested classifier supplied to an annotation constructor. Actual
+  callable references and lambdas retain ordinary contextual checking. Tests:
+  `tests/class_literal_e2e.rs::class_literals_are_values_beside_postponed_callable_arguments` and
+  `tests/generic_annotation_construction_e2e.rs::nested_annotation_class_literals_survive_dependency_publication`.
+
 - **A vararg constructor property is an array; a body property at the same index is not.**
   `class Bag(vararg val values: Int)` stores `values` as `IntArray`. Constructor parameters and
   body properties are each numbered from zero, so the first body property is not that parameter.

@@ -2,6 +2,60 @@
 
 use super::common;
 
+const NESTED_CLASS_ARGUMENTS: &str = r#"import kotlin.reflect.KClass
+annotation class Anno(val k: KClass<*>, val e: C.NestedEnum, val a: C.NestedAnno)
+annotation class AnnoWithDefault(val k: KClass<*> = Nested0::class) {
+    class Nested0
+}
+class C {
+    class Nested1
+    enum class NestedEnum { E }
+    annotation class NestedAnno(val k: KClass<*>) {
+        class Nested2
+    }
+}
+interface I {
+    @Anno(C.Nested1::class, C.NestedEnum.E, C.NestedAnno(C.NestedAnno.Nested2::class))
+    @AnnoWithDefault
+    fun foo(): String = "OK"
+}
+"#;
+
+#[test]
+fn nested_annotation_class_literals_survive_dependency_publication() {
+    let classes =
+        common::classes_against_kotlinc_module(&[("Declarations.kt", NESTED_CLASS_ARGUMENTS)]);
+    assert_eq!(
+        classes.krusty.keys().collect::<Vec<_>>(),
+        classes.reference.keys().collect::<Vec<_>>()
+    );
+    for (name, reference) in &classes.reference {
+        let reference = krusty::jvm::classreader::parse_class(reference).unwrap();
+        let emitted = krusty::jvm::classreader::parse_class(&classes.krusty[name]).unwrap();
+        assert_eq!(emitted.methods, reference.methods, "{name} method ABI");
+        assert_eq!(
+            emitted.annotation_element_defaults, reference.annotation_element_defaults,
+            "{name} annotation defaults"
+        );
+    }
+    common::expect_box_ok_against(
+        "NestedAnnotationClassLiterals",
+        NESTED_CLASS_ARGUMENTS,
+        r#"class D : I { fun answer(): String = foo() }
+fun box(): String {
+    val method = I::class.java.getMethod("foo")
+    val annotation = method.getAnnotation(Anno::class.java) ?: return "missing annotation"
+    val default = method.getAnnotation(AnnoWithDefault::class.java) ?: return "missing default"
+    if (annotation.k != C.Nested1::class) return "class argument"
+    if (annotation.e != C.NestedEnum.E) return "enum argument"
+    if (annotation.a.k != C.NestedAnno.Nested2::class) return "nested class argument"
+    if (default.k != AnnoWithDefault.Nested0::class) return "default class argument"
+    return D().answer()
+}
+"#,
+    );
+}
+
 const POSITIVE: &str = r#"annotation class Leaf<T>(val n: Int)
 annotation class Nest<T>(val leaves: Array<Leaf<T>>)
 annotation class Envelope(val leaf: Leaf<String>)

@@ -13,6 +13,12 @@ constructor retains its stable identity and exposes the same classifier-owned fo
 lambda expectations, eager analysis and selection. Reordered named arguments and same-spelled
 caller/classifier formals use the ordinary mapper and substitution path.
 
+Argument collection uses the parser's class-literal role to check `::class` as an ordinary value,
+while function literals and callable references await their selected callable shape. This keeps
+the checked classifier identity available to nested annotation folding without bypassing ordinary
+constructor selection. Owned source/dependency publication and ordinary-call controls cover the
+shared path.
+
 ## Local-call checked vararg signature
 
 Retain the checker's complete applied value-parameter list on local calls and consume it when

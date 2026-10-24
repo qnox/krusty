@@ -5,6 +5,11 @@ normalizes generic signatures from the classifier's formal layout. Semantic lamb
 templates remain available before argument checking; physical constructor parameters and serialized
 metadata layouts are unchanged.
 
+Class-literal arguments publish their checked classifier identity before constructor selection.
+Nested annotation folding consumes that same identity for its class token; it does not rediscover
+the literal from its source spelling. This also covers deeper nested classifier arguments in
+dependency annotation payloads and preserves ordinary annotation defaults and enum entries.
+
 Wasm's erased-reference binary equality realization uses the already checked operator and the
 runtime GC representation. It changes no metadata, callable identity, or provider authorization;
 explicit dependency `Any.equals` realization remains a separate authenticated-callable contract.
