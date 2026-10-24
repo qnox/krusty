@@ -16,6 +16,7 @@ use super::class_vtable::{
     same_representation,
 };
 use super::members::{function_key, overridden_functions};
+use super::module_interfaces::ModuleInterfaces;
 use super::module_slots::{PlanKey, PlannedSlot, PlannedTable};
 use super::{AnyMember, ClassTable, Representation, Slot, SlotKey, Unsupported};
 
@@ -27,6 +28,7 @@ pub(super) fn planned_class_table(
     superclass: Option<ClassId>,
     parent: Option<&ClassTable>,
     planned: &PlannedTable,
+    numbered: &ModuleInterfaces,
 ) -> Result<ClassTable, Unsupported> {
     let class = &ir.classes[id as usize];
     let qualified = class.fq_name();
@@ -174,7 +176,7 @@ pub(super) fn planned_class_table(
         };
         slots.insert(key, slot);
     }
-    let overridden = overridden_functions(ir, class)?;
+    let overridden = overridden_functions(ir, class, numbered)?;
     for &fid in &class.methods {
         let function = &ir.functions[fid as usize];
         if function.dispatch_receiver.is_none() || function.is_static {

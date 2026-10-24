@@ -15130,9 +15130,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   value, and a generic member is its declared type parameter, which each use site adapts to its own
   instantiation (`Box<Int>` reads an `Int`, `Box<String>` a `String`). The using file evaluates the
   receiver first and, for an assignment, the new value next. The entry point does not run the
-  declaring file's top-level initializer: the instance's constructor has already run. An interface
-  or annotation member, a classifier constant, an extension or context property, and a property of
-  a local or anonymous class are not this access.
+  declaring file's top-level initializer: the instance's constructor has already run. A member of
+  an interface is reached the same way: its declaring file's entry points read and write through
+  the receiver's interface table (below), so an implementor in any file answers. An annotation
+  member, a classifier constant, an extension or context property, and a property of a local or
+  anonymous class are not this access.
   Tests: `tests/native_cross_file_e2e.rs`
   (`a_member_val_is_read_from_the_file_that_declares_the_class`,
   `a_member_var_is_updated_from_another_file`,
@@ -15209,7 +15211,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   could not know its number; the forwarders of `I by d` are the exception, since no class number
   names an interface member alone: they take numbers past the planned ones, and a subclass renumbers
   the ones it inherits past its own. A forwarder that also realizes an inherited class member
-  (`class E : B(), C by D()`) fills that member's number instead. Interface numbers stay per file.
+  (`class E : B(), C by D()`) fills that member's number instead. Interface members are numbered
+  separately, below.
   Tests: `tests/native_cross_file_dispatch_e2e.rs`
   (`an_open_member_dispatches_to_the_override_from_another_file`,
   `an_abstract_member_dispatches_to_its_implementation`,
@@ -15218,6 +15221,38 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `an_overridden_to_string_dispatches_through_the_base`,
   `an_open_property_dispatches_to_its_override`,
   `a_delegated_member_replaces_the_inherited_class_member`).
+- **Native: a call through an interface of the module dispatches by a module-wide member number.**
+  Every member of every named interface of the module (a function, a property's getter, and a
+  `var`'s setter) is numbered once from the declaration headers
+  (`backend::class_tables::module_interfaces`): interfaces in declaration order, each after the
+  interfaces it extends, and a member that overrides a member of a super-interface while carrying
+  values alike takes that member's number, so one number names it through every interface that
+  declares it. A member that carries values differently takes a number of its own. Each type
+  descriptor carries an interface table (`KType.itable`) indexed by that number and ending after the
+  highest number its class implements; class vtables keep their numbering. The declaring file fills
+  each implemented number from the exact override edges common lowering recorded, never by name:
+  the class slot of the implementing member (one inherited from a superclass included), a bridge
+  where the implementation carries values differently from an interface member of the same file,
+  or the body the most derived interface declaring the member supplies, which a subclass inherits.
+  A function default declared in another file is that file's exported member entry point, taking
+  the receiver and the member's declared carriers. A call through an interface in any file, and a
+  property read or write through one, loads the receiver's interface table and calls the entry at
+  the member's number. Refused, by file: a property default of an interface of another file, a
+  default of another file reached through a bridge, an implementation of an interface member of
+  another file that carries values differently, an interface member implemented by a declaration
+  this file has no slot for (one outside the module), an instantiable class leaving a member with
+  no implementation, and a functional interface whose SAM object would inherit one of the refused
+  bodies. An interface outside the module is not numbered and keeps its per-file layout.
+  Tests: `tests/native_cross_file_interface_e2e.rs`
+  (`an_interface_call_reaches_implementors_of_other_files`,
+  `an_inherited_implementation_answers_for_a_subclass`,
+  `a_member_of_an_extended_interface_keeps_its_number`,
+  `a_property_reads_and_writes_through_an_interface`,
+  `a_default_in_the_implementors_file_answers_through_the_interface`,
+  `a_generic_member_reaches_an_implementation_through_its_bridge`,
+  `a_lambda_converted_to_a_functional_interface_answers_another_file`,
+  `a_default_declared_in_another_file_answers_for_an_implementor`,
+  `a_default_reached_through_a_bridge_of_another_file_declines`).
 - **Native: the public C ABI is primitives, String, and a Unit result.** A public top-level
   function whose parameters are primitives or `String` and whose result is one of those types or
   `Unit` is declared in the module's C header and exported under that declaration. The export runs

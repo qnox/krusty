@@ -5753,6 +5753,12 @@ non-inline callers, still reads the field directly. Test:
   their exact form; the committed target-KLIB inventories are the authoritative current backlog.
   Box lanes pass 460 (2.4.0), 460 (2.4.10) and 462 (2.4.20) cases on each target, up from
   181/181/182; Native's counts are unchanged by the shared tables.
+- Known gap: a class implementing an interface declared in another file, or a library interface
+  such as `Collection`, declines (`an interface declared outside this file`); Wasm lays out
+  interface members per file (`ModuleSlotPlan::empty()`). Native's descriptor proofs for that shape
+  (a `Collection` class also dispatched through a program interface, a cross-file `is` check) are
+  therefore named Native KLIB-lane tests in `tests/kotlin_box_native_conformance.rs` rather than
+  owned box regressions, which must pass on every lane.
 - Known gap: `x as? C` on a value smart-cast earlier in the body lowers to a `When` with no
   checked type, which Wasm declines rather than infer one.
 - Nullable scalar assertions decline when the operand is a reference but the checked result has
