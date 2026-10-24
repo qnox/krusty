@@ -136,10 +136,10 @@ final class ClassType implements KSType {
         return other instanceof SourceType && other.equals(this);
     }
 
-    // A source type's hash for the same classifier.
+    // A source type's hash for the same classifier and nullability.
     @Override
     public int hashCode() {
-        return SourceType.classifierHash(declaration.getQualifiedName().asString());
+        return SourceType.classifierHash(declaration.getQualifiedName().asString(), nullable);
     }
 
     @Override
