@@ -261,24 +261,33 @@ fn parse_argument_spelling(
         match (tag >> 3, tag & 7) {
             (2, 2) => {
                 let len = pb.varint()?;
-                let inner = pb.bytes(len as usize)?;
-                let node = parse_type_node(inner)?;
-                let (annotations, parameter_name) =
-                    occurrence_annotations(bind_type_annotations(&node.annotations, records, d2)?)?;
-                return Some(crate::spelling::Spelled {
-                    definitely_non_null: node.definitely_non_null,
-                    use_site_definitely_non_null: node.definitely_non_null,
-                    alias: parse_type_alias_name(inner, records, d2),
-                    args: parse_type_argument_spellings(inner, records, d2)?,
-                    annotations,
-                    parameter_name,
-                    ..crate::spelling::Spelled::default()
-                });
+                return type_spelling(pb.bytes(len as usize)?, records, d2);
             }
             (_, wire) => pb.skip(wire)?,
         }
     }
     Some(crate::spelling::Spelled::default())
+}
+
+/// A `Type`'s spelling: its own abbreviation and annotations plus, recursively, its arguments'.
+/// `None` when an annotation cannot be bound.
+pub(super) fn type_spelling(
+    body: &[u8],
+    records: &[Rec],
+    d2: &[String],
+) -> Option<crate::spelling::Spelled> {
+    let node = parse_type_node(body)?;
+    let (annotations, parameter_name) =
+        occurrence_annotations(bind_type_annotations(&node.annotations, records, d2)?)?;
+    Some(crate::spelling::Spelled {
+        definitely_non_null: node.definitely_non_null,
+        use_site_definitely_non_null: node.definitely_non_null,
+        alias: parse_type_alias_name(body, records, d2),
+        args: parse_type_argument_spellings(body, records, d2)?,
+        annotations,
+        parameter_name,
+        ..crate::spelling::Spelled::default()
+    })
 }
 
 /// Split the applications a `Type` records into those its occurrence wrote and the name of a
