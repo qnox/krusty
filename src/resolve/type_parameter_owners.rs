@@ -194,7 +194,9 @@ pub(super) fn classifier_type_parameter_owner(
     classifier: TypeName,
     declaration: &LibraryType,
 ) -> String {
-    let keyword = if declaration.is_interface() {
+    let keyword = if declaration.is_annotation() {
+        "annotation class"
+    } else if declaration.is_interface() {
         "interface"
     } else {
         "class"

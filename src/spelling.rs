@@ -133,17 +133,40 @@ impl Spelled {
         ty: Ty,
         expects: &crate::fx_hash::HashMap<TypeName, TypeName>,
     ) {
-        let ty = match ty.kind() {
-            TyKind::Nullable(inner)
-            | TyKind::PlatformNullable(inner)
-            | TyKind::DefinitelyNotNull(inner)
-            | TyKind::InProjection(inner)
-            | TyKind::OutProjection(inner)
-            | TyKind::StarProjection(inner) => inner,
-            _ => ty,
-        };
-        let TyKind::Obj(classifier, arguments) = ty.kind() else {
-            return;
+        // Qualifiers and projections stack on one spelled node (`MutableList<out Lock?>`).
+        let mut ty = ty;
+        while let TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::DefinitelyNotNull(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner)
+        | TyKind::StarProjection(inner) = ty.kind()
+        {
+            ty = inner;
+        }
+        let (classifier, arguments) = match ty.kind() {
+            TyKind::Obj(classifier, arguments) => (classifier, arguments),
+            // A function type spells its parameters, then its result, as its arguments. A suspend
+            // function's result is the argument of the `Continuation` in the result's place.
+            TyKind::Fun(signature) => {
+                let count = signature.params.len() + 1;
+                if self.args.len() < count {
+                    self.args.resize_with(count, Spelled::default);
+                }
+                for (spelling, parameter) in self.args.iter_mut().zip(signature.params.iter()) {
+                    spelling.abbreviate_actualized_expects(*parameter, expects);
+                }
+                let mut result = &mut self.args[signature.params.len()];
+                if signature.suspend {
+                    if result.args.is_empty() {
+                        result.args.push(Spelled::default());
+                    }
+                    result = &mut result.args[0];
+                }
+                result.abbreviate_actualized_expects(signature.ret, expects);
+                return;
+            }
+            _ => return,
         };
         if self.args.len() < arguments.len() {
             self.args.resize_with(arguments.len(), Spelled::default);

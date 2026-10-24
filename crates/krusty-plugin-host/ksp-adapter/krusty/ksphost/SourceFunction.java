@@ -41,6 +41,9 @@ final class SourceFunction implements KSFunctionDeclaration {
     Set<Modifier> modifiers;
     List<KSTypeParameter> typeParameters;
     KSTypeReference returnType;
+    String jvmSignature;
+    // The name KSP2 reports; null also when krusty does not name it the way KSP2 does yet.
+    String jvmName;
     // The extension receiver; `receiverUndescribed` when it has one krusty could not describe.
     KSTypeReference extensionReceiver;
     boolean receiverUndescribed;

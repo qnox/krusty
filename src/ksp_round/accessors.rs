@@ -32,6 +32,7 @@ fn compiler_accessor(
         modifiers: described.then(|| vec![KspModifier::Final, KspModifier::Public]),
         annotations,
         parameter,
+        jvm_name: None,
     }
 }
 
@@ -77,6 +78,7 @@ impl Source<'_> {
                 modifiers: (!property.getter_inline).then(Vec::new),
                 annotations: getter_annotations,
                 parameter: None,
+                jvm_name: None,
             }
         } else {
             compiler_accessor(modifiers, getter_annotations, None)
@@ -117,6 +119,7 @@ impl Source<'_> {
                 modifiers: (!setter.is_inline && setter.visibility.is_none()).then(Vec::new),
                 annotations: setter_annotations,
                 parameter: Some((parameter_name, parameter_annotations)),
+                jvm_name: None,
             },
             None => compiler_accessor(
                 modifiers,

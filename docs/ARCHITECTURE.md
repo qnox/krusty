@@ -84,15 +84,22 @@ from the real `kotlin` command, and refuses by name whatever it does not impleme
 
 Gradle projects are compiled by running that project's `./gradlew`, not by reimplementing the
 Kotlin plugin. `tools/krusty-gradle` is a Gradle plugin (`id("dev.krustythecompiler")`, sources under
-`src/main/kotlin`). A build applies both its selected `org.jetbrains.kotlin.jvm` 2.4.x plugin and
-`krusty`; source sets, `kotlin {}`, compiler options, and `KotlinJvmCompile` stay. Source checkouts
+`src/main/kotlin`). A build applies both its selected `org.jetbrains.kotlin.jvm` (or
+`org.jetbrains.kotlin.multiplatform`) 2.4.x plugin and `dev.krustythecompiler`; source sets, `kotlin {}`, compiler
+options, and `KotlinJvmCompile` stay. A multiplatform JVM compilation's source sets (its default
+source set and every source set it depends on) are passed as kotlinc's `-Xfragments`, each listing
+its own `.kt` files in `-Xfragment-sources` and refining the source sets it directly depends on in
+`-Xfragment-refines`, read from the public `KotlinCompilation`/`KotlinSourceSet` model. A
+multiplatform `KotlinJvmCompile` that compiles no Kotlin/JVM target (an Android target) stays with
+its compiler. Source checkouts
 can use `--include-build`; releases include a portable local Maven repository with the implementation
 and plugin-marker publications. The Kotlin JVM plugin still owns source sets, `project()` edges,
 compiler options, classpaths, friend paths,
 and compile outputs. The public Kotlin task is disabled and depends on a typed, cacheable replacement
 task whose `ExecOperations` and `FileSystemOperations` are injected by Gradle. The replacement execs
 the krusty binary (`-Pkrusty.binary`, `KRUSTY_BIN`, or else the plugin release's own compiler,
-downloaded once into the Gradle user home and checked against the release's `SHA256SUMS`) with the task's complete `.kt` and same-module
+downloaded once into the Gradle user home and checked against the release's `SHA256SUMS`, whose
+OpenPGP signature must chain to the root key bundled in the plugin) with the task's complete `.kt` and same-module
 `.java` sources and normalized structured compiler options. kotlinc and the Kotlin compile daemon
 are not started. An Android project (`com.android.base`, with AGP 9's built-in Kotlin or with
 `org.jetbrains.kotlin.android`) is replaced the same way, per variant: an Android variant is no Java

@@ -37,6 +37,18 @@ The Rust compiler/plugin model tracks checkout identity as a Cargo input, so a s
 reuse another checkout's incompatible declaration structure. No serialized plugin fields, protocol
 versions, classfile metadata or annotation payloads change.
 
+## Checked annotation constructor results
+
+The checked constructor overlay retains stable declaration identities while its merged inventory
+normalizes generic signatures from the classifier's formal layout. Semantic lambda parameter
+templates remain available before argument checking; physical constructor parameters and serialized
+metadata layouts are unchanged.
+
+Class-literal arguments publish their checked classifier identity before constructor selection.
+Nested annotation folding consumes that same identity for its class token; it does not rediscover
+the literal from its source spelling. This also covers deeper nested classifier arguments in
+dependency annotation payloads and preserves ordinary annotation defaults and enum entries.
+
 ## KLIB emission root categories
 
 KLIB dependency-root classification retains authenticated intrinsic-support ownership independently
@@ -51,6 +63,12 @@ metadata remain unchanged. Strict whole-class comparisons cover both source inpu
 runtime/binary retention with nested annotations, arrays, class literals and nullable parameters.
 
 ## Constructor-property annotation publication order
+
+Generic annotation owner syntax and its selected alias identity survive to the checking scope.
+Element substitution and nested constant folding consume the checked applied owner/constructor
+types, never an erased parameter list or a fresh lookup by annotation spelling. This changes no
+annotation wire format. JVM generic class/member `Signature` attributes use the same formatter as
+ordinary declarations, with the existing physical `KClass`-to-`Class` annotation representation.
 
 The stable property index receives checked applied-annotation payloads only after every source
 annotation class has published its target policy. Per-file checking releases its TypeInfo while
@@ -148,6 +166,13 @@ anonymous-object metadata at inline call sites stamps the caller's version, exac
 `tests/metadata_language_version_e2e.rs`, which diffs class, facade, `$DefaultImpls`,
 suspend-lambda, and regenerated-object `mv` values, plus the 20-byte module header, against kotlinc
 run with `-language-version 2.2`.
+
+## Interface compatibility holder table order
+
+An interface's generated compatibility holder uses the shared `InnerClasses` retained-row order
+for constant-pool publication. Its nesting relation and Kotlin metadata remain unchanged. Removing
+the earlier explicit class seed lets annotation-only references and declared children precede it
+when the ordinary table order requires that position.
 
 ## Module file — part ordering
 
@@ -1020,3 +1045,9 @@ Receiver admission distinguishes active call-owned inference variables from rigi
 parameters. A satisfiable trial specializes both receiver sides before strict comparison without
 publishing new declaration facts. Alias expansion, selected constructor identity and retained
 declaration parameters remain unchanged; no metadata wire or physical ABI change is involved.
+
+## Annotation classifier nesting
+
+JVM annotation interfaces use the same retained `InnerClasses` inventory as other declared
+classifiers. Declared children and enclosing rows remain discoverable without a method or element
+referencing them. This changes the JVM class table, not Kotlin metadata or annotation values.
