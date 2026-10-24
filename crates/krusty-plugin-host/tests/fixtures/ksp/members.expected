@@ -71,4 +71,7 @@ w: [ksp]   property lambdaParameter mutable=false backingField=false modifiers=:
 w: [ksp]   property localFunctionParameter mutable=false backingField=false modifiers=: kotlin.Int
 w: [ksp]   property throughObject mutable=false backingField=true modifiers=: kotlin.Int
 w: [ksp]   property setterShadowed mutable=true backingField=false modifiers=: kotlin.Int
+w: [ksp]   property throughParameterDefault mutable=false backingField=true modifiers=: kotlin.Int
+w: [ksp]   property objectMember mutable=false backingField=true modifiers=: kotlin.Int
+w: [ksp]   property setterWrites mutable=true backingField=true modifiers=: kotlin.Int
 w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL typeParameters= receiver=null (fromConstructor: kotlin.Int vararg=false default=false): members.Fields

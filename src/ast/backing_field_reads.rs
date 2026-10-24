@@ -3,8 +3,8 @@
 //! Inside an accessor, `field` binds to the property's backing field unless a local declaration
 //! nearer to the use declares `field`: a local variable from the statement after it, a lambda,
 //! local-function or catch parameter, or a loop variable. The binding reaches into lambdas, local
-//! functions and object expressions; a nested property's own accessor binds `field` to that
-//! property instead.
+//! functions and their parameter defaults, and object expressions, where it binds before the
+//! object's own members; a nested property's own accessor binds `field` to that property instead.
 
 use super::{ClassInit, Decl, Expr, ExprId, File, FunBody, FunDecl, Stmt, StmtId};
 
@@ -48,6 +48,8 @@ fn expr_uses(file: &File, expr: ExprId) -> bool {
             let Decl::Class(class) = file.decl(file.anonymous_object_classes[&expr]) else {
                 return false;
             };
+            // A member property of the object named `field` does not shadow it: like a local,
+            // the field binds before the object's members.
             class
                 .base_args
                 .iter()
@@ -91,16 +93,24 @@ fn stmt_uses(file: &File, stmt: StmtId) -> bool {
     }
 }
 
-/// Whether a local function's body reads the field, unless a parameter of its declares `field`.
+/// Whether a local function's parameter defaults or body read the field. A parameter named
+/// `field` shadows it in the defaults after it and in the body.
 fn function_uses(file: &File, function: &FunDecl) -> bool {
-    !function
-        .params
-        .iter()
-        .any(|parameter| parameter.name == FIELD)
-        && matches!(
-            &function.body,
-            FunBody::Expr(body) | FunBody::Block(body) if expr_uses(file, *body)
-        )
+    for parameter in &function.params {
+        if parameter
+            .default
+            .is_some_and(|default| expr_uses(file, default))
+        {
+            return true;
+        }
+        if parameter.name == FIELD {
+            return false;
+        }
+    }
+    matches!(
+        &function.body,
+        FunBody::Expr(body) | FunBody::Block(body) if expr_uses(file, *body)
+    )
 }
 
 /// Whether `stmt` declares a local `field` for the statements after it.
@@ -170,6 +180,9 @@ mod tests {
             val throughObject: Int get() = object { fun read() = field }.read()
             val catchParameter: Int get() = try { 1 } catch (field: Exception) { field.hashCode() }
             val loopVariable: Int get() { for (field in 1..2) { println(field) }; return 1 }
+            val parameterDefault: Int get() { fun read(x: Int = field) = x; return read() }
+            val shadowingParameterDefault: Int get() { fun read(field: Int = 1, x: Int = field) = x; return read() }
+            val objectMember: Int get() = object { val field = 1; fun read() = field }.read()
         }";
         assert_eq!(
             getters(source),
@@ -185,6 +198,9 @@ mod tests {
                 ("throughObject", true),
                 ("catchParameter", false),
                 ("loopVariable", false),
+                ("parameterDefault", true),
+                ("shadowingParameterDefault", false),
+                ("objectMember", true),
             ]
             .map(|(name, uses)| (name.to_string(), uses))
         );
