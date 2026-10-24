@@ -1549,7 +1549,6 @@ multiplatform/k2/anonymousObjectAndSpecificImplementationInDeserializedIr.kt
 multiplatform/k2/basic/contextInFakeOverride.kt
 multiplatform/k2/basic/delegatedByExpectExtensionProperty.kt
 multiplatform/k2/basic/expectActualFakeOverrides2.kt
-multiplatform/k2/basic/expectActualFakeOverrides3.kt
 multiplatform/k2/basic/expectActualFakeOverridesWithTypeParameters.kt
 multiplatform/k2/basic/expectActualIntersectionOverride2.kt
 multiplatform/k2/basic/expectActualOverloads.kt
@@ -2523,7 +2522,6 @@ reified/multipleTypeParameters.kt
 reified/noValueParameters.kt
 reified/parameterSwap.kt
 reified/reifiedIntersectionType.kt
-reified/reifiedIntersectionTypeArgument.kt
 reified/reifiedIntersectionTypeArgumentCrossModule.kt
 reified/safecast.kt
 reified/spreads.kt
