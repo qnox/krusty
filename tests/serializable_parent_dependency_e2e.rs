@@ -451,6 +451,43 @@ fn a_required_parent_element_declines() {
     );
 }
 
+const SERIALIZER_CLASS_LIBRARY: &[(&str, &str)] = &[(
+    "Boxed.kt",
+    "package boxed\n\
+     import kotlinx.serialization.KSerializer\n\
+     import kotlinx.serialization.Serializable\n\
+     import kotlinx.serialization.descriptors.PrimitiveKind\n\
+     import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor\n\
+     import kotlinx.serialization.encoding.Decoder\n\
+     import kotlinx.serialization.encoding.Encoder\n\
+     class Item(val v: Int)\n\
+     class ItemSerializer : KSerializer<Item> {\n\
+     \x20   override val descriptor = PrimitiveSerialDescriptor(\"Item\", PrimitiveKind.INT)\n\
+     \x20   override fun serialize(encoder: Encoder, value: Item) = encoder.encodeInt(value.v)\n\
+     \x20   override fun deserialize(decoder: Decoder) = Item(decoder.decodeInt())\n\
+     }\n\
+     @Serializable\n\
+     open class Boxed(@Serializable(with = ItemSerializer::class) val item: Item)\n",
+)];
+
+const SERIALIZER_CLASS_MAIN: &str = "import kotlinx.serialization.Serializable\n\
+                                     @Serializable\n\
+                                     class Child(val c: Int) : boxed.Boxed(boxed.Item(1))\n";
+
+/// A parent element whose serializer is a class rather than an object needs a constructor call,
+/// and the checked evidence for one (the frontend's selected constructor) exists only for source
+/// annotations. Nothing in the dependency's metadata or class file proves `ItemSerializer()` is
+/// the constructor to call, and the plugin never infers one from the classifier name, so the
+/// subclass declines.
+#[test]
+fn a_parent_element_with_a_serializer_class_declines() {
+    assert_parent_declines(
+        "serializable-parent-serializer-class",
+        SERIALIZER_CLASS_LIBRARY,
+        SERIALIZER_CLASS_MAIN,
+    );
+}
+
 /// kotlinc compiles `main` over `library`; krusty declines it over either compiler's build of the
 /// library.
 fn assert_parent_declines(name: &str, library: &[(&str, &str)], main: &str) {

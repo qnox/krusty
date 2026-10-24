@@ -11528,7 +11528,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   them there, and krusty reads that method's annotations with their arguments from the class
   file. `@SerialName` renames the element in the subclass's descriptor. A property-level
   `@Serializable(with = S::class)` makes `S` the element's serializer, and `@Contextual` makes it a
-  `ContextualSerializer`; an annotation that does not concern serialization changes nothing. A
+  `ContextualSerializer`; an annotation that does not concern serialization changes nothing. `S`
+  must be an object: a serializer class needs a constructor call, and only a source annotation
+  carries the frontend's checked constructor selection, so a class serializer declines (tracked
+  as a follow-up) rather than have the plugin pick a constructor by name. A
   dependency superclass compiled without the plugin, an element that is `@Required` or
   `@Polymorphic` or carries a `@SerialInfo` annotation (which the subclass's descriptor would push
   as an instance of a generated implementation class), an element type that carries annotations
