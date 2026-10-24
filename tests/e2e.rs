@@ -1212,6 +1212,8 @@ mod inner_class_declaration_order_e2e;
 mod inner_class_name_pool_order_e2e;
 #[path = "inner_class_outer_tparam_e2e.rs"]
 mod inner_class_outer_tparam_e2e;
+#[path = "inner_constructor_bounds_e2e.rs"]
+mod inner_constructor_bounds_e2e;
 #[path = "inner_secondary_constructor_line_e2e.rs"]
 mod inner_secondary_constructor_line_e2e;
 #[path = "instant_builtin_serializer_e2e.rs"]
@@ -1900,6 +1902,8 @@ mod native_context_parameter_sam_e2e;
 mod native_cross_file_dispatch_e2e;
 #[path = "native_cross_file_e2e.rs"]
 mod native_cross_file_e2e;
+#[path = "native_cross_file_interface_e2e.rs"]
+mod native_cross_file_interface_e2e;
 #[path = "native_data_class_array_rendering_e2e.rs"]
 mod native_data_class_array_rendering_e2e;
 #[path = "native_delegated_properties_e2e.rs"]

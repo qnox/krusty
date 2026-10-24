@@ -438,6 +438,7 @@ impl Checker<'_> {
             LibraryConstructorOptions {
                 arg_names,
                 applied_classifier: alias_target,
+                bound_outer: Some(receiver),
                 expected,
                 priority: ConstructorPriorityTier::All,
                 selected,

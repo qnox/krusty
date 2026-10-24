@@ -9,6 +9,13 @@ const LIBRARY: &str = include_str!("fixtures/klib_closure_frames/Library.kt");
 
 const CONSUMER: &str = include_str!("fixtures/klib_closure_frames/Consumer.kt");
 
+const CONSTRUCTOR_CONSUMER: &str = r#"
+fun box(): String {
+    val f = makeWithConstructor(40)
+    return if (f() == 41 && f() == 41) "OK" else "wrong closure result"
+}
+"#;
+
 #[test]
 fn official_dependency_closures_preserve_nested_values_and_once_only_operands() {
     assert_official_dependency_closures(
@@ -22,19 +29,56 @@ fn official_dependency_closures_preserve_nested_values_and_once_only_operands() 
 #[test]
 fn a_dependency_constructor_used_only_inside_nested_closures_is_prepared() {
     let library = include_str!("fixtures/klib_closure_frames/DependencyCalls.kt");
-    let consumer = r#"
-fun box(): String {
-    val f = makeWithConstructor(40)
-    return if (f() == 41 && f() == 41) "OK" else "wrong closure result"
-}
-"#;
     // Imported class storage is an independent Native capability. Observe the actual checked
     // dependency-support IR, with Native's preparation capabilities, before target realization.
     assert_official_dependency_closures(
         library,
-        consumer,
+        CONSTRUCTOR_CONSUMER,
         "SerializedClosureDependencies",
         DependencyConsumer::ConstructorIdentity,
+    );
+}
+
+#[test]
+fn a_dependency_constructor_used_only_inside_nested_closures_executes() {
+    assert_official_dependency_closures(
+        include_str!("fixtures/klib_closure_frames/DependencyCalls.kt"),
+        CONSTRUCTOR_CONSUMER,
+        "ImportedClassConstructor",
+        DependencyConsumer::Native,
+    );
+}
+
+#[test]
+fn dependency_class_initializers_run_in_order_for_each_closure_construction() {
+    assert_official_dependency_closures(
+        include_str!("fixtures/klib_dependency_classes/Initialized.kt"),
+        include_str!("fixtures/klib_dependency_classes/InitializedConsumer.kt"),
+        "ImportedClassInitialization",
+        DependencyConsumer::Native,
+    );
+}
+
+#[test]
+fn dependency_class_storage_is_independent_of_constructor_parameters() {
+    assert_official_dependency_closures(
+        include_str!("fixtures/klib_dependency_classes/Initialized.kt"),
+        include_str!("fixtures/klib_dependency_classes/InitializedConsumer.kt"),
+        "ImportedClassLayout",
+        DependencyConsumer::InitializationLayout,
+    );
+}
+
+#[test]
+fn dependency_class_cannot_consume_same_name_source_classifier_facts() {
+    let consumer = format!(
+        "class BodyOnly(seed: Int) {{ val replacement: Long = seed.toLong() }}\n{CONSTRUCTOR_CONSUMER}"
+    );
+    assert_official_dependency_closures(
+        include_str!("fixtures/klib_closure_frames/DependencyCalls.kt"),
+        &consumer,
+        "ImportedClassSourceCollision",
+        DependencyConsumer::SourceClassifierCollision,
     );
 }
 
@@ -58,6 +102,8 @@ fun box(): String {
 enum DependencyConsumer {
     Native,
     ConstructorIdentity,
+    InitializationLayout,
+    SourceClassifierCollision,
 }
 
 /// Observe the same common preparation Native requests without claiming its imported-class
@@ -65,6 +111,7 @@ enum DependencyConsumer {
 struct ConstructorIdentityProbe {
     native: krusty::native::CraneliftBackend,
     producer_module: String,
+    initialization_layout: bool,
 }
 
 impl Backend for ConstructorIdentityProbe {
@@ -103,7 +150,12 @@ impl Backend for ConstructorIdentityProbe {
         count: &mut Self::State,
         _diags: &mut DiagSink,
     ) -> Vec<Artifact> {
-        let expected = krusty::types::type_name("fixture/BodyOnly");
+        use krusty::types::Ty;
+        let expected = krusty::types::type_name(if self.initialization_layout {
+            "fixture/Initialized"
+        } else {
+            "fixture/BodyOnly"
+        });
         for expression in &file.ir.exprs {
             let krusty::ir::IrExpr::New {
                 internal,
@@ -129,7 +181,12 @@ impl Backend for ConstructorIdentityProbe {
                 fact.declaration_owner,
                 Some(krusty::types::SemanticCallableOwner::Classifier(expected))
             );
-            assert_eq!(fact.params, vec![krusty::types::Ty::Int]);
+            let params = if self.initialization_layout {
+                vec![Ty::Int, Ty::fun(vec![Ty::Int], Ty::Int)]
+            } else {
+                vec![Ty::Int]
+            };
+            assert_eq!(fact.params, params);
             let identity = fact
                 .dependency_callable
                 .as_ref()
@@ -139,6 +196,30 @@ impl Backend for ConstructorIdentityProbe {
                 fact.declaration_signature.as_ref(),
                 Some(&identity.declaration)
             );
+            if self.initialization_layout {
+                let class = &file.ir.classes[file.ir.class_id_by_name(expected).unwrap() as usize];
+                assert_eq!(
+                    class
+                        .fields
+                        .iter()
+                        .map(|field| (field.name.as_str(), field.ty))
+                        .collect::<Vec<_>>(),
+                    vec![("first", Ty::Int), ("tag", Ty::String), ("second", Ty::Int)]
+                );
+                assert_eq!(
+                    class
+                        .ctor_args
+                        .iter()
+                        .map(|arg| (arg.ty, arg.is_field, arg.field_index))
+                        .collect::<Vec<_>>(),
+                    params
+                        .iter()
+                        .map(|ty| (*ty, false, None))
+                        .collect::<Vec<_>>()
+                );
+                assert!(class.explicit_param_stores);
+                assert_eq!(class.ctor_param_count, 0);
+            }
             *count += 1;
         }
         Vec::new()
@@ -164,10 +245,25 @@ fn assert_official_dependency_closures(
         return;
     };
     // Establish the portable source behavior before executing a Native dependency consumer.
-    common::expect_box_ok_with_stdlib(
-        &format!("{library_source}\n{consumer}"),
-        &format!("{fixture_name}Oracle"),
-    );
+    let consumer_text = format!("package fixture\n{consumer}");
+    if matches!(purpose, DependencyConsumer::SourceClassifierCollision) {
+        // These are different modules with equal classifier names, not a source redeclaration.
+        let dependency = common::kotlinc_lib_out(&[("Library.kt", library_source)])
+            .expect("reference compiler required for dependency identity oracle");
+        assert_eq!(
+            common::kotlinc_box_files_result_with_classpath(
+                &[("Consumer.kt", &consumer_text)],
+                "fixture.ConsumerKt",
+                &[dependency],
+            ),
+            "OK"
+        );
+    } else {
+        common::expect_box_ok_with_stdlib(
+            &format!("{library_source}\n{consumer}"),
+            &format!("{fixture_name}Oracle"),
+        );
+    }
     let work = common::scratch_dir().expect("allocate serialized closure producer directory");
     let source = work.join("Frames.kt");
     std::fs::write(&source, library_source).unwrap();
@@ -195,7 +291,6 @@ fn assert_official_dependency_closures(
         KlibLibraryInput::dependency(library),
     ])
     .expect("read official serialized closure declarations");
-    let consumer_text = format!("package fixture\n{consumer}");
     let input = krusty::source::SourceInput::kotlin(&consumer_text).with_file_stem("Consumer");
     let mut diags = DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
@@ -213,20 +308,42 @@ fn assert_official_dependency_closures(
         .verified();
     let stems = ["Consumer".to_owned()];
     let artifacts = match purpose {
-        DependencyConsumer::Native => {
+        DependencyConsumer::Native | DependencyConsumer::SourceClassifierCollision => {
             krusty::compiler::emit_analyzed(analysis, &stems, &backend, "consumer", &mut diags)
         }
-        DependencyConsumer::ConstructorIdentity => krusty::compiler::emit_analyzed(
-            analysis,
-            &stems,
-            &ConstructorIdentityProbe {
-                native: backend,
-                producer_module: manifest.unique_name().unwrap().to_owned(),
-            },
-            "consumer",
-            &mut diags,
-        ),
+        DependencyConsumer::ConstructorIdentity | DependencyConsumer::InitializationLayout => {
+            krusty::compiler::emit_analyzed(
+                analysis,
+                &stems,
+                &ConstructorIdentityProbe {
+                    native: backend,
+                    producer_module: manifest.unique_name().unwrap().to_owned(),
+                    initialization_layout: matches!(
+                        purpose,
+                        DependencyConsumer::InitializationLayout
+                    ),
+                },
+                "consumer",
+                &mut diags,
+            )
+        }
     };
+    if matches!(purpose, DependencyConsumer::SourceClassifierCollision) {
+        assert_eq!(
+            diags.diags.iter().map(|diag| (
+                diag.file, diag.span, diag.editor_span, diag.severity, diag.warning_name,
+                diag.kind, diag.identity, diag.msg.as_str(),
+            )).collect::<Vec<_>>(),
+            vec![(
+                0, krusty::diag::Span::new(0, 0), None, krusty::diag::Severity::Error, None,
+                krusty::diag::DiagnosticKind::Compiler, None,
+                "cannot materialize a dependency class that collides with a current-module classifier",
+            )]
+        );
+        assert!(artifacts.is_empty());
+        std::fs::remove_dir_all(work).unwrap();
+        return;
+    }
     assert_eq!(
         diags
             .diags
@@ -235,7 +352,10 @@ fn assert_official_dependency_closures(
             .collect::<Vec<_>>(),
         Vec::<&str>::new()
     );
-    if matches!(purpose, DependencyConsumer::ConstructorIdentity) {
+    if matches!(
+        purpose,
+        DependencyConsumer::ConstructorIdentity | DependencyConsumer::InitializationLayout
+    ) {
         assert!(artifacts.is_empty());
         std::fs::remove_dir_all(work).unwrap();
         return;
