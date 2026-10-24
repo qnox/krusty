@@ -1065,3 +1065,11 @@ physical inputs. This is an in-memory declaration fact, with no Kotlin metadata 
 JVM annotation interfaces use the same retained `InnerClasses` inventory as other declared
 classifiers. Declared children and enclosing rows remain discoverable without a method or element
 referencing them. This changes the JVM class table, not Kotlin metadata or annotation values.
+
+## Initializer inline debug ranges
+
+Class-initializer entry establishes the implicit callable frame. Initializer expressions record
+their local-variable ranges at nested lexical boundaries, and each store restores its source line
+after an inlined value. Class-initializer table curation preserves intentional marks at distinct
+offsets, including returns to the same source line. The JVM uses these debug points to preserve
+inline markers and closing anchors; Kotlin metadata and constructor descriptors are unchanged.
