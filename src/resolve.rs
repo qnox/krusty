@@ -82,6 +82,7 @@ mod class_literal_array_of_nothing;
 mod class_literal_receiver;
 mod class_literal_type_arguments;
 mod class_names_aliases;
+mod star_projected_classifier;
 use candidate_display::{
     ambiguous_classifier_message, classifier_access_display_from_shape,
     inaccessible_classifier_message,
@@ -49103,8 +49104,9 @@ impl<'a> Checker<'a> {
                     // A delegated member property's delegate expression (`by Del()`) — type-check it so
                     // its (and its sub-expressions') types are recorded for the `x$delegate` field lowering.
                     if let Some(de) = bp.delegate.filter(|_| check_ordinary_property_body) {
-                        let owner = Ty::obj_name(
+                        let owner = Ty::obj_args_name(
                             current_owner.expect("a checked member property has an owning class"),
+                            &dispatch_arguments,
                         );
                         // kotlinc gives a script's properties no dispatch receiver: their delegates
                         // see `null` and a reference without the script, like a top-level property.

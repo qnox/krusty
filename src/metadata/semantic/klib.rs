@@ -1412,6 +1412,7 @@ fn semantic_function(
         is_operator: function.is_operator,
         is_infix: function.is_infix,
         is_abstract: function.modality == metadata::KotlinModality::Abstract,
+        modality: function.modality,
         is_static,
         return_value_status: function.return_value_status,
         formals: formals.clone(),
@@ -1760,6 +1761,7 @@ fn semantic_property(
         is_infix: false,
         is_abstract: flags & crate::metadata::property_flags::MODALITY_MASK
             == crate::metadata::property_flags::MODALITY_ABSTRACT,
+        modality: metadata::declaration_modality(flags),
         is_static,
         return_value_status: modern_flags.map_or_else(Default::default, |flags| {
             crate::types::ReturnValueStatus::from_metadata(

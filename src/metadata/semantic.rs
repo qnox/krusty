@@ -155,6 +155,8 @@ pub struct KotlinMember {
     pub is_operator: bool,
     pub is_infix: bool,
     pub is_abstract: bool,
+    /// The declaration's modality, of which [`Self::is_abstract`] is one case.
+    pub modality: KotlinModality,
     /// Whether metadata declares this member static for KLIB signature mangling.
     pub is_static: bool,
     pub return_value_status: crate::types::ReturnValueStatus,

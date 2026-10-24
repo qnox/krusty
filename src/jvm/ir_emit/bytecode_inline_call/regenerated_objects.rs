@@ -311,6 +311,7 @@ impl AnonymousObjects for CallObjects<'_> {
                         line: self.call_line,
                     },
                 },
+                calling_class: &self.owner,
                 type_arguments: &type_arguments,
                 prior_classes,
                 major: self.major,
@@ -325,10 +326,21 @@ impl AnonymousObjects for CallObjects<'_> {
             object_names,
         )
         .map_err(InlineError::Regeneration)?;
+        let mut shared_wrappers = Vec::new();
+        for wrapper in regenerated.sam_wrappers {
+            let (name, first) = generators
+                .sam_wrapper(&self.owner, &wrapper.original)
+                .ok_or(unsupported("a SAM wrapper without its ABI name segment"))?;
+            debug_assert_eq!(name, wrapper.name, "one name for the calling class's copy");
+            if first {
+                shared_wrappers.push((wrapper.name, wrapper.bytes));
+            }
+        }
         if self.commit {
             let mut classes = self.run.machine_classes.borrow_mut();
             classes.push((new_class.clone(), regenerated.bytes));
             classes.extend(regenerated.nested);
+            classes.extend(shared_wrappers);
         }
         Ok(RegeneratedObject {
             name: new_class,

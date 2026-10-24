@@ -472,17 +472,27 @@ mod tests {
     impl SymbolSource for GenericSource {
         fn symbols(&self, namespace: SymbolNamespace, name: &str) -> Rc<ResolvedSymbols> {
             let identity = namespace.existing_classifier(name);
-            let classifier = identity
-                .filter(|identity| identity.matches("demo/Inv"))
-                .map(|_| {
-                    let mut classifier = LibraryType::declaration_header();
+            let classifier = identity.and_then(|identity| {
+                let mut classifier = LibraryType::declaration_header();
+                if identity.matches("demo/Inv") {
                     classifier.type_parameters = TypeParameters::new(
                         vec!["T".to_string()],
                         vec![Vec::new()],
                         vec![self.variance],
                     );
-                    Arc::new(classifier)
-                });
+                    classifier.own_type_parameter_count = classifier.type_params().len();
+                } else {
+                    let argument = if identity.matches("demo/First") {
+                        Ty::obj("demo/Left")
+                    } else if identity.matches("demo/Second") {
+                        Ty::obj("demo/Right")
+                    } else {
+                        return None;
+                    };
+                    classifier.supertype_templates = vec![Ty::obj_args("demo/Inv", &[argument])];
+                }
+                Some(Arc::new(classifier))
+            });
             Rc::new(ResolvedSymbols {
                 builtin_classifier: false,
                 classifier_name: classifier.as_ref().and(identity),
@@ -494,6 +504,26 @@ mod tests {
                 callables: Callables::None,
                 importable_declaration: false,
             })
+        }
+    }
+
+    #[test]
+    fn inherited_join_keeps_the_applied_common_owner_in_both_operand_orders() {
+        let source = GenericSource {
+            variance: TypeVariance::Out,
+        };
+        let first = Ty::obj("demo/First");
+        let second = Ty::obj("demo/Second");
+        let expected = Ty::obj_args("demo/Inv", &[Ty::obj("kotlin/Any")]);
+        for (left, right) in [(first, second), (second, first)] {
+            assert_eq!(
+                super::super::merge_inferred_ty_from_symbols(Some(&source), left, right),
+                expected
+            );
+            assert_eq!(
+                super::super::merge_inferred_lower_bounds_from_symbols(&source, &[left, right]),
+                expected
+            );
         }
     }
 

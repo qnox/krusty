@@ -20,6 +20,14 @@ Goal: emit `@kotlin.Metadata` so krusty output is consumable as a **Kotlin** lib
 need only the signatures, already matched in Phase 5a). This is the single largest remaining piece —
 effectively a re-implementation of `kotlinx-metadata-jvm`'s writer.
 
+## Applied generic argument completeness
+
+The common subtype relation consumes the complete applied supertype supplied by declaration
+evidence. An explicitly applied target must have exactly the same argument count before checking
+variance or projections; an empty target remains the existing owner-reachability query. This does
+not change metadata encoding or recover missing arguments. The unit hierarchy oracle must preserve
+its collection supertype arguments rather than supplying raw declarations for applied queries.
+
 ## Java raw type arguments
 
 A Java raw occurrence is a complete application of `RawProjection` arguments, one per formal.
@@ -388,6 +396,10 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   `Any` member its source does not override as an open DECLARATION (`0x10116`, `0x10016`) without a
   `JvmMethodSignature` and without a JVM method. Test:
   `tests/metadata_value_class_synthesized_members_e2e.rs`.
+  Native's full-value parameter diagnostics do not require a JVM annotation declaration: an
+  unresolved bare `@JvmInline` retains its separate annotation-resolution diagnostic. The Native
+  oracle tests use the matching stdlib KLIB provider and pin both errors and the independent
+  unannotated case without changing metadata.
 - Captured type parameters (kotlinc 2.4.20): a local or anonymous class refers to a type parameter
   of an enclosing declaration by id alone (`Type.type_parameter`). Ids come from kotlinc's
   per-declaration interner: the class's own parameters first, then each captured one on first use,
@@ -775,6 +787,24 @@ accessor's own annotations (modern fields 15/16, BuiltIns fields 152/153, KLIB f
 Each accessor also carries the property's declaration-owned reified formal ordinals. These are
 existing schema facts, not new intrinsic markers or a metadata format change. This producer fix
 alone does not enable ordinary dependency-body or inline-accessor emission.
+
+## Serialized closure capture ownership
+
+Closure frames bind exact arena-local value symbols against their enclosing declaration's value
+environment. A lexical scan includes nested closures, while each nested lowering starts a fresh
+parameter/local/control-flow frame. The lifted declaration publishes its capture prefix,
+parameter identities, receiver ledger and private visibility; rollback removes these side facts
+with the appended functions. The serialized expression's source-form marker distinguishes a
+literal from an anonymous function. Full source naming/debug origins are not reconstructed from
+generated names or invented for dependency bodies. Official-producer tests cover raw bodies,
+prepared inline copies and runtime consumption through the existing Native closure ABI.
+The emitted-callable walk extends only selected expression roots with reached, supported closure
+implementations. It deduplicates nested implementations and projects every call through the same
+producer-origin graph as direct calls. Defaults and unrelated local declarations remain outside the
+root set, and intrinsic-authority inventories stay direct-only. The prewalk checks outer function
+class shape independently of generic argument binding; body lowering retains full capture/header
+validation in its enclosing frame. Imported constructor facts can therefore be prepared without
+claiming a target implements the imported classifier's storage or allocation.
 
 ## Ordinary KLIB generic declaration headers
 

@@ -548,3 +548,16 @@ fn library_classes_are_what_ksp2_reports() {
         "library.expected",
     );
 }
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn library_annotation_members_are_what_ksp2_reports() {
+    log_with_dependencies_is_what_ksp2_reports(
+        "LibraryMembers",
+        "librarymembers.LibraryMembersProvider",
+        &[fixtures().join("library-members-source/Source.kt")],
+        &[fixtures().join("library-members/Dependency.kt")],
+        "ksp-outputs-library-members",
+        "library-members.expected",
+    );
+}

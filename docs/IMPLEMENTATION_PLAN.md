@@ -28,6 +28,23 @@ KLIB dependency-emission categories have disjoint declaration-owned roots before
 An authenticated intrinsic wrapper keeps that ownership when its body transaction declines; the
 ordinary-body category cannot retry it and turn the target decline into an ordinary-closure error.
 
+## Applied generic argument completeness
+
+- ✅ The common subtype relation rejects mismatched explicit argument counts after supertype
+  projection, while preserving bare-owner reachability. Direct and inherited regression cases
+  cover the previous zipped-prefix acceptance. This prerequisite is separate from dependency-body
+  type evidence and adds no backend capability or outcome allowance.
+- ✅ Producers that handed the relation a raw generic classifier now supply a complete
+  application: the delegated-property convention's reference argument is the `KProperty`
+  declaration's star projection (shared with bare class literals), and the core `Array`
+  declaration publishes its `T` formal for erased-cast proofs with an empty classpath.
+- Core top-level declarations publish all their formals as their own, with no enclosing captures.
+  The public declaration inventory and checked array/class-literal applications pin that layout;
+  raw Java flexible applications remain the separate prerequisite #2537.
+- Preserve the class checker's applied self type at delegated-member sites and the applied common
+  superclass in inference joins. Keep the existing complete dependency-star/bridge and capturing
+  local-class delegate regressions unchanged; raw Java applications remain a separate handoff.
+
 ## Java raw type applications
 
 - ✅ A Java raw occurrence carries one `RawProjection(erasure)` argument per formal (SPEC §5), so it
@@ -4273,6 +4290,15 @@ Remaining:
   `reifiedTypeArgumentWithIntersectionTypeAsTypeArgument`).
 - Typealias use-site projections (`typeAliasedType`).
 
+Native: `typeOf<T>()` is a static `KType` object per distinct type, folded to one per program by
+COMDAT group where every file can name the type, read by the runtime's
+`KTypeImpl` descriptor for `equals`, `hashCode`, `toString`, `classifier` and `isMarkedNullable`
+(`native::codegen::lower::type_of`). A reified flow intersection records the common supertype of
+all its constituents. Remaining on Native: `KType.arguments` and `KTypeProjection`, a classifier that
+is a type parameter (`KTypeParameter`, the `nonReifiedTypeParameters` cases), a classifier
+without a runtime descriptor (a dependency class), and a `KType` member read in a file other than
+the one declaring a program's own `KType` class, which waits for module-wide interface dispatch.
+
 ## Phase — local classifiers and type parameters in the lexical scope chain  ◐
 
 Removing the parser's local-class hoisting hack in favour of proper lexical scoping. Two of the five
@@ -4678,6 +4704,12 @@ each one lowering more and declining less:
    Tests: `tests/native_c_abi_e2e.rs`.
 - **Value classes** (tier 6), through the value-class semantics every backend
   shares (`crate::value_classes`):
+  - **Parameter diagnostics:** compare the complete ordered Native oracle outcome before the
+    frontend result, using its Native KLIB declarations through an explicit provider. The
+    unresolved bare JVM annotation and the mutable full-value parameter are
+    independent errors; an unannotated regression isolates the parameter rule.
+    Both Native comparisons belong to the declaration-test inventory already selected by the
+    required Native job and the local KLIB semantics recipe.
   - **The inventory** (`native/value_classes.rs`): one exact inventory per file. It holds every
     classifier the IR references, walked by the shared `IrFile::referenced_classifiers` (the JVM's
     inventory starts from the same walk), plus every classifier their declared underlying types
@@ -5463,9 +5495,12 @@ regress.
     (`anonymous_object::suspend_methods`, kotlinc's `CoroutineTransformer`): the copy takes the
     method's `$$forInline` body with the lambda inlined, the coroutine transformer builds its machine,
     and the continuation is dropped for tail calls or regenerated as the copy's next object with the
-    spill fields and `@DebugMetadata`. ☐ Objects the copied object creates in turn (kotlinx's
-    `Flow.map`: its `FlowCollector` and that collector's continuation), and krusty's own
-    `$$forInline` copy of an object's suspend method in an inline function it compiles.
+    spill fields and `@DebugMetadata`. ✅ Objects the copied method creates in turn, reading the
+    lambda through the copy's field (kotlinx's `Flow.map`: its `FlowCollector` and that collector's
+    continuation), are regenerated under the copy's name generator with the lambda inlined
+    (`anonymous_object::nested_objects`); a multifile facade's inline body is read from its part.
+    ☐ krusty's own `$$forInline` copy of an object's suspend method in an inline function it
+    compiles.
 - ☐ 5. `$default` inline functions (mask expansion) and `finally` blocks around inlined returns.
   Mask expansion and singleton default lambdas (`DefaultLambda`, with reification) are ported;
   a default lambda constructed with captured values and `finally` rewriting remain.
@@ -5902,6 +5937,22 @@ The maintainer approved #2459's remaining Native/Wasm conformance regressions as
 baseline transition, with exact per-release loaded-blob proof and normal shrink-only checks
 afterward. This is not an all-backend support claim. Small capability follow-ups #2520–#2525
 restore measured cases independently; see [KLIB inline migration](KLIB_INLINE_MIGRATION.md).
+
+## Immutable KLIB closure frames
+
+The first #2521 slice lowers serialized immutable captures into ordinary common-IR closure
+prefixes, preserving exact value identities, own parameters, nested receiver provenance and
+transactional rollback. Official raw/prepared producer controls establish JVM behavior before
+Native execution, including nested shadowing, repeated calls and operand effects. Mutable cells,
+suspension, bound/reflective references and independent dependency storage/dispatch capabilities
+remain scoped follow-ups. No outcome baseline exception is renewed.
+Dependency preparation now follows the reached closure implementations that common lowering emits,
+including constructors absent from the consumer's direct selections. A shared source-form/function
+shape decision excludes unsupported references without resolving enclosing generic arguments early.
+Official-producer tests separately prove the imported constructor's exact checked-IR identity and
+Native execution through an existing runtime constructor. General imported-class construction and
+storage remain a separate Native capability, with the positive custom-class program retained in
+its follow-up rather than claimed as recovered runtime coverage.
 
 ## Lossless JVM signature syntax
 
