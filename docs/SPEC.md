@@ -15939,8 +15939,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `kotlin.Any`, `Nothing`, `Unit`, `Number`, the primitives, `String`, `Annotation`,
   `kotlin.collections.Iterable<*>` and `kotlin.Array<*>`, each a `KOTLIN_LIB` classifier read from
   the classpath and applied to a star per type parameter. `makeNullable()` adds `?` to the type
-  and its text (`Iterable<*>?`), and `makeNotNullable()` gives back an equal type, as KSP2 2.3.12
-  reports. (`crates/krusty-plugin-host/tests/ksp.rs`, `library_classes_are_what_ksp2_reports`.)
+  and its text (`Iterable<*>?`), and `makeNotNullable()` gives back an equal type. A builtin
+  equals a resolved source type of the same classifier, arguments and nullability in both
+  directions (`val name: String` against `stringType`, `String?` against its nullable form), and
+  hashes like it; a nullable type hashes apart from its non-null form, as KSP2 2.3.12 reports.
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `library_classes_are_what_ksp2_reports`.)
 - **A star-projected KSP classifier type is assignable from its subclassifiers.** On a type a
   classifier answers (`asStarProjectedType()`, a builtin), `isAssignableFrom` holds for a type whose
   classifier is that classifier or inherits it through its direct supertypes, transitively and
