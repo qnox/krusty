@@ -79,9 +79,14 @@ final class SourceType implements KSType {
         throw Nodes.notImplemented("KSType.replace");
     }
 
+    // KSP2 projects the classifier the type names, keeping the type's nullability; a type parameter
+    // or a type alias is not answered yet.
     @Override
     public KSType starProjection() {
-        throw Nodes.notImplemented("KSType.starProjection");
+        if (parameter >= 0 || alias != null) {
+            throw Nodes.notImplemented("KSType.starProjection");
+        }
+        return ClassType.starProjected(symbols.resolvedClass(name)).withNullability(nullable);
     }
 
     @Override
