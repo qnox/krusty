@@ -1979,6 +1979,14 @@ pub(crate) fn ty_mentions_any_param(ty: Ty) -> bool {
     }
 }
 
+/// Whether an occurrence names a parameter outside the supplied declaration scope.
+/// Declaration-owned bounds are checked separately from the occurrences they contain.
+pub(crate) fn ty_mentions_undeclared_param(ty: Ty, names: &[String]) -> bool {
+    ty.mentions_marker(
+        &|occurrence| matches!(occurrence.kind(), TyKind::TyParam(name, _) if !names.iter().any(|parameter| parameter == name)),
+    )
+}
+
 /// Kotlin's `ReturnValueStatus` of a callable: whether a caller must use its result. It is a
 /// declaration fact that Kotlin metadata records (`Function.flags` bits 16-17, `Property.flags` bits
 /// 17-18) and that an override inherits from the first declaration it overrides; with the return

@@ -394,7 +394,7 @@ pub(super) fn constructor_inference_signature(
 /// slot under an identity of its own, and every captured bound names it by that identity:
 /// `Outer<T : Comparable<T>, U : T>.Inner<T>` keeps `Comparable<T>` and `U : T` on the captured
 /// `T`, not on `Inner`'s.
-fn capture_enclosing_type_parameters(
+pub(super) fn capture_enclosing_type_parameters(
     name: TypeName,
     own: &TypeParameters<Vec<Vec<Ty>>>,
     enclosing: &TypeParameters<Vec<Vec<Ty>>>,
@@ -465,26 +465,6 @@ impl JvmLibraries {
                 class_formal_bounds(outer.signature.as_deref(), &bounds)
             });
         class_formal_bounds(class.signature.as_deref(), &outer_bounds)
-    }
-
-    /// The type parameters class `name` publishes, and how many of them it declares itself. A
-    /// non-static member class (one with an `outer_instance`) captures its enclosing class's
-    /// formals after its own ([`capture_enclosing_type_parameters`]); a static nested class
-    /// captures none.
-    pub(super) fn member_class_type_parameters(
-        &self,
-        outer_instance: Option<TypeName>,
-        name: TypeName,
-        own: TypeParameters<Vec<Vec<Ty>>>,
-    ) -> (usize, TypeParameters<Vec<Vec<Ty>>>) {
-        let own_count = own.type_params().len();
-        match outer_instance.and_then(|outer| self.classifier_record(outer)) {
-            Some(enclosing) => (
-                own_count,
-                capture_enclosing_type_parameters(name, &own, &enclosing.type_parameters),
-            ),
-            None => (own_count, own),
-        }
     }
 
     /// Publish a Java method's `Signature` attribute: the declaring class's formal bounds
@@ -630,6 +610,49 @@ mod class_formal_bound_tests {
                 .ret,
             Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any")))
         );
+    }
+
+    #[test]
+    fn captured_class_formals_use_headers_without_materializing_enclosing_members() {
+        use crate::jvm::classfile::{ClassWriter, InnerClassSpec, ACC_PUBLIC};
+
+        let outer = type_name("header/Outer");
+        let inner = outer.nested_child("Inner");
+        let mut outer_class = ClassWriter::new("header/Outer", "java/lang/Object");
+        outer_class.set_signature("<S:Ljava/lang/CharSequence;>Ljava/lang/Object;");
+        let mut inner_class = ClassWriter::new("header/Outer$Inner", "java/lang/Object");
+        let signature = "<T:TS;>Ljava/lang/Object;";
+        inner_class.set_signature(signature);
+        inner_class.add_inner_class(InnerClassSpec {
+            inner: "header/Outer$Inner".to_owned(),
+            outer: Some("header/Outer".to_owned()),
+            name: Some("Inner".to_owned()),
+            access: ACC_PUBLIC,
+        });
+        let classpath = std::rc::Rc::new(Classpath::new(Vec::new()));
+        classpath.set_stub_overlay(vec![
+            ("header/Outer".to_owned(), outer_class.finish()),
+            ("header/Outer$Inner".to_owned(), inner_class.finish()),
+        ]);
+        let libraries = JvmLibraries::new(classpath.clone()).expect("header fixture provider");
+        let header = libraries
+            .class_application_header(inner)
+            .expect("complete inner layout");
+        let own_count = header.own_count;
+        let complete = header.parameters;
+        assert!(
+            classpath
+                .cached_library_type_name(libraries.api_version, outer)
+                .is_none(),
+            "captured layout must not construct the enclosing classifier/member record"
+        );
+        assert_eq!(own_count, 1);
+        assert_eq!(complete.type_params(), &["T".to_owned(), "S".to_owned()]);
+        assert_eq!(
+            complete.type_param_bounds()[0],
+            [Ty::platform_nullable(Ty::ty_param("S", char_sequence()))]
+        );
+        assert_eq!(complete.type_param_bounds()[1], [char_sequence()]);
     }
 
     #[test]
