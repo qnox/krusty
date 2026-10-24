@@ -686,6 +686,18 @@ fn the_return_type_a_getter_writes_is_refused() {
 
 #[test]
 #[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn effective_java_modifiers_are_what_ksp2_reports() {
+    log_is_what_ksp2_reports(
+        "JavaModifiers",
+        "javamodifiers.JavaModifiersProvider",
+        &[fixtures().join("java-modifiers/JavaModifiers.kt")],
+        "ksp-outputs-java-modifiers",
+        "java-modifiers.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
 fn class_literal_arguments_are_what_ksp2_reports() {
     log_with_dependencies_is_what_ksp2_reports(
         "Annotations",

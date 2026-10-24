@@ -16128,6 +16128,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   own return type (`get(): Long`) and a library property's getter are refused for that query.
   (`crates/krusty-plugin-host/tests/ksp.rs`, `getter_return_types_are_what_ksp2_reports`,
   `the_return_type_a_getter_writes_is_refused`.)
+- **A KSP source declaration's effective Java modifiers are KSP2's.**
+  `Resolver.effectiveJavaModifiers` of a source (`KOTLIN`) declaration keeps the written
+  modifiers that Java has, adds `JAVA_DEFAULT`, `JAVA_STRICT`, `JAVA_SYNCHRONIZED`,
+  `JAVA_TRANSIENT`, `JAVA_VOLATILE` or `JAVA_STATIC` for the matching JVM annotation, the
+  visibility when it is public, private or protected, `ABSTRACT` for an interface, an abstract
+  function or a property whose accessors are abstract, and `FINAL` when the declaration is not
+  open; a `SYNTHETIC` declaration keeps its own modifiers only, as KSP2 2.3.12 reports. A Java or
+  library declaration is refused for that query. A compiler accessor of an interface's property
+  without modifiers, or of an `abstract` property, is public and abstract.
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `effective_java_modifiers_are_what_ksp2_reports`.)
 - **A KSP source classifier lists its members with the inherited ones as KSP2 does.**
   `getAllFunctions` lists the classifier's own functions in declaration order (a data class's
   `componentN` and `copy` among them), then each direct supertype's functions in written order

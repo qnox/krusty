@@ -13,23 +13,36 @@ use crate::types::{PropertyAnnotationSite, ResolvedAnnotation};
 /// A getter the compiler makes for a property whose modifiers say nothing of it. KSP2 reports a
 /// public final property's accessors this way; another's are not described yet.
 pub(super) fn compiler_getter() -> KspAccessor {
-    compiler_accessor(Some(&[]), Vec::new(), None)
+    compiler_accessor(Some(&[]), false, Vec::new(), None)
 }
 
+/// An accessor the compiler makes for a property whose written modifiers are
+/// `property_modifiers`; `in_interface` says the property is an interface's, which is abstract
+/// unless it says otherwise.
 fn compiler_accessor(
     property_modifiers: Option<&[KspModifier]>,
+    in_interface: bool,
     annotations: Vec<KspAnnotation>,
     parameter: Option<(String, Vec<KspAnnotation>)>,
 ) -> KspAccessor {
-    // `const` and a constructor parameter's `vararg` leave the accessors public and final.
-    let described = property_modifiers.is_some_and(|modifiers| {
-        modifiers
-            .iter()
-            .all(|modifier| matches!(modifier, KspModifier::Const | KspModifier::Vararg))
+    // `const` and a constructor parameter's `vararg` leave the accessors public and final, as a
+    // class's property without modifiers has them; KSP2 calls a public abstract property's
+    // accessors public and abstract.
+    let modifiers = property_modifiers.and_then(|modifiers| match modifiers {
+        [] if in_interface => Some(vec![KspModifier::Public, KspModifier::Abstract]),
+        [KspModifier::Abstract] => Some(vec![KspModifier::Public, KspModifier::Abstract]),
+        _ if !in_interface
+            && modifiers
+                .iter()
+                .all(|modifier| matches!(modifier, KspModifier::Const | KspModifier::Vararg)) =>
+        {
+            Some(vec![KspModifier::Final, KspModifier::Public])
+        }
+        _ => None,
     });
     KspAccessor {
         origin: KspDeclarationOrigin::Synthetic,
-        modifiers: described.then(|| vec![KspModifier::Final, KspModifier::Public]),
+        modifiers,
         annotations,
         returns_property_type: parameter.is_none(),
         parameter,
@@ -56,6 +69,7 @@ impl Source<'_> {
         property: &PropDecl,
         declaration: Option<FrontendDeclarationId>,
         modifiers: Option<&[KspModifier]>,
+        in_interface: bool,
     ) -> Result<(KspAccessor, Option<KspAccessor>), String> {
         let accessor_annotations = |setter: bool| {
             declaration.map(|declaration| self.analysis.accessor_annotations(declaration, setter))
@@ -83,7 +97,7 @@ impl Source<'_> {
                 returns_property_type: property.getter_ty.is_none(),
             }
         } else {
-            compiler_accessor(modifiers, getter_annotations, None)
+            compiler_accessor(modifiers, in_interface, getter_annotations, None)
         };
         if !property.is_var {
             return Ok((getter, None));
@@ -126,6 +140,7 @@ impl Source<'_> {
             },
             None => compiler_accessor(
                 modifiers,
+                in_interface,
                 setter_annotations,
                 Some((parameter_name, parameter_annotations)),
             ),
@@ -149,6 +164,7 @@ impl Source<'_> {
         };
         let getter = compiler_accessor(
             modifiers,
+            false,
             self.published_annotations(
                 subject,
                 targeted(&parameter.annotations, PropertyAnnotationSite::Getter),
@@ -162,6 +178,7 @@ impl Source<'_> {
         }
         let setter = compiler_accessor(
             modifiers,
+            false,
             self.published_annotations(
                 subject,
                 targeted(&parameter.annotations, PropertyAnnotationSite::Setter),
