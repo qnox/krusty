@@ -15983,9 +15983,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   property, `lateinit` or `const`, or has a default getter or a getter that uses the backing
   field (a `var` with a default setter included); an interface, abstract, extension, context or
   delegated property has none, so a computed `val` and a `var` with a bodied setter whose getter
-  never uses `field` have none. `field` binds lexically: a local `val field` from the next
-  statement on, or a lambda, local-function, catch or loop parameter named `field`, shadows the
-  backing field, while a read through a lambda, a local function or an object expression uses it.
+  never uses `field` have none; a `var` whose setter alone uses `field` has one. `field` binds
+  lexically: a local `val field` from the next statement on, or a lambda, local-function, catch or
+  loop parameter named `field` (in the defaults after it as in the body), shadows the backing
+  field, while a read through a lambda, a local function, a local function's parameter default or
+  an object expression uses it, even where the object declares a member `field`: kotlinc binds
+  the backing field before the object's members.
   An enum's synthetic `entries` has none; a Java annotation element and a Java field have one. An
   `expect` or `external` property and a Kotlin library property are refused for that query (KSP2
   answers the latter from what the deserialized declaration records: `true` for an annotation

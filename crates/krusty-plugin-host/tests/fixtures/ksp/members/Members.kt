@@ -101,6 +101,21 @@ abstract class Fields(val fromConstructor: Int) {
             val field = value
             println(field)
         }
+    val throughParameterDefault: Int
+        get() {
+            fun read(x: Int = field) = x
+            return read()
+        }
+    val objectMember: Int
+        get() = object {
+            val field = 16
+            fun read() = field
+        }.read()
+    var setterWrites: Int = 17
+        get() = 18
+        set(value) {
+            field = value
+        }
 
     init {
         readsField = 6
@@ -108,6 +123,8 @@ abstract class Fields(val fromConstructor: Int) {
         throughLambda = 13
         throughLocalFunction = 14
         throughObject = 15
+        throughParameterDefault = 19
+        objectMember = 20
     }
 }
 

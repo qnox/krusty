@@ -42,6 +42,7 @@ mod annotation_applications;
 mod annotation_argument_constness;
 mod anonymous_extension_functions;
 mod anonymous_object_capture;
+mod backing_field_binding;
 mod boolean_implications;
 mod dependency_annotation_defaults;
 use anonymous_object_capture::{
@@ -22072,7 +22073,10 @@ impl<'a> Checker<'a> {
         self.record_local_write(s, scoped);
         let local = self
             .lookup(scope, &name)
-            .filter(|local| !matches!(local.origin, ReceiverFnValueOrigin::DispatchProperty { .. }))
+            .filter(|local| {
+                !matches!(local.origin, ReceiverFnValueOrigin::DispatchProperty { .. })
+                    && !self.backing_field_shadows(&name, local.origin)
+            })
             .map(|local| {
                 (
                     local.write_ty.unwrap_or(local.ty),
@@ -57095,6 +57099,9 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+        }
+        if lookup.is_some_and(|binding| self.backing_field_shadows(&n, binding.origin)) {
+            lookup = None;
         }
         if let Some(local) = lookup {
             self.report_uninitialized_default_parameter_read(e, local.flow_identity);
