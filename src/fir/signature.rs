@@ -44,6 +44,7 @@ pub use selections::*;
 pub use signature_state::SignatureState;
 mod classifier_headers;
 mod declaration_metadata;
+mod serialization_records;
 pub use declaration_metadata::{NoArgSuperConstructor, PropertyAccessor};
 mod file_annotations;
 pub(crate) use file_annotations::FileAnnotationFacts;
@@ -1423,28 +1424,12 @@ pub struct ResolvedModuleIndex {
     /// This is the semantic handoff; lowering/backends must not recreate it from annotations or
     /// generated name conventions.
     generated_classifiers: HashMap<DeclarationId, Box<[crate::types::GeneratedClassifierFact]>>,
-    /// Return-value statuses of the exact runtime declarations overridden by serialization-plugin
-    /// generated members. Pass 1 resolves this closed contract from full semantic shapes.
-    serialization_generated_member_statuses:
-        Option<crate::types::SerializationGeneratedMemberStatuses>,
-    /// Exact companion accessor contributed by the serialization frontend plugin for a source
-    /// classifier. The callable was selected while the generated symbol table was authoritative;
-    /// later consumers receive its owner and arity without recognizing a generated spelling.
-    serialization_companion_accessors: HashMap<DeclarationId, (Box<str>, TypeName, usize)>,
+    /// Declaration records the serialization frontend plugin publishes for later phases.
+    serialization: serialization_records::SerializationRecords,
     /// The superclass constructor each class the no-arg plugin matched delegates to.
     no_arg_constructors: HashMap<DeclarationId, NoArgSuperConstructor>,
     /// The annotations kotlinc's sam-with-receiver plugin is configured with.
     sam_with_receiver_annotations: Box<[TypeName]>,
-    /// Primary constructor of the custom serializer CLASS a source classifier's
-    /// `@Serializable(with = …)` names, selected and validated by the serialization frontend, with
-    /// the generated accessor's operand ordinal passed to each constructor parameter.
-    serialization_custom_serializer_constructors:
-        HashMap<DeclarationId, (DeclarationId, Box<[u32]>)>,
-    /// Constructor plans selected for serializer classes named on declared type occurrences, keyed
-    /// by serializer identity and the annotated type's semantic argument count. This is independent
-    /// of source property spelling and can be reused by every equal checked occurrence.
-    serialization_type_use_serializer_constructors:
-        HashMap<(TypeName, u32), ResolvedTypeUseSerializerConstruction>,
     /// Stable declarations whose resolved `@Suppress` policy permits otherwise-invisible source
     /// references while checking their bodies. Annotation occurrences remain Pass-1 syntax; only
     /// this declaration-owned semantic fact crosses into Pass 2.
@@ -2514,14 +2499,9 @@ impl ResolvedModuleIndex {
             && self.continuation_ordinals.is_empty()
             && self.local_class_name_provenance.is_empty()
             && self.generated_classifiers.is_empty()
-            && self.serialization_generated_member_statuses.is_none()
-            && self.serialization_companion_accessors.is_empty()
+            && self.serialization.is_empty()
             && self.no_arg_constructors.is_empty()
             && self.sam_with_receiver_annotations.is_empty()
-            && self.serialization_custom_serializer_constructors.is_empty()
-            && self
-                .serialization_type_use_serializer_constructors
-                .is_empty()
             && self.classifiers.is_empty()
             && self.signatures.is_empty()
             && self.callables.is_empty()
@@ -3009,36 +2989,10 @@ impl ResolvedModuleIndex {
                             .sum::<usize>()
                 })
                 .sum::<usize>()
-            + self.serialization_companion_accessors.len()
-                * (std::mem::size_of::<DeclarationId>()
-                    + std::mem::size_of::<(Box<str>, TypeName, usize)>())
+            + self.serialization.retained_bytes()
             + self.no_arg_constructors.len()
                 * std::mem::size_of::<(DeclarationId, NoArgSuperConstructor)>()
             + std::mem::size_of_val(&*self.sam_with_receiver_annotations)
-            + self
-                .serialization_companion_accessors
-                .values()
-                .map(|(field, _, _)| field.len())
-                .sum::<usize>()
-            + self.serialization_custom_serializer_constructors.len()
-                * (std::mem::size_of::<DeclarationId>()
-                    + std::mem::size_of::<(DeclarationId, Box<[u32]>)>())
-            + self
-                .serialization_custom_serializer_constructors
-                .values()
-                .map(|(_, operands)| std::mem::size_of_val(operands.as_ref()))
-                .sum::<usize>()
-            + self.serialization_type_use_serializer_constructors.len()
-                * (std::mem::size_of::<(TypeName, u32)>()
-                    + std::mem::size_of::<ResolvedTypeUseSerializerConstruction>())
-            + self
-                .serialization_type_use_serializer_constructors
-                .values()
-                .map(|construction| {
-                    std::mem::size_of_val(construction.parameters.as_ref())
-                        + std::mem::size_of_val(construction.operands.as_ref())
-                })
-                .sum::<usize>()
             + (self.invisible_reference_suppressions.len()
                 + self.invisible_member_suppressions.len()
                 + self.optional_declaration_usage_suppressions.len())

@@ -58,11 +58,7 @@ final class HostResolver implements Resolver {
 
     @Override
     public KSClassDeclaration getClassDeclarationByName(KSName name) {
-        KSClassDeclaration declaration = symbols.classNamed(name.asString());
-        if (declaration instanceof LibraryClass) {
-            throw Nodes.notImplemented("Resolver.getClassDeclarationByName of a library class");
-        }
-        return declaration;
+        return symbols.classNamed(name.asString());
     }
 
     @Override
@@ -149,12 +145,14 @@ final class HostResolver implements Resolver {
 
     @Override
     public KSName mapJavaNameToKotlin(KSName javaName) {
-        throw Nodes.notImplemented("Resolver.mapJavaNameToKotlin");
+        String mapped = symbols.classpath().kotlinName(javaName.asString());
+        return mapped == null ? null : new Name(mapped);
     }
 
     @Override
     public KSName mapKotlinNameToJava(KSName kotlinName) {
-        throw Nodes.notImplemented("Resolver.mapKotlinNameToJava");
+        String mapped = symbols.classpath().javaName(kotlinName.asString());
+        return mapped == null ? null : new Name(mapped);
     }
 
     @Override

@@ -2,6 +2,9 @@
 //! crate, so product e2e modules live behind one target to keep link time and target size bounded.
 //! External corpus/reference-toolchain suites live in `conformance.rs`.
 
+#[path = "dependent_constructor_bounds_e2e.rs"]
+mod dependent_constructor_bounds_e2e;
+
 #[path = "abstract_serializable_e2e.rs"]
 mod abstract_serializable_e2e;
 #[path = "annotation_documented_mirror_e2e.rs"]
@@ -12,6 +15,8 @@ mod backticked_dotted_package_qualifier_e2e;
 mod bridge_result_cast_e2e;
 #[path = "common/bytecode_comparison.rs"]
 mod bytecode_comparison_support;
+#[path = "call_result_non_null_cast_e2e.rs"]
+mod call_result_non_null_cast_e2e;
 #[path = "captured_field_storage_e2e.rs"]
 mod captured_field_storage_e2e;
 #[path = "captured_receiver_names_e2e.rs"]
@@ -46,6 +51,10 @@ mod reference_compiler_support;
 mod reference_recording_support;
 #[path = "common/reference_targets.rs"]
 mod reference_targets_support;
+#[path = "serializable_parent_dependency_e2e.rs"]
+mod serializable_parent_dependency_e2e;
+#[path = "serializable_parent_same_module_e2e.rs"]
+mod serializable_parent_same_module_e2e;
 #[path = "super_call_vararg_e2e.rs"]
 mod super_call_vararg_e2e;
 #[path = "common/target_diagnostics.rs"]
@@ -492,6 +501,8 @@ mod classreader_e2e;
 mod cli_compiler_plugin_e2e;
 #[path = "cli_dropin_e2e.rs"]
 mod cli_dropin_e2e;
+#[path = "cli_verify_e2e.rs"]
+mod cli_verify_e2e;
 #[path = "closeable_use_receiver_e2e.rs"]
 mod closeable_use_receiver_e2e;
 #[path = "closure_in_class_e2e.rs"]
@@ -1280,6 +1291,8 @@ mod java_interface_mutable_collection_face_e2e;
 mod java_member_modules;
 #[path = "java_nonfinal_constant_e2e.rs"]
 mod java_nonfinal_constant_e2e;
+#[path = "java_raw_type_e2e.rs"]
+mod java_raw_type_e2e;
 #[path = "java_self_bounded_constructor_e2e.rs"]
 mod java_self_bounded_constructor_e2e;
 #[path = "local_class_capture_order_e2e.rs"]

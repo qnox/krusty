@@ -188,6 +188,8 @@ pub struct SourceInput<'a> {
     /// generated name is file-scoped must be assigned before signature collection, so the frontend
     /// cannot recover this later from an emitted facade name.
     pub file_stem: Option<&'a str>,
+    /// The script definition a script compiles against: kotlinc's standard one when `None`.
+    pub script_definition: Option<&'a crate::script_definitions::ScriptDefinition>,
 }
 
 impl<'a> SourceInput<'a> {
@@ -198,6 +200,7 @@ impl<'a> SourceInput<'a> {
             is_common: false,
             fragment: None,
             file_stem: None,
+            script_definition: None,
         }
     }
 
@@ -213,6 +216,14 @@ impl<'a> SourceInput<'a> {
 
     pub fn with_file_stem(mut self, file_stem: &'a str) -> Self {
         self.file_stem = Some(file_stem);
+        self
+    }
+
+    pub fn with_script_definition(
+        mut self,
+        definition: &'a crate::script_definitions::ScriptDefinition,
+    ) -> Self {
+        self.script_definition = Some(definition);
         self
     }
 

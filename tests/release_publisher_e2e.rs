@@ -310,12 +310,19 @@ fn updates_supersede_their_ref_without_cancelling_master_validation() {
     };
     let acquire = position("release-publisher.sh acquire");
     let check = position("release-publisher.sh check");
-    let publish = position("softprops/action-gh-release");
+    let publish = position("gh release create \"$TAG\"");
+    let central = position("publish-maven-central.sh");
     let portal = position("publishPlugins");
     let record = position("release-publisher.sh record");
     let drop = position("release-publisher.sh release");
     assert!(
-        acquire < check && check < publish && publish < portal && portal < record && record < drop
+        acquire < check
+            && check < publish
+            && publish < central
+            && central < portal
+            && portal < record
+            && record < drop,
+        "Maven Central, which skips a version it already has, publishes before the Plugin Portal"
     );
     assert_eq!(drop, steps.len() - 1, "dropping the lock is the last step");
     assert!(
@@ -348,5 +355,39 @@ fn updates_supersede_their_ref_without_cancelling_master_validation() {
     assert!(
         timeout_minutes * 60 < ttl_seconds,
         "a lock is taken over only after its job's timeout has killed it"
+    );
+}
+
+// This guards only the injection paths the release job itself adds. Gradle, Kotlin and the
+// publishing plugin remain trusted third-party build dependencies that see the credentials.
+#[test]
+fn release_job_adds_no_injection_path_to_secret_bearing_steps() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workflow = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci.yml");
+    let job = release_job(&workflow);
+    assert!(
+        !job.contains("gradle/actions/setup-gradle"),
+        "setup-gradle injects an init script into the Gradle builds that hold the signing key"
+    );
+    for step in steps(job)
+        .into_iter()
+        .filter(|step| step.contains("secrets."))
+    {
+        assert!(
+            !step.contains("<<<"),
+            "a here-string can put a secret in a temporary file: {step}"
+        );
+    }
+    let wrapper = fs::read_to_string(
+        root.join("tools/krusty-gradle/gradle/wrapper/gradle-wrapper.properties"),
+    )
+    .expect("read gradle-wrapper.properties");
+    let checksum = wrapper
+        .lines()
+        .find_map(|line| line.strip_prefix("distributionSha256Sum="))
+        .expect("the plugin's wrapper pins its Gradle distribution");
+    assert!(
+        checksum.len() == 64 && checksum.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "a SHA-256 checksum: {checksum}"
     );
 }

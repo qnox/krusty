@@ -334,6 +334,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 annotation,
                 arguments: Vec::new(),
                 facts: Default::default(),
+                written: None,
             })
             .collect();
         let mut supertype_templates = classifier_header

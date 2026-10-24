@@ -175,6 +175,17 @@ impl IrFile {
             .map(|(classifier, type_params)| (*classifier, type_params.as_slice()))
     }
 
+    /// Exact formal declarations retained for a referenced inline member's classifier owner.
+    pub(crate) fn foreign_template_classifier_parameters(
+        &self,
+        classifier: TypeName,
+    ) -> Option<&[IrTypeParameter]> {
+        self.type_reflection
+            .foreign_template_classifiers
+            .get(&classifier)
+            .map(Vec::as_slice)
+    }
+
     pub(crate) fn record_lambda_type_parameters(
         &mut self,
         lambda: u32,
@@ -306,7 +317,8 @@ pub(crate) fn type_parameters_named_by(ty: Ty, names: &mut Vec<&'static str>) {
         | TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
         | TyKind::InProjection(inner)
-        | TyKind::OutProjection(inner) => type_parameters_named_by(inner, names),
+        | TyKind::OutProjection(inner)
+        | TyKind::RawProjection(inner) => type_parameters_named_by(inner, names),
         TyKind::Intersection(parts) => {
             for &part in parts {
                 type_parameters_named_by(part, names);

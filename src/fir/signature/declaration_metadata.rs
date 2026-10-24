@@ -49,6 +49,10 @@ pub enum PropertyAccessor {
 enum CheckedApplicationSite {
     Declaration(DeclarationId),
     Accessor(DeclarationId, PropertyAccessor),
+    /// A value parameter of a function or constructor, by its position among the written value
+    /// parameters. A primary constructor's `val`/`var` parameter is one too: its applications
+    /// are published here as written, whatever site each lands on.
+    Parameter(DeclarationId, u32),
 }
 
 /// Fully checked annotation applications. Values are folded against the selected annotation
@@ -57,6 +61,9 @@ enum CheckedApplicationSite {
 #[derive(Debug, Default, PartialEq)]
 pub(super) struct CheckedAnnotationApplications {
     sites: HashMap<CheckedApplicationSite, Box<[crate::types::ResolvedAnnotation]>>,
+    /// The folded defaults of a source annotation class's elements, by class declaration, in
+    /// declaration order. An element without a default has no entry.
+    element_defaults: HashMap<DeclarationId, Box<[(String, crate::types::AnnotationValue)]>>,
 }
 
 impl CheckedAnnotationApplications {
@@ -83,18 +90,29 @@ impl CheckedAnnotationApplications {
     }
 
     pub(super) fn is_empty(&self) -> bool {
-        self.sites.is_empty()
+        self.sites.is_empty() && self.element_defaults.is_empty()
     }
 
     pub(super) fn storage_payload_bytes(&self) -> usize {
-        self.sites
+        let sites = self
+            .sites
             .values()
             .map(|annotations| {
                 std::mem::size_of::<CheckedApplicationSite>()
                     + std::mem::size_of::<Box<[crate::types::ResolvedAnnotation]>>()
                     + annotations.len() * std::mem::size_of::<crate::types::ResolvedAnnotation>()
             })
-            .sum()
+            .sum::<usize>();
+        let defaults = self
+            .element_defaults
+            .values()
+            .map(|defaults| {
+                std::mem::size_of::<DeclarationId>()
+                    + std::mem::size_of::<Box<[(String, crate::types::AnnotationValue)]>>()
+                    + std::mem::size_of_val::<[(String, crate::types::AnnotationValue)]>(defaults)
+            })
+            .sum::<usize>();
+        sites + defaults
     }
 }
 
@@ -355,6 +373,30 @@ impl ResolvedModuleIndex {
             .get(CheckedApplicationSite::Declaration(declaration))
     }
 
+    /// The checked applications written on the value parameter at `position` of the function or
+    /// constructor `callable`, in source order, each with the use-site target it was written with.
+    pub fn parameter_applied_annotations(
+        &self,
+        callable: DeclarationId,
+        position: u32,
+    ) -> &[crate::types::ResolvedAnnotation] {
+        self.checked_annotation_applications
+            .get(CheckedApplicationSite::Parameter(callable, position))
+    }
+
+    /// The folded defaults of the elements the source annotation class `class` declares, in
+    /// declaration order; an element without a default has none. `None` when the class's defaults
+    /// were not published: it is no annotation class, or one of its defaults did not fold.
+    pub fn annotation_element_defaults(
+        &self,
+        class: DeclarationId,
+    ) -> Option<&[(String, crate::types::AnnotationValue)]> {
+        self.checked_annotation_applications
+            .element_defaults
+            .get(&class)
+            .map(Box::as_ref)
+    }
+
     /// The checked applications on `property`'s `accessor`, whether written on the accessor or
     /// targeted at it from the property declaration (`@get:A`, `@set:A`), in source order with the
     /// targeted ones first.
@@ -409,50 +451,6 @@ impl ResolvedModuleIndex {
             .any(|classifier| classifier.purpose == purpose)
     }
 
-    pub fn serialization_generated_member_statuses(
-        &self,
-    ) -> Option<crate::types::SerializationGeneratedMemberStatuses> {
-        self.serialization_generated_member_statuses
-    }
-
-    pub(crate) fn publish_serialization_generated_member_statuses(
-        &mut self,
-        statuses: crate::types::SerializationGeneratedMemberStatuses,
-    ) {
-        assert!(
-            self.serialization_generated_member_statuses
-                .replace(statuses)
-                .is_none(),
-            "serialization generated-member statuses may be published only once"
-        );
-    }
-
-    pub fn serialization_companion_accessor(
-        &self,
-        declaration: DeclarationId,
-    ) -> Option<(&str, TypeName, usize)> {
-        self.serialization_companion_accessors
-            .get(&declaration)
-            .map(|(field, companion, arity)| (field.as_ref(), *companion, *arity))
-    }
-
-    /// The custom serializer class's primary constructor selected for `declaration`'s
-    /// `@Serializable(with = …)`, with the accessor operand ordinal for each of its parameters.
-    pub fn serialization_custom_serializer_constructor(
-        &self,
-        declaration: DeclarationId,
-    ) -> Option<(DeclarationId, &[u32])> {
-        self.serialization_custom_serializer_constructors
-            .get(&declaration)
-            .map(|(constructor, operands)| (*constructor, operands.as_ref()))
-    }
-
-    pub fn serialization_type_use_serializer_constructors(
-        &self,
-    ) -> impl Iterator<Item = (&(TypeName, u32), &ResolvedTypeUseSerializerConstruction)> {
-        self.serialization_type_use_serializer_constructors.iter()
-    }
-
     pub fn publish_declaration_annotations(
         &mut self,
         declaration: DeclarationId,
@@ -481,6 +479,32 @@ impl ResolvedModuleIndex {
         self.checked_annotation_applications.publish(
             CheckedApplicationSite::Declaration(declaration),
             annotations,
+        );
+    }
+
+    pub fn publish_parameter_applied_annotations(
+        &mut self,
+        callable: DeclarationId,
+        position: u32,
+        annotations: impl IntoIterator<Item = crate::types::ResolvedAnnotation>,
+    ) {
+        self.checked_annotation_applications.publish(
+            CheckedApplicationSite::Parameter(callable, position),
+            annotations,
+        );
+    }
+
+    pub fn publish_annotation_element_defaults(
+        &mut self,
+        class: DeclarationId,
+        defaults: Vec<(String, crate::types::AnnotationValue)>,
+    ) {
+        assert!(
+            self.checked_annotation_applications
+                .element_defaults
+                .insert(class, defaults.into_boxed_slice())
+                .is_none(),
+            "an annotation class may publish its element defaults only once"
         );
     }
 
@@ -550,54 +574,5 @@ impl ResolvedModuleIndex {
                 .is_none(),
             "a stable declaration may publish generated classifiers only once"
         );
-    }
-
-    pub fn publish_serialization_companion_accessor(
-        &mut self,
-        declaration: DeclarationId,
-        field: Box<str>,
-        companion: TypeName,
-        type_parameters: usize,
-    ) {
-        assert!(
-            self.serialization_companion_accessors
-                .insert(declaration, (field, companion, type_parameters))
-                .is_none(),
-            "a source classifier may publish only one serialization companion accessor"
-        );
-    }
-
-    pub fn publish_serialization_custom_serializer_constructor(
-        &mut self,
-        declaration: DeclarationId,
-        constructor: DeclarationId,
-        operands: Box<[u32]>,
-    ) {
-        assert!(
-            self.serialization_custom_serializer_constructors
-                .insert(declaration, (constructor, operands))
-                .is_none(),
-            "a source classifier may publish only one custom serializer constructor"
-        );
-    }
-
-    pub fn publish_serialization_type_use_serializer_constructor(
-        &mut self,
-        type_argument_count: u32,
-        construction: ResolvedTypeUseSerializerConstruction,
-    ) {
-        let key = (construction.serializer, type_argument_count);
-        if let Some(existing) = self
-            .serialization_type_use_serializer_constructors
-            .get(&key)
-        {
-            assert_eq!(
-                existing, &construction,
-                "equal checked serializer occurrences must select one constructor declaration"
-            );
-            return;
-        }
-        self.serialization_type_use_serializer_constructors
-            .insert(key, construction);
     }
 }

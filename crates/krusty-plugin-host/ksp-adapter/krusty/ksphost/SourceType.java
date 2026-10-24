@@ -18,6 +18,8 @@ final class SourceType implements KSType {
     private final String name;
     // The type parameter's round-unique id, or -1 for a classifier.
     private final int parameter;
+    // The library type alias the type was named by, or null.
+    LibraryTypeAlias alias;
     private final boolean nullable;
     final List<KSTypeArgument> arguments;
 
@@ -36,7 +38,10 @@ final class SourceType implements KSType {
 
     @Override
     public KSDeclaration getDeclaration() {
-        return parameter < 0 ? symbols.classNamed(name) : symbols.typeParameter(parameter);
+        if (alias != null) {
+            return alias;
+        }
+        return parameter < 0 ? symbols.resolvedClass(name) : symbols.typeParameter(parameter);
     }
 
     @Override

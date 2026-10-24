@@ -14,26 +14,30 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-java@v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: zulu
           java-version: "21"
       # build.rs compiles the freestanding runtime for every target, riscv64 included.
       # Apple's clang has no RISC-V backend.
+      # The major is pinned, not Homebrew's moving `llvm`: the runner images already ship llvm@18,
+      # the clang the Linux runners use too.
       - name: select LLVM clang for the native runtime
         run: |
           set -euo pipefail
-          if ! brew list --versions llvm >/dev/null; then
-            brew install llvm
+          if ! brew list --versions llvm@18 >/dev/null; then
+            brew install llvm@18
           fi
-          clang="$(brew --prefix llvm)/bin/clang"
+          clang="$(brew --prefix llvm@18)/bin/clang"
           test -x "$clang"
           "$clang" --print-targets | grep -q riscv64
           echo "KRUSTY_RUNTIME_CC=$clang" >> "$GITHUB_ENV"
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: just
       - name: build krusty
@@ -69,7 +73,7 @@ jobs:
             --work "$RUNNER_TEMP/bench-kmp-ios" \
             --summary "$RUNNER_TEMP/bench-summary.md" \
             100 200 400
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: macos-compile-bench

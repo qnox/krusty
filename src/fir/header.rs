@@ -2858,7 +2858,10 @@ pub fn stream_file_stub_inventory(
             SourceKind::KotlinScript => crate::frontend::parse_script(
                 source.text,
                 source.file_stem,
-                &crate::script_definitions::ScriptDefinition::standard(),
+                &source
+                    .script_definition
+                    .cloned()
+                    .unwrap_or_else(crate::script_definitions::ScriptDefinition::standard),
                 &features,
                 diags,
             ),

@@ -451,8 +451,9 @@ pub(super) fn has_declaration_annotation_arguments(file: &File) -> bool {
 }
 
 /// The arguments of the annotations written on a declaration and on the members a classifier
-/// declares itself: its methods, body properties and their accessors, and its constructors.
-/// Checked declaration-annotation publication folds exactly these applications.
+/// declares itself: its methods, body properties and their accessors, and its constructors, with
+/// the value parameters of each function and constructor. Checked declaration-annotation
+/// publication folds exactly these applications.
 fn declaration_annotation_arguments(declaration: &Decl) -> impl Iterator<Item = ExprId> + '_ {
     let (functions, properties, classifier, constructors): (
         &[FunDecl],
@@ -467,9 +468,14 @@ fn declaration_annotation_arguments(declaration: &Decl) -> impl Iterator<Item = 
     let classifier = classifier
         .into_iter()
         .flat_map(|class| class.annotation_args.iter().flatten().copied());
-    let functions = functions
-        .iter()
-        .flat_map(|function| function.annotation_args.iter().flatten().copied());
+    let functions = functions.iter().flat_map(|function| {
+        function.annotation_args.iter().flatten().copied().chain(
+            function
+                .params
+                .iter()
+                .flat_map(|parameter| parameter.annotation_args.iter().flatten().copied()),
+        )
+    });
     let properties = properties.iter().flat_map(property_annotation_arguments);
     let constructors = constructors.into_iter().flat_map(|class| {
         class
@@ -477,18 +483,18 @@ fn declaration_annotation_arguments(declaration: &Decl) -> impl Iterator<Item = 
             .iter()
             .flatten()
             .copied()
-            .chain(
-                class
-                    .secondary_ctors
-                    .iter()
-                    .flat_map(|constructor| constructor.annotation_args.iter().flatten().copied()),
-            )
-            // A constructor `val`/`var` is a property: its annotations reach its accessors.
+            .chain(class.secondary_ctors.iter().flat_map(|constructor| {
+                constructor.annotation_args.iter().flatten().copied().chain(
+                    constructor
+                        .params
+                        .iter()
+                        .flat_map(|parameter| parameter.annotation_args.iter().flatten().copied()),
+                )
+            }))
             .chain(
                 class
                     .props
                     .iter()
-                    .filter(|parameter| parameter.is_property)
                     .flat_map(|parameter| parameter.annotation_args.iter().flatten().copied()),
             )
     });

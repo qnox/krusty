@@ -12,7 +12,7 @@ mod protocol;
 use std::io::Write;
 use std::path::PathBuf;
 
-use krusty_plugin_ir::KspRound;
+use krusty_plugin_ir::{KspClasspath, KspRound};
 
 use crate::host::HostError;
 use crate::process::{HostProcess, EXIT_GRACE};
@@ -107,24 +107,30 @@ impl KspHost {
     /// Loads the processors on `load`'s classpath, as KSP finds them through its service loader,
     /// and creates each one with the environment `load` describes. Returns their providers' classes.
     pub fn load(&mut self, load: &KspLoad) -> Result<Vec<String>, HostError> {
-        match self.exchange(&Request::Load(load))? {
+        match self.exchange(&Request::Load(load), None)? {
             Reply::Loaded(providers) => Ok(providers),
             reply => Err(refused(reply, "load")),
         }
     }
 
     /// Runs every processor's `process` once over `round`. A file of `round` the previous rounds did
-    /// not have is one of `Resolver.getNewFiles`.
-    pub fn round(&mut self, round: &KspRound) -> Result<KspOutcome, HostError> {
-        match self.exchange(&Request::Round(round))? {
+    /// not have is one of `Resolver.getNewFiles`. `classpath` answers for the library classifiers a
+    /// processor reaches.
+    pub fn round(
+        &mut self,
+        round: &KspRound,
+        classpath: &dyn KspClasspath,
+    ) -> Result<KspOutcome, HostError> {
+        match self.exchange(&Request::Round(round), Some(classpath))? {
             Reply::RoundDone(outcome) => Ok(outcome),
             reply => Err(refused(reply, "round")),
         }
     }
 
     /// Ends processing: every processor's `finish`, or `onError` when one logged an error.
-    pub fn finish(&mut self) -> Result<KspOutcome, HostError> {
-        match self.exchange(&Request::Finish)? {
+    /// `classpath` answers for the library classifiers a processor reaches then, the last round's.
+    pub fn finish(&mut self, classpath: &dyn KspClasspath) -> Result<KspOutcome, HostError> {
+        match self.exchange(&Request::Finish, Some(classpath))? {
             Reply::Finished(outcome) => Ok(outcome),
             reply => Err(refused(reply, "finish")),
         }
@@ -135,11 +141,45 @@ impl KspHost {
         self.process.id()
     }
 
-    fn exchange(&mut self, request: &Request) -> Result<Reply, HostError> {
-        protocol::write_request(self.process.stdin(), request)
-            .map_err(|error| self.process.failure(error))?;
-        protocol::read_reply(self.process.stdout()).map_err(|error| self.process.failure(error))
+    /// Sends `request` and answers each classpath question the host asks while it works on it
+    /// from `classpath`, until the reply. A request that runs no processor has no classpath to ask.
+    fn exchange(
+        &mut self,
+        request: &Request,
+        classpath: Option<&dyn KspClasspath>,
+    ) -> Result<Reply, HostError> {
+        self.send(request)?;
+        loop {
+            let reply = protocol::read_reply(self.process.stdout())
+                .map_err(|error| self.process.failure(error))?;
+            match reply {
+                Reply::ClassQuery(name) => {
+                    let class = in_round(classpath, &name)?.class(&name);
+                    self.send(&Request::ClassAnswer(class.as_ref()))?;
+                }
+                Reply::NameQuery(mapping, name) => {
+                    let mapped = in_round(classpath, &name)?.mapped_name(mapping, &name);
+                    self.send(&Request::NameAnswer(mapped.as_deref()))?;
+                }
+                reply => return Ok(reply),
+            }
+        }
     }
+
+    fn send(&mut self, request: &Request) -> Result<(), HostError> {
+        protocol::write_request(self.process.stdin(), request)
+            .map_err(|error| self.process.failure(error))
+    }
+}
+
+/// The classpath a question about the classifier `name` is answered from, which only a round has.
+fn in_round<'a>(
+    classpath: Option<&'a dyn KspClasspath>,
+    name: &str,
+) -> Result<&'a dyn KspClasspath, HostError> {
+    classpath.ok_or_else(|| HostError::Protocol {
+        detail: format!("the host asked about the classifier {name} outside a round"),
+    })
 }
 
 fn refused(reply: Reply, request: &str) -> HostError {
