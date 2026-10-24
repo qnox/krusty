@@ -220,6 +220,8 @@ pub(super) fn source_ordered_members<'a>(
                 None => Some((
                     if ir.is_jvm_delegate_method(function) {
                         (function_order(function), 3)
+                    } else if lowered_after_generated_members(ir, function) {
+                        (u32::MAX, 4)
                     } else if ir.follows_declared_constructors(class.fq_name_id(), function) {
                         (function_order(function), 1)
                     } else {
@@ -238,12 +240,17 @@ pub(super) fn source_ordered_members<'a>(
             .secondary_ctors
             .iter()
             .enumerate()
-            .filter(|(ordinal, _)| {
-                !defer_serialization_constructor(*ordinal, deferred_serialization_constructor)
-            })
             .map(|(ordinal, constructor)| {
                 (
-                    (constructor.source_order, 0),
+                    // The exact serialization-plugin deserialization constructor follows every
+                    // declared member (`write$Self$main` included), which is kotlinc's member
+                    // order for it; the functions kotlinc lifts out of bodies afterwards follow it.
+                    if defer_serialization_constructor(ordinal, deferred_serialization_constructor)
+                    {
+                        (u32::MAX, 3)
+                    } else {
+                        (constructor.source_order, 0)
+                    },
                     SourceOrderedMember::SecondaryConstructor(ordinal, constructor),
                 )
             }),
@@ -266,6 +273,14 @@ pub(super) fn source_ordered_members<'a>(
         }
     }
     ordered
+}
+
+/// Whether `function` is a lambda's or local function's implementation that has no declaration
+/// order of its own. kotlinc lifts those in `LocalDeclarationsLowering`, after a compiler plugin
+/// has generated its members (a serializable class's `write$Self` and deserialization constructor),
+/// so they follow every member without a source position, constructors included.
+fn lowered_after_generated_members(ir: &IrFile, function: u32) -> bool {
+    ir.lifted_functions.contains_key(&function) && !ir.fn_source_order.contains_key(&function)
 }
 
 /// Split the schedule around the primary `<init>`. kotlinc emits a value class's declared members

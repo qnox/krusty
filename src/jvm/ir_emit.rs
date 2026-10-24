@@ -2806,21 +2806,6 @@ fn emit_class(
     if script_main {
         script_main::emit(&fq_name, opts.param_assertions, &mut cw);
     }
-    // The exact serialization-plugin deserialization constructor emits after every declared member
-    // (`write$Self$main` included) and before `<clinit>`, which is kotlinc's member order for it.
-    if let Some(secondary_ordinal) = serialization_constructor {
-        let sc = &c.secondary_ctors[secondary_ordinal as usize];
-        SecondaryConstructorEmitter {
-            ir,
-            class: c,
-            owner: &fq_name,
-            facade,
-            env,
-            writer: &mut cw,
-            owner_prefix: &OwnerConstructorPrefix::none(),
-        }
-        .emit(secondary_ordinal as usize, sc);
-    }
     // EVERY parameter defaulted → kotlinc also emits the no-arg convenience `<init>()`
     // (`AuditFilters()` in Java/reflection), delegating to the `$default` overload with a full
     // mask — AFTER the declared methods (kotlinc's member order), at the primary's declared

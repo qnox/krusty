@@ -33,6 +33,232 @@ pub fn clone_expression_dag(ir: &mut IrFile, root: ExprId) -> (ExprId, HashMap<E
     (root, cloned)
 }
 
+/// Clone `root` as kotlinc's IR `deepCopy` copies a declaration body before lambdas are lowered:
+/// every lambda in the copy, indy or spliced at an inline call, is a lambda of its own. Each takes
+/// the next identity and the next implementation, class-mode and generated-class ordinals in its
+/// own context, and an implementation that is emitted gets a method of its own beside the
+/// original's.
+pub(crate) fn clone_expression_with_own_lambdas(ir: &mut IrFile, root: ExprId) -> ExprId {
+    let (copy, cloned) = clone_expression_dag(ir, root);
+    give_copied_lambdas_their_own_identity(ir, &cloned, &mut CopiedLambdas::default());
+    copy
+}
+
+/// What one copy has made so far: each original lambda's own copy (a lambda is reached both from
+/// its value's inline body and from its implementation's body), the lifting position each copy
+/// takes in place of its original's, by sequence, and the class name each copied lambda's class
+/// nests its classes under in place of its original's.
+#[derive(Default)]
+struct CopiedLambdas {
+    own: HashMap<FunId, FunId>,
+    positions: HashMap<(super::IrLiftingSequence, u32), u32>,
+    class_prefixes: Vec<(super::IrLocalClassNameProvenance, Box<[String]>)>,
+}
+
+fn give_copied_lambdas_their_own_identity(
+    ir: &mut IrFile,
+    cloned: &HashMap<ExprId, ExprId>,
+    copies: &mut CopiedLambdas,
+) {
+    use super::debug_locals::IrDebugLocalProvenance;
+    let implementation = |ir: &IrFile, expression: ExprId| match ir.expr(expression) {
+        IrExpr::Lambda { impl_fn, .. } => Some(*impl_fn),
+        _ => match ir.debug_local_provenance(expression) {
+            Some(
+                IrDebugLocalProvenance::InlineLambdaReceiver { implementation }
+                | IrDebugLocalProvenance::LambdaFrameMarker { implementation, .. },
+            ) => Some(implementation),
+            _ => None,
+        },
+    };
+    let mut sources = cloned
+        .values()
+        .filter_map(|&expression| implementation(ir, expression))
+        .filter(|function| ir.lambda_origins.contains_key(function))
+        .collect::<Vec<_>>();
+    // A lambda nested in another is copied with it, after it, wherever the copy reaches it first.
+    sources.sort_unstable_by_key(|function| {
+        let depth = ir
+            .lifted_functions
+            .get(function)
+            .map_or(0, |(_, site)| site.path.len());
+        (depth, ir.lambda_origins[function].identity)
+    });
+    sources.dedup();
+    for source in sources {
+        if !copies.own.contains_key(&source) {
+            own_lambda(ir, source, copies);
+        }
+    }
+    let own = &copies.own;
+    for &expression in cloned.values() {
+        if let IrExpr::Lambda { impl_fn, .. } = &mut ir.exprs[expression as usize] {
+            if let Some(&target) = own.get(impl_fn) {
+                *impl_fn = target;
+            }
+            continue;
+        }
+        let provenance = match ir.debug_local_provenance(expression) {
+            Some(IrDebugLocalProvenance::InlineLambdaReceiver { implementation }) => {
+                own.get(&implementation).map(|&implementation| {
+                    IrDebugLocalProvenance::InlineLambdaReceiver { implementation }
+                })
+            }
+            Some(IrDebugLocalProvenance::LambdaFrameMarker {
+                implementation,
+                depth,
+            }) => own.get(&implementation).map(|&implementation| {
+                IrDebugLocalProvenance::LambdaFrameMarker {
+                    implementation,
+                    depth,
+                }
+            }),
+            _ => None,
+        };
+        if let Some(provenance) = provenance {
+            ir.set_debug_local_provenance(expression, provenance);
+        }
+    }
+}
+
+/// Record in `copies` a lambda of its own copied from `source`: its body cloned the same way, its
+/// implementation facts and class placement copied, and its origin renumbered after every lambda
+/// of its context.
+fn own_lambda(ir: &mut IrFile, source: FunId, copies: &mut CopiedLambdas) {
+    let mut shape = ir.functions[source as usize].clone();
+    let body = shape.body.map(|body| clone_expression_dag(ir, body));
+    shape.body = body.as_ref().map(|(body, _)| *body);
+    let target = clone_class_method(ir, source, shape, &HashMap::default());
+    copies.own.insert(source, target);
+    for class in ir
+        .class_method_owners
+        .get(&source)
+        .cloned()
+        .unwrap_or_default()
+    {
+        ir.classes[class as usize].methods.push(target);
+        ir.note_class_method(class, target);
+    }
+    let mut origin = ir.lambda_origins[&source].clone();
+    let next = |select: &dyn Fn(&super::IrLambdaOrigin) -> Option<u32>| {
+        ir.lambda_origins
+            .values()
+            .filter_map(select)
+            .max()
+            .map_or(0, |ordinal| ordinal.saturating_add(1))
+    };
+    let identity = next(&|other| Some(other.identity));
+    let implementation_ordinal = next(&|other| {
+        (other.lexical_owner == origin.lexical_owner
+            && other.implementation_name == origin.implementation_name)
+            .then_some(other.implementation_ordinal)
+    });
+    let ordinal = next(&|other| {
+        (other.lexical_owner == origin.lexical_owner
+            && other.enclosing_name == origin.enclosing_name
+            && other.binding_name == origin.binding_name)
+            .then_some(other.ordinal)
+    });
+    origin.identity = identity;
+    origin.implementation_ordinal = implementation_ordinal;
+    origin.ordinal = ordinal;
+    if let Some(provenance) = origin.class_provenance.as_mut() {
+        // A class nested in a copied lambda's class is nested in the copy's.
+        if let Some((old, new)) = copies.class_prefixes.iter().find(|(old, _)| {
+            old.source == provenance.source
+                && old.lexical_owner == provenance.lexical_owner
+                && provenance.segments.starts_with(&old.segments)
+        }) {
+            provenance.segments = new
+                .iter()
+                .chain(&provenance.segments[old.segments.len()..])
+                .cloned()
+                .collect();
+        }
+        if let Some(previous) = provenance.ordinal {
+            let class_ordinal = ir
+                .lambda_origins
+                .values()
+                .filter_map(|other| other.class_provenance.as_ref())
+                .filter(|other| {
+                    other.source == provenance.source
+                        && other.lexical_owner == provenance.lexical_owner
+                        && other.segments == provenance.segments
+                })
+                .filter_map(|other| other.ordinal)
+                .max()
+                .map_or(1, |ordinal| ordinal.saturating_add(1));
+            provenance.ordinal = Some(class_ordinal);
+            let original = &ir.lambda_origins[&source]
+                .class_provenance
+                .as_ref()
+                .expect("the copy's class provenance is its original's");
+            let nested = |segments: &[String], ordinal: u32| {
+                segments
+                    .iter()
+                    .cloned()
+                    .chain(std::iter::once(ordinal.to_string()))
+                    .collect::<Box<[_]>>()
+            };
+            copies.class_prefixes.push((
+                super::IrLocalClassNameProvenance {
+                    segments: nested(&original.segments, previous),
+                    ..(*original).clone()
+                },
+                nested(&provenance.segments, class_ordinal),
+            ));
+        }
+    }
+    ir.lambda_origins.insert(target, origin);
+    if let Some((sequence, mut site)) = ir.lifted_functions.get(&source).cloned() {
+        for step in site.path.iter_mut() {
+            step.position =
+                copied_lifting_position(ir, &sequence, step.position, &mut copies.positions);
+        }
+        ir.lifted_functions.insert(target, (sequence, site));
+    }
+    if let Some((_, cloned)) = body {
+        give_copied_lambdas_their_own_identity(ir, &cloned, copies);
+    }
+}
+
+/// The position a copy of the callable at `position` in `sequence` takes: a new entry after every
+/// other, numbered as the original's, nested in the copy of the lambda the original is nested in.
+fn copied_lifting_position(
+    ir: &mut IrFile,
+    sequence: &super::IrLiftingSequence,
+    position: u32,
+    positions: &mut HashMap<(super::IrLiftingSequence, u32), u32>,
+) -> u32 {
+    if let Some(&copied) = positions.get(&(sequence.clone(), position)) {
+        return copied;
+    }
+    let Some(mut entry) = ir
+        .lifting_sequences
+        .get(sequence)
+        .and_then(|entries| entries.get(&position))
+        .cloned()
+    else {
+        return position;
+    };
+    entry.scope = entry
+        .scope
+        .map(|scope| copied_lifting_position(ir, sequence, scope, positions));
+    let entries = ir.lifting_sequences.entry(sequence.clone()).or_default();
+    let copied = entries
+        .keys()
+        .next_back()
+        .map_or(0, |last| last.saturating_add(1));
+    entry.order = entries
+        .values()
+        .map(|other| other.order)
+        .max()
+        .map_or(0, |order| order.saturating_add(1));
+    entries.insert(copied, entry);
+    positions.insert((sequence.clone(), position), copied);
+    copied
+}
+
 /// A copy of `source` alone whose direct operands are `map`ped, with its sparse semantic/source
 /// facts: a second use of one checked operation over other operands.
 pub(crate) fn clone_with_operands(

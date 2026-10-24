@@ -173,6 +173,10 @@ pub(crate) fn run_backend_passes(
         jvm_plugin_type_descriptor,
         classifiers,
     );
+    crate::jvm::local_class_names::realize_copied_lambda_class_names(ir, |source| {
+        crate::jvm::module_calls::facade_for(source, facades)
+            .expect("a local classifier's declaring source has a file stem")
+    });
     // The JVM publishes members kotlinc's plugins generate only in IR (serialization's
     // `write$Self`); they join each class's record before any lowering rewrites one.
     crate::metadata::class_declarations::add_target_generated_functions(ir);
