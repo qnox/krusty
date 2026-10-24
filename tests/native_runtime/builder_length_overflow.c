@@ -8,7 +8,7 @@
    expects that refusal. This driver must NOT print OK. */
 #include "driver_checks.h"
 
-static const char few[16] = "0123456789abcdef";
+static const char few[] = "0123456789abcdef";
 
 void kt_program_entry(void) {
     KRef builder = kt_string_builder_with_text(kt_string_utf8(few, 16));
