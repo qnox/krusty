@@ -4,6 +4,8 @@
 
 #[path = "dependent_constructor_bounds_e2e.rs"]
 mod dependent_constructor_bounds_e2e;
+#[path = "nested_signature_argument_layout_e2e.rs"]
+mod nested_signature_argument_layout_e2e;
 
 #[path = "abstract_serializable_e2e.rs"]
 mod abstract_serializable_e2e;
@@ -51,6 +53,8 @@ mod reference_compiler_support;
 mod reference_recording_support;
 #[path = "common/reference_targets.rs"]
 mod reference_targets_support;
+#[path = "serializable_default_read_lines_e2e.rs"]
+mod serializable_default_read_lines_e2e;
 #[path = "serializable_init_replay_e2e.rs"]
 mod serializable_init_replay_e2e;
 #[path = "serializable_lateinit_elements_e2e.rs"]
@@ -117,6 +121,7 @@ mod annotation_instance_defaults_e2e;
 mod annotation_instantiation_e2e;
 #[path = "annotation_kclass_member_e2e.rs"]
 mod annotation_kclass_member_e2e;
+mod annotation_nested_class_table_e2e;
 #[path = "annotation_nested_const_template_e2e.rs"]
 mod annotation_nested_const_template_e2e;
 #[path = "annotation_retention_identity_e2e.rs"]
@@ -1072,6 +1077,7 @@ mod function_type_supertype_e2e;
 mod function_typed_property_e2e;
 #[path = "function_value_conversion_e2e.rs"]
 mod function_value_conversion_e2e;
+mod generic_annotation_construction_e2e;
 #[path = "generic_argument_wildcards_e2e.rs"]
 mod generic_argument_wildcards_e2e;
 #[path = "generic_arity_overload_e2e.rs"]
@@ -1234,6 +1240,8 @@ mod interface_delegation_e2e;
 mod interface_delegation_expr_e2e;
 #[path = "interface_factory_function_e2e.rs"]
 mod interface_factory_function_e2e;
+#[path = "interface_inner_table_pool_order_e2e.rs"]
+mod interface_inner_table_pool_order_e2e;
 #[path = "interface_nested_classifier_e2e.rs"]
 mod interface_nested_classifier_e2e;
 #[path = "interface_object_method_e2e.rs"]
@@ -1352,6 +1360,7 @@ mod jvm_static_functions_e2e;
 mod kclass_type_e2e;
 #[path = "klib_class_surface_e2e.rs"]
 mod klib_class_surface_e2e;
+mod klib_closure_frames_e2e;
 #[path = "klib_container_e2e.rs"]
 mod klib_container_e2e;
 #[path = "klib_semantic_e2e.rs"]
@@ -1610,6 +1619,8 @@ mod module_override_boxed_result_e2e;
 mod mpp_expect_actual_e2e;
 #[path = "mpp_requires_the_feature_e2e.rs"]
 mod mpp_requires_the_feature_e2e;
+#[path = "multifile_inline_part_splice_e2e.rs"]
+mod multifile_inline_part_splice_e2e;
 #[path = "native_conformance_deadline_e2e.rs"]
 mod native_conformance_deadline_e2e;
 #[path = "nested_block_comment_e2e.rs"]
@@ -2013,6 +2024,8 @@ mod native_throws_e2e;
 mod native_try_catch_e2e;
 #[path = "native_type_checks_e2e.rs"]
 mod native_type_checks_e2e;
+#[path = "native_type_of_e2e.rs"]
+mod native_type_of_e2e;
 #[path = "native_unsigned_e2e.rs"]
 mod native_unsigned_e2e;
 #[path = "native_value_classes_e2e.rs"]
@@ -2081,8 +2094,6 @@ mod noarg_plugin_e2e;
 mod non_field_ctor_metadata_e2e;
 #[path = "non_generic_overload_wins_e2e.rs"]
 mod non_generic_overload_wins_e2e;
-#[path = "non_reified_inline_splice_fallback_e2e.rs"]
-mod non_reified_inline_splice_fallback_e2e;
 #[path = "not_null_assert_e2e.rs"]
 mod not_null_assert_e2e;
 #[path = "nothing_call_branch_e2e.rs"]

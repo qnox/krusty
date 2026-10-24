@@ -94,8 +94,10 @@ impl KspFile {
 }
 
 /// A classifier of the classpath, which the host asks krusty for by name when a processor first
-/// reaches it. Its [`KspClass::line`] is unused, as KSP has no location for a library declaration,
-/// and its members are not described yet: [`KspClass::declarations`] is empty and incomplete.
+/// reaches it. Its [`KspClass::line`] is unused, as KSP has no location for a library declaration.
+/// Its [`KspClass::declarations`] are described for an annotation class only, in KSP's order for a
+/// library classifier: functions, properties, constructors, then nested classifiers as
+/// [`KspDeclaration::LibraryClass`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KspLibraryClass {
     pub class: KspClass,
@@ -107,6 +109,24 @@ pub struct KspLibraryClass {
     /// Whether `class.annotations` lists every annotation the declaration states; when not, the
     /// host refuses the query.
     pub annotations_complete: bool,
+    /// What `KSClassDeclaration.getAllProperties` lists, or `None` when the round cannot say, in
+    /// which case the host refuses the query.
+    pub all_properties: Option<Vec<KspMember>>,
+    /// What `KSClassDeclaration.getAllFunctions` lists, constructors last, or `None` when the round
+    /// cannot say, in which case the host refuses the query.
+    pub all_functions: Option<Vec<KspMember>>,
+}
+
+/// A member `getAllProperties` or `getAllFunctions` lists.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KspMember {
+    /// The declaration at this index of the classifier's own [`KspClass::declarations`].
+    Declared(u32),
+    /// A member the classifier inherits, which the classifier `owner` (a qualified name) declares.
+    Inherited {
+        owner: String,
+        declaration: Box<KspDeclaration>,
+    },
 }
 
 /// Where a library classifier was declared, which is what `KSNode.origin` reports.
@@ -116,6 +136,17 @@ pub enum KspOrigin {
     KotlinLib,
     /// A Java declaration (`JAVA_LIB`).
     JavaLib,
+}
+
+/// Where a declaration comes from, which `KSNode.origin` reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KspDeclarationOrigin {
+    /// The module's source wrote it (`Origin.KOTLIN`).
+    Source,
+    /// The compiler made it (`Origin.SYNTHETIC`).
+    Synthetic,
+    /// A library declares it.
+    Library(KspOrigin),
 }
 
 /// Answers the host's questions about the classpath while a round runs. The type parameters of a
@@ -147,6 +178,9 @@ pub enum KspDeclaration {
     Function(KspFunction),
     Property(Box<KspProperty>),
     TypeAlias(KspTypeAlias),
+    /// A classpath classifier a library classifier declares in its body, by qualified name, which
+    /// the host asks for as it asks for any classpath classifier.
+    LibraryClass(String),
 }
 
 /// A function or constructor as `KSFunctionDeclaration` describes it.
@@ -156,7 +190,8 @@ pub struct KspFunction {
     pub name: String,
     pub kind: KspFunctionKind,
     pub is_abstract: bool,
-    /// The 1-based line of the declaration, or `None` for one the language contributes.
+    pub origin: KspDeclarationOrigin,
+    /// The 1-based line of a declaration the source wrote.
     pub line: Option<u32>,
     pub annotations: Vec<KspAnnotation>,
     /// `None` when the round has no record of the modifiers.
@@ -189,7 +224,8 @@ pub enum KspFunctionKind {
 pub struct KspProperty {
     pub name: String,
     pub is_mutable: bool,
-    /// The 1-based line of the declaration, or `None` for one the language contributes.
+    pub origin: KspDeclarationOrigin,
+    /// The 1-based line of a declaration the source wrote.
     pub line: Option<u32>,
     pub annotations: Vec<KspAnnotation>,
     /// `None` when the round has no record of the modifiers.
@@ -210,9 +246,7 @@ pub struct KspProperty {
 /// A property getter or setter as `KSPropertyAccessor` describes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KspAccessor {
-    /// Whether the source wrote it (`Origin.KOTLIN`) rather than the compiler making it
-    /// (`Origin.SYNTHETIC`).
-    pub written: bool,
+    pub origin: KspDeclarationOrigin,
     /// `None` when the round has no record of the modifiers.
     pub modifiers: Option<Vec<KspModifier>>,
     pub annotations: Vec<KspAnnotation>,

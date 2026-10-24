@@ -2,7 +2,7 @@
 //! setter, written in the source or made by the compiler; an annotation targeted at one from the
 //! property (`@get:A`, `@set:A`, `@setparam:A`) is shown on it.
 
-use krusty_plugin_ir::{KspAccessor, KspAnnotation, KspModifier};
+use krusty_plugin_ir::{KspAccessor, KspAnnotation, KspDeclarationOrigin, KspModifier};
 
 use super::annotations::Placement;
 use super::{Source, Subject};
@@ -28,7 +28,7 @@ fn compiler_accessor(
             .all(|modifier| matches!(modifier, KspModifier::Const | KspModifier::Vararg))
     });
     KspAccessor {
-        written: false,
+        origin: KspDeclarationOrigin::Synthetic,
         modifiers: described.then(|| vec![KspModifier::Final, KspModifier::Public]),
         annotations,
         parameter,
@@ -73,7 +73,7 @@ impl Source<'_> {
         )?;
         let getter = if property.getter_declared {
             KspAccessor {
-                written: true,
+                origin: KspDeclarationOrigin::Source,
                 // A written accessor's own modifiers are recorded only as far as `inline`.
                 modifiers: (!property.getter_inline).then(Vec::new),
                 annotations: getter_annotations,
@@ -115,7 +115,7 @@ impl Source<'_> {
             .unwrap_or_else(|| "value".to_string());
         let setter = match written_setter {
             Some(setter) => KspAccessor {
-                written: true,
+                origin: KspDeclarationOrigin::Source,
                 modifiers: (!setter.is_inline && setter.visibility.is_none()).then(Vec::new),
                 annotations: setter_annotations,
                 parameter: Some((parameter_name, parameter_annotations)),

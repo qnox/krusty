@@ -94,6 +94,9 @@ pub(super) struct DefaultFrame<'a> {
     /// The line a re-read property is attributed to: it is the method's own read, not source the
     /// initializer contains. `None` leaves it unattributed.
     pub(super) read_line: Option<u32>,
+    /// The line a read through the receiver is attributed to when the method reads it off another
+    /// object than the one the initializer was checked against. `None` keeps its source line.
+    pub(super) receiver_read_line: Option<u32>,
 }
 
 /// A private copy of property `field`'s checked default, evaluated in `frame`.
@@ -199,6 +202,26 @@ fn copy_in_frame(
     }
     if !receivers.is_empty() {
         let receiver = frame.receiver?;
+        if let Some(line) = frame.receiver_read_line {
+            let receivers = receivers
+                .iter()
+                .copied()
+                .collect::<crate::fx_hash::HashSet<_>>();
+            let mut reads = Vec::new();
+            for &expression in &visited {
+                let mut reads_receiver = false;
+                crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
+                    reads_receiver |= receivers.contains(&child);
+                });
+                if reads_receiver {
+                    reads.push(expression);
+                }
+            }
+            // The receiver it is read off is loaded as part of that read, on its line.
+            for expression in reads.into_iter().chain(receivers.iter().copied()) {
+                ir.expr_source_lines.insert(expression, line);
+            }
+        }
         for expression in receivers {
             ir.exprs[expression as usize] = IrExpr::GetValue(receiver);
         }
@@ -232,6 +255,11 @@ fn copy_in_frame(
             Some(line) => ir.expr_source_lines.insert(expression, line),
             None => ir.expr_source_lines.remove(&expression),
         };
+    }
+    // kotlinc marks the default's own line where it starts and keeps it there when the read it
+    // starts with marks the class's line at the same offset.
+    if frame.read_line.is_some() || frame.receiver_read_line.is_some() {
+        ir.kept_start_lines.insert(copy);
     }
     Some(copy)
 }

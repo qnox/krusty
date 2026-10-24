@@ -1,5 +1,15 @@
 use super::{Expr, ExprId, File};
 
+impl File {
+    /// Function literals and callable references await a selected callable shape. Class literals
+    /// are ordinary values; the parser records their syntax separately from backticked `class`.
+    pub(crate) fn is_callable_syntax(&self, expression: ExprId) -> bool {
+        matches!(self.expr(expression), Expr::Lambda { .. })
+            || (matches!(self.expr(expression), Expr::CallableRef { .. })
+                && !self.class_literal_references.contains(&expression.0))
+    }
+}
+
 pub fn first_lambda_param_or_it(params: &[String]) -> String {
     params.first().cloned().unwrap_or_else(|| "it".to_string())
 }
