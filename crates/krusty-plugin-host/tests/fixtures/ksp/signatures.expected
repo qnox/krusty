@@ -1,0 +1,200 @@
+# What KSP2 2.3.12 (KSPJvmMain) logs with Signatures.kt over signatures/ in the module
+# sig-module.core: Resolver.mapToJvmSignature of each declaration, and Resolver.getJvmName of each
+# function and property accessor, then Resolver.mapToJvmSignature of a few library classes.
+w: [ksp] FUNCTION topLevel -> (Lsignatures/Holder;)Lsignatures/Shape;
+w: [ksp]   jvmName -> topLevel
+w: [ksp] PROPERTY topProperty -> Ljava/util/Map;
+w: [ksp]   getter -> getTopProperty
+w: [ksp] FUNCTION internalTop -> (I)V
+w: [ksp]   jvmName -> internalTop
+w: [ksp] PROPERTY internalTopProperty -> I
+w: [ksp]   getter -> getInternalTopProperty
+w: [ksp] PROPERTY internalTopVar -> I
+w: [ksp]   getter -> getInternalTopVar
+w: [ksp]   setter -> setInternalTopVar
+w: [ksp] FUNCTION extension -> ()I
+w: [ksp]   jvmName -> extension
+w: [ksp] FUNCTION extensionWith -> (I)I
+w: [ksp]   jvmName -> extensionWith-ij9drAw
+w: [ksp] FUNCTION toMeters -> ()I
+w: [ksp]   jvmName -> toMeters
+w: [ksp] FUNCTION consume -> (Ljava/lang/Object;)V
+w: [ksp]   jvmName -> consume-FGe5mpM
+w: [ksp] FUNCTION consumeBoth -> (Ljava/lang/Object;I)V
+w: [ksp]   jvmName -> consumeBoth-mpf1TqA
+w: [ksp] FUNCTION produce -> ()Ljava/lang/Object;
+w: [ksp]   jvmName -> produce
+w: [ksp] PROPERTY doubled -> I
+w: [ksp]   getter -> getDoubled
+w: [ksp] PROPERTY stored -> I
+w: [ksp]   getter -> getStored
+w: [ksp]   setter -> setStored-ij9drAw
+w: [ksp] PROPERTY asMeters -> I
+w: [ksp]   getter -> getAsMeters
+w: [ksp] FUNCTION topMeters -> ()I
+w: [ksp]   jvmName -> topMeters
+w: [ksp] PROPERTY metersProperty -> I
+w: [ksp]   getter -> getMetersProperty
+w: [ksp] CLASS Meters -> I
+w: [ksp]   PROPERTY value -> I
+w: [ksp]     getter -> getValue
+w: [ksp]   FUNCTION <init> -> (I)V
+w: [ksp]     jvmName -> <init>-yuhNKP4
+w: [ksp] INTERFACE Shape -> Lsignatures/Shape;
+w: [ksp]   FUNCTION area -> ()D
+w: [ksp]     jvmName -> area
+w: [ksp] CLASS Holder -> Lsignatures/Holder;
+w: [ksp]   PROPERTY item -> Ljava/lang/Comparable;
+w: [ksp]     getter -> getItem
+w: [ksp]   PROPERTY count -> I
+w: [ksp]     getter -> getCount
+w: [ksp]     setter -> setCount
+w: [ksp]   PROPERTY names -> Ljava/util/List;
+w: [ksp]     getter -> getNames
+w: [ksp]   PROPERTY nullable -> Ljava/lang/String;
+w: [ksp]     getter -> getNullable
+w: [ksp]     setter -> setNullable
+w: [ksp]   PROPERTY late -> Ljava/lang/String;
+w: [ksp]     getter -> getLate
+w: [ksp]     setter -> setLate
+w: [ksp]   PROPERTY array -> [I
+w: [ksp]     getter -> getArray
+w: [ksp]   PROPERTY matrix -> [[Ljava/lang/String;
+w: [ksp]     getter -> getMatrix
+w: [ksp]   FUNCTION plain -> ()V
+w: [ksp]     jvmName -> plain
+w: [ksp]   FUNCTION boxed -> (Ljava/lang/Integer;Ljava/lang/CharSequence;)Ljava/lang/Long;
+w: [ksp]     jvmName -> boxed
+w: [ksp]   FUNCTION generic -> (Ljava/lang/Object;Ljava/util/Map;)Ljava/lang/Object;
+w: [ksp]     jvmName -> generic
+w: [ksp]   FUNCTION bounded -> (Ljava/lang/Comparable;)Ljava/lang/Comparable;
+w: [ksp]     jvmName -> bounded
+w: [ksp]   FUNCTION vararg -> (Ljava/lang/String;)[Ljava/lang/String;
+w: [ksp]     jvmName -> vararg
+w: [ksp]   FUNCTION lambda -> (Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function0;
+w: [ksp]     jvmName -> lambda
+w: [ksp]   FUNCTION suspending -> (Ljava/lang/String;)I
+w: [ksp]     jvmName -> suspending
+w: [ksp]   FUNCTION meters -> (I)I
+w: [ksp]     jvmName -> meters-wVPc15o
+w: [ksp]   FUNCTION nothing -> ()Ljava/lang/Void;
+w: [ksp]     jvmName -> nothing
+w: [ksp]   FUNCTION unit -> (V)V
+w: [ksp]     jvmName -> unit
+w: [ksp]   FUNCTION extension -> (Ljava/lang/String;)Z
+w: [ksp]     jvmName -> extension
+w: [ksp]   FUNCTION named -> ()C
+w: [ksp]     jvmName -> renamed
+w: [ksp]   FUNCTION primitives -> (BSFDZCJ)V
+w: [ksp]     jvmName -> primitives
+w: [ksp]   FUNCTION star -> (Ljava/util/List;Ljava/util/List;Ljava/lang/Comparable;)V
+w: [ksp]     jvmName -> star
+w: [ksp]   FUNCTION nullableMeters -> (Lsignatures/Meters;)Lsignatures/Meters;
+w: [ksp]     jvmName -> nullableMeters-SUQf4hI
+w: [ksp]   FUNCTION returnsMeters -> ()I
+w: [ksp]     jvmName -> returnsMeters-QSIutxg
+w: [ksp]   FUNCTION hidden -> (I)V
+w: [ksp]     jvmName -> hidden$sig_module_core
+w: [ksp]   PROPERTY secret -> I
+w: [ksp]     getter -> getSecret$sig_module_core
+w: [ksp]   PROPERTY secretVar -> I
+w: [ksp]     getter -> getSecretVar$sig_module_core
+w: [ksp]     setter -> setSecretVar$sig_module_core
+w: [ksp]   PROPERTY isOpen -> Z
+w: [ksp]     getter -> isOpen
+w: [ksp]   PROPERTY isClosed -> Z
+w: [ksp]     getter -> isClosed
+w: [ksp]     setter -> setClosed
+w: [ksp]   PROPERTY metersProperty -> I
+w: [ksp]     getter -> getMetersProperty-QSIutxg
+w: [ksp]   PROPERTY fetched -> Ljava/lang/String;
+w: [ksp]     getter -> fetch
+w: [ksp]     setter -> store
+w: [ksp]   FUNCTION privateFunction -> ()V
+w: [ksp]     jvmName -> privateFunction
+w: [ksp]   FUNCTION protectedFunction -> ()V
+w: [ksp]     jvmName -> protectedFunction
+w: [ksp]   CLASS Inner -> Lsignatures/Holder$Inner;
+w: [ksp]     PROPERTY outer -> I
+w: [ksp]       getter -> getOuter
+w: [ksp]     FUNCTION <init> -> (I)V
+w: [ksp]       jvmName -> <init>
+w: [ksp]   FUNCTION <init> -> (Ljava/lang/Comparable;I)V
+w: [ksp]     jvmName -> <init>
+w: [ksp]   FUNCTION <init> -> (Ljava/lang/Comparable;Ljava/lang/String;)V
+w: [ksp]     jvmName -> <init>
+w: [ksp]   CLASS Nested -> Lsignatures/Holder$Nested;
+w: [ksp]     FUNCTION <init> -> ()V
+w: [ksp]       jvmName -> <init>
+w: [ksp]   OBJECT Companion -> Lsignatures/Holder$Companion;
+w: [ksp]     PROPERTY CONSTANT -> I
+w: [ksp]       getter -> getCONSTANT
+w: [ksp]     FUNCTION create -> ()Lsignatures/Holder;
+w: [ksp]       jvmName -> create
+w: [ksp]     FUNCTION <init> -> ()V
+w: [ksp]       jvmName -> <init>
+w: [ksp] ENUM_CLASS Color -> Lsignatures/Color;
+w: [ksp]   FUNCTION <init> -> ()V
+w: [ksp]     jvmName -> <init>
+w: [ksp]   ENUM_ENTRY RED -> Lsignatures/Color;
+w: [ksp]   FUNCTION values -> ()[Lsignatures/Color;
+w: [ksp]     jvmName -> values
+w: [ksp]   FUNCTION valueOf -> (Ljava/lang/String;)Lsignatures/Color;
+w: [ksp]     jvmName -> valueOf
+w: [ksp]   PROPERTY entries -> Lkotlin/enums/EnumEntries;
+w: [ksp]     getter -> getEntries
+w: [ksp] OBJECT Single -> Lsignatures/Single;
+w: [ksp]   PROPERTY value -> I
+w: [ksp]     getter -> getValue
+w: [ksp]   FUNCTION <init> -> ()V
+w: [ksp]     jvmName -> <init>
+w: [ksp] ANNOTATION_CLASS Ann -> Lsignatures/Ann;
+w: [ksp]   PROPERTY x -> I
+w: [ksp]     getter -> x
+w: [ksp]   PROPERTY y -> Ljava/lang/String;
+w: [ksp]     getter -> named
+w: [ksp]   FUNCTION <init> -> (ILjava/lang/String;)V
+w: [ksp]     jvmName -> <init>
+w: [ksp] CLASS Rec -> Lsignatures/Rec;
+w: [ksp]   PROPERTY a -> I
+w: [ksp]     getter -> a
+w: [ksp]   PROPERTY meters -> I
+w: [ksp]     getter -> meters
+w: [ksp]   FUNCTION component1 -> ()I
+w: [ksp]     jvmName -> component1
+w: [ksp]   FUNCTION component2 -> ()I
+w: [ksp]     jvmName -> component2
+w: [ksp]   FUNCTION copy -> (II)Lsignatures/Rec;
+w: [ksp]     jvmName -> copy-WhLd68M
+w: [ksp]   FUNCTION <init> -> (II)V
+w: [ksp]     jvmName -> <init>-WhLd68M
+w: [ksp] CLASS Internals -> Lsignatures/Internals;
+w: [ksp]   FUNCTION hiddenMeters -> (I)V
+w: [ksp]     jvmName -> hiddenMeters-ij9drAw$sig_module_core
+w: [ksp]   FUNCTION hiddenResult -> ()I
+w: [ksp]     jvmName -> hiddenResult-QSIutxg$sig_module_core
+w: [ksp]   PROPERTY hiddenProperty -> I
+w: [ksp]     getter -> getHiddenProperty-QSIutxg$sig_module_core
+w: [ksp]     setter -> setHiddenProperty-ij9drAw$sig_module_core
+w: [ksp]   FUNCTION renamed -> ()V
+w: [ksp]     jvmName -> visible
+w: [ksp]   FUNCTION <init> -> ()V
+w: [ksp]     jvmName -> <init>
+w: [ksp] TYPEALIAS Alias -> null
+w: [ksp] LIBRARY kotlin.Any -> Ljava/lang/Object;
+w: [ksp] LIBRARY kotlin.Int -> I
+w: [ksp] LIBRARY kotlin.Boolean -> Z
+w: [ksp] LIBRARY kotlin.String -> Ljava/lang/String;
+w: [ksp] LIBRARY kotlin.Unit -> V
+w: [ksp] LIBRARY kotlin.Nothing -> Ljava/lang/Void;
+w: [ksp] LIBRARY kotlin.Array -> [Ljava/lang/Object;
+w: [ksp] LIBRARY kotlin.IntArray -> [I
+w: [ksp] LIBRARY kotlin.UInt -> I
+w: [ksp] LIBRARY kotlin.Result -> Ljava/lang/Object;
+w: [ksp] LIBRARY kotlin.collections.List -> Ljava/util/List;
+w: [ksp] LIBRARY kotlin.collections.MutableMap.MutableEntry -> Ljava/util/Map$Entry;
+w: [ksp] LIBRARY kotlin.Int.Companion -> Lkotlin/jvm/internal/IntCompanionObject;
+w: [ksp] LIBRARY kotlin.jvm.functions.Function1 -> Lkotlin/jvm/functions/Function1;
+w: [ksp] LIBRARY java.io.Serializable -> Ljava/io/Serializable;
+w: [ksp] LIBRARY java.util.ArrayList -> Ljava/util/ArrayList;
+w: [ksp] LIBRARY java.lang.Thread.State -> Ljava/lang/Thread$State;

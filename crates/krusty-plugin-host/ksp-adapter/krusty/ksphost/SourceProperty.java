@@ -37,6 +37,7 @@ final class SourceProperty implements KSPropertyDeclaration {
     Set<Modifier> modifiers;
     List<KSTypeParameter> typeParameters;
     KSTypeReference type;
+    String jvmSignature;
     // The extension receiver; `receiverUndescribed` when it has one krusty could not describe.
     KSTypeReference extensionReceiver;
     boolean receiverUndescribed;

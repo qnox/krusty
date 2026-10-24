@@ -28,7 +28,7 @@
     <maven.compiler.release>11</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <!-- The oldest Maven the goal is built against; a newer one runs it unchanged. -->
-    <maven.version>3.6.3</maven.version>
+    <maven.version>3.8.1</maven.version>
   </properties>
 
   <prerequisites>

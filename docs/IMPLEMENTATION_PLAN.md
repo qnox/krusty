@@ -62,6 +62,13 @@ repeating a build in the same checkout retains cached artifacts. A two-checkout 
 copies the real crate, changes its model API, and checks A → B → B → A → A outputs and cache reuse.
 This changes no plugin wire format or Kotlin semantics.
 
+## Interface compatibility holder table order
+
+Register the generated interface compatibility holder as a declared nested class and let the
+shared retained-table writer intern its constants in table order. An eager holder seed would
+preempt annotation-only references or declared children that sort earlier. Complete artifact
+comparisons cover both relative orders and abstract interfaces without a generated holder.
+
 ## Constructor parameter annotation pool order
 
 Argument constraint solving reports only definite declaration-bound violations. A relation still
@@ -75,7 +82,21 @@ projections. Encode their complete values at the existing retention-ordered visi
 source target selection and semantic annotation publication outside the writer. This is independent
 of the cross-file publication and configured default-target-mode follow-ups.
 
+## Annotation interface nesting
+
+Annotation interfaces register the shared per-file nested-class inventory before publication.
+The ordinary table retention policy includes declared children and their enclosing chain, even
+without an executable reference. Complete kotlinc artifact comparisons cover top-level and deeply
+nested annotations and their class, interface, enum, object and annotation members.
+
 ## Constructor-property annotation publication
+
+Generic annotation construction uses the ordinary constructor selector and records the applied
+result. The parser retains complete annotation-owner type syntax until checking; the bound
+classifier/alias facet owns later metadata publication. Provider parameter lists keep symbolic
+constructor templates, while erased callable parameters remain physical ABI facts. Fixed array
+parameter context comes from the agreed constructor declaration, independently of result inference.
+JVM annotation signatures use the existing classifier writer and signature formatter.
 
 Publish checked PROPERTY-targeted constructor-parameter applications by stable property identity,
 so plugin constructor selection sees the same folded payload as common IR. Keep parameter and
@@ -87,6 +108,14 @@ file has published its annotation policies; no syntax or full TypeInfo is retain
 Forward and reverse input orders must publish the same property payload and class bytes.
 The configured param-property default-target mode is a separate semantic layer (#2542), described
 below; it does not change cross-file target-policy publication ownership.
+
+## Nested JVM generic applications
+
+Retain an argument range for each classifier segment in the common own-first layout. Render
+segments outer-first without reordering arguments within a segment; use the semantic ordering
+for declaration variance and raw/Nothing admission too. Source and reference-built dependency
+fixtures compare complete ABI inventories for declared/inferred results, unequal segment arities,
+three nesting levels and mixed declaration variance.
 
 ## Configured property-parameter annotation defaults
 
@@ -101,6 +130,20 @@ Preserve the existing cross-file policy-publication barrier. Keep the separate
 Keep the complete KLIB surface comparison and verify its changed property annotation against the
 official Native compiler in both language modes, using the unchanged source fixture. Each written
 library owns a unique scratch directory so concurrent mode and surface checks cannot replace it.
+
+## Checked constructor signature normalization
+
+Normalize the merged constructor inventory through the existing declaration-to-generic-signature
+operation before contextual argument shaping. A checked declaration that replaces a provisional
+constructor retains its stable identity and exposes the same classifier-owned formal template to
+lambda expectations, eager analysis and selection. Reordered named arguments and same-spelled
+caller/classifier formals use the ordinary mapper and substitution path.
+
+Argument collection uses the parser's class-literal role to check `::class` as an ordinary value,
+while function literals and callable references await their selected callable shape. This keeps
+the checked classifier identity available to nested annotation folding without bypassing ordinary
+constructor selection. Owned source/dependency publication and ordinary-call controls cover the
+shared path.
 
 ## String operation authority publication
 
@@ -5433,6 +5476,13 @@ regress.
     `Result`): the inline body takes the parameter unboxed (`value_classes::inline_body_slots`) and
     `invoke`'s `Object` is coerced over the Kotlin types (`checkcast` + `unbox-impl`, `box-impl`),
     the pairs then removed by RedundantBoxing with the caller's value-class descriptors.
+    ✅ A `crossinline` suspend lambda invoked from an object's suspend method
+    (`anonymous_object::suspend_methods`, kotlinc's `CoroutineTransformer`): the copy takes the
+    method's `$$forInline` body with the lambda inlined, the coroutine transformer builds its machine,
+    and the continuation is dropped for tail calls or regenerated as the copy's next object with the
+    spill fields and `@DebugMetadata`. ☐ Objects the copied object creates in turn (kotlinx's
+    `Flow.map`: its `FlowCollector` and that collector's continuation), and krusty's own
+    `$$forInline` copy of an object's suspend method in an inline function it compiles.
 - ☐ 5. `$default` inline functions (mask expansion) and `finally` blocks around inlined returns.
   Mask expansion and singleton default lambdas (`DefaultLambda`, with reification) are ported;
   a default lambda constructed with captured values and `finally` rewriting remain.

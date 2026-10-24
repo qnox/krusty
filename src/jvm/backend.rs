@@ -36,6 +36,9 @@ pub enum SkipReason {
     InlineParameters,
     /// A read-only collection superclass lacks the exact semantic declaration its stubs need.
     ReadOnlyCollectionStubs(String),
+    /// A `suspend inline` callee's compiled body does not say where it places a suspend lambda
+    /// passed to it: in the caller's frame, or in an object it constructs.
+    SuspendLambdaPlacement(String),
 }
 
 /// What the plugin pass of [`run_backend_passes`] runs: the native plugins the frontend ran for this
@@ -399,6 +402,8 @@ fn run_backend_passes_after_plugins(
     crate::jvm::shared_captures::restore_erased_escaping_capture_holders(ir);
     let null_out_dead_spills =
         crate::jvm::runtime_capabilities::null_out_spilled_variable(classpath);
+    crate::jvm::suspend::lambda_placement::record(ir, classpath, &facts.default_call_operands)
+        .map_err(SkipReason::SuspendLambdaPlacement)?;
     if !crate::jvm::suspend::lower_suspend(
         ir,
         facade,
@@ -1235,6 +1240,13 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
             );
             return;
         }
+        SkipReason::SuspendLambdaPlacement(detail) => {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                format!("krusty: cannot tell {detail}"),
+            );
+            return;
+        }
         SkipReason::MemberDispatch(classifier) => {
             diags.error(
                 crate::diag::Span::new(0, 0),
@@ -1256,6 +1268,7 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
         | SkipReason::CallArguments(_)
         | SkipReason::InlineParameters
         | SkipReason::ReadOnlyCollectionStubs(_)
+        | SkipReason::SuspendLambdaPlacement(_)
         | SkipReason::MemberDispatch(_) => {
             unreachable!()
         }
