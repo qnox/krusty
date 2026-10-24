@@ -28,23 +28,14 @@ KLIB dependency-emission categories have disjoint declaration-owned roots before
 An authenticated intrinsic wrapper keeps that ownership when its body transaction declines; the
 ordinary-body category cannot retry it and turn the target decline into an ordinary-closure error.
 
-## Receiver-bound constructor constraints
+## Java raw type applications
 
-Normalize inner constructors with complete own-plus-captured instance results, preserving independent
-callable formals while removing captured formals from the inference variables. One receiver context
-re-keys normalized enclosing arguments onto the inner declaration's captured identities, including
-captures renamed by a shadowing own parameter; it never overwrites that independent own inference.
-That context
-specializes member-level candidates and provider declarations before eager lambda analysis, fixes
-captured bindings before final admission, and supplies the declaration evidence for exact bound
-diagnostics. Rejected signature recovery preserves that completed application without repeating
-inference. Provider selection moves
-out of the resolver facade into its owning module. Shared classifier-bound checking also retains
-the full enclosing application for alias targets instead of validating own bounds in isolation.
-JVM boxing-cast byte parity remains separate in #2590; the bound slice proves complete ABI
-signatures, reference runtime and exact diagnostics.
-Inferred return types of receiver-bound alias calls remain a separate signature-lookup follow-up
-in #2592; declared alias calls and direct inferred calls are covered here.
+- ✅ A Java raw occurrence carries one `RawProjection(erasure)` argument per formal (SPEC §5), so it
+  is a complete application for the subtype relation, renders and publishes as kotlinc's flexible
+  raw interval, and binds a raw receiver's formals to their erasures.
+- ✅ Members read through a raw receiver are erased whole (nested applications, method formals,
+  inherited members over raw supertypes), and annotated raw occurrences keep their face
+  nullability.
 
 ## Shared-target plugin model identity
 
@@ -5873,3 +5864,21 @@ independent physical descriptor checks.
 Next, declaration-header layouts (#2576) must authenticate complete captured applications and raw
 omissions for #2537/#2532. Raw scope erasure must follow symbolic inheritance specialization, as the
 reference compiler demonstrates; it cannot independently erase a superclass from its own bounds.
+
+## Receiver-bound constructor constraints
+
+Normalize inner constructors with complete own-plus-captured instance results, preserving independent
+callable formals while removing captured formals from the inference variables. One receiver context
+re-keys normalized enclosing arguments onto the inner declaration's captured identities, including
+captures renamed by a shadowing own parameter; it never overwrites that independent own inference.
+That context
+specializes member-level candidates and provider declarations before eager lambda analysis, fixes
+captured bindings before final admission, and supplies the declaration evidence for exact bound
+diagnostics. Rejected signature recovery preserves that completed application without repeating
+inference. Provider selection moves
+out of the resolver facade into its owning module. Shared classifier-bound checking also retains
+the full enclosing application for alias targets instead of validating own bounds in isolation.
+JVM boxing-cast byte parity remains separate in #2590; the bound slice proves complete ABI
+signatures, reference runtime and exact diagnostics.
+Inferred return types of receiver-bound alias calls remain a separate signature-lookup follow-up
+in #2592; declared alias calls and direct inferred calls are covered here.
