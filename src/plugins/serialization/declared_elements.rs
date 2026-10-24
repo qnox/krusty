@@ -54,7 +54,7 @@ pub(super) fn declared_serializable_elements(
             serial_name: None,
             serializer: None,
             contextual: false,
-            type_spelling: crate::spelling::Spelled::default(),
+            type_spelling: Default::default(),
         });
     }
     // The module's checked declarations do not name the type parameters the element types use, so
