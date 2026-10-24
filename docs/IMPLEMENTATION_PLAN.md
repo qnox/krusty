@@ -5957,8 +5957,23 @@ including constructors absent from the consumer's direct selections. A shared so
 shape decision excludes unsupported references without resolving enclosing generic arguments early.
 Official-producer tests separately prove the imported constructor's exact checked-IR identity and
 Native execution through an existing runtime constructor. General imported-class construction and
-storage remain a separate Native capability, with the positive custom-class program retained in
-its follow-up rather than claimed as recovered runtime coverage.
+storage remain a separate Native capability.
+
+## Imported KLIB class initialization
+
+The first #2621 slice realizes final, non-generic ordinary classes constructed inside emitted
+dependency bodies, including nested closures. A shared authenticated plan joins exact primary
+constructor identity, `Any` delegation, actual fields and ordered initialization effects. A private
+instance frame carries receiver/argument identities into explicit stores; ordinary Native layout
+and allocation consume the resulting class. Official-producer fixtures establish JVM results
+before Native execution and preserve the original nested-constructor program. Additional tests
+cover repeated allocation, initializer order, storage distinct from constructor arity, and a
+same-name source classifier's complete refusal diagnostic.
+
+Constructor exports across support units, qualified class facts across producer/source collisions,
+direct source construction, inheritance, secondary/default/vararg/generic constructors and imported
+accessor/member dispatch remain required follow-ups. The first slice explicitly declines identity
+collisions before backend emission. It does not close #2621 or change any outcome baseline.
 
 ## Lossless JVM signature syntax
 

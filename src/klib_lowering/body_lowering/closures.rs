@@ -129,7 +129,7 @@ impl BodyLowering<'_> {
             .get_mut(&implementation)
             .expect("a closure publishes its parameters")
             .captured_receivers = receivers;
-        let body = BodyLowering::new(
+        let mut lowering = BodyLowering::new(
             self.arena,
             LoweredFunction {
                 symbol: &function.base.symbol,
@@ -139,8 +139,9 @@ impl BodyLowering<'_> {
             self.builtins,
             self.ir,
             self.linker,
-        )
-        .body(statements)?;
+        );
+        lowering.initialization = self.initialization;
+        let body = lowering.body(statements)?;
         self.ir.functions[implementation as usize].body = Some(body);
         Ok(self.ir.add_expr(IrExpr::Lambda {
             impl_fn: implementation,

@@ -806,6 +806,31 @@ class shape independently of generic argument binding; body lowering retains ful
 validation in its enclosing frame. Imported constructor facts can therefore be prepared without
 claiming a target implements the imported classifier's storage or allocation.
 
+## Imported class initialization ownership
+
+The selected constructor freezes its declaring class's kind, modality, value/inner/expect flags
+and exact primary-constructor signature beside the existing producer/class identity. The primary
+signature is retained before visibility filtering, so a private primary constructor cannot turn a
+secondary constructor into an apparent primary. The raw class header authenticates that complete
+contract. A shared positive plan admits ordinary final classes with a sole primary constructor,
+an exact `Any` delegation and their own instance initializer; non-admitted classes remain target
+leaves, and malformed admitted declarations decline without trying another lowering path.
+
+Field storage uses serialized field symbols, types and typed field flags. Explicit initialization
+stores run in serialized member order alongside anonymous initializer blocks. Full constructor
+arity belongs to `ctor_args`; plain frame arguments do not imply constructor-backed fields, so
+the generated class records zero implicit constructor-field stores. A private instance helper
+retains the real receiver slot and the exact constructor value symbols. Field access is admitted
+only within this authenticated initialization frame. The ordinary Native layout, allocation and
+closure ABI consume that common IR; no field layout is guessed from argument positions.
+
+Preparation follows only the initializer edges of this same positive plan. Class and helper
+publication share the body's rollback checkpoint. Until qualified class facts and constructor
+exports connect independent units, emission explicitly rejects equal source classifier names,
+different producer identities and repeated materialization in separate support units before
+backend emission or export publication. This first slice executes dependency factories; it does
+not yet establish direct source construction, imported accessor/member dispatch or full #2621.
+
 ## Ordinary KLIB generic declaration headers
 
 The KLIB body contract separately freezes known implementation modifiers from each exact signed
