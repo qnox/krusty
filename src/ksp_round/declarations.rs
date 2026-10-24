@@ -2,8 +2,9 @@
 //! among them, in KSP's order.
 
 use krusty_plugin_ir::{
-    KspClass, KspClassKind, KspDeclaration, KspFunction, KspFunctionKind, KspModifier,
-    KspParameter, KspProperty, KspType, KspTypeArgument, KspTypeParameter, KspTypeSlot,
+    KspClass, KspClassKind, KspDeclaration, KspDeclarationOrigin, KspFunction, KspFunctionKind,
+    KspModifier, KspParameter, KspProperty, KspType, KspTypeArgument, KspTypeParameter,
+    KspTypeSlot,
 };
 
 use super::annotations::Placement;
@@ -310,6 +311,7 @@ impl Source<'_> {
                 }
                 Owner::TopLevel { .. } => false,
             },
+            origin: KspDeclarationOrigin::Source,
             line: Some(function.decl_line),
             annotations: self.published_annotations(
                 subject,
@@ -517,6 +519,7 @@ impl Source<'_> {
         let mut described = KspProperty {
             name: property.name.clone(),
             is_mutable: property.is_var,
+            origin: KspDeclarationOrigin::Source,
             line: Some(property.decl_line),
             annotations: self.published_annotations(
                 subject,
@@ -585,6 +588,7 @@ impl Source<'_> {
         let mut described = KspProperty {
             name: parameter.name.clone(),
             is_mutable: parameter.is_var,
+            origin: KspDeclarationOrigin::Source,
             line: Some(parameter.decl_line),
             annotations: self.published_annotations(
                 subject,
@@ -938,6 +942,7 @@ impl Source<'_> {
             let mut entries = KspProperty {
                 name: "entries".to_string(),
                 is_mutable: false,
+                origin: KspDeclarationOrigin::Synthetic,
                 line: None,
                 annotations: Vec::new(),
                 modifiers: Some(modifiers),
@@ -1055,6 +1060,11 @@ fn constructor(
         name: "<init>".to_string(),
         kind,
         is_abstract: false,
+        // A constructor the source does not write is the compiler's.
+        origin: match line {
+            Some(_) => KspDeclarationOrigin::Source,
+            None => KspDeclarationOrigin::Synthetic,
+        },
         line,
         annotations,
         modifiers,
@@ -1079,6 +1089,7 @@ fn synthetic_function(
         name,
         kind,
         is_abstract: false,
+        origin: KspDeclarationOrigin::Synthetic,
         line: None,
         annotations: Vec::new(),
         modifiers: Some(modifiers),

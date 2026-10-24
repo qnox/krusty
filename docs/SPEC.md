@@ -16260,6 +16260,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `library_classes_are_the_headers_ksp2_reports`; `src/jvm/jvm_libraries/declaration_headers.rs`,
   `an_unreadable_generic_signature_is_not_a_nongeneric_class`,
   `a_container_holding_a_value_that_is_not_an_annotation_is_unreadable`.)
+- **A KSP library annotation class lists its members as KSP2 does.** A classpath annotation
+  class declares its functions, properties, constructors, then nested classifiers; a Kotlin
+  one's nested classifiers follow its metadata (declaration order), a Java one's its
+  `InnerClasses` entries. A Kotlin annotation class's properties are `KOTLIN_LIB`, `final public`,
+  with `final public` getters, and a `vararg` one's type is `Array<out E>`. A Java annotation
+  element is a `SYNTHETIC` `final public` property whose getter is `SYNTHETIC` and `abstract
+  public`; its constructor is `JAVA_LIB`, takes the elements in method order, and an array element
+  named `value` is a `vararg` of its element type while the property stays `kotlin.Array<E>`.
+  `Class<? extends X>` is `KClass<out X>`, and a parameter has a default when the element has
+  one. A constructor is `final` with its visibility and returns its class star-projected.
+  `getAllProperties` is the class's own properties; `getAllFunctions` is its own functions,
+  `kotlin.Any`'s `equals` (`open operator override public`), `hashCode` and `toString` (`open
+  public`), then its constructors. `kotlin.Any` declares those three and `<init>()` (`final
+  public`); `kotlin.Annotation` declares nothing and inherits `kotlin.Any`'s functions. A library
+  modifier set is the visibility (none for Java package-private), the modality, `infix`, and
+  `operator` together with `override`; an accessor lists its modality only when it is not `open`.
+  The members of other classifiers, and of an annotation class whose members carry annotations,
+  are refused for those queries. (`crates/krusty-plugin-host/tests/ksp.rs`,
+  `library_annotation_members_are_what_ksp2_reports`.)
 - **KSP maps names between Kotlin and the JVM by kotlinc's class map.** `mapKotlinNameToJava` and
   `mapJavaNameToKotlin` answer what kotlinc's `JavaToKotlinClassMap` does for the classifier the
   name resolves to on the module's classpath. A mapped builtin, a read-only or mutable collection
