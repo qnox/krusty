@@ -12,7 +12,7 @@ mod classpath_annotation_classes;
 mod collection_canonicalization;
 mod declaration_headers;
 mod declared_members;
-use classpath_annotation_classes::{classpath_annotation_targets, java_annotation_parameter_list};
+use classpath_annotation_classes::*;
 use collection_canonicalization::{
     canonicalize_jvm_collections, overlay_metadata_collection_names,
 };
@@ -2471,7 +2471,7 @@ impl JvmLibraries {
                 annotation_targets: (kind == crate::libraries::TypeKind::Annotation)
                     .then(|| classpath_annotation_targets(&ci)),
                 mapped_collection: None,
-                annotation_element_defaults: ci.annotation_element_defaults.clone(),
+                annotation_element_defaults: annotation_element_defaults(&ci),
                 deprecation,
             })
         }
