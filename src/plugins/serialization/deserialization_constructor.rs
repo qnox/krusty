@@ -443,9 +443,10 @@ pub(super) fn complete_deserialization_constructor(
             SerialParent::External(parent) => {
                 let target_params = std::iter::repeat_n(Ty::Int, parent_masks)
                     .chain(
-                        wire[..offset]
+                        elements
+                            .external_parent_types()
                             .iter()
-                            .map(|element| deserialization_parameter_ty(element.ty)),
+                            .map(|&ty| deserialization_parameter_ty(ty)),
                     )
                     .chain(std::iter::once(class_ty(
                         "kotlinx/serialization/internal/SerializationConstructorMarker",

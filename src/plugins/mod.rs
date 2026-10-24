@@ -93,7 +93,8 @@ pub struct FrontendResolvedSingletonCall {
 #[derive(Clone, Debug)]
 pub struct FrontendSelectedMemberCall {
     pub receiver: Ty,
-    pub member: crate::libraries::LibraryMember,
+    /// Selected declaration payload, kept indirect so synthesized operand variants stay compact.
+    pub member: Box<crate::libraries::LibraryMember>,
     pub ret: Ty,
     pub suspend: bool,
 }
@@ -859,7 +860,7 @@ pub fn complete_enabled(
     let external = external_serializers(
         ir,
         classifiers,
-        serialization::inherited_element_types(&parents),
+        serialization::inherited_element_types(ir, &parents),
     );
     let ctx = ctx
         .with_serial_info_annotations(serial_info_annotations(ir, classifiers))

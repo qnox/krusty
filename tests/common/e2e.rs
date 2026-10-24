@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use super::common_core as common;
-use super::reference_box_support::{kotlinc_box_result, kotlinc_box_result_with_classpath};
+use super::reference_box_support::{
+    kotlinc_box_files_result_with_classpath, kotlinc_box_result, kotlinc_box_result_with_classpath,
+};
 use super::reference_compiler_support::{
     compiler_errors, error_blocks, kotlinc_paths_result, render_errors, write_fixture_sources,
 };
@@ -940,38 +942,6 @@ fn method_instructions(disassembly: &str, method: &str) -> Option<String> {
 /// Compile named in-memory fixtures with kotlinc and run `box()` from `main_class` on the shared JVM.
 pub fn kotlinc_box_files_result(sources: &[(&str, &str)], main_class: &str) -> String {
     kotlinc_box_files_result_with_classpath(sources, main_class, &[])
-}
-
-/// [`kotlinc_box_files_result`] with caller-supplied runtime dependencies, such as `kotlin-reflect`.
-pub fn kotlinc_box_files_result_with_classpath(
-    sources: &[(&str, &str)],
-    main_class: &str,
-    classpath: &[PathBuf],
-) -> String {
-    let work = common::scratch_dir().expect("cannot allocate reference-runtime fixture");
-    let source_paths = write_fixture_sources(&work, sources);
-    let output = work.join("out");
-    let mut extra_args = Vec::new();
-    if !classpath.is_empty() {
-        extra_args.push("-cp".to_string());
-        extra_args.push(
-            std::env::join_paths(classpath)
-                .expect("build reference-runtime classpath")
-                .to_string_lossy()
-                .into_owned(),
-        );
-    }
-    let (code, diagnostics) = kotlinc_paths_result(&source_paths, &output, &extra_args);
-    assert_eq!(code, 0, "kotlinc rejected runtime fixture: {diagnostics}");
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    let mut runtime_classpath = vec![output];
-    runtime_classpath.extend_from_slice(classpath);
-    runtime_classpath.extend([stdlib, jdk]);
-    let result = common::run_box(&[], main_class, &runtime_classpath)
-        .expect("run kotlinc-built multi-file box fixture");
-    let _ = std::fs::remove_dir_all(work);
-    result
 }
 
 /// Compile one named source with kotlinc. Unlike [`kotlinc_source_result`], this preserves a caller

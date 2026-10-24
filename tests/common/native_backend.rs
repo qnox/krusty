@@ -100,19 +100,26 @@ pub fn expect_native_decline(src: &str, stem: &str, reason: &str) {
 
 /// [`expect_native_decline`] for a program of several files (`(stem, text)`).
 pub fn expect_native_sources_decline(sources: &[(&str, &str)], reason: &str) {
-    let Some(target) = krusty::native::NativeTarget::host() else {
-        return;
-    };
+    if let Some(said) = native_decline(sources) {
+        let stem = sources.first().map(|(stem, _)| *stem).unwrap_or("module");
+        assert!(
+            said.contains(reason),
+            "{stem}: declined for {said:?}, which does not name {reason:?}"
+        );
+    }
+}
+
+/// What the native backend says declining the module `sources` (`(stem, text)`), or `None` where
+/// this host cannot link. Emitting or running the program fails the test.
+pub fn native_decline(sources: &[(&str, &str)]) -> Option<String> {
+    let target = krusty::native::NativeTarget::host()?;
     if !krusty::native::can_link(target) {
-        return;
+        return None;
     }
     let stem = sources.first().map(|(stem, _)| *stem).unwrap_or("module");
     match native_sources_outcome(sources, target) {
-        NativeBox::Unavailable => {}
-        NativeBox::Declined(said) => assert!(
-            said.contains(reason),
-            "{stem}: declined for {said:?}, which does not name {reason:?}"
-        ),
+        NativeBox::Unavailable => None,
+        NativeBox::Declined(said) => Some(said),
         NativeBox::Answered(answer) => {
             panic!("{stem}: the native backend emitted this program, answering {answer:?}")
         }

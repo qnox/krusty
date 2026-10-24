@@ -476,6 +476,40 @@ impl Checker<'_> {
         );
     }
 
+    pub(super) fn report_bound_inner_constructor_type_arguments(
+        &mut self,
+        call: crate::ast::ExprId,
+        explicit: &[Ty],
+        bound: &super::library_constructor_failure::BoundConstructorDiagnostic,
+        display: &str,
+    ) -> bool {
+        let Some(written) = self.file.call_type_args.get(&call.0) else {
+            return false;
+        };
+        let spans = written
+            .arguments
+            .iter()
+            .map(type_argument_span)
+            .collect::<Vec<_>>();
+        let formals = bound
+            .signature
+            .formals
+            .iter()
+            .zip(&bound.signature.formal_bounds)
+            .map(|(identity, bounds)| BoundedFormal {
+                identity: crate::types::intern(identity),
+                bounds,
+            })
+            .collect::<Vec<_>>();
+        let owner = Self::bound_constructor_type_parameter_owner(bound.outer, &bound.signature);
+        if !self.check_type_argument_bounds(&formals, &owner, explicit, &spans, &Default::default())
+        {
+            return false;
+        }
+        self.report_bound_inapplicable_candidate(call, display);
+        true
+    }
+
     /// Report each argument of `resolved` (parallel to `formals`, projections kept) that violates
     /// its formal's substituted bounds, at the parallel `spans`; a `None` span is not checked.
     /// `owner` words the formals' declaration.
