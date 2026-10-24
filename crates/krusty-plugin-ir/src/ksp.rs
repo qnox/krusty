@@ -235,8 +235,8 @@ pub struct KspProperty {
     pub extension_receiver: KspTypeSlot,
     /// `None` when the round cannot describe the type.
     pub ty: Option<KspType>,
-    /// Every property has a getter.
-    pub getter: KspAccessor,
+    /// Its getter; a Java field has none.
+    pub getter: Option<KspAccessor>,
     /// A `var`'s setter.
     pub setter: Option<KspAccessor>,
     /// What `Resolver.mapToJvmSignature` answers; `None` when the round cannot say.

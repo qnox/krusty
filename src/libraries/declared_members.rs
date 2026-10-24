@@ -11,6 +11,8 @@ pub struct DeclaredMembers {
     pub functions: Vec<DeclaredFunction>,
     pub properties: Vec<DeclaredProperty>,
     pub constructors: Vec<DeclaredConstructor>,
+    /// The static properties: a Java class's static fields.
+    pub static_properties: Vec<DeclaredProperty>,
     /// The classifiers declared in its body.
     pub nested: Vec<TypeName>,
 }

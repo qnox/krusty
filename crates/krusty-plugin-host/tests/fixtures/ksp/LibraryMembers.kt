@@ -28,6 +28,8 @@ class LibraryMembersProcessor(private val env: SymbolProcessorEnvironment) : Sym
         "kotlin.jvm.JvmName",
         "dependency.Tag",
         "dependency.Choices",
+        "dependency.Constants",
+        "dependency.Constants.Entry",
     )
 
     override fun process(resolver: Resolver): List<KSAnnotated> {
