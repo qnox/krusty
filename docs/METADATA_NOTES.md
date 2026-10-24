@@ -1,5 +1,10 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+The serialization constructor's `named_params` retain nullable reference elements and the nullable
+serialization marker independently of the erased constructor parameter vector. The handoff test
+checks both exact vectors; the generated owner is also compared byte-for-byte with the matching
+official serialization plugin. This updates test coverage without changing metadata encoding.
+
 ## Class formal layouts before member publication
 
 Kotlin class metadata supplies own formals and bounds. A mapped builtin declaration supplies its
