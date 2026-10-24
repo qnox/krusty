@@ -22700,13 +22700,14 @@ impl<'a> Checker<'a> {
         e: Option<ExprId>,
         label: Option<String>,
     ) {
-        if !self.return_allowed {
+        let target = self.lambda_returns.target(label.as_deref());
+        if self.return_is_prohibited(target) {
             self.diags.error(
                 self.file.stmt_spans[s.0 as usize],
                 "'return' is prohibited here.",
             );
         }
-        let Some(target) = self.lambda_returns.target(label.as_deref()) else {
+        let Some(target) = target else {
             crate::trace_compiler!(
                 "resolve",
                 "return label miss label={:?} active={:?} statement={s:?}",
@@ -22719,12 +22720,6 @@ impl<'a> Checker<'a> {
             self.report_unresolved_statement_label(s);
             return;
         };
-        if self.return_allowed && self.lambda_returns.leaves_its_frame(target) {
-            self.diags.error(
-                self.file.stmt_spans[s.0 as usize],
-                "'return' is prohibited here.",
-            );
-        }
         self.stmt_return_targets.insert(s, target);
         if label.is_some() && matches!(target, ReturnTarget::Lambda(_)) {
             let ReturnTarget::Lambda(lambda) = target else {
@@ -54212,11 +54207,12 @@ impl<'a> Checker<'a> {
                 Ty::Nothing
             }
             Expr::Return { value, label } => {
-                if !self.return_allowed {
+                let target = self.lambda_returns.target(label.as_deref());
+                if self.return_is_prohibited(target) {
                     self.diags
                         .error(self.span(e), "'return' is prohibited here.");
                 }
-                let target = match self.lambda_returns.target(label.as_deref()) {
+                let target = match target {
                     Some(target) => target,
                     None => {
                         crate::trace_compiler!(
@@ -54229,10 +54225,6 @@ impl<'a> Checker<'a> {
                         return self.set(e, Ty::Error);
                     }
                 };
-                if self.return_allowed && self.lambda_returns.leaves_its_frame(target) {
-                    self.diags
-                        .error(self.span(e), "'return' is prohibited here.");
-                }
                 self.expr_return_targets.insert(e, target);
                 self.record_labelled_lambda_exit(target, label.is_some(), value.is_none());
                 if let Some(v) = value {
