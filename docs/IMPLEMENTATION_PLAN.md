@@ -65,6 +65,13 @@ projections. Encode their complete values at the existing retention-ordered visi
 source target selection and semantic annotation publication outside the writer. This is independent
 of the cross-file publication and configured default-target-mode follow-ups.
 
+## Annotation interface nesting
+
+Annotation interfaces register the shared per-file nested-class inventory before publication.
+The ordinary table retention policy includes declared children and their enclosing chain, even
+without an executable reference. Complete kotlinc artifact comparisons cover top-level and deeply
+nested annotations and their class, interface, enum, object and annotation members.
+
 ## Constructor-property annotation publication
 
 Publish checked PROPERTY-targeted constructor-parameter applications by stable property identity,

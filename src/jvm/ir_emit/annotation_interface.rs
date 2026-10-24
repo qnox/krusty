@@ -74,6 +74,9 @@ pub(super) fn emit_annotation_class(
     // PUBLIC | INTERFACE | ABSTRACT | ANNOTATION
     cw.set_access(class_public_bit(ir, c) | 0x0200 | 0x0400 | 0x2000);
     cw.add_interface("java/lang/annotation/Annotation");
+    // Declared children and the enclosing chain belong in the table even when no element or
+    // executable body refers to them. Share the ordinary classifier inventory and retention rule.
+    env.inner_classes.register(&mut cw);
     let signature_formatter = JvmSignatureFormatter::new(ir, env);
     let element_defaults = ir.annotation_element_defaults.get(&c.fq_name_id());
     for field in &c.fields {

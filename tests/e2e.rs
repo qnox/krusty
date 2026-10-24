@@ -117,6 +117,7 @@ mod annotation_instance_defaults_e2e;
 mod annotation_instantiation_e2e;
 #[path = "annotation_kclass_member_e2e.rs"]
 mod annotation_kclass_member_e2e;
+mod annotation_nested_class_table_e2e;
 #[path = "annotation_nested_const_template_e2e.rs"]
 mod annotation_nested_const_template_e2e;
 #[path = "annotation_retention_identity_e2e.rs"]

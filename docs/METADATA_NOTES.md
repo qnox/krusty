@@ -990,3 +990,9 @@ against the complete field descriptor independently of the builder's semantic re
 
 This changes no Kotlin metadata wire fields or raw-type flags. Declaration-backed raw/captured
 construction remains separate from this syntax boundary.
+
+## Annotation classifier nesting
+
+JVM annotation interfaces use the same retained `InnerClasses` inventory as other declared
+classifiers. Declared children and enclosing rows remain discoverable without a method or element
+referencing them. This changes the JVM class table, not Kotlin metadata or annotation values.
