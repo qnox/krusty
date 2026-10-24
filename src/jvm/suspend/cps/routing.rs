@@ -128,6 +128,20 @@ impl EmitTimeMachines {
         self.transformed.get(&function)
     }
 
+    /// Add the suspension points of the bodies inline calls place for `function`, a suspend
+    /// lambda, and the continuations they pass, to its machine.
+    pub(crate) fn add_placed_suspensions(
+        &mut self,
+        function: u32,
+        suspensions: Vec<TransformedSuspension>,
+        continuations: Vec<ExprId>,
+    ) {
+        if let Some(machine) = self.transformed.get_mut(&function) {
+            machine.suspensions.extend(suspensions);
+            machine.fake_continuations.extend(continuations);
+        }
+    }
+
     pub(crate) fn record_suspend_lambda(
         &mut self,
         class: crate::types::TypeName,

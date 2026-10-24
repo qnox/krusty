@@ -983,23 +983,6 @@ impl Emitter<'_> {
     }
 }
 
-/// The guard on a private top-level `lateinit` read. The field value is already on the stack.
-fn emit_lateinit_use_guard(name: &str, code: &mut CodeBuilder, cw: &mut ClassWriter) {
-    code.dup();
-    let initialized = code.new_label();
-    code.ifnonnull(initialized);
-    code.pop();
-    code.push_string(name, cw);
-    let throw = cw.methodref(
-        "kotlin/jvm/internal/Intrinsics",
-        "throwUninitializedPropertyAccessException",
-        "(Ljava/lang/String;)V",
-    );
-    code.invokestatic(throw, 1, 0);
-    code.aconst_null();
-    code.bind(initialized);
-}
-
 /// Whether `function` is the compiler-default companion getter synthesized over hoisted `static_`.
 /// The identity is recorded on the property; no accessor name is reconstructed here.
 fn is_hoisted_default_getter(ir: &IrFile, function: u32, static_: u32) -> bool {
@@ -1099,7 +1082,7 @@ impl Emitter<'_> {
             code.invokestatic(m, 0, slot_words(jt) as i32);
             // `access$get<X>$p` is a raw `getstatic`. The use site throws; `isInitialized` does not.
             if is_lateinit && !probe {
-                emit_lateinit_use_guard(&name, code, self.cw);
+                self.emit_lateinit_use_guard(&name, code);
             }
             return;
         }
@@ -1170,7 +1153,7 @@ impl Emitter<'_> {
                         .map(|property| property.accessor_lines.declaration_end);
                     emit_lateinit_getter_guard(&name, jt, null_tail_line, code, self.cw);
                 } else {
-                    emit_lateinit_use_guard(&name, code, self.cw);
+                    self.emit_lateinit_use_guard(&name, code);
                 }
             }
         }
@@ -1191,7 +1174,7 @@ impl Emitter<'_> {
             );
             code.getstatic(fref, slot_words(jt) as i32);
             if is_lateinit && !probe {
-                emit_lateinit_use_guard(&name, code, self.cw);
+                self.emit_lateinit_use_guard(&name, code);
             }
         } else {
             let m = self.cw.methodref(

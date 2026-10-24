@@ -339,6 +339,8 @@ pub(crate) struct InferredCallBindings {
     pub upper_bounds: crate::fx_hash::HashMap<String, Vec<Ty>>,
     /// Variables whose flexible root parameter was collapsed to a nullable argument.
     pub nullable_flexible_roots: crate::fx_hash::HashSet<String>,
+    /// A definite violation from argument evidence. Bounds still containing this call's open
+    /// formals are checked after explicit and expected-result bindings are complete.
     pub bound_violation: Option<GenericBoundViolation>,
 }
 
@@ -558,11 +560,25 @@ impl CallInferenceConstraints {
             let Some(mut current) = self.lower.get(formal).copied() else {
                 continue;
             };
-            let bounds = signature
+            let declared_bounds = signature
                 .formal_bounds
                 .get(index)
                 .map(Vec::as_slice)
                 .unwrap_or_default();
+            // An applied bound may depend on a formal that has no argument evidence yet.
+            // Rejecting `B : Marker<A>` against `Marker<Int>` before the call supplies A is
+            // premature. Keep concrete and caller-owned bounds here; completed-binding admission
+            // checks every declared bound after explicit/result context has been applied.
+            let bounds = declared_bounds
+                .iter()
+                .copied()
+                .filter(|bound| {
+                    !crate::types::ty_mentions_param(
+                        ty_subst_keep_unbound(*bound, &self.lower),
+                        &signature.formals,
+                    )
+                })
+                .collect::<Vec<_>>();
             // A nullable position initially contributes `T & Any` so a genuinely non-null formal
             // bound can accept a caller parameter whose own bound admits null. Do not publish that
             // extra intersection when the formal's declaration already accepts the original `T`:
@@ -570,9 +586,14 @@ impl CallInferenceConstraints {
             // parameter in its invariant result. This is a bound-proven reduction of the recorded
             // provenance, not a representation fallback; `R : Any` still requires the wrapper.
             if let TyKind::DefinitelyNotNull(original) = current.kind() {
-                let original_fits = bounds.iter().all(|bound| {
-                    resolution_subtype(source, original, ty_subst_keep_unbound(*bound, &self.lower))
-                });
+                let original_fits = bounds.len() == declared_bounds.len()
+                    && bounds.iter().all(|bound| {
+                        resolution_subtype(
+                            source,
+                            original,
+                            ty_subst_keep_unbound(*bound, &self.lower),
+                        )
+                    });
                 if original_fits {
                     self.lower.insert(formal.clone(), original);
                     current = original;

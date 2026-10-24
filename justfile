@@ -56,6 +56,7 @@ versioning-tests:
 # check it depends on, against stand-in published checksums.
 release-tests:
     bash scripts/test-signing-key-id.sh
+    bash scripts/test-sign-release-checksums.sh
     bash scripts/test-publish-maven-central.sh
     bash scripts/test-check-gradle-wrappers.sh
 
@@ -702,11 +703,11 @@ build-release TARGET="":
     export KRUSTY_VERSION="$(just version)"
     export KRUSTY_KOTLIN_SUPPORT="$(just supported-kotlin)"
     if [ -n "{{TARGET}}" ]; then
-        cargo build --release --target {{TARGET}} -p krusty-cli --bin krusty
-        cargo build --release --target {{TARGET}} -p krusty-lsp
+        cargo build --locked --release --target {{TARGET}} -p krusty-cli --bin krusty
+        cargo build --locked --release --target {{TARGET}} -p krusty-lsp
     else
-        cargo build --release -p krusty-cli --bin krusty
-        cargo build --release -p krusty-lsp
+        cargo build --locked --release -p krusty-cli --bin krusty
+        cargo build --locked --release -p krusty-lsp
     fi
     echo "built krusty and krusty-lsp $KRUSTY_VERSION (supported Kotlin: $KRUSTY_KOTLIN_SUPPORT) ${TARGET:+for {{TARGET}}}"
 

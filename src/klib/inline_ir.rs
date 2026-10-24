@@ -330,7 +330,10 @@ fn supported_type(ty: Ty, parameters: &[IrTypeParameter]) -> bool {
             _ => supported_type(*argument, parameters),
         }),
         TyKind::Nullable(inner) => supported_type(inner, parameters),
-        TyKind::InProjection(_) | TyKind::OutProjection(_) | TyKind::StarProjection(_) => false,
+        TyKind::InProjection(_)
+        | TyKind::OutProjection(_)
+        | TyKind::StarProjection(_)
+        | TyKind::RawProjection(_) => false,
         TyKind::TyParam(..) => parameters.iter().any(|parameter| parameter.ty() == ty),
         TyKind::Null
         | TyKind::Error

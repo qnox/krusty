@@ -348,7 +348,7 @@ pub(in crate::resolve) fn normalize_referenced_library_annotations(
     let referenced = table
         .resolved_annotations
         .values()
-        .copied()
+        .map(|binding| binding.classifier)
         .collect::<crate::fx_hash::HashSet<_>>();
     for annotation in referenced {
         if table.annotation_retentions.contains_key(&annotation) {
