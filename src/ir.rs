@@ -2740,8 +2740,8 @@ pub use clone::clone_expression_dag;
 #[cfg(test)]
 pub(crate) use clone::make_expression_children_unique;
 pub(crate) use clone::{
-    clone_class_method, clone_function_implementation, clone_with_operands,
-    make_expression_children_unique_tracked,
+    clone_class_method, clone_expression_with_own_lambdas, clone_function_implementation,
+    clone_with_operands, make_expression_children_unique_tracked,
 };
 mod semantic_validation;
 pub use semantic_validation::{

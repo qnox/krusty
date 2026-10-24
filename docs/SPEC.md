@@ -11656,7 +11656,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   of an optional element that follows a block is attributed to the class's start line, like its
   store. krusty skipped the blocks, so a decoded object missed their side effects. A block that
   reads a constructor parameter which is not a property has nothing to read there and keeps the
-  file unsupported.
+  file unsupported. The plugin copies a block before lambdas are lowered, so each lambda in the
+  copy is a lambda of its own: it takes the next identity, implementation ordinal, lifting position
+  and generated-class ordinal of its context, after every original (`_init_$lambda$1` is copied as
+  `_init_$lambda$4` when the class's `init` blocks hold three lambdas), and a class nested in its
+  class nests under the copy's (`$i$a$-repeat-Box$3$1`). Functions lifted out of bodies (lambda
+  and local-function methods with no declaration order of their own) follow every other member,
+  `write$Self` and the deserialization constructor included, as kotlinc lifts them after the
+  plugin has generated those.
   Test: `tests/serializable_init_replay_e2e.rs`.
 - **A labelled return to a lambda is allowed in a class initializer.** An `init` block or a
   property initializer has no declaration a `return` could leave, so kotlinc reports `'return' is
