@@ -13,6 +13,9 @@ use crate::libraries::AnnotationElementDefault;
 use crate::types::{TypeName, TypeNameList};
 
 mod member_nullability_attributes;
+mod method_annotations;
+
+pub use method_annotations::{method_annotations, MethodAnnotations};
 
 pub use super::JavaNullability;
 use member_nullability_attributes::{
