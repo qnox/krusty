@@ -21577,6 +21577,22 @@ The standalone reader keeps its existing innermost-only interpretation and refus
 outer arguments it discards. This boundary supplies lossless evidence for the raw/captured application
 follow-ups; it does not itself publish new raw or captured application semantics.
 
+## JVM boxing at declared operand slots
+
+A scalar consumed by a reference slot is boxed at its own wrapper type, then coerced to the
+slot's reference type with the ordinary JVM reference-coercion rule. A constructor's selected
+declaration retains that slot even when call-site substitution makes its argument a concrete
+scalar: `Outer<O : Number>.Inner<T : O>(T)` receives a boxed `Int` followed by a `Number`
+checkcast, as does an independently bounded `Box<T : Number>(T)`. An `Object` slot or the same
+wrapper needs no extra cast. Unsigned scalars retain their value-class adaptation.
+
+Tests: `tests/constructor_boxing_casts_e2e.rs` compares complete classes with kotlinc for dependent
+and independent source bounds, direct reference parameters, and independently bounded dependency
+parameters. Long, Object and exact-wrapper slots constrain the boundary; source and dependency
+runtime controls check values and single argument evaluation. Dependency inner-constructor
+receiver specialization is supplied by the landed #2593 frontend change; the owned dependency
+controls here retain their independently bounded declarations.
+
 ## Constructor declarations survive receiver specialization
 
 A selected constructor retains its original declaration parameters independently of the types used
