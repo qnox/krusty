@@ -30,7 +30,7 @@ mod property_shape;
 mod type_refs;
 pub use type_refs::{QualifierArgumentLists, QualifierSegmentArguments, TrFlags, TypeRef};
 mod use_site_annotations;
-pub use backing_field_reads::accessor_uses_backing_field;
+pub use backing_field_reads::{accessor_uses_backing_field, getter_declares_field};
 pub use binary_reference_tokens::BinaryReferenceTokens;
 pub(crate) use call_shape::explicit_call_receiver;
 pub use call_shape::{first_lambda_param_or_it, lambda_params_or_implicit};
