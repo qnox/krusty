@@ -12674,6 +12674,47 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Not yet: a reified member inline function (it is called rather than inlined, `typeOf` or not), a
   reified parameter inside a lambda class regenerated per call site, and a use-site projection
   written in a typealias (`typealias T<Y> = MutableMap<in Y, …>` loses its `in`).
+- **On Native, `typeOf<T>()` is a static `KType` object the generator emits.** The target stdlib's
+  body only throws, so the call is never made, and never expanded from that body either: a
+  dependency inline intrinsic whose body only throws (`typeOf`, `enumEntries`) keeps its checked
+  call for the target to realize, whatever template its KLIB serializes. Inline specialization has already substituted a
+  reified parameter, and the frontend has already approximated an intersection to its common
+  supertype (`K : A, K : B` reified from `a is A && a is B` describes `kotlin.Any`, as both
+  kotlinc backends print). Each distinct type is one static object wearing the runtime's
+  `kotlin.reflect.KTypeImpl` descriptor, which implements the `KType` marker. It holds the
+  classifier's descriptor and its static `KClass`, the nullability, and one projection per
+  argument in Kotlin/Native's variance encoding (`-1` star, `0` invariant, `1` `in`, `2` `out`),
+  each pointing at the argument's own object. A type whose classifier and arguments all have
+  program-wide descriptors is one object for the whole program: every file naming it emits it
+  under a symbol spelled from the type, in a COMDAT group of its own, and the linker keeps the
+  first group. A type naming a file's own class (a local class) is that file's object. The
+  runtime answers from that layout:
+  - `equals` is structural, so two sites or two files naming one type are equal, and identical
+    objects answer at once; `hashCode` follows `KTypeImpl`'s
+    `(classifier * 31 + arguments) * 31 + isMarkedNullable` shape. Identity (`===`) is not part
+    of the contract: the JVM builds a new `KType` per call, Native shares one.
+  - `toString` prints what Kotlin/Native's `KTypeImpl` prints: the qualified name (the simple
+    name of a local class, `???` for an anonymous one), then `<…>` with `*`, `in ` and `out `
+    projections, then `?`. A function type is its `kotlin.FunctionN` class with the parameters
+    and result as invariant arguments (`kotlin.Function0<kotlin.Unit>`, where the JVM prints
+    `() -> kotlin.Unit`).
+  - `classifier` is the type's class's one static `KClass`, never a new object per read, as the
+    JVM's `Reflection` hands out the class's cached `KClass`; a mapped collection interface is
+    the runtime's marker for it, and only a marker that is exactly that interface: `Iterator`'s
+    marker also marks `MutableIterator`, so `typeOf<MutableIterator<X>>()` declines rather than
+    equal and print as `Iterator<X>` (kotlinc-native tells them apart). `isMarkedNullable` is the
+    stored nullability.
+  - `KType` is an open interface, so a read of `classifier` or `isMarkedNullable` reaches a
+    program's own implementation first: each class of the file implementing `KType` is matched
+    by descriptor and called through its override, and only the rest reaches the runtime, which
+    checks the receiver is a `KTypeImpl` and fails loudly otherwise instead of reading it as one.
+    Which classes of the module can be a `KType`, body-local ones included, is a module fact, so
+    a read in a file is declined when another file declares one (that file's override is not one
+    this file can name), and when a class of this file is one only through a supertype.
+  - Declined: a type naming a type parameter (its classifier is a `KTypeParameter`), a `suspend`
+    function type, a classifier without a runtime descriptor, and `KType.arguments`, whose
+    `KTypeProjection` objects this target does not build.
+  Tests: `tests/native_type_of_e2e.rs`; the corpus's `reified/reifiedIntersectionTypeArgument`.
 - **An invariant instantiation joins at a captured out-projection of the arguments' common supertype.**
   `sel(Inv(A), Inv(B))`, with `A : X, Y` and `B : X, Y`, has type `Inv<out (X & Y)>` rather than a
   raw `Inv` or `Any`. Reading `v` produces that captured upper bound, so the value has the members
@@ -12682,9 +12723,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   operation does not reify the intersection: the frontend records its single common supertype on
   the substitution (`Any` when the components share none, that shared classifier when they do,
   and the class itself when the captured bound is one class), and `typeOf` encodes that recorded
-  classifier. Corpus: `reflection/typeOf/intersectionType.kt`
+  classifier. A FLOW intersection is the same type: `select(a)` after `a is A && a is B` infers
+  `K` as `A & B`, which the substitution carries as its primary constituent `A` plus the
+  additional bound `B`, and the reified operation records their common supertype `Any`, as both
+  kotlinc backends do (`typeOf<K>()` prints `kotlin.Any` and `y is K` is `true` for every `y`).
+  Inference computes that supertype when it commits the call, over every constituent's declared
+  hierarchy, a dependency's classifiers included, so the cross-module corpus case reifies its
+  library's `A & B` as the single-module one does. It is the runtime classifier only: the
+  semantic argument and its bounds stay the checked intersection.
+  Corpus: `reflection/typeOf/intersectionType.kt`, `reified/reifiedIntersectionTypeArgument.kt`
+  and `reified/reifiedIntersectionTypeArgumentCrossModule.kt`
   (`-ProhibitIntersectionReifiedTypeParameter`).
-  Test: `tests/intersection_reified_type_of_e2e.rs`.
+  Tests: `tests/intersection_reified_type_of_e2e.rs` and `tests/native_type_of_e2e.rs`.
 - **A Java member's flexible return keeps the caller's type arguments.** A Java generic class
   applied to the enclosing declaration's own type parameters (`Shelf<X, Y>` inside `fun <X, Y>`,
   or `LinkedHashMap(map)` over a `Map<K, V>`, which infers `LinkedHashMap<K, V>` from the
