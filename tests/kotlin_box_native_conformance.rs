@@ -468,3 +468,150 @@ fun box(): String = if (check(C())) "OK" else "FAIL"
         "{stem}"
     );
 }
+
+/// Run an owned Native fixture with a `// MODULE:` graph through the KLIB lane after its JVM and
+/// pinned kotlinc-native oracles.
+// PLATFORM-SPECIFIC: these programs are portable Kotlin, but the Wasm backend declines a class
+// implementing an interface declared in another file, so they cannot be owned box regressions.
+fn native_module_graph_case(source: &str, stem: &str) -> Outcome {
+    super::box_reference_classes::checked_box(source, stem)
+        .unwrap_or_else(|error| panic!("{stem}: required JVM oracle: {error}"));
+    if host().is_none() && std::env::var_os("KRUSTY_REQUIRE_NATIVE_CONFORMANCE").is_none() {
+        return Outcome::Pass;
+    }
+    run_native_abi_case(source, stem)
+}
+
+/// A class of the dependent module implements a member of the dependency's interface, and the
+/// dependency's own call through that interface reaches it.
+#[test]
+fn native_a_dependent_module_class_implements_a_dependency_interface_member() {
+    let source = r#"// MODULE: lib
+interface Greeter {
+    fun greet(): String
+}
+
+class LibGreeter : Greeter {
+    override fun greet(): String = "lib"
+}
+
+fun greetOne(greeter: Greeter): String = greeter.greet()
+
+fun greetLib(): String = greetOne(LibGreeter())
+
+// MODULE: main(lib)
+class MainGreeter : Greeter {
+    override fun greet(): String = "main"
+}
+
+fun box(): String {
+    val lib = greetLib()
+    if (lib != "lib") return "fail: $lib"
+    val main = greetOne(MainGreeter())
+    return if (main == "main") "OK" else "fail: $main"
+}
+"#;
+    let stem = "multimoduleDependencyInterfaceImplementation";
+    assert_eq!(
+        native_module_graph_case(source, stem),
+        Outcome::Pass,
+        "{stem}"
+    );
+}
+
+/// Interface members dispatched through a table are numbered program-wide: types of both modules
+/// get their entries in the tables the link builds.
+#[test]
+fn native_interface_tables_are_built_for_every_type_of_the_module_graph() {
+    let source = r#"// MODULE: lib
+interface Shape {
+    fun sides(): Int
+    fun name(): String = "shape"
+}
+
+class Triangle : Shape {
+    override fun sides(): Int = 3
+}
+
+class Square : Shape {
+    override fun sides(): Int = 4
+    override fun name(): String = "square"
+}
+
+fun describe(shape: Shape): String = shape.name() + shape.sides()
+
+fun describeLibShapes(): String = describe(Triangle()) + " " + describe(Square())
+
+// MODULE: main(lib)
+class Hexagon : Shape {
+    override fun sides(): Int = 6
+}
+
+open class Polygon(private val count: Int) : Shape {
+    override fun sides(): Int = count
+    override fun name(): String = "polygon"
+}
+
+class Octagon : Polygon(8)
+
+fun box(): String {
+    val described = describeLibShapes() + " " + describe(Hexagon()) + " " +
+        describe(Polygon(5)) + " " + describe(Octagon())
+    return if (described == "shape3 square4 shape6 polygon5 polygon8") "OK" else "fail: $described"
+}
+"#;
+    let stem = "multimoduleDependencyInterfaceTables";
+    assert_eq!(
+        native_module_graph_case(source, stem),
+        Outcome::Pass,
+        "{stem}"
+    );
+}
+
+/// A class of the dependent module overrides a `val` and a `var` of the dependency's interface and
+/// inherits its getter default; the dependency's calls through the interface reach each accessor.
+#[test]
+fn native_a_dependent_module_class_implements_a_dependency_interface_property() {
+    let source = r#"// MODULE: lib
+interface Named {
+    val name: String
+    var count: Int
+    val greeting: String get() = "hi " + name
+}
+
+class LibNamed : Named {
+    override val name: String get() = "lib"
+    override var count: Int = 1
+}
+
+fun describe(named: Named): String {
+    named.count = named.count + 1
+    return named.greeting + named.count
+}
+
+fun describeLib(): String = describe(LibNamed())
+
+// MODULE: main(lib)
+class MainNamed : Named {
+    override val name: String get() = "main"
+    override var count: Int = 10
+}
+
+class MainGreeter : Named {
+    override val name: String get() = "greeter"
+    override var count: Int = 20
+    override val greeting: String get() = "yo " + name
+}
+
+fun box(): String {
+    val described = describeLib() + " " + describe(MainNamed()) + " " + describe(MainGreeter())
+    return if (described == "hi lib2 hi main11 yo greeter21") "OK" else "fail: $described"
+}
+"#;
+    let stem = "multimoduleDependencyInterfaceProperty";
+    assert_eq!(
+        native_module_graph_case(source, stem),
+        Outcome::Pass,
+        "{stem}"
+    );
+}

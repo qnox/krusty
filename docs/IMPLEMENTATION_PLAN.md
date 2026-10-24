@@ -5657,6 +5657,9 @@ non-inline callers, still reads the field directly. Test:
   (a `Collection` class also dispatched through a program interface, a cross-file `is` check) are
   therefore named Native KLIB-lane tests in `tests/kotlin_box_native_conformance.rs` rather than
   owned box regressions, which must pass on every lane.
+  The same holds across KLIB modules: Native's link-time interface stubs are proved by a dependent
+  module's class implementing a dependency's interface function, property and table members, which
+  are named Native KLIB-lane tests that run the JVM and pinned kotlinc-native oracles first.
 - Known gap: `x as? C` on a value smart-cast earlier in the body lowers to a `When` with no
   checked type, which Wasm declines rather than infer one.
 - Nullable scalar assertions decline when the operand is a reference but the checked result has
