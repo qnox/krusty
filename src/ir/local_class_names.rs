@@ -108,6 +108,7 @@ fn ty(value: Ty, names: &HashMap<TypeName, TypeName>) -> Ty {
         TyKind::InProjection(inner) => Ty::in_projection(ty(inner, names)),
         TyKind::OutProjection(inner) => Ty::out_projection(ty(inner, names)),
         TyKind::StarProjection(inner) => Ty::star_projection(ty(inner, names)),
+        TyKind::RawProjection(inner) => Ty::raw_projection(ty(inner, names)),
         TyKind::TyParam(parameter, bound) => Ty::ty_param(parameter.as_str(), ty(bound, names)),
         TyKind::DefinitelyNotNull(inner) => Ty::from(TyKind::DefinitelyNotNull(ty(inner, names))),
         TyKind::Intersection(parts) => Ty::intersection(
@@ -748,10 +749,8 @@ fn generic_signature(signature: &mut super::IrGenericSig, names: &HashMap<TypeNa
 }
 
 fn spelled(spelling: &mut crate::spelling::Spelled, names: &HashMap<TypeName, TypeName>) {
-    spelling
-        .alias
-        .iter_mut()
-        .for_each(|value| name(value, names));
+    // An alias is never a local class, and an actualized expect's abbreviation keeps naming the
+    // expect class the target realizes, so only the classifiers below an abbreviation move.
     for (value, spelling) in &mut spelling.alias_args {
         *value = ty(*value, names);
         spelled(spelling, names);

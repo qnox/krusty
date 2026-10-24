@@ -1,6 +1,6 @@
 //! JVM emission for common-IR lexical blocks and their local-slot lifetimes.
 
-use crate::fx_hash::HashMap;
+use crate::fx_hash::{HashMap, HashSet};
 
 use super::declaration_types::jvm_is_erased_top;
 use super::frame_map::{FrameKey, Mark, TempRole, TempSlot};
@@ -1503,20 +1503,13 @@ impl Emitter<'_> {
     /// Close a lexical slot scope: restore the value map and leave the locals declared in it, as
     /// kotlinc's block end does.
     pub(super) fn restore_slot_scope(&mut self, scope: SlotScope) {
-        // Activation of an outer inline-return result happens inside this scope, after the
-        // snapshot. Restoring the snapshot would point the result back at the slot it lent to
-        // a nested local (`return@run i * 10` would then read `i`).
-        let activated = std::mem::take(&mut self.slots);
-        self.slots = scope.slots;
-        for (value, binding) in activated {
-            if self.slots.contains_key(&value)
-                && self.inline_return_frame_result_type(value).is_some()
-            {
-                self.slots.insert(value, binding);
-            }
-        }
-        self.unassigned_values
-            .retain(|value| self.slots.contains_key(value));
+        let current = std::mem::take(&mut self.slots);
+        let results = self
+            .inline_return_frame_results
+            .values()
+            .map(|&(value, _)| value)
+            .collect::<HashSet<_>>();
+        self.slots = close_slot_scope(current, scope.slots, &results, &mut self.unassigned_values);
         self.frame.leave_block(scope.frame);
     }
 
@@ -1614,6 +1607,30 @@ mod tests {
         });
         assert_eq!(inline_stack_coercion_owner(&ir, effectful_wrapper, 1), None);
     }
+
+    #[test]
+    fn closing_a_scope_leaves_only_its_own_values_unassigned() {
+        let int = |slot| (slot, Ty::Int);
+        // Value 3 is an enclosing body's deferred result; this body numbers its own values too,
+        // and declared 1 before the scope and 2 inside it.
+        let mut unassigned = HashSet::from_iter([1, 2, 3]);
+        let snapshot = HashMap::from_iter([(1, int(0))]);
+        let current = HashMap::from_iter([(1, int(0)), (2, int(1))]);
+        let slots = close_slot_scope(current, snapshot, &HashSet::default(), &mut unassigned);
+        assert_eq!(slots, HashMap::from_iter([(1, int(0))]));
+        assert_eq!(unassigned, HashSet::from_iter([1, 3]));
+    }
+
+    #[test]
+    fn closing_a_scope_keeps_where_an_inline_return_result_was_activated() {
+        let int = |slot| (slot, Ty::Int);
+        let mut unassigned = HashSet::default();
+        let snapshot = HashMap::from_iter([(5, int(2)), (6, int(3))]);
+        let current = HashMap::from_iter([(5, int(4)), (6, int(3)), (7, int(2))]);
+        let slots = close_slot_scope(current, snapshot, &HashSet::from_iter([5]), &mut unassigned);
+        assert_eq!(slots, HashMap::from_iter([(5, int(4)), (6, int(3))]));
+        assert_eq!(unassigned, HashSet::default());
+    }
 }
 
 /// Open a bracket FixStack saves the caller's operand stack across. Its analysis clears the stack at
@@ -1631,6 +1648,37 @@ fn close_inline_stack(saved: i32, code: &mut CodeBuilder) {
     let result = code.stack_height();
     code.inline_call_marker(false);
     code.set_stack((saved + result).max(0) as u16);
+}
+
+/// The value map after a lexical scope closes: `snapshot`, the map the scope opened with, keeping
+/// the binding an inline-return result was activated at inside the scope. Restoring the snapshot's
+/// binding would point the result back at the slot it lent to a nested local (`return@run i * 10`
+/// would then read `i`).
+///
+/// Only the values declared in the scope leave `unassigned`. The set also holds the values of the
+/// bodies this one is nested in, which number their values separately and are absent from this
+/// map. A deferred inline-return result of an enclosing body stays unassigned until its first
+/// store: that is what lets a temporary of the nested call borrow the slot it reserves.
+fn close_slot_scope(
+    current: HashMap<u32, (u16, Ty)>,
+    snapshot: HashMap<u32, (u16, Ty)>,
+    results: &HashSet<u32>,
+    unassigned: &mut HashSet<u32>,
+) -> HashMap<u32, (u16, Ty)> {
+    let mut slots = snapshot;
+    for (value, binding) in current {
+        match slots.entry(value) {
+            std::collections::hash_map::Entry::Vacant(_) => {
+                unassigned.remove(&value);
+            }
+            std::collections::hash_map::Entry::Occupied(mut held) => {
+                if results.contains(&value) {
+                    held.insert(binding);
+                }
+            }
+        }
+    }
+    slots
 }
 
 /// An open lexical slot scope; see [`Emitter::open_slot_scope`].

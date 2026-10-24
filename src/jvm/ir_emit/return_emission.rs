@@ -177,9 +177,20 @@ impl Emitter<'_> {
     /// the protected regions ([`Self::reopen_finally_segments`]). A lambda's non-local return
     /// inlined from a body's node takes the same path (kotlinc's `generateAndInsertFinallyBlocks`).
     pub(super) fn emit_finalizers_before_return(&mut self, code: &mut CodeBuilder) -> bool {
-        let ret = self.ret;
-        if self.return_finalizers.is_empty() || slot_words(ret) == 0 {
-            return self.emit_return_finalizers(code);
+        self.emit_finalizers_with_value(self.ret, 0, code)
+    }
+
+    /// Run the active `finally` blocks down to `floor` ([`Self::emit_transfer_finalizers`]) ahead
+    /// of a transfer that carries a value of type `ret` on the stack: a return of the function's
+    /// value, or of a return frame's result out of a lambda node.
+    pub(super) fn emit_finalizers_with_value(
+        &mut self,
+        ret: crate::types::Ty,
+        floor: usize,
+        code: &mut CodeBuilder,
+    ) -> bool {
+        if self.return_finalizers.len() <= floor || slot_words(ret) == 0 {
+            return self.emit_transfer_finalizers(floor, code);
         }
         // Kotlin evaluates the return expression before `finally`. Spill that value so arbitrary
         // branchy finalizers run on an empty operand stack, then reload it only if none overrides.
@@ -194,7 +205,7 @@ impl Emitter<'_> {
         let slot = temp.slot();
         store(ret, slot, code);
         let parked = self.lease_frame_temporary(temp, ret);
-        let survives = self.emit_return_finalizers(code);
+        let survives = self.emit_transfer_finalizers(floor, code);
         if survives {
             load(ret, slot, code);
         }

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use krusty::jvm::classpath::Classpath;
+use krusty::ksp_round::KspLibraries;
 use krusty_plugin_host::{
     provision_ksp, Curl, Environment, GeneratedKind, HostError, KspHost, KspLoad, KspOutputs,
     KspRequest, KspRuntime, Pins,
@@ -39,8 +40,9 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
-/// What krusty analyzes against: KSP's API, the standard library and the runtime's JDK.
-fn classpath(runtime: &KspRuntime) -> Rc<Classpath> {
+/// What krusty analyzes against: KSP's API, the standard library, the runtime's JDK and
+/// `dependencies`.
+fn classpath(runtime: &KspRuntime, dependencies: &[PathBuf]) -> Rc<Classpath> {
     let jdk = runtime.java_home.join("lib/modules");
     assert!(
         jdk.is_file(),
@@ -49,11 +51,12 @@ fn classpath(runtime: &KspRuntime) -> Rc<Classpath> {
     );
     let mut paths = runtime.api_classpath.clone();
     paths.push(jdk);
+    paths.extend(dependencies.iter().cloned());
     Rc::new(Classpath::new(paths))
 }
 
-fn platform(runtime: &KspRuntime) -> krusty::frontend::PlatformProvider {
-    let libraries = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath(runtime))
+fn platform(runtime: &KspRuntime, dependencies: &[PathBuf]) -> krusty::frontend::PlatformProvider {
+    let libraries = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath(runtime, dependencies))
         .expect("the JVM provider");
     krusty::frontend::PlatformProvider::jvm(Box::new(libraries))
 }
@@ -68,17 +71,31 @@ fn processor(runtime: &KspRuntime, stem: &str, provider: &str) -> PathBuf {
 /// can each build the same processor.
 fn processor_in(runtime: &KspRuntime, stem: &str, provider: &str, directory: &str) -> PathBuf {
     let out = scratch(directory);
-    let text = std::fs::read_to_string(fixtures().join(format!("{stem}.kt"))).unwrap();
-    let inputs = [krusty::source::SourceInput::kotlin(&text).with_file_stem(stem)];
-    let stems = [stem.to_string()];
+    compile(runtime, &fixtures().join(format!("{stem}.kt")), &out);
+    let services = out.join("META-INF/services");
+    std::fs::create_dir_all(&services).unwrap();
+    std::fs::write(
+        services.join("com.google.devtools.ksp.processing.SymbolProcessorProvider"),
+        format!("{provider}\n"),
+    )
+    .unwrap();
+    out
+}
+
+/// Compiles the Kotlin file `source` with krusty into the classpath directory `out`.
+fn compile(runtime: &KspRuntime, source: &Path, out: &Path) {
+    let stem = source.file_stem().unwrap().to_string_lossy().into_owned();
+    let text = std::fs::read_to_string(source).unwrap();
+    let inputs = [krusty::source::SourceInput::kotlin(&text).with_file_stem(&stem)];
+    let stems = [stem.clone()];
     let mut diags = krusty::diag::DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
-        platform(runtime),
+        platform(runtime, &[]),
         &krusty::features::LangFeatures::from_source(&text),
         &mut diags,
     );
-    let backend = krusty::jvm::JvmBackend::new(classpath(runtime));
+    let backend = krusty::jvm::JvmBackend::new(classpath(runtime, &[]));
     let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
     let messages: Vec<&str> = diags.diags.iter().map(|diag| diag.msg.as_str()).collect();
     assert!(
@@ -90,14 +107,6 @@ fn processor_in(runtime: &KspRuntime, stem: &str, provider: &str, directory: &st
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(file, bytes).unwrap();
     }
-    let services = out.join("META-INF/services");
-    std::fs::create_dir_all(&services).unwrap();
-    std::fs::write(
-        services.join("com.google.devtools.ksp.processing.SymbolProcessorProvider"),
-        format!("{provider}\n"),
-    )
-    .unwrap();
-    out
 }
 
 /// What the processors generated, logged and wrote, in `ksp2.expected`'s form.
@@ -114,6 +123,7 @@ fn run(
     env: &Environment,
     processor: &Path,
     sources: &[PathBuf],
+    dependencies: &[PathBuf],
     outputs: &KspOutputs,
 ) -> Result<Run, HostError> {
     let mut host = KspHost::start(runtime, env, &mut std::io::stderr())?;
@@ -137,7 +147,7 @@ fn run(
         generated: Vec::new(),
         log: Vec::new(),
     };
-    loop {
+    let analysis = loop {
         let texts: Vec<String> = sources
             .iter()
             .map(|path| std::fs::read_to_string(path).unwrap())
@@ -151,7 +161,7 @@ fn run(
             &inputs,
             0,
             inputs.len(),
-            platform(runtime),
+            platform(runtime, dependencies),
             &krusty::features::LangFeatures::new(),
             &mut diags,
         );
@@ -161,10 +171,10 @@ fn run(
             .collect();
         let round = krusty::ksp_round::ksp_round(&analysis, &paths)
             .unwrap_or_else(|refusal| panic!("{refusal}"));
-        let outcome = host.round(&round)?;
+        let outcome = host.round(&round, &KspLibraries::new(&analysis))?;
         run.log.extend(outcome.log);
         if outcome.generated.is_empty() {
-            break;
+            break analysis;
         }
         for generated in outcome.generated {
             run.generated
@@ -173,8 +183,8 @@ fn run(
                 sources.push(generated.path);
             }
         }
-    }
-    let outcome = host.finish()?;
+    };
+    let outcome = host.finish(&KspLibraries::new(&analysis))?;
     run.log.extend(outcome.log);
     for generated in outcome.generated {
         run.generated
@@ -208,7 +218,7 @@ fn a_processor_sees_generates_and_logs_what_it_does_under_ksp2() {
     };
     let source_dir = fixtures().join("sources");
     let sources = [source_dir.join("Sample.kt"), source_dir.join("Other.kt")];
-    let run = run(&runtime, &env, &processor, &sources, &outputs)
+    let run = run(&runtime, &env, &processor, &sources, &[], &outputs)
         .unwrap_or_else(|error| panic!("{error}"));
     let mut actual: Vec<String> = run.generated;
     actual.extend(run.log);
@@ -246,7 +256,7 @@ fn a_processor_deferring_symbols_is_refused_rather_than_dropping_them() {
         fixtures().join("sources/Sample.kt"),
         fixtures().join("sources/Other.kt"),
     ];
-    let error = run(&runtime, &env, &processor, &sources, &outputs)
+    let error = run(&runtime, &env, &processor, &sources, &[], &outputs)
         .err()
         .expect("the host refuses a deferring processor");
     assert_eq!(
@@ -268,10 +278,35 @@ fn primary_constructors_and_their_parameters_are_what_ksp2_reports() {
         resources: out.join("resources"),
     };
     let sources = [fixtures().join("constructors/Constructors.kt")];
-    let run = run(&runtime, &env, &processor, &sources, &outputs)
+    let run = run(&runtime, &env, &processor, &sources, &[], &outputs)
         .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(run.generated, Vec::<String>::new());
     let expected: Vec<String> = std::fs::read_to_string(fixtures().join("ctors.expected"))
+        .unwrap()
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(run.log, expected);
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn mapped_names_are_what_ksp2_reports() {
+    let (runtime, env) = runtime();
+    let processor = processor(&runtime, "Names", "names.NamesProvider");
+    let out = scratch("ksp-outputs-names");
+    let outputs = KspOutputs {
+        kotlin: out.join("kotlin"),
+        java: out.join("java"),
+        classes: out.join("classes"),
+        resources: out.join("resources"),
+    };
+    let sources = [fixtures().join("names/Source.kt")];
+    let run = run(&runtime, &env, &processor, &sources, &[], &outputs)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(run.generated, Vec::<String>::new());
+    let expected: Vec<String> = std::fs::read_to_string(fixtures().join("names.expected"))
         .unwrap()
         .lines()
         .filter(|line| !line.starts_with('#'))
@@ -293,7 +328,7 @@ fn class_headers_are_what_ksp2_reports() {
         resources: out.join("resources"),
     };
     let sources = [fixtures().join("headers/Headers.kt")];
-    let run = run(&runtime, &env, &processor, &sources, &outputs)
+    let run = run(&runtime, &env, &processor, &sources, &[], &outputs)
         .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(run.generated, Vec::<String>::new());
     let expected: Vec<String> = std::fs::read_to_string(fixtures().join("headers.expected"))
@@ -322,7 +357,7 @@ fn a_kept_sequence_reads_again_and_through_two_iterators_as_under_ksp2() {
         fixtures().join("companions/Companions.kt"),
         fixtures().join("sources/Other.kt"),
     ];
-    let run = run(&runtime, &env, &processor, &sources, &outputs)
+    let run = run(&runtime, &env, &processor, &sources, &[], &outputs)
         .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(run.generated, Vec::<String>::new());
     let expected: Vec<String> = std::fs::read_to_string(fixtures().join("traverse.expected"))
@@ -336,11 +371,60 @@ fn a_kept_sequence_reads_again_and_through_two_iterators_as_under_ksp2() {
 
 /// Runs the Members processor over `sources` and compares its log with `expected`.
 fn members_log_is_what_ksp2_reports(sources: &[PathBuf], scratch_name: &str, expected: &str) {
-    let (runtime, env) = runtime();
-    let processor = processor_in(
-        &runtime,
+    log_is_what_ksp2_reports(
         "Members",
         "members.MembersProvider",
+        sources,
+        scratch_name,
+        expected,
+    );
+}
+
+/// Runs the processor `stem` (provided by `provider`) over `sources` and compares its log with
+/// `expected`.
+fn log_is_what_ksp2_reports(
+    stem: &str,
+    provider: &str,
+    sources: &[PathBuf],
+    scratch_name: &str,
+    expected: &str,
+) {
+    log_with_dependencies_is_what_ksp2_reports(
+        stem,
+        provider,
+        sources,
+        &[],
+        scratch_name,
+        expected,
+    );
+}
+
+/// [`log_is_what_ksp2_reports`], with the Kotlin files `dependencies` compiled by krusty onto the
+/// classpath.
+fn log_with_dependencies_is_what_ksp2_reports(
+    stem: &str,
+    provider: &str,
+    sources: &[PathBuf],
+    dependencies: &[PathBuf],
+    scratch_name: &str,
+    expected: &str,
+) {
+    let (runtime, env) = runtime();
+    let dependencies: Vec<PathBuf> = match dependencies.is_empty() {
+        true => Vec::new(),
+        false => {
+            let out = scratch(&format!("{scratch_name}-dependencies"));
+            for dependency in dependencies {
+                compile(&runtime, dependency, &out);
+            }
+            vec![out]
+        }
+    };
+    let dependencies = dependencies.as_slice();
+    let processor = processor_in(
+        &runtime,
+        stem,
+        provider,
         &format!("{scratch_name}-processor"),
     );
     let out = scratch(scratch_name);
@@ -350,7 +434,7 @@ fn members_log_is_what_ksp2_reports(sources: &[PathBuf], scratch_name: &str, exp
         classes: out.join("classes"),
         resources: out.join("resources"),
     };
-    let run = run(&runtime, &env, &processor, sources, &outputs)
+    let run = run(&runtime, &env, &processor, sources, dependencies, &outputs)
         .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(run.generated, Vec::<String>::new());
     let expected: Vec<String> = std::fs::read_to_string(fixtures().join(expected))
@@ -379,5 +463,33 @@ fn declarations_are_in_the_order_ksp2_lists_them() {
         &[fixtures().join("order/Order.kt")],
         "ksp-outputs-order",
         "order.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn annotation_arguments_and_accessors_are_what_ksp2_reports() {
+    log_is_what_ksp2_reports(
+        "Annotations",
+        "annotations.AnnotationsProvider",
+        &[
+            fixtures().join("annotations/Aliased.kt"),
+            fixtures().join("annotations/Annotations.kt"),
+        ],
+        "ksp-outputs-annotations",
+        "annotations.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn library_classes_are_what_ksp2_reports() {
+    log_with_dependencies_is_what_ksp2_reports(
+        "Library",
+        "library.LibraryProvider",
+        &[fixtures().join("library/Library.kt")],
+        &[fixtures().join("dependency/Dependency.kt")],
+        "ksp-outputs-library",
+        "library.expected",
     );
 }

@@ -45,15 +45,19 @@ ci: lint coverage-gate
 # Lint gate (enforced locally + in CI + by the pre-commit hook): formatting must be clean, and
 # clippy must introduce NO new findings beyond the frozen baseline (clippy-baseline.tsv). Existing
 # findings are tolerated; any new one fails. Identical behaviour everywhere — it's plain cargo + sh.
-lint: versioning-tests signing-key-tests fmt-check clippy-baseline-check
+lint: versioning-tests release-tests fmt-check clippy-baseline-check
 
 # Cheap release-version contracts, without a compiler build or reference-toolchain download.
 versioning-tests:
     bash scripts/test-versioning.sh
 
-# The release job's signing key id selection, against keys generated in a throwaway keyring.
-signing-key-tests:
+# The release job's signing key id selection, against keys generated in a throwaway keyring, its
+# Maven Central upload, against a stand-in Gradle build and Central Portal, and the Gradle wrapper
+# check it depends on, against stand-in published checksums.
+release-tests:
     bash scripts/test-signing-key-id.sh
+    bash scripts/test-publish-maven-central.sh
+    bash scripts/test-check-gradle-wrappers.sh
 
 # Run the LSP package without coverage instrumentation.
 test-lsp:
@@ -698,11 +702,11 @@ build-release TARGET="":
     export KRUSTY_VERSION="$(just version)"
     export KRUSTY_KOTLIN_SUPPORT="$(just supported-kotlin)"
     if [ -n "{{TARGET}}" ]; then
-        cargo build --release --target {{TARGET}} -p krusty-cli --bin krusty
-        cargo build --release --target {{TARGET}} -p krusty-lsp
+        cargo build --locked --release --target {{TARGET}} -p krusty-cli --bin krusty
+        cargo build --locked --release --target {{TARGET}} -p krusty-lsp
     else
-        cargo build --release -p krusty-cli --bin krusty
-        cargo build --release -p krusty-lsp
+        cargo build --locked --release -p krusty-cli --bin krusty
+        cargo build --locked --release -p krusty-lsp
     fi
     echo "built krusty and krusty-lsp $KRUSTY_VERSION (supported Kotlin: $KRUSTY_KOTLIN_SUPPORT) ${TARGET:+for {{TARGET}}}"
 

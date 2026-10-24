@@ -334,6 +334,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 annotation,
                 arguments: Vec::new(),
                 facts: Default::default(),
+                written: None,
             })
             .collect();
         let mut supertype_templates = classifier_header
@@ -1862,6 +1863,14 @@ impl<'a> StreamedModuleSymbols<'a> {
 }
 
 impl SymbolSource for StreamedModuleSymbols<'_> {
+    fn actualized_expect(&self, internal: TypeName) -> Option<TypeName> {
+        self.index
+            .actualizes_expect(self.source_file, internal)
+            .then(|| self.index.type_alias_by_identity(internal))
+            .flatten()
+            .map(|alias| alias.target)
+    }
+
     fn sees_function(&self, function: &FunctionInfo) -> bool {
         self.sees_declaration(function.stable_declaration)
     }

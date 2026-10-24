@@ -56,6 +56,9 @@ pub trait SymbolSource {
     /// Core projection of the classifier half of [`Self::symbols`]. Providers must not override this;
     /// the implementation lives here solely while call sites migrate to reading the record directly.
     fn classifier(&self, internal: TypeName) -> Option<std::sync::Arc<LibraryType>> {
+        if let Some(target) = self.actualized_expect(internal) {
+            return self.classifier(target);
+        }
         let (namespace, name) = SymbolNamespace::classifier_key(internal);
         let record = self.symbols(namespace, name);
         // A typealias occupies this source key but names its expanded classifier. Asking for the
@@ -64,6 +67,13 @@ pub trait SymbolSource {
         (record.classifier_name == Some(internal))
             .then(|| record.classifier.clone())
             .flatten()
+    }
+
+    /// The classifier an `expect` classifier `internal` stands for in the source this provider
+    /// resolves for: the target of the `actual typealias` actualizing it, where that source sees
+    /// the alias. A common source sees no alias and types the `expect` classifier as its own.
+    fn actualized_expect(&self, _internal: TypeName) -> Option<TypeName> {
+        None
     }
 
     /// Whether `name` is a package directly inside `parent` in this source.
@@ -175,6 +185,15 @@ pub trait SymbolSource {
         None
     }
 
+    /// The serial elements a dependency's `@Serializable` class publishes for subclasses compiled
+    /// apart from it; see [`crate::types::ClassifierFactSource::serializable_class_elements`].
+    fn serializable_class_elements(
+        &self,
+        _classifier: TypeName,
+    ) -> Option<crate::types::SerializableClassElements> {
+        None
+    }
+
     /// The annotations kotlinc's sam-with-receiver plugin is configured with: an interface carrying
     /// one directly converts a lambda with its abstract method's first parameter as the receiver.
     /// A compilation fact, published by the current-module provider.
@@ -239,6 +258,12 @@ impl SymbolSource for CompositeSource<'_> {
             .any(|child| child.api_withheld_callable(owner, name))
     }
 
+    fn actualized_expect(&self, internal: TypeName) -> Option<TypeName> {
+        self.children
+            .iter()
+            .find_map(|child| child.actualized_expect(internal))
+    }
+
     fn sees_function(&self, function: &crate::libraries::FunctionInfo) -> bool {
         self.children
             .iter()
@@ -255,6 +280,15 @@ impl SymbolSource for CompositeSource<'_> {
         self.children
             .iter()
             .find_map(|child| child.generated_serializer_singleton(classifier))
+    }
+
+    fn serializable_class_elements(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::types::SerializableClassElements> {
+        self.children
+            .iter()
+            .find_map(|child| child.serializable_class_elements(classifier))
     }
 
     fn sam_with_receiver_annotations(&self) -> &[TypeName] {
@@ -435,6 +469,10 @@ impl SymbolSource for CachedCompositeSource<'_> {
         self.source.api_withheld_callable(owner, name)
     }
 
+    fn actualized_expect(&self, internal: TypeName) -> Option<TypeName> {
+        self.source.actualized_expect(internal)
+    }
+
     fn sees_function(&self, function: &crate::libraries::FunctionInfo) -> bool {
         self.source.sees_function(function)
     }
@@ -487,6 +525,13 @@ impl SymbolSource for CachedCompositeSource<'_> {
 
     fn generated_serializer_singleton(&self, classifier: TypeName) -> Option<TypeName> {
         self.source.generated_serializer_singleton(classifier)
+    }
+
+    fn serializable_class_elements(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::types::SerializableClassElements> {
+        self.source.serializable_class_elements(classifier)
     }
 
     fn sam_with_receiver_annotations(&self) -> &[TypeName] {

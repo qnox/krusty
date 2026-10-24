@@ -133,7 +133,8 @@ impl FirBody {
                         return Ok((file == source).then_some(span))
                     }
                     Some(Origin::Synthetic {
-                        kind: SyntheticOriginKind::ContextArgument,
+                        kind:
+                            SyntheticOriginKind::ContextArgument | SyntheticOriginKind::ScriptReceiver,
                         ..
                     }) => return Err(()),
                     Some(Origin::Synthetic { cause, .. }) => current = cause,

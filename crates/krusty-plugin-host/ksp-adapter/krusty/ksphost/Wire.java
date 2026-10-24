@@ -12,7 +12,7 @@ import java.util.List;
 // The frame and value encodings of the protocol (`src/ksp/protocol.rs`): big-endian integers,
 // strings as a u32 byte length and UTF-8, lists as a u32 count and the elements.
 final class Wire {
-    static final int PROTOCOL = 3;
+    static final int PROTOCOL = 6;
 
     static final byte HELLO = 0;
     static final byte LOAD = 1;
@@ -24,6 +24,10 @@ final class Wire {
     static final byte FINISH = 7;
     static final byte FINISHED = 8;
     static final byte SHUTDOWN = 9;
+    static final byte CLASS_QUERY = 10;
+    static final byte CLASS_ANSWER = 11;
+    static final byte NAME_QUERY = 12;
+    static final byte NAME_ANSWER = 13;
 
     interface Body {
         void write(DataOutputStream out) throws IOException;

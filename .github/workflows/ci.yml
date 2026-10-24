@@ -29,7 +29,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       # Commit messages are checked here so a push does not queue a second workflow for them.
@@ -40,16 +40,21 @@ jobs:
         run: scripts/check-attribution.sh "$RANGE"
       - name: validate pinned IntelliJ patch
         run: scripts/check-intellij-patch.sh
+      # The release job runs tools/krusty-gradle's wrapper with the signing key, without setup-gradle's
+      # wrapper validation; every committed wrapper is checked here instead.
+      - name: validate Gradle wrappers
+        run: scripts/check-gradle-wrappers.sh
       - name: outcome manifests only shrink
         env:
           BASE: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           HEAD: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event.after }}
         run: scripts/check-outcome-lists.sh "$BASE" "$HEAD"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
+          toolchain: stable
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: just
       - name: lint
@@ -57,7 +62,7 @@ jobs:
       # The ignored tests start real compiler-plugin and KSP hosts from their pinned toolchains
       # on the runner's JDK. The toolchains and compiled adapters stay in krusty's cache.
       - name: cache plugin host runtime
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/krusty/plugin-host
           key: plugin-host-${{ hashFiles('crates/krusty-plugin-host/src/pins/*.tsv', 'crates/krusty-plugin-host/adapter/*', 'crates/krusty-plugin-host/ksp-adapter/**') }}
@@ -76,31 +81,31 @@ jobs:
       # instrumenting compiler on the same immutable nightly.
       KRUSTY_COVERAGE_TOOLCHAIN: nightly-2026-09-05
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: install coverage tooling
         run: rustup toolchain install "$KRUSTY_COVERAGE_TOOLCHAIN" --profile minimal --component llvm-tools-preview
       # Prebuilt binary: `cargo install cargo-llvm-cov` compiled it from source on every run
       # (~75s of the ci job).
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-llvm-cov
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: just
       # krusty-toolchain's oracle builds the Build Tools API implementation with its Gradle
       # wrapper, which does not run on JDK 25; the coverage gate points it at JDK 21. The last
       # version listed stays JAVA_HOME.
-      - uses: actions/setup-java@v6.1.0
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: zulu
           java-version: |
             21
             25
       - name: cache kotlin toolchain and corpora
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             target/cache/kotlinc
@@ -109,7 +114,7 @@ jobs:
           key: kotlin-toolchain-${{ hashFiles('kotlin-versions') }}
       - name: cache box corpus
         id: box-corpus
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/box-corpus
           # The checkout carries the box corpus, the mock JDK its tests compile against, and the CLI
@@ -124,7 +129,7 @@ jobs:
         run: echo "version=$(just max-version)" >> "$GITHUB_OUTPUT"
       - name: restore recorded kotlinc bytes
         id: recorded-bytes
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/class-dumps
           key: recorded-kotlinc-bytes-${{ steps.recorded-version.outputs.version }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
@@ -135,14 +140,14 @@ jobs:
       # `tests/support/oracle.rs` keys each entry by the reference's identity and its inputs.
       - name: restore Kotlin Toolchain oracle output
         id: toolchain-oracle
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/kotlin-toolchain-oracle
           key: kotlin-toolchain-oracle-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
           restore-keys: |
             kotlin-toolchain-oracle-
       - name: cache Kotlin Toolchain distribution
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/JetBrains/Kotlin/cli
           key: kotlin-toolchain-cli-${{ runner.os }}-${{ hashFiles('scripts/kotlin-toolchain/kotlin') }}
@@ -195,13 +200,13 @@ jobs:
         run: just coverage-gate
       - name: save recorded kotlinc bytes
         if: steps.recorded-mode.outputs.write == '1'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/class-dumps
           key: recorded-kotlinc-bytes-${{ steps.recorded-version.outputs.version }}-${{ github.sha }}
       - name: save Kotlin Toolchain oracle output
         if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.toolchain-oracle.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/kotlin-toolchain-oracle
           key: kotlin-toolchain-oracle-${{ github.sha }}
@@ -216,10 +221,12 @@ jobs:
   build-conformance-bin:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: just
       - name: build conformance binary
@@ -233,7 +240,7 @@ jobs:
           bin=$(just conformance-bin)
           phase_end conformance-test-binary
           cp "$bin" conformance-bin
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: conformance-bin
           path: conformance-bin
@@ -242,9 +249,11 @@ jobs:
   build-klib-test-bins:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: build focused KLIB test binaries
         run: |
           set -euo pipefail
@@ -255,7 +264,7 @@ jobs:
           phase_begin focused-klib-test-binaries
           scripts/build-klib-test-binaries.sh "$PWD"
           phase_end focused-klib-test-binaries
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: klib-test-bins
           path: |
@@ -271,10 +280,12 @@ jobs:
       matrix: ${{ steps.versions.outputs.matrix }}
       max: ${{ steps.versions.outputs.max }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: just
       - name: select supported Kotlin versions
@@ -297,7 +308,7 @@ jobs:
           bin=$(just krusty-build-tests)
           phase_end krusty-build-tests
           cp "$bin" krusty-build-tests
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tool-bins
           path: |
@@ -317,14 +328,14 @@ jobs:
         target: [jvm]
     runs-on: ubuntu-latest
     steps: &conformance-steps
-      - uses: actions/checkout@v7
-      - uses: taiki-e/install-action@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: just
       # Kotlin's CLI corpus names JDK 8, 11, 17 and 21 homes; kotlin_cli_jvm_conformance finds them
       # through the JAVA_HOME_<release>_X64 variables this exports and fails a case it cannot run.
       # The last version listed stays JAVA_HOME.
-      - uses: actions/setup-java@v6.1.0
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: zulu
           java-version: |
@@ -335,7 +346,7 @@ jobs:
             25
       - name: cache kotlin toolchain and conformance corpora (${{ matrix.version }})
         if: matrix.target == 'jvm'
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             target/cache/kotlinc/${{ matrix.version }}
@@ -347,7 +358,7 @@ jobs:
           key: kotlin-conformance-all-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
       - name: cache Kotlin compiler for ${{ matrix.target }} conformance (${{ matrix.version }})
         if: matrix.target != 'jvm'
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/kotlinc/${{ matrix.version }}
           # Do not let a Native or Wasm row publish the JVM row's broader immutable cache before its
@@ -355,7 +366,7 @@ jobs:
           key: kotlin-${{ matrix.target }}-conformance-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
       - name: cache Wasm target KLIB dependencies (${{ matrix.version }})
         if: matrix.target == 'wasm'
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/krusty-deps
           key: wasm-target-klibs-v1-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
@@ -363,7 +374,7 @@ jobs:
       # `scripts/kotlin-native.sh` re-downloads a restored root whose stdlib payload is incomplete.
       - name: cache Kotlin/Native distribution (${{ matrix.version }})
         if: matrix.target == 'native'
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/kotlin-native/${{ matrix.version }}
           key: kotlin-native-conformance-${{ runner.os }}-${{ runner.arch }}-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
@@ -371,7 +382,7 @@ jobs:
       # ordinary Native conformance step below already provisions the exact compiler distribution.
       - name: cache Kotlin/Native dependencies
         if: matrix.target == 'native' && matrix.version == needs.build-tool-bins.outputs.max
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.konan/dependencies
@@ -380,7 +391,7 @@ jobs:
       - name: restore recorded kotlinc-native bytes
         if: matrix.target == 'native' && matrix.version == needs.build-tool-bins.outputs.max
         id: native-recordings
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/native-recordings
           key: recorded-kotlinc-native-bytes-${{ matrix.version }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
@@ -401,7 +412,7 @@ jobs:
           echo "write=$write" >> "$GITHUB_OUTPUT"
       - name: cache box corpus (${{ matrix.version }})
         id: box-corpus
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/box-corpus/${{ matrix.version }}
           # The checkout carries the box corpus, the mock JDK its tests compile against, and the CLI
@@ -416,7 +427,7 @@ jobs:
       - name: restore recorded kotlinc bytes (${{ matrix.version }})
         if: matrix.target == 'jvm'
         id: recorded-bytes
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/class-dumps
           key: recorded-kotlinc-bytes-conformance-${{ matrix.version }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
@@ -447,23 +458,23 @@ jobs:
       - name: restore kotlinc box references (${{ matrix.version }})
         if: matrix.target == 'jvm'
         id: box-references
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/ref-classes
           key: box-reference-classes-${{ matrix.version }}-${{ hashFiles('tests/box_reference_classes.rs', 'tests/common/kotlinc_server.rs', 'tests/common/server_pool.rs', 'tests/common/mod.rs', 'tests/common/producing_jdk.rs', 'tests/common/byte_dump.rs', 'tests/common/byte_dump/**', 'src/conformance.rs', 'src/conformance/**') }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
           restore-keys: |
             box-reference-classes-${{ matrix.version }}-${{ hashFiles('tests/box_reference_classes.rs', 'tests/common/kotlinc_server.rs', 'tests/common/server_pool.rs', 'tests/common/mod.rs', 'tests/common/producing_jdk.rs', 'tests/common/byte_dump.rs', 'tests/common/byte_dump/**', 'src/conformance.rs', 'src/conformance/**') }}-
       - name: download conformance binary
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: conformance-bin
       - name: download compiler binary
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
       - name: download focused KLIB test binaries
         if: matrix.target != 'jvm'
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: klib-test-bins
       # One box run writes both reports over the same applicable cases: pct.txt is the case report
@@ -487,7 +498,7 @@ jobs:
           bash scripts/conformance-badge.sh fields jvm-byte-equality jvm-byte-equality.txt "${{ matrix.version }}"
       - name: save kotlinc box references (${{ matrix.version }})
         if: matrix.target == 'jvm' && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.box-references.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/ref-classes
           key: box-reference-classes-${{ matrix.version }}-${{ hashFiles('tests/box_reference_classes.rs', 'tests/common/kotlinc_server.rs', 'tests/common/server_pool.rs', 'tests/common/mod.rs', 'tests/common/producing_jdk.rs', 'tests/common/byte_dump.rs', 'tests/common/byte_dump/**', 'src/conformance.rs', 'src/conformance/**') }}-${{ github.sha }}
@@ -512,7 +523,7 @@ jobs:
         run: just native-conformance-regressions "$PWD/conformance-bin" "${{ matrix.version }}"
       - name: upload Native conformance
         if: always() && matrix.target == 'native'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: native-pct-${{ matrix.version }}
           path: native-pct.txt
@@ -545,7 +556,7 @@ jobs:
           timeout 600s ./klib-unit-tests klib_ --nocapture
       - name: save recorded kotlinc-native bytes
         if: matrix.target == 'native' && matrix.version == needs.build-tool-bins.outputs.max && steps.native-recording-mode.outputs.write == '1'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/native-recordings
           key: recorded-kotlinc-native-bytes-${{ matrix.version }}-${{ github.sha }}
@@ -559,7 +570,7 @@ jobs:
       # version 22. Each lane's ratchet fails the step on a regression or an unrecorded pass. Each
       # lane analyzes against its exact wasm-js or wasm-wasi stdlib KLIB before target
       # emission. They remain separate because Kotlin publishes different platform surfaces.
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: matrix.target == 'wasm'
         with:
           node-version: '22'
@@ -614,20 +625,20 @@ jobs:
         run: just conformance-regressions "$PWD/conformance-bin" "${{ matrix.version }}"
       - name: save recorded kotlinc bytes (${{ matrix.version }})
         if: matrix.target == 'jvm' && steps.recorded-mode.outputs.write == '1'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/class-dumps
           key: recorded-kotlinc-bytes-conformance-${{ matrix.version }}-${{ github.sha }}
       - name: upload pct
         if: always() && matrix.target == 'jvm'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pct-${{ matrix.version }}
           path: pct.txt
           if-no-files-found: error
       - name: upload JVM byte equality
         if: always() && matrix.target == 'jvm'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: jvm-byte-equality-${{ matrix.version }}
           path: jvm-byte-equality.txt
@@ -654,7 +665,7 @@ jobs:
   # which fails this aggregate too.
   ci-and-conformance:
     name: ci-and-conformance
-    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, bazel]
+    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, maven, build-tools, bazel]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -666,6 +677,7 @@ jobs:
           KLIB_CONFORMANCE_RESULT: ${{ needs.conformance-klib.result }}
           GRADLE_PLUGIN_RESULT: ${{ needs.build-gradle-plugin.result }}
           GRADLE_RESULT: ${{ needs.gradle.result }}
+          MAVEN_RESULT: ${{ needs.maven.result }}
           BUILD_TOOLS_RESULT: ${{ needs.build-tools.result }}
           BAZEL_RESULT: ${{ needs.bazel.result }}
         run: |
@@ -675,6 +687,7 @@ jobs:
           echo "KLIB conformance: $KLIB_CONFORMANCE_RESULT"
           echo "build-gradle-plugin: $GRADLE_PLUGIN_RESULT"
           echo "gradle: $GRADLE_RESULT"
+          echo "maven: $MAVEN_RESULT"
           echo "build-tools: $BUILD_TOOLS_RESULT"
           echo "bazel: $BAZEL_RESULT"
           if [ "$CI_RESULT" != success ] \
@@ -683,9 +696,10 @@ jobs:
             || [ "$KLIB_CONFORMANCE_RESULT" != success ] \
             || [ "$GRADLE_PLUGIN_RESULT" != success ] \
             || [ "$GRADLE_RESULT" != success ] \
+            || [ "$MAVEN_RESULT" != success ] \
             || [ "$BUILD_TOOLS_RESULT" != success ] \
             || [ "$BAZEL_RESULT" != success ]; then
-            echo "lint, coverage, conformance (including KLIB semantics), every Gradle gate, every build-tools lane, and every Bazel lane must succeed" >&2
+            echo "lint, coverage, conformance (including KLIB semantics), every Gradle gate, the Maven goal, every build-tools lane, and every Bazel lane must succeed" >&2
             exit 1
           fi
 
@@ -694,17 +708,17 @@ jobs:
   build-gradle-plugin:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: just
-      - uses: actions/setup-java@v6.1.0
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: zulu
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
         with:
           cache-provider: basic
       - name: build portable local-Maven distribution
@@ -712,7 +726,7 @@ jobs:
           set -euo pipefail
           version=$(just version)
           scripts/package-gradle-plugin.sh "$version" "$PWD/dist-gradle"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: krusty-gradle-plugin
           path: |
@@ -732,20 +746,20 @@ jobs:
         kotlin: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: just
-      - uses: actions/setup-java@v6.1.0
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: zulu
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
         with:
           cache-provider: basic
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
       - name: build, test and package for Kotlin ${{ matrix.kotlin }}
@@ -753,7 +767,7 @@ jobs:
           set -euo pipefail
           chmod +x krusty
           scripts/package-build-tools.sh "$(just version)" "${{ matrix.kotlin }}" "$PWD/krusty" "$PWD/dist-build-tools"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: krusty-build-tools-kotlin-${{ matrix.kotlin }}
           path: dist-build-tools/*
@@ -779,33 +793,33 @@ jobs:
           - { kotlin: 2.4.20, gradle: 7.6.3,  ksp: false }
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: just
-      - uses: actions/setup-java@v6.1.0
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: zulu
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
         with:
           gradle-version: ${{ matrix.gradle }}
           # The integration harness deliberately uses an isolated user home below. Do not restore
           # an unused ~/.gradle cache; the next step owns the exact home the nested builds consume.
           cache-provider: external
       - name: cache Gradle integration dependencies
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/krusty-gradle-user-home/caches
           # Each matrix lane has a different Gradle/KGP/KSP dependency graph. The generated fixture
           # build scripts live in gradle.rs, while the tested plugin build lives under tools/.
           key: gradle-integration-${{ runner.os }}-${{ runner.arch }}-${{ matrix.gradle }}-${{ matrix.kotlin }}-${{ matrix.ksp }}-${{ hashFiles('Cargo.lock', 'crates/krusty-build/src/gradle.rs', 'tools/krusty-gradle/**') }}
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: krusty-gradle-plugin
           path: dist-gradle
@@ -829,6 +843,9 @@ jobs:
           chmod +x krusty krusty-build-tests
           tests="kotlin_compiler_slice_compiles_through_krusty kotlin_dsl_build_src_compiles_through_krusty"
           tests="$tests serialization_plugin_compiles_through_krusty kapt_project_compiles_through_krusty"
+          tests="$tests verify_task_reports_krusty_against_kotlinc verify_task_reports_only_the_current_invocation"
+          tests="$tests verify_task_reports_an_unsupported_kotlin_gradle_plugin verify_task_reports_projects_that_each_load_the_plugin"
+          tests="$tests verify_task_reports_kotlin_dsl_compiles_after_kotlinc_compiles_them"
           tests="$tests oss_corpus_init_script_applies_the_packaged_plugin"
           if [ "${{ matrix.ksp }}" = true ]; then
             tests="$tests ksp2_generated_sources_compile_through_krusty"
@@ -841,6 +858,77 @@ jobs:
           KRUSTY_GRADLE_BIN=$(command -v gradle) \
             ./krusty-build-tests --ignored $tests
 
+  # Build the Maven plugin's release bytes once: a portable local Maven repository the release
+  # publishes and the job below consumes.
+  build-maven-plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - uses: actions/setup-java@v6.1.0
+        with:
+          distribution: zulu
+          java-version: '17'
+          cache: maven
+          cache-dependency-path: tools/krusty-maven/pom.xml
+      - name: build portable local-Maven distribution
+        run: |
+          set -euo pipefail
+          version=$(just version)
+          scripts/package-maven-plugin.sh "$version" "$PWD/dist-maven"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: krusty-maven-plugin
+          path: |
+            dist-maven/*.jar
+            dist-maven/*.zip
+            dist-maven/*-SHA256SUMS
+          if-no-files-found: error
+
+  # Run the Maven plugin's verify goal from the packaged release repository against
+  # kotlin-maven-plugin builds, with the shared krusty binary.
+  maven:
+    needs: [build-tool-bins, build-maven-plugin]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - uses: actions/setup-java@v6.1.0
+        with:
+          distribution: zulu
+          java-version: '17'
+          cache: maven
+          cache-dependency-path: tools/krusty-maven/pom.xml
+      - uses: actions/download-artifact@v8
+        with:
+          name: tool-bins
+      - uses: actions/download-artifact@v8
+        with:
+          name: krusty-maven-plugin
+          path: dist-maven
+      - name: verify and unpack the tested Maven plugin distribution
+        run: |
+          set -euo pipefail
+          version=$(just version)
+          (cd dist-maven && sha256sum -c "krusty-maven-plugin-$version-SHA256SUMS")
+          unzip -q "dist-maven/krusty-maven-plugin-$version.zip" -d dist-maven/unpacked
+          echo "KRUSTY_MAVEN_PLUGIN_VERSION=$version" >> "$GITHUB_ENV"
+          echo "KRUSTY_MAVEN_PLUGIN_REPOSITORY=$PWD/dist-maven/unpacked/krusty-maven-plugin-$version/repository" >> "$GITHUB_ENV"
+      - name: run the Maven verify goal
+        env:
+          KRUSTY_MAVEN_TEST_BIN: ${{ github.workspace }}/krusty
+        run: |
+          chmod +x krusty krusty-build-tests
+          ./krusty-build-tests --ignored maven_verify_goal_ --test-threads=1
+
   # Build Kotlin with the Bazel module the release would publish, as a consumer depends on it,
   # with the toolchain's compiler and an override, in action and worker mode.
   bazel:
@@ -851,13 +939,13 @@ jobs:
         bazel: [8.4.2, 9.3.1]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: just
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
       - name: build the packaged Bazel module with Bazel ${{ matrix.bazel }}
@@ -891,16 +979,17 @@ jobs:
           - { triple: aarch64-pc-windows-msvc,  os: windows-11-arm }
     runs-on: ${{ matrix.target.os }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
+          toolchain: stable
           targets: ${{ matrix.target.triple }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.target.triple }}
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: just
       - name: install aarch64-linux linker
@@ -911,14 +1000,16 @@ jobs:
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
       # build.rs cross-compiles the native runtime for every Linux target, riscv64 included. Apple's
       # clang ships without the RISC-V backend, so macOS builds use Homebrew's LLVM clang instead.
+      # The major is pinned, not Homebrew's moving `llvm`: the runner images already ship llvm@18,
+      # the clang the Linux runners use too.
       - name: select LLVM clang for the native runtime
         if: runner.os == 'macOS'
         run: |
           set -euo pipefail
-          if ! brew list --versions llvm >/dev/null; then
-            brew install llvm
+          if ! brew list --versions llvm@18 >/dev/null; then
+            brew install llvm@18
           fi
-          clang="$(brew --prefix llvm)/bin/clang"
+          clang="$(brew --prefix llvm@18)/bin/clang"
           test -x "$clang"
           "$clang" --print-targets | grep -q riscv64
           echo "KRUSTY_RUNTIME_CC=$clang" >> "$GITHUB_ENV"
@@ -933,7 +1024,7 @@ jobs:
         id: lsp_pkg
         shell: bash
         run: echo "path=$(just package "${{ matrix.target.triple }}" krusty-lsp)" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: krusty-${{ matrix.target.triple }}
           path: |
@@ -942,17 +1033,17 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-tools, bazel, build-tool-bins, build-release]
+    needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-maven-plugin, maven, build-tools, bazel, build-tool-bins, build-release]
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     # Shorter than the release lock's TTL, so a lock that outlives it belongs to a dead job.
-    timeout-minutes: 20
+    timeout-minutes: 25
     permissions:
       contents: write
       # Dispatches the pages workflow, which regenerates the Bazel registry.
       actions: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       # Master runs overlap, so two release jobs can run at once and an older commit can reach
@@ -966,13 +1057,13 @@ jobs:
       - name: publish only the newest master commit
         id: tip
         run: scripts/release-publisher.sh check >> "$GITHUB_OUTPUT"
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         if: steps.tip.outputs.publish == 'true'
         with:
           tool: just
       - name: collect all target artifacts
         if: steps.tip.outputs.publish == 'true'
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: krusty-*
           path: dist
@@ -983,6 +1074,12 @@ jobs:
           set -euo pipefail
           version=$(just version)
           (cd dist && sha256sum -c "krusty-gradle-plugin-$version-SHA256SUMS")
+      - name: verify Maven plugin release assets
+        if: steps.tip.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          version=$(just version)
+          (cd dist && sha256sum -c "krusty-maven-plugin-$version-SHA256SUMS")
       - name: verify Build Tools API implementation release assets
         if: steps.tip.outputs.publish == 'true'
         env:
@@ -1016,29 +1113,38 @@ jobs:
       - name: package Bazel module
         if: steps.tip.outputs.publish == 'true'
         run: scripts/package-bazel-module.sh "${{ steps.v.outputs.ver }}" dist
+      # The gh CLI on the runner, not a third-party action holding this job's contents:write token.
+      # A rerun after a later step failed finds the release already published and re-uploads its
+      # assets instead.
       - name: publish
         if: steps.tip.outputs.publish == 'true'
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ steps.v.outputs.tag }}
-          name: "krusty ${{ steps.v.outputs.ver }}: Kotlin compiler written in Rust"
-          target_commitish: ${{ github.sha }}
-          # The titles of the pull requests merged since the previous release, each linked.
-          generate_release_notes: true
-          files: dist/**
-          fail_on_unmatched_files: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.v.outputs.tag }}
+          VER: ${{ steps.v.outputs.ver }}
+        run: |
+          set -euo pipefail
+          mapfile -t assets < <(find dist -type f | sort)
+          test "${#assets[@]}" -gt 0
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" --clobber "${assets[@]}"
+          else
+            # The titles of the pull requests merged since the previous release, each linked.
+            gh release create "$TAG" --target "$GITHUB_SHA" \
+              --title "krusty $VER: Kotlin compiler written in Rust" --generate-notes "${assets[@]}"
+          fi
       # The Gradle Plugin Portal gets every published release under the same version. A Portal
       # version is immutable, and the release lock above already publishes each version once. It
       # runs before the commit is recorded, so a failed upload leaves the release to a rerun.
-      - uses: actions/setup-java@v6.1.0
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         if: steps.tip.outputs.publish == 'true'
         with:
           distribution: zulu
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@v6
-        if: steps.tip.outputs.publish == 'true'
-        with:
-          cache-provider: basic
+      # No setup-gradle here: it injects an init script into every Gradle build, and these builds
+      # hold the signing key and publishing credentials. The lint job validates the wrapper jar,
+      # whose properties pin the distribution's checksum.
       # The maintainer's krusty signing subkey (`gpg --armor --export-secret-subkeys <id>!`) signs
       # every published artifact. SIGNING_KEY_ID, its 8-hex-digit short id, is optional: without
       # it the id is read from the key itself.
@@ -1053,12 +1159,35 @@ jobs:
           if [[ -n "$SIGNING_KEY_ID" ]]; then
             id=$SIGNING_KEY_ID
           elif [[ -n "$SIGNING_KEY" ]]; then
-            id=$(scripts/signing-key-id.sh <<< "$SIGNING_KEY")
+            # A pipe, not a here-string, which an older bash backs with a temporary file.
+            id=$(printf '%s\n' "$SIGNING_KEY" | scripts/signing-key-id.sh)
           else
             id=
           fi
           echo "signing key: ${id:-none}"
           echo "id=$id" >> "$GITHUB_OUTPUT"
+      # Maven Central goes first: it skips a version it already has, so a rerun after a failed
+      # Plugin Portal upload does not trip over Central's immutable versions.
+      - name: publish the Gradle plugin to Maven Central
+        if: steps.tip.outputs.publish == 'true'
+        env:
+          # A Central Portal user token for the verified dev.krustythecompiler namespace.
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyId: ${{ steps.signing.outputs.id }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$MAVEN_CENTRAL_USERNAME" || -z "$MAVEN_CENTRAL_PASSWORD" ]]; then
+            echo "MAVEN_CENTRAL_USERNAME/MAVEN_CENTRAL_PASSWORD are not set; skipping Maven Central"
+            exit 0
+          fi
+          if [[ -z "$ORG_GRADLE_PROJECT_signingInMemoryKey" ]]; then
+            echo "SIGNING_KEY is not set; refusing to publish an unsigned plugin" >&2
+            exit 1
+          fi
+          scripts/publish-maven-central.sh "${{ steps.v.outputs.ver }}"
       - name: publish the Gradle plugin to the Gradle Plugin Portal
         if: steps.tip.outputs.publish == 'true'
         env:
@@ -1092,77 +1221,38 @@ jobs:
       # its own gist file.
       - name: download max-version pct
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: pct-${{ needs.build-tool-bins.outputs.max }}
       - name: download max-version JVM byte equality
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: jvm-byte-equality-${{ needs.build-tool-bins.outputs.max }}
       - name: download max-version Native conformance
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: native-pct-${{ needs.build-tool-bins.outputs.max }}
-      - name: compute conformance badge payload
+      # One gist update with every badge's shields.io endpoint JSON, through the gh CLI.
+      - name: publish badges → gist
         if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
-        id: c
         env:
+          GH_TOKEN: ${{ secrets.GIST_TOKEN }}
+          GIST_ID: ${{ vars.CONFORMANCE_GIST_ID }}
           MAX_VERSION: ${{ needs.build-tool-bins.outputs.max }}
-        run: bash scripts/conformance-badge.sh fields conformance pct.txt "$MAX_VERSION" >> "$GITHUB_OUTPUT"
-      - name: compute JVM byte-equality badge payload
-        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
-        id: b
-        env:
-          MAX_VERSION: ${{ needs.build-tool-bins.outputs.max }}
-        run: bash scripts/conformance-badge.sh fields jvm-byte-equality jvm-byte-equality.txt "$MAX_VERSION" >> "$GITHUB_OUTPUT"
-      - name: compute Native conformance badge payload
-        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
-        id: n
-        env:
-          MAX_VERSION: ${{ needs.build-tool-bins.outputs.max }}
-        run: bash scripts/conformance-badge.sh fields native-conformance native-pct.txt "$MAX_VERSION" >> "$GITHUB_OUTPUT"
-      - name: publish conformance badge → gist
-        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
-        uses: Schneegans/dynamic-badges-action@v1.9.0
-        with:
-          auth: ${{ secrets.GIST_TOKEN }}
-          gistID: ${{ vars.CONFORMANCE_GIST_ID }}
-          filename: krusty-conformance.json
-          label: ${{ steps.c.outputs.label }}
-          message: ${{ steps.c.outputs.message }}
-          color: ${{ steps.c.outputs.color }}
-      - name: publish JVM byte-equality badge → gist
-        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
-        uses: Schneegans/dynamic-badges-action@v1.9.0
-        with:
-          auth: ${{ secrets.GIST_TOKEN }}
-          gistID: ${{ vars.CONFORMANCE_GIST_ID }}
-          filename: krusty-jvm-byte-equality.json
-          label: ${{ steps.b.outputs.label }}
-          message: ${{ steps.b.outputs.message }}
-          color: ${{ steps.b.outputs.color }}
-      - name: publish Native conformance badge → gist
-        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
-        uses: Schneegans/dynamic-badges-action@v1.9.0
-        with:
-          auth: ${{ secrets.GIST_TOKEN }}
-          gistID: ${{ vars.CONFORMANCE_GIST_ID }}
-          filename: krusty-native-conformance.json
-          label: ${{ steps.n.outputs.label }}
-          message: ${{ steps.n.outputs.message }}
-          color: ${{ steps.n.outputs.color }}
-      - name: publish kotlin-version badge → gist
-        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
-        uses: Schneegans/dynamic-badges-action@v1.9.0
-        with:
-          auth: ${{ secrets.GIST_TOKEN }}
-          gistID: ${{ vars.CONFORMANCE_GIST_ID }}
-          filename: krusty-kotlin.json
-          label: Kotlin
-          message: ${{ needs.build-tool-bins.outputs.max }}
-          color: blue
+        run: |
+          set -euo pipefail
+          conformance=$(bash scripts/conformance-badge.sh json conformance pct.txt "$MAX_VERSION")
+          bytes=$(bash scripts/conformance-badge.sh json jvm-byte-equality jvm-byte-equality.txt "$MAX_VERSION")
+          native=$(bash scripts/conformance-badge.sh json native-conformance native-pct.txt "$MAX_VERSION")
+          kotlin=$(jq -cn --arg v "$MAX_VERSION" '{schemaVersion: 1, label: "Kotlin", message: $v, color: "blue"}')
+          jq -n --arg c "$conformance" --arg b "$bytes" --arg n "$native" --arg k "$kotlin" '{files: {
+            "krusty-conformance.json": {content: $c},
+            "krusty-jvm-byte-equality.json": {content: $b},
+            "krusty-native-conformance.json": {content: $n},
+            "krusty-kotlin.json": {content: $k}}}' |
+            gh api --method PATCH "gists/$GIST_ID" --input - >/dev/null
       - name: drop the release lock
         if: always() && steps.lock.outputs.lock != ''
         run: scripts/release-publisher.sh release "${{ steps.lock.outputs.lock }}"

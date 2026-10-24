@@ -567,8 +567,11 @@ pub(in crate::resolve) fn source_type_universe(
     // `typealias A = Primitive` → A maps to `"__ty/<PrimName>"` (decoded in ty_of_ref).
     // `typealias A = java.lang.Foo` → A resolves to the JVM internal name `java/lang/Foo`.
     // Multiple passes handle chains: A = B, B = C.
-    let mut alias_map: HashMap<String, String> = HashMap::default();
-    // The declaring package is known HERE and nowhere downstream — `alias_map` is spelling-keyed —
+    // Each alias spelling with its target and declaring file: a fragmented source set expands only
+    // the aliases a file's fragment sees, so a common alias over an `expect` class stays on that
+    // class rather than following the platform's `actual typealias`.
+    let mut alias_entries: Vec<(String, String, usize)> = Vec::new();
+    // The declaring package is known HERE and nowhere downstream — the alias map is spelling-keyed —
     // so the alias's qualified identity is captured alongside, for `Type.abbreviated_type`.
     let mut source_alias_identities: Vec<(String, TypeName)> = Vec::new();
     for file_index in 0..source_packages.len() {
@@ -579,7 +582,7 @@ pub(in crate::resolve) fn source_type_universe(
             if target.name == "<fun>" || target.name.is_empty() {
                 continue;
             }
-            alias_map.insert(alias.clone(), target.name.clone());
+            alias_entries.push((alias.clone(), target.name.clone(), file_index));
             // A FULLY QUALIFIED spelling (`app.Cargo`) reaches name resolution intact — the parse
             // seam expands only simple spellings — and qualified resolution answers it with the
             // alias's OWN declaration, because an alias declaration is a name a package contains.
@@ -588,7 +591,11 @@ pub(in crate::resolve) fn source_type_universe(
             // exactly as the bare one does. Without this the emitted descriptor named `app/Cargo`,
             // a class nothing declares or emits.
             if !alias_package.is_empty() {
-                alias_map.insert(format!("{alias_package}.{alias}"), target.name.clone());
+                alias_entries.push((
+                    format!("{alias_package}.{alias}"),
+                    target.name.clone(),
+                    file_index,
+                ));
             }
         }
         // Identities come from `type_alias_fun`, not `type_aliases`: the latter records only aliases
@@ -609,13 +616,31 @@ pub(in crate::resolve) fn source_type_universe(
     for (spelling, identity) in &source_alias_identities {
         class_names.insert_source_alias_identity(spelling.clone(), *identity);
     }
-    expand_type_aliases(&mut class_names, &alias_map);
+    let fragments = crate::source::SourceFragments::new(files.iter().map(|file| file.fragment));
+    let visible_aliases = |from: Option<usize>| {
+        alias_entries
+            .iter()
+            .filter(|(_, _, declared_in)| match from {
+                Some(from) => fragments.sees(Some(from as u32), Some(*declared_in as u32), None),
+                None => (0..source_packages.len())
+                    .all(|from| fragments.sees(Some(from as u32), Some(*declared_in as u32), None)),
+            })
+            .map(|(spelling, target, _)| (spelling.clone(), target.clone()))
+            .collect::<HashMap<_, _>>()
+    };
+    let shared_aliases = visible_aliases(None);
+    let fragmented = files.iter().any(|file| file.fragment.is_some());
+    expand_type_aliases(&mut class_names, &shared_aliases);
     let class_names = class_names.into_shared();
     let mut selected_source_aliases = Vec::with_capacity(imports_by_file.len());
     let mut file_class_names: Vec<ClassNames> = imports_by_file
         .into_iter()
+        .enumerate()
         .map(
-            |(imports, expansions, source_aliases, unresolved, ambiguous, classifier_segments)| {
+            |(
+                file_index,
+                (imports, expansions, source_aliases, unresolved, ambiguous, classifier_segments),
+            )| {
                 selected_source_aliases.push(source_aliases);
                 let mut names = class_names.clone();
                 for (simple, full) in imports {
@@ -635,7 +660,11 @@ pub(in crate::resolve) fn source_type_universe(
                 for (spelling, segment) in classifier_segments {
                     names.insert_classifier_segment(spelling, segment);
                 }
-                expand_type_aliases(&mut names, &alias_map);
+                if fragmented {
+                    expand_type_aliases(&mut names, &visible_aliases(Some(file_index)));
+                } else {
+                    expand_type_aliases(&mut names, &shared_aliases);
+                }
                 names
             },
         )

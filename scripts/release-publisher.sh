@@ -13,7 +13,7 @@
 # Availability, not correctness: a lock orphaned by a killed job is taken over only once the TTL
 # (30 minutes) has passed, which outlasts the acquisition wait (15 minutes), so a release job that
 # meets a fresh orphan fails and publishing resumes with the next master run or a re-run after the
-# TTL. A job that waits the full 15 minutes has 5 minutes of its 20-minute timeout left to publish.
+# TTL. A job that waits the full 15 minutes has 10 minutes of its 25-minute timeout left to publish.
 # Neither case can publish an older commit over a newer one.
 #
 #   scripts/release-publisher.sh acquire           take the lock; prints the lock commit

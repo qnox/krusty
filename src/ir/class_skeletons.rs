@@ -99,39 +99,27 @@ impl IrClass {
             supertypes.push(superclass.get());
         }
         supertypes.extend(header.interfaces.iter().map(|interface| interface.get()));
+        let script = flags.has(crate::fir::DeclarationFlags::SCRIPT);
         let context_fields = header
             .context_parameters
             .iter()
             .enumerate()
             .map(|(ordinal, parameter)| {
-                IrField::new(
-                    format!("$context_receiver_{ordinal}"),
-                    crate::types::stored_value_ty(parameter.ty.get()),
-                )
-                .with_is_final(true)
+                let ty = crate::types::stored_value_ty(parameter.ty.get());
+                if script {
+                    script_implicit_receiver_field(ordinal, ty)
+                } else {
+                    IrField::new(format!("$context_receiver_{ordinal}"), ty).with_is_final(true)
+                }
             })
             .collect::<Vec<_>>();
-        let context_arguments = header
-            .context_parameters
-            .iter()
-            .enumerate()
-            .map(|(field, parameter)| IrCtorArg {
-                name: parameter.name.as_deref().map(str::to_owned),
-                context_kind: parameter.kind,
-                ty: crate::types::stored_value_ty(parameter.ty.get()),
-                declared_ty: Some(parameter.ty.get()),
-                is_field: true,
-                field_index: Some(u32::try_from(field).expect("too many context fields")),
-                has_default: false,
-                is_vararg: false,
-                type_param: None,
-                check: None,
-                anonymous_super_forward: None,
-                capture: None,
-                provenance: IrCtorParameterProvenance::Value,
-                capture_identity: None,
-            })
-            .collect::<Vec<_>>();
+        // A script's implicit receivers follow its template's constructor parameters, so the
+        // constructor lowering appends them after the declared ones.
+        let context_arguments = if script {
+            Vec::new()
+        } else {
+            Self::context_constructor_arguments(header)
+        };
         let context_count =
             u32::try_from(context_arguments.len()).expect("too many classifier context parameters");
         Self {
@@ -145,7 +133,7 @@ impl IrClass {
             is_value: flags.has(crate::fir::DeclarationFlags::VALUE),
             is_full_value: flags.has(crate::fir::DeclarationFlags::FULL_VALUE),
             is_data: flags.has(crate::fir::DeclarationFlags::DATA),
-            is_script: flags.has(crate::fir::DeclarationFlags::SCRIPT),
+            is_script: script,
             decl_line: 0,
             decl_start_line: 0,
             decl_end_line: 0,
@@ -199,4 +187,67 @@ impl IrClass {
             annotation_retention: None,
         }
     }
+
+    /// A class's context receivers as the leading constructor parameters that initialize their
+    /// fields, which lead the field table.
+    fn context_constructor_arguments(
+        header: &crate::fir::ResolvedClassifierHeader,
+    ) -> Vec<IrCtorArg> {
+        header
+            .context_parameters
+            .iter()
+            .enumerate()
+            .map(|(field, parameter)| IrCtorArg {
+                name: parameter.name.as_deref().map(str::to_owned),
+                context_kind: parameter.kind,
+                ty: crate::types::stored_value_ty(parameter.ty.get()),
+                declared_ty: Some(parameter.ty.get()),
+                is_field: true,
+                field_index: Some(u32::try_from(field).expect("too many context fields")),
+                has_default: false,
+                is_vararg: false,
+                type_param: None,
+                check: None,
+                anonymous_super_forward: None,
+                capture: None,
+                provenance: IrCtorParameterProvenance::Value,
+                capture_identity: None,
+            })
+            .collect()
+    }
+
+    /// A script's implicit receivers as the constructor parameters kotlinc appends after its
+    /// template's, each initializing the receiver's field, which leads the field table.
+    pub(crate) fn script_receiver_arguments(
+        header: &crate::fir::ResolvedClassifierHeader,
+    ) -> impl Iterator<Item = IrCtorArg> + '_ {
+        header
+            .context_parameters
+            .iter()
+            .enumerate()
+            .map(|(field, parameter)| IrCtorArg {
+                name: None,
+                context_kind: crate::types::ContextParameterKind::None,
+                ty: crate::types::stored_value_ty(parameter.ty.get()),
+                declared_ty: Some(parameter.ty.get()),
+                is_field: true,
+                field_index: Some(u32::try_from(field).expect("too many script receivers")),
+                has_default: false,
+                is_vararg: false,
+                type_param: None,
+                check: None,
+                anonymous_super_forward: None,
+                capture: None,
+                provenance: IrCtorParameterProvenance::ScriptReceiver {
+                    ordinal: u32::try_from(field).expect("too many script receivers"),
+                },
+                capture_identity: None,
+            })
+    }
+}
+
+/// The field a script keeps its implicit receiver `ordinal` in. Its constructor parameter's
+/// [`IrCtorParameterProvenance::ScriptReceiver`] identifies it, and each backend spells it.
+fn script_implicit_receiver_field(ordinal: usize, ty: crate::types::Ty) -> IrField {
+    IrField::new(format!("<script receiver {ordinal}>"), ty).with_is_final(true)
 }

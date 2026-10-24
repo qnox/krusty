@@ -34,7 +34,7 @@ public final class Host {
                         if (session != null) {
                             session.close();
                         }
-                        session = Session.load(request);
+                        session = Session.load(request, new Classpath(in, out));
                         Session loaded = session;
                         Wire.send(out, w -> {
                             w.writeByte(Wire.LOADED);
@@ -46,7 +46,8 @@ public final class Host {
                         break;
                     }
                     case Wire.ROUND: {
-                        Session.Outcome outcome = requireSession(session).round(Symbols.read(request));
+                        Session loaded = requireSession(session);
+                        Session.Outcome outcome = loaded.round(Symbols.read(request, loaded.classpath));
                         sendOutcome(out, Wire.ROUND_DONE, outcome);
                         break;
                     }

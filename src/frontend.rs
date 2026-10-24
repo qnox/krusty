@@ -16,10 +16,12 @@ mod explicit_api;
 mod external_modifier_targets;
 mod header_validation;
 mod inline_preparation;
+mod library_classifiers;
 mod local_class_names;
 pub(crate) use local_class_names::{settle_generated_class_names, SettledGeneratedClassNames};
 mod local_function_names;
 mod no_expect_for_actual;
+mod published_declarations;
 mod retained_syntax;
 #[cfg(test)]
 pub(crate) use crate::resolve::collect_signatures;
@@ -359,6 +361,10 @@ impl StreamedPassState {
 struct ActualizedHeaders {
     /// Top-level `expect` declarations an `actual` replaced. Their subtrees are excluded.
     matched: crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    /// Top-level `expect` classifiers an `actual typealias` actualized, each with that alias's
+    /// declaration. A common source types them as their own classifiers, so their subtrees stay in
+    /// the inventory.
+    aliased: crate::fx_hash::HashMap<crate::fir::DeclarationId, crate::fir::DeclarationId>,
     /// The `actual` declarations that actualized something.
     targets: crate::fx_hash::HashSet<crate::fir::DeclarationId>,
     /// Each `actual`, members included, and the source of the `expect` it stands for.
@@ -378,6 +384,7 @@ struct ActualizedHeaders {
 fn actualize_headers_and_collect_inherited_defaults(
     headers: &mut crate::fir::StreamedHeaderModule,
     actualization: crate::fir::Actualization,
+    fragmented: bool,
 ) -> ActualizedHeaders {
     let crate::fir::Actualization {
         pairs,
@@ -400,19 +407,27 @@ fn actualize_headers_and_collect_inherited_defaults(
     // found its `expect`: this matcher compares resolved type SHAPES and follows an
     // `actual typealias`, so it pairs `expect val S.tag: S` with `actual val String.tag: String`
     // where a name-and-arity key cannot.
+    // Only a refined fragment hierarchy analyzes common sources as their own module.
+    let aliased = pairs
+        .iter()
+        .filter(|_| fragmented)
+        .filter(|pair| {
+            headers
+                .declarations
+                .anchor(pair.expect)
+                .is_some_and(|anchor| anchor.owner.is_none())
+        })
+        .filter(|pair| headers.type_alias_identity(pair.actual).is_some())
+        .map(|pair| (pair.expect, pair.actual))
+        .collect::<crate::fx_hash::HashMap<_, _>>();
     let actualized_targets = pairs.iter().map(|pair| pair.actual).collect();
     let expect_sources = pairs
         .iter()
+        .filter(|pair| !aliased.contains_key(&pair.expect))
         .filter_map(|pair| {
             let anchor = headers.declarations.anchor(pair.expect)?;
             Some(crate::source::ExpectStandIn {
                 actual: pair.actual,
-                // A nested alias is reached through its owner, which carries the visibility.
-                alias: anchor
-                    .owner
-                    .is_none()
-                    .then(|| headers.type_alias_identity(pair.actual))
-                    .flatten(),
                 expect_source: anchor.source.raw(),
             })
         })
@@ -489,6 +504,7 @@ fn actualize_headers_and_collect_inherited_defaults(
     // declaration here forced later code to recover it by `(file, TextRange)`.
     ActualizedHeaders {
         matched,
+        aliased,
         targets: actualized_targets,
         expect_sources,
         defaults: work,
@@ -1214,15 +1230,19 @@ where
                 .for_source(source.text)
                 .has("MultiPlatformProjects")
         });
-    let script_definition = ScriptDefinition::standard().on_classpath(|template| {
-        platform
-            .platform
-            .as_ref()
-            .is_ok_and(|platform| platform.classifier(template).is_some())
-    });
     for (index, source) in sources.iter().enumerate() {
         diags.set_file(index as u32);
         let features = project_features.for_source(source.text);
+        let script_definition = source
+            .script_definition
+            .cloned()
+            .unwrap_or_else(ScriptDefinition::standard)
+            .on_classpath(|template| {
+                platform
+                    .platform
+                    .as_ref()
+                    .is_ok_and(|platform| platform.classifier(template).is_some())
+            });
         reparse_sources.sources.push(ReparseSource {
             kind: source.kind,
             is_common: source.is_common,
@@ -1441,7 +1461,7 @@ where
         mut signature_default_work_items,
         matched_expect_declarations,
         actualized_targets,
-        actual_expect_sources,
+        (actual_expect_sources, aliased_expects),
         incompatible_expects,
         unactualized_members,
         incompatible_members,
@@ -1451,6 +1471,7 @@ where
         let actualization = crate::fir::actualization(&pass1_headers, &bindings);
         let ActualizedHeaders {
             matched,
+            aliased,
             targets: actualized_targets,
             expect_sources,
             defaults,
@@ -1458,7 +1479,11 @@ where
             incompatible,
             unactualized_members,
             incompatible_members,
-        } = actualize_headers_and_collect_inherited_defaults(&mut pass1_headers, actualization);
+        } = actualize_headers_and_collect_inherited_defaults(
+            &mut pass1_headers,
+            actualization,
+            sources.iter().any(|source| source.fragment.is_some()),
+        );
         // Reported here, while every file's syntax is still live: the diagnostic points at the
         // declaration's NAME, and the compact inventory anchors only its whole range.
         no_expect_for_actual::report_unmarked_implementations(
@@ -1467,7 +1492,13 @@ where
             &pass1_headers,
             diags,
         );
-        pass1_headers.exclude_declaration_subtrees(&matched);
+        pass1_headers.exclude_declaration_subtrees(
+            &matched
+                .iter()
+                .filter(|expect| !aliased.contains_key(expect))
+                .copied()
+                .collect(),
+        );
         // Explicit expect→actual default mappings remain valid after exclusion because their
         // provider anchors and bounded syntax live through the rest of Pass 1. Enumerate ordinary
         // self-owned defaults only after exclusion so a removed expect constructor cannot schedule
@@ -1492,7 +1523,13 @@ where
             signature_default_work_items,
             matched,
             actualized_targets,
-            expect_sources,
+            (
+                expect_sources,
+                aliased
+                    .into_values()
+                    .filter_map(|alias| pass1_headers.type_alias_identity(alias))
+                    .collect::<Vec<_>>(),
+            ),
             incompatible,
             unactualized_members,
             incompatible_members,
@@ -1502,7 +1539,7 @@ where
             signature_default_work(&pass1_headers, &[]),
             crate::fx_hash::HashSet::default(),
             crate::fx_hash::HashSet::default(),
-            Vec::new(),
+            (Vec::new(), Vec::new()),
             crate::fx_hash::HashSet::default(),
             Vec::new(),
             crate::fx_hash::HashSet::default(),
@@ -1546,7 +1583,7 @@ where
     );
     symbols
         .source_fragments
-        .publish_expect_sources(actual_expect_sources);
+        .publish_expect_sources(actual_expect_sources, aliased_expects);
     if multiplatform {
         report_unmatched_expect_roots(
             UnmatchedExpectRoots {
