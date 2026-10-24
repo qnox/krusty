@@ -690,6 +690,8 @@ fn all_functions_whose_order_krusty_cannot_say_are_refused() {
     );
     for case in [
         "Intersection",
+        "UnrelatedInterfaces",
+        "SiblingOverrides",
         "Substitution",
         "EnumClass",
         "LibrarySupertype",

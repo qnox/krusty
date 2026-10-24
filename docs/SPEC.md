@@ -16130,9 +16130,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `hashCode` and `toString` (`open public`), `SYNTHETIC` and declared by the class, take the place
   of the member each overrides: `kotlin.Any`'s, or a superclass's that overrides it, so with no
   superclass they follow `kotlin.Any`'s order. A classifier with no written supertype inherits
-  `kotlin.Any`'s functions and no property. A member inherited along two supertypes as different
-  declarations, one overriding the other (a superclass's `toString` and an interface's
-  `kotlin.Any.toString`), is an intersection override KSP2 declares on the classifier, and a member
+  `kotlin.Any`'s functions and no property. Members inherited along two supertypes as different
+  declarations (a superclass's `toString` and an interface's `kotlin.Any.toString`, two unrelated
+  interfaces' `fun shared(): Int` or `val label: String`, or two interfaces' overrides of one
+  ancestor's member) are one intersection override KSP2 declares on the classifier (`SYNTHETIC`,
+  parent the classifier). The frontend publishes no relation between inherited members, so the
+  round treats two different inherited members of one name from different supertypes as such a
+  pair, which also refuses an inherited overload pair. A member
   of a supertype applied to type arguments a substituted copy; neither is described yet, so the
   lists of such a classifier, of one with another library supertype, of an enum class, an
   annotation class and an enum entry are refused. (`crates/krusty-plugin-host/tests/ksp.rs`,
