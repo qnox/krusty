@@ -40,7 +40,7 @@ impl JvmSignatureFormatter<'_> {
                     generic |= self
                         .classifier_signature_chain(*outer)?
                         .iter()
-                        .any(|(_, variances)| !variances.is_empty());
+                        .any(|segment| !segment.variances.is_empty());
                 }
                 ConstructorParameter::EnumSynthetic => generic = true,
             }

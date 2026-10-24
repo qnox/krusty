@@ -56,6 +56,7 @@ versioning-tests:
 # check it depends on, against stand-in published checksums.
 release-tests:
     bash scripts/test-signing-key-id.sh
+    bash scripts/test-sign-release-checksums.sh
     bash scripts/test-publish-maven-central.sh
     bash scripts/test-check-gradle-wrappers.sh
 

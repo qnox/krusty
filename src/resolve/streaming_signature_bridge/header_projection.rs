@@ -873,7 +873,7 @@ pub(in crate::resolve) fn streamed_declaration_annotation_class_literals(
 pub(in crate::resolve) fn streamed_resolved_declaration_annotations(
     headers: &crate::fir::StreamedHeaderModule,
     declaration: crate::fir::DeclarationId,
-    bindings: &crate::fx_hash::HashMap<(u32, u32, u32), TypeName>,
+    bindings: &crate::resolve::annotation_bindings::BoundAnnotations,
 ) -> Vec<TypeName> {
     let source = headers
         .stub(declaration)
@@ -892,7 +892,7 @@ pub(in crate::resolve) fn streamed_resolved_declaration_annotations(
             .expect("a declaration annotation retains its type syntax")
             .span;
         if let Some(identity) = bindings.get(&(source, span.lo, span.hi)) {
-            annotations.push(*identity);
+            annotations.push(identity.classifier);
         }
     }
     annotations
