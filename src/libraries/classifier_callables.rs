@@ -175,6 +175,31 @@ impl FunctionInfo {
         candidate
     }
 
+    /// Project an already-selected constructor out of its lookup facet. The synthetic enclosing
+    /// receiver is a reference binding, not one of the constructor's declared parameters.
+    pub(crate) fn selected_constructor_member(&self) -> Option<LibraryMember> {
+        self.bound_inner_constructor?;
+        let mut member = self.member_with_return(self.callable.ret);
+        let mut declared = self.callable.declared_params.as_deref()?.to_vec();
+        if let Some(receiver) =
+            super::extension_receiver_index(self.is_extension(), self.context_count)
+        {
+            if receiver >= declared.len() {
+                return None;
+            }
+            declared.remove(receiver);
+        }
+        if declared.len() != member.params.len() {
+            return None;
+        }
+        member.declared_params = Some(declared.into_boxed_slice());
+        member.set_is_member_extension(false);
+        if let Some(signature) = &mut member.generic_sig {
+            signature.receiver = None;
+        }
+        Some(member)
+    }
+
     /// Normalize one constructor of the `inner` classifier `inner` as a member candidate of its
     /// outer class; `None` for a classifier that captures no outer instance. Kotlin collects such
     /// a constructor into the receiver's member level together with the same-named member

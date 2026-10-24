@@ -159,9 +159,12 @@ fn bound_inner_alias_constructor_candidates(
             candidate.receiver = signature.receiver;
             candidate.scope_rung = selected.scope_rung;
             candidate.scope_rank = selected.scope_rank;
-            let declared = signature.parameters_with_receiver(candidate.context_count);
-            candidate.callable.params = declared.to_vec();
-            candidate.callable.declared_params = Some(declared);
+            candidate.callable.params = signature
+                .parameters_with_receiver(candidate.context_count)
+                .into_vec();
+            let mut declared = constructor.constructor_declaration_params().to_vec();
+            declared.insert(candidate.context_count.min(declared.len()), receiver);
+            candidate.callable.declared_params = Some(declared.into_boxed_slice());
             candidate.callable.ret = signature.ret;
             candidate.ret.class = Some(signature.ret);
             candidate.generic_sig = Some(signature);

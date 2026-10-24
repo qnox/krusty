@@ -1,5 +1,59 @@
 use super::common;
 
+#[test]
+fn aliases_of_inner_classes_keep_ordinary_and_callable_reference_receiver_roles() {
+    let source = r#"
+class C {
+    inner class Inner
+    inner class Inner2<K>
+    fun f() {
+        TA()
+        TA2<String>()
+        val callable = ::TA
+        callable()
+    }
+}
+typealias TA = C.Inner
+typealias TA2<K> = C.Inner2<K>
+fun box(): String {
+    val c = C()
+    c.TA()
+    c.TA2<String>()
+    c.f()
+    val callable = C::TA
+    callable(c)
+    with(c) {
+        TA()
+        TA2<Int>()
+    }
+    return "OK"
+}
+"#;
+    common::expect_box_same_as_kotlinc(source, "inner_alias_static_scope_receiver_roles");
+}
+
+#[test]
+fn selected_inner_alias_references_keep_their_exact_outer_instance() {
+    let source = r#"
+class Outer(val head: String) {
+    inner class Inner(val tail: String) { fun value(): String = head + tail }
+}
+typealias Pick = Outer.Inner
+fun box(): String {
+    val first = Outer("O")
+    val second = Outer("wrong")
+    val bound = first::Pick
+    val unbound = Outer::Pick
+    val implicit = with(first) { ::Pick }
+    if (bound("K").value() != "OK") return "bound"
+    if (unbound(first, "K").value() != "OK") return "unbound"
+    if (unbound(second, " receiver").value() != "wrong receiver") return "second"
+    return implicit("K").value()
+}
+"#;
+    common::expect_box_same_as_kotlinc(source, "selected_inner_alias_reference_outer_instance");
+}
+
 const DECLARATIONS: &str = "class Outer<O : Number> { inner class Inner<T : O>(val value: T) }\n\
     typealias Fixed = Outer<Long>.Inner<Long>\n\
     typealias Generic<T> = Outer<Number>.Inner<T>\n\
