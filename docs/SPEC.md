@@ -11631,10 +11631,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   same list (field 18000) and constructor flags, and trusts the annotation only when the classfile
   has the generated members with their exact descriptors: a public static `write$Self(self,
   output, descriptor)` and a public constructor taking the `seen` masks, each element's
-  deserialization parameter type in wire order, and the marker. A dependency superclass compiled
-  without the plugin, whose element or element type
-  carries annotations (`List<@Serializable(with = S::class) Item>` serializes with `S`), that
-  publishes no order for its stored properties, declines the file rather than guess.
+  deserialization parameter type in wire order, and the marker. An element's property annotations
+  live on its `get<Name>$annotations()` marker, which the property's metadata names; kotlinc reads
+  them there, and krusty reads that method's annotations with their arguments from the class
+  file. `@SerialName` renames the element in the subclass's descriptor. A property-level
+  `@Serializable(with = S::class)` makes `S` the element's serializer, and `@Contextual` makes it a
+  `ContextualSerializer`; an annotation that does not concern serialization changes nothing. `S`
+  must be an object: a serializer class needs a constructor call, and only a source annotation
+  carries the frontend's checked constructor selection, so a class serializer declines (tracked
+  as a follow-up) rather than have the plugin pick a constructor by name. A
+  dependency superclass compiled without the plugin, an element that is `@Required` or
+  `@Polymorphic` or carries a `@SerialInfo` annotation (which the subclass's descriptor would push
+  as an instance of a generated implementation class), an element type that carries annotations
+  (`List<@Serializable(with = S::class) Item>` serializes with `S`), or a superclass that
+  publishes no order for its stored properties declines the file rather than guess.
   A generic dependency superclass's elements are typed over its own type parameters, which its
   metadata names. A subclass inherits them typed by the arguments it gives the superclass, and
   further up the chain the arguments each class gives its own superclass are substituted the same
