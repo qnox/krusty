@@ -1,5 +1,13 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Serialization constructor contract checks
+
+The deserialization-constructor handoff test retains nullable value-class element parameters and
+the nullable semantic serialization marker, with exact parameter names and order. It provisions the
+pinned runtime and requires this fixture to lower. A complete JVM classfile comparison and a
+reference JSON round trip, including missing-field rejection, independently constrain that contract.
+Tests: `tests/plugins_e2e.rs`.
+
 ## Class application header ownership
 
 A classpath classifier's generic layout is read from declaration headers before its members are

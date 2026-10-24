@@ -1,5 +1,9 @@
 # krusty — implementation plan
 
+Serialization handoff validation now provisions the pinned runtime and checks nullable value-class
+deserialization parameters against the established plugin contract. Exact common-IR assertions,
+complete generated-owner class bytes and reference JSON behavior guard the same constructor.
+
 Phased, each phase ends in a **green `cargo test`** and a runnable artifact. The pipeline is built
 front-to-back so the streaming/arena shape is real from the start, then widened.
 
