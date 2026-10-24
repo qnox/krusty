@@ -15944,6 +15944,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   one. Every classifier reaches `kotlin.Any`. A type parameter or typealias on the right is refused
   for that query, as is `isAssignableFrom` on a type a source declaration names.
   (`crates/krusty-plugin-host/tests/ksp.rs`, `class_headers_are_what_ksp2_reports`.)
+- **A KSP property has a backing field as KSP2 reads it off the declaration.** A source property
+  has one when it has an initializer, is a constructor property, `lateinit` or `const`, has an
+  explicit backing field, or has a default accessor or an accessor body that uses `field` (a
+  setter's included); an interface, abstract, extension, context or delegated property has none,
+  so a getter-only computed `val` and a `var` whose bodied accessors never use `field` have none.
+  An enum's synthetic `entries` has none; a Java annotation element and a Java field have one. An
+  `expect` or `external` property and a Kotlin library property are refused for that query (KSP2
+  answers the latter from what the deserialized declaration records: `true` for an annotation
+  element with a constant default, `false` for one with an enum, array or annotation default).
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `members_and_their_types_are_what_ksp2_reports`,
+  `declarations_are_in_the_order_ksp2_lists_them` and `library_annotation_members_are_what_ksp2_reports`;
+  `src/ksp_round/backing_field.rs`.)
 - **KSP members are listed as KSP2 lists them.** A file lists its functions and properties in
   source order, then its classifiers and type aliases in source order. A class lists its
   constructor properties, then its properties and functions interleaved in source order, then a

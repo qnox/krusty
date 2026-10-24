@@ -54,3 +54,27 @@ class Numbers(vararg val ids: Int)
 class NativeApi {
     external fun ping(): Int
 }
+
+abstract class Fields(val fromConstructor: Int) {
+    val initialized: Int = 1
+    val computed: Int get() = 2
+    var usesField: Int = 3
+        get() = field + 1
+    val readsField: Int
+        get() = field
+    val blockReadsField: Int
+        get() {
+            return field
+        }
+    lateinit var late: String
+    val delegated: Int by lazy { 4 }
+    abstract val pending: Int
+    var noField: Int
+        get() = 5
+        set(value) {}
+
+    init {
+        readsField = 6
+        blockReadsField = 7
+    }
+}
