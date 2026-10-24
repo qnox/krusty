@@ -11526,8 +11526,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   deserialization parameter type in wire order, and the marker. A dependency superclass compiled
   without the plugin, whose element or element type
   carries annotations (`List<@Serializable(with = S::class) Item>` serializes with `S`), that
-  publishes no order for its stored properties, or that is generic, declines the file rather than
-  guess.
+  publishes no order for its stored properties, declines the file rather than guess.
+  A generic dependency superclass's elements are typed over its own type parameters, which its
+  metadata names. A subclass inherits them typed by the arguments it gives the superclass, and
+  further up the chain the arguments each class gives its own superclass are substituted the same
+  way (`Fixed : Holder<String>` inherits `value: String`). The superclass's `write$Self` takes one
+  `KSerializer` per type parameter after the descriptor, which the subclass passes for its
+  arguments. Its deserialization constructor is still declared over its own type parameters (`T`
+  is `Object`), so the subclass delegates with that constructor's parameter types, not its own
+  element types. A superclass in another file of the same module publishes no type parameter
+  names, so a subclass of a generic one there still declines.
   Test: `tests/serializable_parent_dependency_e2e.rs`.
 - **A serializable superclass in another file of the same module contributes its declared
   elements.** A file's plugin pass sees only its own classes, so before any file is lowered the

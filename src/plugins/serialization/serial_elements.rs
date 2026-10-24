@@ -34,7 +34,7 @@ use super::{custom_serializer_of, serializer_name, SERIALIZABLE_FQ, TRANSIENT_FQ
 pub(super) struct SerialElements {
     parent: Option<SerialParent>,
     /// A serializable superclass, at any depth, whose elements are not known here: its provider
-    /// did not describe it, or it is generic. The class's generated members would call members of
+    /// did not describe it, or did not name the type parameters its elements use. The class's generated members would call members of
     /// that superclass the plugin cannot name, so it declines.
     undescribed_parent: Option<TypeName>,
     /// The type arguments the class gives its serializable superclass, in the superclass's
@@ -43,6 +43,10 @@ pub(super) struct SerialElements {
     /// Every ancestor's type parameter, by semantic identity, as the class sees it: an inherited
     /// element declared `T` in a generic superclass has the class's type argument for `T`.
     inherited_bindings: HashMap<String, Ty>,
+    /// The inherited elements' types as a superclass compiled apart from this file declares its
+    /// deserialization constructor over them: over its own type parameters, not the class's
+    /// arguments.
+    external_parent_types: Vec<Ty>,
     inherited: Vec<ElementSource>,
     fields: Vec<usize>,
 }
@@ -123,6 +127,7 @@ impl SerialElements {
         let mut parent_type_arguments = Vec::new();
         let mut inherited_bindings = HashMap::default();
         let mut undescribed_parent = None;
+        let mut external_parent_types = Vec::new();
         let mut inherited = Vec::new();
         let parent = if let Some(parent) = serializable_superclass(ctx, ir, class_id) {
             let parent_elements = SerialElements::of(ctx, ir, parent);
@@ -141,13 +146,27 @@ impl SerialElements {
             Some(SerialParent::Local(parent))
         } else if ctx.external_serializable_parent(superclass).is_some() {
             parent_type_arguments = superclass_type_arguments(ir, class_id, superclass);
-            if parent_type_arguments.is_empty() {
-                match external_elements(ctx, superclass) {
-                    Ok(elements) => inherited = elements,
-                    Err(undescribed) => undescribed_parent = Some(undescribed),
+            match external_elements(ctx, superclass) {
+                Ok(chain) if chain.type_parameters.len() == parent_type_arguments.len() => {
+                    let own: HashMap<String, Ty> = chain
+                        .type_parameters
+                        .iter()
+                        .map(|parameter| parameter.to_string())
+                        .zip(parent_type_arguments.iter().copied())
+                        .collect();
+                    external_parent_types =
+                        chain.elements.iter().map(|element| element.ty).collect();
+                    inherited = chain
+                        .elements
+                        .into_iter()
+                        .map(|mut element| {
+                            element.ty = ty_subst_keep_unbound(element.ty, &own);
+                            ElementSource::External(element)
+                        })
+                        .collect();
                 }
-            } else {
-                undescribed_parent = Some(superclass);
+                Ok(_) => undescribed_parent = Some(superclass),
+                Err(undescribed) => undescribed_parent = Some(undescribed),
             }
             Some(SerialParent::External(superclass))
         } else {
@@ -163,9 +182,16 @@ impl SerialElements {
             undescribed_parent,
             parent_type_arguments,
             inherited_bindings,
+            external_parent_types,
             inherited,
             fields,
         }
+    }
+
+    /// The types a superclass compiled apart from this file declares its deserialization
+    /// constructor's element parameters with, inherited ones first.
+    pub(super) fn external_parent_types(&self) -> &[Ty] {
+        &self.external_parent_types
     }
 
     /// The type arguments the class gives its serializable superclass.
@@ -254,34 +280,63 @@ impl SerialElements {
     }
 }
 
+/// The elements a serializable superclass compiled apart from this file writes with its
+/// superclasses', theirs first, typed over its own type parameters.
+struct ExternalChain {
+    type_parameters: Box<[Box<str>]>,
+    elements: Vec<SerializableElement>,
+}
+
 /// The elements `parent`, a serializable superclass compiled apart from this file, writes with
-/// its superclasses': theirs first. `Err` names the first superclass in the chain whose elements
-/// are not known here.
-fn external_elements(
-    ctx: &PluginContext,
-    parent: TypeName,
-) -> Result<Vec<ElementSource>, TypeName> {
-    let mut chain = Vec::new();
-    let mut current = Some(parent);
-    while let Some(classifier) = current {
+/// its superclasses': theirs first. A generic superclass's elements are typed by the arguments the
+/// class below it gives. `Err` names the first superclass in the chain whose elements are not
+/// known here.
+fn external_elements(ctx: &PluginContext, parent: TypeName) -> Result<ExternalChain, TypeName> {
+    let mut levels = Vec::new();
+    let mut type_parameters = None;
+    // The arguments the class below gives `classifier`, over `parent`'s own type parameters;
+    // `None` for `parent` itself.
+    let mut current = Some((parent, None::<Vec<Ty>>));
+    while let Some((classifier, arguments)) = current {
         let Some(published) = ctx.external_serializable_parent(classifier) else {
             break;
         };
         let record = published.ok_or(classifier)?;
-        current = match record.superclass {
-            Some(superclass) if !superclass.type_args().is_empty() => {
-                return Err(superclass.kotlin_class_internal().unwrap_or(classifier));
-            }
-            Some(superclass) => superclass.kotlin_class_internal(),
-            None => None,
+        let bindings: HashMap<String, Ty> = match arguments {
+            Some(arguments) if arguments.len() == record.type_parameters.len() => record
+                .type_parameters
+                .iter()
+                .map(|parameter| parameter.to_string())
+                .zip(arguments)
+                .collect(),
+            Some(_) => return Err(classifier),
+            None => HashMap::default(),
         };
-        chain.push(record);
+        type_parameters.get_or_insert_with(|| record.type_parameters.clone());
+        current = record.superclass.and_then(|superclass| {
+            let arguments = superclass
+                .type_args()
+                .iter()
+                .map(|argument| ty_subst_keep_unbound(*argument, &bindings))
+                .collect();
+            Some((superclass.kotlin_class_internal()?, Some(arguments)))
+        });
+        levels.push(
+            record
+                .elements
+                .iter()
+                .cloned()
+                .map(|mut element| {
+                    element.ty = ty_subst_keep_unbound(element.ty, &bindings);
+                    element
+                })
+                .collect::<Vec<_>>(),
+        );
     }
-    Ok(chain
-        .into_iter()
-        .rev()
-        .flat_map(|record| record.elements.iter().cloned().map(ElementSource::External))
-        .collect())
+    Ok(ExternalChain {
+        type_parameters: type_parameters.unwrap_or_default(),
+        elements: levels.into_iter().rev().flatten().collect(),
+    })
 }
 
 /// What decides whether the plugin generates a class's `write$Self` and deserialization

@@ -70,6 +70,9 @@ pub enum GeneratedClassifierKind {
 /// read, or the class lists no program order) publishes no record rather than a partial one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SerializableClassElements {
+    /// The class's own type parameters, by the identities its element types and superclass name
+    /// them with. A generic class publishes them only where its provider knows those identities.
+    pub type_parameters: Box<[Box<str>]>,
     /// The class's own elements, in program order.
     pub elements: Box<[SerializableElement]>,
     /// The superclass as the class declares it, type arguments included; `None` for `Any`.
