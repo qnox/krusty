@@ -6,7 +6,7 @@ plugins {
     `kotlin-dsl`
     `maven-publish`
     signing
-    id("com.gradle.plugin-publish") version "1.3.1"
+    id("com.gradle.plugin-publish") version "2.2.1"
 }
 
 group = "dev.krustythecompiler"
@@ -19,7 +19,7 @@ repositories {
 dependencies {
     // Compile against the oldest supported public API. The consuming build supplies and applies
     // its selected Kotlin/JVM plugin; the release JAR does not bundle a Kotlin Gradle plugin.
-    compileOnly("org.jetbrains.kotlin:kotlin-gradle-plugin-api:2.4.0")
+    compileOnly("org.jetbrains.kotlin:kotlin-gradle-plugin-api:2.4.21")
     testImplementation(kotlin("test-junit5"))
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
