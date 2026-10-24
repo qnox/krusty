@@ -15945,6 +15945,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   directions (`val name: String` against `stringType`, `String?` against its nullable form), and
   hashes like it; a nullable type hashes apart from its non-null form, as KSP2 2.3.12 reports.
   (`crates/krusty-plugin-host/tests/ksp.rs`, `library_classes_are_what_ksp2_reports`.)
+- **A KSP type source spells without type-use annotations has none.** `KSType.annotations` is
+  empty for a property, parameter, receiver or return type the source spells with no type-use
+  annotation of its own, for each argument whose written spelling has none, and for the
+  classifier type a constructor returns, as KSP2 2.3.12 reports. A type whose spelling carries
+  one, an argument the spelling does not write, an inferred type and a library type are refused
+  for that query. (`crates/krusty-plugin-host/tests/ksp.rs`,
+  `members_and_their_types_are_what_ksp2_reports`; `src/ksp_round/type_model.rs`.)
 - **A KSP generated file's package is a directory path.** `CodeGenerator.createNewFile` turns
   each `.` of the package into a directory and does not require a Kotlin package name, so a
   processor writes a service descriptor to `META-INF.services` (`resources/META-INF/services/`), as
