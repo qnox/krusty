@@ -2,6 +2,8 @@
 
 use super::*;
 
+mod argument_completion;
+
 #[derive(Clone, Copy)]
 enum ReceiverAdmissionPhase {
     BeforeArguments,
@@ -357,6 +359,20 @@ impl Checker<'_> {
                 constraints,
                 ReceiverAdmissionPhase::BeforeArguments,
             ) {
+                if let Some(signature) = candidate.generic_sig.as_ref() {
+                    let bindings = CallConstraints {
+                        expected: None,
+                        ..constraints
+                    }
+                    .bindings(&self.fed_source(), signature);
+                    let mapping = parameters
+                        .iter()
+                        .map(|&parameter| shape.parameter_indices[parameter])
+                        .collect::<Vec<_>>();
+                    self.complete_rejected_lambda_inputs(
+                        scope, call, args, candidate, &mapping, &bindings,
+                    );
+                }
                 self.diags.sort_source_order_from(checkpoint);
                 return Some(result);
             }
@@ -984,9 +1000,17 @@ impl Checker<'_> {
             }
         }
 
-        let display = self
-            .source_callable_display(candidate)
-            .unwrap_or_else(|| Self::callable_candidate_display(name, candidate));
+        let display = self.source_callable_display(candidate).unwrap_or_else(|| {
+            Self::callable_candidate_display_with_alias_constructor(
+                name,
+                candidate,
+                |signature, member| {
+                    Self::generic_constructor_display_with_type(signature, member, &|ty| {
+                        self.declared_function_semantic_type(ty).source_name()
+                    })
+                },
+            )
+        });
         self.diags.error(
             self.call_callee_name_span(call),
             format!("candidate '{display}' is inapplicable because of a receiver type mismatch."),

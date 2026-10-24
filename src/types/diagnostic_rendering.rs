@@ -37,11 +37,19 @@ pub(super) fn function_type(
     } else {
         format!("context({}) ", join(&signature.params[..contexts]))
     };
-    // kotlinc parenthesizes a receiver whose rendering is not a plain classifier.
+    // Bare classifiers and type parameters need no parentheses; compound types and a type
+    // parameter's diagnostic owner wording do.
     let receiver = receiver
         .map(|receiver| match receiver.kind() {
-            TyKind::TyParam(..)
-            | TyKind::Nullable(_)
+            TyKind::TyParam(parameter, _) => {
+                let rendered = render(receiver);
+                if rendered == type_parameter_source_name(parameter.as_str()) {
+                    format!("{rendered}.")
+                } else {
+                    format!("({rendered}).")
+                }
+            }
+            TyKind::Nullable(_)
             | TyKind::PlatformNullable(_)
             | TyKind::DefinitelyNotNull(_)
             | TyKind::Intersection(_)
@@ -206,4 +214,20 @@ pub(super) fn raw_type(
         mark(nullability.lower),
         mark(nullability.upper)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn function_receiver_parentheses_preserve_type_parameter_owner_wording() {
+        let parameter = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let function = Ty::fun_with_shape(vec![parameter], Ty::String, 0, true, false);
+        assert_eq!(function.source_name(), "T.() -> String");
+        assert_eq!(
+            function.source_name_with_type_parameter(&|_| "T (of fun <T> callback)".to_owned()),
+            "(T (of fun <T> callback)).() -> String"
+        );
+    }
 }

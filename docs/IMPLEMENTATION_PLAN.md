@@ -5905,3 +5905,12 @@ Owner tests constrain the constructor and context/extension/value round trips, a
 dependency runtime tests read both generic and concrete stored values. The selected-member record
 and conversion move out of the resolver facade, and plugin plans keep their declaration payload
 indirect, retiring two large-enum lint findings without changing the indexed FIR/IR representation.
+
+Constructor argument expectations now live in a declaration-owned resolver module. Bound admission
+uses the existing complete constructor-bound checker over the actual mapped declarations before
+supplying nested result context; independently inferred arguments remain intact. Failed receiver
+selection completes untyped lambda inputs from the retained candidate and source argument mapping,
+then rechecks only affected bodies without the rejected expected result. Normal checking and
+recovery share the function input layout, including contexts and anonymous receiver slots. Exact
+source/dependency diagnostics and admitted-context controls cover #2587. Explicit invalid-bound
+lambda diagnostic ordering remains a separate follow-up in #2629.
