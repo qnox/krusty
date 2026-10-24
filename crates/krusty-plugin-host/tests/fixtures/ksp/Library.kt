@@ -1,5 +1,6 @@
 package library
 
+import com.google.devtools.ksp.getDeclaredProperties
 import com.google.devtools.ksp.processing.*
 import com.google.devtools.ksp.symbol.*
 
@@ -59,6 +60,10 @@ class LibraryProcessor(private val env: SymbolProcessorEnvironment) : SymbolProc
         "dependency.Empty",
         "dependency.Shape",
         "dependency.Circle",
+        "dependency.Holder",
+        "dependency.Holder.Inner",
+        "dependency.Holder.Bare",
+        "dependency.Holder.Nested",
         "library.Missing",
     )
 
@@ -84,6 +89,20 @@ class LibraryProcessor(private val env: SymbolProcessorEnvironment) : SymbolProc
                 "builtIn $name=${type(builtIn)} text=$builtIn origin=${builtIn.declaration.origin}" +
                     " nullable=${type(nullable)} text=$nullable" +
                     " notNullable=${type(nullable.makeNotNullable())} same=${nullable.makeNotNullable() == builtIn}",
+            )
+        }
+        // Resolved source property types against the builtin of the same classifier.
+        val typed = resolver.getClassDeclarationByName(resolver.getKSNameFromString("library.Typed"))!!
+        for (property in typed.getDeclaredProperties()) {
+            val resolved = property.type.resolve()
+            val builtIn = types.first { it.second.declaration == resolved.declaration }
+            val plain = builtIn.second
+            env.logger.warn(
+                "resolved ${property.simpleName.asString()}=${type(resolved)} ${builtIn.first} equals=${resolved == plain}" +
+                    " reverse=${plain == resolved} nullable equals=${resolved == plain.makeNullable()}" +
+                    " reverse=${plain.makeNullable() == resolved}" +
+                    " same hash=${resolved.hashCode() == plain.hashCode()}" +
+                    " not null equals=${resolved.makeNotNullable() == plain}",
             )
         }
         for (file in resolver.getAllFiles()) {
@@ -162,6 +181,9 @@ class LibraryProcessor(private val env: SymbolProcessorEnvironment) : SymbolProc
             .append(" annotations=").append(declaration.annotations.map { annotation(it) }.joinToString("; "))
         val star = declaration.asStarProjectedType()
         out.append(" star=").append(type(star)).append(" starText=").append(star.toString())
+            .append(" starArguments=").append(star.arguments.joinToString(", ", "[", "]") {
+                "${it.variance} type=${it.type} origin=${it.origin} parent=${it.parent}"
+            })
         env.logger.warn(out.toString())
     }
 }
