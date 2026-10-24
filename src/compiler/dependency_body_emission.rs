@@ -407,7 +407,9 @@ fn prepare_bodyless_externals(
         if !visited.insert(identity.clone()) {
             continue;
         }
-        for callee in bodies.direct_body_callables(&identity) {
+        for callee in
+            bodies.emitted_body_callables(&identity, crate::klib_lowering::emitted_closure_function)
+        {
             if externals.contains_key(&callee) {
                 continue;
             }

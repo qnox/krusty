@@ -207,6 +207,128 @@ fn serialized_closure_frames_separate_captures_from_own_parameters() {
 }
 
 #[test]
+fn emitted_closure_roots_keep_generic_shapes_and_exclude_unsupported_forms() {
+    use crate::klib_lowering::emitted_closure_function;
+    use crate::metadata::klib_ir::tree::KlibIrNullability;
+    use crate::types::type_name;
+
+    for rich in [None, Some(2)] {
+        demo(&[("a", &[T::Int, T::String], T::Int)], |_, body| {
+            let id = closure(body, rich, None, false, Some("LAMBDA"));
+            let expression = body.arena.expr(id).clone();
+            let function = match expression.kind {
+                KlibIrExprKind::FunctionExpression { function, .. }
+                | KlibIrExprKind::RichFunctionReference {
+                    invoke: function, ..
+                } => function,
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                emitted_closure_function(&body.arena, &expression),
+                Some(function)
+            );
+
+            // The outer shape does not bind enclosing type arguments. A missing generic binding
+            // is a later semantic-header question, not permission to omit this closure's edges.
+            let generic = body.arena.push_type(KlibIrType::Simple {
+                classifier: local_symbol(KlibIrSymbolKind::TypeParameter, 99000),
+                nullability: KlibIrNullability::NotSpecified,
+                arguments: vec![],
+                annotations: vec![],
+                abbreviation: None,
+            });
+            let mut generic_function = body.arena.ty(expression.ty.unwrap()).clone();
+            if let KlibIrType::Simple { arguments, .. } = &mut generic_function {
+                arguments[2] = KlibIrTypeArgument::Type {
+                    variance: KlibIrVariance::Invariant,
+                    ty: generic,
+                };
+            }
+            let generic_type = body.arena.push_type(generic_function);
+            let mut generic_expression = expression.clone();
+            generic_expression.ty = Some(generic_type);
+            assert_eq!(
+                emitted_closure_function(&body.arena, &generic_expression),
+                Some(function)
+            );
+
+            for name in [
+                "demo/Comparator",
+                "kotlin/reflect/KFunction2",
+                "kotlin/coroutines/SuspendFunction2",
+            ] {
+                let mut ty = body.arena.ty(expression.ty.unwrap()).clone();
+                if let KlibIrType::Simple { classifier, .. } = &mut ty {
+                    *classifier = public_symbol(
+                        KlibIrSymbolKind::Class,
+                        KlibPublicIdSignature::classifier(type_name(name)),
+                    );
+                }
+                let ty = body.arena.push_type(ty);
+                let mut unsupported = expression.clone();
+                unsupported.ty = Some(ty);
+                assert_eq!(
+                    emitted_closure_function(&body.arena, &unsupported),
+                    None,
+                    "{name}"
+                );
+            }
+            let mut missing_origin = expression.clone();
+            match &mut missing_origin.kind {
+                KlibIrExprKind::FunctionExpression { origin, .. }
+                | KlibIrExprKind::RichFunctionReference { origin, .. } => *origin = None,
+                _ => unreachable!(),
+            }
+            assert_eq!(emitted_closure_function(&body.arena, &missing_origin), None);
+            for suspended in [false, true] {
+                let mut declaration = body.arena.function(function).clone();
+                if suspended {
+                    declaration.base.flags |= crate::metadata::function_flags::IS_SUSPEND;
+                } else {
+                    declaration.body = None;
+                }
+                let target = body.arena.push_function(declaration);
+                let mut unsupported = expression.clone();
+                match &mut unsupported.kind {
+                    KlibIrExprKind::FunctionExpression { function, .. }
+                    | KlibIrExprKind::RichFunctionReference {
+                        invoke: function, ..
+                    } => *function = target,
+                    _ => unreachable!(),
+                }
+                assert_eq!(emitted_closure_function(&body.arena, &unsupported), None);
+            }
+            if rich.is_some() {
+                for mode in 0..3 {
+                    let mut unsupported = expression.clone();
+                    if let KlibIrExprKind::RichFunctionReference {
+                        bound_values,
+                        reflection_target,
+                        flags,
+                        ..
+                    } = &mut unsupported.kind
+                    {
+                        match mode {
+                            0 => bound_values.push(id),
+                            1 => {
+                                *reflection_target = Some(public_symbol(
+                                    KlibIrSymbolKind::Function,
+                                    KlibPublicIdSignature::classifier(type_name("demo/reflect")),
+                                ))
+                            }
+                            _ => *flags = 1,
+                        }
+                    }
+                    assert_eq!(emitted_closure_function(&body.arena, &unsupported), None);
+                }
+            }
+            let answer = body.int(0);
+            Some(vec![body.ret(answer)])
+        });
+    }
+}
+
+#[test]
 fn mutable_serialized_capture_declines_without_leaking_a_frame() {
     let fixture = demo(&[("a", &[T::Int, T::String], T::Int)], |_, body| {
         let initial = body.int(7);

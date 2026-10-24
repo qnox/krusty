@@ -277,13 +277,11 @@ impl<'a> BodyLowering<'a> {
             KlibIrExprKind::FunctionReference { .. } => return unsupported("a function reference"),
             KlibIrExprKind::RichFunctionReference {
                 invoke,
-                bound_values,
-                reflection_target,
                 overridden,
-                flags,
                 origin,
+                ..
             } => {
-                if !bound_values.is_empty() || reflection_target.is_some() || *flags != 0 {
+                if !super::closure_forms::unbound_rich_reference(&expression.kind) {
                     return unsupported("a bound or reflective rich function reference");
                 }
                 let ty = self.ty(expression, "closure")?;

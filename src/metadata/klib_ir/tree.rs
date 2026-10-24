@@ -17,6 +17,7 @@
 use super::symbols::KlibIrSymbol;
 use super::KlibIrConstant;
 
+mod emitted_callables;
 mod lexical_values;
 
 macro_rules! arena_id {
@@ -974,6 +975,117 @@ mod tests {
                 .collect::<Vec<_>>(),
             [unused_default, executed]
         );
+    }
+
+    #[test]
+    fn emitted_callable_inventory_follows_only_selected_closure_roots_once() {
+        let mut arena = KlibIrArena::default();
+        let ty = arena.push_type(KlibIrType::Error {
+            annotations: vec![],
+        });
+        let constructor = |symbol| KlibIrExprKind::ConstructorCall {
+            access: KlibIrMemberAccess {
+                symbol,
+                arguments: KlibIrArguments::Flat(vec![]),
+                type_arguments: vec![],
+                origin: None,
+            },
+            constructor_type_arguments: 0,
+        };
+        let executed = local(KlibIrSymbolKind::Constructor, 1);
+        let helper = local(KlibIrSymbolKind::Function, 2);
+        let excluded = local(KlibIrSymbolKind::Constructor, 3);
+        let call = arena.push_expr(Some(ty), constructor(executed.clone()));
+        let excluded_call = arena.push_expr(Some(ty), constructor(excluded));
+        let helper_call = arena.push_expr(
+            Some(ty),
+            KlibIrExprKind::Call {
+                access: KlibIrMemberAccess {
+                    symbol: helper.clone(),
+                    arguments: KlibIrArguments::Flat(vec![]),
+                    type_arguments: vec![],
+                    origin: None,
+                },
+                super_qualifier: None,
+            },
+        );
+        let block = arena.push_expr(
+            Some(ty),
+            KlibIrExprKind::Block {
+                statements: vec![
+                    KlibIrStatement::Expression(call),
+                    KlibIrStatement::Expression(helper_call),
+                ],
+                origin: None,
+            },
+        );
+        let leaf = arena.push_function(function(local(KlibIrSymbolKind::Function, 11), ty, block));
+        let leaf_expression = arena.push_expr(
+            Some(ty),
+            KlibIrExprKind::FunctionExpression {
+                function: leaf,
+                origin: Some("LAMBDA".into()),
+            },
+        );
+        let outer = arena.push_function(function(
+            local(KlibIrSymbolKind::Function, 12),
+            ty,
+            leaf_expression,
+        ));
+        let outer_expression = arena.push_expr(
+            Some(ty),
+            KlibIrExprKind::FunctionExpression {
+                function: outer,
+                origin: Some("LAMBDA".into()),
+            },
+        );
+        let unrelated = arena.push_function(function(
+            local(KlibIrSymbolKind::Function, 13),
+            ty,
+            excluded_call,
+        ));
+        let root_block = arena.push_expr(
+            Some(ty),
+            KlibIrExprKind::Block {
+                statements: vec![
+                    KlibIrStatement::Function(unrelated),
+                    KlibIrStatement::Expression(outer_expression),
+                    KlibIrStatement::Expression(outer_expression),
+                ],
+                origin: None,
+            },
+        );
+        let mut root = function(local(KlibIrSymbolKind::Function, 10), ty, root_block);
+        root.regular_parameters.push(KlibIrParameter {
+            base: KlibIrDeclarationBase {
+                symbol: local(KlibIrSymbolKind::ValueParameter, 20),
+                origin: "DEFINED".into(),
+                flags: 0,
+                annotations: vec![],
+            },
+            name: "unused".into(),
+            ty,
+            vararg_element_type: None,
+            default_value: Some(excluded_call),
+        });
+        let root = arena.push_function(root);
+        let selected = arena.function(root);
+        assert_eq!(
+            arena
+                .emitted_callable_symbols(selected, |_, expression| match expression.kind {
+                    KlibIrExprKind::FunctionExpression { function, .. } => Some(function),
+                    _ => None,
+                })
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            [helper, executed]
+        );
+        assert!(arena
+            .emitted_callable_symbols(selected, |_, _| None)
+            .is_empty());
+        assert_eq!(arena.callable_symbols_in_body(selected).count(), 0);
+        assert_eq!(arena.call_symbols_in_body(selected).count(), 0);
     }
 
     #[test]

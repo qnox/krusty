@@ -2,7 +2,7 @@
 
 use super::super::function_lowering::{closure_header, declare_function, CaptureParameter};
 use super::*;
-use crate::ir::{IrCapturedDeclaration, IrCapturingCallable, IrParameterIdentity, IrValueCapture};
+use crate::ir::{IrCapturedDeclaration, IrParameterIdentity, IrValueCapture};
 use crate::metadata::klib_ir::tree::{KlibIrBody, KlibIrFunctionId};
 use crate::types::TyKind;
 
@@ -21,10 +21,9 @@ impl BodyLowering<'_> {
         }
         // The serialized source-form marker owns this distinction. Neither the expression's
         // encoding nor the FunctionN.invoke override proves whether source used `fun` or braces.
-        let capturer = match source_form {
-            Some("LAMBDA") => IrCapturingCallable::Lambda,
-            Some("ANONYMOUS_FUNCTION") => IrCapturingCallable::AnonymousFunction,
-            _ => return unsupported("a closure without a serialized source form"),
+        let capturer = match super::super::closure_forms::source_form(source_form) {
+            Some(capturer) => capturer,
+            None => return unsupported("a closure without a serialized source form"),
         };
         let function = self.arena.function(function);
         let statements = match &function.body {

@@ -5868,6 +5868,13 @@ transactional rollback. Official raw/prepared producer controls establish JVM be
 Native execution, including nested shadowing, repeated calls and operand effects. Mutable cells,
 suspension, bound/reflective references and independent dependency storage/dispatch capabilities
 remain scoped follow-ups. No outcome baseline exception is renewed.
+Dependency preparation now follows the reached closure implementations that common lowering emits,
+including constructors absent from the consumer's direct selections. A shared source-form/function
+shape decision excludes unsupported references without resolving enclosing generic arguments early.
+Official-producer tests separately prove the imported constructor's exact checked-IR identity and
+Native execution through an existing runtime constructor. General imported-class construction and
+storage remain a separate Native capability, with the positive custom-class program retained in
+its follow-up rather than claimed as recovered runtime coverage.
 
 ## Lossless JVM signature syntax
 

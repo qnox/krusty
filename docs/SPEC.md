@@ -18827,6 +18827,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `klib_lowering::function_lowering::closure_headers::tests`, and
   `klib_lowering::tests::closure_producers` (official raw/prepared producer frames and unsupported SAM
   classification), and `tests/klib_closure_frames_e2e.rs` (JVM/Native execution).
+  Dependency preparation follows reached supported closure implementations, recursively, so a
+  constructor or ordinary call used only inside a lifted closure retains its exact producer-module
+  identity and provider handle. Unreferenced declarations and parameter defaults are not roots;
+  direct-only inventories used to authenticate intrinsic support remain unchanged. The public
+  producer test checks an imported constructor's frozen checked-IR facts separately from Native
+  execution of a supported runtime constructor. This does not implement imported class storage.
 
 - **A KLIB template lowers the forms kotlinc's prepared copy introduces.** A constructor call
   constructs by the provider identity of the exact serialized constructor, with the provider's
