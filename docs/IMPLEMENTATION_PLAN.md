@@ -74,6 +74,13 @@ nested annotations and their class, interface, enum, object and annotation membe
 
 ## Constructor-property annotation publication
 
+Generic annotation construction uses the ordinary constructor selector and records the applied
+result. The parser retains complete annotation-owner type syntax until checking; the bound
+classifier/alias facet owns later metadata publication. Provider parameter lists keep symbolic
+constructor templates, while erased callable parameters remain physical ABI facts. Fixed array
+parameter context comes from the agreed constructor declaration, independently of result inference.
+JVM annotation signatures use the existing classifier writer and signature formatter.
+
 Publish checked PROPERTY-targeted constructor-parameter applications by stable property identity,
 so plugin constructor selection sees the same folded payload as common IR. Keep parameter and
 accessor sites separate. Pure serialization runtime fixtures explicitly supply the compile-time
@@ -106,6 +113,20 @@ Preserve the existing cross-file policy-publication barrier. Keep the separate
 Keep the complete KLIB surface comparison and verify its changed property annotation against the
 official Native compiler in both language modes, using the unchanged source fixture. Each written
 library owns a unique scratch directory so concurrent mode and surface checks cannot replace it.
+
+## Checked constructor signature normalization
+
+Normalize the merged constructor inventory through the existing declaration-to-generic-signature
+operation before contextual argument shaping. A checked declaration that replaces a provisional
+constructor retains its stable identity and exposes the same classifier-owned formal template to
+lambda expectations, eager analysis and selection. Reordered named arguments and same-spelled
+caller/classifier formals use the ordinary mapper and substitution path.
+
+Argument collection uses the parser's class-literal role to check `::class` as an ordinary value,
+while function literals and callable references await their selected callable shape. This keeps
+the checked classifier identity available to nested annotation folding without bypassing ordinary
+constructor selection. Owned source/dependency publication and ordinary-call controls cover the
+shared path.
 
 ## String operation authority publication
 
