@@ -145,6 +145,44 @@ pub(super) fn sealed_subclasses(ctx: &MetaCtx) -> Vec<String> {
     out
 }
 
+/// The simple names of the classifiers a class declares in its body, in declaration order:
+/// `Class.nested_class_name` (field 7, a repeated string-table index, packed or not). The
+/// `InnerClasses` attribute lists them in an order of its own.
+pub(super) fn nested_class_names(ctx: &MetaCtx) -> Box<[Box<str>]> {
+    let mut out = Vec::new();
+    let mut push = |id: u64| {
+        if let Some(name) = resolve_string(ctx.records, ctx.d2, id as usize) {
+            out.push(name.into_boxed_str());
+        }
+    };
+    let mut pb = Pb::new(ctx.msg);
+    while !pb.at_end() {
+        let Some(tag) = pb.varint() else { break };
+        match (tag >> 3, tag & 7) {
+            (7, 0) => {
+                if let Some(id) = pb.varint() {
+                    push(id);
+                }
+            }
+            (7, 2) => {
+                let Some(bytes) = pb.varint().and_then(|n| pb.bytes(n as usize)) else {
+                    break;
+                };
+                let mut ids = Pb::new(bytes);
+                while let Some(id) = ids.varint() {
+                    push(id);
+                }
+            }
+            (_, w) => {
+                if pb.skip(w).is_none() {
+                    break;
+                }
+            }
+        }
+    }
+    out.into_boxed_slice()
+}
+
 #[cfg(test)]
 mod tests {
     use super::metadata_classifier_name;

@@ -19,6 +19,21 @@ pub struct BoundInnerConstructor {
     pub outer: TypeName,
 }
 
+impl LibraryMember {
+    /// The selected constructor's parameters before applicability specialization. Constructors have
+    /// no extension receiver, so this source-order declaration vector is parallel to `params`;
+    /// enclosing-instance and default-marker JVM slots are independently owned physical inputs.
+    pub fn constructor_declaration_params(&self) -> &[Ty] {
+        self.declared_params.as_deref().unwrap_or_else(|| {
+            self.generic_sig
+                .as_ref()
+                .map(|signature| signature.params.as_slice())
+                .filter(|params| params.len() == self.params.len())
+                .unwrap_or(&self.params)
+        })
+    }
+}
+
 /// Constructor signature as a callable: the classifier's type parameters are the constructor's
 /// inference variables and its application is the result. A provider that already published a
 /// generic constructor signature keeps it.
@@ -33,6 +48,17 @@ pub(crate) fn constructor_generic_signature(
     if classifier.type_params().is_empty() {
         return None;
     }
+    Some(GenericSig {
+        formals: classifier.type_params().to_vec(),
+        formal_bounds: classifier.type_param_bounds().to_vec(),
+        receiver: None,
+        params: constructor.params.clone(),
+        ret: classifier_instance_type(internal, classifier),
+        return_policy: GenericReturnPolicy::Exact,
+    })
+}
+
+fn classifier_instance_type(internal: TypeName, classifier: &LibraryType) -> Ty {
     let type_arguments = classifier
         .type_params()
         .iter()
@@ -47,14 +73,7 @@ pub(crate) fn constructor_generic_signature(
             Ty::ty_param(formal, bound)
         })
         .collect::<Vec<_>>();
-    Some(GenericSig {
-        formals: classifier.type_params().to_vec(),
-        formal_bounds: classifier.type_param_bounds().to_vec(),
-        receiver: None,
-        params: constructor.params.clone(),
-        ret: Ty::obj_args_name(internal, &type_arguments),
-        return_policy: GenericReturnPolicy::Exact,
-    })
+    Ty::obj_args_name(internal, &type_arguments)
 }
 
 impl FunctionInfo {
@@ -77,10 +96,12 @@ impl FunctionInfo {
         callable.physical_params = member.physical_params.clone();
         callable.physical_parameter_plan = member.physical_parameter_plan.clone();
         callable.generic_sig = member.generic_sig.clone().map(Box::new);
-        callable.declared_params = member
-            .generic_sig
-            .as_ref()
-            .map(|signature| signature.parameters_with_receiver(member.context_count));
+        callable.declared_params = member.declared_params.clone().or_else(|| {
+            member
+                .generic_sig
+                .as_ref()
+                .map(|signature| signature.parameters_with_receiver(member.context_count))
+        });
         callable.inline_modifiers = member.call_sig.inline_modifiers.clone().into_boxed_slice();
         callable.reified_type_parameter_ordinals = member
             .call_sig
@@ -153,6 +174,21 @@ impl FunctionInfo {
         let outer = classifier.outer_instance?;
         constructor.owner.get_or_insert(inner);
         constructor.generic_sig = constructor_generic_signature(inner, classifier, &constructor);
+        if let Some(signature) = &mut constructor.generic_sig {
+            let captured = &classifier.type_params()[classifier.own_type_parameter_count..];
+            let mut ordinal = 0;
+            signature.formal_bounds.retain(|_| {
+                let keep = !captured.contains(&signature.formals[ordinal]);
+                ordinal += 1;
+                keep
+            });
+            signature
+                .formals
+                .retain(|formal| !captured.contains(formal));
+            // Source declarations may publish an own-only constructor result. Its instance type
+            // always includes the declaration's captured slots before receiver specialization.
+            signature.ret = classifier_instance_type(inner, classifier);
+        }
         let result = constructor
             .generic_sig
             .as_ref()
@@ -171,6 +207,37 @@ mod tests {
     use crate::libraries::{
         CompilerIntrinsic, InlineBodyPlan, InlineBodyValue, InlineKind, MemberRealization,
     };
+
+    #[test]
+    fn an_inner_constructor_keeps_independent_formals_and_a_complete_instance_result() {
+        let inner = crate::types::type_name("fixtures/Outer$Inner");
+        let mut classifier = LibraryType::declaration_header();
+        classifier.outer_instance = Some(crate::types::type_name("fixtures/Outer"));
+        classifier.own_type_parameter_count = 1;
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        classifier.type_parameters = crate::types::TypeParameters::invariant(
+            vec!["inner:T".into(), "outer:T".into()],
+            vec![vec![any], vec![any]],
+        );
+        let mut constructor = LibraryMember::new("<init>".into(), vec![], Ty::Unit, "()V".into());
+        constructor.generic_sig = Some(GenericSig {
+            formals: vec!["inner:T".into(), "outer:T".into(), "constructor:T".into()],
+            formal_bounds: vec![vec![any]; 3],
+            receiver: None,
+            params: vec![],
+            ret: Ty::obj_args_name(inner, &[Ty::ty_param("inner:T", any)]),
+            return_policy: GenericReturnPolicy::Exact,
+        });
+        let candidate = FunctionInfo::receiver_bound_constructor(inner, &classifier, constructor)
+            .expect("inner candidate");
+        let signature = candidate.generic_sig.expect("generic constructor");
+        assert_eq!(signature.formals, ["inner:T", "constructor:T"]);
+        assert_eq!(signature.formal_bounds, vec![vec![any]; 2]);
+        assert_eq!(
+            signature.ret.type_args(),
+            [Ty::ty_param("inner:T", any), Ty::ty_param("outer:T", any),]
+        );
+    }
 
     #[test]
     fn classifier_member_round_trip_keeps_source_and_physical_names_separate() {
@@ -197,6 +264,112 @@ mod tests {
 
         assert_eq!(selected.name, "sourceName");
         assert_eq!(selected.physical_name.as_deref(), Some("platformName"));
+    }
+
+    #[test]
+    fn constructor_member_round_trip_keeps_declaration_parameters_after_specialization() {
+        let outer = crate::types::type_name("fixtures/Outer");
+        let inner = crate::types::type_name("fixtures/Outer$Inner");
+        let token = Ty::obj("fixtures/Token");
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let formal = Ty::ty_param("outer:O", any);
+        let mut classifier = LibraryType::declaration_header();
+        classifier.outer_instance = Some(outer);
+        classifier.own_type_parameter_count = 0;
+        classifier.type_parameters =
+            crate::types::TypeParameters::invariant(vec!["outer:O".into()], vec![vec![any]]);
+        let mut constructor = LibraryMember::new(
+            "<init>".into(),
+            vec![formal],
+            Ty::Unit,
+            "(Lfixtures/Outer;Ljava/lang/Object;)V".into(),
+        );
+        let physical = vec![Ty::obj_name(outer), Ty::obj("kotlin/Any")];
+        constructor.physical_params = physical.clone();
+        let mut candidate =
+            FunctionInfo::receiver_bound_constructor(inner, &classifier, constructor)
+                .expect("a receiver-bound constructor");
+        assert_eq!(
+            candidate.callable.declared_params.as_deref(),
+            Some(&[formal][..])
+        );
+
+        // Receiver specialization changes applicability while the declaration remains generic.
+        candidate.callable.params = vec![token];
+        candidate
+            .generic_sig
+            .as_mut()
+            .expect("constructor signature")
+            .params = vec![token];
+        let selected = candidate.member_with_return(Ty::obj_args_name(inner, &[token]));
+        assert_eq!(selected.params, [token]);
+        assert_eq!(selected.constructor_declaration_params(), [formal]);
+        assert_eq!(selected.physical_params, physical);
+
+        let callable = LibraryCallable::constructor(inner, &selected);
+        assert_eq!(callable.declared_params.as_deref(), Some(&[formal][..]));
+        let resolved = crate::symbol_resolver::ResolvedMember::from_callable(
+            Ty::obj_args_name(outer, &[token]),
+            callable,
+            false,
+        );
+        assert_eq!(resolved.member.constructor_declaration_params(), [formal]);
+        assert_eq!(resolved.member.params, [token]);
+        assert_eq!(resolved.physical_params, physical);
+
+        let round_trip = FunctionInfo::classifier_member(FnKind::Member, inner, resolved.member);
+        assert_eq!(
+            round_trip.callable.declared_params.as_deref(),
+            Some(&[formal][..])
+        );
+        assert_eq!(round_trip.callable.params, [token]);
+    }
+
+    #[test]
+    fn member_projection_keeps_declared_context_receiver_and_value_parameter_order() {
+        let owner = crate::types::type_name("fixtures/Owner");
+        let context = Ty::obj("fixtures/Context");
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let receiver = Ty::ty_param("owner:R", any);
+        let value = Ty::ty_param("owner:T", any);
+        let token = Ty::obj("fixtures/Token");
+        let declared = vec![context, receiver, value];
+        let mut member = LibraryMember::new(
+            "transform".into(),
+            declared.clone(),
+            value,
+            "(Lfixtures/Context;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;".into(),
+        );
+        member.context_count = 1;
+        member.generic_sig = Some(GenericSig {
+            formals: vec![],
+            formal_bounds: vec![],
+            receiver: Some(receiver),
+            params: vec![context, value],
+            ret: value,
+            return_policy: GenericReturnPolicy::Exact,
+        });
+        let mut candidate = FunctionInfo::classifier_member(FnKind::Extension, owner, member);
+        assert_eq!(
+            candidate.callable.declared_params.as_deref(),
+            Some(declared.as_slice())
+        );
+        candidate.callable.params = vec![context, Ty::String, token];
+        let signature = candidate.generic_sig.as_mut().expect("member signature");
+        signature.receiver = Some(Ty::String);
+        signature.params = vec![context, token];
+        signature.ret = token;
+
+        let selected = candidate.member_with_return(token);
+        assert_eq!(selected.params, [context, token]);
+        let projected = crate::libraries::member_record(&candidate);
+        assert_eq!(projected.params, [context, Ty::String, token]);
+        let round_trip = FunctionInfo::classifier_member(FnKind::Extension, owner, projected);
+        assert_eq!(
+            round_trip.callable.declared_params.as_deref(),
+            Some(declared.as_slice())
+        );
+        assert_eq!(round_trip.callable.params, [context, Ty::String, token]);
     }
 
     #[test]

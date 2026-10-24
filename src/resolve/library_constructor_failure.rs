@@ -3,6 +3,18 @@
 
 use super::*;
 
+/// Receiver-specialized declaration evidence for an inner constructor's bound diagnostics.
+pub(super) struct BoundConstructorDiagnostic {
+    pub(super) outer: Ty,
+    pub(super) signature: crate::libraries::GenericSig,
+}
+
+impl BoundConstructorDiagnostic {
+    pub(super) fn new(outer: Ty, signature: crate::libraries::GenericSig) -> Box<Self> {
+        Box::new(Self { outer, signature })
+    }
+}
+
 pub(super) struct LibraryConstructorMappingFailure {
     failure: CallArgMappingFailure,
     params: Vec<Ty>,
@@ -29,6 +41,7 @@ pub(super) enum LibraryConstructorFailure {
         explicit: Vec<Ty>,
         /// kotlinc's rendering of the first constructor rejected by the bound.
         constructor: String,
+        bound_constructor: Option<Box<BoundConstructorDiagnostic>>,
     },
 }
 
@@ -142,7 +155,16 @@ impl Checker<'_> {
                 classifier,
                 explicit,
                 constructor,
+                bound_constructor,
             } => {
+                if let Some(bound) = bound_constructor {
+                    let display = format!("{}.{}", bound.outer.source_name(), constructor);
+                    if self.report_bound_inner_constructor_type_arguments(
+                        call, &explicit, &bound, &display,
+                    ) {
+                        return;
+                    }
+                }
                 if !self.report_explicit_constructor_type_argument_bounds(
                     call,
                     classifier,

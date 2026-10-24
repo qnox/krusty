@@ -319,6 +319,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
 ## 7. Edge cases tracked (grow as implemented)
 
+- **Applied generic subtyping compares complete argument lists.** After projecting a source onto
+  the target classifier, an explicitly applied target requires the same argument count before
+  variance/projection containment is checked. Matching only a zipped prefix is not proof. A bare
+  target retains the existing owner-reachability query. The common relation's unit regression
+  covers direct and inherited applications; the hierarchy test oracle preserves applied arguments.
+  Compiler-owned top-level generic classifiers retain complete own-parameter counts, so their
+  formals never become synthetic enclosing captures. Empty-classpath array applications and class
+  literals preserve the written argument or the language-selected projection.
+  A delegated member retains the checker's applied self type, including its own and captured
+  formals. Inference joins a shared superclass's applied arguments instead of reducing it to a
+  bare classifier. The existing dependency-star and capturing-delegate oracles pin these producers.
+
 - **`suspend fun` (coroutines), slice 1 — the calling convention.** A `suspend fun` lowers to
   kotlinc's continuation-passing-style (CPS) JVM ABI: an extra `kotlin.coroutines.Continuation`
   parameter is appended and the return type erases to `java.lang.Object` (the resume value, *boxed* —
@@ -11622,8 +11634,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   deserialization parameter type in wire order, and the marker. A dependency superclass compiled
   without the plugin, whose element or element type
   carries annotations (`List<@Serializable(with = S::class) Item>` serializes with `S`), that
-  publishes no order for its stored properties, or that is generic, declines the file rather than
-  guess.
+  publishes no order for its stored properties, declines the file rather than guess.
+  A generic dependency superclass's elements are typed over its own type parameters, which its
+  metadata names. A subclass inherits them typed by the arguments it gives the superclass, and
+  further up the chain the arguments each class gives its own superclass are substituted the same
+  way (`Fixed : Holder<String>` inherits `value: String`). The superclass's `write$Self` takes one
+  `KSerializer` per type parameter after the descriptor, which the subclass passes for its
+  arguments. Its deserialization constructor is still declared over its own type parameters (`T`
+  is `Object`), so the subclass delegates with that constructor's parameter types, not its own
+  element types. A local generic class over a dependency superclass passes those inherited
+  elements on typed over its own type parameters, and its own subclass sees them typed by its
+  arguments (`Leaf : Middle<Int>` over `Middle<U> : Holder<U>` inherits `value: Int`). An
+  inherited element typed by a dependency's serializable class takes that class's serializer even
+  when no property of the file names it (`Child : Holder<Item>(Item(1))`, and `Leaf : Middle<Item>`),
+  because the type arguments every class gives its superclass enter the serializer inventory with
+  the published element types. A superclass
+  in another file of the same module publishes no type parameter
+  names, so a subclass of a generic one there still declines.
   Test: `tests/serializable_parent_dependency_e2e.rs`.
 - **A serializable superclass in another file of the same module contributes its declared
   elements.** A file's plugin pass sees only its own classes, so before any file is lowered the
@@ -14874,6 +14901,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   level serves a bare inner construction on an implicit receiver.
   (`tests/inner_class_construction_e2e.rs`, `a_receiver_inner_constructor_types_postponed_arguments`.)
 
+- **An inner constructor cannot infer a different enclosing application.** Given
+  `Outer<O : Number>.Inner<T : O>`, a receiver `Outer<Int>` fixes `O` to `Int` before constructor
+  inference and bound admission. `outer.Inner<Long>(1L)` is rejected with the reference compiler's
+  inapplicable-candidate and upper-bound diagnostics, with or without an explicit function return.
+  A receiver `Outer<Long>` also supplies the bound used to contextualize `Inner<Long>(1)` and
+  `Inner(1)`. Source and dependency calls, including fixed aliases, retain complete own-plus-captured
+  result arguments. Receiver-bound alias calls with inferred function returns remain tracked in
+  #2592; declared alias returns are covered. Captured formals are removed by declaration identity;
+  independently declared constructor formals remain inferable. A shadowing own parameter also
+  remains independent when a Java provider renames the hidden captured parameter: enclosing
+  bindings use the inner declaration's capture identities (`tests/java_class_formal_bound_e2e.rs`).
+  The enclosing application supplies the input type
+  during eager lambda overload selection, before Unit coercion decides between constructor
+  candidates. (`tests/inner_constructor_bounds_e2e.rs`.)
+
 - **Inner constructors and same-named member functions are one overload family.** kotlinc places
   the constructors of an `inner` classifier in the member level of the receiver that supplies its
   outer instance, beside that receiver's member functions of the same name. `o.Inner(args)`,
@@ -15328,7 +15370,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     errors. kotlinc follows declared underlying types without substituting type arguments, so
     `value class V(val w: W<V>)` with `value class W<T>(val x: T)` is accepted. Common checking
     consumes the target-aware inline/full selection recorded during signature collection; it does
-    not reinterpret `@JvmInline`. (`tests/value_class_parameters_e2e.rs`.)
+    not reinterpret `@JvmInline`. Against the Native stdlib, an unresolved bare `@JvmInline` also
+    reports its ordinary annotation-resolution error before the independent mutable-parameter error. The
+    unannotated full value class reports just the parameter error; both complete ordered outcomes
+    are checked against kotlinc-native with the same Native KLIB declarations, rather than a JVM
+    classpath checked under Native source rules. `tests/value_class_parameters_e2e.rs` covers the
+    shared parameter rules; `tests/native_value_class_parameter_diagnostics_e2e.rs` owns these two
+    Native comparisons under the declaration-test inventory used by the Native CI job.
   - `ForbidOperatorEqualsInEnumEntriesAndAnonymousObjects`: `operator fun equals` must be a member
     whose resolved overridden-symbol relation reaches `kotlin.Any.equals`, reported at the
     `operator` keyword. That relation retains the exact selected callable identity, owner and
@@ -16299,6 +16347,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `library_classes_are_the_headers_ksp2_reports`; `src/jvm/jvm_libraries/declaration_headers.rs`,
   `an_unreadable_generic_signature_is_not_a_nongeneric_class`,
   `a_container_holding_a_value_that_is_not_an_annotation_is_unreadable`.)
+- **A KSP library annotation class lists its members as KSP2 does.** A classpath annotation
+  class declares its functions, properties, constructors, then nested classifiers; a Kotlin
+  one's nested classifiers follow its metadata (declaration order), a Java one's its
+  `InnerClasses` entries. A Kotlin annotation class's properties are `KOTLIN_LIB`, `final public`,
+  with `final public` getters, and a `vararg` one's type is `Array<out E>`. A Java annotation
+  element is a `SYNTHETIC` `final public` property whose getter is `SYNTHETIC` and `abstract
+  public`; its constructor is `JAVA_LIB`, takes the elements in method order, and an array element
+  named `value` is a `vararg` of its element type while the property stays `kotlin.Array<E>`.
+  `Class<? extends X>` is `KClass<out X>`, and a parameter has a default when the element has
+  one. A constructor is `final` with its visibility and returns its class star-projected.
+  `getAllProperties` is the class's own properties; `getAllFunctions` is its own functions,
+  `kotlin.Any`'s `equals` (`open operator override public`), `hashCode` and `toString` (`open
+  public`), then its constructors. `kotlin.Any` declares those three and `<init>()` (`final
+  public`); `kotlin.Annotation` declares nothing and inherits `kotlin.Any`'s functions. A library
+  modifier set is the visibility (none for Java package-private), the modality, `infix`, and
+  `operator` together with `override`; an accessor lists its modality only when it is not `open`.
+  The members of other classifiers, and of an annotation class whose members carry annotations,
+  are refused for those queries. (`crates/krusty-plugin-host/tests/ksp.rs`,
+  `library_annotation_members_are_what_ksp2_reports`.)
 - **KSP maps names between Kotlin and the JVM by kotlinc's class map.** `mapKotlinNameToJava` and
   `mapJavaNameToKotlin` answer what kotlinc's `JavaToKotlinClassMap` does for the classifier the
   name resolves to on the module's classpath. A mapped builtin, a read-only or mutable collection
@@ -21462,3 +21529,17 @@ Field descriptor authentication uses physical syntax independently of the constr
 The standalone reader keeps its existing innermost-only interpretation and refuses fields whose
 outer arguments it discards. This boundary supplies lossless evidence for the raw/captured application
 follow-ups; it does not itself publish new raw or captured application semantics.
+
+## Constructor declarations survive receiver specialization
+
+A selected constructor retains its original declaration parameters independently of the types used
+for applicability. Constructing `Outer<Token>().Inner(Token(17))` for `Outer<O>.Inner(O)` keeps `O`
+as the declaration parameter while checking the argument as `Token`. On the JVM that generic
+parameter receives the value-class box through Object; a genuinely declared `Token` parameter
+keeps its concrete carrier. Substitution never changes this declaration distinction.
+
+Common callable/member conversions preserve the full declaration parameter order: contexts,
+extension receiver, then values. Member projection inserts the extension receiver into its call
+parameters once, without inserting it again into the retained declaration vector. Physical outer
+instances and default markers are separate ABI slots. Tests: `libraries::classifier_callables::tests`
+and both value-class dependency controls in `tests/inner_constructor_bounds_e2e.rs`.

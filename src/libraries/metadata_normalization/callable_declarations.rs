@@ -155,6 +155,7 @@ pub(crate) fn declared_function(
     callable.suspend = function.is_suspend;
     callable.source_receiver = generic_sig.receiver;
     callable.generic_sig = Some(Box::new(generic_sig.clone()));
+    callable.declared_params = Some(generic_sig.parameters_with_receiver(function.context_count));
     callable.reified_type_parameter_ordinals = reified.clone().into_boxed_slice();
     callable.inline_modifiers = function.inline_modifiers.clone().into_boxed_slice();
     callable.context_count = function.context_count;

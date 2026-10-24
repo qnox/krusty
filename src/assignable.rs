@@ -374,6 +374,11 @@ fn obj_assignable(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bool
         return false;
     };
     let target = sup.obj_internal();
+    // A bare target is also the existing owner-reachability query. An explicitly applied
+    // target, however, requires every argument, not just a matching zipped prefix.
+    if !sup.type_args().is_empty() && sup.type_args().len() != applied_sub.type_args().len() {
+        return false;
+    }
     sup.type_args()
         .iter()
         .zip(applied_sub.type_args().iter())
@@ -679,6 +684,12 @@ mod tests {
             if internal.matches("app/Anonymous") {
                 return vec![g("app/Box", ty.type_args())];
             }
+            if internal.matches("kotlin/collections/List") {
+                return vec![g("kotlin/collections/Iterable", ty.type_args())];
+            }
+            if internal.matches("kotlin/collections/MutableList") {
+                return vec![g("kotlin/collections/List", ty.type_args())];
+            }
             if internal.matches("app/EntityImpl") {
                 let data = ty
                     .type_args()
@@ -691,8 +702,6 @@ mod tests {
                 n if n.matches("kotlin/String") => &["kotlin/CharSequence", "kotlin/Comparable"],
                 n if n.matches("kotlin/CharSequence") => &["kotlin/Any"],
                 n if n.matches("kotlin/Comparable") => &["kotlin/Any"],
-                n if n.matches("kotlin/collections/List") => &["kotlin/collections/Iterable"],
-                n if n.matches("kotlin/collections/MutableList") => &["kotlin/collections/List"],
                 n if n.matches("kotlin/collections/Iterable") => &["kotlin/Any"],
                 n if n.matches("kotlin/Int") || n.matches("kotlin/Double") => &["kotlin/Number"],
                 n if n.matches("kotlin/Number") => &["kotlin/Any"],
@@ -892,6 +901,27 @@ mod tests {
             g("app/Exact", &[Ty::String]),
             g("app/Source", &[s("kotlin/Any")])
         ));
+    }
+
+    #[test]
+    fn applied_generic_arguments_must_have_matching_arity() {
+        let raw = g("app/Box", &[]);
+        let one = g("app/Box", &[Ty::String]);
+        let two = g("app/Box", &[Ty::String, Ty::Int]);
+        for (sub, sup) in [(raw, one), (one, two), (two, one)] {
+            assert!(!ok(sub, sup), "mismatched applications: {sub:?} <: {sup:?}");
+        }
+        assert!(!ok(
+            g("app/Exact", &[Ty::String]),
+            g("app/Source", &[Ty::String, Ty::Int])
+        ));
+        assert!(!ok(
+            g("app/Exact", &[Ty::String, Ty::Int]),
+            g("app/Source", &[Ty::String])
+        ));
+        assert!(ok(one, one));
+        // Raw targets deliberately query class ownership, not generic assignability.
+        assert!(ok(one, raw));
     }
 
     #[test]

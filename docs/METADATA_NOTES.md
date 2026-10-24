@@ -20,6 +20,14 @@ Goal: emit `@kotlin.Metadata` so krusty output is consumable as a **Kotlin** lib
 need only the signatures, already matched in Phase 5a). This is the single largest remaining piece —
 effectively a re-implementation of `kotlinx-metadata-jvm`'s writer.
 
+## Applied generic argument completeness
+
+The common subtype relation consumes the complete applied supertype supplied by declaration
+evidence. An explicitly applied target must have exactly the same argument count before checking
+variance or projections; an empty target remains the existing owner-reachability query. This does
+not change metadata encoding or recover missing arguments. The unit hierarchy oracle must preserve
+its collection supertype arguments rather than supplying raw declarations for applied queries.
+
 ## Java raw type arguments
 
 A Java raw occurrence is a complete application of `RawProjection` arguments, one per formal.
@@ -388,6 +396,10 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   `Any` member its source does not override as an open DECLARATION (`0x10116`, `0x10016`) without a
   `JvmMethodSignature` and without a JVM method. Test:
   `tests/metadata_value_class_synthesized_members_e2e.rs`.
+  Native's full-value parameter diagnostics do not require a JVM annotation declaration: an
+  unresolved bare `@JvmInline` retains its separate annotation-resolution diagnostic. The Native
+  oracle tests use the matching stdlib KLIB provider and pin both errors and the independent
+  unannotated case without changing metadata.
 - Captured type parameters (kotlinc 2.4.20): a local or anonymous class refers to a type parameter
   of an enclosing declaration by id alone (`Type.type_parameter`). Ids come from kotlinc's
   per-declaration interner: the class's own parameters first, then each captured one on first use,
@@ -1026,6 +1038,27 @@ against the complete field descriptor independently of the builder's semantic re
 
 This changes no Kotlin metadata wire fields or raw-type flags. Declaration-backed raw/captured
 construction remains separate from this syntax boundary.
+
+## Receiver-bound constructor signatures
+
+Receiver-bound constructor candidates retain the full classifier argument layout, including captured
+enclosing arguments, even when a source provider's provisional constructor result contains only its
+own arguments. Captured declaration identities are substituted from the selected outer application;
+they are not constructor inference variables. Ordinary callable-owned formals remain independent.
+The enclosing declaration's normalized argument bindings are re-keyed onto the inner classifier's
+captured suffix. A hidden captured parameter and a same-spelled own parameter retain their distinct
+provider identities, including Java declarations; projection and dependent-star bounds stay intact.
+Complete capture layouts provide declaration-order correspondence; selective layouts retain exact
+semantic outer identities. Only present normalized bindings enter the captured context, so an
+unapplied outer does not acquire invented type arguments.
+The same complete result reaches inferred function signatures and rejected-call recovery. This
+changes no metadata schema, physical constructor descriptor or enclosing-instance ABI.
+
+Selected member records also retain pre-substitution declaration parameters in full source order
+(contexts, extension receiver, values). Metadata function normalization publishes this fact before
+specialization; callable/member projection and constructor publication carry it without recovering
+it from the specialized signature. Constructor outer-instance and default-marker slots remain
+physical inputs. This is an in-memory declaration fact, with no Kotlin metadata wire change.
 
 ## Annotation classifier nesting
 

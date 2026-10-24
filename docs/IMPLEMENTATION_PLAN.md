@@ -28,6 +28,23 @@ KLIB dependency-emission categories have disjoint declaration-owned roots before
 An authenticated intrinsic wrapper keeps that ownership when its body transaction declines; the
 ordinary-body category cannot retry it and turn the target decline into an ordinary-closure error.
 
+## Applied generic argument completeness
+
+- ✅ The common subtype relation rejects mismatched explicit argument counts after supertype
+  projection, while preserving bare-owner reachability. Direct and inherited regression cases
+  cover the previous zipped-prefix acceptance. This prerequisite is separate from dependency-body
+  type evidence and adds no backend capability or outcome allowance.
+- ✅ Producers that handed the relation a raw generic classifier now supply a complete
+  application: the delegated-property convention's reference argument is the `KProperty`
+  declaration's star projection (shared with bare class literals), and the core `Array`
+  declaration publishes its `T` formal for erased-cast proofs with an empty classpath.
+- Core top-level declarations publish all their formals as their own, with no enclosing captures.
+  The public declaration inventory and checked array/class-literal applications pin that layout;
+  raw Java flexible applications remain the separate prerequisite #2537.
+- Preserve the class checker's applied self type at delegated-member sites and the applied common
+  superclass in inference joins. Keep the existing complete dependency-star/bridge and capturing
+  local-class delegate regressions unchanged; raw Java applications remain a separate handoff.
+
 ## Java raw type applications
 
 - ✅ A Java raw occurrence carries one `RawProjection(erasure)` argument per formal (SPEC §5), so it
@@ -4687,6 +4704,12 @@ each one lowering more and declining less:
    Tests: `tests/native_c_abi_e2e.rs`.
 - **Value classes** (tier 6), through the value-class semantics every backend
   shares (`crate::value_classes`):
+  - **Parameter diagnostics:** compare the complete ordered Native oracle outcome before the
+    frontend result, using its Native KLIB declarations through an explicit provider. The
+    unresolved bare JVM annotation and the mutable full-value parameter are
+    independent errors; an unannotated regression isolates the parameter rule.
+    Both Native comparisons belong to the declaration-test inventory already selected by the
+    required Native job and the local KLIB semantics recipe.
   - **The inventory** (`native/value_classes.rs`): one exact inventory per file. It holds every
     classifier the IR references, walked by the shared `IrFile::referenced_classifiers` (the JVM's
     inventory starts from the same walk), plus every classifier their declared underlying types
@@ -5951,3 +5974,29 @@ independent physical descriptor checks.
 Next, declaration-header layouts (#2576) must authenticate complete captured applications and raw
 omissions for #2537/#2532. Raw scope erasure must follow symbolic inheritance specialization, as the
 reference compiler demonstrates; it cannot independently erase a superclass from its own bounds.
+
+## Receiver-bound constructor constraints
+
+Normalize inner constructors with complete own-plus-captured instance results, preserving independent
+callable formals while removing captured formals from the inference variables. One receiver context
+re-keys normalized enclosing arguments onto the inner declaration's captured identities, including
+captures renamed by a shadowing own parameter; it never overwrites that independent own inference.
+That context
+specializes member-level candidates and provider declarations before eager lambda analysis, fixes
+captured bindings before final admission, and supplies the declaration evidence for exact bound
+diagnostics. Rejected signature recovery preserves that completed application without repeating
+inference. Provider selection moves
+out of the resolver facade into its owning module. Shared classifier-bound checking also retains
+the full enclosing application for alias targets instead of validating own bounds in isolation.
+JVM boxing-cast byte parity remains separate in #2590; the bound slice proves complete ABI
+signatures, reference runtime and exact diagnostics.
+Inferred return types of receiver-bound alias calls remain a separate signature-lookup follow-up
+in #2592; declared alias calls and direct inferred calls are covered here.
+
+Original parameter declarations now survive selected callable/member conversion independently of
+the specialized applicability signature. Constructor publication reads that same declaration shape;
+the JVM retains generic value-class boxes while concrete value-class slots keep their carriers.
+Owner tests constrain the constructor and context/extension/value round trips, and own/reference
+dependency runtime tests read both generic and concrete stored values. The selected-member record
+and conversion move out of the resolver facade, and plugin plans keep their declaration payload
+indirect, retiring two large-enum lint findings without changing the indexed FIR/IR representation.

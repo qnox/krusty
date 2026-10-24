@@ -10,6 +10,7 @@
 //! - `simple_name → internal_name` for every class in the classpath
 //! - Kotlin type aliases from `@kotlin.Metadata` `d2` arrays in `*TypeAliasesKt.class` files
 
+mod builtin_declared_members;
 mod builtin_inventory;
 mod builtin_signatures;
 use builtin_members::BuiltinPackageFunction;
@@ -1088,13 +1089,18 @@ struct BuiltinMember {
     name: String,
     generic_sig: GenericSig,
     is_property: bool,
+    is_var: bool,
     is_operator: bool,
     is_infix: bool,
     is_abstract: bool,
+    modality: crate::metadata::semantic::KotlinModality,
+    visibility: crate::types::Visibility,
     return_value_status: crate::types::ReturnValueStatus,
     ret_nullable: bool,
     annotations: Vec<crate::types::TypeName>,
     param_names: Vec<String>,
+    param_defaults: Vec<bool>,
+    vararg: Option<usize>,
 }
 
 struct BuiltinConstructor {
@@ -1181,13 +1187,18 @@ impl BuiltinsFile {
                             return_policy: Default::default(),
                         },
                         is_property: m.is_property,
+                        is_var: m.is_var,
                         is_operator: m.is_operator,
                         is_infix: m.is_infix,
                         is_abstract: m.is_abstract,
+                        modality: m.modality,
+                        visibility: m.visibility,
                         return_value_status: m.return_value_status,
                         ret_nullable: m.ret_nullable,
                         annotations: m.annotations,
                         param_names: m.param_names,
+                        param_defaults: m.param_defaults,
+                        vararg: m.vararg,
                     }
                 })
                 .collect();
@@ -2413,47 +2424,6 @@ impl Classpath {
         let class = file.get_name(nested)?;
         Some((jvm_outer.to_string(), simple.to_string(), class.access))
     }
-    /// Constructors declared by a classless Kotlin builtin. Their descriptor is deliberately empty:
-    /// the declaration is semantic metadata, while a backend intrinsic owns the platform realization
-    /// (`Array(size, init)` has no JVM `<init>` method).
-    pub fn builtin_constructors_name(
-        &self,
-        internal: TypeName,
-    ) -> Vec<crate::libraries::LibraryMember> {
-        let file = self.builtins_file_for_package(Self::builtins_package_for(internal));
-        let Some(class) = file.get_name(internal) else {
-            return Vec::new();
-        };
-        class
-            .constructors
-            .iter()
-            .map(|constructor| {
-                let mut member = crate::libraries::LibraryMember::new(
-                    "<init>".to_string(),
-                    constructor.params.clone(),
-                    Ty::Unit,
-                    String::new(),
-                );
-                member.visibility = constructor.visibility;
-                member.generic_sig = Some(crate::libraries::GenericSig {
-                    formals: Vec::new(),
-                    formal_bounds: Vec::new(),
-                    receiver: None,
-                    params: constructor.params.clone(),
-                    ret: Ty::obj_name(internal),
-                    return_policy: Default::default(),
-                });
-                member.call_sig = crate::libraries::CallSig::metadata_member(
-                    constructor.params.len(),
-                    constructor.param_names.clone(),
-                    constructor.param_defaults.clone(),
-                    constructor.vararg,
-                );
-                member
-            })
-            .collect()
-    }
-
     /// Whether the Kotlin builtin `internal` declares its function member `name`/`arity` with a NULLABLE
     /// return (`kotlin/collections/Map.get(K): V?`). When the mapped JVM class IS on the classpath the
     /// member that resolves such a call is the erased classpath method (`java/util/Map.get` → `Object`),
