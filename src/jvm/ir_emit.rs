@@ -3415,8 +3415,6 @@ fn emit_interface_class(
     if emitted_default_impls {
         let holder = format!("{fq_name}$DefaultImpls");
         // The outer interface must publish the same nested-class relation as the synthetic holder.
-        // Seed after metadata so the class constant lands in kotlinc's class-visit order.
-        cw.seed_class(&holder);
         cw.add_inner_class(crate::jvm::classfile::InnerClassSpec {
             inner: holder,
             outer: Some(fq_name.clone()),

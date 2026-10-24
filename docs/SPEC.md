@@ -8083,6 +8083,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the JVM local-class naming spells them (`<init>`, `<clinit>`, `<get-x>`, `<anonymous>`) into the
   sort key. Tests: `tests/inner_class_declaration_order_e2e.rs`,
   `src/frontend/tests/streaming/local_class_provenance.rs::an_initializer_object_records_the_instance_or_static_initialization_it_runs_in`.
+- **Interface compatibility holders share the retained nested-table order.** A generated
+  `$DefaultImpls` row does not pre-seed its class constant ahead of annotation-only references or
+  declared nested classifiers that sort before it. The shared row writer determines its position
+  alongside every other retained entry.
+  Whole-class tests: `tests/interface_inner_table_pool_order_e2e.rs`.
 - **A member reference only copied inline code makes gives its caller no `InnerClasses` row.**
   kotlinc lists a nested class when its type mapper maps a signature naming it while generating
   the class. An inline function's body is compiled once and its instructions are copied into each

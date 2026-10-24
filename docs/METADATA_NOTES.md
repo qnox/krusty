@@ -131,6 +131,13 @@ anonymous-object metadata at inline call sites stamps the caller's version, exac
 suspend-lambda, and regenerated-object `mv` values, plus the 20-byte module header, against kotlinc
 run with `-language-version 2.2`.
 
+## Interface compatibility holder table order
+
+An interface's generated compatibility holder uses the shared `InnerClasses` retained-row order
+for constant-pool publication. Its nesting relation and Kotlin metadata remain unchanged. Removing
+the earlier explicit class seed lets annotation-only references and declared children precede it
+when the ordinary table order requires that position.
+
 ## Module file — part ordering
 
 Within one package, the `.kotlin_module` part list is sorted by part name
