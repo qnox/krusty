@@ -1,14 +1,16 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
-The checked constructor overlay retains stable declaration identities while its merged inventory
-normalizes generic signatures from the classifier's formal layout. Semantic lambda parameter
-templates remain available before argument checking; physical constructor parameters and serialized
-metadata layouts are unchanged.
+## Class formal layouts before member publication
 
-Class-literal arguments publish their checked classifier identity before constructor selection.
-Nested annotation folding consumes that same identity for its class token; it does not rediscover
-the literal from its source spelling. This also covers deeper nested classifier arguments in
-dependency annotation payloads and preserves ordinary annotation defaults and enum entries.
+Kotlin class metadata supplies own formals and bounds. A mapped builtin declaration supplies its
+semantic layout when applicable; Java class signatures supply the remaining declarations. Captured
+class formals come from non-static `InnerClasses` outer edges, with bound hydration before own-first
+capture/shadow renaming. Local or anonymous entries without an outer are not member capture edges.
+
+Layout reads use class headers and builtin declaration tables, not the enclosing `LibraryType` or
+its members. Physical mapped Java requests keep invariant formals independently of a Kotlin view's
+declared variance. This changes no metadata wire fields or physical descriptors. Missing lexical
+formal scopes, including unavailable enclosing-method evidence, do not license placeholder bounds.
 
 Wasm's erased-reference binary equality realization uses the already checked operator and the
 runtime GC representation. It changes no metadata, callable identity, or provider authorization;
@@ -23,6 +25,18 @@ effectively a re-implementation of `kotlinx-metadata-jvm`'s writer.
 The Rust compiler/plugin model tracks checkout identity as a Cargo input, so a shared target cannot
 reuse another checkout's incompatible declaration structure. No serialized plugin fields, protocol
 versions, classfile metadata or annotation payloads change.
+
+## Checked annotation constructor results
+
+The checked constructor overlay retains stable declaration identities while its merged inventory
+normalizes generic signatures from the classifier's formal layout. Semantic lambda parameter
+templates remain available before argument checking; physical constructor parameters and serialized
+metadata layouts are unchanged.
+
+Class-literal arguments publish their checked classifier identity before constructor selection.
+Nested annotation folding consumes that same identity for its class token; it does not rediscover
+the literal from its source spelling. This also covers deeper nested classifier arguments in
+dependency annotation payloads and preserves ordinary annotation defaults and enum entries.
 
 ## KLIB emission root categories
 

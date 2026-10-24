@@ -5,19 +5,16 @@ front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
 
-## Checked constructor signature normalization
+## Class application headers
 
-Normalize the merged constructor inventory through the existing declaration-to-generic-signature
-operation before contextual argument shaping. A checked declaration that replaces a provisional
-constructor retains its stable identity and exposes the same classifier-owned formal template to
-lambda expectations, eager analysis and selection. Reordered named arguments and same-spelled
-caller/classifier formals use the ordinary mapper and substitution path.
+JVM classifier assembly reads complete own/captured formal layouts without recursively publishing
+enclosing members. The header reader preserves metadata authority, bound chains, shadowed identities,
+static boundaries, local/anonymous entries and physical mapped-class variance. Owner tests constrain
+the member-cache lifetime as well as the resulting layout.
 
-Argument collection uses the parser's class-literal role to check `::class` as an ordinary value,
-while function literals and callable references await their selected callable shape. This keeps
-the checked classifier identity available to nested annotation folding without bypassing ordinary
-constructor selection. Owned source/dependency publication and ordinary-call controls cover the
-shared path.
+This is declaration evidence for #2537. Raw occurrence construction, lossless explicit outer-segment
+parsing and erased-application semantics remain separate follow-ups. Enclosing-method formal scopes
+need explicit header evidence; unavailable bounds are refused rather than replaced with `Any`.
 
 ## Local-call checked vararg signature
 
@@ -85,6 +82,20 @@ Preserve the existing cross-file policy-publication barrier. Keep the separate
 Keep the complete KLIB surface comparison and verify its changed property annotation against the
 official Native compiler in both language modes, using the unchanged source fixture. Each written
 library owns a unique scratch directory so concurrent mode and surface checks cannot replace it.
+
+## Checked constructor signature normalization
+
+Normalize the merged constructor inventory through the existing declaration-to-generic-signature
+operation before contextual argument shaping. A checked declaration that replaces a provisional
+constructor retains its stable identity and exposes the same classifier-owned formal template to
+lambda expectations, eager analysis and selection. Reordered named arguments and same-spelled
+caller/classifier formals use the ordinary mapper and substitution path.
+
+Argument collection uses the parser's class-literal role to check `::class` as an ordinary value,
+while function literals and callable references await their selected callable shape. This keeps
+the checked classifier identity available to nested annotation folding without bypassing ordinary
+constructor selection. Owned source/dependency publication and ordinary-call controls cover the
+shared path.
 
 ## String operation authority publication
 
