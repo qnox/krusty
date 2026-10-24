@@ -272,13 +272,15 @@ impl Parser<'_> {
         // combinations, and invalid neighboring forms alike; signature collection/checking decides
         // which declaration contexts permit it.
         let end = self.t[self.i.saturating_sub(1)].span;
-        let getter_reads_field = getter
-            .as_ref()
-            .and_then(|g| match g {
-                FunBody::Expr(e) | FunBody::Block(e) => Some(*e),
-                FunBody::None => None,
-            })
-            .is_some_and(|e| crate::ast::accessor_uses_backing_field(&self.file, e));
+        let getter_reads_field =
+            crate::ast::getter_declares_field(ty.is_some() || getter_ty.is_some(), init.is_some())
+                && getter
+                    .as_ref()
+                    .and_then(|g| match g {
+                        FunBody::Expr(e) | FunBody::Block(e) => Some(*e),
+                        FunBody::None => None,
+                    })
+                    .is_some_and(|e| crate::ast::accessor_uses_backing_field(&self.file, e));
         self.pop_lexical_type_params(lexical_type_param_lens);
         PropDecl {
             is_open: false,
