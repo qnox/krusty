@@ -859,7 +859,7 @@ pub fn complete_enabled(
     let external = external_serializers(
         ir,
         classifiers,
-        serialization::inherited_element_types(&parents),
+        serialization::inherited_element_types(ir, &parents),
     );
     let ctx = ctx
         .with_serial_info_annotations(serial_info_annotations(ir, classifiers))
