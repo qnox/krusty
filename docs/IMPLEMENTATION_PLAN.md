@@ -4687,6 +4687,12 @@ each one lowering more and declining less:
    Tests: `tests/native_c_abi_e2e.rs`.
 - **Value classes** (tier 6), through the value-class semantics every backend
   shares (`crate::value_classes`):
+  - **Parameter diagnostics:** compare the complete ordered Native oracle outcome before the
+    frontend result, using its Native KLIB declarations through an explicit provider. The
+    unresolved bare JVM annotation and the mutable full-value parameter are
+    independent errors; an unannotated regression isolates the parameter rule.
+    Both Native comparisons belong to the declaration-test inventory already selected by the
+    required Native job and the local KLIB semantics recipe.
   - **The inventory** (`native/value_classes.rs`): one exact inventory per file. It holds every
     classifier the IR references, walked by the shared `IrFile::referenced_classifiers` (the JVM's
     inventory starts from the same walk), plus every classifier their declared underlying types

@@ -388,6 +388,10 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   `Any` member its source does not override as an open DECLARATION (`0x10116`, `0x10016`) without a
   `JvmMethodSignature` and without a JVM method. Test:
   `tests/metadata_value_class_synthesized_members_e2e.rs`.
+  Native's full-value parameter diagnostics do not require a JVM annotation declaration: an
+  unresolved bare `@JvmInline` retains its separate annotation-resolution diagnostic. The Native
+  oracle tests use the matching stdlib KLIB provider and pin both errors and the independent
+  unannotated case without changing metadata.
 - Captured type parameters (kotlinc 2.4.20): a local or anonymous class refers to a type parameter
   of an enclosing declaration by id alone (`Type.type_parameter`). Ids come from kotlinc's
   per-declaration interner: the class's own parameters first, then each captured one on first use,
