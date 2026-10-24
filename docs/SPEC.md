@@ -8055,6 +8055,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   after its metadata or when it is written; a single pass at write time dropped `A$B` and left `A`
   and `B` to intern after the attribute names. Test:
   `tests/inner_class_name_pool_order_e2e.rs::a_facade_interns_an_enclosing_row_its_nested_row_keeps`.
+  Annotation interfaces register that same inventory: their declared child classifiers and the
+  enclosing chain remain in the table even when no element or executable body references them.
+  Whole-class tests: `tests/annotation_nested_class_table_e2e.rs`.
 - **`InnerClasses` rows sort by the declaration path kotlinc's IR gives each class.** kotlinc sorts
   the table stably by `fqNameWhenAvailable`, and a class declared in executable code is named by
   its owner, then every declaration its IR nests it in (functions, accessors, `<anonymous>` for a

@@ -8,6 +8,12 @@ Goal: emit `@kotlin.Metadata` so krusty output is consumable as a **Kotlin** lib
 need only the signatures, already matched in Phase 5a). This is the single largest remaining piece —
 effectively a re-implementation of `kotlinx-metadata-jvm`'s writer.
 
+## Annotation classifier nesting
+
+JVM annotation interfaces use the same retained `InnerClasses` inventory as other declared
+classifiers. Declared children and enclosing rows remain discoverable without a method or element
+referencing them. This changes the JVM class table, not Kotlin metadata or annotation values.
+
 ## Shared-target compiler/plugin model artifacts
 
 The Rust compiler/plugin model tracks checkout identity as a Cargo input, so a shared target cannot

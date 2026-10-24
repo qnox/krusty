@@ -5,6 +5,13 @@ front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
 
+## Annotation interface nesting
+
+Annotation interfaces register the shared per-file nested-class inventory before publication.
+The ordinary table retention policy includes declared children and their enclosing chain, even
+without an executable reference. Complete kotlinc artifact comparisons cover top-level and deeply
+nested annotations and their class, interface, enum, object and annotation members.
+
 ## Local-call checked vararg signature
 
 Retain the checker's complete applied value-parameter list on local calls and consume it when
