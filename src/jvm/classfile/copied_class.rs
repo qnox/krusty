@@ -208,7 +208,31 @@ impl ClassWriter {
         if let Some(optimized) = optimized {
             self.methods[index].take_rewritten(optimized);
         }
+        self.intern_copied_frame_classes(index, &method.name, &method.desc);
         Ok(())
+    }
+
+    /// Intern the classes the stack map of the copied method `index` names, where kotlinc's writer
+    /// computes the table: once the method's body is complete, before the next member.
+    fn intern_copied_frame_classes(&mut self, index: usize, name: &str, desc: &str) {
+        let method = &self.methods[index];
+        let Some(code) = method.code.clone().filter(|code| !code.is_empty()) else {
+            return;
+        };
+        let exceptions = method.exceptions.clone();
+        let labels = super::stack_maps::table_labels(&method.lnt, &method.lvt, code.len());
+        let body = super::stack_maps::Body {
+            access: method.access,
+            name,
+            descriptor: desc,
+            code: &code,
+            exceptions: &exceptions,
+            labels,
+        };
+        // A body the computation declines is caught when the class is finished.
+        if let Ok(computed) = self.compute_frames(&body) {
+            self.encode_frames(&body, &computed);
+        }
     }
 
     /// `node`, the body of `method`, after kotlinc's optimizations; as it is when they decline it.

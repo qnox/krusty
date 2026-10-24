@@ -180,11 +180,26 @@ fn published_chain(libraries: &JvmLibraries, classifier: TypeName) -> Option<Pub
                 .is_some_and(|parent| generates_serializer(&parent.annotations));
             if !parent_generates {
                 Vec::new()
-            } else if superclass.type_args().is_empty() {
-                published_chain(libraries, parent)?.wire
             } else {
-                // A generic parent's elements need its type arguments, which no record carries.
-                return None;
+                // A generic parent's elements are typed over its own type parameters; the class
+                // inherits them typed by the arguments it gives the parent.
+                let formals = &SymbolSource::classifier(libraries, parent)?
+                    .type_parameters
+                    .type_params;
+                let arguments = superclass.type_args();
+                if formals.len() != arguments.len() {
+                    return None;
+                }
+                let bindings = formals
+                    .iter()
+                    .cloned()
+                    .zip(arguments.iter().copied())
+                    .collect::<crate::fx_hash::HashMap<_, _>>();
+                published_chain(libraries, parent)?
+                    .wire
+                    .into_iter()
+                    .map(|(name, ty)| (name, ty_subst_keep_unbound(ty, &bindings)))
+                    .collect()
             }
         }
         None => Vec::new(),
@@ -278,11 +293,18 @@ fn published_chain(libraries: &JvmLibraries, classifier: TypeName) -> Option<Pub
     );
     // The annotation says the class asked for a generated serializer; only the generated members
     // themselves say the plugin ran and what they take.
-    if !has_generated_parent_abi(&class.methods, classifier, &wire) {
+    let type_parameters = shape.type_parameters.type_params.len();
+    if !has_generated_parent_abi(&class.methods, classifier, type_parameters, &wire) {
         return None;
     }
     Some(PublishedChain {
         record: crate::types::SerializableClassElements {
+            type_parameters: shape
+                .type_parameters
+                .type_params
+                .iter()
+                .map(|parameter| Box::from(parameter.as_str()))
+                .collect(),
             elements,
             superclass,
         },
@@ -300,19 +322,21 @@ fn generates_serializer(annotations: &[crate::types::ResolvedAnnotation]) -> boo
 }
 
 /// Whether `methods` hold exactly the members the serialization plugin generates on an
-/// inheritable class without type parameters whose wire is `wire`: a public static
-/// `write$Self(self, output, descriptor)` and a public deserialization constructor taking the
-/// `seen` masks, each element as the subclass's delegation passes it, and the marker.
+/// inheritable class with `type_parameters` type parameters whose wire is `wire`: a public static
+/// `write$Self(self, output, descriptor, typeSerial0, …)` and a public deserialization constructor
+/// taking the `seen` masks, each element as the subclass's delegation passes it, and the marker.
 fn has_generated_parent_abi(
     methods: &[crate::jvm::classreader::MethodSig],
     classifier: TypeName,
+    type_parameters: usize,
     wire: &[(Box<str>, Ty)],
 ) -> bool {
     const PUBLIC: u16 = 0x0001;
     const STATIC: u16 = 0x0008;
     let write_self = format!(
-        "(L{};Lkotlinx/serialization/encoding/CompositeEncoder;Lkotlinx/serialization/descriptors/SerialDescriptor;)V",
-        classifier.render()
+        "(L{};Lkotlinx/serialization/encoding/CompositeEncoder;Lkotlinx/serialization/descriptors/SerialDescriptor;{})V",
+        classifier.render(),
+        "Lkotlinx/serialization/KSerializer;".repeat(type_parameters)
     );
     let mut constructor = String::from("(");
     constructor.push_str(&"I".repeat(wire.len() / 32 + 1));
@@ -480,16 +504,26 @@ mod tests {
         assert!(has_generated_parent_abi(
             &[write_self.clone(), constructor("ILjava/util/List;")],
             classifier,
+            0,
             &wire,
         ));
         assert!(!has_generated_parent_abi(
             &[write_self.clone(), constructor("ILjava/lang/String;")],
             classifier,
+            0,
             &wire,
         ));
         assert!(!has_generated_parent_abi(
             &[constructor("ILjava/util/List;")],
             classifier,
+            0,
+            &wire,
+        ));
+        // A generic class's `write$Self` takes one serializer per type parameter.
+        assert!(!has_generated_parent_abi(
+            &[write_self, constructor("ILjava/util/List;")],
+            classifier,
+            1,
             &wire,
         ));
     }

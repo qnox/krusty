@@ -16,6 +16,7 @@ mod classifier_role;
 mod compiler_intrinsic;
 mod core_builtins;
 mod declaration_header;
+mod declared_members;
 mod default_value;
 mod dependency_access_policy;
 mod dependency_body_contract;
@@ -60,6 +61,10 @@ pub use classifier_declaration::{AliasExpansion, ClassifierDeclaration};
 pub use classifier_kind::TypeKind;
 pub use declaration_header::{
     DeclarationHeader, DeclarationLanguage, HeaderSignature, HeaderSupertype, HeaderTypeParameter,
+};
+pub use declared_members::{
+    DeclaredConstructor, DeclaredFunction, DeclaredMembers, DeclaredParameter, DeclaredProperty,
+    KotlinModality,
 };
 pub use default_value::DefaultValue;
 pub use dependency_access_policy::DependencyAccessPolicy;
@@ -239,6 +244,9 @@ pub struct LibraryMember {
     /// facts (a constructor's `(TA;TB;)V`) without making consumers parse backend signature strings.
     /// Used to infer a construction's type arguments against the enclosing type's [`LibraryType::type_params`].
     pub generic_sig: Option<GenericSig>,
+    /// Pre-substitution source parameters: contexts, extension receiver, then values, as in
+    /// [`LibraryCallable::declared_params`]. Runtime outer/default ABI slots are excluded.
+    pub declared_params: Option<Box<[Ty]>>,
     /// The declaration returns through a projected generic position whose erased top result must
     /// not be treated as an ordinary inferred `Any`. This semantic applicability fact is retained
     /// on the selected member so Pass 2 never reopens the signature graph to rediscover it.
@@ -441,6 +449,13 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// The declaration of a library classifier as its source language states it, for a consumer
     /// that shows declarations. `None` for a classifier this provider does not declare.
     fn declaration_header(&self, _classifier: TypeName) -> Option<DeclarationHeader> {
+        None
+    }
+
+    /// The members a library classifier declares, as its source language states them, beside its
+    /// [`Self::declaration_header`]. `None` for a classifier this provider does not declare, or
+    /// whose members it does not read yet.
+    fn declared_members(&self, _classifier: TypeName) -> Option<DeclaredMembers> {
         None
     }
 
@@ -721,6 +736,7 @@ impl LibraryMember {
             signature: None,
             generic_sig: None,
             projected_return_hazard: false,
+            declared_params: None,
             flags: LmFlags::default(),
             inline: InlineKind::None,
             reified: false,
@@ -745,18 +761,6 @@ impl LibraryMember {
             stable_declaration: None,
             source_member: None,
         }
-    }
-
-    /// The selected constructor's parameter types before classifier type-argument substitution,
-    /// aligned with [`Self::params`]. Constructor selection specializes `params` from the generic
-    /// signature exactly when that signature has the same arity, so the same rule names the
-    /// declaration shape a specialized `params` came from (`Holder(T)` selected as `Holder(Money)`).
-    pub fn constructor_declaration_params(&self) -> &[Ty] {
-        self.generic_sig
-            .as_ref()
-            .map(|signature| signature.params.as_slice())
-            .filter(|params| params.len() == self.params.len())
-            .unwrap_or(&self.params)
     }
 
     #[inline]
@@ -1686,6 +1690,7 @@ impl FunctionInfo {
         member.external_default_provider = self.callable.external_default_provider;
         member.nonvirtual_realization = self.callable.nonvirtual_realization.clone();
         member.generic_sig = self.generic_sig.clone();
+        member.declared_params = self.callable.declared_params.clone();
         member.projected_return_hazard = self.projected_return_hazard;
         member.inline = self.flags.inline;
         member.inline_body_plan = self.callable.inline_body_plan.clone();
