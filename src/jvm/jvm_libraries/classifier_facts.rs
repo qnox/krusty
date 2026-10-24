@@ -250,11 +250,15 @@ fn published_chain(libraries: &JvmLibraries, classifier: TypeName) -> Option<Pub
                 .iter()
                 .find(|property| property.name.as_str() == &**name)
                 .filter(|property| stored(property))?;
-            // Annotations on the element or inside its type (a serial name, a serializer of its
-            // own) change its wire shape, and this record carries none.
-            if property.annotation_method.is_some() || element.annotated_type {
+            // Annotations inside the element's type (a serializer of its own for a type argument)
+            // change its wire shape, and this record carries none.
+            if element.annotated_type {
                 return None;
             }
+            let annotations = match &property.annotation_method {
+                Some(method) => element_annotations(libraries, classifier, method)?,
+                None => ElementAnnotations::default(),
+            };
             let ty = shape
                 .declared_callables
                 .get(&**name)?
@@ -283,6 +287,9 @@ fn published_chain(libraries: &JvmLibraries, classifier: TypeName) -> Option<Pub
                 name: name.clone(),
                 ty,
                 optional,
+                serial_name: annotations.serial_name,
+                serializer: annotations.serializer,
+                contextual: annotations.contextual,
             })
         })
         .collect::<Option<Box<[_]>>>()?;
@@ -310,6 +317,75 @@ fn published_chain(libraries: &JvmLibraries, classifier: TypeName) -> Option<Pub
         },
         wire,
     })
+}
+
+/// What a library element's property annotations say about its wire shape.
+#[derive(Default)]
+struct ElementAnnotations {
+    serial_name: Option<crate::kt_string::KtString>,
+    serializer: Option<TypeName>,
+    contextual: bool,
+}
+
+/// Read the annotations a library property keeps on its `$annotations` marker `method`, as
+/// kotlinc's plugin reads a superclass element's: `@SerialName`, a property-level
+/// `@Serializable(with = …)` and `@Contextual`. `None` when one changes the element in a way the
+/// record cannot state: `@Required`, `@Polymorphic`, or a `@SerialInfo` annotation the subclass's
+/// descriptor would have to carry.
+fn element_annotations(
+    libraries: &JvmLibraries,
+    classifier: TypeName,
+    method: &crate::jvm::metadata::MetaJvmMethodSig,
+) -> Option<ElementAnnotations> {
+    use crate::types::AnnotationValue;
+    let applications = libraries
+        .cp
+        .method_annotations(classifier, &method.name, &method.desc)?;
+    let mut annotations = ElementAnnotations::default();
+    for application in applications {
+        let argument = |name: &str| {
+            application
+                .arguments
+                .iter()
+                .find(|(argument, _)| argument == name)
+                .map(|(_, value)| value)
+        };
+        match application.annotation {
+            name if name == type_name("kotlinx/serialization/SerialName") => {
+                let Some(AnnotationValue::String(value)) = argument("value") else {
+                    return None;
+                };
+                annotations.serial_name = Some(value.clone());
+            }
+            name if name == type_name("kotlinx/serialization/Serializable") => {
+                let Some(AnnotationValue::Class(serializer)) = argument("with") else {
+                    return None;
+                };
+                annotations.serializer = Some(serializer.kotlin_class_internal()?);
+            }
+            name if name == type_name("kotlinx/serialization/Contextual") => {
+                annotations.contextual = true;
+            }
+            name if name == type_name("kotlinx/serialization/Required")
+                || name == type_name("kotlinx/serialization/Polymorphic") =>
+            {
+                return None
+            }
+            name => {
+                let serial_info = type_name("kotlinx/serialization/SerialInfo");
+                let marked = SymbolSource::classifier(libraries, name).is_some_and(|annotation| {
+                    annotation
+                        .annotations
+                        .iter()
+                        .any(|meta| meta.annotation == serial_info)
+                });
+                if marked {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(annotations)
 }
 
 /// `@Serializable` without its own `with` serializer: the plugin generates the serializer.
