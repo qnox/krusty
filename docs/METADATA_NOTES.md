@@ -776,6 +776,24 @@ Each accessor also carries the property's declaration-owned reified formal ordin
 existing schema facts, not new intrinsic markers or a metadata format change. This producer fix
 alone does not enable ordinary dependency-body or inline-accessor emission.
 
+## Serialized closure capture ownership
+
+Closure frames bind exact arena-local value symbols against their enclosing declaration's value
+environment. A lexical scan includes nested closures, while each nested lowering starts a fresh
+parameter/local/control-flow frame. The lifted declaration publishes its capture prefix,
+parameter identities, receiver ledger and private visibility; rollback removes these side facts
+with the appended functions. The serialized expression's source-form marker distinguishes a
+literal from an anonymous function. Full source naming/debug origins are not reconstructed from
+generated names or invented for dependency bodies. Official-producer tests cover raw bodies,
+prepared inline copies and runtime consumption through the existing Native closure ABI.
+The emitted-callable walk extends only selected expression roots with reached, supported closure
+implementations. It deduplicates nested implementations and projects every call through the same
+producer-origin graph as direct calls. Defaults and unrelated local declarations remain outside the
+root set, and intrinsic-authority inventories stay direct-only. The prewalk checks outer function
+class shape independently of generic argument binding; body lowering retains full capture/header
+validation in its enclosing frame. Imported constructor facts can therefore be prepared without
+claiming a target implements the imported classifier's storage or allocation.
+
 ## Ordinary KLIB generic declaration headers
 
 The KLIB body contract separately freezes known implementation modifiers from each exact signed
