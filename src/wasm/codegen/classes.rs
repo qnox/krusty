@@ -8,21 +8,25 @@
 //! `as` along the class hierarchy directly.
 //!
 //! **Tables.** A class's table is a struct with one immutable field per slot of its shared table,
-//! each a typed function reference. Every table of the file has the same width — the end of the
-//! interface region — and is declared a subtype of its superclass's table, or of the file's own
-//! root table for a root class. The file's root table types `kotlin.Any`'s three slots and every
-//! interface member, and leaves the class slots untyped (`funcref`): a call through a class reads
-//! the slot off the class's table type, a call through an interface off the file's. A class slot
-//! a table does not have yet is untyped and null, so a subclass's table can type it.
+//! each a typed function reference, and the interface table after `kotlin.Any`'s three
+//! (`super::super::objects::slot_field`). It is declared a subtype of its superclass's table, or of
+//! `$AnyTable` for a root class. A slot a table does not type is `funcref` and null.
+//!
+//! **Interfaces.** Interface members are numbered once for the module, from the declaration
+//! headers (`class_tables::module_interfaces`), and kept out of the class tables: a call through
+//! one goes to the member's stub, which the finished module writes from every class's
+//! implementations (`super::super::interface_dispatch`, `super::interface_implementations`).
 //!
 //! **Refusals.** Anything this form does not cover declines by name: a class kind other than an
-//! ordinary class, interface or `object`, a supertype declared in another file, and an override
-//! whose signature needs a bridge.
+//! ordinary class, interface or `object`, a superclass declared in another file, and an override
+//! whose signature needs a bridge in a class table.
 
 use crate::fx_hash::HashMap;
 
+use crate::backend::class_tables::module_classes::ModuleClasses;
+use crate::backend::class_tables::module_slots::ModuleSlotPlan;
 use crate::backend::class_tables::{
-    self, AnyMember, ClassTables, Representation, Slot, SlotKey, ANY_SLOTS,
+    self, AnyMember, NumberedClassTables, Representation, Slot, SlotKey, ANY_SLOTS,
 };
 use crate::backend::local_properties::RealizedLocalPropertyAccess;
 use crate::fir::{PropertyId, ResolvedPropertyOverrideTarget};
@@ -32,7 +36,8 @@ use crate::types::{Ty, TypeName};
 use super::super::encode::{
     Code, CompositeType, FieldType, HeapType, Module, StorageType, SubType, ValType,
 };
-use super::super::objects::{immutable, ObjectRoot, REFERENCE};
+use super::super::interface_dispatch::ClassRef;
+use super::super::objects::{immutable, ObjectRoot, ITABLE_FIELD, REFERENCE};
 use super::lower::{carrier, Unsupported};
 
 /// How the WasmGC form carries values, as the shared tables ask it.
@@ -90,14 +95,15 @@ pub(super) struct ClassForm {
     /// Parallel to `IrClass::secondary_ctors`.
     pub(super) secondaries: Vec<u32>,
     pub(super) singleton: Option<Singleton>,
+    /// The class as the program's interface dispatch knows it; `None` for a class with no
+    /// instances of its own.
+    pub(super) record: Option<ClassRef>,
 }
 
 /// The WasmGC form of every class of one file.
 pub(super) struct FileClasses {
-    pub(super) tables: ClassTables,
+    pub(super) tables: NumberedClassTables,
     pub(super) forms: Vec<ClassForm>,
-    /// The file's root table type: what a call through an interface reads its slot off.
-    pub(super) file_table: u32,
     /// The function type of every typed slot, by class and slot; `None` for an untyped one.
     slot_types: Vec<Vec<Option<u32>>>,
     /// The synthesized accessors the tables hold — each with its function and that function's
@@ -149,8 +155,14 @@ pub(super) fn method_type(
     Ok(module.func_type(params, results))
 }
 
+/// The module-wide numbering of the interface members of `classes`, as every file of the module
+/// reads it.
+pub(super) fn module_plan(classes: &ModuleClasses) -> ModuleSlotPlan {
+    ModuleSlotPlan::interfaces_only(classes, &WasmRepresentation)
+}
+
 /// Reject, by name, a class this form does not lay out.
-fn check_supported(ir: &IrFile, class: &IrClass) -> Result<(), Unsupported> {
+fn check_supported(class: &IrClass) -> Result<(), Unsupported> {
     let name = class.fq_name();
     let construct = if class.is_annotation || class.annotation_impl_of.is_some() {
         "an annotation class"
@@ -169,24 +181,12 @@ fn check_supported(ir: &IrFile, class: &IrClass) -> Result<(), Unsupported> {
         "a class capturing its surroundings"
     } else if class.companion_class.is_some() {
         "a class with a companion object"
-    } else if !class.bridges.is_empty() {
-        "a class with bridge methods"
     } else if class
         .supertypes
         .iter()
         .any(|supertype| supertype.non_null().is_fun())
     {
         "a class implementing a function type"
-    } else if let Some(outside) = class
-        .interfaces
-        .iter()
-        .find(|interface| ir.class_id_by_name(*interface).is_none())
-    {
-        // Boundary conversion for a diagnostic.
-        return Err(format!(
-            "an interface declared outside this file (`{name}` implements `{}`)",
-            outside.render().replace('/', ".")
-        ));
     } else {
         return Ok(());
     };
@@ -201,54 +201,13 @@ pub(super) fn declare(
     objects: &mut ObjectRoot,
     functions: &[Option<u32>],
     properties: &RealizedProperties,
+    plan: &ModuleSlotPlan,
 ) -> Result<FileClasses, Unsupported> {
     for class in &ir.classes {
-        check_supported(ir, class)?;
+        check_supported(class)?;
     }
-    let tables = class_tables::build(
-        &WasmRepresentation,
-        ir,
-        &class_tables::module_slots::ModuleSlotPlan::empty(),
-    )?;
-    let width = (tables.region.base + tables.region.members) as usize;
-    let mut slot_types = slot_types(ir, module, objects, &tables, width)?;
-
-    // The file's root table: `kotlin.Any`'s slots and the interface members typed, the rest
-    // untyped. Every class table of the file is a subtype of it.
-    let region_types = interface_member_types(ir, &tables, &slot_types, width)?;
-    // A class table is a subtype of the file's root table, which types every interface member:
-    // a class implementing none of an interface's members still types those slots, and holds the
-    // trap there, as an abstract slot does.
-    for (id, class) in ir.classes.iter().enumerate() {
-        if class.is_interface {
-            continue;
-        }
-        for (slot, ty) in region_types
-            .iter()
-            .enumerate()
-            .skip(tables.region.base as usize)
-        {
-            if slot_types[id][slot].is_none() {
-                slot_types[id][slot] = *ty;
-            }
-        }
-    }
-    let mut root_fields: Vec<Option<u32>> = vec![None; width];
-    for (slot, ty) in objects.any_slot_types.iter().enumerate() {
-        root_fields[slot] = Some(*ty);
-    }
-    for (slot, ty) in region_types
-        .iter()
-        .enumerate()
-        .skip(tables.region.base as usize)
-    {
-        root_fields[slot] = *ty;
-    }
-    let file_table = module.subtype(SubType {
-        composite: table_struct(&root_fields),
-        supertype: Some(objects.any_table),
-        open: true,
-    });
+    let tables = class_tables::build_numbered(&WasmRepresentation, ir, plan)?;
+    let slot_types = slot_types(ir, module, objects, &tables)?;
 
     let mut forms: Vec<ClassForm> = ir.classes.iter().map(|_| ClassForm::default()).collect();
     for &id in &tables.order {
@@ -271,8 +230,8 @@ pub(super) fn declare(
             open: true,
         });
         let table_type = module.subtype(SubType {
-            composite: table_struct(&slot_types[id as usize]),
-            supertype: Some(parent.map_or(file_table, |parent| {
+            composite: table_struct(&slot_types[id as usize], objects.itable),
+            supertype: Some(parent.map_or(objects.any_table, |parent| {
                 parent.table_type.expect("a superclass has a table type")
             })),
             open: true,
@@ -301,9 +260,23 @@ pub(super) fn declare(
         if class.is_interface || class.is_abstract || class.is_sealed {
             continue;
         }
+        let mut ancestors = Vec::new();
+        let mut ancestor = Some(id);
+        while let Some(current) = ancestor {
+            ancestors.push(
+                forms[current as usize]
+                    .structure
+                    .expect("a class has a struct"),
+            );
+            ancestor = tables.table(current).superclass;
+        }
+        let (record, itable) = objects.interfaces.class(module, objects.itable, ancestors);
         let table = tables.table(id);
         let mut init = Code::default();
         for (slot, entry) in table.vtable.iter().enumerate() {
+            if slot as u32 == ITABLE_FIELD {
+                init.global_get(itable);
+            }
             let Some(ty) = slot_types[id as usize][slot] else {
                 init.ref_null(HeapType::Func);
                 continue;
@@ -327,14 +300,7 @@ pub(super) fn declare(
                         field: *field,
                         setter: matches!(entry, Slot::FieldSetter { .. }),
                     };
-                    match accessors.iter().find(|(known, ..)| *known == accessor) {
-                        Some((_, function, _)) => *function,
-                        None => {
-                            let function = module.declare();
-                            accessors.push((accessor, function, ty));
-                            function
-                        }
-                    }
+                    accessor_function(module, &mut accessors, accessor, ty)
                 }
                 Slot::Bridge { .. } | Slot::FunctionBridge { .. } | Slot::AccessorBridge { .. } => {
                     return Err(format!(
@@ -346,17 +312,20 @@ pub(super) fn declare(
             module.reference_function(function);
             init.ref_func(function);
         }
+        if table.vtable.len() as u32 <= ITABLE_FIELD {
+            init.global_get(itable);
+        }
         let table_type = forms[id as usize]
             .table_type
             .expect("a class has a table type");
         init.struct_new(table_type);
-        forms[id as usize].table =
-            Some(module.constant_global(ValType::reference(table_type), init));
+        let form = &mut forms[id as usize];
+        form.table = Some(module.constant_global(ValType::reference(table_type), init));
+        form.record = Some(record);
     }
     Ok(FileClasses {
         tables,
         forms,
-        file_table,
         slot_types,
         accessors,
         properties: properties
@@ -367,22 +336,44 @@ pub(super) fn declare(
     })
 }
 
-/// A table struct: one immutable typed function reference per typed slot, `funcref` elsewhere.
-fn table_struct(slots: &[Option<u32>]) -> CompositeType {
-    CompositeType::Struct(
-        slots
-            .iter()
-            .map(|slot| {
-                immutable(match slot {
-                    Some(ty) => ValType::reference(*ty),
-                    None => ValType::Ref {
-                        nullable: true,
-                        heap: HeapType::Func,
-                    },
-                })
-            })
-            .collect(),
-    )
+/// The function standing for `accessor`, carried as `ty`: declared the first time a table names
+/// it, and defined with the file's bodies.
+pub(super) fn accessor_function(
+    module: &mut Module,
+    accessors: &mut Vec<(Accessor, u32, u32)>,
+    accessor: Accessor,
+    ty: u32,
+) -> u32 {
+    match accessors.iter().find(|(known, ..)| *known == accessor) {
+        Some((_, function, _)) => *function,
+        None => {
+            let function = module.declare();
+            accessors.push((accessor, function, ty));
+            function
+        }
+    }
+}
+
+/// A table struct: one immutable typed function reference per typed slot, `funcref` elsewhere,
+/// and the interface table after `kotlin.Any`'s slots.
+fn table_struct(slots: &[Option<u32>], itable: u32) -> CompositeType {
+    let mut fields = Vec::with_capacity(slots.len() + 1);
+    for (slot, ty) in slots.iter().enumerate() {
+        if slot as u32 == ITABLE_FIELD {
+            fields.push(immutable(ValType::nullable(itable)));
+        }
+        fields.push(immutable(match ty {
+            Some(ty) => ValType::reference(*ty),
+            None => ValType::Ref {
+                nullable: true,
+                heap: HeapType::Func,
+            },
+        }));
+    }
+    if slots.len() as u32 <= ITABLE_FIELD {
+        fields.push(immutable(ValType::nullable(itable)));
+    }
+    CompositeType::Struct(fields)
 }
 
 /// The struct fields `class` declares, each mutable: a field is written by the constructor after
@@ -410,7 +401,7 @@ fn own_fields(class: &IrClass) -> Result<Vec<FieldType>, Unsupported> {
 /// Every field of `class` and its superclasses in this file, root first.
 fn inherited_fields(
     ir: &IrFile,
-    tables: &ClassTables,
+    tables: &NumberedClassTables,
     class: ClassId,
 ) -> Result<Vec<FieldType>, Unsupported> {
     let mut fields = match tables.table(class).superclass {
@@ -431,8 +422,7 @@ fn slot_types(
     ir: &IrFile,
     module: &mut Module,
     objects: &ObjectRoot,
-    tables: &ClassTables,
-    width: usize,
+    tables: &NumberedClassTables,
 ) -> Result<Vec<Vec<Option<u32>>>, Unsupported> {
     let mut types: Vec<Vec<Option<u32>>> = vec![Vec::new(); ir.classes.len()];
     for &id in &tables.order {
@@ -447,7 +437,7 @@ fn slot_types(
                 })
                 .or_insert(key);
         }
-        let mut own = vec![None; width];
+        let mut own = vec![None; table.vtable.len()];
         for (slot, entry) in table.vtable.iter().enumerate() {
             let ty = match entry {
                 Slot::AnyMember(member) => Some(objects.any_slot_types[member.slot() as usize]),
@@ -487,57 +477,6 @@ fn slot_types(
         types[id as usize] = own;
     }
     Ok(types)
-}
-
-/// The type of each interface member's number, by slot; `None` below the interface region.
-fn interface_member_types(
-    ir: &IrFile,
-    tables: &ClassTables,
-    slot_types: &[Vec<Option<u32>>],
-    width: usize,
-) -> Result<Vec<Option<u32>>, Unsupported> {
-    let base = tables.region.base as usize;
-    let mut region: Vec<Option<u32>> = vec![None; width];
-    for (id, class) in ir.classes.iter().enumerate() {
-        if !class.is_interface {
-            continue;
-        }
-        for slot in tables.table(id as ClassId).slots.values() {
-            let slot = *slot as usize;
-            if slot < base {
-                continue;
-            }
-            let Some(ty) = slot_types[id][slot] else {
-                continue;
-            };
-            match region[slot] {
-                Some(known) if known != ty => {
-                    return Err(format!(
-                        "an interface member typed two ways (`{}`)",
-                        class.fq_name()
-                    ));
-                }
-                _ => region[slot] = Some(ty),
-            }
-        }
-    }
-    // Every implementor's entry must be callable as the interface declares the member.
-    for (id, class) in ir.classes.iter().enumerate() {
-        if class.is_interface {
-            continue;
-        }
-        for (slot, ty) in region.iter().enumerate().skip(base) {
-            if let (Some(member), Some(entry)) = (ty, slot_types[id][slot]) {
-                if *member != entry {
-                    return Err(format!(
-                        "an interface member implemented with a different signature (`{}`)",
-                        class.fq_name()
-                    ));
-                }
-            }
-        }
-    }
-    Ok(region)
 }
 
 /// A total order over the keys naming one slot, so the one a slot's type is read from does not

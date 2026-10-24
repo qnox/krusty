@@ -1950,6 +1950,8 @@ mod native_gc_stress_e2e;
 mod native_implemented_dependency_dispatch_e2e;
 #[path = "native_interface_bridges_e2e.rs"]
 mod native_interface_bridges_e2e;
+#[path = "native_interface_call_stubs_e2e.rs"]
+mod native_interface_call_stubs_e2e;
 #[path = "native_interface_implementations_e2e.rs"]
 mod native_interface_implementations_e2e;
 #[path = "native_lateinit_initialized_e2e.rs"]
