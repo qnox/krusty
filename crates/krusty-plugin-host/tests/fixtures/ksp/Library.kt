@@ -59,6 +59,10 @@ class LibraryProcessor(private val env: SymbolProcessorEnvironment) : SymbolProc
         "dependency.Empty",
         "dependency.Shape",
         "dependency.Circle",
+        "dependency.Holder",
+        "dependency.Holder.Inner",
+        "dependency.Holder.Bare",
+        "dependency.Holder.Nested",
         "library.Missing",
     )
 
@@ -162,6 +166,9 @@ class LibraryProcessor(private val env: SymbolProcessorEnvironment) : SymbolProc
             .append(" annotations=").append(declaration.annotations.map { annotation(it) }.joinToString("; "))
         val star = declaration.asStarProjectedType()
         out.append(" star=").append(type(star)).append(" starText=").append(star.toString())
+            .append(" starArguments=").append(star.arguments.joinToString(", ", "[", "]") {
+                "${it.variance} type=${it.type} origin=${it.origin} parent=${it.parent}"
+            })
         env.logger.warn(out.toString())
     }
 }
