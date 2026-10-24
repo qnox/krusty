@@ -5860,6 +5860,15 @@ baseline transition, with exact per-release loaded-blob proof and normal shrink-
 afterward. This is not an all-backend support claim. Small capability follow-ups #2520–#2525
 restore measured cases independently; see [KLIB inline migration](KLIB_INLINE_MIGRATION.md).
 
+## Immutable KLIB closure frames
+
+The first #2521 slice lowers serialized immutable captures into ordinary common-IR closure
+prefixes, preserving exact value identities, own parameters, nested receiver provenance and
+transactional rollback. Official raw/prepared producer controls establish JVM behavior before
+Native execution, including nested shadowing, repeated calls and operand effects. Mutable cells,
+suspension, bound/reflective references and independent dependency storage/dispatch capabilities
+remain scoped follow-ups. No outcome baseline exception is renewed.
+
 ## Lossless JVM signature syntax
 
 The signature reader has an application-construction boundary that retains all written class

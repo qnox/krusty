@@ -18812,6 +18812,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   retained separately as `tests/box_regressions/multimodule/inlineStdlibRepeat.kt`; its template now
   binds the inherited iterator declaration instead of asserting that the old gap remains.
 
+- **Serialized immutable closures retain lexical capture frames.** Raw dependency bodies and
+  prepared inline templates lower function expressions and non-reflective rich references through
+  the common `Lambda`/`InvokeFunction` representation. Exact serialized value identities select
+  immutable captures, including values needed by nested closures; captures precede the closure's
+  own parameters without changing their identities or order. Capture operands are evaluated once
+  at creation and invocation arguments once per call. Fresh body frames keep local values,
+  return targets and loop targets inside their own declaration. Captured receivers retain their
+  original receiver facts through recapture and use a separate dense receiver ledger. Literal
+  versus anonymous-function provenance comes from the serialized source-form marker, independently
+  of the expression's encoding. Unknown forms, mutable cells, suspend closures, explicit bound
+  references and reflective references still decline. A declined body leaves no partial functions
+  or capture metadata. Tests: `klib_lowering::tests::closure_frames`,
+  `klib_lowering::function_lowering::closure_headers::tests`, and
+  `tests/klib_closure_frames_e2e.rs` (official raw/prepared producer frames and JVM/Native execution).
+
 - **A KLIB template lowers the forms kotlinc's prepared copy introduces.** A constructor call
   constructs by the provider identity of the exact serialized constructor, with the provider's
   parameter types and omitted arguments left to the constructor's defaults; a generic constructor

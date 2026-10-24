@@ -17,6 +17,7 @@ mod arrays;
 mod blocks;
 mod calls;
 mod class_literals;
+mod closures;
 mod compiler_blocks;
 mod conditionals;
 mod constructions;
@@ -273,9 +274,36 @@ impl<'a> BodyLowering<'a> {
             KlibIrExprKind::EnumConstructorCall(_) => {
                 return unsupported("an enum constructor call")
             }
-            KlibIrExprKind::FunctionReference { .. }
-            | KlibIrExprKind::RichFunctionReference { .. } => {
-                return unsupported("a function reference")
+            KlibIrExprKind::FunctionReference { .. } => return unsupported("a function reference"),
+            KlibIrExprKind::RichFunctionReference {
+                invoke,
+                bound_values,
+                reflection_target,
+                overridden,
+                flags,
+                origin,
+            } => {
+                if !bound_values.is_empty() || reflection_target.is_some() || *flags != 0 {
+                    return unsupported("a bound or reflective rich function reference");
+                }
+                let ty = self.ty(expression, "closure")?;
+                let invocation = match &overridden.signature {
+                    crate::metadata::klib_ir::KlibIrSignature::Public(signature)
+                        if overridden.kind
+                            == crate::metadata::klib_ir::KlibIrSymbolKind::Function =>
+                    {
+                        super::klib_types::function_invocation_arity(signature)
+                    }
+                    _ => None,
+                };
+                if !matches!(ty.kind(), crate::types::TyKind::Fun(signature)
+                    if invocation == Some(signature.params.len()))
+                {
+                    return Err(mismatch(
+                        "a rich closure does not override its function invocation",
+                    ));
+                }
+                (self.closure(*invoke, ty, origin.as_deref())?, ty)
             }
             KlibIrExprKind::PropertyReference { .. }
             | KlibIrExprKind::RichPropertyReference { .. } => {
@@ -398,7 +426,10 @@ impl<'a> BodyLowering<'a> {
                 let ty = self.ty(expression, "a vararg array")?;
                 (self.vararg_array(*element_type, elements, ty)?, ty)
             }
-            KlibIrExprKind::FunctionExpression { .. } => return unsupported("a lambda"),
+            KlibIrExprKind::FunctionExpression { function, origin } => {
+                let ty = self.ty(expression, "closure")?;
+                (self.closure(*function, ty, origin.as_deref())?, ty)
+            }
             KlibIrExprKind::DynamicMember { .. } => return unsupported("a dynamic member access"),
             KlibIrExprKind::DynamicOperator { .. } => return unsupported("a dynamic operator"),
             KlibIrExprKind::Error { .. } => return unsupported("an error expression"),
@@ -624,6 +655,8 @@ impl<'a> BodyLowering<'a> {
         // after those locals, as checked FIR does, and keep its symbol invisible until then.
         let local = self.locals.slot(variable, ty)?;
         self.locals.declare(&variable.base.symbol, local)?;
+        self.locals
+            .record_name(&variable.base.symbol, &variable.name);
         Ok(self.ir.add_expr(IrExpr::Variable {
             index: local.index,
             ty,

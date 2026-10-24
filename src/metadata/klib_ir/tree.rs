@@ -17,6 +17,8 @@
 use super::symbols::KlibIrSymbol;
 use super::KlibIrConstant;
 
+mod lexical_values;
+
 macro_rules! arena_id {
     ($name:ident) => {
         #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
