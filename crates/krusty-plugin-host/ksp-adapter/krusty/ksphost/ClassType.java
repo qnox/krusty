@@ -145,10 +145,7 @@ final class ClassType implements KSType {
         if (arguments.isEmpty()) {
             return simple;
         }
-        List<String> stars = new ArrayList<>();
-        for (KSTypeArgument argument : arguments) {
-            stars.add(argument.toString());
-        }
-        return simple + "<" + String.join(", ", stars) + ">";
+        // Every argument is a star, which the type's text writes as `*`.
+        return simple + "<" + String.join(", ", Collections.nCopies(arguments.size(), "*")) + ">";
     }
 }

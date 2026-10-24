@@ -15929,8 +15929,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `asStarProjectedType()` on a source or library classifier applies it to `*` for each of its type
   parameters (`Map<*, *>`, `headers.Base<*, *>`), then, while the classifier is `inner`, for each
   of its enclosing class's (`Holder<A>.Inner<B>` is `Inner<*, *>`, an inner `Bare` of it `Bare<*>`),
-  and to nothing when there are none. Each star is `SYNTHETIC`, with no type and no parent. The
-  type is not nullable, its text is the simple name with the stars (`Entry<*, *>`), and it equals
+  and to nothing when there are none. Each star is `SYNTHETIC`, with no type and no parent, and
+  renders as `STAR null`. The type is not nullable, its text is the simple name with the stars
+  (`Entry<*, *>`), and it equals
   the same type a source declaration names (`Middle<*>` written in a supertype), with the same
   hash, as KSP2 2.3.12 reports.
   (`crates/krusty-plugin-host/tests/ksp.rs`, `class_headers_are_what_ksp2_reports` and

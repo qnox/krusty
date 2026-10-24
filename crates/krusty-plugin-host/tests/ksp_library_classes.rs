@@ -225,7 +225,8 @@ fn logged(name: &str, library: Option<KspLibraryClass>, libraries: &KspLibraries
         0 => String::new(),
         count => format!("<{}>", vec!["*"; count].join(", ")),
     };
-    let star_arguments = vec!["STAR type=null origin=SYNTHETIC parent=null"; count].join(", ");
+    let star_arguments =
+        vec!["STAR type=null origin=SYNTHETIC parent=null text=STAR null"; count].join(", ");
     format!(
         "{name} -> {kind} {} simple={} package={} parent={} origin={} modifiers={} \
          typeParameters=[{}] supertypes={} annotations={} star={}{stars} starText={}{stars} \
