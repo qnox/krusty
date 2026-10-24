@@ -23,7 +23,7 @@ jobs:
   attribution:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Read the current title and body rather than the event payload: an integration may append a
       # footer at creation that is removed right after, and a re-run must see the edited text.
       # Dependabot's text is quoted upstream release notes, which may name an assistant that

@@ -241,7 +241,15 @@ fn run_verify_compile(argv: &[String]) {
                     Err(report) => verify::Outcome::Failed {
                         errors: error_lines(&report),
                     },
-                    Ok(_) => match verify::compare_outputs(&arguments.reference, &opts.dest) {
+                    Ok(_) => match verify::compare_outputs(
+                        &arguments.reference,
+                        &opts.dest,
+                        if arguments.kotlin_outputs_only {
+                            verify::ReferenceOutputs::KotlinOnly
+                        } else {
+                            verify::ReferenceOutputs::All
+                        },
+                    ) {
                         Ok(comparison) => verify::Outcome::Compiled { comparison },
                         Err(error) => {
                             eprintln!("error: cannot compare the outputs: {error}");
@@ -597,12 +605,21 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
         .zip(&sources)
         .zip(&stems)
         .map(|((path, source), stem)| {
-            krusty::source::SourceInput::new(
+            let input = krusty::source::SourceInput::new(
                 krusty::source::kind(Path::new(path))
                     .expect("CLI source collection must classify every source"),
                 source,
             )
-            .with_file_stem(stem)
+            .with_file_stem(stem);
+            let input = match opts.source_fragments.get(path) {
+                Some(fragment) => input.with_fragment(*fragment),
+                None => input,
+            };
+            if opts.common_sources.contains(path) {
+                input.common()
+            } else {
+                input
+            }
         })
         .collect::<Vec<_>>();
     // The module name reaches diagnostics that spell it (an `expect` with no `actual` names the

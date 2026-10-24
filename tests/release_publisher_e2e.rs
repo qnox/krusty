@@ -310,7 +310,7 @@ fn updates_supersede_their_ref_without_cancelling_master_validation() {
     };
     let acquire = position("release-publisher.sh acquire");
     let check = position("release-publisher.sh check");
-    let publish = position("softprops/action-gh-release");
+    let publish = position("gh release create \"$TAG\"");
     let central = position("publish-maven-central.sh");
     let portal = position("publishPlugins");
     let record = position("release-publisher.sh record");

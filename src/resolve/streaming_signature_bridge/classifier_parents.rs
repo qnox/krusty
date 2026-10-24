@@ -116,6 +116,16 @@ pub(super) fn compact_classifier_parents(
     // edges that participate in a source cycle. Compact type resolution above recovers the applied
     // source shapes, but must not resurrect one of those rejected nominal edges merely because its
     // syntax still exists in the header inventory.
+    // A class extending an alias-actualized `expect` class declares the `expect` class; the
+    // collected hierarchy already names the classifier its `actual typealias` names.
+    let actualized_expect = |owner: TypeName| {
+        let table = semantics.table;
+        table
+            .source_fragments
+            .is_aliased_expect(owner)
+            .then(|| table.source_alias_fqns.get(&owner).copied())
+            .flatten()
+    };
     let retained_parent = |parent: Ty| {
         if parent.non_null().is_fun() {
             return true;
@@ -134,6 +144,8 @@ pub(super) fn compact_classifier_parents(
                 }
                 {
                     classifier.super_internal == Some(owner)
+                        || classifier.super_internal.is_some()
+                            && actualized_expect(owner) == classifier.super_internal
                         || classifier
                             .interfaces
                             .iter_ids()

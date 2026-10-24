@@ -1497,7 +1497,7 @@ pub fn facade_package_metadata_from_ir(
             };
             // Recorded exactly when a reader cannot rebuild the physical descriptor from the
             // declared types (kotlinc's `requiresFunctionSignature`).
-            let jvm_desc = super::metadata_method_signatures::requires_function_signature(
+            let jvm_desc = (super::metadata_method_signatures::requires_function_signature(
                 declaration.receiver,
                 declaration
                     .params
@@ -1513,7 +1513,7 @@ pub fn facade_package_metadata_from_ir(
                 declaration.ret,
                 &physical_descriptor,
                 &Default::default(),
-            )
+            ) || declaration.spellings.names_actualized_expect())
             .then_some(physical_descriptor);
             crate::metadata::builder::FnMeta {
                 jvm_desc,
@@ -1621,11 +1621,12 @@ pub fn facade_package_metadata_from_ir(
                 delegate_method,
                 field_name: field.as_ref().and_then(|(name, _)| name.clone()),
                 field_desc: field.map(|(_, descriptor)| descriptor).filter(|physical| {
-                    super::metadata_method_signatures::requires_field_signature(
-                        declaration.ty,
-                        physical,
-                        &Default::default(),
-                    )
+                    declaration.spellings.ret.actualized_expect
+                        || super::metadata_method_signatures::requires_field_signature(
+                            declaration.ty,
+                            physical,
+                            &Default::default(),
+                        )
                 }),
                 annotation_method: ir
                     .jvm_package_property_annotation_marker(declaration.property)

@@ -477,6 +477,7 @@ fn collect_type_reified_parameters(
         | TyKind::PlatformNullable(inner)
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner)
+        | TyKind::RawProjection(inner)
         | TyKind::DefinitelyNotNull(inner) => {
             collect_type_reified_parameters(inner, parameters, found);
         }
