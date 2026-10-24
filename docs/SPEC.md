@@ -318,6 +318,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   variance/projection containment is checked. Matching only a zipped prefix is not proof. A bare
   target retains the existing owner-reachability query. The common relation's unit regression
   covers direct and inherited applications; the hierarchy test oracle preserves applied arguments.
+  Compiler-owned top-level generic classifiers retain complete own-parameter counts, so their
+  formals never become synthetic enclosing captures. Empty-classpath array applications and class
+  literals preserve the written argument or the language-selected projection.
+  A delegated member retains the checker's applied self type, including its own and captured
+  formals. Inference joins a shared superclass's applied arguments instead of reducing it to a
+  bare classifier. The existing dependency-star and capturing-delegate oracles pin these producers.
 
 - **`suspend fun` (coroutines), slice 1 — the calling convention.** A `suspend fun` lowers to
   kotlinc's continuation-passing-style (CPS) JVM ABI: an extra `kotlin.coroutines.Continuation`

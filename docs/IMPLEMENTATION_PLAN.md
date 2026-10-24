@@ -38,6 +38,12 @@ ordinary-body category cannot retry it and turn the target decline into an ordin
   application: the delegated-property convention's reference argument is the `KProperty`
   declaration's star projection (shared with bare class literals), and the core `Array`
   declaration publishes its `T` formal for erased-cast proofs with an empty classpath.
+- Core top-level declarations publish all their formals as their own, with no enclosing captures.
+  The public declaration inventory and checked array/class-literal applications pin that layout;
+  raw Java flexible applications remain the separate prerequisite #2537.
+- Preserve the class checker's applied self type at delegated-member sites and the applied common
+  superclass in inference joins. Keep the existing complete dependency-star/bridge and capturing
+  local-class delegate regressions unchanged; raw Java applications remain a separate handoff.
 
 ## Java raw type applications
 
