@@ -71,6 +71,14 @@ Forward and reverse input orders must publish the same property payload and clas
 The configured param-property default-target mode is a separate semantic layer (#2542), described
 below; it does not change cross-file target-policy publication ownership.
 
+## Nested JVM generic applications
+
+Retain an argument range for each classifier segment in the common own-first layout. Render
+segments outer-first without reordering arguments within a segment; use the semantic ordering
+for declaration variance and raw/Nothing admission too. Source and reference-built dependency
+fixtures compare complete ABI inventories for declared/inferred results, unequal segment arities,
+three nesting levels and mixed declaration variance.
+
 ## Configured property-parameter annotation defaults
 
 Project `PropertyParamAnnotationDefaultTargetMode` through the shared parser feature boundary.
