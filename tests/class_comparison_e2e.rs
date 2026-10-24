@@ -3,7 +3,9 @@
 //! the class files are real compiler output rather than hand-assembled bytes.
 
 use super::common;
-use krusty::jvm::class_comparison::{compare_classes, ClassDifference, DifferenceKind};
+use krusty::jvm::class_comparison::{
+    compare_classes, is_kotlin_class, ClassDifference, DifferenceKind,
+};
 
 fn class(src: &str, name: &str) -> Vec<u8> {
     let classes = common::compile_in_process(
@@ -144,4 +146,13 @@ fn every_kind_round_trips_through_its_identifier() {
     for kind in DifferenceKind::ALL {
         assert_eq!(DifferenceKind::from_id(kind.id()), Some(kind));
     }
+}
+
+#[test]
+fn kotlin_classes_carry_kotlin_metadata_and_other_bytes_do_not() {
+    assert!(is_kotlin_class(&class(
+        "fun answer(): Int = 42\n",
+        "SampleKt"
+    )));
+    assert!(!is_kotlin_class(b"not a class"));
 }

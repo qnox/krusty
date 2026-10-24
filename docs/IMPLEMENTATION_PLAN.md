@@ -5,6 +5,29 @@ front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
 
+## Class application headers
+
+JVM classifier assembly reads complete own/captured formal layouts without recursively publishing
+enclosing members. The header reader preserves metadata authority, bound chains, shadowed identities,
+static boundaries, local/anonymous entries and physical mapped-class variance. Owner tests constrain
+the member-cache lifetime as well as the resulting layout.
+
+This is declaration evidence for #2537. Raw occurrence construction, lossless explicit outer-segment
+parsing and erased-application semantics remain separate follow-ups. Enclosing-method formal scopes
+need explicit header evidence; unavailable bounds are refused rather than replaced with `Any`.
+
+## Local-call checked vararg signature
+
+Retain the checker's complete applied value-parameter list on local calls and consume it when
+packing varargs. The lifted declaration still owns ABI coercions, captures, extension receivers
+and defaults; reject mismatched value arity. Real-kotlinc runtime and whole-class regressions cover
+the selected Int/String array carriers. This functional slice does not implement #2554's broader
+call-owned operand-preparation/result contract or introduce the private numeric carrier prototype.
+
+KLIB dependency-emission categories have disjoint declaration-owned roots before lowering begins.
+An authenticated intrinsic wrapper keeps that ownership when its body transaction declines; the
+ordinary-body category cannot retry it and turn the target decline into an ordinary-closure error.
+
 ## Receiver-bound constructor constraints
 
 Normalize inner constructors with complete own-plus-captured instance results, preserving independent
@@ -23,18 +46,6 @@ signatures, reference runtime and exact diagnostics.
 Inferred return types of receiver-bound alias calls remain a separate signature-lookup follow-up
 in #2592; declared alias calls and direct inferred calls are covered here.
 
-## Local-call checked vararg signature
-
-Retain the checker's complete applied value-parameter list on local calls and consume it when
-packing varargs. The lifted declaration still owns ABI coercions, captures, extension receivers
-and defaults; reject mismatched value arity. Real-kotlinc runtime and whole-class regressions cover
-the selected Int/String array carriers. This functional slice does not implement #2554's broader
-call-owned operand-preparation/result contract or introduce the private numeric carrier prototype.
-
-KLIB dependency-emission categories have disjoint declaration-owned roots before lowering begins.
-An authenticated intrinsic wrapper keeps that ownership when its body transaction declines; the
-ordinary-body category cannot retry it and turn the target decline into an ordinary-closure error.
-
 ## Shared-target plugin model identity
 
 The compiler/plugin IR crate records the existing checkout build input in Rust dep-info. Switching
@@ -44,6 +55,12 @@ copies the real crate, changes its model API, and checks A → B → B → A →
 This changes no plugin wire format or Kotlin semantics.
 
 ## Constructor parameter annotation pool order
+
+Argument constraint solving reports only definite declaration-bound violations. A relation still
+containing a current-call formal waits for the ordinary completed-binding check, after explicit
+and expected-result context. Caller-owned variables remain fixed. Source and dependency
+constructor regressions cover dependent applied bounds and contradictory complete applications;
+the existing prior-valid-argument diagnostic and concrete-bound tests remain required.
 
 The JVM constructor header seeder carries retained checked applications rather than descriptor-only
 projections. Encode their complete values at the existing retention-ordered visit boundary; keep
