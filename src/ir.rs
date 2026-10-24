@@ -58,6 +58,7 @@ mod enum_switch_whens;
 pub(crate) use enum_switch_whens::EnumSwitchWhen;
 mod emitted_body_roots;
 mod enums;
+mod expect_actualization;
 mod expression_provenance;
 pub(crate) use emitted_body_roots::emitted_body_roots;
 mod field_flags;
@@ -1304,6 +1305,17 @@ pub struct IrExternalFrameLine {
     pub call_line: u32,
 }
 
+/// Where an inline callee's body places one of the lambdas a call passes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InlineLambdaPlacement {
+    /// The body never uses it: no frame runs the lambda's body.
+    Unused,
+    /// The body invokes it, so the lambda's body runs in the caller's frame.
+    Invoked,
+    /// The body hands it to an object it constructs, whose method runs the lambda's body.
+    Retained,
+}
+
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.
 #[derive(Default)]
 pub struct IrFile {
@@ -2098,6 +2110,10 @@ pub struct IrFile {
     /// return, before CPS erasure to `Object`), recorded from the checked FIR call target: the
     /// cross-unit complement of `suspend_funs`, for a callee in ANOTHER file or a dependency.
     pub suspend_calls: crate::fx_hash::HashMap<u32, Ty>,
+    /// Each suspend literal an emitted inline call binds to an inline parameter → where its body
+    /// runs: in the caller's frame, in an object the callee constructs, or nowhere. Decided before
+    /// coroutine lowering, from the callee's compiled body where the callee is spliced from one.
+    pub suspend_lambda_placements: crate::fx_hash::HashMap<ExprId, InlineLambdaPlacement>,
     /// A cross-unit suspend call → the declared results of the declarations its callee overrides,
     /// nearest first, when it overrides any: how its result crosses the continuation is the target's.
     pub suspend_call_overridden_results: crate::fx_hash::HashMap<ExprId, Box<[Ty]>>,

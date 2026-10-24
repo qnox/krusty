@@ -11,6 +11,13 @@ pub struct ScriptDefinition {
     pub template: Option<String>,
     /// The script constructor's parameters, which it passes on to the template's constructor.
     pub constructor_parameters: Vec<ScriptParameter>,
+    /// The classes of the definition's implicit receivers, as qualified Kotlin names, in the
+    /// definition's order. The script receives one value of each after the template's parameters,
+    /// and its body reaches their members after its own and the template's.
+    pub implicit_receivers: Vec<String>,
+    /// Imports every script of the definition has before its own, each a qualified name that may
+    /// end in `.*`.
+    pub default_imports: Vec<String>,
 }
 
 /// A script constructor parameter.
@@ -36,6 +43,8 @@ impl ScriptDefinition {
                 classifier: "kotlin.Array".to_string(),
                 type_arguments: vec!["kotlin.String".to_string()],
             }],
+            implicit_receivers: Vec::new(),
+            default_imports: Vec::new(),
         }
     }
 
@@ -47,6 +56,7 @@ impl ScriptDefinition {
             Some(template) if !has_classifier(top_level_classifier(template)) => Self {
                 template: None,
                 constructor_parameters: Vec::new(),
+                ..self
             },
             _ => self,
         }

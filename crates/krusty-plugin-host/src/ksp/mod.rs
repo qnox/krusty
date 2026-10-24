@@ -152,16 +152,17 @@ impl KspHost {
         loop {
             let reply = protocol::read_reply(self.process.stdout())
                 .map_err(|error| self.process.failure(error))?;
-            let Reply::ClassQuery(name) = reply else {
-                return Ok(reply);
-            };
-            let Some(classpath) = classpath else {
-                return Err(HostError::Protocol {
-                    detail: format!("the host asked for the classifier {name} outside a round"),
-                });
-            };
-            let class = classpath.class(&name);
-            self.send(&Request::ClassAnswer(class.as_ref()))?;
+            match reply {
+                Reply::ClassQuery(name) => {
+                    let class = in_round(classpath, &name)?.class(&name);
+                    self.send(&Request::ClassAnswer(class.as_ref()))?;
+                }
+                Reply::NameQuery(mapping, name) => {
+                    let mapped = in_round(classpath, &name)?.mapped_name(mapping, &name);
+                    self.send(&Request::NameAnswer(mapped.as_deref()))?;
+                }
+                reply => return Ok(reply),
+            }
         }
     }
 
@@ -169,6 +170,16 @@ impl KspHost {
         protocol::write_request(self.process.stdin(), request)
             .map_err(|error| self.process.failure(error))
     }
+}
+
+/// The classpath a question about the classifier `name` is answered from, which only a round has.
+fn in_round<'a>(
+    classpath: Option<&'a dyn KspClasspath>,
+    name: &str,
+) -> Result<&'a dyn KspClasspath, HostError> {
+    classpath.ok_or_else(|| HostError::Protocol {
+        detail: format!("the host asked about the classifier {name} outside a round"),
+    })
 }
 
 fn refused(reply: Reply, request: &str) -> HostError {

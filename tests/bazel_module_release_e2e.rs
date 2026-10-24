@@ -233,7 +233,7 @@ fn the_release_job_packages_the_module_before_publishing() {
     let collect = position("name: collect all target artifacts");
     let version = position("name: compute version + tag");
     let package = position("scripts/package-bazel-module.sh \"${{ steps.v.outputs.ver }}\" dist");
-    let publish = position("softprops/action-gh-release");
+    let publish = position("gh release create \"$TAG\"");
     assert!(collect < package && version < package && package < publish);
     assert!(steps[package].contains("if: steps.tip.outputs.publish == 'true'"));
 

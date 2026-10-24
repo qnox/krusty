@@ -203,7 +203,14 @@ impl SerializeBody<'_> {
                 .properties
                 .iter()
                 .find(|property| property.backing_field == Some(field))
-                .filter(|property| property.is_open)
+                // kotlinc reads a non-private `lateinit` element through its getter too, which
+                // throws for an uninitialized one. A private one has no getter: its field read is
+                // checked where it is used.
+                .filter(|property| {
+                    property.is_open
+                        || (!property.is_private
+                            && ir.classes[foo_id as usize].fields[field_index].is_lateinit())
+                })
                 .map(|property| (property.name.clone(), property.getter));
             let read = match overridable {
                 Some((name, declared_getter)) => {
