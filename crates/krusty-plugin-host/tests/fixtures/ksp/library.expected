@@ -1,6 +1,7 @@
 # What KSP2 2.3.12 (KSPJvmMain) logs with Library.kt over library/, with dependency/ (built by kotlinc
-# for this record) on the classpath: each classpath classifier the processor names, then the
-# declaration of each source classifier's direct supertypes, each with its star-projected type.
+# for this record) on the classpath: each classpath classifier the processor names, the builtin
+# types, then the declaration of each source classifier's direct supertypes; each with its
+# star-projected type.
 w: [ksp] kotlin.collections.List -> INTERFACE kotlin.collections.List simple=List package=kotlin.collections parent=null origin=KOTLIN_LIB modifiers=ABSTRACT,PUBLIC typeParameters=[E variance=COVARIANT bounds=kotlin.Any?] supertypes=kotlin.collections.Collection<kotlin.collections.List.E> annotations= star=kotlin.collections.List<*> starText=List<*>
 w: [ksp] kotlin.collections.MutableMap -> INTERFACE kotlin.collections.MutableMap simple=MutableMap package=kotlin.collections parent=null origin=KOTLIN_LIB modifiers=ABSTRACT,PUBLIC typeParameters=[K variance=INVARIANT bounds=kotlin.Any?; V variance=INVARIANT bounds=kotlin.Any?] supertypes=kotlin.collections.Map<kotlin.collections.MutableMap.K, kotlin.collections.MutableMap.V> annotations= star=kotlin.collections.MutableMap<*, *> starText=MutableMap<*, *>
 w: [ksp] kotlin.collections.Map.Entry -> INTERFACE kotlin.collections.Map.Entry simple=Entry package=kotlin.collections parent=kotlin.collections.Map origin=KOTLIN_LIB modifiers=ABSTRACT,PUBLIC typeParameters=[K variance=COVARIANT bounds=kotlin.Any?; V variance=COVARIANT bounds=kotlin.Any?] supertypes=kotlin.Any annotations= star=kotlin.collections.Map.Entry<*, *> starText=Entry<*, *>
@@ -45,6 +46,22 @@ w: [ksp] dependency.Empty -> CLASS dependency.Empty simple=Empty package=depende
 w: [ksp] dependency.Shape -> INTERFACE dependency.Shape simple=Shape package=dependency parent=null origin=KOTLIN_LIB modifiers=PUBLIC,SEALED typeParameters=[] supertypes=kotlin.Any annotations= star=dependency.Shape starText=Shape
 w: [ksp] dependency.Circle -> CLASS dependency.Circle simple=Circle package=dependency parent=null origin=KOTLIN_LIB modifiers=FINAL,PUBLIC typeParameters=[] supertypes=dependency.Shape annotations= star=dependency.Circle starText=Circle
 w: [ksp] library.Missing null
+w: [ksp] builtIn any=kotlin.Any text=Any origin=KOTLIN_LIB nullable=kotlin.Any? text=Any? notNullable=kotlin.Any same=true
+w: [ksp] builtIn nothing=kotlin.Nothing text=Nothing origin=KOTLIN_LIB nullable=kotlin.Nothing? text=Nothing? notNullable=kotlin.Nothing same=true
+w: [ksp] builtIn unit=kotlin.Unit text=Unit origin=KOTLIN_LIB nullable=kotlin.Unit? text=Unit? notNullable=kotlin.Unit same=true
+w: [ksp] builtIn number=kotlin.Number text=Number origin=KOTLIN_LIB nullable=kotlin.Number? text=Number? notNullable=kotlin.Number same=true
+w: [ksp] builtIn byte=kotlin.Byte text=Byte origin=KOTLIN_LIB nullable=kotlin.Byte? text=Byte? notNullable=kotlin.Byte same=true
+w: [ksp] builtIn short=kotlin.Short text=Short origin=KOTLIN_LIB nullable=kotlin.Short? text=Short? notNullable=kotlin.Short same=true
+w: [ksp] builtIn int=kotlin.Int text=Int origin=KOTLIN_LIB nullable=kotlin.Int? text=Int? notNullable=kotlin.Int same=true
+w: [ksp] builtIn long=kotlin.Long text=Long origin=KOTLIN_LIB nullable=kotlin.Long? text=Long? notNullable=kotlin.Long same=true
+w: [ksp] builtIn float=kotlin.Float text=Float origin=KOTLIN_LIB nullable=kotlin.Float? text=Float? notNullable=kotlin.Float same=true
+w: [ksp] builtIn double=kotlin.Double text=Double origin=KOTLIN_LIB nullable=kotlin.Double? text=Double? notNullable=kotlin.Double same=true
+w: [ksp] builtIn char=kotlin.Char text=Char origin=KOTLIN_LIB nullable=kotlin.Char? text=Char? notNullable=kotlin.Char same=true
+w: [ksp] builtIn boolean=kotlin.Boolean text=Boolean origin=KOTLIN_LIB nullable=kotlin.Boolean? text=Boolean? notNullable=kotlin.Boolean same=true
+w: [ksp] builtIn string=kotlin.String text=String origin=KOTLIN_LIB nullable=kotlin.String? text=String? notNullable=kotlin.String same=true
+w: [ksp] builtIn iterable=kotlin.collections.Iterable<*> text=Iterable<*> origin=KOTLIN_LIB nullable=kotlin.collections.Iterable<*>? text=Iterable<*>? notNullable=kotlin.collections.Iterable<*> same=true
+w: [ksp] builtIn annotation=kotlin.Annotation text=Annotation origin=KOTLIN_LIB nullable=kotlin.Annotation? text=Annotation? notNullable=kotlin.Annotation same=true
+w: [ksp] builtIn array=kotlin.Array<*> text=Array<*> origin=KOTLIN_LIB nullable=kotlin.Array<*>? text=Array<*>? notNullable=kotlin.Array<*> same=true
 w: [ksp] Bag super CLASS java.util.AbstractList simple=AbstractList package=java.util parent=null origin=JAVA_LIB modifiers=ABSTRACT,PUBLIC typeParameters=[E variance=INVARIANT bounds=kotlin.Any] supertypes=java.util.AbstractCollection<java.util.AbstractList.E>, kotlin.collections.MutableList<java.util.AbstractList.E> annotations= star=java.util.AbstractList<*> starText=AbstractList<*>
 w: [ksp] Bag super INTERFACE java.io.Serializable simple=Serializable package=java.io parent=null origin=JAVA_LIB modifiers=ABSTRACT,PUBLIC typeParameters=[] supertypes=kotlin.Any annotations= star=java.io.Serializable starText=Serializable
 w: [ksp] Bag super INTERFACE kotlin.Comparable simple=Comparable package=kotlin parent=null origin=KOTLIN_LIB modifiers=ABSTRACT,PUBLIC typeParameters=[T variance=CONTRAVARIANT bounds=kotlin.Any?] supertypes=kotlin.Any annotations= star=kotlin.Comparable<*> starText=Comparable<*>

@@ -12,19 +12,22 @@ import java.util.Collections;
 import java.util.List;
 import kotlin.sequences.Sequence;
 
-// A classifier that is not nullable, applied either to no type arguments, such as the type an
-// annotation names, or to a star for each of its type parameters.
+// A classifier applied either to no type arguments, such as the type an annotation names, or to a
+// star for each of its type parameters, and nullable only when made so.
 final class ClassType implements KSType {
     private final KSClassDeclaration declaration;
     private final List<KSTypeArgument> arguments;
+    private final boolean nullable;
 
     ClassType(KSClassDeclaration declaration) {
-        this(declaration, Collections.emptyList());
+        this(declaration, Collections.emptyList(), false);
     }
 
-    private ClassType(KSClassDeclaration declaration, List<KSTypeArgument> arguments) {
+    private ClassType(
+            KSClassDeclaration declaration, List<KSTypeArgument> arguments, boolean nullable) {
         this.declaration = declaration;
         this.arguments = arguments;
+        this.nullable = nullable;
     }
 
     // `declaration.asStarProjectedType()`: KSP2 applies the classifier to a star for each type
@@ -35,7 +38,7 @@ final class ClassType implements KSType {
         for (int i = 0; i < parameters; i++) {
             stars.add(new SourceTypeArgument(null, Variance.STAR));
         }
-        return new ClassType(declaration, stars);
+        return new ClassType(declaration, stars, false);
     }
 
     @Override
@@ -45,7 +48,7 @@ final class ClassType implements KSType {
 
     @Override
     public Nullability getNullability() {
-        return Nullability.NOT_NULL;
+        return nullable ? Nullability.NULLABLE : Nullability.NOT_NULL;
     }
 
     @Override
@@ -85,17 +88,17 @@ final class ClassType implements KSType {
 
     @Override
     public KSType makeNullable() {
-        throw Nodes.notImplemented("KSType.makeNullable");
+        return nullable ? this : new ClassType(declaration, arguments, true);
     }
 
     @Override
     public KSType makeNotNullable() {
-        return this;
+        return nullable ? new ClassType(declaration, arguments, false) : this;
     }
 
     @Override
     public boolean isMarkedNullable() {
-        return false;
+        return nullable;
     }
 
     @Override
@@ -117,7 +120,8 @@ final class ClassType implements KSType {
     public boolean equals(Object other) {
         return other instanceof ClassType
                 && ((ClassType) other).declaration == declaration
-                && ((ClassType) other).arguments.size() == arguments.size();
+                && ((ClassType) other).arguments.size() == arguments.size()
+                && ((ClassType) other).nullable == nullable;
     }
 
     @Override
@@ -127,14 +131,17 @@ final class ClassType implements KSType {
 
     @Override
     public String toString() {
-        String simple = declaration.getSimpleName().asString();
-        if (arguments.isEmpty()) {
-            return simple;
+        StringBuilder out = new StringBuilder(declaration.getSimpleName().asString());
+        if (!arguments.isEmpty()) {
+            List<String> stars = new ArrayList<>();
+            for (KSTypeArgument argument : arguments) {
+                stars.add(argument.toString());
+            }
+            out.append('<').append(String.join(", ", stars)).append('>');
         }
-        List<String> stars = new ArrayList<>();
-        for (KSTypeArgument argument : arguments) {
-            stars.add(argument.toString());
+        if (nullable) {
+            out.append('?');
         }
-        return simple + "<" + String.join(", ", stars) + ">";
+        return out.toString();
     }
 }
