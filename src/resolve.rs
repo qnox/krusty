@@ -38695,7 +38695,7 @@ impl<'a> Checker<'a> {
                 let receiver = receiver.or(candidate.receiver)?;
                 if inference_receiver
                     .or(candidate_receiver)
-                    .is_some_and(|actual| !self.receiver_is_assignable(actual, receiver))
+                    .is_some_and(|actual| !self.receiver_accepts_inference(actual, receiver))
                 {
                     continue;
                 }
@@ -58887,7 +58887,7 @@ impl<'a> Checker<'a> {
                 let (&actual_outer, rest) = function.params.split_first()?;
                 let natural_outer = outer?;
                 if !self.receiver_is_assignable(actual_outer, natural_outer) {
-                    if !self.postponed_assignability_trial(natural_outer, actual_outer) {
+                    if !self.receiver_accepts_inference(actual_outer, natural_outer) {
                         return None;
                     }
                     postponed_outer = true;

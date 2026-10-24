@@ -5905,3 +5905,8 @@ Owner tests constrain the constructor and context/extension/value round trips, a
 dependency runtime tests read both generic and concrete stored values. The selected-member record
 and conversion move out of the resolver facade, and plugin plans keep their declaration payload
 indirect, retiring two large-enum lint findings without changing the indexed FIR/IR representation.
+
+Late extension admission now uses strict receiver assignability or the existing satisfiable
+postponed-frame trial. The common operation also serves unbound constructor-reference receivers;
+selection cannot commit its trial bindings. This repairs the two existing builder-inference
+regressions introduced by the alias receiver guard while retaining concrete receiver refusal.

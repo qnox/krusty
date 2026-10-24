@@ -21273,3 +21273,11 @@ extension receiver, then values. Member projection inserts the extension receive
 parameters once, without inserting it again into the retained declaration vector. Physical outer
 instances and default markers are separate ABI slots. Tests: `libraries::classifier_callables::tests`
 and both value-class dependency controls in `tests/inner_constructor_bounds_e2e.rs`.
+
+Extension receiver admission retains satisfiable active builder-inference variables. Selection may
+test the receiver relation against cloned postponed frames, solve those trial bindings and require
+strict assignability after substitution. Only ordinary call commitment publishes the constraints.
+Concrete or conflicting receiver applications still fail. The same operation admits a postponed
+unbound outer receiver in a constructor reference. Tests: `builder_inference_receivers_e2e`,
+`postponed_bound_inference_e2e` and the exact wrong-receiver ledgers in
+`bound_inner_alias_inference_e2e`.

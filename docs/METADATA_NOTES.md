@@ -1015,3 +1015,8 @@ Selected member records also retain pre-substitution declaration parameters in f
 specialization; callable/member projection and constructor publication carry it without recovering
 it from the specialized signature. Constructor outer-instance and default-marker slots remain
 physical inputs. This is an in-memory declaration fact, with no Kotlin metadata wire change.
+
+Receiver admission distinguishes active call-owned inference variables from rigid declaration
+parameters. A satisfiable trial specializes both receiver sides before strict comparison without
+publishing new declaration facts. Alias expansion, selected constructor identity and retained
+declaration parameters remain unchanged; no metadata wire or physical ABI change is involved.
