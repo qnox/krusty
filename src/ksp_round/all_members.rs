@@ -5,11 +5,17 @@
 //! of each direct supertype in written order as that supertype lists them, leaving out a private
 //! one, one already listed, and one a member listed before overrides. A data class's generated
 //! `equals`, `hashCode` and `toString` take the place of the member each overrides. Constructors
-//! come last. A member inherited along two supertypes that are not one declaration becomes an
+//! come last. Members inherited along two supertypes that are not one declaration become an
 //! intersection override of KSP2's own, and a member of a supertype applied to type arguments a
 //! substituted copy; neither is described yet, so neither is a classifier with a library supertype
 //! other than `kotlin.Any`, an enum class, or an annotation class: the round leaves their lists
 //! undescribed and the host refuses the queries.
+//!
+//! The frontend publishes no override relation between members a classifier only inherits, so
+//! two inherited members that may meet in an intersection are recognized conservatively: a member
+//! one supertype lists that is not a member an earlier supertype listed, but shares its name,
+//! leaves the list undescribed. That refuses an inherited overload pair too, which KSP2 lists
+//! plainly; it never lists two members where KSP2 lists one.
 
 use std::cell::RefCell;
 
@@ -290,6 +296,8 @@ impl Order<'_> {
         let mut listed: HashSet<Identity> =
             own.iter().map(|entry| entry.identity.clone()).collect();
         let mut inherited: Vec<Entry> = Vec::new();
+        // The names of the members earlier supertypes contributed.
+        let mut earlier_names: HashSet<String> = HashSet::default();
         for super_type in class.super_types.as_ref()? {
             let KspTypeDeclaration::Class(super_name) = &super_type.declaration else {
                 return None;
@@ -340,12 +348,13 @@ impl Order<'_> {
                     || inherited
                         .iter()
                         .any(|listed| listed.closure.contains(&entry.identity));
-                if intersects {
+                if intersects || earlier_names.contains(&entry.name) {
                     return None;
                 }
                 listed.insert(entry.identity.clone());
                 inherited.push(entry.clone());
             }
+            earlier_names.extend(inherited.iter().map(|entry| entry.name.clone()));
         }
         if !generated.is_empty() {
             return None;
