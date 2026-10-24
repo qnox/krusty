@@ -5,12 +5,16 @@ front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
 
-## Annotation interface nesting
+## Class application headers
 
-Annotation interfaces register the shared per-file nested-class inventory before publication.
-The ordinary table retention policy includes declared children and their enclosing chain, even
-without an executable reference. Complete kotlinc artifact comparisons cover top-level and deeply
-nested annotations and their class, interface, enum, object and annotation members.
+JVM classifier assembly reads complete own/captured formal layouts without recursively publishing
+enclosing members. The header reader preserves metadata authority, bound chains, shadowed identities,
+static boundaries, local/anonymous entries and physical mapped-class variance. Owner tests constrain
+the member-cache lifetime as well as the resulting layout.
+
+This is declaration evidence for #2537. Raw occurrence construction, lossless explicit outer-segment
+parsing and erased-application semantics remain separate follow-ups. Enclosing-method formal scopes
+need explicit header evidence; unavailable bounds are refused rather than replaced with `Any`.
 
 ## Local-call checked vararg signature
 
@@ -44,6 +48,13 @@ The JVM constructor header seeder carries retained checked applications rather t
 projections. Encode their complete values at the existing retention-ordered visit boundary; keep
 source target selection and semantic annotation publication outside the writer. This is independent
 of the cross-file publication and configured default-target-mode follow-ups.
+
+## Annotation interface nesting
+
+Annotation interfaces register the shared per-file nested-class inventory before publication.
+The ordinary table retention policy includes declared children and their enclosing chain, even
+without an executable reference. Complete kotlinc artifact comparisons cover top-level and deeply
+nested annotations and their class, interface, enum, object and annotation members.
 
 ## Constructor-property annotation publication
 
