@@ -259,6 +259,10 @@ pub(super) fn apply(
             .fragments
             .fragment_sources
             .extend(list.iter().cloned()),
+        "-Xfragment-refines" => parsed
+            .fragments
+            .fragment_refines
+            .extend(list.iter().cloned()),
         "-language-version" => parsed.language_version = Some(text.to_string()),
         "-api-version" => parsed.api_version = Some(text.to_string()),
         "-progressive" => parsed.progressive = flag,

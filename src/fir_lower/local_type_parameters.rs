@@ -143,7 +143,8 @@ impl Closure<'_> {
             | TyKind::Nullable(inner)
             | TyKind::PlatformNullable(inner)
             | TyKind::InProjection(inner)
-            | TyKind::OutProjection(inner) => self.see(inner),
+            | TyKind::OutProjection(inner)
+            | TyKind::RawProjection(inner) => self.see(inner),
             TyKind::Intersection(parts) => parts.iter().for_each(|&part| self.see(part)),
             TyKind::StarProjection(_)
             | TyKind::Unit
