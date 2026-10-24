@@ -16,14 +16,6 @@ This is declaration evidence for #2537. Raw occurrence construction, lossless ex
 parsing and erased-application semantics remain separate follow-ups. Enclosing-method formal scopes
 need explicit header evidence; unavailable bounds are refused rather than replaced with `Any`.
 
-## Nested JVM generic applications
-
-Retain an argument range for each classifier segment in the common own-first layout. Render
-segments outer-first without reordering arguments within a segment; use the semantic ordering
-for declaration variance and raw/Nothing admission too. Source and reference-built dependency
-fixtures compare complete ABI inventories for declared/inferred results, unequal segment arities,
-three nesting levels and mixed declaration variance.
-
 ## Local-call checked vararg signature
 
 Retain the checker's complete applied value-parameter list on local calls and consume it when
@@ -78,6 +70,14 @@ file has published its annotation policies; no syntax or full TypeInfo is retain
 Forward and reverse input orders must publish the same property payload and class bytes.
 The configured param-property default-target mode is a separate semantic layer (#2542), described
 below; it does not change cross-file target-policy publication ownership.
+
+## Nested JVM generic applications
+
+Retain an argument range for each classifier segment in the common own-first layout. Render
+segments outer-first without reordering arguments within a segment; use the semantic ordering
+for declaration variance and raw/Nothing admission too. Source and reference-built dependency
+fixtures compare complete ABI inventories for declared/inferred results, unequal segment arities,
+three nesting levels and mixed declaration variance.
 
 ## Configured property-parameter annotation defaults
 

@@ -1,12 +1,5 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
-## Nested JVM signature argument layout
-
-Common classifier applications store own arguments before captured enclosing arguments. JVM
-generic signatures render enclosing segments first, with each segment reading its own semantic
-argument range. Declaration variance and raw/Nothing decisions use the same own-first layout.
-Kotlin metadata's existing inner-type split and the physical JVM descriptors remain unchanged.
-
 ## Class formal layouts before member publication
 
 Kotlin class metadata supplies own formals and bounds. A mapped builtin declaration supplies its
@@ -79,6 +72,13 @@ Local calls retain the checker-applied value-parameter list for packing too. It 
 reference array while the lifted local declaration still has an erased generic array descriptor.
 This changes neither that declaration's generic signature nor metadata encoding, and does not
 reconstruct selected element types from operands or physical descriptors.
+
+## Nested JVM signature argument layout
+
+Common classifier applications store own arguments before captured enclosing arguments. JVM
+generic signatures render enclosing segments first, with each segment reading its own semantic
+argument range. Declaration variance and raw/Nothing decisions use the same own-first layout.
+Kotlin metadata's existing inner-type split and the physical JVM descriptors remain unchanged.
 
 ## Reference (`fun f(a: Int): Int = a` in `M.kt` → class `MKt`)
 
