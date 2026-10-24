@@ -202,6 +202,12 @@ impl SymbolSource for KlibLibraries {
                 signature: class.signature.clone(),
                 classifier: owner,
                 parameters: class.type_parameters.klib_body_parameters(),
+                kind: class.shape.kind,
+                modality: class.modality,
+                is_value: class.is_value,
+                is_inner: class.shape.outer_instance.is_some(),
+                is_expect: class.expect,
+                primary_constructor: class.primary_constructor.clone(),
             });
         }
         Some(realization)

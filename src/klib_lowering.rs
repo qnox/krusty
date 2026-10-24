@@ -15,6 +15,7 @@ mod body_lowering;
 mod body_unit;
 mod callee_facts;
 mod class_headers;
+mod class_initialization;
 mod closure_forms;
 mod constructor_bounds;
 mod constructor_calls;

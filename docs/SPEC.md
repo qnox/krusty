@@ -18832,7 +18832,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   identity and provider handle. Unreferenced declarations and parameter defaults are not roots;
   direct-only inventories used to authenticate intrinsic support remain unchanged. The public
   producer test checks an imported constructor's frozen checked-IR facts separately from Native
-  execution of a supported runtime constructor. This does not implement imported class storage.
+  execution of a supported runtime constructor. Imported ordinary-class storage has a separate
+  admission contract below.
+
+- **Imported ordinary classes initialize from their declared storage.** A reached KLIB constructor
+  can materialize a final, non-generic ordinary class whose sole primary constructor delegates to
+  `Any` and runs its own instance initializer. Exact producer/class/constructor identities, metadata
+  modifiers, receiver and field types must agree with the serialized declarations. Storage comes
+  from actual field declarations, never constructor positions. Constructor arguments remain plain
+  frame values; explicit stores and anonymous initializer blocks execute in declaration order on
+  each fresh instance. The private initialization frame retains its instance receiver and argument
+  identities, including captured values. Preparation and lowering use the same admission plan and
+  follow initializer calls through the existing producer-origin graph.
+  Unsupported inheritance, secondary/default/vararg constructors, value/inner/expect classes,
+  generic classes and member dispatch remain separate capabilities. Existing target runtime
+  constructors retain their frozen external contract. Before target emission, a same-name source
+  classifier, different producer or separately materialized support unit declines explicitly until
+  qualified class facts and constructor exports can connect them safely. No partial support export
+  is published. Tests: `tests/klib_closure_frames_e2e.rs` (unchanged nested constructor execution,
+  ordered initialization and repeated allocation, independent storage/argument layout, and exact
+  source-classifier collision diagnostics), with the JVM oracle preceding Native checks.
 
 - **A KLIB template lowers the forms kotlinc's prepared copy introduces.** A constructor call
   constructs by the provider identity of the exact serialized constructor, with the provider's

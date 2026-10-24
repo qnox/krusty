@@ -87,6 +87,25 @@ impl<'a> KlibCalleeFacts<'a> {
             .map(|constructor| constructor.is_some())
     }
 
+    /// The initializer graph of the same positive ordinary-class capability used by lowering.
+    pub(crate) fn constructor_initialization_callees(
+        &self,
+        identity: &KlibDependencyCallable,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<Option<Vec<KlibDependencyCallable>>, super::decline::KlibBodyDeclineReason> {
+        match self.get(identity) {
+            Some(KlibCalleeFact::Selected(callables)) => {
+                super::class_initialization::constructor_initialization_callees(
+                    callables[0],
+                    bodies,
+                )
+            }
+            _ => Err(super::decline::KlibBodyDeclineReason::SignatureMismatch(
+                "an initializer has no unique selected constructor declaration".to_owned(),
+            )),
+        }
+    }
+
     /// Authenticate a declaration the target implements without lowering its serialized body.
     pub(crate) fn target_intrinsic(
         &self,
