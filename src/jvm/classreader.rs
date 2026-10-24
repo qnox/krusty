@@ -1545,6 +1545,18 @@ fn class_literal_type(descriptor: &str) -> Option<crate::types::Ty> {
             },
         );
     }
+    // A collection interface is read the way Kotlin reads a Java type, as the mutable face of the
+    // mapped collection (`Ljava/util/List;` is `MutableList`); both faces name the same class. A
+    // primitive wrapper keeps its class (`Integer.class` is not `int.class`).
+    let class = descriptor
+        .strip_prefix('L')
+        .and_then(|value| value.strip_suffix(';'))
+        .map(crate::types::type_name);
+    if let Some(mutable) =
+        class.and_then(crate::jvm::jvm_class_map::jvm_collection_to_kotlin_mutable_type_name)
+    {
+        return Some(Ty::obj_name(mutable));
+    }
     if let Some(classifier) = descriptor_classifier(descriptor) {
         return Some(
             crate::types::builtin_semantic(classifier).unwrap_or_else(|| Ty::obj_name(classifier)),
@@ -2320,5 +2332,24 @@ mod tests {
             super::source_debug_extension(b"not a class"),
             Err(super::ReadError::NotAClass)
         ));
+    }
+
+    #[test]
+    fn a_class_literal_is_the_type_kotlin_reads_its_class_as() {
+        use crate::types::{type_name, Ty};
+        let read = |descriptor| super::class_literal_type(descriptor).expect(descriptor);
+        assert_eq!(read("V"), Ty::Unit);
+        assert_eq!(read("I"), Ty::Int);
+        assert_eq!(read("Ljava/lang/Integer;"), Ty::obj("java/lang/Integer"));
+        assert_eq!(read("Ljava/lang/String;"), Ty::String);
+        assert_eq!(
+            read("Ljava/util/List;"),
+            Ty::obj_name(type_name("kotlin/collections/MutableList"))
+        );
+        assert_eq!(read("[I"), Ty::array(Ty::Int));
+        assert_eq!(
+            read("[Ljava/lang/String;"),
+            Ty::obj_args_name(crate::types::wk::array(), &[Ty::String])
+        );
     }
 }
