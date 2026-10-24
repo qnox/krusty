@@ -1115,6 +1115,15 @@ KRef kt_class_literal(const KType *type);
 KRef kt_class_simple_name(KRef self);
 KRef kt_class_qualified_name(KRef self);
 
+/* `typeOf<T>()`: a `kotlin.reflect.KType`. Each is a static object the generator emits whole
+   (see `krusty_rt.c` for its layout) wearing `kt_type_ktype_impl`, which names the `KType` marker
+   among its interfaces. Equality is structural, and `toString` prints what Kotlin/Native's
+   `KTypeImpl` does. `classifier` answers the class literal of the type's class. */
+extern const KType kt_type_ktype;
+extern const KType kt_type_ktype_impl;
+KRef kt_ktype_classifier(KRef self);
+kt_boolean kt_ktype_is_marked_nullable(KRef self);
+
 /* `Double.toString`/`Float.toString`: the shortest decimal that reads back as exactly this value,
    written into `out` (32 bytes is always enough). Returns the number of bytes written. Defined in
    `krusty_fp.c`, which is where the whole of that question lives. */

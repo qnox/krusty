@@ -95,13 +95,19 @@ pub fn expect_native_box(src: &str, stem: &str, expected: &str) {
 /// point is that emitting the program would be WRONG, that difference is the whole test.
 #[allow(dead_code)]
 pub fn expect_native_decline(src: &str, stem: &str, reason: &str) {
+    expect_native_sources_decline(&[(stem, src)], reason);
+}
+
+/// [`expect_native_decline`] for a program of several files (`(stem, text)`).
+pub fn expect_native_sources_decline(sources: &[(&str, &str)], reason: &str) {
     let Some(target) = krusty::native::NativeTarget::host() else {
         return;
     };
     if !krusty::native::can_link(target) {
         return;
     }
-    match native_box_outcome(src, stem, target) {
+    let stem = sources.first().map(|(stem, _)| *stem).unwrap_or("module");
+    match native_sources_outcome(sources, target) {
         NativeBox::Unavailable => {}
         NativeBox::Declined(said) => assert!(
             said.contains(reason),
@@ -281,6 +287,18 @@ pub fn native_image(
     sources: &[(&str, &str)],
     target: krusty::native::NativeTarget,
 ) -> Result<Vec<u8>, NativeBox> {
+    let objects = native_objects(sources, target)?;
+    let object_refs: Vec<&[u8]> = objects.iter().map(Vec::as_slice).collect();
+    krusty::native::link_program(&object_refs, target)
+        .map_err(|error| NativeBox::Failed(format!("link: {error}")))
+}
+
+/// Compile `sources` with the native code generator into one object per file, or say why there
+/// are none.
+pub fn native_objects(
+    sources: &[(&str, &str)],
+    target: krusty::native::NativeTarget,
+) -> Result<Vec<Vec<u8>>, NativeBox> {
     use krusty::diag::DiagSink;
     use krusty::native::{CraneliftBackend, Entry};
 
@@ -312,7 +330,12 @@ pub fn native_image(
     {
         return Err(NativeBox::Declined(decline.msg.clone()));
     }
-    if let Some(refusal) = diags.diags.first() {
+    // A warning, such as kotlinc's on a reified intersection, refuses nothing.
+    if let Some(refusal) = diags
+        .diags
+        .iter()
+        .find(|diagnostic| diagnostic.severity == krusty::diag::Severity::Error)
+    {
         return Err(NativeBox::Declined(refusal.msg.clone()));
     }
     if artifacts.is_empty() {
@@ -320,17 +343,11 @@ pub fn native_image(
             "the backend emitted nothing".to_string(),
         ));
     }
-    let objects: Vec<Vec<u8>> = artifacts
+    Ok(artifacts
         .into_iter()
         .filter(|(name, _)| name.ends_with(".o"))
         .map(|(_, object)| object)
-        .collect();
-    let object_refs: Vec<&[u8]> = objects.iter().map(Vec::as_slice).collect();
-    let image = match krusty::native::link_program(&object_refs, target) {
-        Ok(image) => image,
-        Err(error) => return Err(NativeBox::Failed(format!("link: {error}"))),
-    };
-    Ok(image)
+        .collect())
 }
 
 /// Run a linked image with `arguments` and `input` on standard input, and an empty environment.

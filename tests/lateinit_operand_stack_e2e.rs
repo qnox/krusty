@@ -1,7 +1,8 @@
-//! An in-class `lateinit` FIELD read in operand position. The read emits `dup; ifnonnull L; ldc name;
-//! invokestatic throwUninitializedPropertyAccessException; L:` — a branch whose join records a stackmap
-//! frame — so any operand already on the stack when it runs must be spilled to a temp first, or the
-//! frame types only the field value and the JVM verifier rejects the class at link time.
+//! An in-class `lateinit` read in operand position. A private one reads the field and emits `dup;
+//! ifnonnull L; pop; ldc name; invokestatic throwUninitializedPropertyAccessException; aconst_null;
+//! L:` — a branch whose join records a stackmap frame — so any operand already on the stack when it
+//! runs must be spilled to a temp first, or the frame types only the field value and the JVM verifier
+//! rejects the class at link time. A non-private one is read through its getter, as kotlinc does.
 //!
 //! These must RUN, not merely compile: the emitted class file is well-formed, and the mismatch only
 //! surfaces as a `VerifyError` when the JVM links the method.

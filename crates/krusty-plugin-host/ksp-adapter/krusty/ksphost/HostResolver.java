@@ -94,7 +94,25 @@ final class HostResolver implements Resolver {
 
     @Override
     public String mapToJvmSignature(KSDeclaration declaration) {
-        throw Nodes.notImplemented("Resolver.mapToJvmSignature");
+        // KSP2 describes no typealias.
+        if (declaration instanceof SourceTypeAlias) {
+            return null;
+        }
+        String signature = null;
+        if (declaration instanceof SourceClass) {
+            signature = ((SourceClass) declaration).jvmSignature;
+        } else if (declaration instanceof SourceFunction) {
+            signature = ((SourceFunction) declaration).jvmSignature;
+        } else if (declaration instanceof LibraryClass) {
+            signature = ((LibraryClass) declaration).jvmSignature;
+        } else if (declaration instanceof SourceProperty) {
+            signature = ((SourceProperty) declaration).jvmSignature;
+        }
+        // A declaration krusty could not describe is refused.
+        if (signature == null) {
+            throw Nodes.notImplemented("Resolver.mapToJvmSignature");
+        }
+        return signature;
     }
 
     @Override
@@ -110,13 +128,20 @@ final class HostResolver implements Resolver {
 
     @Override
     public String getJvmName(KSFunctionDeclaration declaration) {
+        if (declaration instanceof SourceFunction && ((SourceFunction) declaration).jvmName != null) {
+            return ((SourceFunction) declaration).jvmName;
+        }
         throw Nodes.notImplemented("Resolver.getJvmName");
     }
 
     @Override
     public String getJvmName(KSPropertyAccessor accessor) {
+        if (accessor instanceof SourceAccessor && ((SourceAccessor) accessor).jvmName != null) {
+            return ((SourceAccessor) accessor).jvmName;
+        }
         throw Nodes.notImplemented("Resolver.getJvmName");
     }
+
 
     @Override
     public String getOwnerJvmClassName(KSPropertyDeclaration declaration) {

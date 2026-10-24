@@ -86,7 +86,13 @@ impl Emitter<'_> {
         }
         class.fq_name_matches(&self.owner)
             && !declared.is_some_and(|p| {
-                p.is_open
+                // kotlinc keeps a non-private `lateinit` property's accessors in-class too: the
+                // getter is where its uninitialized check lives.
+                let lateinit = p
+                    .backing_field
+                    .and_then(|field| class.fields.get(field as usize))
+                    .is_some_and(|field| field.is_lateinit());
+                (p.is_open || lateinit)
                     && !p.is_private
                     && (!writable || (p.is_var && !p.has_private_default_setter()))
             })

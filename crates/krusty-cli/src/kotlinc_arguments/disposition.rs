@@ -72,6 +72,9 @@ pub const INERT: &[&str] = &[
     // krusty does not reserve the `kotlin` package, so it already compiles declarations there as
     // kotlinc does once this argument lifts the reservation.
     "-Xallow-kotlin-package",
+    // krusty does not warn that expect/actual classes are Beta, so it already reports what kotlinc
+    // reports once this argument silences that warning.
+    "-Xexpect-actual-classes",
     // krusty does not warn about a `@Suppress` naming an error diagnostic, so it already reports
     // what kotlinc reports once this argument silences that warning.
     "-Xdont-warn-on-error-suppression",
@@ -131,7 +134,6 @@ pub const UNSUPPORTED: &[&str] = &[
     "-Xenhance-type-parameter-types-to-def-not-null",
     "-Xenhanced-coroutines-debugging",
     "-Xescaping-functions",
-    "-Xexpect-actual-classes",
     "-Xexplicit-context-arguments",
     "-Xfir-aggressive-pruning",
     "-Xfragment-dependency",

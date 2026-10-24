@@ -16,9 +16,9 @@ use crate::jvm::method_node::{Category, Insn, MethodNode, Node};
 use crate::jvm::source_map::SourceMap;
 
 use super::super::lambda_expansion::{self, Lambda, SourceLines};
-use super::super::{functional_arguments, preparation, try_blocks};
+use super::super::{functional_arguments, object_regeneration, preparation, try_blocks};
 use super::super::{Binding, InlineError, Parameter, Parameters};
-use super::{CopiedLines, RegenerationError};
+use super::{CopiedLines, NestedObjects, RegenerationError};
 
 const ALOAD: u8 = 0x19;
 const GETFIELD: u8 = 0xb4;
@@ -57,6 +57,7 @@ pub(super) fn inline_into(
     lambdas: &[FieldLambda<'_>],
     lines: &mut CopiedLines,
     caller: &SourceMap,
+    objects: &mut NestedObjects<'_, '_>,
 ) -> Result<MethodNode, RegenerationError> {
     let inlining = |error: InlineError| RegenerationError::Inlining(Box::new(error));
     let (parameters, placed) = method_parameters(method, owner, lambdas)?;
@@ -66,7 +67,12 @@ pub(super) fn inline_into(
     try_blocks::move_try_starts_to_their_first_instruction(&mut node).map_err(inlining)?;
     let mut node = super::super::preprocess_node_before_inline(node).map_err(inlining)?;
     preparation::remove_fake_variable_initializations(&mut node);
+    let classes = objects.regeneration.classes;
+    let constructors =
+        object_regeneration::regenerate_objects(&mut node, &parameters, &placed, classes, objects)
+            .map_err(inlining)?;
     let invokes = functional_arguments::mark_places(&mut node, &parameters).map_err(inlining)?;
+    object_regeneration::complete_constructor_calls(&mut node, constructors).map_err(inlining)?;
     let context = lambda_expansion::Context {
         parameters: &parameters,
         lambdas: &placed,
