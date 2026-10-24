@@ -28,6 +28,23 @@ KLIB dependency-emission categories have disjoint declaration-owned roots before
 An authenticated intrinsic wrapper keeps that ownership when its body transaction declines; the
 ordinary-body category cannot retry it and turn the target decline into an ordinary-closure error.
 
+## Applied generic argument completeness
+
+- ✅ The common subtype relation rejects mismatched explicit argument counts after supertype
+  projection, while preserving bare-owner reachability. Direct and inherited regression cases
+  cover the previous zipped-prefix acceptance. This prerequisite is separate from dependency-body
+  type evidence and adds no backend capability or outcome allowance.
+- ✅ Producers that handed the relation a raw generic classifier now supply a complete
+  application: the delegated-property convention's reference argument is the `KProperty`
+  declaration's star projection (shared with bare class literals), and the core `Array`
+  declaration publishes its `T` formal for erased-cast proofs with an empty classpath.
+- Core top-level declarations publish all their formals as their own, with no enclosing captures.
+  The public declaration inventory and checked array/class-literal applications pin that layout;
+  raw Java flexible applications remain the separate prerequisite #2537.
+- Preserve the class checker's applied self type at delegated-member sites and the applied common
+  superclass in inference joins. Keep the existing complete dependency-star/bridge and capturing
+  local-class delegate regressions unchanged; raw Java applications remain a separate handoff.
+
 ## Java raw type applications
 
 - ✅ A Java raw occurrence carries one `RawProjection(erasure)` argument per formal (SPEC §5), so it
