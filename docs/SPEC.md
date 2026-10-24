@@ -1,5 +1,20 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## JVM generic result consumption
+
+A checked generic call's declaration-result coercion can retain its recorded reference slot until
+the return consumer materializes that value. The exact coercion marker and physical producer own
+that decision. A source null assertion checks and preserves the same value; its call slot is
+realized after generic erasure and refined with value-class declaration evidence. Inline regions,
+compiled inline calls and transformed suspension results retain their own materialization boundary.
+
+Named local storage and explicit source casts still materialize their declared types. Value-class
+returns distinguish declaration carriers from values boxed through a bare type parameter. A source
+assertion's extra nullability coercion retains the same authenticated declaration boundary rather
+than materializing an intermediate substituted type. Complete classfile and reference runtime
+controls, including single evaluation, live in
+`tests/consumer_materialized_result_e2e.rs`.
+
 ## Class application header ownership
 
 A classpath classifier's generic layout is read from declaration headers before its members are

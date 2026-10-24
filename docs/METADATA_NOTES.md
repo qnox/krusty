@@ -1,5 +1,11 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+JVM generic result consumption joins the retained declaration-result coercion with its physical
+producer after erasure. Null assertions preserve that producer's slot, and value-class lowering
+uses the same marked edge to distinguish declaration carriers from generic boxes. The extra
+nullable-to-nonnull coercion retains that declaration boundary. Source metadata types continue
+to describe the selected declaration independently of this JVM representation decision.
+
 ## Class formal layouts before member publication
 
 Kotlin class metadata supplies own formals and bounds. A mapped builtin declaration supplies its
