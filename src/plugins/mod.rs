@@ -921,12 +921,15 @@ fn declared_serializer_objects(
     for spelling in ir.prop_declared_spellings.values() {
         serialization::named_serializers(&spelling.ret, &mut type_annotations);
     }
-    let inherited = parents.values().flatten().flat_map(|record| {
-        record
-            .elements
-            .iter()
-            .filter_map(|element| element.serializer)
-    });
+    let mut inherited = Vec::new();
+    for element in parents
+        .values()
+        .flatten()
+        .flat_map(|record| &*record.elements)
+    {
+        inherited.extend(element.serializer);
+        serialization::named_serializers(&element.type_spelling, &mut inherited);
+    }
     property_annotations
         .chain(type_annotations)
         .chain(inherited)

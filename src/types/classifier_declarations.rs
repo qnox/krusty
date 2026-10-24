@@ -68,7 +68,7 @@ pub enum GeneratedClassifierKind {
 ///
 /// A provider that cannot state every element exactly (an element carries annotations it does not
 /// read, or the class lists no program order) publishes no record rather than a partial one.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SerializableClassElements {
     /// The class's own type parameters, by the identities its element types and superclass name
     /// them with. A generic class publishes them only where its provider knows those identities.
@@ -80,7 +80,7 @@ pub struct SerializableClassElements {
 }
 
 /// One serial element of a [`SerializableClassElements`].
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SerializableElement {
     pub name: Box<str>,
     /// The property's declared type, over the class's own type parameters.
@@ -94,6 +94,9 @@ pub struct SerializableElement {
     pub serializer: Option<TypeName>,
     /// The property is `@Contextual`.
     pub contextual: bool,
+    /// How the property's type is spelled, with the type-use annotations at each position
+    /// (`List<@Serializable(with = S::class) Item>`).
+    pub type_spelling: crate::spelling::Spelled,
 }
 
 /// Declaration facts of a classifier, as its declaring compilation fixed them.
