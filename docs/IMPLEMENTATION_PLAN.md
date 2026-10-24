@@ -5,13 +5,16 @@ front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
 
-## Nested JVM generic applications
+## Class application headers
 
-Retain an argument range for each classifier segment in the common own-first layout. Render
-segments outer-first without reordering arguments within a segment; use the semantic ordering
-for declaration variance and raw/Nothing admission too. Source and reference-built dependency
-fixtures compare complete ABI inventories for declared/inferred results, unequal segment arities,
-three nesting levels and mixed declaration variance.
+JVM classifier assembly reads complete own/captured formal layouts without recursively publishing
+enclosing members. The header reader preserves metadata authority, bound chains, shadowed identities,
+static boundaries, local/anonymous entries and physical mapped-class variance. Owner tests constrain
+the member-cache lifetime as well as the resulting layout.
+
+This is declaration evidence for #2537. Raw occurrence construction, lossless explicit outer-segment
+parsing and erased-application semantics remain separate follow-ups. Enclosing-method formal scopes
+need explicit header evidence; unavailable bounds are refused rather than replaced with `Any`.
 
 ## Local-call checked vararg signature
 
@@ -58,6 +61,14 @@ file has published its annotation policies; no syntax or full TypeInfo is retain
 Forward and reverse input orders must publish the same property payload and class bytes.
 The configured param-property default-target mode is a separate semantic layer (#2542), described
 below; it does not change cross-file target-policy publication ownership.
+
+## Nested JVM generic applications
+
+Retain an argument range for each classifier segment in the common own-first layout. Render
+segments outer-first without reordering arguments within a segment; use the semantic ordering
+for declaration variance and raw/Nothing admission too. Source and reference-built dependency
+fixtures compare complete ABI inventories for declared/inferred results, unequal segment arities,
+three nesting levels and mixed declaration variance.
 
 ## Configured property-parameter annotation defaults
 

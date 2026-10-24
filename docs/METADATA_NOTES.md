@@ -1,11 +1,16 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
-## Nested JVM signature argument layout
+## Class formal layouts before member publication
 
-Common classifier applications store own arguments before captured enclosing arguments. JVM
-generic signatures render enclosing segments first, with each segment reading its own semantic
-argument range. Declaration variance and raw/Nothing decisions use the same own-first layout.
-Kotlin metadata's existing inner-type split and the physical JVM descriptors remain unchanged.
+Kotlin class metadata supplies own formals and bounds. A mapped builtin declaration supplies its
+semantic layout when applicable; Java class signatures supply the remaining declarations. Captured
+class formals come from non-static `InnerClasses` outer edges, with bound hydration before own-first
+capture/shadow renaming. Local or anonymous entries without an outer are not member capture edges.
+
+Layout reads use class headers and builtin declaration tables, not the enclosing `LibraryType` or
+its members. Physical mapped Java requests keep invariant formals independently of a Kotlin view's
+declared variance. This changes no metadata wire fields or physical descriptors. Missing lexical
+formal scopes, including unavailable enclosing-method evidence, do not license placeholder bounds.
 
 Wasm's erased-reference binary equality realization uses the already checked operator and the
 runtime GC representation. It changes no metadata, callable identity, or provider authorization;
@@ -56,6 +61,13 @@ Local calls retain the checker-applied value-parameter list for packing too. It 
 reference array while the lifted local declaration still has an erased generic array descriptor.
 This changes neither that declaration's generic signature nor metadata encoding, and does not
 reconstruct selected element types from operands or physical descriptors.
+
+## Nested JVM signature argument layout
+
+Common classifier applications store own arguments before captured enclosing arguments. JVM
+generic signatures render enclosing segments first, with each segment reading its own semantic
+argument range. Declaration variance and raw/Nothing decisions use the same own-first layout.
+Kotlin metadata's existing inner-type split and the physical JVM descriptors remain unchanged.
 
 ## Reference (`fun f(a: Int): Int = a` in `M.kt` → class `MKt`)
 
