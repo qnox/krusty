@@ -255,7 +255,9 @@ const GENERIC_LIBRARY: &[(&str, &str)] = &[(
      @Serializable\n\
      abstract class Couple<A, B>(val first: A, val rest: List<B>)\n\
      @Serializable\n\
-     open class Fixed(val f: Int) : Holder<String>(\"f\")\n",
+     open class Fixed(val f: Int) : Holder<String>(\"f\")\n\
+     @Serializable\n\
+     class Item(val i: Int)\n",
 )];
 
 const GENERIC_MAIN: &str = "import kotlinx.serialization.Serializable\n\
@@ -295,6 +297,28 @@ const GENERIC_MAIN: &str = "import kotlinx.serialization.Serializable\n\
                             \x20   if (middle != \"{\\\"value\\\":7,\\\"tag\\\":7}\") return middle\n\
                             \x20   return \"OK\"\n\
                             }\n";
+
+const ITEM_ARGUMENT_MAIN: &str = "import kotlinx.serialization.Serializable\n\
+                                  import kotlinx.serialization.json.Json\n\
+                                  import generic.Holder\n\
+                                  import generic.Item\n\
+                                  @Serializable\n\
+                                  class Child : Holder<Item>(Item(1))\n\
+                                  @Serializable\n\
+                                  open class Middle<U>(val tag: U) : Holder<U>(tag)\n\
+                                  @Serializable\n\
+                                  class Leaf(val l: Int) : Middle<Item>(Item(2))\n\
+                                  fun box(): String {\n\
+                                  \x20   val child = Json.encodeToString(Child.serializer(), Child())\n\
+                                  \x20   if (child != \"{\\\"value\\\":{\\\"i\\\":1}}\") return child\n\
+                                  \x20   val decoded = Json.decodeFromString(Child.serializer(), \"{\\\"value\\\":{\\\"i\\\":4},\\\"count\\\":5}\")\n\
+                                  \x20   if (decoded.value.i != 4 || decoded.count != 5) return \"child\"\n\
+                                  \x20   val leaf = Json.encodeToString(Leaf.serializer(), Leaf(3))\n\
+                                  \x20   if (leaf != \"{\\\"value\\\":{\\\"i\\\":2},\\\"tag\\\":{\\\"i\\\":2},\\\"l\\\":3}\") return leaf\n\
+                                  \x20   val back = Json.decodeFromString(Leaf.serializer(), leaf)\n\
+                                  \x20   if (back.value.i != 2 || back.tag.i != 2 || back.l != 3) return \"leaf\"\n\
+                                  \x20   return \"OK\"\n\
+                                  }\n";
 
 /// A generic parent's elements are typed by the arguments the subclass gives it, and its
 /// `write$Self` takes one serializer per type parameter, which the subclass passes for its
@@ -513,4 +537,33 @@ fn assert_parent_declines(name: &str, library: &[(&str, &str)], main: &str) {
         "<fixture>/main-on-kotlinc-lib/src/Main.kt:1:1: error: krusty: this construct is not yet supported by the IR backend\n\
          krusty: 1 error(s)\n"
     );
+}
+
+/// A generic parent's element typed by a serializable class argument is serialized with that
+/// class's serializer, though no property of the subclass names it (`Child : Holder<Item>`), and
+/// so is one a local generic parent passes on from the dependency (`Leaf : Middle<Item>`).
+#[test]
+fn a_generic_dependency_parent_element_takes_its_type_arguments_serializer() {
+    let (plugin, mut runtime) = plugin_and_runtime()
+        .expect("the serialization plugin and runtime must be available to this regression");
+    runtime.push(
+        krusty::toolchain::serialization_json_jar()
+            .expect("kotlinx-serialization-json must be available to this regression"),
+    );
+    let switches = vec![format!("-Xplugin={}", plugin.display())];
+    let fixture = PluginFixture::new("serializable-generic-parent-item-argument");
+    let reference_lib = fixture.kotlinc("lib", GENERIC_LIBRARY, &runtime, &switches);
+    let krusty_lib = fixture.krusty("lib", GENERIC_LIBRARY, &runtime, &switches);
+    assert_same_classes(&reference_lib, &krusty_lib);
+    let sources = [("Main.kt", ITEM_ARGUMENT_MAIN)];
+    let mut reference_cp = runtime.clone();
+    reference_cp.push(reference_lib);
+    let mut krusty_cp = runtime.clone();
+    krusty_cp.push(krusty_lib);
+    let reference = fixture.kotlinc("main", &sources, &reference_cp, &switches);
+    let krusty = fixture.krusty("main", &sources, &krusty_cp, &switches);
+    assert_same_classes_and_box(&reference, &krusty, &krusty_cp);
+    let on_reference_lib =
+        fixture.krusty("main-on-kotlinc-lib", &sources, &reference_cp, &switches);
+    assert_same_classes_and_box(&reference, &on_reference_lib, &reference_cp);
 }
