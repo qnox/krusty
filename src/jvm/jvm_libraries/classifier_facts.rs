@@ -404,7 +404,9 @@ fn type_use_serializers_stated(spelled: &crate::spelling::Spelled) -> bool {
         .chain(&spelled.expansion_annotations)
         .all(|annotation| match annotation {
             TypeUseAnnotation::Checked(annotation) => {
-                !annotation.annotation.package_matches("kotlinx/serialization")
+                !annotation
+                    .annotation
+                    .package_matches("kotlinx/serialization")
                     || annotation.annotation == serializable
                         && annotation.arguments.iter().any(|(name, _)| name == "with")
             }
