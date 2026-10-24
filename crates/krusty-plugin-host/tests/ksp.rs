@@ -719,8 +719,14 @@ fn the_overridee_of_an_override_is_refused() {
         "ksp-processor-overridees-refusals",
     );
     for (fixture, query) in [
-        ("OverridingFunction.kt", "KSFunctionDeclaration.findOverridee"),
-        ("OverridingProperty.kt", "KSPropertyDeclaration.findOverridee"),
+        (
+            "OverridingFunction.kt",
+            "KSFunctionDeclaration.findOverridee",
+        ),
+        (
+            "OverridingProperty.kt",
+            "KSPropertyDeclaration.findOverridee",
+        ),
         ("DataComponent.kt", "KSFunctionDeclaration.findOverridee"),
     ] {
         let out = scratch(&format!("ksp-outputs-overridees-refused-{fixture}"));
