@@ -91,7 +91,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     /// A call dispatched on the receiver's own type, named by the STATIC type it is made through:
     /// `Callee::Virtual`. The class or interface that declares the member fixes the slot number —
-    /// `place_interface_slots` gives an interface member one number that means the same thing in
+    /// `module_interfaces` gives an interface member one number that means the same thing in
     /// every implementation — so the slot is looked up on the DECLARING classifier and the vtable
     /// it indexes is the receiver's. That is what makes `class C(a: I) : I by a` work: the
     /// forwarder synthesized on `C` knows only `I`.

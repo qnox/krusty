@@ -5,11 +5,12 @@
 //! member its interfaces declare (see `native::interface_calls`).
 
 use super::super::super::interface_calls::{
-    identities_section, implementations_section, member_identity, padded, property_member_identity,
-    DEPENDENCY_IMPLEMENTATIONS_SECTION, RECORD_SIZE,
+    identities_section, implementations_section, padded, DEPENDENCY_IMPLEMENTATIONS_SECTION,
+    RECORD_SIZE,
 };
 use super::*;
 use crate::backend::class_tables::module_slots::PlanKey;
+use crate::backend::interface_identity::{member_identity, property_member_identity};
 use crate::fir::ResolvedFunctionOverrideTarget;
 
 impl FileLowering<'_> {

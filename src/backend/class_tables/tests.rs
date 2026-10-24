@@ -20,8 +20,8 @@ impl Representation for IntsAndReferences {
     }
 }
 
-fn tables(ir: &IrFile) -> Result<ClassTables, Unsupported> {
-    build(
+fn tables(ir: &IrFile) -> Result<NumberedClassTables, Unsupported> {
+    build_numbered(
         &IntsAndReferences,
         ir,
         &super::module_slots::ModuleSlotPlan::empty(),
@@ -41,13 +41,6 @@ fn a_root_table_is_kotlin_any_by_role_then_the_reserved_function_slot() {
             Slot::AnyMember(AnyMember::ToString),
             Slot::Abstract,
         ]
-    );
-    assert_eq!(
-        tables.region,
-        InterfaceRegion {
-            base: 4,
-            members: 0
-        }
     );
     assert_eq!(tables.table(point).superclass, None);
     assert_eq!(tables.table(point).first_field, 0);
@@ -136,65 +129,11 @@ fn a_superclass_no_file_declares_is_declined_unless_the_target_owns_it() {
                 .to_string()
         )
     );
-    let owned = build(
+    let owned = build_numbered(
         &OwnsEverything,
         &ir,
         &super::module_slots::ModuleSlotPlan::empty(),
     )
     .expect("tables");
     assert_eq!(owned.table(error).superclass, None);
-}
-
-#[test]
-fn an_interface_member_has_one_number_in_every_implementing_table() {
-    let mut ir = IrFile::default();
-    let named = class(&mut ir, "Named", "kotlin/Any", 0);
-    ir.classes[named as usize].is_interface = true;
-    let declared = add_method(
-        &mut ir,
-        named,
-        function("name", "Named", vec![], Ty::String, true),
-    );
-    let mut implementors = Vec::new();
-    for (name, extra) in [("First", false), ("Second", true)] {
-        let implementor = class(&mut ir, name, "kotlin/Any", 0);
-        ir.classes[implementor as usize].interfaces = vec!["Named"].into();
-        if extra {
-            add_method(
-                &mut ir,
-                implementor,
-                function("own", name, vec![], Ty::Int, false),
-            );
-        }
-        let implementation = add_method(
-            &mut ir,
-            implementor,
-            function("name", name, vec![], Ty::String, false),
-        );
-        record_override(&mut ir, implementor, implementation, declared);
-        let owner = ir.classes[implementor as usize].fq_name_id();
-        for edge in ir.function_overrides.get_mut(&owner).into_iter().flatten() {
-            edge.overridden_is_interface = true;
-        }
-        implementors.push((implementor, implementation));
-    }
-    let tables = tables(&ir).expect("tables");
-    // `Second`'s own two methods put every class's interface region above slot 5.
-    assert_eq!(
-        tables.region,
-        InterfaceRegion {
-            base: 6,
-            members: 1
-        }
-    );
-    assert_eq!(
-        tables.slot(named, &SlotKey::Function(declared)),
-        Some(6),
-        "the interface's own spelling names the shared number"
-    );
-    for (implementor, implementation) in implementors {
-        let table = tables.table(implementor);
-        assert_eq!(table.vtable.len(), 7);
-        assert_eq!(table.vtable[6], Slot::Function(implementation));
-    }
 }

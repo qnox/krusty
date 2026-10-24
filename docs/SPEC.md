@@ -21130,12 +21130,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   instance is a struct whose first field is its dispatch table, followed by its superclasses'
   fields root first and then its own; it is declared a subtype of its superclass's struct, so
   `is`, `!is`, `as` and `as?` against a class are `ref.test`/`ref.cast`, and against an interface
-  test every class of the file implementing it. Slot numbers come from the target-neutral tables
-  Native also uses (`src/backend/class_tables/`): `equals`, `hashCode`, `toString` first by role,
-  one reserved slot, the class's own members, then a program-wide interface region in which an
-  interface member has the same number in every implementing class. Class, interface and `Any`
-  values are carried as `(ref null eq)`, so an override never needs a signature of its own; an
-  override carried differently from the member it overrides (a bridge) declines. `==` on a class
+  call that interface's test function, which tests every struct of the program implementing it.
+  Class slot numbers come from the target-neutral tables Native also uses
+  (`src/backend/class_tables/`): `equals`, `hashCode`, `toString` first by role, one reserved
+  slot, then the class's own members. Interface members are numbered once per module
+  (`ModuleInterfaces`) and published by their backend-neutral identity
+  (`src/backend/interface_identity.rs`), so a dependent module's class implementing a dependency
+  or library interface records its implementation against the declaring module's number. As
+  Native's linker does, Wasm's finalize step writes one stub per interface member once every
+  module is known: a direct call when one function implements it, a `ref.test` choice between
+  two, otherwise an index into the receiver's immutable itable array, packed so no class has two
+  members at one index. An implementation whose reference parameters are narrower than the
+  member's gets an erased-signature thunk that casts them down; one that would have to box a
+  primitive declines (`an interface member implemented with a value it would have to box`).
+  Class, interface and `Any` values are carried as `(ref null eq)`. `==` on a class
   value calls its `equals` slot null-safely, whose default is identity. Erasing a reference to
   `Any?` preserves structural `==` and `!=`: runtime Strings compare UTF-16 contents, class
   instances dispatch their actual `equals` slot, and other GC references use identity. Both

@@ -5643,7 +5643,7 @@ non-inline callers, still reads the field directly. Test:
   declarations, with primary and secondary constructors, fields, properties, virtual and `super`
   calls, interface dispatch, `is`/`!is`/`as`/`as?`, and `equals`/`hashCode`/`toString` a class
   declares. The target-neutral layout (hierarchy order, slot numbering by `kotlin.Any` role, the
-  program-wide interface region, bridges) is `src/backend/class_tables/`, shared with Native, which
+  module interface numbering, bridges) is `src/backend/class_tables/`, shared with Native, which
   keeps only byte offsets and symbols on top of it; Wasm builds a struct subtype and a vtable
   struct subtype per class from the same tables (`src/wasm/codegen/classes.rs`). Independently
   analyzed `// MODULE:` units retain one Wasm program state and join generated dependency KLIB
@@ -5651,15 +5651,13 @@ non-inline callers, still reads the field directly. Test:
   their exact form; the committed target-KLIB inventories are the authoritative current backlog.
   Box lanes pass 460 (2.4.0), 460 (2.4.10) and 462 (2.4.20) cases on each target, up from
   181/181/182; Native's counts are unchanged by the shared tables.
-- Known gap: a class implementing an interface declared in another file, or a library interface
-  such as `Collection`, declines (`an interface declared outside this file`); Wasm lays out
-  interface members per file (`ModuleSlotPlan::empty()`). Native's descriptor proofs for that shape
-  (a `Collection` class also dispatched through a program interface, a cross-file `is` check) are
-  therefore named Native KLIB-lane tests in `tests/kotlin_box_native_conformance.rs` rather than
-  owned box regressions, which must pass on every lane.
-  The same holds across KLIB modules: Native's link-time interface stubs are proved by a dependent
-  module's class implementing a dependency's interface function, property and table members, which
-  are named Native KLIB-lane tests that run the JVM and pinned kotlinc-native oracles first.
+- Interfaces: a class implementing an interface declared in another file, another module or the
+  library (such as `Collection`) is dispatched through module-numbered interface members and
+  per-member stubs written at Wasm finalize (direct, two-way `ref.test`, or a packed itable
+  index), with one `is` test function per interface (`src/wasm/interface_dispatch.rs`,
+  `src/wasm/codegen/interface_members.rs`). The per-file interface region is deleted. The shared
+  box regressions `collectionSizeWithModuleInterface.kt`, `interfaceCheckAcrossFiles.kt` and the
+  three `multimoduleDependencyInterface*.kt` cases run on every lane.
 - Known gap: `x as? C` on a value smart-cast earlier in the body lowers to a `When` with no
   checked type, which Wasm declines rather than infer one.
 - Nullable scalar assertions decline when the operand is a reference but the checked result has
