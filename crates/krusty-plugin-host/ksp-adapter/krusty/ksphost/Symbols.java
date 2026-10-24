@@ -50,34 +50,38 @@ final class Symbols {
         return symbols;
     }
 
-    // The declarations of a file or of the classifier `owner` (`put_declaration` in
-    // `src/ksp/protocol.rs`).
+    // The declarations of a file or of the classifier `owner`, a source or a library classifier.
     private void readDeclarations(
             DataInputStream in,
             SourceFile file,
-            SourceClass owner,
+            KSDeclaration owner,
             List<KSDeclaration> into)
             throws IOException {
         int count = in.readInt();
         for (int i = 0; i < count; i++) {
-            byte tag = in.readByte();
-            switch (tag) {
-                case 0:
-                    into.add(readClass(in, file, owner));
-                    break;
-                case 1:
-                    into.add(readFunction(in, file, owner));
-                    break;
-                case 2:
-                    into.add(readProperty(in, file, owner));
-                    break;
-                case 3:
-                    String simpleName = Wire.readString(in);
-                    into.add(new SourceTypeAlias(file, simpleName, Wire.readString(in)));
-                    break;
-                default:
-                    throw new IOException("unknown declaration " + tag);
-            }
+            into.add(readDeclaration(in, file, owner));
+        }
+    }
+
+    // A declaration of a file or of the classifier `owner` (`put_declaration` in
+    // `src/ksp/protocol.rs`). A library classifier's file is null.
+    private KSDeclaration readDeclaration(DataInputStream in, SourceFile file, KSDeclaration owner)
+            throws IOException {
+        byte tag = in.readByte();
+        switch (tag) {
+            case 0:
+                return readClass(in, file, (SourceClass) owner);
+            case 1:
+                return readFunction(in, file, owner);
+            case 2:
+                return readProperty(in, file, owner);
+            case 3:
+                String simpleName = Wire.readString(in);
+                return new SourceTypeAlias(file, simpleName, Wire.readString(in));
+            case 4:
+                return resolvedClass(Wire.readString(in));
+            default:
+                throw new IOException("unknown declaration " + tag);
         }
     }
 
@@ -100,11 +104,13 @@ final class Symbols {
         declaration.declarationsComplete = Wire.readBoolean(in);
         sourceClasses.put(qualifiedName, declaration);
         readDeclarations(in, file, declaration, declaration.declarations);
+        declaration.jvmSignature = readOptionalString(in);
         return declaration;
     }
 
     // A classpath classifier (`put_library_class` in `src/ksp/protocol.rs`): a class's header with
-    // no declarations, then its package, parent, origin and whether its annotations are complete.
+    // its declarations, then its package, parent, origin, whether its annotations are complete, and
+    // the properties and functions it lists with the inherited ones.
     static LibraryClass readLibraryClass(DataInputStream in, Classpath classpath)
             throws IOException {
         Symbols symbols = new Symbols(classpath);
@@ -121,27 +127,56 @@ final class Symbols {
         if (Wire.readBoolean(in)) {
             declaration.superTypes = symbols.readReferences(in, declaration);
         }
-        Wire.readBoolean(in); // whether the declarations are complete, which they are not
-        if (in.readInt() != 0) {
-            throw new IOException("a library class lists no declarations");
-        }
+        declaration.declarationsComplete = Wire.readBoolean(in);
+        symbols.readDeclarations(in, null, declaration, declaration.declarations);
+        declaration.jvmSignature = readOptionalString(in);
         declaration.packageName = new Name(Wire.readString(in));
-        declaration.parent = Wire.readBoolean(in) ? Wire.readString(in) : null;
+        declaration.parent = readOptionalString(in);
         declaration.origin = in.readByte() == 0 ? Origin.KOTLIN_LIB : Origin.JAVA_LIB;
         declaration.annotationsComplete = Wire.readBoolean(in);
+        if (Wire.readBoolean(in)) {
+            declaration.allProperties = symbols.readMembers(in, declaration);
+        }
+        if (Wire.readBoolean(in)) {
+            declaration.allFunctions = symbols.readMembers(in, declaration);
+        }
         return declaration;
     }
 
+    // The members a library classifier lists (`put_members` in `src/ksp/protocol.rs`): its own
+    // declarations by index, and inherited ones with the classifier that declares them.
+    private List<KSDeclaration> readMembers(DataInputStream in, LibraryClass declaration)
+            throws IOException {
+        int count = in.readInt();
+        List<KSDeclaration> members = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            if (in.readByte() == 0) {
+                members.add(declaration.declarations.get(in.readInt()));
+            } else {
+                KSDeclaration owner = resolvedClass(Wire.readString(in));
+                members.add(readDeclaration(in, null, owner));
+            }
+        }
+        return members;
+    }
+
     // A function (`put_function` in `src/ksp/protocol.rs`).
-    private SourceFunction readFunction(DataInputStream in, SourceFile file, SourceClass owner)
+    private SourceFunction readFunction(DataInputStream in, SourceFile file, KSDeclaration owner)
             throws IOException {
         String name = Wire.readString(in);
         byte kind = in.readByte();
         boolean isAbstract = Wire.readBoolean(in);
+        Origin origin = origin(in.readByte());
         int line = Wire.readBoolean(in) ? in.readInt() : 0;
-        SourceFunction function =
-                new SourceFunction(
-                        file, owner, name, functionKind(kind), kind == 3 || kind == 4, isAbstract, line);
+        SourceFunction function = new SourceFunction(
+                file,
+                owner,
+                name,
+                functionKind(kind),
+                kind == 3 || kind == 4,
+                isAbstract,
+                origin,
+                line);
         readAnnotations(in, function, function.annotations);
         function.modifiers = readModifiers(in);
         if (Wire.readBoolean(in)) {
@@ -173,19 +208,24 @@ final class Symbols {
             function.parameters.add(parameter);
         }
         function.returnType = Wire.readBoolean(in) ? readReference(in, function) : null;
-        if (kind == 3 && owner != null) {
-            owner.primaryConstructor = function;
+        function.jvmSignature = readOptionalString(in);
+        function.jvmName = readOptionalString(in);
+        if (kind == 3 && owner instanceof SourceClass) {
+            ((SourceClass) owner).primaryConstructor = function;
+        } else if (kind == 3 && owner instanceof LibraryClass) {
+            ((LibraryClass) owner).primaryConstructor = function;
         }
         return function;
     }
 
     // A property (`put_property` in `src/ksp/protocol.rs`).
-    private SourceProperty readProperty(DataInputStream in, SourceFile file, SourceClass owner)
+    private SourceProperty readProperty(DataInputStream in, SourceFile file, KSDeclaration owner)
             throws IOException {
         String name = Wire.readString(in);
         boolean mutable = Wire.readBoolean(in);
+        Origin origin = origin(in.readByte());
         int line = Wire.readBoolean(in) ? in.readInt() : 0;
-        SourceProperty property = new SourceProperty(file, owner, name, mutable, line);
+        SourceProperty property = new SourceProperty(file, owner, name, mutable, origin, line);
         readAnnotations(in, property, property.annotations);
         property.modifiers = readModifiers(in);
         if (Wire.readBoolean(in)) {
@@ -199,6 +239,7 @@ final class Symbols {
         if (readAccessor(in, property.getter)) {
             throw new IOException("a getter has no parameter");
         }
+        property.getter.jvmName = readOptionalString(in);
         if (Wire.readBoolean(in)) {
             SourceAccessor.Setter setter = new SourceAccessor.Setter(property);
             if (!readAccessor(in, setter)) {
@@ -206,18 +247,24 @@ final class Symbols {
             }
             setter.parameter = new SetterParameter(setter, Wire.readString(in));
             readAnnotations(in, setter.parameter, setter.parameter.annotations);
+            setter.jvmName = readOptionalString(in);
             property.setter = setter;
         }
+        property.jvmSignature = readOptionalString(in);
         return property;
     }
 
     // An accessor up to its parameter (`put_accessor` in `src/ksp/protocol.rs`): whether it has
-    // one, which follows.
+    // one, which follows with its JVM name.
     private boolean readAccessor(DataInputStream in, SourceAccessor accessor) throws IOException {
-        accessor.written = Wire.readBoolean(in);
+        accessor.origin = origin(in.readByte());
         accessor.modifiers = readModifiers(in);
         readAnnotations(in, accessor, accessor.annotations);
         return Wire.readBoolean(in);
+    }
+
+    private static String readOptionalString(DataInputStream in) throws IOException {
+        return Wire.readBoolean(in) ? Wire.readString(in) : null;
     }
 
     private void readAnnotations(DataInputStream in, KSNode parent, List<KSAnnotation> into)
@@ -395,6 +442,17 @@ final class Symbols {
         }
     }
 
+    // Where a declaration comes from (`put_origin` in `src/ksp/protocol.rs`).
+    private static Origin origin(byte tag) throws IOException {
+        switch (tag) {
+            case 0: return Origin.KOTLIN;
+            case 1: return Origin.SYNTHETIC;
+            case 2: return Origin.KOTLIN_LIB;
+            case 3: return Origin.JAVA_LIB;
+            default: throw new IOException("unknown origin " + tag);
+        }
+    }
+
     private static ClassKind classKind(byte tag) throws IOException {
         switch (tag) {
             case 0: return ClassKind.INTERFACE;
@@ -425,6 +483,11 @@ final class Symbols {
             return source;
         }
         return classpath.classNamed(qualifiedName);
+    }
+
+    // The module's classpath.
+    Classpath classpath() {
+        return classpath;
     }
 
     // The classifier a resolved type or value names, which krusty found when it resolved it.

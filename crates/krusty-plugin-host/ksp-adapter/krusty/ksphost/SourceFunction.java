@@ -23,17 +23,20 @@ import java.util.List;
 import java.util.Set;
 import kotlin.sequences.Sequence;
 
-// A source function or constructor, or a function the language contributes to a classifier.
+// A source function or constructor, a function the language contributes to a classifier, or a
+// library classifier's.
 final class SourceFunction implements KSFunctionDeclaration {
+    // Null for a library classifier's.
     private final SourceFile file;
     // The classifier that declares it, or null for a top-level function.
-    private final SourceClass owner;
+    private final KSDeclaration owner;
     private final Name simpleName;
     // Null for a constructor, which KSP2 gives no qualified name.
     private final Name qualifiedName;
     private final FunctionKind kind;
     private final boolean isAbstract;
-    // The 1-based line, or 0 for a function the language contributes.
+    private final Origin origin;
+    // The 1-based line of a function the source wrote, else 0.
     private final int line;
     final List<KSAnnotation> annotations = new ArrayList<>();
     final List<KSValueParameter> parameters = new ArrayList<>();
@@ -41,17 +44,21 @@ final class SourceFunction implements KSFunctionDeclaration {
     Set<Modifier> modifiers;
     List<KSTypeParameter> typeParameters;
     KSTypeReference returnType;
+    String jvmSignature;
+    // The name KSP2 reports; null also when krusty does not name it the way KSP2 does yet.
+    String jvmName;
     // The extension receiver; `receiverUndescribed` when it has one krusty could not describe.
     KSTypeReference extensionReceiver;
     boolean receiverUndescribed;
 
     SourceFunction(
             SourceFile file,
-            SourceClass owner,
+            KSDeclaration owner,
             String name,
             FunctionKind kind,
             boolean constructor,
             boolean isAbstract,
+            Origin origin,
             int line) {
         this.file = file;
         this.owner = owner;
@@ -64,6 +71,7 @@ final class SourceFunction implements KSFunctionDeclaration {
                 : new Name(container.isEmpty() ? name : container + "." + name);
         this.kind = kind;
         this.isAbstract = isAbstract;
+        this.origin = origin;
         this.line = line;
     }
 
@@ -132,7 +140,7 @@ final class SourceFunction implements KSFunctionDeclaration {
 
     @Override
     public KSName getPackageName() {
-        return file.getPackageName();
+        return owner != null ? owner.getPackageName() : file.getPackageName();
     }
 
     @Override
@@ -193,7 +201,7 @@ final class SourceFunction implements KSFunctionDeclaration {
 
     @Override
     public Origin getOrigin() {
-        return line == 0 ? Origin.SYNTHETIC : Origin.KOTLIN;
+        return origin;
     }
 
     @Override

@@ -7,10 +7,12 @@ mod builtin_property_realization;
 mod builtins_customizer;
 mod callable_availability;
 mod catalog_presence;
+mod class_application_headers;
 mod classifier_facts;
 mod classpath_annotation_classes;
 mod collection_canonicalization;
 mod declaration_headers;
+mod declared_members;
 use classpath_annotation_classes::{classpath_annotation_targets, java_annotation_parameter_list};
 use collection_canonicalization::{
     canonicalize_jvm_collections, overlay_metadata_collection_names,
@@ -25,13 +27,16 @@ mod generic_signatures;
 mod inline_body_plan;
 mod inline_capability;
 mod java_nullability;
+mod java_operator_convention;
 mod mapped_builtin_member_status;
 mod object_methods;
 mod override_slots;
 mod parameter_plans;
+mod platform_abi;
 mod provider_normalization;
 #[cfg(test)]
 mod provider_normalization_tests;
+mod raw_types;
 use provider_normalization::normalize_tail;
 mod signature_parser;
 use signature_parser::parse_formals;
@@ -75,6 +80,8 @@ use crate::runtime::{PlatformRangeCtor, RangeConstruction};
 use crate::symbol_resolver::{ty_subst, ty_subst_all, ty_subst_keep_unbound};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{type_name, SemanticCallableOwner, Ty, TyKind, TypeName, TypeNameList};
+
+use java_operator_convention::java_method_has_operator_convention;
 
 fn effective_class_access(class: &super::classreader::ClassInfo) -> u16 {
     class
@@ -141,31 +148,6 @@ pub(super) struct JvmStaticField {
     pub(super) deprecated_hidden: bool,
 }
 
-/// Kotlin operator capability of a Java instance method. Java declarations cannot encode
-/// Kotlin's `operator` modifier, so the interoperability rule is defined entirely by the declared
-/// method name and value-parameter arity.
-fn java_method_has_operator_convention(name: &str, arity: usize) -> bool {
-    match name {
-        "invoke" => true,
-        "unaryPlus" | "unaryMinus" | "not" | "inc" | "dec" | "iterator" | "hasNext" | "next" => {
-            arity == 0
-        }
-        "plus" | "minus" | "times" | "div" | "rem" | "rangeTo" | "rangeUntil" | "contains"
-        | "compareTo" | "plusAssign" | "minusAssign" | "timesAssign" | "divAssign"
-        | "remAssign" => arity == 1,
-        "get" => arity >= 1,
-        "set" => arity >= 2,
-        "getValue" | "provideDelegate" => arity == 2,
-        "setValue" => arity == 3,
-        _ => name.strip_prefix("component").is_some_and(|suffix| {
-            arity == 0
-                && !suffix.is_empty()
-                && suffix.bytes().all(|byte| byte.is_ascii_digit())
-                && suffix.bytes().any(|byte| byte != b'0')
-        }),
-    }
-}
-
 impl JvmLibraries {
     /// Read only the value-class declaration fact needed while aligning a metadata signature. Building
     /// a complete provider classifier here recursively expands all of that classifier's members; a
@@ -185,6 +167,7 @@ impl JvmLibraries {
     /// declaration and its type-parameter metadata.
     fn semanticize_jvm_type(&self, ty: Ty) -> Ty {
         match ty.kind() {
+            TyKind::Obj(_, args) if args.is_empty() => self.java_raw_occurrences(ty),
             TyKind::Obj(internal, args) => {
                 let args = args
                     .iter()
@@ -1265,12 +1248,9 @@ impl JvmLibraries {
             let mut enum_entries_accessor = None;
             let has_kotlin_metadata = ci.meta.is_present();
             let uses_java_type_semantics = !has_kotlin_metadata;
+            let application_header = self.class_application_header(internal_name).ok()?;
             let class_bounds = self.member_class_formal_bounds(&ci);
-            let constructor_outer = ci.inner_class_self().and_then(|entry| {
-                (entry.access & ACC_STATIC == 0)
-                    .then(|| entry.outer.as_deref().map(type_name))
-                    .flatten()
-            });
+            let constructor_outer = application_header.outer_instance;
             // Identify the generated accessor while decoding JVM declarations, where metadata and
             // class flags are authoritative. The backend-neutral checker then consumes an explicit
             // capability instead of inferring declaration origin from a same-named static method.
@@ -1377,17 +1357,23 @@ impl JvmLibraries {
                         }),
                 );
                 if uses_java_type_semantics {
+                    // A descriptor names a generic classifier bare whether or not the source
+                    // applied it; only a method without a generic `Signature` wrote it raw.
+                    let raw = |ty: Ty| match m.signature {
+                        Some(_) => ty,
+                        None => self.java_raw_occurrences(ty),
+                    };
                     for (index, parameter) in params.iter_mut().enumerate() {
-                        *parameter = java_type_nullability(
+                        *parameter = raw(java_type_nullability(
                             java_collection_return_lower_bound(*parameter),
                             m.parameter_nullability.get(index).copied().flatten(),
-                        );
+                        ));
                     }
                     params.drain(..constructor_enclosing_prefix);
-                    ret = java_type_nullability(
+                    ret = raw(java_type_nullability(
                         java_collection_return_lower_bound(ret),
                         m.return_nullability,
-                    );
+                    ));
                 }
                 // Kotlin metadata defines the SOURCE declarations. The class file only realizes
                 // those declarations physically. An unmatched method in a Kotlin class is compiler
@@ -2414,15 +2400,8 @@ impl JvmLibraries {
                 &mut constructors,
                 constructor_outer,
             );
-            let (own_type_parameter_count, type_parameters) = self.member_class_type_parameters(
-                constructor_outer,
-                internal_name,
-                crate::types::TypeParameters::new(
-                    type_params,
-                    type_param_bounds,
-                    type_param_variances,
-                ),
-            );
+            let own_type_parameter_count = application_header.own_count;
+            let type_parameters = application_header.parameters;
             Some(LibraryType {
                 is_kotlin: has_kotlin_metadata,
                 is_data: ci.meta.is_data,
@@ -3180,7 +3159,11 @@ impl JvmLibraries {
                 let field_ty = if ci.meta.is_present() {
                     field_ty
                 } else {
-                    java_field_type(field_ty, field.access, field.nullability)
+                    self.java_raw_occurrences(java_field_type(
+                        field_ty,
+                        field.access,
+                        field.nullability,
+                    ))
                 };
                 let visibility = if field.access & 0x0001 != 0 {
                     Visibility::Public
@@ -4619,6 +4602,22 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         self.classpath_declaration_header(classifier)
     }
 
+    fn declared_members(&self, classifier: TypeName) -> Option<crate::libraries::DeclaredMembers> {
+        self.classpath_declared_members(classifier)
+    }
+
+    fn abi(&self) -> Option<&dyn crate::libraries::PlatformAbi> {
+        Some(self)
+    }
+
+    fn platform_class(&self, classifier: TypeName) -> Option<TypeName> {
+        super::jvm_class_map::java_class(classifier)
+    }
+
+    fn mapped_classifier(&self, class: TypeName) -> Option<TypeName> {
+        super::jvm_class_map::kotlin_class(class)
+    }
+
     fn dependency_access_policy(&self) -> &dyn crate::libraries::DependencyAccessPolicy {
         self
     }
@@ -5112,6 +5111,7 @@ mod tests {
     use crate::types::type_name;
     use crate::types::{Ty, TyKind, Visibility};
 
+    mod mapped_builtins;
     mod signature_parsing;
 
     fn initialized_libraries(classpath: std::rc::Rc<super::Classpath>) -> super::JvmLibraries {
@@ -5260,134 +5260,6 @@ mod tests {
             panic!("Function1 callable signature is not a function")
         };
         assert_eq!(signature.params.len(), 1);
-    }
-
-    #[test]
-    fn mapped_number_members_publish_only_their_kotlin_names() {
-        let (Some(stdlib), Some(jdk)) = (
-            crate::toolchain::stdlib_jar(),
-            crate::toolchain::jdk_modules(),
-        ) else {
-            return;
-        };
-        let libraries = initialized_libraries(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(vec![stdlib, jdk]),
-        ));
-        let classifier = libraries
-            .classifier_record(type_name("java/lang/Number"))
-            .expect("Number classifier");
-        assert!(classifier
-            .members
-            .iter()
-            .any(|member| member.name == "toInt"
-                && member.physical_name.as_deref() == Some("intValue")));
-        assert!(
-            classifier
-                .members
-                .iter()
-                .all(|member| member.name != "intValue"),
-            "provider boundary must not leak the physical Java spelling"
-        );
-    }
-
-    #[test]
-    fn mapped_kotlin_number_publishes_jdk_realizations_without_stdlib() {
-        let Some(jdk) = crate::toolchain::jdk_modules() else {
-            return;
-        };
-        let libraries = initialized_libraries(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(vec![jdk]),
-        ));
-        let classifier = libraries
-            .classifier_record(type_name("kotlin/Number"))
-            .expect("kotlin.Number");
-        for (source, physical) in [
-            ("toByte", "byteValue"),
-            ("toShort", "shortValue"),
-            ("toInt", "intValue"),
-            ("toLong", "longValue"),
-            ("toFloat", "floatValue"),
-            ("toDouble", "doubleValue"),
-        ] {
-            assert!(
-                classifier.members.iter().any(|member| {
-                    member.name == source && member.physical_name.as_deref() == Some(physical)
-                }),
-                "missing {source} realized by {physical}"
-            );
-        }
-        assert!(classifier.members.iter().all(|member| {
-            !matches!(
-                member.name.as_str(),
-                "byteValue"
-                    | "shortValue"
-                    | "intValue"
-                    | "longValue"
-                    | "floatValue"
-                    | "doubleValue"
-            )
-        }));
-    }
-
-    #[test]
-    fn mapped_throwable_constructors_keep_kotlin_parameter_names_and_jvm_realizations() {
-        let (Some(stdlib), Some(jdk)) = (
-            crate::toolchain::stdlib_jar(),
-            crate::toolchain::jdk_modules(),
-        ) else {
-            return;
-        };
-        let libraries = initialized_libraries(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(vec![stdlib, jdk]),
-        ));
-        let classifier = libraries
-            .classifier_record(type_name("kotlin/Throwable"))
-            .expect("Throwable classifier");
-        let constructor = classifier
-            .constructors
-            .iter()
-            .find(|constructor| constructor.call_sig.param_names.as_slice() == ["message", "cause"])
-            .expect("Kotlin Throwable(message, cause) declaration");
-
-        assert_eq!(
-            constructor.params,
-            [
-                Ty::nullable(Ty::String),
-                Ty::nullable(Ty::obj("kotlin/Throwable"))
-            ]
-        );
-        assert_eq!(
-            constructor.physical_params,
-            [
-                Ty::platform_nullable(Ty::String),
-                Ty::platform_nullable(Ty::obj("kotlin/Throwable"))
-            ]
-        );
-        assert_eq!(
-            constructor.descriptor,
-            "(Ljava/lang/String;Ljava/lang/Throwable;)V"
-        );
-    }
-
-    #[test]
-    fn mapped_mutable_list_publishes_its_applied_read_only_supertype() {
-        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
-            return;
-        };
-        let libraries = initialized_libraries(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(vec![stdlib]),
-        ));
-        let actual = Ty::obj_args("kotlin/collections/MutableList", &[Ty::String]);
-        let supertypes = crate::symbol_resolver::direct_supertypes(&libraries, actual);
-        assert!(
-            supertypes.contains(&Ty::obj_args("kotlin/collections/List", &[Ty::String])),
-            "MutableList<String> direct supertypes: {supertypes:?}"
-        );
-        assert!(crate::symbol_resolver::resolution_subtype(
-            &libraries,
-            actual,
-            Ty::obj_args("kotlin/collections/List", &[Ty::String]),
-        ));
     }
 
     #[test]

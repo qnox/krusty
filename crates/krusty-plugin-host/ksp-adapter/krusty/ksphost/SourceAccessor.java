@@ -18,13 +18,16 @@ import java.util.List;
 import java.util.Set;
 import kotlin.sequences.Sequence;
 
-// A property's getter or setter, written in the source or made by the compiler.
+// A property's getter or setter, written in the source, made by the compiler, or a library
+// property's.
 abstract class SourceAccessor implements KSPropertyAccessor {
     final SourceProperty property;
-    boolean written;
+    Origin origin;
     // Null when krusty has no record of the modifiers; the query is then refused.
     Set<Modifier> modifiers;
     final List<KSAnnotation> annotations = new ArrayList<>();
+    // The name KSP2 reports; null when krusty does not name it the way KSP2 does yet.
+    String jvmName;
 
     SourceAccessor(SourceProperty property) {
         this.property = property;
@@ -37,7 +40,7 @@ abstract class SourceAccessor implements KSPropertyAccessor {
 
     @Override
     public Sequence<KSDeclaration> getDeclarations() {
-        if (written) {
+        if (origin == Origin.KOTLIN) {
             throw Nodes.notImplemented("KSPropertyAccessor.declarations of a written accessor");
         }
         return Nodes.empty();
@@ -58,7 +61,7 @@ abstract class SourceAccessor implements KSPropertyAccessor {
 
     @Override
     public Origin getOrigin() {
-        return written ? Origin.KOTLIN : Origin.SYNTHETIC;
+        return origin;
     }
 
     @Override

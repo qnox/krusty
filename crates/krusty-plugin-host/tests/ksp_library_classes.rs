@@ -1,5 +1,6 @@
-//! The headers krusty serves a KSP processor for classpath classifiers, against what KSP2 logs for
-//! them (`tests/fixtures/ksp/library.expected`).
+//! The headers krusty serves a KSP processor for classpath classifiers, and the names it maps
+//! between Kotlin and the JVM, against what KSP2 logs for them (`tests/fixtures/ksp/library.expected`
+//! and `names.expected`).
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -14,7 +15,7 @@ use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty::ksp_round::KspLibraries;
 use krusty::source::SourceInput;
 use krusty_plugin_ir::{
-    KspAnnotation, KspClassKind, KspClasspath, KspLibraryClass, KspOrigin, KspType,
+    KspAnnotation, KspClassKind, KspClasspath, KspLibraryClass, KspNameMapping, KspOrigin, KspType,
     KspTypeArgument, KspTypeDeclaration, KspValue, KspVariance,
 };
 
@@ -255,4 +256,36 @@ fn library_classes_are_the_headers_ksp2_reports() {
         }
     }
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+#[test]
+fn mapped_names_are_what_ksp2_reports() {
+    let Some(analysis) = analysis() else {
+        return;
+    };
+    let libraries = KspLibraries::new(&analysis);
+    let expected: Vec<String> = std::fs::read_to_string(fixtures().join("names.expected"))
+        .unwrap()
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(str::to_string)
+        .collect();
+    let actual: Vec<String> = expected
+        .iter()
+        .map(|line| {
+            let asked = line.strip_prefix("w: [ksp] ").unwrap();
+            let (side, rest) = asked.split_once(' ').unwrap();
+            let (name, _) = rest.split_once(" -> ").unwrap();
+            let mapping = match side {
+                "kotlin" => KspNameMapping::KotlinToJava,
+                _ => KspNameMapping::JavaToKotlin,
+            };
+            let mapped = libraries.mapped_name(mapping, name);
+            format!(
+                "w: [ksp] {side} {name} -> {}",
+                mapped.as_deref().unwrap_or("null")
+            )
+        })
+        .collect();
+    assert_eq!(actual, expected);
 }

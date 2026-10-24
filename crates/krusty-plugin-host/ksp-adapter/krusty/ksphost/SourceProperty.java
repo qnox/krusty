@@ -21,22 +21,25 @@ import java.util.List;
 import java.util.Set;
 import kotlin.sequences.Sequence;
 
-// A source property, one a primary-constructor parameter declares, or one the language
-// contributes to a classifier.
+// A source property, one a primary-constructor parameter declares, one the language contributes
+// to a classifier, or a library classifier's.
 final class SourceProperty implements KSPropertyDeclaration {
+    // Null for a library classifier's.
     private final SourceFile file;
     // The classifier that declares it, or null for a top-level property.
-    private final SourceClass owner;
+    private final KSDeclaration owner;
     private final Name simpleName;
     private final Name qualifiedName;
     private final boolean mutable;
-    // The 1-based line, or 0 for a property the language contributes.
+    private final Origin origin;
+    // The 1-based line of a property the source wrote, else 0.
     private final int line;
     final List<KSAnnotation> annotations = new ArrayList<>();
     // Each is null when krusty could not describe it; the query is then refused.
     Set<Modifier> modifiers;
     List<KSTypeParameter> typeParameters;
     KSTypeReference type;
+    String jvmSignature;
     // The extension receiver; `receiverUndescribed` when it has one krusty could not describe.
     KSTypeReference extensionReceiver;
     boolean receiverUndescribed;
@@ -44,7 +47,13 @@ final class SourceProperty implements KSPropertyDeclaration {
     // Null for a read-only property.
     SourceAccessor.Setter setter;
 
-    SourceProperty(SourceFile file, SourceClass owner, String name, boolean mutable, int line) {
+    SourceProperty(
+            SourceFile file,
+            KSDeclaration owner,
+            String name,
+            boolean mutable,
+            Origin origin,
+            int line) {
         this.file = file;
         this.owner = owner;
         this.simpleName = new Name(name);
@@ -53,6 +62,7 @@ final class SourceProperty implements KSPropertyDeclaration {
                 : file.getPackageName().asString();
         this.qualifiedName = new Name(container.isEmpty() ? name : container + "." + name);
         this.mutable = mutable;
+        this.origin = origin;
         this.line = line;
     }
 
@@ -128,7 +138,7 @@ final class SourceProperty implements KSPropertyDeclaration {
 
     @Override
     public KSName getPackageName() {
-        return file.getPackageName();
+        return owner != null ? owner.getPackageName() : file.getPackageName();
     }
 
     @Override
@@ -183,7 +193,7 @@ final class SourceProperty implements KSPropertyDeclaration {
 
     @Override
     public Origin getOrigin() {
-        return line == 0 ? Origin.SYNTHETIC : Origin.KOTLIN;
+        return origin;
     }
 
     @Override

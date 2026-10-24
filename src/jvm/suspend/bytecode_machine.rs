@@ -18,6 +18,8 @@
 //! from its `$$forInline` copy, is taken as a point of this frame once the method inliner places
 //! the lambda. Other interface bodies, and other spliced inline bodies, keep the IR machine.
 
+pub(super) mod spliced_lambdas;
+
 use crate::fx_hash::HashSet;
 
 use super::cps::{
@@ -371,12 +373,20 @@ fn binds_inline_continuation_operand(ir: &IrFile, declaration: ExprId) -> bool {
 }
 
 /// Whether the body reads its own continuation where kotlinc has no fake one in its place: outside
-/// a `suspendCoroutineUninterceptedOrReturn` block and an inline suspend lambda's operands.
+/// a `suspendCoroutineUninterceptedOrReturn` block and an inline suspend lambda's operands. The
+/// body of a suspend lambda an inline call places in an object is that object's method's.
 fn reads_continuation_outside_fake_reads(ir: &IrFile, expression: ExprId, blocks: bool) -> bool {
     if blocks && ir.is_unintercepted_suspension(expression)
         || binds_inline_continuation_operand(ir, expression)
     {
         return false;
+    }
+    if let IrExpr::Lambda { captures, .. } = &ir.exprs[expression as usize] {
+        if spliced_lambdas::placed_in_an_object(ir, expression) {
+            return captures
+                .iter()
+                .any(|&capture| reads_continuation_outside_fake_reads(ir, capture, blocks));
+        }
     }
     if let IrExpr::CurrentContinuation = ir.exprs[expression as usize] {
         return true;

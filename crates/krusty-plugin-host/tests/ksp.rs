@@ -126,11 +126,32 @@ fn run(
     dependencies: &[PathBuf],
     outputs: &KspOutputs,
 ) -> Result<Run, HostError> {
+    run_in_module(
+        runtime,
+        env,
+        processor,
+        sources,
+        dependencies,
+        outputs,
+        "main",
+    )
+}
+
+/// [`run`] for the module `module_name`.
+fn run_in_module(
+    runtime: &KspRuntime,
+    env: &Environment,
+    processor: &Path,
+    sources: &[PathBuf],
+    dependencies: &[PathBuf],
+    outputs: &KspOutputs,
+    module_name: &str,
+) -> Result<Run, HostError> {
     let mut host = KspHost::start(runtime, env, &mut std::io::stderr())?;
     let providers = host.load(&KspLoad {
         processor_classpath: &[processor.to_path_buf()],
         options: &[],
-        module_name: "main",
+        module_name,
         outputs,
         language_version: "2.3",
         api_version: "2.3",
@@ -169,7 +190,7 @@ fn run(
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect();
-        let round = krusty::ksp_round::ksp_round(&analysis, &paths)
+        let round = krusty::ksp_round::ksp_round(&analysis, &paths, module_name)
             .unwrap_or_else(|refusal| panic!("{refusal}"));
         let outcome = host.round(&round, &KspLibraries::new(&analysis))?;
         run.log.extend(outcome.log);
@@ -282,6 +303,65 @@ fn primary_constructors_and_their_parameters_are_what_ksp2_reports() {
         .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(run.generated, Vec::<String>::new());
     let expected: Vec<String> = std::fs::read_to_string(fixtures().join("ctors.expected"))
+        .unwrap()
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(run.log, expected);
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn mapped_names_are_what_ksp2_reports() {
+    let (runtime, env) = runtime();
+    let processor = processor(&runtime, "Names", "names.NamesProvider");
+    let out = scratch("ksp-outputs-names");
+    let outputs = KspOutputs {
+        kotlin: out.join("kotlin"),
+        java: out.join("java"),
+        classes: out.join("classes"),
+        resources: out.join("resources"),
+    };
+    let sources = [fixtures().join("names/Source.kt")];
+    let run = run(&runtime, &env, &processor, &sources, &[], &outputs)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(run.generated, Vec::<String>::new());
+    let expected: Vec<String> = std::fs::read_to_string(fixtures().join("names.expected"))
+        .unwrap()
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(run.log, expected);
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn jvm_signatures_are_what_ksp2_reports() {
+    let (runtime, env) = runtime();
+    let processor = processor(&runtime, "Signatures", "signatures.SignaturesProvider");
+    let out = scratch("ksp-outputs-signatures");
+    let outputs = KspOutputs {
+        kotlin: out.join("kotlin"),
+        java: out.join("java"),
+        classes: out.join("classes"),
+        resources: out.join("resources"),
+    };
+    let sources = [fixtures().join("signatures/Signatures.kt")];
+    // A module name with punctuation, which an internal member's suffix makes a Java identifier.
+    let run = run_in_module(
+        &runtime,
+        &env,
+        &processor,
+        &sources,
+        &[],
+        &outputs,
+        "sig-module.core",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(run.generated, Vec::<String>::new());
+    let expected: Vec<String> = std::fs::read_to_string(fixtures().join("signatures.expected"))
         .unwrap()
         .lines()
         .filter(|line| !line.starts_with('#'))
@@ -466,5 +546,18 @@ fn library_classes_are_what_ksp2_reports() {
         &[fixtures().join("dependency/Dependency.kt")],
         "ksp-outputs-library",
         "library.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn library_annotation_members_are_what_ksp2_reports() {
+    log_with_dependencies_is_what_ksp2_reports(
+        "LibraryMembers",
+        "librarymembers.LibraryMembersProvider",
+        &[fixtures().join("library-members-source/Source.kt")],
+        &[fixtures().join("library-members/Dependency.kt")],
+        "ksp-outputs-library-members",
+        "library-members.expected",
     );
 }

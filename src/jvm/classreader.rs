@@ -815,6 +815,26 @@ impl ClassBodies {
     /// Decode one method's `Code` attribute against the shared constant pool. `None` when the
     /// class declares no such method, declares it without `Code`, or its `Code` is unreadable.
     pub fn method_code(&self, name: &str, descriptor: &str) -> Option<MethodCode> {
+        self.read_method_code(name, descriptor, false)
+    }
+
+    /// [`Self::method_code`] for a class read whole: a line the class's source map does not cover
+    /// is kept, and fails only where a copy maps it. kotlinc's coroutine transformer writes line 0
+    /// in a machine it built without a call-site line, which a copy skips.
+    pub(crate) fn method_code_with_unmapped_lines(
+        &self,
+        name: &str,
+        descriptor: &str,
+    ) -> Option<MethodCode> {
+        self.read_method_code(name, descriptor, true)
+    }
+
+    fn read_method_code(
+        &self,
+        name: &str,
+        descriptor: &str,
+        unmapped_lines: bool,
+    ) -> Option<MethodCode> {
         let range = self
             .methods
             .get(&(Box::<str>::from(name), Box::<str>::from(descriptor)))?
@@ -888,10 +908,11 @@ impl ClassBodies {
                 }
             }
         }
-        if self
-            .dependency_source_map
-            .as_ref()
-            .is_some_and(|map| lines.iter().any(|&(_, line)| map.resolve(line).is_none()))
+        if !unmapped_lines
+            && self
+                .dependency_source_map
+                .as_ref()
+                .is_some_and(|map| lines.iter().any(|&(_, line)| map.resolve(line).is_none()))
         {
             return None;
         }

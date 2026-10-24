@@ -12,8 +12,8 @@ use crate::jvm::bytecode_passes::redundant_boxing::ValueClassDescriptors;
 use crate::jvm::class_node::ClassNode;
 use crate::jvm::inline::RegeneratedClass;
 use crate::jvm::inliner::{
-    copy_sam_wrapper, regenerate, AnonymousObjects, CallSite, ClassNameGenerators, InlineError,
-    ObjectLambda, RegeneratedObject, Regeneration, RegenerationError,
+    copy_sam_wrapper, regenerate, AnonymousObjects, CallSite, CallSiteSource, ClassNameGenerators,
+    InlineError, ObjectLambda, RegeneratedObject, Regeneration, RegenerationError,
 };
 use crate::jvm::ir_emit::JvmSignatureFormatter;
 use crate::jvm::reified_arguments::ReifiedArguments;
@@ -174,6 +174,10 @@ pub(super) struct CallObjects<'a> {
     caller_lines: SourceMap,
     value_classes: Rc<ValueClassDescriptors>,
     reified: ReifiedArguments,
+    /// The calling class's source file name.
+    source_file: Option<String>,
+    /// The call's line, zero-based as kotlinc's IR reports it to a copy's state machine.
+    call_line: Option<u16>,
 }
 
 impl<'a> Emitter<'a> {
@@ -207,6 +211,12 @@ impl<'a> Emitter<'a> {
             caller_lines,
             value_classes: self.cw.value_classes(),
             reified,
+            source_file: self.cw.source_file_name(),
+            call_line: self
+                .ir
+                .expr_source_lines
+                .get(&call_expression)
+                .and_then(|&line| u16::try_from(line.checked_sub(1)?).ok()),
         }
     }
 }
@@ -281,38 +291,56 @@ impl AnonymousObjects for CallObjects<'_> {
             });
         }
         let kotlin_name = (!site.special).then_some(site.function.as_str());
-        let new_class = generators
+        let object_names = generators
             .for_function(&self.owner, kotlin_name)
             .for_inlined_method(&self.callee)
-            .next_object()
-            .class()
-            .to_string();
-        let regenerated = regenerate(&Regeneration {
-            original: &original,
-            new_class: &new_class,
-            constructor_desc,
-            call_site: CallSite {
-                owner: &self.owner,
-                method: &site.method,
-                descriptor: &site.descriptor,
-                public_inline_scope: false,
+            .next_object();
+        let new_class = object_names.class().to_string();
+        let regenerated = regenerate(
+            &Regeneration {
+                original: &original,
+                new_class: &new_class,
+                constructor_desc,
+                call_site: CallSite {
+                    owner: &self.owner,
+                    method: &site.method,
+                    descriptor: &site.descriptor,
+                    public_inline_scope: false,
+                    source: CallSiteSource {
+                        file: self.source_file.as_deref().unwrap_or_default(),
+                        line: self.call_line,
+                    },
+                },
+                calling_class: &self.owner,
+                type_arguments: &type_arguments,
+                prior_classes,
+                major: self.major,
+                metadata_stamp: self.metadata_stamp,
+                lambdas,
+                caller_lines: &self.caller_lines,
+                classes: &self.bodies,
+                value_classes: &self.value_classes,
+                reified: &self.reified,
+                continuation: None,
             },
-            type_arguments: &type_arguments,
-            prior_classes,
-            major: self.major,
-            metadata_stamp: self.metadata_stamp,
-            lambdas,
-            caller_lines: &self.caller_lines,
-            classes: &self.bodies,
-            value_classes: &self.value_classes,
-            reified: &self.reified,
-        })
+            object_names,
+        )
         .map_err(InlineError::Regeneration)?;
+        let mut shared_wrappers = Vec::new();
+        for wrapper in regenerated.sam_wrappers {
+            let (name, first) = generators
+                .sam_wrapper(&self.owner, &wrapper.original)
+                .ok_or(unsupported("a SAM wrapper without its ABI name segment"))?;
+            debug_assert_eq!(name, wrapper.name, "one name for the calling class's copy");
+            if first {
+                shared_wrappers.push((wrapper.name, wrapper.bytes));
+            }
+        }
         if self.commit {
-            self.run
-                .machine_classes
-                .borrow_mut()
-                .push((new_class.clone(), regenerated.bytes));
+            let mut classes = self.run.machine_classes.borrow_mut();
+            classes.push((new_class.clone(), regenerated.bytes));
+            classes.extend(regenerated.nested);
+            classes.extend(shared_wrappers);
         }
         Ok(RegeneratedObject {
             name: new_class,
