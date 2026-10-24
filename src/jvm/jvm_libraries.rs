@@ -7,6 +7,7 @@ mod builtin_property_realization;
 mod builtins_customizer;
 mod callable_availability;
 mod catalog_presence;
+mod class_application_headers;
 mod classifier_facts;
 mod classpath_annotation_classes;
 mod collection_canonicalization;
@@ -1265,12 +1266,9 @@ impl JvmLibraries {
             let mut enum_entries_accessor = None;
             let has_kotlin_metadata = ci.meta.is_present();
             let uses_java_type_semantics = !has_kotlin_metadata;
+            let application_header = self.class_application_header(internal_name).ok()?;
             let class_bounds = self.member_class_formal_bounds(&ci);
-            let constructor_outer = ci.inner_class_self().and_then(|entry| {
-                (entry.access & ACC_STATIC == 0)
-                    .then(|| entry.outer.as_deref().map(type_name))
-                    .flatten()
-            });
+            let constructor_outer = application_header.outer_instance;
             // Identify the generated accessor while decoding JVM declarations, where metadata and
             // class flags are authoritative. The backend-neutral checker then consumes an explicit
             // capability instead of inferring declaration origin from a same-named static method.
@@ -2414,15 +2412,8 @@ impl JvmLibraries {
                 &mut constructors,
                 constructor_outer,
             );
-            let (own_type_parameter_count, type_parameters) = self.member_class_type_parameters(
-                constructor_outer,
-                internal_name,
-                crate::types::TypeParameters::new(
-                    type_params,
-                    type_param_bounds,
-                    type_param_variances,
-                ),
-            );
+            let own_type_parameter_count = application_header.own_count;
+            let type_parameters = application_header.parameters;
             Some(LibraryType {
                 is_kotlin: has_kotlin_metadata,
                 is_data: ci.meta.is_data,
