@@ -15945,6 +15945,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   directions (`val name: String` against `stringType`, `String?` against its nullable form), and
   hashes like it; a nullable type hashes apart from its non-null form, as KSP2 2.3.12 reports.
   (`crates/krusty-plugin-host/tests/ksp.rs`, `library_classes_are_what_ksp2_reports`.)
+- **A star-projected KSP classifier type is assignable from its subclassifiers.** On a type a
+  classifier answers (`asStarProjectedType()`, a builtin), `isAssignableFrom` holds for a type whose
+  classifier is that classifier or inherits it through its direct supertypes, transitively and
+  whatever its arguments, and for `kotlin.Nothing`; a nullable type is assignable only to a nullable
+  one. Every classifier reaches `kotlin.Any`. A type parameter or typealias on the right is refused
+  for that query, as is `isAssignableFrom` on a type a source declaration names.
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `class_headers_are_what_ksp2_reports`.)
 - **KSP members are listed as KSP2 lists them.** A file lists its functions and properties in
   source order, then its classifiers and type aliases in source order. A class lists its
   constructor properties, then its properties and functions interleaved in source order, then a

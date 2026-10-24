@@ -37,7 +37,40 @@ class HeadersProcessor(private val env: SymbolProcessorEnvironment) : SymbolProc
             "written ${type(written)} equals star=${written == star} star equals written=${star == written}" +
                 " same hash=${written.hashCode() == star.hashCode()}",
         )
+        assignability(resolver, resolver.getClassDeclarationByName(resolver.getKSNameFromString("headers.Outer"))!!)
         return emptyList()
+    }
+
+    private val libraryNames = listOf(
+        "kotlin.Any", "kotlin.Nothing", "kotlin.Comparable", "java.io.Serializable", "kotlin.Enum",
+        "kotlin.Function0", "kotlin.Function", "kotlin.Annotation", "kotlin.CharSequence", "kotlin.String",
+    )
+
+    /**
+     * Logs, for each classifier's star-projected type and its nullable form, which of those types
+     * it is assignable from.
+     */
+    private fun assignability(resolver: Resolver, outer: KSClassDeclaration) {
+        val classes = mutableListOf<KSClassDeclaration>()
+        for (file in resolver.getAllFiles()) {
+            for (declaration in file.declarations) {
+                if (declaration is KSClassDeclaration) classes.add(declaration)
+            }
+        }
+        for (nested in outer.declarations) {
+            if (nested is KSClassDeclaration) classes.add(nested)
+        }
+        for (name in libraryNames) {
+            classes.add(resolver.getClassDeclarationByName(resolver.getKSNameFromString(name))!!)
+        }
+        val types = classes.flatMap {
+            val star = it.asStarProjectedType()
+            listOf(star, star.makeNullable())
+        }
+        for (receiver in types) {
+            val assignable = types.filter { receiver.isAssignableFrom(it) }.map { type(it) }
+            env.logger.warn("assignable ${type(receiver)} <- ${assignable.joinToString(", ")}")
+        }
     }
 
     private fun type(reference: KSTypeReference): String = type(reference.resolve())
