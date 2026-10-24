@@ -1,5 +1,22 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Selected alias references and receiver captures
+
+An alias constructor selected through an extension lookup facet publishes a constructor reference
+from that selected declaration. Its enclosing receiver retains the exact expression or implicit
+receiver selection; unbound references carry the outer instance separately from constructor value
+parameters. The lookup receiver is removed from the selected argument plan and declared parameter
+vector without changing physical constructor ABI or repeating selection. Ordinary function and
+property reference identity checks retain their existing contract.
+
+Demanded source-call signatures retain projected receiver evidence before applying expected-result
+constraints. The same receiver participates in call constraint solving and binding admission; output
+specialization reads a root capture through its bound and preserves projections in invariant type
+arguments. Exact corpus regressions, outer-instance runtime and projection variants live in
+`bound_inner_alias_inference_e2e` and `projected_receiver_extension_e2e`; existing alias receiver and
+bound diagnostic ledgers remain intact. Anonymous public-result ABI approximation and complete
+closed-projection diagnostic parity remain separate follow-ups with preserved failing oracles.
+
 ## Class application header ownership
 
 A classpath classifier's generic layout is read from declaration headers before its members are
@@ -14907,14 +14924,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   inapplicable-candidate and upper-bound diagnostics, with or without an explicit function return.
   A receiver `Outer<Long>` also supplies the bound used to contextualize `Inner<Long>(1)` and
   `Inner(1)`. Source and dependency calls, including fixed aliases, retain complete own-plus-captured
-  result arguments. Receiver-bound alias calls with inferred function returns remain tracked in
-  #2592; declared alias returns are covered. Captured formals are removed by declaration identity;
+  result arguments. Captured formals are removed by declaration identity;
   independently declared constructor formals remain inferable. A shadowing own parameter also
   remains independent when a Java provider renames the hidden captured parameter: enclosing
   bindings use the inner declaration's capture identities (`tests/java_class_formal_bound_e2e.rs`).
   The enclosing application supplies the input type
   during eager lambda overload selection, before Unit coercion decides between constructor
   candidates. (`tests/inner_constructor_bounds_e2e.rs`.)
+
+- **A receiver-bound alias constructor retains its selected alias application.** An inferred
+  function return such as `fun f(o: Outer<Number>) = o.Generic(1)` uses the same selected alias and
+  mapped constructor arguments as body checking. Lexical aliases shadow package aliases, applicable
+  members keep priority, and written type arguments follow the alias's own formal order, including
+  unused formals. Named value arguments do not reorder those formals. Both source and dependency
+  aliases retain their complete own-plus-captured return arguments and target bounds. Independent
+  underlying constructor formals stay rigid through an alias; a rejection names their underlying
+  declaration owner with the alias's declaration substitutions, rather than the call's inferred or
+  written arguments. Same-spelled alias and constructor formals keep distinct semantic identities.
+  An inadmissible alias receiver retains its receiver-derived bindings but does not infer remaining
+  alias formals from value arguments or an expected result; those formals receive inference errors.
+  Alias applicability does not replace the target constructor's original declaration parameters:
+  a value-class value stays boxed in a generic slot and uses its carrier in a concrete slot, also
+  when the constructor is reached through an inferred alias result across a dependency boundary.
+  (`tests/bound_inner_alias_inference_e2e.rs`: runtime, complete source/dependency ABI, and exact
+  diagnostic comparisons with kotlinc.)
 
 - **Inner constructors and same-named member functions are one overload family.** kotlinc places
   the constructors of an `inner` classifier in the member level of the receiver that supplies its
@@ -21539,3 +21572,11 @@ extension receiver, then values. Member projection inserts the extension receive
 parameters once, without inserting it again into the retained declaration vector. Physical outer
 instances and default markers are separate ABI slots. Tests: `libraries::classifier_callables::tests`
 and both value-class dependency controls in `tests/inner_constructor_bounds_e2e.rs`.
+
+Extension receiver admission retains satisfiable active builder-inference variables. Selection may
+test the receiver relation against cloned postponed frames, solve those trial bindings and require
+strict assignability after substitution. Only ordinary call commitment publishes the constraints.
+Concrete or conflicting receiver applications still fail. The same operation admits a postponed
+unbound outer receiver in a constructor reference. Tests: `builder_inference_receivers_e2e`,
+`postponed_bound_inference_e2e` and the exact wrong-receiver ledgers in
+`bound_inner_alias_inference_e2e`.

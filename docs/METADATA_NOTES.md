@@ -1,5 +1,11 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+Selected alias constructor references keep the constructor's original declaration parameters apart
+from the synthetic extension lookup receiver. Projection of that facet removes only its known
+receiver slot; physical descriptor/carrier evidence and stable constructor identity remain intact.
+Inferred source-call results retain receiver projections through declaration-signature publication
+using the common output-position specialization. This changes no Kotlin metadata wire schema.
+
 ## Class formal layouts before member publication
 
 Kotlin class metadata supplies own formals and bounds. A mapped builtin declaration supplies its
@@ -1054,11 +1060,27 @@ unapplied outer does not acquire invented type arguments.
 The same complete result reaches inferred function signatures and rejected-call recovery. This
 changes no metadata schema, physical constructor descriptor or enclosing-instance ABI.
 
+Receiver-bound aliases carry the already-selected alias expansion and its declaration signature on
+the constructor candidate. Alias formal order governs written type arguments independently of the
+target classifier's own-plus-captured layout. Inferred return publication uses the selected named
+argument mapping and preserves the alias abbreviation. Independent underlying constructor formals
+retain their semantic identities and declaration-specialized owner signature for diagnostics; they
+are not added to the alias's inference variables. No metadata schema or physical descriptor changes.
+Receiver-call inventories retain classifier and callable facets from the same declaration read;
+object-import singleton projection preserves those classifier and alias facts as well.
+Alias applicability substitutions do not replace the target constructor's original declaration
+parameters: generic value-class slots remain boxed, while concrete slots retain their carriers.
+
 Selected member records also retain pre-substitution declaration parameters in full source order
 (contexts, extension receiver, values). Metadata function normalization publishes this fact before
 specialization; callable/member projection and constructor publication carry it without recovering
 it from the specialized signature. Constructor outer-instance and default-marker slots remain
 physical inputs. This is an in-memory declaration fact, with no Kotlin metadata wire change.
+
+Receiver admission distinguishes active call-owned inference variables from rigid declaration
+parameters. A satisfiable trial specializes both receiver sides before strict comparison without
+publishing new declaration facts. Alias expansion, selected constructor identity and retained
+declaration parameters remain unchanged; no metadata wire or physical ABI change is involved.
 
 ## Annotation classifier nesting
 

@@ -6,8 +6,8 @@
 //! candidate structure so every call position collects them into the same overload family.
 
 use super::{
-    FnKind, FunctionInfo, GenericReturnPolicy, GenericSig, LibraryCallable, LibraryMember,
-    LibraryType, ReturnInfo,
+    AliasExpansion, FnKind, FunctionInfo, GenericReturnPolicy, GenericSig, LibraryCallable,
+    LibraryMember, LibraryType, ReturnInfo,
 };
 use crate::types::{Ty, TypeName};
 
@@ -17,6 +17,16 @@ use crate::types::{Ty, TypeName};
 pub struct BoundInnerConstructor {
     pub inner: TypeName,
     pub outer: TypeName,
+}
+
+/// The alias declaration and uninstantiated callable shape retained by a selected constructor.
+/// Receiver-specialized inference bounds are call constraints, not bounds declared by the alias.
+#[derive(Clone)]
+pub(crate) struct ConstructorAlias {
+    pub(crate) declaration: AliasExpansion,
+    pub(crate) signature: GenericSig,
+    pub(crate) underlying_signature: GenericSig,
+    pub(crate) rigid_formals: Vec<String>,
 }
 
 impl LibraryMember {
@@ -77,6 +87,12 @@ fn classifier_instance_type(internal: TypeName, classifier: &LibraryType) -> Ty 
 }
 
 impl FunctionInfo {
+    pub(crate) fn constructor_alias(&self) -> Option<&AliasExpansion> {
+        self.constructor_alias
+            .as_deref()
+            .map(|alias| &alias.declaration)
+    }
+
     /// Normalize one callable exposed through a classifier (`Owner.name`) into the same candidate
     /// structure used by package, module, and lexical sources. The classifier record owns the source
     /// declaration facts; this conversion copies them once into the selected-call handle so import
@@ -157,6 +173,31 @@ impl FunctionInfo {
         candidate.associated_classifier = member.associated_classifier;
         candidate.associated_access_owner = member.associated_access_owner;
         candidate
+    }
+
+    /// Project an already-selected constructor out of its lookup facet. The synthetic enclosing
+    /// receiver is a reference binding, not one of the constructor's declared parameters.
+    pub(crate) fn selected_constructor_member(&self) -> Option<LibraryMember> {
+        self.bound_inner_constructor?;
+        let mut member = self.member_with_return(self.callable.ret);
+        let mut declared = self.callable.declared_params.as_deref()?.to_vec();
+        if let Some(receiver) =
+            super::extension_receiver_index(self.is_extension(), self.context_count)
+        {
+            if receiver >= declared.len() {
+                return None;
+            }
+            declared.remove(receiver);
+        }
+        if declared.len() != member.params.len() {
+            return None;
+        }
+        member.declared_params = Some(declared.into_boxed_slice());
+        member.set_is_member_extension(false);
+        if let Some(signature) = &mut member.generic_sig {
+            signature.receiver = None;
+        }
+        Some(member)
     }
 
     /// Normalize one constructor of the `inner` classifier `inner` as a member candidate of its

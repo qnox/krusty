@@ -35,10 +35,7 @@ pub(crate) struct CompletedClassifierPath {
 impl CompletedClassifierPath {
     pub(crate) fn ordinary_root(classifier: TypeName) -> Self {
         Self {
-            selected: ScopedClassifier {
-                classifier,
-                alias: None,
-            },
+            selected: ScopedClassifier::new(classifier, None),
             classifier_segment: 0,
         }
     }
@@ -105,7 +102,7 @@ impl SymbolResolver<'_> {
         }
         match prefix {
             ClassifierPathPrefix::Classifier(classifier) => Ok(CompletedClassifierPath {
-                selected: ScopedClassifier { classifier, alias },
+                selected: ScopedClassifier::new(classifier, alias),
                 classifier_segment: classifier_segment
                     .expect("a completed classifier path must retain its written boundary"),
             }),
@@ -254,30 +251,33 @@ impl SymbolResolver<'_> {
             return (CandidateSelectionWithTies::None, Some(spelling.to_string()));
         };
         let mut failure = None;
-        let mut consider =
-            |candidates: Vec<(TypeName, Option<crate::libraries::AliasExpansion>)>| {
-                let mut completed: Vec<CompletedClassifierPath> = Vec::new();
-                for (candidate, alias) in candidates {
-                    match self.advance_classifier_path(
-                        ClassifierPathPrefix::Classifier(candidate),
-                        &segments[1..],
-                        1,
-                        alias,
-                    ) {
-                        Ok(path) => record_completed_path(&mut completed, path),
-                        Err(miss) => {
-                            if failure.as_ref().is_none_or(|(depth, _)| miss.0 > *depth) {
-                                failure = Some(miss);
-                            }
+        let mut consider = |candidates: Vec<ScopedClassifier>| {
+            let mut completed: Vec<CompletedClassifierPath> = Vec::new();
+            for candidate in candidates {
+                let position = (candidate.scope_rung, candidate.scope_rank);
+                match self.advance_classifier_path(
+                    ClassifierPathPrefix::Classifier(candidate.classifier),
+                    &segments[1..],
+                    1,
+                    candidate.alias,
+                ) {
+                    Ok(mut path) => {
+                        (path.selected.scope_rung, path.selected.scope_rank) = position;
+                        record_completed_path(&mut completed, path);
+                    }
+                    Err(miss) => {
+                        if failure.as_ref().is_none_or(|(depth, _)| miss.0 > *depth) {
+                            failure = Some(miss);
                         }
                     }
                 }
-                match completed.len() {
-                    0 => None,
-                    1 => completed.pop().map(CandidateSelectionWithTies::Selected),
-                    _ => Some(CandidateSelectionWithTies::Ambiguous(completed)),
-                }
-            };
+            }
+            match completed.len() {
+                0 => None,
+                1 => completed.pop().map(CandidateSelectionWithTies::Selected),
+                _ => Some(CandidateSelectionWithTies::Ambiguous(completed)),
+            }
+        };
         let selected =
             |selection: CandidateSelectionWithTies<CompletedClassifierPath>| match selection {
                 CandidateSelectionWithTies::Selected(_) => (selection, None),
@@ -291,10 +291,7 @@ impl SymbolResolver<'_> {
                 // candidates: the use site reports the ambiguity between their complete paths.
                 let explicit = super::classifier_scope::explicit_classifier_candidates(
                     &self.src, imports, first,
-                )
-                .into_iter()
-                .map(|candidate| (candidate.classifier, candidate.alias))
-                .collect::<Vec<_>>();
+                );
                 if let Some(selection) = consider(explicit) {
                     return selected(selection);
                 }
@@ -302,10 +299,7 @@ impl SymbolResolver<'_> {
                     let candidates =
                         super::classifier_scope::scoped_classifier_candidates_at_import_level(
                             &self.src, first, level,
-                        )
-                        .into_iter()
-                        .map(|candidate| (candidate.classifier, candidate.alias))
-                        .collect();
+                        );
                     if let Some(selection) = consider(candidates) {
                         return selected(selection);
                     }
@@ -315,10 +309,7 @@ impl SymbolResolver<'_> {
                 let candidates =
                     super::classifier_scope::scoped_classifier_candidates_at_scope_level(
                         &self.src, first, packages,
-                    )
-                    .into_iter()
-                    .map(|candidate| (candidate.classifier, candidate.alias))
-                    .collect();
+                    );
                 if let Some(selection) = consider(candidates) {
                     return selected(selection);
                 }

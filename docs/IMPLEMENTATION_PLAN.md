@@ -1,5 +1,11 @@
 # krusty — implementation plan
 
+Inner-alias conformance recovery shares constructor-reference publication across direct and
+already-selected alias declarations. The constructor selection responsibility moves out of the
+resolver facade; selected receiver provenance and declaration ABI survive that boundary. Demanded
+source signatures now retain receiver captures before contextual result constraints and reuse the
+ordinary call solver and output-slot specialization. Shared conformance expectations stay unchanged.
+
 Phased, each phase ends in a **green `cargo test`** and a runnable artifact. The pipeline is built
 front-to-back so the streaming/arena shape is real from the start, then widened.
 
@@ -5987,8 +5993,15 @@ out of the resolver facade into its owning module. Shared classifier-bound check
 the full enclosing application for alias targets instead of validating own bounds in isolation.
 JVM boxing-cast byte parity remains separate in #2590; the bound slice proves complete ABI
 signatures, reference runtime and exact diagnostics.
-Inferred return types of receiver-bound alias calls remain a separate signature-lookup follow-up
-in #2592; declared alias calls and direct inferred calls are covered here.
+The #2592 alias slice normalizes the selected lexical/file/import alias into the ordinary receiver
+candidate family. Alias-owned formals control written arity and inference; the selected physical
+constructor and enclosing receiver remain declaration-owned. Signature publication consumes the
+same named-argument substitution as body checking, retaining the alias expansion without a second
+lookup. Rigid underlying constructor formals retain scoped diagnostic owners from declaration
+substitutions. Source/dependency oracles cover full ABI, receiver and target bounds, scope/member
+priority, reordered and unused alias formals, named arguments, and independent constructor formals.
+Alias/value-class runtime controls also retain the target declaration's generic versus concrete
+constructor carriers for source, own-produced and reference-produced dependencies.
 
 Original parameter declarations now survive selected callable/member conversion independently of
 the specialized applicability signature. Constructor publication reads that same declaration shape;
@@ -5997,3 +6010,8 @@ Owner tests constrain the constructor and context/extension/value round trips, a
 dependency runtime tests read both generic and concrete stored values. The selected-member record
 and conversion move out of the resolver facade, and plugin plans keep their declaration payload
 indirect, retiring two large-enum lint findings without changing the indexed FIR/IR representation.
+
+Late extension admission now uses strict receiver assignability or the existing satisfiable
+postponed-frame trial. The common operation also serves unbound constructor-reference receivers;
+selection cannot commit its trial bindings. This repairs the two existing builder-inference
+regressions introduced by the alias receiver guard while retaining concrete receiver refusal.

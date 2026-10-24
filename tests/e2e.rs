@@ -174,6 +174,8 @@ mod boolean_not_call_e2e;
 mod boolean_val_implications_e2e;
 #[path = "bound_expr_ref_e2e.rs"]
 mod bound_expr_ref_e2e;
+#[path = "bound_inner_alias_inference_e2e.rs"]
+mod bound_inner_alias_inference_e2e;
 #[path = "bound_library_ref_e2e.rs"]
 mod bound_library_ref_e2e;
 #[path = "bound_relation_type_variable_e2e.rs"]
