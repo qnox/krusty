@@ -2,6 +2,7 @@
 //! crate, so product e2e modules live behind one target to keep link time and target size bounded.
 //! External corpus/reference-toolchain suites live in `conformance.rs`.
 
+mod constructor_boxing_casts_e2e;
 #[path = "dependent_constructor_bounds_e2e.rs"]
 mod dependent_constructor_bounds_e2e;
 

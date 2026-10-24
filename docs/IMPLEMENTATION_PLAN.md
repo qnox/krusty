@@ -5871,3 +5871,12 @@ independent physical descriptor checks.
 Next, declaration-header layouts (#2576) must authenticate complete captured applications and raw
 omissions for #2537/#2532. Raw scope erasure must follow symbolic inheritance specialization, as the
 reference compiler demonstrates; it cannot independently erase a superclass from its own bounds.
+
+## Declared JVM constructor boxing slots
+
+Physical call operands and implicit coercions share scalar boxing followed by ordinary reference
+coercion. Constructor slots consume the existing declaration-owned parameter evidence; neither
+checked argument types nor callable selection are rewritten to obtain a JVM cast. Full-class
+reference controls cover source dependent bounds and independently bounded dependency slots,
+with width, Object, exact-wrapper and runtime controls. The dependency inner-constructor frontend
+prerequisite remains in #2593; it is separate from this representation fix (#2590).

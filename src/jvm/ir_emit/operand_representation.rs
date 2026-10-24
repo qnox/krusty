@@ -377,7 +377,7 @@ impl Emitter<'_> {
             } else {
                 semantic
             };
-            box_prim_free(self.cw, code, semantic_scalar_adapter(semantic, source_jvm));
+            self.box_scalar_as_reference(semantic, source_jvm, physical, code);
         } else if source_jvm.is_reference() && physical.is_jvm_scalar() {
             unbox_prim_from(
                 self.cw,
@@ -389,6 +389,25 @@ impl Emitter<'_> {
             emit_num_conv(source_jvm, physical, code);
         } else if source_jvm.is_reference() && physical.is_reference() {
             self.coerce_reference_on_stack(source_jvm, physical, code);
+        }
+    }
+
+    /// Materialize a scalar's wrapper at the consumer's reference type. The declared physical
+    /// slot can retain a generic bound even when the checked argument is a concrete scalar.
+    pub(super) fn box_scalar_as_reference(
+        &mut self,
+        semantic: Ty,
+        physical: Ty,
+        target: Ty,
+        code: &mut CodeBuilder,
+    ) {
+        let scalar = semantic_scalar_adapter(semantic, physical);
+        box_prim_free(self.cw, code, scalar);
+        // kotlinc coerces the materialized wrapper even when this widens it to Number or
+        // Comparable. Object and the same wrapper need no cast; unsigned carriers have their
+        // own value-class adaptation instead of ordinary reference coercion.
+        if let Some(wrapper) = scalar.jvm_boxed_ref() {
+            self.coerce_reference_on_stack(wrapper, target, code);
         }
     }
 

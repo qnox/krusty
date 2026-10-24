@@ -976,3 +976,11 @@ against the complete field descriptor independently of the builder's semantic re
 
 This changes no Kotlin metadata wire fields or raw-type flags. Declaration-backed raw/captured
 construction remains separate from this syntax boundary.
+
+## JVM constructor boxing consumption
+
+The existing constructor declared-parameter sidecar retains the selected declaration's erased
+operand slots independently of call-site substitution. The JVM now applies its shared post-boxing
+reference coercion at those physical slots. No Kotlin metadata encoding, formal identity, source
+type or declaration normalization changes. Dependency captured receiver specialization is owned
+by #2593 and is not reconstructed by the boxing emitter.
