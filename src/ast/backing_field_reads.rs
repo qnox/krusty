@@ -10,6 +10,13 @@ use super::{ClassInit, Decl, Expr, ExprId, File, FunBody, FunDecl, Stmt, StmtId}
 
 const FIELD: &str = "field";
 
+/// Whether a property's getter has a backing field `field` at all. kotlinc declares none in a
+/// getter whose property has neither a declared type nor an initializer: that getter infers the
+/// property's type, and `field` there resolves as any other name.
+pub fn getter_declares_field(declared_type: bool, initialized: bool) -> bool {
+    declared_type || initialized
+}
+
 /// Whether the accessor body `body` reads or writes the backing field of the property it belongs
 /// to.
 pub fn accessor_uses_backing_field(file: &File, body: ExprId) -> bool {
