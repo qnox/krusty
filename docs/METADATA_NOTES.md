@@ -1,5 +1,11 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+Selected alias constructor references keep the constructor's original declaration parameters apart
+from the synthetic extension lookup receiver. Projection of that facet removes only its known
+receiver slot; physical descriptor/carrier evidence and stable constructor identity remain intact.
+Inferred source-call results retain receiver projections through declaration-signature publication
+using the common output-position specialization. This changes no Kotlin metadata wire schema.
+
 ## Class formal layouts before member publication
 
 Kotlin class metadata supplies own formals and bounds. A mapped builtin declaration supplies its

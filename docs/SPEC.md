@@ -1,5 +1,22 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Selected alias references and receiver captures
+
+An alias constructor selected through an extension lookup facet publishes a constructor reference
+from that selected declaration. Its enclosing receiver retains the exact expression or implicit
+receiver selection; unbound references carry the outer instance separately from constructor value
+parameters. The lookup receiver is removed from the selected argument plan and declared parameter
+vector without changing physical constructor ABI or repeating selection. Ordinary function and
+property reference identity checks retain their existing contract.
+
+Demanded source-call signatures retain projected receiver evidence before applying expected-result
+constraints. The same receiver participates in call constraint solving and binding admission; output
+specialization reads a root capture through its bound and preserves projections in invariant type
+arguments. Exact corpus regressions, outer-instance runtime and projection variants live in
+`bound_inner_alias_inference_e2e` and `projected_receiver_extension_e2e`; existing alias receiver and
+bound diagnostic ledgers remain intact. Anonymous public-result ABI approximation and complete
+closed-projection diagnostic parity remain separate follow-ups with preserved failing oracles.
+
 ## Class application header ownership
 
 A classpath classifier's generic layout is read from declaration headers before its members are
