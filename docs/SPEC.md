@@ -14874,6 +14874,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   level serves a bare inner construction on an implicit receiver.
   (`tests/inner_class_construction_e2e.rs`, `a_receiver_inner_constructor_types_postponed_arguments`.)
 
+- **An inner constructor cannot infer a different enclosing application.** Given
+  `Outer<O : Number>.Inner<T : O>`, a receiver `Outer<Int>` fixes `O` to `Int` before constructor
+  inference and bound admission. `outer.Inner<Long>(1L)` is rejected with the reference compiler's
+  inapplicable-candidate and upper-bound diagnostics, with or without an explicit function return.
+  A receiver `Outer<Long>` also supplies the bound used to contextualize `Inner<Long>(1)` and
+  `Inner(1)`. Source and dependency calls, including fixed aliases, retain complete own-plus-captured
+  result arguments. Receiver-bound alias calls with inferred function returns remain tracked in
+  #2592; declared alias returns are covered. Captured formals are removed by declaration identity;
+  independently declared constructor formals remain inferable. A shadowing own parameter also
+  remains independent when a Java provider renames the hidden captured parameter: enclosing
+  bindings use the inner declaration's capture identities (`tests/java_class_formal_bound_e2e.rs`).
+  The enclosing application supplies the input type
+  during eager lambda overload selection, before Unit coercion decides between constructor
+  candidates. (`tests/inner_constructor_bounds_e2e.rs`.)
+
 - **Inner constructors and same-named member functions are one overload family.** kotlinc places
   the constructors of an `inner` classifier in the member level of the receiver that supplies its
   outer instance, beside that receiver's member functions of the same name. `o.Inner(args)`,
@@ -21448,3 +21463,17 @@ Field descriptor authentication uses physical syntax independently of the constr
 The standalone reader keeps its existing innermost-only interpretation and refuses fields whose
 outer arguments it discards. This boundary supplies lossless evidence for the raw/captured application
 follow-ups; it does not itself publish new raw or captured application semantics.
+
+## Constructor declarations survive receiver specialization
+
+A selected constructor retains its original declaration parameters independently of the types used
+for applicability. Constructing `Outer<Token>().Inner(Token(17))` for `Outer<O>.Inner(O)` keeps `O`
+as the declaration parameter while checking the argument as `Token`. On the JVM that generic
+parameter receives the value-class box through Object; a genuinely declared `Token` parameter
+keeps its concrete carrier. Substitution never changes this declaration distinction.
+
+Common callable/member conversions preserve the full declaration parameter order: contexts,
+extension receiver, then values. Member projection inserts the extension receiver into its call
+parameters once, without inserting it again into the retained declaration vector. Physical outer
+instances and default markers are separate ABI slots. Tests: `libraries::classifier_callables::tests`
+and both value-class dependency controls in `tests/inner_constructor_bounds_e2e.rs`.

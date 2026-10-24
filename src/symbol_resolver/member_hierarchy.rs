@@ -4,6 +4,7 @@ mod bound_inner_constructors;
 mod result_enhancement;
 
 pub(crate) use bound_inner_constructors::bound_inner_constructor_candidates;
+pub(crate) use bound_inner_constructors::BoundInnerConstructorContext;
 
 use super::{
     classifier_bindings, projected_supertypes, resolution_subtype, specialize_call_sig,

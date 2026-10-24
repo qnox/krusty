@@ -215,7 +215,7 @@ impl crate::plugins::FrontendCallResolver for Checker<'_> {
             receiver,
             selected: crate::plugins::FrontendSelectedMemberCall {
                 receiver: call.receiver,
-                member: call.member,
+                member: Box::new(call.member),
                 ret: call.ret,
                 suspend: call.suspend,
             },

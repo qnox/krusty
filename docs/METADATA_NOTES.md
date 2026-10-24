@@ -1031,6 +1031,27 @@ against the complete field descriptor independently of the builder's semantic re
 This changes no Kotlin metadata wire fields or raw-type flags. Declaration-backed raw/captured
 construction remains separate from this syntax boundary.
 
+## Receiver-bound constructor signatures
+
+Receiver-bound constructor candidates retain the full classifier argument layout, including captured
+enclosing arguments, even when a source provider's provisional constructor result contains only its
+own arguments. Captured declaration identities are substituted from the selected outer application;
+they are not constructor inference variables. Ordinary callable-owned formals remain independent.
+The enclosing declaration's normalized argument bindings are re-keyed onto the inner classifier's
+captured suffix. A hidden captured parameter and a same-spelled own parameter retain their distinct
+provider identities, including Java declarations; projection and dependent-star bounds stay intact.
+Complete capture layouts provide declaration-order correspondence; selective layouts retain exact
+semantic outer identities. Only present normalized bindings enter the captured context, so an
+unapplied outer does not acquire invented type arguments.
+The same complete result reaches inferred function signatures and rejected-call recovery. This
+changes no metadata schema, physical constructor descriptor or enclosing-instance ABI.
+
+Selected member records also retain pre-substitution declaration parameters in full source order
+(contexts, extension receiver, values). Metadata function normalization publishes this fact before
+specialization; callable/member projection and constructor publication carry it without recovering
+it from the specialized signature. Constructor outer-instance and default-marker slots remain
+physical inputs. This is an in-memory declaration fact, with no Kotlin metadata wire change.
+
 ## Annotation classifier nesting
 
 JVM annotation interfaces use the same retained `InnerClasses` inventory as other declared

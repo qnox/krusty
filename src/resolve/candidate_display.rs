@@ -121,6 +121,18 @@ impl Checker<'_> {
         )
     }
 
+    pub(super) fn bound_constructor_type_parameter_owner(
+        outer: Ty,
+        signature: &crate::libraries::GenericSig,
+    ) -> String {
+        format!(
+            "{}.constructor{}: {}",
+            outer.source_name(),
+            type_parameters_display(signature, false).trim_end(),
+            signature.ret.source_name(),
+        )
+    }
+
     pub(super) fn semantic_callable_display(
         name: &str,
         signature: &crate::libraries::GenericSig,
