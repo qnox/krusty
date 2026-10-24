@@ -5,7 +5,7 @@ use krusty_plugin_ir::{
     KspModifier, KspType, KspTypeArgument, KspTypeDeclaration, KspTypeParameter, KspVariance,
 };
 
-use crate::ast::{ModifierKeyword, WrittenModifiers};
+use crate::ast::{File, ModifierKeyword, TypeRef, WrittenModifiers};
 use crate::types::{Ty, TyKind, TyParamName, TypeName, TypeVariance};
 
 /// The type parameters a header can name: its own and its enclosing classifiers', by resolved
@@ -79,6 +79,7 @@ impl TypeParameterScope {
                     },
                     nullable: false,
                     arguments: Vec::new(),
+                    unannotated: false,
                 })
             }
             // A function type is the `kotlin.FunctionN` classifier applied to its parameter types,
@@ -98,6 +99,7 @@ impl TypeParameterScope {
                     )),
                     nullable: false,
                     arguments,
+                    unannotated: false,
                 })
             }
             _ => None,
@@ -113,6 +115,7 @@ impl TypeParameterScope {
                 .iter()
                 .map(|argument| self.argument(*argument))
                 .collect::<Option<_>>()?,
+            unannotated: false,
         })
     }
 
@@ -157,11 +160,47 @@ impl TypeParameterScope {
     }
 }
 
+/// `ty` as source spells it with `spelling`: KSP reports no annotations on a type whose spelling
+/// writes no type-use annotation of its own, and the same of each argument whose spelling is the
+/// matching written argument. An argument the spelling does not write one for keeps them
+/// undescribed.
+pub(super) fn as_written(file: &File, spelling: &TypeRef, mut ty: KspType) -> KspType {
+    mark_unannotated(file, spelling, &mut ty);
+    ty
+}
+
+fn mark_unannotated(file: &File, spelling: &TypeRef, ty: &mut KspType) {
+    let inside = |span: crate::diag::Span, offset: u32| span.lo <= offset && offset < span.hi;
+    let own_annotation = file.type_annotations.keys().any(|&offset| {
+        inside(spelling.span, offset)
+            && !spelling
+                .targs
+                .iter()
+                .any(|argument| inside(argument.span, offset))
+    });
+    if own_annotation {
+        return;
+    }
+    ty.unannotated = true;
+    if spelling.targs.len() != ty.arguments.len() {
+        return;
+    }
+    for (written, argument) in spelling.targs.iter().zip(&mut ty.arguments) {
+        match argument {
+            KspTypeArgument::Star => {}
+            KspTypeArgument::Invariant(argument)
+            | KspTypeArgument::Out(argument)
+            | KspTypeArgument::In(argument) => mark_unannotated(file, written, argument),
+        }
+    }
+}
+
 pub(super) fn class_type(qualified_name: &str) -> KspType {
     KspType {
         declaration: KspTypeDeclaration::Class(qualified_name.to_string()),
         nullable: false,
         arguments: Vec::new(),
+        unannotated: false,
     }
 }
 
@@ -222,4 +261,63 @@ pub(super) fn modifiers(written: WrittenModifiers) -> Vec<KspModifier> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{as_written, class_type};
+    use crate::ast::Decl;
+    use crate::diag::DiagSink;
+    use krusty_plugin_ir::{KspType, KspTypeArgument};
+
+    /// Which levels of `List<String>`, or of `String` when `generic` is false, the top-level
+    /// property `name` of `source` leaves unannotated: the type, then its argument.
+    fn unannotated(source: &str, name: &str, generic: bool) -> Vec<bool> {
+        let mut diagnostics = DiagSink::new();
+        let tokens = crate::lexer::lex(source, &mut diagnostics);
+        let file = crate::parser::parse(source, &tokens, &mut diagnostics);
+        assert!(
+            !diagnostics.has_errors(),
+            "{}",
+            diagnostics.render("test", source)
+        );
+        let spelling = file
+            .decl_arena
+            .iter()
+            .find_map(|declaration| match declaration {
+                Decl::Property(property) if property.name == name => property.ty.as_ref(),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{name} parsed with a type"));
+        let ty = match generic {
+            true => KspType {
+                arguments: vec![KspTypeArgument::Invariant(class_type("kotlin.String"))],
+                ..class_type("kotlin.collections.List")
+            },
+            false => class_type("kotlin.String"),
+        };
+        let ty = as_written(&file, spelling, ty);
+        let mut levels = vec![ty.unannotated];
+        for argument in &ty.arguments {
+            if let KspTypeArgument::Invariant(argument) = argument {
+                levels.push(argument.unannotated);
+            }
+        }
+        levels
+    }
+
+    #[test]
+    fn a_type_use_annotation_leaves_its_own_type_undescribed() {
+        let source = "@Target(AnnotationTarget.TYPE) annotation class A
+            val plain: List<String> = listOf()
+            val outer: @A List<String> = listOf()
+            val inner: List<@A String> = listOf()
+            val single: @A String = \"\"
+            val bare: String = \"\"";
+        assert_eq!(unannotated(source, "plain", true), [true, true]);
+        assert_eq!(unannotated(source, "outer", true), [false, false]);
+        assert_eq!(unannotated(source, "inner", true), [true, false]);
+        assert_eq!(unannotated(source, "single", false), [false]);
+        assert_eq!(unannotated(source, "bare", false), [true]);
+    }
 }

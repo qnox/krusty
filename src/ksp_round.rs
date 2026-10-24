@@ -288,6 +288,7 @@ impl Source<'_> {
         let type_parameters = type_parameters(class, signature, &scope);
         let header = declarations::ClassHeader {
             id,
+            file: self.file,
             class,
             signature,
             kind,

@@ -227,6 +227,7 @@ fn super_types(
                     },
                     nullable: false,
                     arguments: Vec::new(),
+                    unannotated: false,
                 }),
                 _ => None,
             },

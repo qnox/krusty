@@ -1,9 +1,10 @@
 # What KSP2 2.3.12 (KSPJvmMain) logs with Members.kt over members/: every declaration with its
 # modifiers, type parameters, supertypes and types, and whether a property has a backing field, in
-# KSP's order.
+# KSP's order; then the type-use annotations of each type `Spelled` and `spelledExtension` write.
 w: [ksp] fun topLevel kind=TOP_LEVEL abstract=false modifiers= typeParameters= receiver=null (items: kotlin.Array<out members.Item> vararg=false default=false, sink: kotlin.collections.MutableMap<in kotlin.String, *> vararg=false default=false): kotlin.Unit
 w: [ksp] property topValue mutable=false backingField=true modifiers=: kotlin.collections.List<kotlin.collections.Set<kotlin.Int>>
 w: [ksp] property shout mutable=false backingField=false modifiers=: kotlin.String receiver=kotlin.String
+w: [ksp] fun spelledExtension kind=TOP_LEVEL abstract=false modifiers= typeParameters= receiver=kotlin.collections.List<kotlin.String> (): kotlin.Unit
 w: [ksp] INTERFACE members.Named modifiers= typeParameters= supertypes=kotlin.Any
 w: [ksp]   property name mutable=false backingField=false modifiers=: kotlin.String
 w: [ksp]   fun describe kind=MEMBER abstract=true modifiers= typeParameters= receiver=null (prefix: kotlin.String vararg=false default=true): kotlin.String
@@ -65,3 +66,18 @@ w: [ksp]   property delegated mutable=false backingField=false modifiers=: kotli
 w: [ksp]   property pending mutable=false backingField=false modifiers=ABSTRACT: kotlin.Int
 w: [ksp]   property noField mutable=true backingField=false modifiers=: kotlin.Int
 w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL typeParameters= receiver=null (fromConstructor: kotlin.Int vararg=false default=false): members.Fields
+w: [ksp] CLASS members.Spelled modifiers= typeParameters= supertypes=kotlin.Any
+w: [ksp]   property fromConstructor mutable=false backingField=true modifiers=: kotlin.collections.List<kotlin.String>
+w: [ksp]   property property mutable=false backingField=true modifiers=: kotlin.collections.Map<kotlin.String, kotlin.collections.List<kotlin.Int?>>?
+w: [ksp]   fun function kind=MEMBER abstract=false modifiers= typeParameters= receiver=null (parameter: kotlin.collections.Set<out kotlin.Number> vararg=false default=false, rest: kotlin.String vararg=true default=false): kotlin.Array<kotlin.String>
+w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL typeParameters= receiver=null (fromConstructor: kotlin.collections.List<kotlin.String> vararg=false default=false, plain: kotlin.collections.Map<kotlin.String, kotlin.Int?> vararg=false default=false): members.Spelled
+w: [ksp] typeAnnotations fromConstructor List[]<String[]>
+w: [ksp] typeAnnotations property Map[]<String[], List[]<Int[]>>
+w: [ksp] typeAnnotations function parameter Set[]<Number[]>
+w: [ksp] typeAnnotations function rest String[]
+w: [ksp] typeAnnotations function return Array[]<String[]>
+w: [ksp] typeAnnotations <init> fromConstructor List[]<String[]>
+w: [ksp] typeAnnotations <init> plain Map[]<String[], Int[]>
+w: [ksp] typeAnnotations <init> return Spelled[]
+w: [ksp] typeAnnotations spelledExtension receiver List[]<String[]>
+w: [ksp] typeAnnotations spelledExtension return Unit[]
