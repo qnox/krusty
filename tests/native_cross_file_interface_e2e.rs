@@ -8,7 +8,7 @@
 use crate::common::{expect_box_ok_files_with_stdlib, expect_native_sources, native_decline};
 
 /// The native backend must decline the module `sources` with exactly `reason`.
-fn expect_native_sources_decline(sources: &[(&str, &str)], reason: &str) {
+fn expect_native_sources_decline_exactly(sources: &[(&str, &str)], reason: &str) {
     if let Some(said) = native_decline(sources) {
         assert_eq!(said, reason);
     }
@@ -337,7 +337,7 @@ fn a_default_reached_through_a_bridge_of_another_file_declines() {
                 "#,
         ),
     ];
-    expect_native_sources_decline(
+    expect_native_sources_decline_exactly(
         sources,
         "krusty: the native backend does not support an interface default reached through a \
          bridge, declared in another file (`demo.IntSource`) yet",

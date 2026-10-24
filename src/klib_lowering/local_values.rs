@@ -48,6 +48,7 @@ impl LocalValue {
 /// The local variables of one body, by serialized symbol.
 pub(super) struct LocalValues {
     values: HashMap<KlibIrSymbol, LocalValue>,
+    names: HashMap<KlibIrSymbol, String>,
     next: u32,
 }
 
@@ -56,6 +57,7 @@ impl LocalValues {
     pub(super) fn after(parameters: usize) -> Self {
         Self {
             values: HashMap::default(),
+            names: HashMap::default(),
             next: u32::try_from(parameters).expect("a parameter list fits u32"),
         }
     }
@@ -149,6 +151,14 @@ impl LocalValues {
 
     pub(super) fn get(&self, symbol: &KlibIrSymbol) -> Option<LocalValue> {
         self.values.get(symbol).copied()
+    }
+
+    pub(super) fn name(&self, symbol: &KlibIrSymbol) -> Option<String> {
+        self.names.get(symbol).cloned()
+    }
+
+    pub(super) fn record_name(&mut self, symbol: &KlibIrSymbol, name: &str) {
+        self.names.insert(symbol.clone(), name.to_owned());
     }
 
     /// Reserve internal storage without declaring a serialized value identity. A return-target

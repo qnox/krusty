@@ -5,17 +5,17 @@
 use std::io::{self, Read, Write};
 
 use krusty_plugin_ir::{
-    KspAccessor, KspAnnotation, KspArgument, KspClass, KspClassKind, KspDeclaration, KspFunction,
-    KspFunctionKind, KspLibraryClass, KspModifier, KspOrigin, KspParameter, KspProperty, KspRound,
-    KspType, KspTypeArgument, KspTypeDeclaration, KspTypeParameter, KspTypeSlot, KspValue,
-    KspVariance,
+    KspAccessor, KspAnnotation, KspArgument, KspClass, KspClassKind, KspDeclaration,
+    KspDeclarationOrigin, KspFunction, KspFunctionKind, KspLibraryClass, KspMember, KspModifier,
+    KspNameMapping, KspOrigin, KspParameter, KspProperty, KspRound, KspType, KspTypeArgument,
+    KspTypeDeclaration, KspTypeParameter, KspTypeSlot, KspValue, KspVariance,
 };
 
 use crate::protocol::{malformed, put_list, put_str, read_frame, utf8, write_frame, Payload};
 
 use super::{GeneratedKind, KspGenerated, KspLoad, KspOutcome};
 
-pub(crate) const PROTOCOL: u32 = 5;
+pub(crate) const PROTOCOL: u32 = 8;
 
 const HELLO: u8 = 0;
 const LOAD: u8 = 1;
@@ -29,6 +29,8 @@ const FINISHED: u8 = 8;
 pub(crate) const SHUTDOWN: u8 = 9;
 const CLASS_QUERY: u8 = 10;
 const CLASS_ANSWER: u8 = 11;
+const NAME_QUERY: u8 = 12;
+const NAME_ANSWER: u8 = 13;
 
 pub(crate) enum Request<'a> {
     Load(&'a KspLoad<'a>),
@@ -37,6 +39,8 @@ pub(crate) enum Request<'a> {
     /// The answer to a [`Reply::ClassQuery`]: the classifier, or `None` when the classpath has
     /// none by that name.
     ClassAnswer(Option<&'a KspLibraryClass>),
+    /// The answer to a [`Reply::NameQuery`]: the mapped name, or `None` when there is none.
+    NameAnswer(Option<&'a str>),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -48,6 +52,9 @@ pub(crate) enum Reply {
     /// Not a reply but a question in the middle of a request: a processor reached the classpath
     /// classifier with this qualified name. The host waits for its [`Request::ClassAnswer`].
     ClassQuery(String),
+    /// Likewise a question: a processor asked for the name this mapping gives a qualified name.
+    /// The host waits for its [`Request::NameAnswer`].
+    NameQuery(KspNameMapping, String),
     /// A processor reached an API member the host does not implement yet.
     Unsupported(String),
     /// The request failed in the host, with the stack trace that says why.
@@ -109,11 +116,16 @@ pub(crate) fn write_request(out: &mut impl Write, request: &Request) -> io::Resu
                 put_library_class(payload, library)
             });
         }
+        Request::NameAnswer(answer) => {
+            payload.push(NAME_ANSWER);
+            put_option(&mut payload, answer, |payload, name| put_str(payload, name));
+        }
     }
     write_frame(out, &payload)
 }
 
-/// A declaration: 0 and a classifier, 1 and a function, 2 and a property, or 3 and a type alias.
+/// A declaration: 0 and a classifier, 1 and a function, 2 and a property, 3 and a type alias, or 4
+/// and a library classifier's qualified name.
 fn put_declaration(payload: &mut Vec<u8>, declaration: &KspDeclaration) {
     match declaration {
         KspDeclaration::Class(class) => {
@@ -132,6 +144,10 @@ fn put_declaration(payload: &mut Vec<u8>, declaration: &KspDeclaration) {
             payload.push(3);
             put_str(payload, &alias.simple_name);
             put_str(payload, &alias.qualified_name);
+        }
+        KspDeclaration::LibraryClass(qualified_name) => {
+            payload.push(4);
+            put_str(payload, qualified_name);
         }
     }
 }
@@ -156,11 +172,14 @@ fn put_class(payload: &mut Vec<u8>, class: &KspClass) {
     });
     payload.push(u8::from(class.declarations_complete));
     put_list(payload, &class.declarations, put_declaration);
+    put_option(payload, &class.jvm_signature, |payload, text| {
+        put_str(payload, text)
+    });
 }
 
 /// A classpath classifier: its header as a class's, then its package, the qualified name of the
-/// classifier it is nested in if any, its origin (0 Kotlin, 1 Java), and whether its annotations
-/// are complete.
+/// classifier it is nested in if any, its origin (0 Kotlin, 1 Java), whether its annotations are
+/// complete, and the members it lists with the inherited ones: its properties, then its functions.
 fn put_library_class(payload: &mut Vec<u8>, library: &KspLibraryClass) {
     put_class(payload, &library.class);
     put_str(payload, &library.package_name);
@@ -172,11 +191,44 @@ fn put_library_class(payload: &mut Vec<u8>, library: &KspLibraryClass) {
         KspOrigin::JavaLib => 1,
     });
     payload.push(u8::from(library.annotations_complete));
+    put_option(payload, &library.all_properties, |payload, members| {
+        put_members(payload, members)
+    });
+    put_option(payload, &library.all_functions, |payload, members| {
+        put_members(payload, members)
+    });
+}
+
+/// Members a classifier lists: 0 and the index of one of its own declarations, or 1, the
+/// qualified name of the classifier that declares an inherited one, and that declaration.
+fn put_members(payload: &mut Vec<u8>, members: &[KspMember]) {
+    put_list(payload, members, |payload, member| match member {
+        KspMember::Declared(index) => {
+            payload.push(0);
+            payload.extend_from_slice(&index.to_be_bytes());
+        }
+        KspMember::Inherited { owner, declaration } => {
+            payload.push(1);
+            put_str(payload, owner);
+            put_declaration(payload, declaration);
+        }
+    });
+}
+
+/// Where a declaration comes from: 0 the source, 1 the compiler, 2 a Kotlin library, 3 a Java
+/// library.
+fn put_origin(payload: &mut Vec<u8>, origin: KspDeclarationOrigin) {
+    payload.push(match origin {
+        KspDeclarationOrigin::Source => 0,
+        KspDeclarationOrigin::Synthetic => 1,
+        KspDeclarationOrigin::Library(KspOrigin::KotlinLib) => 2,
+        KspDeclarationOrigin::Library(KspOrigin::JavaLib) => 3,
+    });
 }
 
 /// A function: its name, kind (0 top-level, 1 member, 2 static, 3 primary constructor,
-/// 4 secondary constructor), whether it is abstract, its line, annotations, modifiers, type
-/// parameters, extension receiver, parameters and return type.
+/// 4 secondary constructor), whether it is abstract, its origin, line, annotations, modifiers, type
+/// parameters, extension receiver, parameters, return type, JVM signature and JVM name.
 fn put_function(payload: &mut Vec<u8>, function: &KspFunction) {
     put_str(payload, &function.name);
     payload.push(match function.kind {
@@ -187,6 +239,7 @@ fn put_function(payload: &mut Vec<u8>, function: &KspFunction) {
         KspFunctionKind::SecondaryConstructor => 4,
     });
     payload.push(u8::from(function.is_abstract));
+    put_origin(payload, function.origin);
     put_option(payload, &function.line, |payload, line| {
         payload.extend_from_slice(&line.to_be_bytes());
     });
@@ -196,11 +249,18 @@ fn put_function(payload: &mut Vec<u8>, function: &KspFunction) {
     put_type_slot(payload, &function.extension_receiver);
     put_list(payload, &function.parameters, put_parameter);
     put_option(payload, &function.return_type, put_type);
+    put_option(payload, &function.jvm_signature, |payload, text| {
+        put_str(payload, text)
+    });
+    put_option(payload, &function.jvm_name, |payload, text| {
+        put_str(payload, text)
+    });
 }
 
 fn put_property(payload: &mut Vec<u8>, property: &KspProperty) {
     put_str(payload, &property.name);
     payload.push(u8::from(property.is_mutable));
+    put_origin(payload, property.origin);
     put_option(payload, &property.line, |payload, line| {
         payload.extend_from_slice(&line.to_be_bytes());
     });
@@ -211,12 +271,15 @@ fn put_property(payload: &mut Vec<u8>, property: &KspProperty) {
     put_option(payload, &property.ty, put_type);
     put_accessor(payload, &property.getter);
     put_option(payload, &property.setter, put_accessor);
+    put_option(payload, &property.jvm_signature, |payload, text| {
+        put_str(payload, text)
+    });
 }
 
-/// An accessor: whether the source wrote it, its modifiers and annotations, and a setter's
-/// parameter name and annotations.
+/// An accessor: its origin, its modifiers and annotations, a setter's parameter name and
+/// annotations, and its JVM name.
 fn put_accessor(payload: &mut Vec<u8>, accessor: &KspAccessor) {
-    payload.push(u8::from(accessor.written));
+    put_origin(payload, accessor.origin);
     put_modifiers(payload, &accessor.modifiers);
     put_annotations(payload, &accessor.annotations);
     put_option(
@@ -227,6 +290,9 @@ fn put_accessor(payload: &mut Vec<u8>, accessor: &KspAccessor) {
             put_annotations(payload, annotations);
         },
     );
+    put_option(payload, &accessor.jvm_name, |payload, text| {
+        put_str(payload, text)
+    });
 }
 
 /// A parameter: its name, its type and a flags byte (bit 0 `val`, 1 `var`, 2 vararg, 3 default,
@@ -440,6 +506,14 @@ pub(crate) fn read_reply(input: &mut impl Read) -> io::Result<Reply> {
         ROUND_DONE => Ok(Reply::RoundDone(outcome(&mut payload)?)),
         FINISHED => Ok(Reply::Finished(outcome(&mut payload)?)),
         CLASS_QUERY => Ok(Reply::ClassQuery(payload.string()?)),
+        NAME_QUERY => {
+            let mapping = match payload.byte()? {
+                0 => KspNameMapping::KotlinToJava,
+                1 => KspNameMapping::JavaToKotlin,
+                tag => return Err(malformed(format!("unknown name mapping {tag}"))),
+            };
+            Ok(Reply::NameQuery(mapping, payload.string()?))
+        }
         UNSUPPORTED => Ok(Reply::Unsupported(payload.string()?)),
         FAILED => Ok(Reply::Failed(payload.string()?)),
         tag => Err(malformed(format!("unknown reply {tag}"))),
@@ -492,6 +566,7 @@ mod tests {
             name: "<init>".into(),
             kind: KspFunctionKind::PrimaryConstructor,
             is_abstract: false,
+            origin: KspDeclarationOrigin::Synthetic,
             line: None,
             annotations: Vec::new(),
             modifiers: Some(vec![KspModifier::Final]),
@@ -509,6 +584,8 @@ mod tests {
                 annotations: Vec::new(),
             }],
             return_type: None,
+            jvm_signature: Some("(I)V".into()),
+            jvm_name: None,
         };
         let round = KspRound {
             files: vec![KspFile {
@@ -552,6 +629,7 @@ mod tests {
                     }]),
                     declarations: vec![KspDeclaration::Function(constructor)],
                     declarations_complete: true,
+                    jvm_signature: Some("Lp/A;".into()),
                 })],
                 declarations_complete: false,
             }],
@@ -594,16 +672,23 @@ mod tests {
             t
         };
         expected.extend(&t);
-        // The complete declarations: a primary constructor, final, with one `val x: T = …`.
+        // The complete declarations: a primary constructor the compiler made, final, with one
+        // `val x: T = …`.
         expected.extend([1, 0, 0, 0, 1, 1, 0, 0, 0, 6]);
         expected.extend(b"<init>");
-        expected.extend([3, 0, 0, 0, 0, 0, 0]);
+        expected.extend([3, 0, 1, 0, 0, 0, 0, 0]);
         expected.extend([1, 0, 0, 0, 1, 0, 0, 0, 5]);
         expected.extend(b"FINAL");
         expected.extend([0, 0, 0, 0, 0, 1, 0, 0, 0, 1, b'x', 1]);
         expected.extend(&t);
-        // Its flags, no annotations, and no return type.
+        // Its flags, no annotations, no return type, its JVM signature and no JVM name.
         expected.extend([0b1001, 0, 0, 0, 0, 0]);
+        expected.extend([1, 0, 0, 0, 4]);
+        expected.extend(b"(I)V");
+        expected.push(0);
+        // The classifier's JVM signature.
+        expected.extend([1, 0, 0, 0, 5]);
+        expected.extend(b"Lp/A;");
         let mut frame = (expected.len() as u32).to_be_bytes().to_vec();
         frame.extend(expected);
         assert_eq!(framed, frame);
@@ -639,5 +724,41 @@ mod tests {
                 has_error: true,
             })
         );
+    }
+
+    #[test]
+    fn a_name_query_reads_back_its_mapping_and_its_answer_frames_the_name() {
+        let frame = |payload: Vec<u8>| {
+            let mut frame = (payload.len() as u32).to_be_bytes().to_vec();
+            frame.extend(payload);
+            frame
+        };
+        let query = |direction: u8| {
+            let mut payload = vec![NAME_QUERY, direction, 0, 0, 0, 10];
+            payload.extend(b"kotlin.Int");
+            frame(payload)
+        };
+        assert_eq!(
+            read_reply(&mut query(0).as_slice()).unwrap(),
+            Reply::NameQuery(KspNameMapping::KotlinToJava, "kotlin.Int".into())
+        );
+        assert_eq!(
+            read_reply(&mut query(1).as_slice()).unwrap(),
+            Reply::NameQuery(KspNameMapping::JavaToKotlin, "kotlin.Int".into())
+        );
+        assert_eq!(
+            read_reply(&mut query(2).as_slice())
+                .unwrap_err()
+                .to_string(),
+            "unknown name mapping 2"
+        );
+        let mut framed = Vec::new();
+        write_request(&mut framed, &Request::NameAnswer(Some("java.lang.Integer"))).unwrap();
+        let mut answer = vec![NAME_ANSWER, 1, 0, 0, 0, 17];
+        answer.extend(b"java.lang.Integer");
+        assert_eq!(framed, frame(answer));
+        let mut framed = Vec::new();
+        write_request(&mut framed, &Request::NameAnswer(None)).unwrap();
+        assert_eq!(framed, frame(vec![NAME_ANSWER, 0]));
     }
 }

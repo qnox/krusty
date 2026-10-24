@@ -62,11 +62,13 @@ pub struct VerifyCompileArguments {
     pub unsupported: Vec<String>,
     /// The compilation's kotlinc arguments, with krusty's own `-d`.
     pub kotlinc_arguments: Vec<String>,
+    /// `--kotlin-outputs-only`: the reference directory holds javac's classes and resources too.
+    pub kotlin_outputs_only: bool,
 }
 
 pub const VERIFY_COMPILE_USAGE: &str = "usage: krusty verify-compile --reference <kotlinc output> \
 --record <record.json> --compilation <name> [--source-set <name>] [--kotlin-version <version>] \
-[--kotlinc-millis <ms>] [--unsupported <reason>]... [--unsupported-from <file>] \
+[--kotlinc-millis <ms>] [--unsupported <reason>]... [--unsupported-from <file>] [--kotlin-outputs-only] \
 -- <kotlinc arguments with -d <krusty output>>";
 
 impl VerifyCompileArguments {
@@ -82,6 +84,10 @@ impl VerifyCompileArguments {
             if option == "--" {
                 parsed.kotlinc_arguments = argv[index..].to_vec();
                 break;
+            }
+            if option == "--kotlin-outputs-only" {
+                parsed.kotlin_outputs_only = true;
+                continue;
             }
             let value = argv
                 .get(index)
@@ -239,6 +245,7 @@ mod tests {
                 kotlinc_millis: Some(1200),
                 unsupported: vec![],
                 kotlinc_arguments: strings(&["A.kt", "-d", "krusty"]),
+                kotlin_outputs_only: false,
             }
         );
     }

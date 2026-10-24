@@ -563,7 +563,8 @@ fn note_template_conflicts(
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
         | TyKind::DefinitelyNotNull(inner)
-        | TyKind::StarProjection(inner) => note_template_conflicts(inner, bindings, conflicting),
+        | TyKind::StarProjection(inner)
+        | TyKind::RawProjection(inner) => note_template_conflicts(inner, bindings, conflicting),
         TyKind::Obj(_, arguments) => {
             for argument in arguments {
                 note_template_conflicts(*argument, bindings, conflicting);
