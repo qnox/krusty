@@ -145,12 +145,14 @@ final class HostResolver implements Resolver {
 
     @Override
     public KSName mapJavaNameToKotlin(KSName javaName) {
-        throw Nodes.notImplemented("Resolver.mapJavaNameToKotlin");
+        String mapped = symbols.classpath().kotlinName(javaName.asString());
+        return mapped == null ? null : new Name(mapped);
     }
 
     @Override
     public KSName mapKotlinNameToJava(KSName kotlinName) {
-        throw Nodes.notImplemented("Resolver.mapKotlinNameToJava");
+        String mapped = symbols.classpath().javaName(kotlinName.asString());
+        return mapped == null ? null : new Name(mapped);
     }
 
     @Override

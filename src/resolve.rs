@@ -89,6 +89,8 @@ mod capture_storage;
 mod cast_erasure;
 mod cast_narrowing;
 mod catch_flow;
+mod checker_module_symbols;
+use checker_module_symbols::CheckerModuleSymbols;
 mod checker_symbol_queries;
 mod class_body_bindings;
 mod classifier_associated;
@@ -2600,6 +2602,7 @@ pub struct SymbolTable {
     /// dependency providers own their caches separately. The optional file component preserves
     /// private top-level visibility.
     pub(crate) module_symbol_cache: std::cell::RefCell<ModuleSymbolCache>,
+    pub(crate) source_fragments: crate::source::SourceFragments,
     pub(crate) module_shape_cache: std::cell::RefCell<
         HashMap<TypeName, Option<std::sync::Arc<crate::libraries::LibraryType>>>,
     >,
@@ -2813,6 +2816,7 @@ impl Default for SymbolTable {
         SymbolTable {
             compilation_id: NEXT_COMPILATION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             module_symbol_cache: Default::default(),
+            source_fragments: Default::default(),
             module_shape_cache: Default::default(),
             module_cache_enabled: std::cell::Cell::new(false),
             module_mutation_depth: std::cell::Cell::new(0),
@@ -34343,115 +34347,6 @@ struct LambdaCheckMode {
 type AnnotationElements = Vec<(String, Ty)>;
 type AnnotationShape = (AnnotationElements, ParamList, AnnotationParameterPolicy);
 
-/// Current-module provider selected by frontend lifetime. Legacy inference runs before signature
-/// finalization; production Pass 2 overlays the finalized declaration index and may therefore
-/// destroy parser-keyed declaration families before constructing this checker.
-enum CheckerModuleSymbols<'a> {
-    Legacy(crate::module_symbols::ModuleSymbols<'a>),
-    Streamed(crate::fir::StreamedModuleSymbols<'a>),
-}
-
-impl<'a> CheckerModuleSymbols<'a> {
-    /// The temporary signature graph exists only for pre-finalization inference. Callers must
-    /// handle its absence explicitly; authoritative Pass 2 has no graph-bearing variant to return.
-    fn legacy_symbols(&self) -> Option<&'a SymbolTable> {
-        match self {
-            Self::Legacy(source) => Some(source.pass_one_symbols()),
-            Self::Streamed(_) => None,
-        }
-    }
-
-    fn declares_top_level(&self, name: &str) -> bool {
-        match self {
-            Self::Legacy(source) => source.declares_top_level(name),
-            Self::Streamed(source) => source.declares_top_level(name),
-        }
-    }
-
-    fn type_alias_binding(&self, identity: TypeName) -> Option<crate::libraries::AliasExpansion> {
-        match self {
-            Self::Legacy(source) => source.type_alias_binding(identity),
-            Self::Streamed(source) => source.type_alias_binding(identity),
-        }
-    }
-
-    fn type_parameter_extra_bounds(&self, identity: &str) -> Vec<Ty> {
-        match self {
-            Self::Legacy(source) => source.type_parameter_extra_bounds(identity),
-            Self::Streamed(source) => source.type_parameter_extra_bounds(identity),
-        }
-    }
-
-    fn type_parameter_bounds(&self, identity: &str) -> Vec<Ty> {
-        match self {
-            Self::Legacy(source) => source.type_parameter_bounds(identity),
-            Self::Streamed(source) => source.type_parameter_bounds(identity),
-        }
-    }
-
-    fn annotation_retention(
-        &self,
-        classifier: TypeName,
-    ) -> Option<crate::types::AnnotationRetention> {
-        match self {
-            Self::Legacy(source) => source.annotation_retention(classifier),
-            Self::Streamed(source) => source.annotation_retention(classifier),
-        }
-    }
-
-    fn annotation_targets(&self) -> &'a crate::types::DeclaredTargetPolicies {
-        match self {
-            Self::Legacy(source) => source.annotation_targets(),
-            Self::Streamed(source) => source.annotation_targets(),
-        }
-    }
-
-    fn finalized_function(
-        &self,
-        declaration: crate::fir::DeclarationId,
-        owner: TypeName,
-        owner_is_interface: bool,
-    ) -> Option<crate::libraries::FunctionInfo> {
-        match self {
-            Self::Legacy(_) => None,
-            Self::Streamed(source) => {
-                source.function_for_declaration(declaration, owner, owner_is_interface)
-            }
-        }
-    }
-}
-
-impl SymbolSource for CheckerModuleSymbols<'_> {
-    fn type_variable_bounds(&self, name: &str) -> Vec<Ty> {
-        self.type_parameter_bounds(name)
-    }
-
-    fn package_exists(&self, parent: TypeName, name: &str) -> bool {
-        match self {
-            Self::Legacy(source) => source.package_exists(parent, name),
-            Self::Streamed(source) => source.package_exists(parent, name),
-        }
-    }
-
-    fn symbols(
-        &self,
-        namespace: crate::symbol_source::SymbolNamespace,
-        name: &str,
-    ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
-        match self {
-            Self::Legacy(source) => source.symbols(namespace, name),
-            Self::Streamed(source) => source.symbols(namespace, name),
-        }
-    }
-
-    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
-        match self {
-            Self::Legacy(source) => source.sam_with_receiver_annotations(),
-            Self::Streamed(source) => source.sam_with_receiver_annotations(),
-        }
-    }
-}
-
 struct Checker<'a> {
     file: &'a File,
     /// Interned source package of `file`, computed once from its dotted spelling.
@@ -35342,8 +35237,11 @@ impl crate::assignable::TypeOracle for Checker<'_> {
         supertypes
     }
 
+    /// A platform source types an `expect` classifier as the target of the `actual typealias`
+    /// actualizing it, so the two are one classifier there.
     fn same_class_name(&self, a: TypeName, b: TypeName) -> bool {
-        a == b
+        let actualized = |name| self.module.actualized_expect(name).unwrap_or(name);
+        a == b || actualized(a) == actualized(b)
     }
 
     fn type_param_variance(&self, internal: TypeName, index: usize) -> crate::types::TypeVariance {

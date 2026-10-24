@@ -63,6 +63,13 @@ impl JvmSignatureFormatter<'_> {
         if arguments.is_empty() {
             return Some(false);
         }
+        // A Java raw occurrence signs as the raw classifier it was read from.
+        if arguments
+            .iter()
+            .any(|argument| argument.is_raw_projection())
+        {
+            return Some(true);
+        }
         let chain = self.classifier_signature_chain(owner)?;
         let declared = chain.iter().map(|segment| segment.variances.len()).sum();
         let arguments = self.classifier_usage_arguments(owner, arguments, declared)?;
@@ -83,6 +90,7 @@ impl JvmSignatureFormatter<'_> {
 pub(super) fn makes_raw(variance: TypeVariance, argument: Ty) -> bool {
     let argument = match argument.kind() {
         TyKind::StarProjection(_) => return false,
+        TyKind::RawProjection(_) => return true,
         TyKind::InProjection(inner) | TyKind::OutProjection(inner) => inner,
         _ => argument,
     };

@@ -2,6 +2,8 @@
 //! crate, so product e2e modules live behind one target to keep link time and target size bounded.
 //! External corpus/reference-toolchain suites live in `conformance.rs`.
 
+#[path = "dependent_constructor_bounds_e2e.rs"]
+mod dependent_constructor_bounds_e2e;
 #[path = "nested_signature_argument_layout_e2e.rs"]
 mod nested_signature_argument_layout_e2e;
 
@@ -1295,6 +1297,8 @@ mod java_interface_mutable_collection_face_e2e;
 mod java_member_modules;
 #[path = "java_nonfinal_constant_e2e.rs"]
 mod java_nonfinal_constant_e2e;
+#[path = "java_raw_type_e2e.rs"]
+mod java_raw_type_e2e;
 #[path = "java_self_bounded_constructor_e2e.rs"]
 mod java_self_bounded_constructor_e2e;
 #[path = "local_class_capture_order_e2e.rs"]

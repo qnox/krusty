@@ -83,6 +83,10 @@ pub struct Spelled {
     /// This occurrence carries kotlinc's `EnhancedNullability` type attribute. Inferred
     /// declarations retain argument-position marks from the checked Java value that produced them.
     pub enhanced_nullability: bool,
+    /// Common code typed this occurrence as an `expect` class an `actual typealias` actualizes;
+    /// [`Self::alias`] names that class. kotlinc's reader derives the occurrence's class id from
+    /// the expect class, not from the alias expansion the target realizes.
+    pub actualized_expect: bool,
 }
 
 /// The spelling of a node that names no alias and records no annotation.
@@ -99,6 +103,7 @@ const EMPTY: Spelled = Spelled {
     parameter_name: None,
     flexible_upper_bound: None,
     enhanced_nullability: false,
+    actualized_expect: false,
 };
 
 impl Spelled {
@@ -119,6 +124,47 @@ impl Spelled {
             && self.flexible_upper_bound.is_none()
             && !self.enhanced_nullability
             && self.args.iter().all(Spelled::is_none)
+    }
+
+    /// Abbreviate every occurrence in `ty` of an `expect` class that `expects` maps to the
+    /// classifier its `actual typealias` names, as kotlinc writes the expansion of that alias.
+    pub(crate) fn abbreviate_actualized_expects(
+        &mut self,
+        ty: Ty,
+        expects: &crate::fx_hash::HashMap<TypeName, TypeName>,
+    ) {
+        let ty = match ty.kind() {
+            TyKind::Nullable(inner)
+            | TyKind::PlatformNullable(inner)
+            | TyKind::DefinitelyNotNull(inner)
+            | TyKind::InProjection(inner)
+            | TyKind::OutProjection(inner)
+            | TyKind::StarProjection(inner) => inner,
+            _ => ty,
+        };
+        let TyKind::Obj(classifier, arguments) = ty.kind() else {
+            return;
+        };
+        if self.args.len() < arguments.len() {
+            self.args.resize_with(arguments.len(), Spelled::default);
+        }
+        for (spelling, argument) in self.args.iter_mut().zip(arguments) {
+            spelling.abbreviate_actualized_expects(*argument, expects);
+        }
+        if !expects.contains_key(&classifier) {
+            return;
+        }
+        self.actualized_expect = true;
+        if self.alias.is_none() {
+            // kotlinc rejects an actual typealias whose arguments are not its own parameters in
+            // order, so the alias arguments are the expansion's.
+            self.alias = Some(classifier);
+            self.alias_args = arguments
+                .iter()
+                .zip(&self.args)
+                .map(|(argument, spelling)| (*argument, spelling.clone()))
+                .collect();
+        }
     }
 
     /// Record provider-owned upper faces for every flexible occurrence in inferred `ty`.
@@ -360,6 +406,15 @@ impl Spelled {
 }
 
 impl DeclaredSpellings {
+    /// Whether the receiver, a value parameter or the result is an actualized expect class: a
+    /// reader derives its descriptor from the expect class, so kotlinc records the physical one.
+    pub(crate) fn names_actualized_expect(&self) -> bool {
+        std::iter::once(&self.receiver)
+            .chain(&self.params)
+            .chain(std::iter::once(&self.ret))
+            .any(|spelled| spelled.actualized_expect)
+    }
+
     /// [`Spelled::seal`] over every spelling of the declaration.
     pub(crate) fn seal(
         &mut self,

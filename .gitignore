@@ -20,3 +20,4 @@ tools/ktlint/
 # Left behind by any Bazel invocation in the krusty Bazel module.
 /tools/krusty-bazel/bazel-*
 /tools/krusty-bazel/MODULE.bazel.lock
+.flattened-pom.xml

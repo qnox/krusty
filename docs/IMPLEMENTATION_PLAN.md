@@ -5,28 +5,16 @@ front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
 
-## Receiver-bound constructor constraints
+## Class application headers
 
-Normalize inner constructors with complete own-plus-captured instance results, preserving independent
-callable formals while removing captured formals from the inference variables. One receiver context
-re-keys normalized enclosing arguments onto the inner declaration's captured identities, including
-captures renamed by a shadowing own parameter; it never overwrites that independent own inference.
-That context
-specializes member-level candidates and provider declarations before eager lambda analysis, fixes
-captured bindings before final admission, and supplies the declaration evidence for exact bound
-diagnostics. Rejected signature recovery preserves that completed application without repeating
-inference. Provider selection moves
-out of the resolver facade into its owning module. Shared classifier-bound checking also retains
-the full enclosing application for alias targets instead of validating own bounds in isolation.
-JVM boxing-cast byte parity remains separate in #2590; the bound slice proves complete ABI
-signatures, reference runtime and exact diagnostics.
-The #2592 alias slice normalizes the selected lexical/file/import alias into the ordinary receiver
-candidate family. Alias-owned formals control written arity and inference; the selected physical
-constructor and enclosing receiver remain declaration-owned. Signature publication consumes the
-same named-argument substitution as body checking, retaining the alias expansion without a second
-lookup. Rigid underlying constructor formals retain scoped diagnostic owners from declaration
-substitutions. Source/dependency oracles cover full ABI, receiver and target bounds, scope/member
-priority, reordered and unused alias formals, named arguments, and independent constructor formals.
+JVM classifier assembly reads complete own/captured formal layouts without recursively publishing
+enclosing members. The header reader preserves metadata authority, bound chains, shadowed identities,
+static boundaries, local/anonymous entries and physical mapped-class variance. Owner tests constrain
+the member-cache lifetime as well as the resulting layout.
+
+This is declaration evidence for #2537. Raw occurrence construction, lossless explicit outer-segment
+parsing and erased-application semantics remain separate follow-ups. Enclosing-method formal scopes
+need explicit header evidence; unavailable bounds are refused rather than replaced with `Any`.
 
 ## Nested JVM generic applications
 
@@ -48,6 +36,15 @@ KLIB dependency-emission categories have disjoint declaration-owned roots before
 An authenticated intrinsic wrapper keeps that ownership when its body transaction declines; the
 ordinary-body category cannot retry it and turn the target decline into an ordinary-closure error.
 
+## Java raw type applications
+
+- ✅ A Java raw occurrence carries one `RawProjection(erasure)` argument per formal (SPEC §5), so it
+  is a complete application for the subtype relation, renders and publishes as kotlinc's flexible
+  raw interval, and binds a raw receiver's formals to their erasures.
+- ✅ Members read through a raw receiver are erased whole (nested applications, method formals,
+  inherited members over raw supertypes), and annotated raw occurrences keep their face
+  nullability.
+
 ## Shared-target plugin model identity
 
 The compiler/plugin IR crate records the existing checkout build input in Rust dep-info. Switching
@@ -57,6 +54,12 @@ copies the real crate, changes its model API, and checks A → B → B → A →
 This changes no plugin wire format or Kotlin semantics.
 
 ## Constructor parameter annotation pool order
+
+Argument constraint solving reports only definite declaration-bound violations. A relation still
+containing a current-call formal waits for the ordinary completed-binding check, after explicit
+and expected-result context. Caller-owned variables remain fixed. Source and dependency
+constructor regressions cover dependent applied bounds and contradictory complete applications;
+the existing prior-valid-argument diagnostic and concrete-bound tests remain required.
 
 The JVM constructor header seeder carries retained checked applications rather than descriptor-only
 projections. Encode their complete values at the existing retention-ordered visit boundary; keep
@@ -5869,3 +5872,36 @@ independent physical descriptor checks.
 Next, declaration-header layouts (#2576) must authenticate complete captured applications and raw
 omissions for #2537/#2532. Raw scope erasure must follow symbolic inheritance specialization, as the
 reference compiler demonstrates; it cannot independently erase a superclass from its own bounds.
+
+## Receiver-bound constructor constraints
+
+Normalize inner constructors with complete own-plus-captured instance results, preserving independent
+callable formals while removing captured formals from the inference variables. One receiver context
+re-keys normalized enclosing arguments onto the inner declaration's captured identities, including
+captures renamed by a shadowing own parameter; it never overwrites that independent own inference.
+That context
+specializes member-level candidates and provider declarations before eager lambda analysis, fixes
+captured bindings before final admission, and supplies the declaration evidence for exact bound
+diagnostics. Rejected signature recovery preserves that completed application without repeating
+inference. Provider selection moves
+out of the resolver facade into its owning module. Shared classifier-bound checking also retains
+the full enclosing application for alias targets instead of validating own bounds in isolation.
+JVM boxing-cast byte parity remains separate in #2590; the bound slice proves complete ABI
+signatures, reference runtime and exact diagnostics.
+The #2592 alias slice normalizes the selected lexical/file/import alias into the ordinary receiver
+candidate family. Alias-owned formals control written arity and inference; the selected physical
+constructor and enclosing receiver remain declaration-owned. Signature publication consumes the
+same named-argument substitution as body checking, retaining the alias expansion without a second
+lookup. Rigid underlying constructor formals retain scoped diagnostic owners from declaration
+substitutions. Source/dependency oracles cover full ABI, receiver and target bounds, scope/member
+priority, reordered and unused alias formals, named arguments, and independent constructor formals.
+Alias/value-class runtime controls also retain the target declaration's generic versus concrete
+constructor carriers for source, own-produced and reference-produced dependencies.
+
+Original parameter declarations now survive selected callable/member conversion independently of
+the specialized applicability signature. Constructor publication reads that same declaration shape;
+the JVM retains generic value-class boxes while concrete value-class slots keep their carriers.
+Owner tests constrain the constructor and context/extension/value round trips, and own/reference
+dependency runtime tests read both generic and concrete stored values. The selected-member record
+and conversion move out of the resolver facade, and plugin plans keep their declaration payload
+indirect, retiring two large-enum lint findings without changing the indexed FIR/IR representation.

@@ -14,6 +14,40 @@ const CALLS: &str = "fun fixed(o: Outer<Long>) = o.Fixed(1)\n\
     fun unused(o: Outer<Long>) = o.Ignored<String>(1)\n";
 
 #[test]
+fn bound_aliases_keep_the_original_constructor_value_class_carriers() {
+    let declarations = r#"
+@JvmInline value class Token(val value: Int)
+class Outer<O> {
+    inner class Inner(val value: O)
+    inner class Direct(val value: Token)
+}
+typealias GenericSlot = Outer<Token>.Inner
+typealias ConcreteSlot = Outer<Token>.Direct
+"#;
+    let consumer = r#"
+fun inferred(outer: Outer<Token>) = outer.GenericSlot(Token(17))
+fun concrete(outer: Outer<Token>) = outer.ConcreteSlot(Token(23))
+fun box(): String {
+    val outer = Outer<Token>()
+    return if (inferred(outer).value.value == 17 && concrete(outer).value.value == 23)
+        "OK" else "wrong values"
+}
+"#;
+    common::expect_box_same_as_kotlinc(
+        &format!("{declarations}{consumer}"),
+        "bound_inner_alias_value_class_carriers",
+    );
+    assert_eq!(
+        common::expect_box_run_against("BoundInnerAliasValueClassCarriers", declarations, consumer,),
+        Some("OK".into()),
+    );
+    assert_eq!(
+        common::expect_box_run_against_kotlinc(declarations, consumer),
+        Some("OK".into()),
+    );
+}
+
+#[test]
 fn a_lexical_alias_shadows_the_package_alias_for_inferred_calls() {
     let source = "class Outer<O : Number> { inner class Inner<T : O>(val value: T) }\n\
         typealias Fixed = Outer<Int>.Inner<Int>\n\
