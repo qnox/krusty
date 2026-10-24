@@ -45,6 +45,13 @@ repeating a build in the same checkout retains cached artifacts. A two-checkout 
 copies the real crate, changes its model API, and checks A → B → B → A → A outputs and cache reuse.
 This changes no plugin wire format or Kotlin semantics.
 
+## Interface compatibility holder table order
+
+Register the generated interface compatibility holder as a declared nested class and let the
+shared retained-table writer intern its constants in table order. An eager holder seed would
+preempt annotation-only references or declared children that sort earlier. Complete artifact
+comparisons cover both relative orders and abstract interfaces without a generated holder.
+
 ## Constructor parameter annotation pool order
 
 Argument constraint solving reports only definite declaration-bound violations. A relation still

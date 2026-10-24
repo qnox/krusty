@@ -1234,6 +1234,8 @@ mod interface_delegation_e2e;
 mod interface_delegation_expr_e2e;
 #[path = "interface_factory_function_e2e.rs"]
 mod interface_factory_function_e2e;
+#[path = "interface_inner_table_pool_order_e2e.rs"]
+mod interface_inner_table_pool_order_e2e;
 #[path = "interface_nested_classifier_e2e.rs"]
 mod interface_nested_classifier_e2e;
 #[path = "interface_object_method_e2e.rs"]
