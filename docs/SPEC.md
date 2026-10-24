@@ -21506,6 +21506,24 @@ parameters once, without inserting it again into the retained declaration vector
 instances and default markers are separate ABI slots. Tests: `libraries::classifier_callables::tests`
 and both value-class dependency controls in `tests/inner_constructor_bounds_e2e.rs`.
 
+## Failed constructor context and argument diagnostics
+
+A constructor application whose fixed class arguments violate every mapped declaration's bounds
+does not lend its result constraints to nested argument calls. Nested constructors still infer from
+their own explicit arguments and independent value arguments. The outer applicability and bound
+errors precede any missing nested result parameter diagnostic.
+
+When a receiver-bound alias constructor is rejected before argument checking, retained declaration
+and receiver bindings still describe its lambda inputs. Missing callable formals are diagnosed at
+the written, untyped input parameters; explicit annotations and independently fixed inputs survive.
+The rejected call's expected result cannot solve those inputs. Ordinary function declarations,
+nominal function classifiers, vararg elements and anonymous-function receiver slots share the same
+parameter layout. Candidate messages render the alias declaration, not a failed instantiated shape.
+Tests: `dependent_constructor_bounds_e2e` and `bound_inner_alias_inference_e2e`, with complete ordered
+kotlinc diagnostic comparisons, reference-built dependencies and valid inference/runtime controls.
+
+## Postponed receiver admission
+
 Extension receiver admission retains satisfiable active builder-inference variables. Selection may
 test the receiver relation against cloned postponed frames, solve those trial bindings and require
 strict assignability after substitution. Only ordinary call commitment publishes the constraints.

@@ -31,6 +31,19 @@ impl Checker<'_> {
         name: &str,
         function: &crate::libraries::FunctionInfo,
     ) -> String {
+        Self::callable_candidate_display_with_alias_constructor(
+            name,
+            function,
+            Self::generic_constructor_display,
+        )
+    }
+
+    /// Retain the declaration-kind dispatch while a caller supplies alias parameter type rendering.
+    pub(super) fn callable_candidate_display_with_alias_constructor(
+        name: &str,
+        function: &crate::libraries::FunctionInfo,
+        constructor: impl Fn(&crate::libraries::GenericSig, &crate::libraries::LibraryMember) -> String,
+    ) -> String {
         match function.bound_inner_constructor {
             Some(_) if function.constructor_alias.is_some() => {
                 let signature = &function
@@ -38,10 +51,7 @@ impl Checker<'_> {
                     .as_deref()
                     .expect("an alias constructor retains its declaration")
                     .signature;
-                Self::generic_constructor_display(
-                    signature,
-                    &function.member_with_return(signature.ret),
-                )
+                constructor(signature, &function.member_with_return(signature.ret))
             }
             Some(constructor) => Self::bound_inner_constructor_display(constructor, function),
             None => Self::generic_callable_display(name, function),
@@ -122,8 +132,16 @@ impl Checker<'_> {
         signature: &crate::libraries::GenericSig,
         member: &crate::libraries::LibraryMember,
     ) -> String {
+        Self::generic_constructor_display_with_type(signature, member, &Ty::source_name)
+    }
+
+    pub(super) fn generic_constructor_display_with_type(
+        signature: &crate::libraries::GenericSig,
+        member: &crate::libraries::LibraryMember,
+        render: &dyn Fn(Ty) -> String,
+    ) -> String {
         let type_parameters = type_parameters_display(signature, false);
-        let parameters = parameters_display(signature, &member.call_sig);
+        let parameters = parameters_display_with_type(signature, &member.call_sig, render);
         let parameters = parameters[member.context_count.min(parameters.len())..].join(", ");
         format!(
             "constructor{}({parameters}): {}",
@@ -224,6 +242,14 @@ fn type_parameters_display(signature: &crate::libraries::GenericSig, reified: bo
 
 /// Each declared parameter as `vararg name: Type = ...`, context parameters included.
 fn parameters_display(signature: &crate::libraries::GenericSig, call_sig: &CallSig) -> Vec<String> {
+    parameters_display_with_type(signature, call_sig, &Ty::source_name)
+}
+
+fn parameters_display_with_type(
+    signature: &crate::libraries::GenericSig,
+    call_sig: &CallSig,
+    render: &dyn Fn(Ty) -> String,
+) -> Vec<String> {
     signature
         .params
         .iter()
@@ -240,15 +266,12 @@ fn parameters_display(signature: &crate::libraries::GenericSig, call_sig: &CallS
             } else {
                 ""
             };
-            let vararg = if call_sig.vararg_index == Some(index) {
-                "vararg "
+            let (vararg, parameter) = if call_sig.vararg_index == Some(index) {
+                ("vararg ", parameter.array_read_elem().unwrap_or(*parameter))
             } else {
-                ""
+                ("", *parameter)
             };
-            format!(
-                "{vararg}{parameter_name}: {}{default}",
-                parameter.source_name()
-            )
+            format!("{vararg}{parameter_name}: {}{default}", render(parameter))
         })
         .collect()
 }
