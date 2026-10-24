@@ -27,3 +27,11 @@ class Outer {
 }
 
 fun interface Action : () -> Unit
+
+class Holder<A> {
+    inner class Inner<B>
+
+    inner class Bare
+
+    class Nested<C>
+}

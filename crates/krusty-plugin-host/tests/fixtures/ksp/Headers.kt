@@ -9,7 +9,7 @@ class HeadersProvider : SymbolProcessorProvider {
 
 /**
  * Logs each classifier's header: its modifiers, type parameters and supertypes, once. It lists a
- * class's declarations only to reach the classifiers nested in `Outer`.
+ * class's declarations only to reach the classifiers nested in `Outer` and `Holder`.
  */
 class HeadersProcessor(private val env: SymbolProcessorEnvironment) : SymbolProcessor {
     private var done = false
@@ -22,11 +22,22 @@ class HeadersProcessor(private val env: SymbolProcessorEnvironment) : SymbolProc
                 if (declaration is KSClassDeclaration) log(declaration)
             }
         }
-        val outer = resolver.getClassDeclarationByName(resolver.getKSNameFromString("headers.Outer"))!!
-        for (nested in outer.declarations) {
-            if (nested is KSClassDeclaration) log(nested)
+        for (name in listOf("headers.Outer", "headers.Holder")) {
+            val outer = resolver.getClassDeclarationByName(resolver.getKSNameFromString(name))!!
+            for (nested in outer.declarations) {
+                if (nested is KSClassDeclaration) log(nested)
+            }
         }
-        assignability(resolver, outer)
+        // `Middle<*>` as `Middle` writes it in its `Comparable` supertype, against its star projection.
+        val middle = resolver.getClassDeclarationByName(resolver.getKSNameFromString("headers.Middle"))!!
+        val comparable = middle.superTypes.map { it.resolve() }.first { it.declaration.simpleName.asString() == "Comparable" }
+        val written = comparable.arguments.single().type!!.resolve()
+        val star = middle.asStarProjectedType()
+        env.logger.warn(
+            "written ${type(written)} equals star=${written == star} star equals written=${star == written}" +
+                " same hash=${written.hashCode() == star.hashCode()}",
+        )
+        assignability(resolver, resolver.getClassDeclarationByName(resolver.getKSNameFromString("headers.Outer"))!!)
         return emptyList()
     }
 
@@ -107,6 +118,9 @@ class HeadersProcessor(private val env: SymbolProcessorEnvironment) : SymbolProc
         out.append("] supertypes=").append(declaration.superTypes.map { type(it) }.joinToString(", "))
         val star = declaration.asStarProjectedType()
         out.append(" star=").append(type(star)).append(" starText=").append(star.toString())
+            .append(" starArguments=").append(star.arguments.joinToString(", ", "[", "]") {
+                "${it.variance} type=${it.type} origin=${it.origin} parent=${it.parent}"
+            })
         env.logger.warn(out.toString())
     }
 }
