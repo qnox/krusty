@@ -72,6 +72,55 @@ fun box(): String = if (My().selfTest() == 34) \"OK\" else \"fail: ${My().selfTe
     common::expect_box_ok_with_stdlib(SRC, "P");
 }
 
+/// A getter's `field` binds lexically: a local `val field` or a lambda or local-function parameter
+/// named `field` shadows the backing field, so those properties are computed and get no field,
+/// while a read through a lambda, a local function or an object expression still uses it.
+#[test]
+fn getter_field_binding_decides_storage() {
+    const SRC: &str = "// WITH_STDLIB
+class My {
+    val shadowed: Int
+        get() {
+            val field = 8
+            return field
+        }
+    val lambdaParameter: Int
+        get() = 9.let { field -> field }
+    val localFunctionParameter: Int
+        get() {
+            fun read(field: Int) = field
+            return read(10)
+        }
+    val throughLambda: Int
+        get() = run { field + 1 }
+    val throughLocalFunction: Int
+        get() {
+            fun read() = field + 1
+            return read()
+        }
+    val throughObject: Int
+        get() = object {
+            fun read() = field + 1
+        }.read()
+
+    init {
+        throughLambda = 13
+        throughLocalFunction = 14
+        throughObject = 15
+    }
+}
+fun box(): String {
+    val m = My()
+    val values = listOf(
+        m.shadowed, m.lambdaParameter, m.localFunctionParameter,
+        m.throughLambda, m.throughLocalFunction, m.throughObject,
+    )
+    return if (values == listOf(8, 9, 10, 14, 15, 16)) \"OK\" else \"fail: $values\"
+}
+";
+    common::expect_box_ok_with_stdlib(SRC, "P");
+}
+
 /// The `inline` modifier on a property ACCESSOR (`inline get()`, `private inline set(…)`) — accepted
 /// (erased; krusty emits an ordinary accessor) rather than misparsed as an unterminated declaration.
 #[test]
