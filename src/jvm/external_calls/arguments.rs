@@ -74,6 +74,11 @@ pub(super) fn copy_call_facts(
     if let Some(value) = ir.suspend_call_overridden_results.remove(&source) {
         ir.suspend_call_overridden_results.insert(target, value);
     }
+    // So is the selection of an inline function: the lambdas the call inlines are arguments of the
+    // operation, which the wrapper only coerces the result of.
+    if ir.inline_call_sites.remove(&source) {
+        ir.inline_call_sites.insert(target);
+    }
 }
 
 #[derive(Debug)]

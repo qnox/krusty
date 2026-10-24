@@ -1183,6 +1183,9 @@ impl Parser<'_> {
             // Collection-literal `[a, b, …]`. Keep the ordinary call operand layout so generic
             // expression walkers remain exhaustive; the sparse marker below tells semantic checking
             // to ignore this provisional callee and select the language-defined target factory.
+            TokenKind::LBracket if self.annotation_value_context => {
+                self.parse_annotation_array_literal()
+            }
             TokenKind::LBracket => {
                 self.bump(); // '['
                 let args = self.with_newlines_insignificant(|parser| {

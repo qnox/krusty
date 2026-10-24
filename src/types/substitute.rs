@@ -32,7 +32,9 @@ where
     P: Fn(&str) -> bool + Copy,
 {
     match ty.kind() {
+        // A Java raw receiver binds each formal to its erasure: its member reads it as erased.
         TyKind::TyParam(name, bound) => lookup(name.as_str())
+            .map(Ty::raw_binding_read)
             .map(|binding| {
                 if !enforce_bound_nullability || bound.upper_bound_admits_null() {
                     binding
@@ -76,11 +78,13 @@ where
         TyKind::DefinitelyNotNull(inner) => {
             let other = inner;
             match other.kind() {
-                TyKind::TyParam(name, bound) => match lookup(name.as_str()) {
-                    Some(binding) => binding.contributed_through_nullable_formal(),
-                    None if preserve_unbound(name.as_str()) => ty,
-                    None => bound.contributed_through_nullable_formal(),
-                },
+                TyKind::TyParam(name, bound) => {
+                    match lookup(name.as_str()).map(Ty::raw_binding_read) {
+                        Some(binding) => binding.contributed_through_nullable_formal(),
+                        None if preserve_unbound(name.as_str()) => ty,
+                        None => bound.contributed_through_nullable_formal(),
+                    }
+                }
                 _ => substitute_type_parameters(
                     other,
                     lookup,
@@ -115,6 +119,12 @@ where
             enforce_bound_nullability,
         )),
         TyKind::StarProjection(inner) => Ty::star_projection(substitute_type_parameters(
+            inner,
+            lookup,
+            preserve_unbound,
+            enforce_bound_nullability,
+        )),
+        TyKind::RawProjection(inner) => Ty::raw_projection(substitute_type_parameters(
             inner,
             lookup,
             preserve_unbound,
@@ -187,6 +197,7 @@ pub(crate) fn ty_subst_alias_expansion(ty: Ty, bindings: &HashMap<String, Ty>) -
             TyKind::InProjection(inner) => Ty::in_projection(normalize(inner)),
             TyKind::OutProjection(inner) => Ty::out_projection(normalize(inner)),
             TyKind::StarProjection(inner) => Ty::star_projection(normalize(inner)),
+            TyKind::RawProjection(inner) => Ty::raw_projection(normalize(inner)),
             TyKind::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
                 name,
                 &arguments
@@ -208,7 +219,8 @@ pub(crate) fn ty_subst_alias_expansion(ty: Ty, bindings: &HashMap<String, Ty>) -
         match ty.kind() {
             TyKind::InProjection(inner)
             | TyKind::OutProjection(inner)
-            | TyKind::StarProjection(inner) => function_component(inner),
+            | TyKind::StarProjection(inner)
+            | TyKind::RawProjection(inner) => function_component(inner),
             TyKind::Nullable(inner) => Ty::nullable(function_component(inner)),
             TyKind::PlatformNullable(inner) => Ty::platform_nullable(function_component(inner)),
             TyKind::DefinitelyNotNull(inner) => {
@@ -268,6 +280,7 @@ pub(crate) fn ty_with_param_bounds(ty: Ty, bounds: &HashMap<String, Ty>) -> Ty {
         TyKind::InProjection(inner) => Ty::in_projection(ty_with_param_bounds(inner, bounds)),
         TyKind::OutProjection(inner) => Ty::out_projection(ty_with_param_bounds(inner, bounds)),
         TyKind::StarProjection(inner) => Ty::star_projection(ty_with_param_bounds(inner, bounds)),
+        TyKind::RawProjection(inner) => Ty::raw_projection(ty_with_param_bounds(inner, bounds)),
         TyKind::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
             name,
             &arguments
@@ -323,6 +336,7 @@ pub(crate) fn ty_with_transitive_param_bounds(ty: Ty, bounds: &HashMap<String, T
             TyKind::InProjection(inner) => Ty::in_projection(hydrate(inner, bounds, visiting)),
             TyKind::OutProjection(inner) => Ty::out_projection(hydrate(inner, bounds, visiting)),
             TyKind::StarProjection(inner) => Ty::star_projection(hydrate(inner, bounds, visiting)),
+            TyKind::RawProjection(inner) => Ty::raw_projection(hydrate(inner, bounds, visiting)),
             TyKind::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
                 name,
                 &arguments
@@ -376,6 +390,7 @@ pub(crate) fn ty_rename_params(ty: Ty, identities: &HashMap<&str, &'static str>)
         TyKind::InProjection(inner) => Ty::in_projection(ty_rename_params(inner, identities)),
         TyKind::OutProjection(inner) => Ty::out_projection(ty_rename_params(inner, identities)),
         TyKind::StarProjection(inner) => Ty::star_projection(ty_rename_params(inner, identities)),
+        TyKind::RawProjection(inner) => Ty::raw_projection(ty_rename_params(inner, identities)),
         TyKind::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
             name,
             &arguments

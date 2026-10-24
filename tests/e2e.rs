@@ -2,6 +2,11 @@
 //! crate, so product e2e modules live behind one target to keep link time and target size bounded.
 //! External corpus/reference-toolchain suites live in `conformance.rs`.
 
+#[path = "dependent_constructor_bounds_e2e.rs"]
+mod dependent_constructor_bounds_e2e;
+#[path = "nested_signature_argument_layout_e2e.rs"]
+mod nested_signature_argument_layout_e2e;
+
 #[path = "abstract_serializable_e2e.rs"]
 mod abstract_serializable_e2e;
 #[path = "annotation_documented_mirror_e2e.rs"]
@@ -48,6 +53,10 @@ mod reference_compiler_support;
 mod reference_recording_support;
 #[path = "common/reference_targets.rs"]
 mod reference_targets_support;
+#[path = "serializable_default_read_lines_e2e.rs"]
+mod serializable_default_read_lines_e2e;
+#[path = "serializable_lateinit_elements_e2e.rs"]
+mod serializable_lateinit_elements_e2e;
 #[path = "serializable_parent_dependency_e2e.rs"]
 mod serializable_parent_dependency_e2e;
 #[path = "serializable_parent_same_module_e2e.rs"]
@@ -110,6 +119,7 @@ mod annotation_instance_defaults_e2e;
 mod annotation_instantiation_e2e;
 #[path = "annotation_kclass_member_e2e.rs"]
 mod annotation_kclass_member_e2e;
+mod annotation_nested_class_table_e2e;
 #[path = "annotation_nested_const_template_e2e.rs"]
 mod annotation_nested_const_template_e2e;
 #[path = "annotation_retention_identity_e2e.rs"]
@@ -651,6 +661,8 @@ mod cross_file_typealias_e2e;
 mod cross_file_value_param_constructor_e2e;
 #[path = "crossinline_lambda_inlining_e2e.rs"]
 mod crossinline_lambda_inlining_e2e;
+#[path = "crossinline_suspend_object_e2e.rs"]
+mod crossinline_suspend_object_e2e;
 #[path = "ctor_lambda_return_binds_type_param_e2e.rs"]
 mod ctor_lambda_return_binds_type_param_e2e;
 #[path = "ctor_numeric_widening_e2e.rs"]
@@ -1063,6 +1075,7 @@ mod function_type_supertype_e2e;
 mod function_typed_property_e2e;
 #[path = "function_value_conversion_e2e.rs"]
 mod function_value_conversion_e2e;
+mod generic_annotation_construction_e2e;
 #[path = "generic_argument_wildcards_e2e.rs"]
 mod generic_argument_wildcards_e2e;
 #[path = "generic_arity_overload_e2e.rs"]
@@ -1225,6 +1238,8 @@ mod interface_delegation_e2e;
 mod interface_delegation_expr_e2e;
 #[path = "interface_factory_function_e2e.rs"]
 mod interface_factory_function_e2e;
+#[path = "interface_inner_table_pool_order_e2e.rs"]
+mod interface_inner_table_pool_order_e2e;
 #[path = "interface_nested_classifier_e2e.rs"]
 mod interface_nested_classifier_e2e;
 #[path = "interface_object_method_e2e.rs"]
@@ -1288,6 +1303,8 @@ mod java_interface_mutable_collection_face_e2e;
 mod java_member_modules;
 #[path = "java_nonfinal_constant_e2e.rs"]
 mod java_nonfinal_constant_e2e;
+#[path = "java_raw_type_e2e.rs"]
+mod java_raw_type_e2e;
 #[path = "java_self_bounded_constructor_e2e.rs"]
 mod java_self_bounded_constructor_e2e;
 #[path = "local_class_capture_order_e2e.rs"]
@@ -1339,6 +1356,7 @@ mod jvm_static_functions_e2e;
 mod kclass_type_e2e;
 #[path = "klib_class_surface_e2e.rs"]
 mod klib_class_surface_e2e;
+mod klib_closure_frames_e2e;
 #[path = "klib_container_e2e.rs"]
 mod klib_container_e2e;
 #[path = "klib_semantic_e2e.rs"]
@@ -1403,6 +1421,8 @@ mod lateinit_field_visibility_e2e;
 mod lateinit_getter_shape_e2e;
 #[path = "lateinit_local_e2e.rs"]
 mod lateinit_local_e2e;
+#[path = "lateinit_member_access_e2e.rs"]
+mod lateinit_member_access_e2e;
 #[path = "lateinit_operand_stack_e2e.rs"]
 mod lateinit_operand_stack_e2e;
 #[path = "legacy_interface_calls_e2e.rs"]
@@ -1595,6 +1615,8 @@ mod module_override_boxed_result_e2e;
 mod mpp_expect_actual_e2e;
 #[path = "mpp_requires_the_feature_e2e.rs"]
 mod mpp_requires_the_feature_e2e;
+#[path = "multifile_inline_part_splice_e2e.rs"]
+mod multifile_inline_part_splice_e2e;
 #[path = "native_conformance_deadline_e2e.rs"]
 mod native_conformance_deadline_e2e;
 #[path = "nested_block_comment_e2e.rs"]
@@ -2072,8 +2094,6 @@ mod noarg_plugin_e2e;
 mod non_field_ctor_metadata_e2e;
 #[path = "non_generic_overload_wins_e2e.rs"]
 mod non_generic_overload_wins_e2e;
-#[path = "non_reified_inline_splice_fallback_e2e.rs"]
-mod non_reified_inline_splice_fallback_e2e;
 #[path = "not_null_assert_e2e.rs"]
 mod not_null_assert_e2e;
 #[path = "nothing_call_branch_e2e.rs"]

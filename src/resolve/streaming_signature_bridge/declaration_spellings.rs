@@ -177,6 +177,7 @@ fn project_local_alias_spelling(
                         .map(Into::into),
                     flexible_upper_bound: None,
                     enhanced_nullability: false,
+                    actualized_expect: false,
                 };
                 let resolved = crate::symbol_resolver::ty_subst_keep_unbound(
                     occurrence.binding.resolved?,

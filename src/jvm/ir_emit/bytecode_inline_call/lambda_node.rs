@@ -108,6 +108,8 @@ struct LiteralLambda {
     parameter_coercions: Vec<InvokeCoercion>,
     /// The checked type of the body's value.
     result_semantic: Ty,
+    /// A suspend lambda returns its value as the `Object` of `invoke`, boxed within its own body.
+    suspend: bool,
 }
 
 /// A callable reference the bytecode inliner can place as a lambda: its adapter returns one value.
@@ -148,7 +150,7 @@ impl Emitter<'_> {
         let split = captures.len().min(physical.len());
         let (capture_types, physical_parameters) = physical.split_at(split);
         let arity = usize::from(arity);
-        let semantic = match self
+        let (semantic, suspend) = match self
             .ir
             .logical_types
             .get(&argument)
@@ -156,7 +158,15 @@ impl Emitter<'_> {
             .map(Ty::kind)
         {
             Some(TyKind::Fun(signature)) if signature.params.len() == arity => {
-                signature.params.clone()
+                (signature.params.clone(), false)
+            }
+            // A suspend lambda's last parameter is the continuation its `invoke` is passed.
+            Some(TyKind::Fun(signature))
+                if signature.suspend && signature.params.len() + 1 == arity =>
+            {
+                let mut params = signature.params.clone();
+                params.push(Ty::obj("kotlin/coroutines/Continuation"));
+                (params, true)
             }
             _ => {
                 return Err(
@@ -183,6 +193,7 @@ impl Emitter<'_> {
                 parameter_types,
                 parameter_coercions,
                 result_semantic,
+                suspend,
             },
             arity,
         ))
@@ -226,6 +237,7 @@ impl Emitter<'_> {
                 parameter_types,
                 parameter_coercions,
                 result_semantic,
+                suspend: false,
             },
             signature.params.len(),
         ))
@@ -480,6 +492,7 @@ impl Emitter<'_> {
             captured: 0..0,
             capture_names: self.capture_names(lambda.impl_fn, lambda.captures.len()),
             default_class: None,
+            suspend: lambda.suspend,
         };
         let captures = lambda
             .captures
@@ -582,6 +595,7 @@ impl Emitter<'_> {
             inline_body,
             capture_types,
             parameter_types,
+            suspend,
             ..
         } = lambda;
         let LambdaFrame {
@@ -590,8 +604,18 @@ impl Emitter<'_> {
         } = lambda_frame(&capture_types, &parameter_types);
         let declared_result = self.ir.functions[impl_fn as usize].ret;
         // A suspension in the body passes on the caller's continuation, which the lambda captures
-        // as its last value, as kotlinc's lambda captures `$completion`.
-        let continuation_read = self.continuation_read_within(inline_body);
+        // as its last value, as kotlinc's lambda captures `$completion`. A suspend lambda passes on
+        // its own `$completion`, its last parameter.
+        let continuation_read = if suspend {
+            None
+        } else {
+            self.continuation_read_within(inline_body)
+        };
+        let placed_machine = self
+            .emit_time_machines
+            .transformed(impl_fn)
+            .filter(|_| suspend)
+            .zip(parameter_slots.last().map(|&(slot, _)| slot));
         let continuation_slot = continuation_read.map(|_| {
             let slot = args_size;
             args_size += 1;
@@ -636,9 +660,14 @@ impl Emitter<'_> {
         }
         let marker_start = u16::try_from(scratch.bytes.len())
             .map_err(|_| "an inline lambda's code is too long")?;
+        let caller_machine = placed_machine
+            .map(|(machine, completion)| self.arm_placed_suspend_lambda(machine, completion));
         let caller_type_parameters = self.type_parameter_function.replace(impl_fn);
         let result = self.emit_fn_body_inline(inline_body, &parameter_slots, &mut scratch);
         self.type_parameter_function = caller_type_parameters;
+        if let Some(caller_machine) = caller_machine {
+            self.disarm_placed_suspend_lambda(caller_machine);
+        }
         self.return_finalizers = caller_finalizers;
         self.protected_regions = caller_regions;
         let jumps = self.leave_lambda_loops(caller_loops);
@@ -659,6 +688,21 @@ impl Emitter<'_> {
                 self.mark_expression_line(inline_body, line, &mut scratch);
             }
         }
+        // A suspend lambda's `invoke` returns `Object`: its body boxes a primitive value and returns
+        // `Unit.INSTANCE` for a `Unit` one, before its frame ends.
+        let result = if suspend && !scratch.is_dead() {
+            match type_descriptor(result).as_str() {
+                "V" if scratch.stack_height() == 0 => {
+                    let unit = self.cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
+                    scratch.getstatic(unit, 1);
+                }
+                "V" => {}
+                _ => super::super::scalar_coercion::box_prim_free(self.cw, &mut scratch, result),
+            }
+            Ty::obj("java/lang/Object")
+        } else {
+            result
+        };
         // A `Unit` body may or may not leave `Unit.INSTANCE`; any other body leaves its value. A
         // body that always throws or returns non-locally ends without a return of its own.
         let own_return = scratch.bytes.len();
@@ -791,6 +835,7 @@ impl Emitter<'_> {
                     names
                 },
                 default_class: None,
+                suspend,
             },
             captures: captures
                 .iter()

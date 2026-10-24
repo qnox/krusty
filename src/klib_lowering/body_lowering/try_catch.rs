@@ -45,6 +45,8 @@ impl BodyLowering<'_> {
         }
         let local = self.locals.catch_parameter(parameter, caught)?;
         self.locals.declare(&parameter.base.symbol, local)?;
+        self.locals
+            .record_name(&parameter.base.symbol, &parameter.name);
         Ok(IrCatch {
             var: local.index,
             binding: Some(IrCatchBinding::source(parameter.name.clone())),

@@ -40,6 +40,7 @@ mod member_specialization;
 mod overload_selection;
 mod property_candidates;
 mod qualified_classifiers;
+mod raw_member_view;
 pub(crate) use qualified_classifiers::{ClassifierMiss, CompletedClassifierPath};
 mod receiver_mro;
 mod resolved_symbol;
@@ -76,7 +77,7 @@ pub(crate) use hierarchy_projection::{
     ClassifierCompanionInstance, SupertypeProjectionCache,
 };
 use hierarchy_projection::{
-    classifier_type_parameter_bounds, direct_supertypes_from_classifier, receiver_hierarchy,
+    classifier_type_parameter_bounds, projected_supertypes, receiver_hierarchy,
     supertype_with_classifier,
 };
 pub use lambda_call_shape::LambdaCallShape;
@@ -141,8 +142,10 @@ impl crate::assignable::TypeOracle for SourceOracle<'_> {
     fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
         direct_supertypes(self.0, ty)
     }
+    // A platform source sees an alias-actualized `expect` class as the alias's target.
     fn same_class_name(&self, a: TypeName, b: TypeName) -> bool {
-        a == b
+        let actualized = |name| self.0.actualized_expect(name).unwrap_or(name);
+        a == b || actualized(a) == actualized(b)
     }
     fn type_param_variance(&self, internal: TypeName, index: usize) -> crate::types::TypeVariance {
         self.0

@@ -100,8 +100,8 @@ pub fn expect_native_decline(src: &str, stem: &str, reason: &str) {
 
 /// [`expect_native_decline`] for a program of several files (`(stem, text)`).
 pub fn expect_native_sources_decline(sources: &[(&str, &str)], reason: &str) {
-    let stem = sources.first().map(|(stem, _)| *stem).unwrap_or("module");
     if let Some(said) = native_decline(sources) {
+        let stem = sources.first().map(|(stem, _)| *stem).unwrap_or("module");
         assert!(
             said.contains(reason),
             "{stem}: declined for {said:?}, which does not name {reason:?}"

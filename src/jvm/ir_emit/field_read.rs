@@ -59,17 +59,26 @@ impl Emitter<'_> {
         // A `lateinit var` read throws while the field is still null. The bridge above performs a
         // raw field read, so the use site keeps the same guard as a direct read.
         if is_lateinit {
-            code.dup();
-            let initialized = code.new_label();
-            code.ifnonnull(initialized);
-            code.push_string(&source_name, self.cw);
-            let throw = self.cw.methodref(
-                "kotlin/jvm/internal/Intrinsics",
-                "throwUninitializedPropertyAccessException",
-                "(Ljava/lang/String;)V",
-            );
-            code.invokestatic(throw, 1, 0);
-            self.bind(initialized, code);
+            self.emit_lateinit_use_guard(&source_name, code);
         }
+    }
+
+    /// The guard kotlinc puts on a `lateinit` read that loads the field (or a raw field bridge)
+    /// rather than calling the getter: the value is on the stack, and a null one is replaced by the
+    /// throw, whose `Nothing` result is the `aconst_null` the join expects.
+    pub(super) fn emit_lateinit_use_guard(&mut self, name: &str, code: &mut CodeBuilder) {
+        code.dup();
+        let initialized = code.new_label();
+        code.ifnonnull(initialized);
+        code.pop();
+        code.push_string(name, self.cw);
+        let throw = self.cw.methodref(
+            "kotlin/jvm/internal/Intrinsics",
+            "throwUninitializedPropertyAccessException",
+            "(Ljava/lang/String;)V",
+        );
+        code.invokestatic(throw, 1, 0);
+        code.aconst_null();
+        self.bind(initialized, code);
     }
 }

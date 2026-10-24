@@ -421,17 +421,12 @@ impl Checker<'_> {
             );
             return None;
         }
-        let internal = if self.fragment.publishes_annotation_metadata() {
-            // Pass 1 already bound this exact occurrence. Metadata publication consumes that
-            // identity directly: resolving its spelling again after actualization could resurrect
-            // a target-excluded optional-expect annotation or select a different scope rung.
-            self.bound_annotation_identities
-                .get(&(annotation.span.lo, annotation.span.hi))
-                .copied()?
-        } else {
-            // Resolve the application in its owning lexical scope. Pass 1's declaration-header
-            // inventory and Pass 2's body checking use the same scope rules.
-            let reference = TypeRef {
+        let reference = self
+            .file
+            .annotation_type_references
+            .get(&annotation.span.lo)
+            .cloned()
+            .unwrap_or_else(|| TypeRef {
                 name: annotation.name.clone(),
                 flags: TrFlags::default(),
                 arg: None,
@@ -439,16 +434,20 @@ impl Checker<'_> {
                 span: annotation.span,
                 fun_params: Box::new([]),
                 fun_context_count: 0,
-                qualifier_arguments: self
-                    .file
-                    .annotation_qualifier_arguments
-                    .get(&annotation.span.lo)
-                    .map(|arguments| arguments.clone().into())
-                    .unwrap_or_default(),
-            };
+                qualifier_arguments: Default::default(),
+            });
+        let owner = if self.fragment.publishes_annotation_metadata() {
+            // The selected declaration facet was bound before actualization. Apply its syntax in
+            // this lexical scope without selecting the annotation spelling again.
+            let binding = self
+                .bound_annotation_identities
+                .get(&(annotation.span.lo, annotation.span.hi))
+                .copied()?;
+            self.bound_annotation_owner(scope, binding, &reference)
+        } else {
             self.type_ref_ty_reported(scope, &reference)
-                .kotlin_class_internal()?
         };
+        let internal = owner.kotlin_class_internal()?;
         if !self.file.is_common
             && self.is_optional_expectation_classifier(internal)
             && !self.suppresses_diagnostic("OPTIONAL_DECLARATION_USAGE_IN_NON_COMMON_SOURCE")
@@ -463,7 +462,7 @@ impl Checker<'_> {
             let _ = self.validate_property_annotation_contract(annotation, internal, host);
             return Some(internal);
         }
-        let Some(shape) = self.annotation_shape(internal) else {
+        let Some(shape) = self.applied_annotation_shape(owner) else {
             self.diags.error(
                 annotation.span,
                 "resolved annotation has no semantic element declaration".to_string(),
@@ -474,7 +473,7 @@ impl Checker<'_> {
         let applied =
             if self.check_annotation_arguments(scope, annotation.span, &shape, arguments, None) {
                 match self.fold_annotation_application(
-                    internal,
+                    owner,
                     arguments,
                     annotation.property_site,
                     written_short_name(&annotation.name),
