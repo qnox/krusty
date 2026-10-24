@@ -601,7 +601,12 @@ fn library_annotation_members_are_what_ksp2_reports() {
 #[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
 fn a_type_naming_an_alias_is_refused() {
     let (runtime, env) = runtime();
-    let processor = processor(&runtime, "Members", "members.MembersProvider");
+    let processor = processor_in(
+        &runtime,
+        "Members",
+        "members.MembersProvider",
+        "ksp-processor-members-alias-refusals",
+    );
     for (case, source) in [
         ("annotated", "members-refused/AnnotatedAlias.kt"),
         ("plain", "members-refused/PlainAlias.kt"),
