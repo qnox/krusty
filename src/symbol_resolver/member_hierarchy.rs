@@ -203,7 +203,21 @@ pub(super) fn declared_callables(
     let Some(callables) = classifier.declared_callables.get(name) else {
         return Callables::None;
     };
-    specialize_declared_callables(source, classifier, receiver, callables.clone())
+    // A refined common fragment sees an `actual` class only through its `expect`: the members only
+    // the actual declares are not declarations there.
+    let (mut functions, mut properties) = callables.clone().into_parts();
+    functions
+        .overloads
+        .retain(|function| source.sees_function(function));
+    properties
+        .overloads
+        .retain(|property| source.sees_property(property));
+    specialize_declared_callables(
+        source,
+        classifier,
+        receiver,
+        Callables::from_parts(functions, properties),
+    )
 }
 
 fn specialize_declared_callables(

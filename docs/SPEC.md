@@ -15413,11 +15413,58 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A name declared twice (`-Xfragments=main,main`, or `-Xfragments=main` repeated) is one
   fragment, and the empty name is a fragment. Each distinct `-Xfragment-sources` value and free
   spelling is checked once, in first-seen order (`bad,bad` is one diagnostic, `,` one empty
-  value). These errors are reported for any number of fragments; only a well-formed structure
-  with more than one distinct fragment (a common/platform hierarchy, with `-Xfragment-refines`)
-  is refused. (`tests/fragment_arguments_e2e.rs` compares exit code, complete stderr and the
-  output tree with kotlinc; `crates/krusty-cli/src/cli/fragments.rs` unit tests; five
-  `compiler/testData/cli/jvm/hmpp` cases in the CLI corpus.)
+  value). These errors are reported for any number of fragments.
+- **A refined fragment hierarchy compiles as its platform leaf.** A Kotlin Multiplatform JVM
+  compilation passes several fragments with `-Xfragment-refines=<from>:<on>` edges. kotlinc
+  compiles each fragment in its own session in a depth-first post-order over the edges (starting
+  from each fragment in declaration order); the last one is the platform leaf, every other one is
+  common, and the classes are the leaf compilation's. krusty folds the fragments the leaf refines,
+  directly or transitively, into one compilation as common sources (`SourceInput::common`), the
+  same folding as the multiplatform box lane. A fragment the leaf does not refine (two fragments
+  with no edge) would be visible only in the fold, so krusty refuses it: `krusty compiles
+  fragments the leaf refines, but `<leaf>` does not refine `<fragment>``. After the source checks
+  (a source in two fragments or in none stops kotlinc before the graph), kotlinc 2.4.20 reports
+  `-Xfragment-refines` without `-Xfragments`, with a single distinct fragment (`… there is only one
+  module declared`), each edge that is not two names, each undeclared name of an edge
+  (`` `-Xfragment-refines=<edge>` Fragment `<name>` not found in -Xfragments arguments ``), then
+  each fragment of the order whose refined fragment does not precede it (`there is a cycle in
+  dependencies of module `<name>``), a repeated message once. For an edge that is not two names
+  kotlinc prints its argument array's identity hash (`[Ljava.lang.String;@…`), which varies by
+  run; krusty prints the edge. Folding keeps each fragment's source boundary: every source carries
+  its fragment (`SourceInput::with_fragment`), and a source sees only the top-level functions,
+  properties, classifiers and type aliases of its own fragment and of the fragments it refines, as
+  kotlinc's per-fragment sessions do. Both module symbol providers drop the other declarations
+  before overload selection, so a common call of a name the leaf declares is kotlinc's `unresolved
+  reference`, and a common call of an overload resolves among the common candidates even when the
+  leaf declares a more specific one. An `actual` is seen wherever the `expect` it actualizes is.
+  krusty distinguishes at most 64 fragments and refuses more. (`tests/fragment_arguments_e2e.rs`
+  compares exit code, complete stderr and the output tree with kotlinc, including an `expect`
+  actualized by the leaf, and compares the exact errors of a common reference to a leaf
+  function, property, class, object, type alias and import; `crates/krusty-cli/src/cli/fragments.rs`
+  unit tests; the `compiler/testData/cli/jvm/hmpp` cases and `kt77220` in the CLI corpus.)
+- **Common code types an alias-actualized `expect` class as its own classifier.** With
+  `expect open class Lock()` in common and `actual typealias Lock = ReentrantLock` in the leaf, a
+  common source does not see the alias, so `Lock` stays the `expect` class there: a common call of
+  a member only the target declares is kotlinc's `unresolved reference`, and a common `Lock` is not
+  a `ReentrantLock` (a return-type mismatch). A leaf source sees the alias and types `Lock` as the
+  target, and checking compares the two classifiers through the alias. Lowering skips the `expect`
+  declarations; at the backend boundary (`IrFile::actualize_expects`) every occurrence is renamed to
+  the target, which is exact because kotlinc requires an actual typealias to pass its own type
+  parameters in order. Before the rename, each declared occurrence (members, constructors,
+  supertypes, top-level functions and properties) is abbreviated by the `expect` class, as kotlinc
+  writes the expansion of the alias, and a function or field whose receiver, value parameter or
+  result is such an occurrence records its JVM signature: kotlinc derives the reader's descriptor
+  from the `expect` class id (`Lp/Lock;`), which differs from the physical one. A leaf occurrence
+  spelled through the alias records no signature. A common class extending the `expect` class keeps
+  it as its declared superclass while its constructor delegates to the target's. A common
+  `typealias Local = Lock` expands to the `expect` class too: a source expands only the aliases its
+  fragment sees. A platform call of a common extension declared on the `expect` class binds a
+  receiver of the alias target. A classifier nested in the `expect` class is realized as the
+  same-named classifier nested in the alias target; its metadata still names that target class
+  where kotlinc keeps the `expect` class's own nested identity. An `@OptionalExpectation`
+  annotation without an actual is no actualized `expect` and is lowered as declared. (`tests/fragment_arguments_e2e.rs` compares exit code,
+  stderr and every class file with kotlinc, including koin's `Lockable = Any` and generic
+  `ThreadLocal<T>` shapes, and every class but the facade for the nested case.)
 - **A supertype missing from the classpath is `MISSING_DEPENDENCY_SUPERCLASS`.** As kotlinc's
   `FirMissingDependencySupertype*` checkers, a classpath classifier naming a supertype that no
   source or classpath entry provides makes every use that depends on that hierarchy an error:

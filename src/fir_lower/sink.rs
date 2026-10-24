@@ -1491,6 +1491,9 @@ impl<'a> CommonIrBodySink<'a> {
         body: FirBody,
     ) -> Result<(), FirFileLoweringFailure> {
         let declaration = DeclarationId::from_raw(owner.raw());
+        if super::within_actualized_expect(index, declaration) {
+            return Ok(());
+        }
         let anchor = index.declaration_anchor(declaration).ok_or(
             FirFileLoweringFailure::UnsupportedCallableOwner(declaration),
         )?;
