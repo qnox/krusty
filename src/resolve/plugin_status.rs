@@ -41,7 +41,7 @@ impl OpenByDefault {
             return OpenByDefault::default();
         }
         let mut matcher = ClassPredicate::new(table, annotations);
-        let jvm_record = crate::types::type_name("kotlin/jvm/JvmRecord");
+        let jvm_record = crate::types::wk::jvm_record();
         let mut open = OpenByDefault::default();
         for stub in &headers.stubs {
             if stub.kind != DeclarationKind::Classifier {

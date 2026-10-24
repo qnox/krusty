@@ -40,6 +40,9 @@ mod alias_constructor_application;
 mod alias_projection;
 mod annotation_applications;
 mod annotation_argument_constness;
+mod annotation_arguments;
+mod annotation_bindings;
+use annotation_bindings::{BoundAnnotation, BoundAnnotations};
 mod anonymous_extension_functions;
 mod anonymous_object_capture;
 mod boolean_implications;
@@ -2342,15 +2345,18 @@ impl ClassNames {
     }
 
     pub fn insert(&mut self, k: String, v: impl AsRef<str>) -> Option<TypeName> {
-        self.ambiguous.remove(&k);
-        self.user.insert(k, crate::types::type_name(v.as_ref()))
+        self.insert_name(k, crate::types::type_name(v.as_ref()))
     }
     pub fn insert_name(&mut self, k: String, v: TypeName) -> Option<TypeName> {
         self.ambiguous.remove(&k);
+        self.alias_bindings.remove(&k);
+        self.source_alias_identities.remove(&k);
         self.user.insert(k, v)
     }
     pub fn mark_ambiguous(&mut self, name: String) {
         self.user.remove(&name);
+        self.alias_bindings.remove(&name);
+        self.source_alias_identities.remove(&name);
         self.ambiguous.insert(name);
     }
 
@@ -2729,7 +2735,7 @@ pub struct SymbolTable {
     /// Temporary Pass-1 bindings from annotation occurrences to resolved classifier identities.
     /// Signature finalization projects declaration-owned facts to stable declaration ids, then
     /// production releases this coordinate map before Pass 2.
-    resolved_annotations: HashMap<(u32, u32, u32), TypeName>,
+    resolved_annotations: BoundAnnotations,
     /// Visibility diagnostics explicitly suppressed on a stable declaration. This is compact
     /// resolved annotation state, not retained annotation syntax or a parser-id side table.
     declaration_visibility_suppressions: HashMap<crate::fir::DeclarationId, VisibilitySuppressions>,
@@ -3053,7 +3059,7 @@ impl SymbolTable {
     pub fn resolved_annotation(&self, file: u32, annotation: &AnnotationRef) -> Option<TypeName> {
         self.resolved_annotations
             .get(&(file, annotation.span.lo, annotation.span.hi))
-            .copied()
+            .map(|binding| binding.classifier)
     }
 
     fn declaration_suppresses_visibility(&self, declaration: crate::fir::DeclarationId) -> bool {
@@ -4135,37 +4141,6 @@ pub(super) fn class_internal(file: &File, name: &str) -> String {
     match &file.package {
         Some(pkg) if !pkg.is_empty() => format!("{}/{}", pkg.replace('.', "/"), mangled),
         _ => mangled,
-    }
-}
-
-fn expand_type_aliases(class_names: &mut ClassNames, aliases: &HashMap<String, String>) {
-    for _ in 0..8 {
-        let mut changed = false;
-        for (alias, target) in aliases {
-            let resolved = if let Some(internal) = class_names.get(target) {
-                Some(internal)
-            } else if Ty::from_name(target).is_some() {
-                Some(crate::types::type_name(&format!("__ty/{target}")))
-            } else if target.contains('/') {
-                Some(crate::types::type_name(target))
-            } else if target.contains('.') {
-                Some(crate::types::type_name(&target.replace('.', "/")))
-            } else {
-                None
-            };
-            if let Some(internal) =
-                resolved.filter(|&internal| class_names.get(alias) != Some(internal))
-            {
-                // A source alias is a declaration in the winning source scope, not a fallback filled
-                // only when no imported spelling exists. Replace the bootstrap alias identity/import
-                // binding once its target is known; repeated passes still handle alias chains.
-                class_names.insert_name(alias.clone(), internal);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
     }
 }
 
@@ -15867,7 +15842,16 @@ impl<'a> Checker<'a> {
                     // the same `ResolvedConstructor::Source` the lowerer's default-filling
                     // consumes — exactly like an unqualified `Inner(args)` construction.
                     let declaration = self.source_class_decl_by_internal(cls.internal_name());
-                    let arg_tys = self.arg_tys(scope, args);
+                    let mut arg_tys = self.arg_tys(scope, args);
+                    for (index, actual) in self.contextualize_constructor_arrays(
+                        scope,
+                        call,
+                        cls.internal_name(),
+                        args,
+                        arg_names.as_deref(),
+                    ) {
+                        arg_tys[index] = actual;
+                    }
                     let names = arg_names.clone().unwrap_or_else(|| vec![None; args.len()]);
                     let arguments = CtorDelegationCall {
                         args: args.to_vec(),
@@ -18839,6 +18823,15 @@ impl<'a> Checker<'a> {
                 let typed_args = std::cell::RefCell::new(vec![Ty::Error; args.len()]);
                 let mut callable_reference_constraints = invariant_expected_result_constraints;
                 let type_argument = |i: usize, a: ExprId| -> Ty {
+                    if let Some(declared) = constructor_expectations.as_ref().and_then(|plan| {
+                        plan.symbolic[i].or_else(|| plan.params[i].map(|(ty, _)| ty))
+                    }) {
+                        if let Some(actual) =
+                            self.annotation_array_declaration_context(scope, a, declared)
+                        {
+                            return actual;
+                        }
+                    }
                     if matches!(self.file.expr(a), Expr::Lambda { .. }) {
                         crate::trace_compiler!(
                                 "lambda_apply",
@@ -34188,9 +34181,6 @@ struct LambdaCheckMode {
     result_constraint: LambdaResultConstraint,
 }
 
-type AnnotationElements = Vec<(String, Ty)>;
-type AnnotationShape = (AnnotationElements, ParamList, AnnotationParameterPolicy);
-
 struct Checker<'a> {
     file: &'a File,
     /// Interned source package of `file`, computed once from its dotted spelling.
@@ -34333,7 +34323,7 @@ struct Checker<'a> {
     /// Exact Pass-1 binding for each annotation occurrence owned by a bounded metadata fragment.
     /// The fragment consumes this handoff directly instead of reopening the temporary module
     /// provider or resolving the source spelling a second time.
-    bound_annotation_identities: HashMap<(u32, u32), TypeName>,
+    bound_annotation_identities: HashMap<(u32, u32), BoundAnnotation>,
     ret_ty: Ty,
     /// kotlinc's owner wording (`fun <T : B> f`) of each declaration-owned type parameter checked
     /// so far, keyed by semantic identity, solely for diagnostics.
@@ -45417,90 +45407,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn annotation_shape(&self, internal: TypeName) -> Option<AnnotationShape> {
-        let classifier = self.resolver().classifier(internal)?;
-        let application = classifier.annotation_application()?;
-        let elements = application
-            .parameters
-            .names
-            .iter()
-            .cloned()
-            .zip(application.parameters.types.iter().copied())
-            .collect();
-        Some((elements, application.parameters, application.policy))
-    }
-
-    fn annotation_argument_names(
-        &self,
-        arguments: &[ExprId],
-        nested_call: Option<ExprId>,
-    ) -> Vec<Option<String>> {
-        // A TOP-LEVEL annotation's labels are recorded per argument in `annotation_arg_names`. A
-        // NESTED annotation (`@Outer(Inner(b = "BB", a = "AA"))`) is parsed as an ordinary call, so
-        // its labels live in the call's own `call_arg_names` instead. Reading only the former bound
-        // every nested argument positionally and silently swapped the values.
-        match nested_call {
-            // A nested annotation's labels are the CALL's, positionally parallel to its arguments.
-            // An unlabelled call records no names at all, which is all-positional — never a reason
-            // to consult the annotation map, whose keys are direct `@Ann(...)` arguments.
-            Some(call) => {
-                let names = self.file.call_arg_names.get(&call.0);
-                (0..arguments.len())
-                    .map(|position| names.and_then(|names| names.get(position).cloned().flatten()))
-                    .collect::<Vec<_>>()
-            }
-            None => arguments
-                .iter()
-                .map(|argument| self.file.annotation_arg_names.get(&argument.0).cloned())
-                .collect::<Vec<_>>(),
-        }
-    }
-
-    fn annotation_argument_parameter_indices(
-        &self,
-        parameters: &ParamList,
-        arguments: &[ExprId],
-        argument_names: &[Option<String>],
-    ) -> Result<Vec<usize>, CallArgMappingFailure> {
-        let signature = CallSig {
-            param_names: parameters.names.clone(),
-            param_defaults: parameters.defaults,
-            required: required_arity(parameters.names.len(), &parameters.defaults),
-            vararg: parameters.vararg.is_some(),
-            vararg_index: parameters.vararg,
-            ..CallSig::default()
-        };
-        call_argument_parameter_indices_result(
-            arguments.len(),
-            parameters.names.len(),
-            Some(argument_names),
-            false,
-            &signature,
-        )
-    }
-
-    fn report_annotation_mapping_failure(
-        &mut self,
-        application_span: Span,
-        arguments: &[ExprId],
-        failure: CallArgMappingFailure,
-    ) {
-        for error in failure.errors {
-            let argument = match &error {
-                CallArgMappingError::NoParameterNamed { argument, .. }
-                | CallArgMappingError::AlreadyPassed { argument }
-                | CallArgMappingError::PositionalAfterNamed { argument }
-                | CallArgMappingError::TooManyArguments { argument, .. }
-                | CallArgMappingError::TrailingLambdaOnVararg { argument } => Some(*argument),
-                CallArgMappingError::MissingRequired { .. } => None,
-            };
-            let span = argument
-                .and_then(|index| arguments.get(index).copied())
-                .map_or(application_span, |argument| self.span(argument));
-            self.diags.error(span, error.to_string());
-        }
-    }
-
     fn is_optional_expectation_classifier(&self, classifier: TypeName) -> bool {
         self.libraries.is_optional_expectation(classifier)
             || self.resolved_index.is_some_and(|index| {
@@ -45542,158 +45448,6 @@ impl<'a> Checker<'a> {
         for (annotation, arguments) in applications {
             self.check_type_parameter_annotation_application(scope, &annotation, &arguments);
         }
-    }
-
-    fn check_annotation_arguments(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        application_span: Span,
-        shape: &AnnotationShape,
-        arguments: &[ExprId],
-        nested_call: Option<ExprId>,
-    ) -> bool {
-        let (elements, parameters, policy) = shape;
-        let mut unsupported = false;
-        for &argument in arguments {
-            let Expr::UnsupportedAnnotationArgument(kind) = self.file.expr(argument) else {
-                continue;
-            };
-            let description = match kind {
-                crate::ast::UnsupportedAnnotationArgument::NestedAnnotation => "nested-annotation",
-            };
-            self.diags.error(
-                self.span(argument),
-                format!("{description} annotation argument is not yet supported"),
-            );
-            unsupported = true;
-        }
-        if unsupported {
-            return false;
-        }
-        let argument_names = self.annotation_argument_names(arguments, nested_call);
-        let parameter_indices = match self.annotation_argument_parameter_indices(
-            parameters,
-            arguments,
-            &argument_names,
-        ) {
-            Ok(indices) => indices,
-            Err(failure) => {
-                self.report_annotation_mapping_failure(application_span, arguments, failure);
-                return false;
-            }
-        };
-        let mut forbidden_positional = false;
-        for ((&argument, &index), name) in arguments
-            .iter()
-            .zip(&parameter_indices)
-            .zip(&argument_names)
-        {
-            let permitted = match policy.positional {
-                AnnotationPositionalPolicy::Constructor => true,
-                AnnotationPositionalPolicy::NamedOnly => false,
-                AnnotationPositionalPolicy::Value | AnnotationPositionalPolicy::ValueVararg => {
-                    index == 0
-                }
-            };
-            if name.is_none() && !permitted {
-                self.diags.error(
-                    self.span(argument),
-                    "only named arguments are available for Java annotations.".to_string(),
-                );
-                forbidden_positional = true;
-            }
-        }
-        if forbidden_positional {
-            return false;
-        }
-        for ((&argument, index), name) in
-            arguments.iter().zip(parameter_indices).zip(&argument_names)
-        {
-            let Some((_, declared)) = elements.get(index) else {
-                self.diags.error(
-                    self.span(argument),
-                    "annotation parameter metadata does not match its element declarations"
-                        .to_string(),
-                );
-                return false;
-            };
-            // A vararg element takes its ELEMENT type only when the argument is passed
-            // POSITIONALLY: kotlinc accepts `@Filt("a")` but rejects `@Filt(value = "a")`, where
-            // naming the parameter demands the array itself.
-            let named = name.is_some();
-            let expected =
-                if parameters.vararg == Some(index) && !named && !self.file.is_spread_arg(argument)
-                {
-                    declared.array_read_elem().unwrap_or(*declared)
-                } else {
-                    *declared
-                };
-            // An annotation array literal has no type independently of its selected element. Check
-            // each ELEMENT against that declared element type: otherwise a class literal or enum
-            // entry inside one is never resolved, and an element-typed expectation (a vararg element
-            // passed positionally) could accept an array and write the wrong constant tag.
-            self.check_annotation_argument_value(scope, argument, expected);
-        }
-        true
-    }
-
-    /// Check one annotation argument against its declared type. An array literal has no independent
-    /// factory/type, so each element is checked against the selected element type — RECURSIVELY,
-    /// because the fold recurses too: a literal one level deeper (`xs = [[1, 2]]`) would otherwise
-    /// reach the fold unchecked and write an array where a scalar element belongs.
-    fn check_annotation_argument_value(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        argument: ExprId,
-        expected: Ty,
-    ) {
-        if let Expr::AnnotationArrayLiteral(elements) = self.file.expr(argument).clone() {
-            let Some(element_ty) = expected.non_null().array_elem() else {
-                self.expect_assignable(
-                    expected,
-                    Ty::array(Ty::obj("kotlin/Any")),
-                    self.span(argument),
-                    "annotation argument",
-                );
-                return;
-            };
-            for element in elements {
-                self.check_annotation_argument_value(scope, element, element_ty);
-            }
-            return;
-        }
-        let actual = self.check_annotation_value_expression(scope, argument, expected);
-        self.expect_assignable(expected, actual, self.span(argument), "annotation argument");
-    }
-
-    fn check_annotation_value_expression(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        expression: ExprId,
-        expected: Ty,
-    ) -> Ty {
-        if let Expr::Call { callee, args } = self.file.expr(expression).clone() {
-            if let Some(expected_internal) = expected.kotlin_class_internal() {
-                if let Some(shape) = self.annotation_shape(expected_internal) {
-                    let selected = self
-                        .qualifier(scope, QualifierInput::Expression(callee))
-                        .ok();
-                    if selected == Some(ResolvedQualifier::Classifier(expected_internal)) {
-                        if self.check_annotation_arguments(
-                            scope,
-                            self.span(expression),
-                            &shape,
-                            &args,
-                            Some(expression),
-                        ) {
-                            return self.set(expression, Ty::obj_name(expected_internal));
-                        }
-                        return Ty::Error;
-                    }
-                }
-            }
-        }
-        self.expr_expected(scope, expression, expected)
     }
 
     /// Kotlin's strict-equality contract keeps the declared `equals(Any?)` ABI while making an
@@ -50266,6 +50020,11 @@ impl<'a> Checker<'a> {
             "commit selected argument={argument:?} probed={probed_actual:?} expected={expected:?} syntax={:?}",
             self.file.expr(argument),
         );
+        if let Some(actual) =
+            self.contextual_annotation_array_argument(scope, argument, probed_actual, expected)
+        {
+            return actual;
+        }
         let unbound_result = self.unbound_contextual_result_signature(argument);
         self.commit_call_owned_conditional_branches(scope, argument, expected);
         // An argument whose recorded type already EQUALS the selected parameter has nothing left
@@ -50644,7 +50403,11 @@ impl<'a> Checker<'a> {
         // well. Callable references retain a nominal reflection shell until the selected parameter
         // supplies the exact function shape. Nullable function parameters still contextually type a
         // non-null callable value.
-        let actual = if matches!(self.file.expr(argument), Expr::Call { .. })
+        let actual = if let Some(committed) =
+            self.contextual_annotation_array_argument(scope, argument, actual, expected)
+        {
+            committed
+        } else if matches!(self.file.expr(argument), Expr::Call { .. })
             && self.expr_types[argument.0 as usize] == actual
             && (actual == expected
                 || (self.unbound_contextual_result_signature(argument).is_none()
@@ -51372,6 +51135,18 @@ impl<'a> Checker<'a> {
                 .iter()
                 .map(|(name, ty)| (name.clone(), *ty)),
         );
+        if let Some(written) = explicit_refs.as_ref() {
+            let declaration = self
+                .resolved_type_name(class.internal_name())
+                .expect("a selected source constructor retains its classifier declaration");
+            self.check_classifier_argument_bounds_with_context(
+                class.internal_name(),
+                &declaration,
+                written,
+                &bindings,
+                &constructor_bindings,
+            );
+        }
         for (type_parameter, &binding) in bindings.iter().enumerate() {
             if binding == Ty::Error {
                 continue;
@@ -51386,11 +51161,16 @@ impl<'a> Checker<'a> {
                 declared_bound,
                 &constructor_bindings,
             );
-            if let Some(type_ref) = explicit_refs.as_ref().and_then(|refs| {
-                refs.get(type_parameter)
-                    .filter(|reference| !reference.is_inference_placeholder())
-            }) {
-                self.expect_assignable(bound, binding, type_ref.span, "type argument");
+            if explicit_refs
+                .as_ref()
+                .and_then(|refs| {
+                    refs.get(type_parameter)
+                        .filter(|reference| !reference.is_inference_placeholder())
+                })
+                .is_some()
+            {
+                // Written bindings use the declaration-owned formal-bound diagnostic above,
+                // shared with provider constructors. They are not value-argument mismatches.
                 continue;
             }
             let mut prior_valid_binding = None;
@@ -53177,10 +52957,8 @@ impl<'a> Checker<'a> {
         // shape, and checking either eagerly can publish diagnostics for an interpretation that
         // overload selection never chooses. Checked arguments are skipped to avoid duplicate work.
         for &arg in args {
-            if !matches!(
-                self.file.expr(arg),
-                Expr::Lambda { .. } | Expr::CallableRef { .. }
-            ) && self.expr_types[arg.0 as usize] == Ty::Error
+            if !self.file.is_callable_syntax(arg)
+                && self.expr_types[arg.0 as usize] == Ty::Error
                 && self.postponed_context_sensitive_name(scope, arg).is_none()
                 && !self.postponed_empty_reference_array_factory(scope, arg)
             {
@@ -53234,10 +53012,8 @@ impl<'a> Checker<'a> {
         let partial: Vec<Option<Ty>> = args
             .iter()
             .map(|&arg| {
-                (!matches!(
-                    self.file.expr(arg),
-                    Expr::Lambda { .. } | Expr::CallableRef { .. }
-                ) && self.postponed_context_sensitive_name(scope, arg).is_none())
+                (!self.file.is_callable_syntax(arg)
+                    && self.postponed_context_sensitive_name(scope, arg).is_none())
                 .then(|| self.expr(scope, arg))
             })
             .collect();
@@ -53266,7 +53042,7 @@ impl<'a> Checker<'a> {
                         ),
                         None => Ty::Error,
                     },
-                    Expr::CallableRef { .. } => expectation
+                    Expr::CallableRef { .. } if self.file.is_callable_syntax(arg) => expectation
                         .and_then(|expectation| expectation.callable_type)
                         .map(|expected| self.expr_expected(scope, arg, expected))
                         .unwrap_or(Ty::Error),
@@ -54057,9 +53833,9 @@ impl<'a> Checker<'a> {
             // is consumed. Keeping it as an error type here avoids inventing a resolvable spelling
             // while leaving non-emitted annotation positions inert.
             Expr::UnsupportedAnnotationArgument(_) => Ty::Error,
-            // Annotation array literals are typed and consumed by `check_annotation_arguments`;
-            // they do not independently participate in ordinary expression inference.
-            Expr::AnnotationArrayLiteral(_) => Ty::Error,
+            Expr::AnnotationArrayLiteral(elements) => {
+                self.check_annotation_array_expression(scope, e, &elements, expected)
+            }
             Expr::ExtensionAccess { receiver, callable } => {
                 let receiver_ty = self.expr(scope, receiver);
                 let callable_ty = self.expr(scope, callable);

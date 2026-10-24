@@ -120,7 +120,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                 if declaration_annotation_spans.contains(&reference.span) {
                     continue;
                 }
-                if let Some(internal) = names.get_class(&reference.name) {
+                if let Some(internal) = names.annotation_binding(&reference.name) {
                     table.resolved_annotations.insert(
                         (file_index as u32, reference.span.lo, reference.span.hi),
                         internal,
@@ -133,7 +133,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                 if declaration_annotation_spans.contains(&reference.span) {
                     continue;
                 }
-                if let Some(internal) = names.get_class(&reference.name) {
+                if let Some(internal) = names.annotation_binding(&reference.name) {
                     table.resolved_annotations.insert(
                         (file_index as u32, reference.span.lo, reference.span.hi),
                         internal,
@@ -175,7 +175,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         .is_some_and(|source| source.is_common)
                 },
             );
-            let optional = libraries.is_optional_expectation(*annotation);
+            let optional = libraries.is_optional_expectation(annotation.classifier);
             crate::trace_compiler!(
             "diagnostic",
             "annotation source={file} identity={annotation:?} common={common} optional={optional}",
@@ -4405,7 +4405,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         .file(crate::fir::SourceFileId::from_raw(*file))
                         .is_some_and(|source| source.is_common)
                 },
-            ) || !libraries.is_optional_expectation(*annotation)
+            ) || !libraries.is_optional_expectation(annotation.classifier)
         });
     normalize_referenced_library_annotations(&mut table, &*libraries);
     table.libraries = libraries;

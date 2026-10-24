@@ -237,4 +237,35 @@ impl Checker<'_> {
             })
         })
     }
+
+    /// Context shared by the qualified source and provider constructor selectors. Only a fixed
+    /// declaration parameter agreed by the whole constructor family supplies literal context.
+    pub(super) fn contextualize_constructor_arrays(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        internal: TypeName,
+        arguments: &[ExprId],
+        names: Option<&[Option<String>]>,
+    ) -> Vec<(usize, Ty)> {
+        let Some(expectations) = self.construction_argument_expectations(
+            internal,
+            arguments.len(),
+            names,
+            self.file.call_has_trailing_lambda.contains(&call.0),
+        ) else {
+            return Vec::new();
+        };
+        arguments
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &argument)| {
+                let declared = expectations.symbolic[index]
+                    .or_else(|| expectations.params[index].map(|(ty, _)| ty))?;
+                let actual =
+                    self.annotation_array_declaration_context(scope, argument, declared)?;
+                Some((index, actual))
+            })
+            .collect()
+    }
 }

@@ -49,6 +49,7 @@ pub(crate) use emission_facts::{
 use emission_facts::{MachineOutputs, MachineSubject};
 mod get_or_create;
 mod intrinsic_probes;
+pub(crate) mod lambda_placement;
 mod live_scopes;
 use live_scopes::{
     live_temp_scopes, merge_live_temps, reconcile_positional_spill_locals, ScopeWalk,
@@ -56,6 +57,7 @@ use live_scopes::{
 mod residual_trace;
 use residual_trace::{trace_residual_parents, trace_residual_suspension};
 mod spill_layout;
+mod suspending_catches;
 use spill_layout::{
     kind_positions, rematerialized_nulls, spill_field_ty, spill_order, suspension_points_in_order,
     SpillLayout,
@@ -606,6 +608,16 @@ pub(crate) fn lower_suspend(
                 return false;
             }
         }
+    }
+    let route = bytecode_machine::Route {
+        facade,
+        suspend_set: &suspend_set,
+        context: &context,
+        machines: emit_time_machines,
+        outputs: &mut outputs,
+    };
+    if !bytecode_machine::spliced_lambdas::place_bodies(&ir.suspend_funs.clone(), ir, route) {
+        return false;
     }
     outputs.default_call_operands.synchronize(ir)
 }
@@ -1425,7 +1437,7 @@ fn build_state_machine(
     let mut next_ev = base + 4;
     {
         let mut tries: Vec<(u32, ExprId, crate::types::TypeName)> = Vec::new();
-        find_suspending_catch_tries(ir, b, &suspend_set, &mut tries);
+        suspending_catches::find_suspending_catch_tries(ir, b, &suspend_set, &mut tries);
         for (cvar, cbody, exc_internal) in tries {
             let ev = next_ev;
             next_ev += 1;
@@ -3875,59 +3887,6 @@ fn collect_getvalue(ir: &IrFile, e: ExprId, var: u32, out: &mut Vec<ExprId>) {
         _ => {}
     }
     for_each_child(&ir.exprs, e, &mut |c| collect_getvalue(ir, c, var, out));
-}
-
-/// Collect every suspending catch body so [`build_state_machine`] can spill its caught exception across
-/// that body's suspension (`r_v` no longer holds it once the catch resumes). Catch BODY identity—not
-/// the lexically reused catch-variable slot—distinguishes sibling arms. Does not descend into lambdas,
-/// whose bodies own separate state machines and value namespaces.
-fn find_suspending_catch_tries(
-    ir: &IrFile,
-    e: ExprId,
-    suspend_set: &HashSet<u32>,
-    out: &mut Vec<(u32, ExprId, crate::types::TypeName)>,
-) {
-    match &ir.exprs[e as usize] {
-        IrExpr::Lambda { .. } => return,
-        IrExpr::Try {
-            catches, finally, ..
-        } if finally.is_none() => {
-            for catch in catches {
-                if expr_calls_suspend(ir, catch.body, suspend_set)
-                    && !catch_body_nests_suspending_catch(ir, catch.body, suspend_set)
-                {
-                    out.push((catch.var, catch.body, catch.jvm_class()));
-                }
-            }
-        }
-        _ => {}
-    }
-    for_each_child(&ir.exprs, e, &mut |c| {
-        find_suspending_catch_tries(ir, c, suspend_set, out)
-    });
-}
-
-/// Whether `e` (a catch body) is, or contains (excluding `Lambda` bodies), a `try/catch` whose own catch
-/// body suspends — a nested suspending catch whose exception variable could alias the enclosing one.
-fn catch_body_nests_suspending_catch(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> bool {
-    match &ir.exprs[e as usize] {
-        IrExpr::Lambda { .. } => return false,
-        IrExpr::Try { catches, .. }
-            if catches
-                .iter()
-                .any(|c| expr_calls_suspend(ir, c.body, suspend_set)) =>
-        {
-            return true;
-        }
-        _ => {}
-    }
-    let mut found = false;
-    for_each_child(&ir.exprs, e, &mut |c| {
-        if !found && catch_body_nests_suspending_catch(ir, c, suspend_set) {
-            found = true;
-        }
-    });
-    found
 }
 
 /// Apply `f` to the node at `e` and every node in its subtree (pre-order), read-only. The single home

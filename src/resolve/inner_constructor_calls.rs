@@ -289,6 +289,10 @@ impl Checker<'_> {
             .cloned()
             .collect::<Vec<_>>();
         declarations.extend(checked_local.into_iter().flatten().cloned());
+        for declaration in &mut declarations {
+            declaration.generic_sig =
+                crate::libraries::constructor_generic_signature(internal, classifier, declaration);
+        }
         declarations
     }
 

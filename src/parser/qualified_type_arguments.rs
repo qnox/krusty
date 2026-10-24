@@ -3,7 +3,9 @@
 use super::*;
 
 impl Parser<'_> {
-    pub(super) fn parse_annotation_name(&mut self) -> (String, Vec<QualifierSegmentArguments>) {
+    pub(super) fn parse_annotation_name(
+        &mut self,
+    ) -> (String, Vec<TypeRef>, Vec<QualifierSegmentArguments>) {
         let mut segments = Vec::new();
         let mut lists = Vec::new();
         if self.at(TokenKind::Ident) {
@@ -24,9 +26,14 @@ impl Parser<'_> {
         } else {
             self.parse_type_args();
         }
+        let arguments = lists
+            .iter()
+            .rev()
+            .flat_map(|list| list.arguments.iter().cloned())
+            .collect();
         let last = segments.len().saturating_sub(1) as u32;
         lists.retain(|list| list.segment != last);
-        (segments.join("."), lists)
+        (segments.join("."), arguments, lists)
     }
 
     pub(super) fn parse_segment_type_arguments(

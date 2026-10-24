@@ -36,12 +36,10 @@ impl Checker<'_> {
             }
             None => None,
         };
+        self.contextualize_constructor_arrays(scope, call, internal, args, arg_names);
         for &argument in args {
             if self.expr_types[argument.0 as usize] == Ty::Error
-                && !matches!(
-                    self.file.expr(argument),
-                    Expr::Lambda { .. } | Expr::CallableRef { .. }
-                )
+                && !self.file.is_callable_syntax(argument)
             {
                 self.expr(scope, argument);
             }
@@ -108,11 +106,8 @@ impl Checker<'_> {
         let partial = args
             .iter()
             .map(|&argument| {
-                (!matches!(
-                    self.file.expr(argument),
-                    Expr::Lambda { .. } | Expr::CallableRef { .. }
-                ))
-                .then(|| self.expr_types[argument.0 as usize])
+                (!self.file.is_callable_syntax(argument))
+                    .then(|| self.expr_types[argument.0 as usize])
             })
             .collect::<Vec<_>>();
         let declarations = self.eager_lambda_constructors(

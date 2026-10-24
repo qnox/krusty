@@ -91,8 +91,12 @@ plugins {
 }
 ```
 
-Kotlin/JVM, the Android Gradle plugin (AGP 9's built-in Kotlin, or `kotlin("android")`), or both
-must be applied before krusty; an Android project's Kotlin compiles are replaced per variant. `kotlin("plugin.serialization")` works in any order:
+Kotlin/JVM, Kotlin Multiplatform, the Android Gradle plugin (AGP 9's built-in Kotlin, or
+`kotlin("android")`), or a combination must be applied before krusty; an Android project's Kotlin
+compiles are replaced per variant. In a multiplatform project krusty compiles the JVM targets'
+compilations; each source set of a compilation reaches the compiler as a fragment refining the
+source sets it depends on, as kotlinc receives them. Other targets (Android included) keep their own
+compilers. `kotlin("plugin.serialization")` works in any order:
 krusty receives the Kotlin Gradle plugin's compiler-plugin classpath and options exactly as kotlinc
 would. The compiler identifies plugin jars and directories from their registrar service entries;
 a compile that requests a Kotlin compiler plugin krusty does not implement (assignment, Compose,
@@ -105,8 +109,13 @@ validated Gradle versions are 7.6.3, 8.14.3, 9.5.0, and 9.7.0. Projects applying
 `kotlin-dsl` (such as `buildSrc`) and Kotlin compile tasks outside any source set stay with kotlinc;
 the plugin logs each task it leaves. The plugin runs the compiler of its own release: on first use
 it downloads the archive for the host from that GitHub release into the Gradle user home and checks
-it against the release's `krusty-<version>-SHA256SUMS`. `-Pkrusty.releases=<url>` reads releases
-from a mirror with the same layout instead. To run another compiler binary, use either form:
+it against the release's `krusty-<version>-SHA256SUMS`. It trusts that file only through its
+signature, `krusty-<version>-SHA256SUMS.asc`, made by a subkey that the maintainer's OpenPGP key
+(fingerprint `D1A7 76AB F83D BE95 D365 C2A1 B871 3034 DFAE AA99`, bundled in the plugin) binds for
+signing, as published in `krusty-<version>-signing-key.asc`; a missing or invalid signature fails
+the build. Every release file also carries GitHub build provenance
+(`gh attestation verify <file> -R qnox/krusty`). `-Pkrusty.releases=<url>` reads releases from a
+mirror with the same layout instead. To run another compiler binary, use either form:
 
 ```sh
 ./gradlew -Pkrusty.binary=/absolute/path/to/krusty krustyCompile
@@ -192,6 +201,13 @@ plugins listed above.
 - Kotlin/Native
 - Kotlin/Wasm
 - Compose
+
+## Contributing
+
+krusty accepts issues, not code: turning a precise issue into our own implementation is faster than
+reviewing an outside change. Ask your coding agent to draft one with a minimal reproduction and
+kotlinc's vs. krusty's result, or submit a `krustyVerify` report. See
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Sponsor
 
