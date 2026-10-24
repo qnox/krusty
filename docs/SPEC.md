@@ -12613,8 +12613,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `K` as `A & B`, which the substitution carries as its primary constituent `A` plus the
   additional bound `B`, and the reified operation records their common supertype `Any`, as both
   kotlinc backends do (`typeOf<K>()` prints `kotlin.Any` and `y is K` is `true` for every `y`).
-  Corpus: `reflection/typeOf/intersectionType.kt` and
-  `reified/reifiedIntersectionTypeArgument.kt` (`-ProhibitIntersectionReifiedTypeParameter`).
+  Inference computes that supertype when it commits the call, over every constituent's declared
+  hierarchy, a dependency's classifiers included, so the cross-module corpus case reifies its
+  library's `A & B` as the single-module one does. It is the runtime classifier only: the
+  semantic argument and its bounds stay the checked intersection.
+  Corpus: `reflection/typeOf/intersectionType.kt`, `reified/reifiedIntersectionTypeArgument.kt`
+  and `reified/reifiedIntersectionTypeArgumentCrossModule.kt`
+  (`-ProhibitIntersectionReifiedTypeParameter`).
   Tests: `tests/intersection_reified_type_of_e2e.rs` and `tests/native_type_of_e2e.rs`.
 - **A Java member's flexible return keeps the caller's type arguments.** A Java generic class
   applied to the enclosing declaration's own type parameters (`Shelf<X, Y>` inside `fun <X, Y>`,
