@@ -224,6 +224,9 @@ fn diagnostic_tails(stderr: &str, stdout: &str) -> String {
 }
 
 #[cfg(test)]
+mod verify_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use krusty::plugins::registry::PluginDiagnostic;
@@ -2273,10 +2276,10 @@ fun main() {
     /// single-use daemons time out connecting. One fixture runs at a time.
     static GRADLE_INTEGRATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    struct IntegrationFixture {
+    pub(super) struct IntegrationFixture {
         _serial: std::sync::MutexGuard<'static, ()>,
-        root: PathBuf,
-        log: PathBuf,
+        pub(super) root: PathBuf,
+        pub(super) log: PathBuf,
         /// The recording proxy's log of support checks, apart from the compiles in `log`.
         probes: PathBuf,
         proxy: PathBuf,
@@ -2286,7 +2289,7 @@ fun main() {
     }
 
     impl IntegrationFixture {
-        fn new(prefix: &str, write: fn(&Path, &str, &str)) -> Self {
+        pub(super) fn new(prefix: &str, write: fn(&Path, &str, &str)) -> Self {
             // A failed test poisons the lock; the next fixture still needs it.
             let serial = GRADLE_INTEGRATION
                 .lock()
@@ -2359,7 +2362,7 @@ fun main() {
             }
         }
 
-        fn build(&self) -> GradleBuild {
+        pub(super) fn build(&self) -> GradleBuild {
             let build = GradleBuild::new(&self.root, repository_plugin_project(), &self.proxy)
                 .property("kotlinPluginVersion", &self.kgp)
                 .property("krustyPluginVersion", &self.plugin_version)
@@ -2613,7 +2616,7 @@ fun main() {
         runs.pop().expect("single module invocation")
     }
 
-    fn invocations(text: &str) -> Vec<Vec<String>> {
+    pub(super) fn invocations(text: &str) -> Vec<Vec<String>> {
         let mut out = Vec::new();
         let mut current = Vec::new();
         for line in text.lines() {

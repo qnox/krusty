@@ -26,14 +26,15 @@ pub(super) fn is_return(insn: &Insn) -> bool {
     matches!(insn, Insn::Op(0xac..=0xb1))
 }
 
-/// The marker kotlinc places in front of a non-local return. kotlinc names it after the function
-/// the return leaves; every marked return krusty writes leaves the function it is finally written
-/// into, so the name is not needed and is left empty.
-pub(crate) fn non_local_return_marker() -> Node {
+/// The marker kotlinc places in front of a non-local return, named after what the return leaves.
+/// A return that leaves the function it is finally written into has the empty name: every such
+/// return krusty writes leaves that one function. A `break` or `continue` of a loop outside the
+/// lambda names the loop (kotlinc's `nonLocalReturnLabel`).
+pub(crate) fn non_local_return_marker(name: String) -> Node {
     Node::Insn(Insn::Method {
         op: INVOKESTATIC,
         owner: NON_LOCAL_RETURN.to_string(),
-        name: String::new(),
+        name,
         desc: "()V".to_string(),
         interface: false,
     })
@@ -41,7 +42,20 @@ pub(crate) fn non_local_return_marker() -> Node {
 
 /// Whether `node` is the marker of a non-local return.
 pub(crate) fn is_non_local_return_marker(node: &Node) -> bool {
-    matches!(node, Node::Insn(Insn::Method { op: INVOKESTATIC, owner, .. }) if owner == NON_LOCAL_RETURN)
+    non_local_return_name(node).is_some()
+}
+
+/// The name of `node`, if it is the marker of a non-local return.
+pub(crate) fn non_local_return_name(node: &Node) -> Option<&str> {
+    match node {
+        Node::Insn(Insn::Method {
+            op: INVOKESTATIC,
+            owner,
+            name,
+            ..
+        }) if owner == NON_LOCAL_RETURN => Some(name),
+        _ => None,
+    }
 }
 
 /// kotlinc's `isMarkedReturn`: whether the node at `at` is a return right behind the marker.

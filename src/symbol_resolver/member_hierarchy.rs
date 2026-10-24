@@ -6,9 +6,9 @@ mod result_enhancement;
 pub(crate) use bound_inner_constructors::bound_inner_constructor_candidates;
 
 use super::{
-    classifier_bindings, direct_supertypes_from_classifier, resolution_subtype,
-    specialize_call_sig, specialize_callable, specialize_member_type, ty_subst_keep_unbound,
-    PropertyAccess, TypePosition,
+    classifier_bindings, projected_supertypes, resolution_subtype, specialize_call_sig,
+    specialize_callable, specialize_member_type, ty_subst_keep_unbound, PropertyAccess,
+    TypePosition,
 };
 use crate::libraries::{Callables, FnKind, FunctionInfo, FunctionSet, PropKind, PropertySet};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
@@ -284,6 +284,9 @@ fn specialize_declared_callables(
                 }
             }
         }
+        if super::raw_member_view::is_raw_receiver(receiver) {
+            super::raw_member_view::erase_property(source, property);
+        }
         if raw_owner_property {
             let erased = property.getter.physical_ret;
             let erased = match declared_nullability.kind() {
@@ -322,6 +325,10 @@ pub(crate) fn specialize_member_function(
             // would specialize `Box<String>.echo(42)` before overload inference.
             bindings.remove(formal);
         }
+    }
+    let raw_receiver = super::raw_member_view::is_raw_receiver(receiver);
+    if let (true, Some(signature)) = (raw_receiver, &function.generic_sig) {
+        super::raw_member_view::bind_method_formals(signature, &mut bindings);
     }
     match function.kind {
         FnKind::Member => function.receiver = Some(receiver),
@@ -396,6 +403,9 @@ pub(crate) fn specialize_member_function(
             }
         }
     }
+    if raw_receiver {
+        super::raw_member_view::erase_function(source, function);
+    }
 }
 
 /// All exact declarations in one classifier slot, including HIDDEN-deprecated callables used by
@@ -462,7 +472,7 @@ pub(crate) fn has_hidden_deprecated_member(
         {
             return true;
         }
-        queue.extend(direct_supertypes_from_classifier(&classifier, current));
+        queue.extend(projected_supertypes(source, &classifier, current));
     }
     false
 }
@@ -508,7 +518,7 @@ pub(crate) fn has_hidden_deprecated_property_accessor(
         {
             return true;
         }
-        queue.extend(direct_supertypes_from_classifier(&classifier, current));
+        queue.extend(projected_supertypes(source, &classifier, current));
     }
     false
 }
@@ -692,7 +702,7 @@ fn members_in_hierarchy_for(
         functions.overloads.extend(current_functions.overloads);
         properties.overloads.extend(current_properties.overloads);
         queue.extend(
-            direct_supertypes_from_classifier(&classifier, current)
+            projected_supertypes(source, &classifier, current)
                 .into_iter()
                 .map(|supertype| (supertype, depth + 1)),
         );
@@ -1406,7 +1416,7 @@ pub(crate) fn imported_object_member_symbols(
                 .extend(specialized.into_parts().0.overloads);
         }
         extension_queue.extend(
-            direct_supertypes_from_classifier(&classifier, current)
+            projected_supertypes(source, &classifier, current)
                 .into_iter()
                 .map(|supertype| (supertype, depth + 1)),
         );

@@ -12,7 +12,7 @@ mod semantic_callable_owner;
 pub use classifier_declarations::{
     ClassifierDeclarationFacts, ClassifierDeclarationKind, DeclaredValueClass,
     GeneratedClassifierFact, GeneratedClassifierKind, GeneratedClassifierPurpose,
-    SerializationGeneratedMemberStatuses,
+    SerializableClassElements, SerializableElement, SerializationGeneratedMemberStatuses,
 };
 pub use deprecation::{
     DeclaredDeprecation, DeprecatedDeclaration, DeprecatedSinceKotlin, Deprecation,
@@ -24,8 +24,10 @@ pub use semantic_callable_owner::SemanticCallableOwner;
 mod annotation_targets;
 mod interning;
 mod spelling;
+pub(crate) use annotation_targets::PropertyAnnotationHost;
 pub use annotation_targets::{
-    AnnotationTargets, DeclaredTargetPolicies, KotlinTarget, PropertyAnnotationSite,
+    AnnotationTargets, DeclaredTargetPolicies, KotlinTarget, PropertyAnnotationDefaultTargetMode,
+    PropertyAnnotationSite, PropertyAnnotationSites,
 };
 mod equality_mode;
 mod substitute;
@@ -43,6 +45,8 @@ pub use crate::inline_parameter_modifier::{InlineExpansionMode, InlineParameterM
 use crate::name_tree::{NameId, NameTree};
 use interning::ShardedInterner;
 mod primitive_arrays;
+mod raw_erasure;
+pub(crate) use raw_erasure::{formal_erasures, raw_member_type};
 mod thin_handles;
 mod ty_kind;
 mod ty_table;
@@ -747,6 +751,7 @@ impl Ty {
             TyKind::TyParam(name, bound) => bindings
                 .get(name.as_str())
                 .copied()
+                .map(Ty::raw_binding_read)
                 .map(|binding| {
                     if bound.upper_bound_admits_null() {
                         binding
@@ -773,6 +778,7 @@ impl Ty {
             TyKind::InProjection(inner) => Ty::in_projection(inner.substitute_erased(bindings)),
             TyKind::OutProjection(inner) => Ty::out_projection(inner.substitute_erased(bindings)),
             TyKind::StarProjection(inner) => Ty::star_projection(inner.substitute_erased(bindings)),
+            TyKind::RawProjection(inner) => Ty::raw_projection(inner.substitute_erased(bindings)),
             TyKind::Obj(internal, arguments) if !arguments.is_empty() => {
                 let arguments = arguments
                     .iter()
@@ -891,6 +897,34 @@ impl Ty {
 
     pub fn star_projection(upper_bound: Ty) -> Ty {
         Ty::intern(TyKind::StarProjection(upper_bound))
+    }
+
+    /// One argument of a Java raw type occurrence; see [`TyKind::RawProjection`].
+    pub fn raw_projection(erased: Ty) -> Ty {
+        Ty::intern(TyKind::RawProjection(erased))
+    }
+
+    /// Whether this is one argument of a Java raw type occurrence.
+    pub fn is_raw_projection(self) -> bool {
+        matches!(self.kind(), TyKind::RawProjection(_))
+    }
+
+    /// The type a formal bound to this argument reads as. A Java raw argument is read through its
+    /// erasure (`Box.raw().get()` is the `CharSequence!` bound of `Box<T extends CharSequence>`);
+    /// every other argument is itself.
+    pub fn raw_binding_read(self) -> Ty {
+        match self.kind() {
+            TyKind::RawProjection(erased) => erased,
+            _ => self,
+        }
+    }
+
+    /// Whether this is a Java raw type occurrence: an application whose arguments are all
+    /// [`TyKind::RawProjection`]s. A raw occurrence is written without arguments, so renderers
+    /// that spell Java's view of it drop them.
+    pub fn is_raw_application(self) -> bool {
+        matches!(self.kind(), TyKind::Obj(_, arguments)
+            if !arguments.is_empty() && arguments.iter().all(|argument| argument.is_raw_projection()))
     }
 
     /// `A & B & …`. See [`intersection::canonical`].
@@ -1154,7 +1188,8 @@ impl Ty {
             TyKind::Intersection(parts) => parts.iter().any(|part| part.mentions_marker(marker)),
             TyKind::InProjection(inner)
             | TyKind::OutProjection(inner)
-            | TyKind::StarProjection(inner) => inner.mentions_marker(marker),
+            | TyKind::StarProjection(inner)
+            | TyKind::RawProjection(inner) => inner.mentions_marker(marker),
             TyKind::Obj(_, args) => args.iter().any(|a| a.mentions_marker(marker)),
             TyKind::Fun(signature) => {
                 signature.ret.mentions_marker(marker)
@@ -1173,7 +1208,8 @@ impl Ty {
             | TyKind::PlatformNullable(inner)
             | TyKind::InProjection(inner)
             | TyKind::OutProjection(inner)
-            | TyKind::StarProjection(inner) => inner.mentions_ty_param(),
+            | TyKind::StarProjection(inner)
+            | TyKind::RawProjection(inner) => inner.mentions_ty_param(),
             TyKind::Obj(_, args) => args.iter().any(|a| a.mentions_ty_param()),
             TyKind::Fun(signature) => {
                 signature.ret.mentions_ty_param()
@@ -1211,7 +1247,8 @@ impl Ty {
             | TyKind::PlatformNullable(inner)
             | TyKind::InProjection(inner)
             | TyKind::OutProjection(inner)
-            | TyKind::StarProjection(inner) => inner.type_parameter_occurrence_bound(name),
+            | TyKind::StarProjection(inner)
+            | TyKind::RawProjection(inner) => inner.type_parameter_occurrence_bound(name),
             TyKind::Obj(_, arguments) => arguments
                 .iter()
                 .find_map(|argument| argument.type_parameter_occurrence_bound(name)),
@@ -1342,6 +1379,7 @@ impl Ty {
             TyKind::InProjection(inner) => Ty::in_projection(inner.canonical_semantic()),
             TyKind::OutProjection(inner) => Ty::out_projection(inner.canonical_semantic()),
             TyKind::StarProjection(inner) => Ty::star_projection(inner.canonical_semantic()),
+            TyKind::RawProjection(inner) => Ty::raw_projection(inner.canonical_semantic()),
             TyKind::Intersection(parts) => Ty::intersection(
                 &parts
                     .iter()
@@ -1512,6 +1550,14 @@ impl Ty {
                 });
                 if args.is_empty() {
                     base
+                } else if self.is_raw_application() {
+                    diagnostic_rendering::raw_type(
+                        &base,
+                        &base,
+                        &args,
+                        diagnostic_rendering::RawNullability::NOT_NULL,
+                        render,
+                    )
                 } else {
                     let arguments = args
                         .iter()
@@ -1542,6 +1588,9 @@ impl Ty {
                     type_parameter,
                 )
             }
+            TyKind::Nullable(inner) if inner.is_raw_application() => {
+                diagnostic_rendering::nullable_raw_type(inner, render, platform_upper_bound)
+            }
             TyKind::Nullable(inner) => intersection::spell_nullable(inner, render, true),
             TyKind::PlatformNullable(inner) => diagnostic_rendering::platform_type(
                 inner,
@@ -1563,6 +1612,7 @@ impl Ty {
                 _ => format!("out {}", render(inner)),
             },
             TyKind::StarProjection(_) => "*".to_string(),
+            TyKind::RawProjection(erased) => render(erased),
             TyKind::DefinitelyNotNull(inner) => format!("{} & Any", render(inner)),
             TyKind::Intersection(parts) => parts
                 .iter()
@@ -1595,7 +1645,8 @@ impl Ty {
             | TyKind::PlatformNullable(inner)
             | TyKind::InProjection(inner)
             | TyKind::OutProjection(inner)
-            | TyKind::StarProjection(inner) => {
+            | TyKind::StarProjection(inner)
+            | TyKind::RawProjection(inner) => {
                 inner.contains_distinct_classifier_with_segment(classifier)
             }
             _ => false,
@@ -1629,6 +1680,7 @@ impl Ty {
             TyKind::InProjection(inner) => format!("in {}", inner.name()),
             TyKind::OutProjection(inner) => format!("out {}", inner.name()),
             TyKind::StarProjection(_) => "*".to_string(),
+            TyKind::RawProjection(erased) => erased.name(),
             TyKind::TyParam(name, _) => name.to_string(),
             TyKind::DefinitelyNotNull(inner) => format!("{} & Any", inner.name()),
             TyKind::Intersection(parts) => parts
@@ -1946,7 +1998,8 @@ pub(crate) fn ty_mentions_param(ty: Ty, names: &[String]) -> bool {
         | TyKind::PlatformNullable(inner)
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner)
-        | TyKind::StarProjection(inner) => ty_mentions_param(inner, names),
+        | TyKind::StarProjection(inner)
+        | TyKind::RawProjection(inner) => ty_mentions_param(inner, names),
         _ => false,
     }
 }
@@ -1972,9 +2025,18 @@ pub(crate) fn ty_mentions_any_param(ty: Ty) -> bool {
         | TyKind::PlatformNullable(inner)
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner)
-        | TyKind::StarProjection(inner) => ty_mentions_any_param(inner),
+        | TyKind::StarProjection(inner)
+        | TyKind::RawProjection(inner) => ty_mentions_any_param(inner),
         _ => false,
     }
+}
+
+/// Whether an occurrence names a parameter outside the supplied declaration scope.
+/// Declaration-owned bounds are checked separately from the occurrences they contain.
+pub(crate) fn ty_mentions_undeclared_param(ty: Ty, names: &[String]) -> bool {
+    ty.mentions_marker(
+        &|occurrence| matches!(occurrence.kind(), TyKind::TyParam(name, _) if !names.iter().any(|parameter| parameter == name)),
+    )
 }
 
 /// Kotlin's `ReturnValueStatus` of a callable: whether a caller must use its result. It is a
@@ -2075,9 +2137,12 @@ pub enum AnnotationValue {
     /// their component type; collapsing `Array<String>::class` to the `kotlin/Array` classifier
     /// loses the class-file descriptor before lowering can encode it.
     Class(Ty),
+    /// A nested annotation. `written` is how the source wrote it, `None` for one read from a
+    /// class file or made by a compiler plugin.
     Annotation {
         internal: TypeName,
         values: Vec<(String, AnnotationValue)>,
+        written: Option<Box<WrittenAnnotation>>,
     },
     Array(Vec<AnnotationValue>),
 }
@@ -2102,10 +2167,15 @@ impl std::fmt::Debug for AnnotationValue {
             Self::String(value) => f.debug_tuple("String").field(value).finish(),
             Self::Enum(class, entry) => f.debug_tuple("Enum").field(class).field(entry).finish(),
             Self::Class(ty) => f.debug_tuple("Class").field(ty).finish(),
-            Self::Annotation { internal, values } => f
+            Self::Annotation {
+                internal,
+                values,
+                written,
+            } => f
                 .debug_struct("Annotation")
                 .field("internal", internal)
                 .field("values", values)
+                .field("written", written)
                 .finish(),
             Self::Array(values) => f.debug_tuple("Array").field(values).finish(),
         }
@@ -2158,6 +2228,25 @@ pub struct ResolvedAnnotation {
     pub annotation: TypeName,
     pub arguments: Vec<(String, AnnotationValue)>,
     pub facts: AnnotationSemanticFacts,
+    /// How a source application was written. `None` for an application read from a class file or
+    /// made by a compiler plugin, which has no written form.
+    pub written: Option<Box<WrittenAnnotation>>,
+}
+
+/// How a checked source application was written, beyond the values it folded to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WrittenAnnotation {
+    /// The annotation class's name as the source wrote it: its last segment, an import alias's
+    /// name when the source used one. For rendering only; the application's identity is resolved.
+    pub short_name: Box<str>,
+    /// The use-site target written before the annotation's name (`@get:A`), if any. A nested
+    /// annotation has none.
+    pub use_site: Option<PropertyAnnotationSite>,
+    /// The arguments the application wrote, as indices into its declaration-ordered arguments, in
+    /// the order the source wrote them; a `vararg` element once, where its first value is. An
+    /// argument absent here was not written: an omitted Kotlin `vararg` element folds to an empty
+    /// array all the same.
+    pub order: Box<[u16]>,
 }
 
 impl ResolvedAnnotation {
@@ -2201,6 +2290,15 @@ pub trait ClassifierFactSource {
     /// this only from a declaration/classifier record; consumers must not manufacture the plugin's
     /// nested-class spelling and probe it.
     fn generated_serializer_singleton(&self, _classifier: TypeName) -> Option<TypeName> {
+        None
+    }
+
+    /// The serial elements of `classifier`, a `@Serializable` class whose serializer the
+    /// serialization plugin generated, as a subclass compiled apart from it inherits them.
+    fn serializable_class_elements(
+        &self,
+        _classifier: TypeName,
+    ) -> Option<SerializableClassElements> {
         None
     }
 
@@ -2257,9 +2355,25 @@ pub struct AppliedAnnotation {
     pub internal: TypeName,
     pub values: Vec<(String, AnnotationValue)>,
     pub facts: AnnotationSemanticFacts,
+    pub written: Box<WrittenAnnotation>,
     pub retention: AnnotationRetention,
     /// The annotation's DECLARED `@Target` set (see [`AnnotationTargets`]).
     pub targets: AnnotationTargets,
+    /// Selected destinations when this application belongs to a property declaration. Non-property
+    /// applications have no property placement; an empty set is not an absent decision.
+    pub property_sites: Option<PropertyAnnotationSites>,
+}
+
+impl AppliedAnnotation {
+    /// The application as published with its declaration, written form included.
+    pub fn resolved(&self) -> ResolvedAnnotation {
+        ResolvedAnnotation {
+            annotation: self.internal,
+            arguments: self.values.clone(),
+            facts: self.facts,
+            written: Some(self.written.clone()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

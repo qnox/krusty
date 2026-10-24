@@ -90,6 +90,53 @@ impl KspFile {
     }
 }
 
+/// A classifier of the classpath, which the host asks krusty for by name when a processor first
+/// reaches it. Its [`KspClass::line`] is unused, as KSP has no location for a library declaration,
+/// and its members are not described yet: [`KspClass::declarations`] is empty and incomplete.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KspLibraryClass {
+    pub class: KspClass,
+    /// Dot-separated; empty for the root package.
+    pub package_name: String,
+    /// The qualified name of the classifier this one is nested in.
+    pub parent: Option<String>,
+    pub origin: KspOrigin,
+    /// Whether `class.annotations` lists every annotation the declaration states; when not, the
+    /// host refuses the query.
+    pub annotations_complete: bool,
+}
+
+/// Where a library classifier was declared, which is what `KSNode.origin` reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KspOrigin {
+    /// A Kotlin declaration (`KOTLIN_LIB`): its class file carries Kotlin metadata.
+    KotlinLib,
+    /// A Java declaration (`JAVA_LIB`).
+    JavaLib,
+}
+
+/// Answers the host's questions about the classpath while a round runs. The type parameters of a
+/// [`KspLibraryClass`] have ids of their own answer, not the round's: an answer refers only to the
+/// type parameters it declares.
+pub trait KspClasspath {
+    /// The classifier KSP's `Resolver.getClassDeclarationByName` finds by `qualified_name`
+    /// (`pkg.Outer.Inner`), or `None` when the classpath declares none.
+    fn class(&self, qualified_name: &str) -> Option<KspLibraryClass>;
+
+    /// The name `mapping` gives the classifier `qualified_name` names, or `None` when the name
+    /// denotes no classifier or the classifier is not mapped.
+    fn mapped_name(&self, mapping: KspNameMapping, qualified_name: &str) -> Option<String>;
+}
+
+/// Which way a name is mapped between Kotlin and the JVM, by kotlinc's class map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KspNameMapping {
+    /// `Resolver.mapKotlinNameToJava`: the JVM class a Kotlin classifier is on the platform.
+    KotlinToJava,
+    /// `Resolver.mapJavaNameToKotlin`: the Kotlin classifier a JVM class is read as.
+    JavaToKotlin,
+}
+
 /// One declaration of a file or a classifier body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KspDeclaration {
@@ -145,6 +192,23 @@ pub struct KspProperty {
     pub extension_receiver: KspTypeSlot,
     /// `None` when the round cannot describe the type.
     pub ty: Option<KspType>,
+    /// Every property has a getter.
+    pub getter: KspAccessor,
+    /// A `var`'s setter.
+    pub setter: Option<KspAccessor>,
+}
+
+/// A property getter or setter as `KSPropertyAccessor` describes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KspAccessor {
+    /// Whether the source wrote it (`Origin.KOTLIN`) rather than the compiler making it
+    /// (`Origin.SYNTHETIC`).
+    pub written: bool,
+    /// `None` when the round has no record of the modifiers.
+    pub modifiers: Option<Vec<KspModifier>>,
+    pub annotations: Vec<KspAnnotation>,
+    /// A setter's value parameter: its name and annotations. `None` for a getter.
+    pub parameter: Option<(String, Vec<KspAnnotation>)>,
 }
 
 /// A type alias, of which the round describes only the name yet.
@@ -179,6 +243,7 @@ pub struct KspParameter {
     /// Whether the parameter declares or inherits a default; `None` when it overrides a library
     /// function the round cannot read the defaults of.
     pub has_default: Option<bool>,
+    pub annotations: Vec<KspAnnotation>,
 }
 
 /// KSP's `ClassKind`.
@@ -195,10 +260,93 @@ pub enum KspClassKind {
 /// One annotation applied to a declaration, as resolved.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KspAnnotation {
-    /// The name the annotation was written with (`KSAnnotation.shortName`).
+    /// `KSAnnotation.shortName`: on a classifier, function or constructor the name the source
+    /// wrote the annotation with, an import alias's name included; elsewhere its class's name.
     pub short_name: String,
     /// The annotation class it resolved to.
     pub qualified_name: String,
+    /// The use-site target written before the name (`@get:A`); `None` when there is none.
+    pub use_site: Option<KspUseSite>,
+    /// Whether KSP reports the application as one the compiler made (`Origin.SYNTHETIC`) rather
+    /// than one the source wrote: a default that is an annotation, or a `@setparam:` application
+    /// KSP moves onto the setter's parameter.
+    pub synthetic: bool,
+    /// What the arguments are, or `None` when the round cannot fold them, in which case the host
+    /// refuses the queries.
+    pub arguments: Option<KspAnnotationArguments>,
+}
+
+/// An annotation's arguments as KSP lists them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KspAnnotationArguments {
+    /// `KSAnnotation.arguments`: the written arguments in the order the source wrote them, then
+    /// the default of each element the application did not write, in declaration order. An
+    /// omitted `vararg` element has no default and is not listed.
+    pub arguments: Vec<KspArgument>,
+    /// `KSAnnotation.defaultArguments`: the default of every element that has one, in
+    /// declaration order, whether the application wrote the element or not.
+    pub defaults: Vec<KspArgument>,
+}
+
+/// One named annotation argument.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KspArgument {
+    pub name: String,
+    pub value: KspValue,
+    /// Whether the source wrote it (`Origin.KOTLIN`) rather than it being a default
+    /// (`Origin.SYNTHETIC`).
+    pub written: bool,
+}
+
+/// A constant annotation argument, in the form KSP hands a processor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KspValue {
+    Boolean(bool),
+    Byte(i8),
+    Short(i16),
+    Int(i32),
+    Long(i64),
+    Char(u16),
+    /// The value's bits, so that every NaN and `-0.0` survive.
+    Float(u32),
+    /// The value's bits.
+    Double(u64),
+    String(String),
+    /// An enum entry: its enum class's qualified name and the entry's name.
+    EnumEntry {
+        class: String,
+        entry: String,
+    },
+    /// A class literal, as the type it denotes.
+    Type(KspType),
+    Annotation(Box<KspAnnotation>),
+    /// An array of any element kind, which KSP hands over as a list.
+    Array(Vec<KspValue>),
+}
+
+/// KSP's `AnnotationUseSiteTarget`, as far as a Kotlin declaration can write one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KspUseSite {
+    Field,
+    Property,
+    Get,
+    Set,
+    Param,
+    SetParam,
+}
+
+impl KspUseSite {
+    /// The name of KSP's `AnnotationUseSiteTarget` constant.
+    pub fn name(self) -> &'static str {
+        match self {
+            KspUseSite::Field => "FIELD",
+            KspUseSite::Property => "PROPERTY",
+            KspUseSite::Get => "GET",
+            KspUseSite::Set => "SET",
+            KspUseSite::Param => "PARAM",
+            KspUseSite::SetParam => "SETPARAM",
+        }
+    }
 }
 
 /// KSP's `Modifier`, as far as a Kotlin declaration can write one.
@@ -314,6 +462,12 @@ pub struct KspType {
 pub enum KspTypeDeclaration {
     /// A classifier, by qualified name: the module's own or the classpath's.
     Class(String),
+    /// A classpath type alias a library declaration names the type by, which KSP resolves the
+    /// type to rather than to the classifier it expands to.
+    TypeAlias {
+        qualified_name: String,
+        package_name: String,
+    },
     /// The type parameter [`KspTypeParameter::id`] `id`, named `name` and declared by `owner` (a
     /// qualified name).
     TypeParameter {
