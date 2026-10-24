@@ -16138,6 +16138,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   library declaration is refused for that query. A compiler accessor of an interface's property
   without modifiers, or of an `abstract` property, is public and abstract.
   (`crates/krusty-plugin-host/tests/ksp.rs`, `effective_java_modifiers_are_what_ksp2_reports`.)
+- **A KSP source declaration written without `override` has no overridee.**
+  `findOverridee` of a written (`KOTLIN`) function or property without the `override` modifier,
+  and of any constructor, is `null`, as KSP2 2.3.12 reports. The overridee of an `override`
+  member, and of a compiler-generated function whose `override` modifier says nothing of it (a
+  data class's `componentN`), is refused. (`crates/krusty-plugin-host/tests/ksp.rs`,
+  `overridees_are_what_ksp2_reports`, `the_overridee_of_an_override_is_refused`.)
 - **A KSP source classifier lists its members with the inherited ones as KSP2 does.**
   `getAllFunctions` lists the classifier's own functions in declaration order (a data class's
   `componentN` and `copy` among them), then each direct supertype's functions in written order
