@@ -90,6 +90,53 @@ impl KspFile {
     }
 }
 
+/// A classifier of the classpath, which the host asks krusty for by name when a processor first
+/// reaches it. Its [`KspClass::line`] is unused, as KSP has no location for a library declaration,
+/// and its members are not described yet: [`KspClass::declarations`] is empty and incomplete.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KspLibraryClass {
+    pub class: KspClass,
+    /// Dot-separated; empty for the root package.
+    pub package_name: String,
+    /// The qualified name of the classifier this one is nested in.
+    pub parent: Option<String>,
+    pub origin: KspOrigin,
+    /// Whether `class.annotations` lists every annotation the declaration states; when not, the
+    /// host refuses the query.
+    pub annotations_complete: bool,
+}
+
+/// Where a library classifier was declared, which is what `KSNode.origin` reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KspOrigin {
+    /// A Kotlin declaration (`KOTLIN_LIB`): its class file carries Kotlin metadata.
+    KotlinLib,
+    /// A Java declaration (`JAVA_LIB`).
+    JavaLib,
+}
+
+/// Answers the host's questions about the classpath while a round runs. The type parameters of a
+/// [`KspLibraryClass`] have ids of their own answer, not the round's: an answer refers only to the
+/// type parameters it declares.
+pub trait KspClasspath {
+    /// The classifier KSP's `Resolver.getClassDeclarationByName` finds by `qualified_name`
+    /// (`pkg.Outer.Inner`), or `None` when the classpath declares none.
+    fn class(&self, qualified_name: &str) -> Option<KspLibraryClass>;
+
+    /// The name `mapping` gives the classifier `qualified_name` names, or `None` when the name
+    /// denotes no classifier or the classifier is not mapped.
+    fn mapped_name(&self, mapping: KspNameMapping, qualified_name: &str) -> Option<String>;
+}
+
+/// Which way a name is mapped between Kotlin and the JVM, by kotlinc's class map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KspNameMapping {
+    /// `Resolver.mapKotlinNameToJava`: the JVM class a Kotlin classifier is on the platform.
+    KotlinToJava,
+    /// `Resolver.mapJavaNameToKotlin`: the Kotlin classifier a JVM class is read as.
+    JavaToKotlin,
+}
+
 /// One declaration of a file or a classifier body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KspDeclaration {
@@ -415,6 +462,12 @@ pub struct KspType {
 pub enum KspTypeDeclaration {
     /// A classifier, by qualified name: the module's own or the classpath's.
     Class(String),
+    /// A classpath type alias a library declaration names the type by, which KSP resolves the
+    /// type to rather than to the classifier it expands to.
+    TypeAlias {
+        qualified_name: String,
+        package_name: String,
+    },
     /// The type parameter [`KspTypeParameter::id`] `id`, named `name` and declared by `owner` (a
     /// qualified name).
     TypeParameter {

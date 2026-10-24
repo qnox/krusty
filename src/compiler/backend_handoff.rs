@@ -36,14 +36,15 @@ pub(super) fn checked_ir_file<'a>(
     module: ModuleEmission<'a>,
     diags: &mut DiagSink,
 ) -> Option<CheckedIrFile<'a>> {
+    let classifiers = CheckedBackendClassifiers::new(module_facts, symbols.semantic_platform());
     // Plugin-generated declarations are part of the file every target receives.
     crate::plugins::declare_enabled(
         &mut ir,
         symbols.native_plugins(),
         module.module_name,
         module_facts.serialization_generated_member_statuses(),
+        &classifiers,
     );
-    let classifiers = CheckedBackendClassifiers::new(module_facts, symbols.semantic_platform());
     let callables = match CheckedBackendCallables::freeze(&ir, symbols.semantic_platform()) {
         Ok(callables) => callables,
         Err(error) => {
@@ -56,6 +57,10 @@ pub(super) fn checked_ir_file<'a>(
     };
     // Each class's declarations are recorded here, before any target lowers them.
     crate::metadata::class_declarations::record_all(&mut ir);
+    // Common code typed an `expect` classifier as its own; every target realizes the classifier
+    // the `actual typealias` actualizing it names, so the file names that one from here on.
+    let (expects, nested_expects) = module_facts.actualized_expects();
+    ir.actualize_expects(expects, nested_expects);
     Some(CheckedIrFile {
         ir,
         kind: CheckedIrUnitKind::Source,

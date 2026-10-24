@@ -20,6 +20,9 @@ pub enum FirValueParameterName {
     Unused,
     /// A lambda parameter written as a destructuring declaration `(a, b)`.
     Destructured,
+    /// A script's implicit receiver with this ordinal, which a script statement reads. It has no
+    /// source name.
+    ScriptReceiver { ordinal: u32 },
 }
 
 impl FirValueParameter {
@@ -30,6 +33,21 @@ impl FirValueParameter {
             value,
             ty,
             name: FirValueParameterName::Bound,
+        }
+    }
+
+    /// A script's implicit receiver `ordinal`.
+    pub fn script_receiver(
+        origin: OriginId,
+        value: LocalValueId,
+        ty: ResolvedTy,
+        ordinal: u32,
+    ) -> Self {
+        Self {
+            origin,
+            value,
+            ty,
+            name: FirValueParameterName::ScriptReceiver { ordinal },
         }
     }
 }

@@ -1541,6 +1541,8 @@ pub struct File {
     pub is_script: bool,
     /// Common-source role supplied by the source-set driver, not parsed from Kotlin syntax.
     pub is_common: bool,
+    /// Refined multiplatform fragment supplied by the source-set driver.
+    pub fragment: Option<crate::source::SourceFragment>,
     /// Source imports in declaration order.
     pub import_paths: Vec<ImportPath>,
     /// Classifier references that are not retained by another AST node. Import entries are candidates
@@ -1924,6 +1926,8 @@ pub struct File {
     /// instead of being unconditionally public. Signature collection combines it with the per-class
     /// `kotlin.ConsistentCopyVisibility` / `kotlin.ExposedCopyVisibility` annotations.
     pub data_copy_respects_ctor_visibility: bool,
+    /// Configured property-parameter annotation defaulting, projected once from language features.
+    pub property_annotation_default_target_mode: crate::types::PropertyAnnotationDefaultTargetMode,
     /// `+UnitConversionsOnArbitraryExpressions`: a call argument whose function value returns
     /// non-`Unit` may be converted to a function type returning `Unit`.
     pub unit_conversions_on_arbitrary_expressions: bool,

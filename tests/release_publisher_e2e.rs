@@ -310,12 +310,19 @@ fn updates_supersede_their_ref_without_cancelling_master_validation() {
     };
     let acquire = position("release-publisher.sh acquire");
     let check = position("release-publisher.sh check");
-    let publish = position("softprops/action-gh-release");
+    let publish = position("gh release create \"$TAG\"");
+    let central = position("publish-maven-central.sh");
     let portal = position("publishPlugins");
     let record = position("release-publisher.sh record");
     let drop = position("release-publisher.sh release");
     assert!(
-        acquire < check && check < publish && publish < portal && portal < record && record < drop
+        acquire < check
+            && check < publish
+            && publish < central
+            && central < portal
+            && portal < record
+            && record < drop,
+        "Maven Central, which skips a version it already has, publishes before the Plugin Portal"
     );
     assert_eq!(drop, steps.len() - 1, "dropping the lock is the last step");
     assert!(
@@ -351,8 +358,10 @@ fn updates_supersede_their_ref_without_cancelling_master_validation() {
     );
 }
 
+// This guards only the injection paths the release job itself adds. Gradle, Kotlin and the
+// publishing plugin remain trusted third-party build dependencies that see the credentials.
 #[test]
-fn release_secrets_reach_only_first_party_build_code() {
+fn release_job_adds_no_injection_path_to_secret_bearing_steps() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workflow = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci.yml");
     let job = release_job(&workflow);

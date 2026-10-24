@@ -171,7 +171,9 @@ pub(super) fn take_reference_version(arguments: Vec<String>, opts: &mut Options)
             .filter(|version| KotlinVersion::supported().contains(version))
         {
             Some(version) => opts.kotlin_reference_version = Some(version),
-            None => opts.errors.push(format!(
+            // A release kotlinc has and krusty does not support is krusty's limit, which a build
+            // tool hands to kotlinc.
+            None => opts.refuse(format!(
                 "-Xkotlin-reference-version={value} names no supported Kotlin release \
                  (supported: {})",
                 supported_kotlin_versions()
@@ -256,6 +258,10 @@ pub(super) fn apply(
         "-Xfragment-sources" => parsed
             .fragments
             .fragment_sources
+            .extend(list.iter().cloned()),
+        "-Xfragment-refines" => parsed
+            .fragments
+            .fragment_refines
             .extend(list.iter().cloned()),
         "-language-version" => parsed.language_version = Some(text.to_string()),
         "-api-version" => parsed.api_version = Some(text.to_string()),

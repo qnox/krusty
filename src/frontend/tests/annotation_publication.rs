@@ -80,6 +80,83 @@ class Subject(
 }
 
 #[test]
+fn pass_one_default_target_mode_retains_parameter_and_property_applications() {
+    use crate::language_version::LanguageVersion;
+
+    let source = r#"
+@Target(AnnotationTarget.PROPERTY, AnnotationTarget.VALUE_PARAMETER, AnnotationTarget.FIELD)
+annotation class Mark(val text: String)
+class Subject(
+    @Mark("default") val defaulted: Int,
+    @param:Mark("parameter") val parameterOnly: Int,
+    @property:Mark("property") val propertyOnly: Int,
+    @field:Mark("field") val fieldOnly: Int
+)
+"#;
+    for (language, property_default) in [
+        (LanguageVersion::V2_3, false),
+        (LanguageVersion::V2_4, true),
+    ] {
+        let mut diagnostics = DiagSink::new();
+        let analysis = analyze_source_set_with_features(
+            &[SourceInput::kotlin(source).with_file_stem("DefaultTargetMode")],
+            crate::frontend::PlatformProvider::jvm(Box::new(
+                crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+                    crate::jvm::classpath::Classpath::new(
+                        crate::toolchain::jvm_classpath_jars_for(source),
+                    ),
+                ))
+                .expect("JVM provider initialization"),
+            )),
+            &LangFeatures::for_language_version(language),
+            &mut diagnostics,
+        );
+        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+        let index = analysis.streamed.as_ref().expect("Pass 1").module.index();
+        let subject = index
+            .classifier_declaration(crate::types::type_name("Subject"))
+            .expect("stable subject declaration");
+        for (sibling, expected) in [
+            property_default.then_some(("default", None)),
+            None,
+            Some((
+                "property",
+                Some(crate::types::PropertyAnnotationSite::Property),
+            )),
+            None,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let property = index
+                .owned_declaration(
+                    subject,
+                    crate::fir::DeclarationKind::Property,
+                    sibling as u32,
+                )
+                .expect("stable constructor property");
+            let expected = expected
+                .into_iter()
+                .map(|(text, site)| crate::types::ResolvedAnnotation {
+                    annotation: crate::types::type_name("Mark"),
+                    arguments: vec![(
+                        "text".to_owned(),
+                        crate::types::AnnotationValue::string(text),
+                    )],
+                    facts: Default::default(),
+                    written: written("Mark", site, &[0]),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                index.declaration_applied_annotations(property),
+                expected,
+                "language {language:?}, constructor property {sibling}"
+            );
+        }
+    }
+}
+
+#[test]
 fn pass_one_retains_constructor_property_payloads_only_at_their_checked_use_site() {
     let source = r#"
 import kotlin.reflect.KClass
@@ -130,7 +207,18 @@ class Subject(
             written: written("PropertyMark", None, &[0]),
         }]
     );
-    assert!(applications(1).is_empty());
+    assert_eq!(
+        applications(1),
+        [crate::types::ResolvedAnnotation {
+            annotation: crate::types::type_name("Other"),
+            arguments: vec![(
+                "text".to_owned(),
+                crate::types::AnnotationValue::string("default parameter")
+            )],
+            facts: Default::default(),
+            written: written("Other", None, &[0]),
+        }]
+    );
     assert_eq!(
         applications(2),
         [crate::types::ResolvedAnnotation {

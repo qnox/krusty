@@ -6,15 +6,16 @@ use std::io::{self, Read, Write};
 
 use krusty_plugin_ir::{
     KspAccessor, KspAnnotation, KspArgument, KspClass, KspClassKind, KspDeclaration, KspFunction,
-    KspFunctionKind, KspModifier, KspParameter, KspProperty, KspRound, KspType, KspTypeArgument,
-    KspTypeDeclaration, KspTypeParameter, KspTypeSlot, KspValue, KspVariance,
+    KspFunctionKind, KspLibraryClass, KspModifier, KspNameMapping, KspOrigin, KspParameter,
+    KspProperty, KspRound, KspType, KspTypeArgument, KspTypeDeclaration, KspTypeParameter,
+    KspTypeSlot, KspValue, KspVariance,
 };
 
 use crate::protocol::{malformed, put_list, put_str, read_frame, utf8, write_frame, Payload};
 
 use super::{GeneratedKind, KspGenerated, KspLoad, KspOutcome};
 
-pub(crate) const PROTOCOL: u32 = 4;
+pub(crate) const PROTOCOL: u32 = 6;
 
 const HELLO: u8 = 0;
 const LOAD: u8 = 1;
@@ -26,11 +27,20 @@ const ROUND_DONE: u8 = 6;
 const FINISH: u8 = 7;
 const FINISHED: u8 = 8;
 pub(crate) const SHUTDOWN: u8 = 9;
+const CLASS_QUERY: u8 = 10;
+const CLASS_ANSWER: u8 = 11;
+const NAME_QUERY: u8 = 12;
+const NAME_ANSWER: u8 = 13;
 
 pub(crate) enum Request<'a> {
     Load(&'a KspLoad<'a>),
     Round(&'a KspRound),
     Finish,
+    /// The answer to a [`Reply::ClassQuery`]: the classifier, or `None` when the classpath has
+    /// none by that name.
+    ClassAnswer(Option<&'a KspLibraryClass>),
+    /// The answer to a [`Reply::NameQuery`]: the mapped name, or `None` when there is none.
+    NameAnswer(Option<&'a str>),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -39,6 +49,12 @@ pub(crate) enum Reply {
     Loaded(Vec<String>),
     RoundDone(KspOutcome),
     Finished(KspOutcome),
+    /// Not a reply but a question in the middle of a request: a processor reached the classpath
+    /// classifier with this qualified name. The host waits for its [`Request::ClassAnswer`].
+    ClassQuery(String),
+    /// Likewise a question: a processor asked for the name this mapping gives a qualified name.
+    /// The host waits for its [`Request::NameAnswer`].
+    NameQuery(KspNameMapping, String),
     /// A processor reached an API member the host does not implement yet.
     Unsupported(String),
     /// The request failed in the host, with the stack trace that says why.
@@ -94,6 +110,16 @@ pub(crate) fn write_request(out: &mut impl Write, request: &Request) -> io::Resu
             });
         }
         Request::Finish => payload.push(FINISH),
+        Request::ClassAnswer(answer) => {
+            payload.push(CLASS_ANSWER);
+            put_option(&mut payload, answer, |payload, library| {
+                put_library_class(payload, library)
+            });
+        }
+        Request::NameAnswer(answer) => {
+            payload.push(NAME_ANSWER);
+            put_option(&mut payload, answer, |payload, name| put_str(payload, name));
+        }
     }
     write_frame(out, &payload)
 }
@@ -141,6 +167,22 @@ fn put_class(payload: &mut Vec<u8>, class: &KspClass) {
     });
     payload.push(u8::from(class.declarations_complete));
     put_list(payload, &class.declarations, put_declaration);
+}
+
+/// A classpath classifier: its header as a class's, then its package, the qualified name of the
+/// classifier it is nested in if any, its origin (0 Kotlin, 1 Java), and whether its annotations
+/// are complete.
+fn put_library_class(payload: &mut Vec<u8>, library: &KspLibraryClass) {
+    put_class(payload, &library.class);
+    put_str(payload, &library.package_name);
+    put_option(payload, &library.parent, |payload, parent| {
+        put_str(payload, parent)
+    });
+    payload.push(match library.origin {
+        KspOrigin::KotlinLib => 0,
+        KspOrigin::JavaLib => 1,
+    });
+    payload.push(u8::from(library.annotations_complete));
 }
 
 /// A function: its name, kind (0 top-level, 1 member, 2 static, 3 primary constructor,
@@ -347,8 +389,8 @@ fn put_type_parameter(payload: &mut Vec<u8>, parameter: &KspTypeParameter) {
     put_list(payload, &parameter.bounds, put_type);
 }
 
-/// A type: its declaration (0 and a classifier's qualified name, or 1 and a type parameter's id,
-/// owner and name), whether it is nullable, then its arguments (0 for a star, else 1 invariant,
+/// A type: its declaration (0 and a classifier's qualified name, 1 and a type parameter's id,
+/// owner and name, or 2 and a type alias's qualified and package names), whether it is nullable, then its arguments (0 for a star, else 1 invariant,
 /// 2 `out` or 3 `in`, and the type).
 fn put_type(payload: &mut Vec<u8>, ty: &KspType) {
     match &ty.declaration {
@@ -361,6 +403,14 @@ fn put_type(payload: &mut Vec<u8>, ty: &KspType) {
             payload.extend_from_slice(&id.to_be_bytes());
             put_str(payload, owner);
             put_str(payload, name);
+        }
+        KspTypeDeclaration::TypeAlias {
+            qualified_name,
+            package_name,
+        } => {
+            payload.push(2);
+            put_str(payload, qualified_name);
+            put_str(payload, package_name);
         }
     }
     payload.push(u8::from(ty.nullable));
@@ -400,6 +450,15 @@ pub(crate) fn read_reply(input: &mut impl Read) -> io::Result<Reply> {
         LOADED => Ok(Reply::Loaded(payload.list(|payload| payload.string())?)),
         ROUND_DONE => Ok(Reply::RoundDone(outcome(&mut payload)?)),
         FINISHED => Ok(Reply::Finished(outcome(&mut payload)?)),
+        CLASS_QUERY => Ok(Reply::ClassQuery(payload.string()?)),
+        NAME_QUERY => {
+            let mapping = match payload.byte()? {
+                0 => KspNameMapping::KotlinToJava,
+                1 => KspNameMapping::JavaToKotlin,
+                tag => return Err(malformed(format!("unknown name mapping {tag}"))),
+            };
+            Ok(Reply::NameQuery(mapping, payload.string()?))
+        }
         UNSUPPORTED => Ok(Reply::Unsupported(payload.string()?)),
         FAILED => Ok(Reply::Failed(payload.string()?)),
         tag => Err(malformed(format!("unknown reply {tag}"))),
@@ -599,5 +658,41 @@ mod tests {
                 has_error: true,
             })
         );
+    }
+
+    #[test]
+    fn a_name_query_reads_back_its_mapping_and_its_answer_frames_the_name() {
+        let frame = |payload: Vec<u8>| {
+            let mut frame = (payload.len() as u32).to_be_bytes().to_vec();
+            frame.extend(payload);
+            frame
+        };
+        let query = |direction: u8| {
+            let mut payload = vec![NAME_QUERY, direction, 0, 0, 0, 10];
+            payload.extend(b"kotlin.Int");
+            frame(payload)
+        };
+        assert_eq!(
+            read_reply(&mut query(0).as_slice()).unwrap(),
+            Reply::NameQuery(KspNameMapping::KotlinToJava, "kotlin.Int".into())
+        );
+        assert_eq!(
+            read_reply(&mut query(1).as_slice()).unwrap(),
+            Reply::NameQuery(KspNameMapping::JavaToKotlin, "kotlin.Int".into())
+        );
+        assert_eq!(
+            read_reply(&mut query(2).as_slice())
+                .unwrap_err()
+                .to_string(),
+            "unknown name mapping 2"
+        );
+        let mut framed = Vec::new();
+        write_request(&mut framed, &Request::NameAnswer(Some("java.lang.Integer"))).unwrap();
+        let mut answer = vec![NAME_ANSWER, 1, 0, 0, 0, 17];
+        answer.extend(b"java.lang.Integer");
+        assert_eq!(framed, frame(answer));
+        let mut framed = Vec::new();
+        write_request(&mut framed, &Request::NameAnswer(None)).unwrap();
+        assert_eq!(framed, frame(vec![NAME_ANSWER, 0]));
     }
 }

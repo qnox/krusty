@@ -34,9 +34,13 @@ abstract class ConstantValue {
         return new ConstantValue() {
             @Override
             Object resolve(KSAnnotation owner) {
-                KSClassDeclaration declaration = symbols.classNamed(enumClass);
+                KSClassDeclaration declaration = symbols.resolvedClass(enumClass);
+                if (declaration instanceof LibraryClass
+                        && declaration.getClassKind() == ClassKind.ENUM_CLASS) {
+                    return ((LibraryClass) declaration).entry(entry);
+                }
                 if (!(declaration instanceof SourceClass)) {
-                    throw Nodes.notImplemented("an annotation argument naming an entry of a library enum");
+                    throw new IllegalStateException(enumClass + " is no enum class");
                 }
                 for (KSDeclaration member : ((SourceClass) declaration).declarations) {
                     if (member instanceof KSClassDeclaration

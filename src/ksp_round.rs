@@ -14,7 +14,10 @@
 mod accessors;
 mod annotations;
 mod declarations;
+mod library;
 mod type_model;
+
+pub use library::KspLibraries;
 
 use krusty_plugin_ir::{
     KspAnnotation, KspClass, KspClassKind, KspDeclaration, KspFile, KspRound, KspType,
@@ -462,6 +465,7 @@ mod tests {
     fn render(ty: &KspType) -> String {
         let mut out = match &ty.declaration {
             KspTypeDeclaration::Class(name) => name.clone(),
+            KspTypeDeclaration::TypeAlias { qualified_name, .. } => qualified_name.clone(),
             KspTypeDeclaration::TypeParameter { owner, name, .. } => format!("{owner}.{name}"),
         };
         if !ty.arguments.is_empty() {

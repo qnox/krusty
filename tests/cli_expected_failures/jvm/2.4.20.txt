@@ -136,10 +136,6 @@ globalWarningSuppression_incorrect.args
 headerMode.args
 help.args
 hmpp/commaInFragmentDependency.args
-hmpp/cycleInDependencies.args
-hmpp/missingFragment.args
-hmpp/refinesSingleModule.args
-hmpp/refinesWithoutFragments.args
 hmpp/scriptInCommonFragment.args
 hmpp/successfulCompilation.args
 hmpp/successfulCompilation2.args
@@ -169,7 +165,6 @@ kt48833_doNotSuppressVersionErrors.args
 kt51846_backendThreadsValidation1.args
 kt51846_backendThreadsValidation2.args
 kt51846_backendThreadsValidation3.args
-kt77220.args
 languageVersion/deprecatedLanguageUnsupportedApi.args
 languageVersion/deprecatedLanguageVersion.args
 languageVersion/languageVersion.args

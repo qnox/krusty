@@ -12,6 +12,7 @@ import com.google.devtools.ksp.symbol.KSTypeParameter;
 import com.google.devtools.ksp.symbol.KSTypeReference;
 import com.google.devtools.ksp.symbol.KSValueArgument;
 import com.google.devtools.ksp.symbol.Modifier;
+import com.google.devtools.ksp.symbol.Origin;
 import com.google.devtools.ksp.symbol.Variance;
 import java.io.DataInputStream;
 import java.io.IOException;
@@ -23,15 +24,20 @@ import java.util.Map;
 import java.util.Set;
 
 // One round's symbol model, read from what krusty sends (`KspRound`): the module's source files and
-// their declarations, and the library classifiers they name.
+// their declarations, with the classpath for the library classifiers they name. A library
+// classifier's own header is read into a model of its own, whose type parameters are its own.
 final class Symbols {
     final List<SourceFile> files = new ArrayList<>();
+    private final Classpath classpath;
     private final Map<String, SourceClass> sourceClasses = new HashMap<>();
-    private final Map<String, LibraryClass> libraryClasses = new HashMap<>();
     private final Map<Integer, KSTypeParameter> typeParameters = new HashMap<>();
 
-    static Symbols read(DataInputStream in) throws IOException {
-        Symbols symbols = new Symbols();
+    private Symbols(Classpath classpath) {
+        this.classpath = classpath;
+    }
+
+    static Symbols read(DataInputStream in, Classpath classpath) throws IOException {
+        Symbols symbols = new Symbols(classpath);
         int fileCount = in.readInt();
         for (int i = 0; i < fileCount; i++) {
             String path = Wire.readString(in);
@@ -94,6 +100,35 @@ final class Symbols {
         declaration.declarationsComplete = Wire.readBoolean(in);
         sourceClasses.put(qualifiedName, declaration);
         readDeclarations(in, file, declaration, declaration.declarations);
+        return declaration;
+    }
+
+    // A classpath classifier (`put_library_class` in `src/ksp/protocol.rs`): a class's header with
+    // no declarations, then its package, parent, origin and whether its annotations are complete.
+    static LibraryClass readLibraryClass(DataInputStream in, Classpath classpath)
+            throws IOException {
+        Symbols symbols = new Symbols(classpath);
+        String simpleName = Wire.readString(in);
+        String qualifiedName = Wire.readString(in);
+        ClassKind kind = classKind(in.readByte());
+        in.readInt(); // the line, which a library declaration has none of
+        LibraryClass declaration = new LibraryClass(classpath, simpleName, qualifiedName, kind);
+        symbols.readAnnotations(in, declaration, declaration.annotations);
+        declaration.modifiers = readModifiers(in);
+        if (Wire.readBoolean(in)) {
+            declaration.typeParameters = symbols.readTypeParameters(in, declaration);
+        }
+        if (Wire.readBoolean(in)) {
+            declaration.superTypes = symbols.readReferences(in, declaration);
+        }
+        Wire.readBoolean(in); // whether the declarations are complete, which they are not
+        if (in.readInt() != 0) {
+            throw new IOException("a library class lists no declarations");
+        }
+        declaration.packageName = new Name(Wire.readString(in));
+        declaration.parent = Wire.readBoolean(in) ? Wire.readString(in) : null;
+        declaration.origin = in.readByte() == 0 ? Origin.KOTLIN_LIB : Origin.JAVA_LIB;
+        declaration.annotationsComplete = Wire.readBoolean(in);
         return declaration;
     }
 
@@ -312,13 +347,17 @@ final class Symbols {
             throws IOException {
         SourceTypeReference reference = new SourceTypeReference(parent);
         String name;
-        int parameter;
-        if (in.readByte() == 1) {
+        int parameter = -1;
+        LibraryTypeAlias alias = null;
+        byte declaration = in.readByte();
+        if (declaration == 1) {
             parameter = in.readInt();
             Wire.readString(in); // the owner, which the id already names
             name = Wire.readString(in);
+        } else if (declaration == 2) {
+            name = Wire.readString(in);
+            alias = new LibraryTypeAlias(name, Wire.readString(in));
         } else {
-            parameter = -1;
             name = Wire.readString(in);
         }
         boolean nullable = Wire.readBoolean(in);
@@ -333,6 +372,7 @@ final class Symbols {
             arguments.add(argument);
         }
         reference.type = new SourceType(this, name, parameter, nullable, arguments);
+        reference.type.alias = alias;
         return reference;
     }
 
@@ -378,13 +418,27 @@ final class Symbols {
     }
 
     // The classifier named `qualifiedName`: the module's own when it declares one, else the
-    // classpath's.
+    // classpath's, or null when neither does.
     KSClassDeclaration classNamed(String qualifiedName) {
         SourceClass source = sourceClasses.get(qualifiedName);
         if (source != null) {
             return source;
         }
-        return libraryClasses.computeIfAbsent(qualifiedName, LibraryClass::new);
+        return classpath.classNamed(qualifiedName);
+    }
+
+    // The module's classpath.
+    Classpath classpath() {
+        return classpath;
+    }
+
+    // The classifier a resolved type or value names, which krusty found when it resolved it.
+    KSClassDeclaration resolvedClass(String qualifiedName) {
+        KSClassDeclaration declaration = classNamed(qualifiedName);
+        if (declaration == null) {
+            throw new IllegalStateException("the classpath has no classifier " + qualifiedName);
+        }
+        return declaration;
     }
 
     // The type parameter with the round-unique `id`.

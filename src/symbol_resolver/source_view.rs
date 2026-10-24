@@ -108,6 +108,27 @@ impl<'a> SymbolResolver<'a> {
 }
 
 impl SymbolSource for ResolverSource<'_> {
+    fn actualized_expect(&self, internal: TypeName) -> Option<TypeName> {
+        match self {
+            Self::Direct(source) => source.actualized_expect(internal),
+            Self::Memoized(source) => source.actualized_expect(internal),
+        }
+    }
+
+    fn sees_function(&self, function: &crate::libraries::FunctionInfo) -> bool {
+        match self {
+            Self::Direct(source) => source.sees_function(function),
+            Self::Memoized(source) => source.sees_function(function),
+        }
+    }
+
+    fn sees_property(&self, property: &crate::libraries::PropertyInfo) -> bool {
+        match self {
+            Self::Direct(source) => source.sees_property(property),
+            Self::Memoized(source) => source.sees_property(property),
+        }
+    }
+
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
         match self {
             Self::Direct(source) => source.package_exists(parent, name),
@@ -147,6 +168,16 @@ impl SymbolSource for ResolverSource<'_> {
         match self {
             Self::Direct(source) => source.generated_serializer_singleton(classifier),
             Self::Memoized(source) => source.generated_serializer_singleton(classifier),
+        }
+    }
+
+    fn serializable_class_elements(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::types::SerializableClassElements> {
+        match self {
+            Self::Direct(source) => source.serializable_class_elements(classifier),
+            Self::Memoized(source) => source.serializable_class_elements(classifier),
         }
     }
 

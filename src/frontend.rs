@@ -16,6 +16,7 @@ mod explicit_api;
 mod external_modifier_targets;
 mod header_validation;
 mod inline_preparation;
+mod library_classifiers;
 mod local_class_names;
 pub(crate) use local_class_names::{settle_generated_class_names, SettledGeneratedClassNames};
 mod local_function_names;
@@ -155,6 +156,7 @@ impl From<SourceSetAnalysis> for StreamingSourceSetAnalysis {
 pub(crate) struct ReparseSource {
     kind: SourceKind,
     is_common: bool,
+    fragment: Option<crate::source::SourceFragment>,
     text: Box<str>,
     /// The file name without its extension. A script class is named after it.
     file_stem: Option<Box<str>>,
@@ -224,6 +226,7 @@ impl ReparseSource {
                 diags,
             );
             file.is_common = self.is_common;
+            file.fragment = self.fragment;
             record_local_class_name_provenance(&mut file);
             visit(file, diags);
             return;
@@ -237,6 +240,7 @@ impl ReparseSource {
             &module_features.for_source(&self.text),
             |mut file, diags| {
                 file.is_common = self.is_common;
+                file.fragment = self.fragment;
                 record_local_class_name_provenance_with_counters(
                     &mut file,
                     &mut local_name_counters,
@@ -357,8 +361,14 @@ impl StreamedPassState {
 struct ActualizedHeaders {
     /// Top-level `expect` declarations an `actual` replaced. Their subtrees are excluded.
     matched: crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    /// Top-level `expect` classifiers an `actual typealias` actualized, each with that alias's
+    /// declaration. A common source types them as their own classifiers, so their subtrees stay in
+    /// the inventory.
+    aliased: crate::fx_hash::HashMap<crate::fir::DeclarationId, crate::fir::DeclarationId>,
     /// The `actual` declarations that actualized something.
     targets: crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    /// Each `actual`, members included, and the source of the `expect` it stands for.
+    expect_sources: Vec<crate::source::ExpectStandIn>,
     /// Expect-owned defaults, as stable provider→target work.
     defaults: Vec<crate::fir::DefaultArgumentProvider>,
     /// Implementations that did not write `actual`.
@@ -374,6 +384,7 @@ struct ActualizedHeaders {
 fn actualize_headers_and_collect_inherited_defaults(
     headers: &mut crate::fir::StreamedHeaderModule,
     actualization: crate::fir::Actualization,
+    fragmented: bool,
 ) -> ActualizedHeaders {
     let crate::fir::Actualization {
         pairs,
@@ -396,7 +407,31 @@ fn actualize_headers_and_collect_inherited_defaults(
     // found its `expect`: this matcher compares resolved type SHAPES and follows an
     // `actual typealias`, so it pairs `expect val S.tag: S` with `actual val String.tag: String`
     // where a name-and-arity key cannot.
+    // Only a refined fragment hierarchy analyzes common sources as their own module.
+    let aliased = pairs
+        .iter()
+        .filter(|_| fragmented)
+        .filter(|pair| {
+            headers
+                .declarations
+                .anchor(pair.expect)
+                .is_some_and(|anchor| anchor.owner.is_none())
+        })
+        .filter(|pair| headers.type_alias_identity(pair.actual).is_some())
+        .map(|pair| (pair.expect, pair.actual))
+        .collect::<crate::fx_hash::HashMap<_, _>>();
     let actualized_targets = pairs.iter().map(|pair| pair.actual).collect();
+    let expect_sources = pairs
+        .iter()
+        .filter(|pair| !aliased.contains_key(&pair.expect))
+        .filter_map(|pair| {
+            let anchor = headers.declarations.anchor(pair.expect)?;
+            Some(crate::source::ExpectStandIn {
+                actual: pair.actual,
+                expect_source: anchor.source.raw(),
+            })
+        })
+        .collect();
     let mut work = Vec::new();
     for pair in pairs {
         let Some(source_declaration) = headers.syntax.declaration(pair.expect) else {
@@ -469,7 +504,9 @@ fn actualize_headers_and_collect_inherited_defaults(
     // declaration here forced later code to recover it by `(file, TextRange)`.
     ActualizedHeaders {
         matched,
+        aliased,
         targets: actualized_targets,
+        expect_sources,
         defaults: work,
         unmarked,
         incompatible,
@@ -1193,18 +1230,23 @@ where
                 .for_source(source.text)
                 .has("MultiPlatformProjects")
         });
-    let script_definition = ScriptDefinition::standard().on_classpath(|template| {
-        platform
-            .platform
-            .as_ref()
-            .is_ok_and(|platform| platform.classifier(template).is_some())
-    });
     for (index, source) in sources.iter().enumerate() {
         diags.set_file(index as u32);
         let features = project_features.for_source(source.text);
+        let script_definition = source
+            .script_definition
+            .cloned()
+            .unwrap_or_else(ScriptDefinition::standard)
+            .on_classpath(|template| {
+                platform
+                    .platform
+                    .as_ref()
+                    .is_ok_and(|platform| platform.classifier(template).is_some())
+            });
         reparse_sources.sources.push(ReparseSource {
             kind: source.kind,
             is_common: source.is_common,
+            fragment: source.fragment,
             text: source.text.into(),
             file_stem: source.file_stem.map(Into::into),
             script_definition: (source.kind == SourceKind::KotlinScript)
@@ -1221,6 +1263,7 @@ where
                 .iter()
                 .any(|diagnostic| diagnostic.severity == Severity::Error);
         file.is_common = source.is_common;
+        file.fragment = source.fragment;
         if source.kind != SourceKind::Java {
             record_local_class_name_provenance(&mut file);
         }
@@ -1418,6 +1461,7 @@ where
         mut signature_default_work_items,
         matched_expect_declarations,
         actualized_targets,
+        (actual_expect_sources, aliased_expects),
         incompatible_expects,
         unactualized_members,
         incompatible_members,
@@ -1427,13 +1471,19 @@ where
         let actualization = crate::fir::actualization(&pass1_headers, &bindings);
         let ActualizedHeaders {
             matched,
+            aliased,
             targets: actualized_targets,
+            expect_sources,
             defaults,
             unmarked,
             incompatible,
             unactualized_members,
             incompatible_members,
-        } = actualize_headers_and_collect_inherited_defaults(&mut pass1_headers, actualization);
+        } = actualize_headers_and_collect_inherited_defaults(
+            &mut pass1_headers,
+            actualization,
+            sources.iter().any(|source| source.fragment.is_some()),
+        );
         // Reported here, while every file's syntax is still live: the diagnostic points at the
         // declaration's NAME, and the compact inventory anchors only its whole range.
         no_expect_for_actual::report_unmarked_implementations(
@@ -1442,7 +1492,13 @@ where
             &pass1_headers,
             diags,
         );
-        pass1_headers.exclude_declaration_subtrees(&matched);
+        pass1_headers.exclude_declaration_subtrees(
+            &matched
+                .iter()
+                .filter(|expect| !aliased.contains_key(expect))
+                .copied()
+                .collect(),
+        );
         // Explicit expect→actual default mappings remain valid after exclusion because their
         // provider anchors and bounded syntax live through the rest of Pass 1. Enumerate ordinary
         // self-owned defaults only after exclusion so a removed expect constructor cannot schedule
@@ -1467,6 +1523,13 @@ where
             signature_default_work_items,
             matched,
             actualized_targets,
+            (
+                expect_sources,
+                aliased
+                    .into_values()
+                    .filter_map(|alias| pass1_headers.type_alias_identity(alias))
+                    .collect::<Vec<_>>(),
+            ),
             incompatible,
             unactualized_members,
             incompatible_members,
@@ -1476,6 +1539,7 @@ where
             signature_default_work(&pass1_headers, &[]),
             crate::fx_hash::HashSet::default(),
             crate::fx_hash::HashSet::default(),
+            (Vec::new(), Vec::new()),
             crate::fx_hash::HashSet::default(),
             Vec::new(),
             crate::fx_hash::HashSet::default(),
@@ -1517,6 +1581,9 @@ where
         target,
         diags,
     );
+    symbols
+        .source_fragments
+        .publish_expect_sources(actual_expect_sources, aliased_expects);
     if multiplatform {
         report_unmatched_expect_roots(
             UnmatchedExpectRoots {
@@ -1597,6 +1664,7 @@ where
                 index.publish_common_source(crate::fir::SourceFileId::from_raw(source as u32));
             }
         }
+        index.publish_source_fragments(symbols.source_fragments.clone());
         crate::resolve::project_finalized_signatures(&index, &mut symbols);
         // A `const val` initializer is a stable declaration dependency. Check each such bounded
         // fragment now, while Pass 1 still owns its AST and exact operator selections can be
@@ -1734,6 +1802,7 @@ where
         let mut index = streamed_index.index;
         pass1_headers.publish_declaration_inventory(&mut index);
         index.publish_actualized_away_declarations(&matched_expect_declarations);
+        index.publish_source_fragments(symbols.source_fragments.clone());
         // The declarations that DID finalize are still the module's facts. Project them into the
         // source symbol environment consumed beside the partial stable index; otherwise one
         // genuine signature error would make every use of an unrelated inferred declaration look

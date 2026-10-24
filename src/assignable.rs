@@ -384,13 +384,19 @@ fn obj_assignable(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bool
         .zip(applied_sub.type_args().iter())
         .enumerate()
         .all(|(index, (&p, &a))| {
+            // A Java raw argument is the interval from its erasure up to a star. Every argument
+            // fits under the star; as a source it supplies its erasure, the lower bound.
+            let a = match a.kind() {
+                TyKind::RawProjection(erased) => erased,
+                _ => a,
+            };
             match p.kind() {
                 // `A<B> <: A<*>` for every argument `B`: a star projection contains every argument
                 // of its parameter. Its carried readable bound is derived from the declaration
                 // (kotlinc's `isSubtypeForSameConstructor` skips a star super-argument outright),
                 // so it never decides containment: a classpath `Frame<*>` whose bound the metadata
                 // reader leaves at `Any?` is the same type as a source `Frame<*>` reading `Bound`.
-                TyKind::StarProjection(_) => return true,
+                TyKind::StarProjection(_) | TyKind::RawProjection(_) => return true,
                 TyKind::OutProjection(expected) => {
                     if matches!(a.kind(), TyKind::InProjection(_)) {
                         let readable = target
@@ -493,7 +499,8 @@ fn capture_projection_parameters(
         | TyKind::PlatformNullable(template)
         | TyKind::InProjection(template)
         | TyKind::OutProjection(template)
-        | TyKind::StarProjection(template) => capture_projection_parameters(
+        | TyKind::StarProjection(template)
+        | TyKind::RawProjection(template) => capture_projection_parameters(
             cx,
             oracle,
             template,
@@ -525,6 +532,12 @@ fn same_type_argument_with(oracle: &dyn TypeOracle, left: Ty, right: Ty) -> bool
         | (TyKind::OutProjection(a), TyKind::OutProjection(b)) => {
             same_flexible_type_with(oracle, a, b)
         }
+        // A Java raw argument is the interval from its erasure up to a star, so it is the same
+        // argument as a star or as a type equal to its erasure.
+        (TyKind::RawProjection(_), TyKind::StarProjection(_))
+        | (TyKind::StarProjection(_), TyKind::RawProjection(_)) => true,
+        (TyKind::RawProjection(erased), _) => same_flexible_type_with(oracle, erased, right),
+        (_, TyKind::RawProjection(erased)) => same_flexible_type_with(oracle, left, erased),
         // Two stars in one argument slot are one projection, whatever readable bound each carries:
         // the bound is derived from the declaration, not part of the projection's identity.
         (TyKind::StarProjection(_), TyKind::StarProjection(_)) => true,
