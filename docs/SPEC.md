@@ -8257,6 +8257,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   signature, arguments and nullability included (`Map<String, String>`, `String?`, a class type
   parameter), and never from the field's erased classifier. Test:
   `tests/classpath_jvmfield_property_type_e2e.rs`.
+- **`Unit::class` is an annotation argument naming `kotlin.Unit`.** Written as an argument or as an
+  annotation parameter's default, `Unit::class` folds to a constant, and the class file records the
+  class `Lkotlin/Unit;`, never `void`. A dependency annotation's `java.lang.Integer::class` default
+  is `Int::class` to kotlinc, so a Kotlin-metadata class reads that `AnnotationDefault` as the
+  primitive and a construction loads `int`; reflection over an application still reports the
+  recorded `java.lang.Integer`. A Java annotation keeps the wrapper. Tests (JVM-specific):
+  `tests/annotation_instance_defaults_e2e.rs`.
 - **A primitive class literal is the primitive's class.** `Int::class` loads `Integer.TYPE` (the
   `int` class) before `Reflection.getOrCreateKotlinClass`, as kotlinc's `generateClassInstance`
   does for a primitive without `wrapPrimitives`. `T::class` over a reified type parameter loads the
@@ -16283,8 +16290,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   element it did not write, in declaration order (origin `SYNTHETIC`); `defaultArguments` are
   every element default. An omitted vararg element is not listed, an explicit empty spread is an
   empty list, and a spread is flattened. Values are folded constants: boxed primitives, a string,
-  an enum entry as its `ENUM_ENTRY` class declaration, a class literal as the class applied to a
-  star for each type parameter, a nested annotation (`SYNTHETIC` when it is a default) with its own
+  an enum entry as its `ENUM_ENTRY` class declaration, a class literal written in source as the
+  class applied to a star for each type parameter, a class literal read from a class file as the
+  Kotlin classifier its JVM class reads as with no type arguments (`void` and `Unit` as
+  `kotlin.Unit`, a primitive and its wrapper as the Kotlin primitive, `int[]` as `kotlin.IntArray`,
+  `String[]` as `kotlin.Array<kotlin.String>`, a Java collection interface as its mutable Kotlin
+  form even when a Kotlin library wrote `List::class`), a nested annotation (`SYNTHETIC` when it is a default) with its own
   arguments in the order it wrote them and its omitted vararg element not listed, and a list for
   an array. A library annotation's defaults are those its class file records, so a vararg
   element declared without one has an empty one. An unprefixed annotation on a constructor `val`
@@ -16295,11 +16306,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   modifiers. An annotation on a classifier, function or constructor has the `shortName` the
   source wrote, an import alias's name when it used one; one on a property, parameter or
   accessor, and a nested one, has its class's simple name. An annotation whose arguments the
-  frontend did not fold, an array class literal, and a
+  frontend did not fold, an array class literal written in source, and a
   non-public compiler-made accessor's modifiers are refused for that
   query only.
-  (`crates/krusty-plugin-host/tests/ksp.rs`, `annotation_arguments_and_accessors_are_what_ksp2_reports`;
-  frontend tests `pass_one_publishes_folded_annotation_element_defaults` and
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `annotation_arguments_and_accessors_are_what_ksp2_reports`,
+  `class_literal_arguments_are_what_ksp2_reports`; frontend tests `pass_one_publishes_folded_annotation_element_defaults` and
   `pass_one_publishes_value_parameter_annotations_as_written`.)
 - **A KSP library class is the declaration KSP2 reads from the classpath.** A processor reaches a
   classpath classifier by name (`getClassDeclarationByName`) or through a source supertype, and
