@@ -102,23 +102,76 @@ class My {
         get() = object {
             fun read() = field + 1
         }.read()
+    val throughParameterDefault: Int
+        get() {
+            fun read(x: Int = field) = x + 1
+            return read()
+        }
+    val shadowingParameterDefault: Int
+        get() {
+            fun read(field: Int = 11, x: Int = field) = x
+            return read()
+        }
+    val objectMember: Int
+        get() = object {
+            val field = 0
+            fun read() = field + 1
+        }.read()
+    var setterWrites: Int = 12
+        get() = 0
+        set(value) {
+            field = value
+        }
 
     init {
         throughLambda = 13
         throughLocalFunction = 14
         throughObject = 15
+        throughParameterDefault = 16
+        objectMember = 17
     }
 }
 fun box(): String {
     val m = My()
+    m.setterWrites = 1
     val values = listOf(
         m.shadowed, m.lambdaParameter, m.localFunctionParameter,
         m.throughLambda, m.throughLocalFunction, m.throughObject,
+        m.throughParameterDefault, m.shadowingParameterDefault, m.objectMember, m.setterWrites,
     )
-    return if (values == listOf(8, 9, 10, 14, 15, 16)) \"OK\" else \"fail: $values\"
+    return if (values == listOf(8, 9, 10, 14, 15, 16, 17, 11, 18, 0)) \"OK\" else \"fail: $values\"
 }
 ";
     common::expect_box_ok_with_stdlib(SRC, "P");
+}
+
+/// `field` in an accessor names the backing field even where a member or top-level property of
+/// that name is in scope, as kotlinc binds it.
+#[test]
+fn field_in_an_accessor_wins_over_properties_named_field() {
+    const SRC: &str = "// WITH_STDLIB
+val field = 100
+class C {
+    val x: Int = 1
+        get() = field + 0
+}
+class D {
+    val field = 5
+    val y: Int = 2
+        get() = field + 0
+    var z: Int = 3
+        set(value) {
+            field = value
+        }
+}
+fun box(): String {
+    val d = D()
+    d.z = 4
+    val values = listOf(C().x, d.y, d.z, d.field, field)
+    return if (values == listOf(1, 2, 4, 5, 100)) \"OK\" else \"fail: $values\"
+}
+";
+    common::expect_box_ok_with_stdlib(SRC, "Q");
 }
 
 /// The `inline` modifier on a property ACCESSOR (`inline get()`, `private inline set(…)`) — accepted

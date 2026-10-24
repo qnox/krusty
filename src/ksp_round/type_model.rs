@@ -6,6 +6,7 @@ use krusty_plugin_ir::{
 };
 
 use crate::ast::{File, ModifierKeyword, TypeRef, WrittenModifiers};
+use crate::frontend::FrontendSpelled as Spelled;
 use crate::types::{Ty, TyKind, TyParamName, TypeName, TypeVariance};
 
 /// The type parameters a header can name: its own and its enclosing classifiers', by resolved
@@ -160,16 +161,35 @@ impl TypeParameterScope {
     }
 }
 
-/// `ty` as source spells it with `spelling`: KSP reports no annotations on a type whose spelling
-/// writes no type-use annotation of its own, and the same of each argument whose spelling is the
-/// matching written argument. An argument the spelling does not write one for keeps them
-/// undescribed.
-pub(super) fn as_written(file: &File, spelling: &TypeRef, mut ty: KspType) -> KspType {
-    mark_unannotated(file, spelling, &mut ty);
-    ty
+/// `ty` as source spells it with `spelling`, whose resolved spelling is `spelled` (`None` when the
+/// frontend has none): KSP reports no annotations on a type that writes no type-use annotation of
+/// its own and inherits none, and the same of each argument whose spelling is the matching
+/// written argument. An argument the spelling does not write keeps its annotations undescribed.
+///
+/// `None` when the type, or any type argument within it, names a type alias: KSP resolves such a
+/// type to the alias, with the alias's own arguments and annotations, which the round does not
+/// describe yet, so it leaves the type undescribed rather than report the expansion.
+pub(super) fn as_written(
+    file: &File,
+    spelling: &TypeRef,
+    spelled: Option<&Spelled>,
+    mut ty: KspType,
+) -> Option<KspType> {
+    if let Some(spelled) = spelled {
+        if names_alias(spelled) {
+            return None;
+        }
+        mark_unannotated(file, spelling, spelled, &mut ty);
+    }
+    Some(ty)
 }
 
-fn mark_unannotated(file: &File, spelling: &TypeRef, ty: &mut KspType) {
+/// Whether `spelled`, or any argument within it, names a type alias.
+fn names_alias(spelled: &Spelled) -> bool {
+    spelled.alias.is_some() || spelled.args.iter().any(names_alias)
+}
+
+fn mark_unannotated(file: &File, spelling: &TypeRef, spelled: &Spelled, ty: &mut KspType) {
     let inside = |span: crate::diag::Span, offset: u32| span.lo <= offset && offset < span.hi;
     let own_annotation = file.type_annotations.keys().any(|&offset| {
         inside(spelling.span, offset)
@@ -178,19 +198,24 @@ fn mark_unannotated(file: &File, spelling: &TypeRef, ty: &mut KspType) {
                 .iter()
                 .any(|argument| inside(argument.span, offset))
     });
-    if own_annotation {
+    if own_annotation
+        || !spelled.annotations.is_empty()
+        || !spelled.expansion_annotations.is_empty()
+    {
         return;
     }
     ty.unannotated = true;
     if spelling.targs.len() != ty.arguments.len() {
         return;
     }
-    for (written, argument) in spelling.targs.iter().zip(&mut ty.arguments) {
+    for (index, (written, argument)) in spelling.targs.iter().zip(&mut ty.arguments).enumerate() {
         match argument {
             KspTypeArgument::Star => {}
             KspTypeArgument::Invariant(argument)
             | KspTypeArgument::Out(argument)
-            | KspTypeArgument::In(argument) => mark_unannotated(file, written, argument),
+            | KspTypeArgument::In(argument) => {
+                mark_unannotated(file, written, spelled.arg(index), argument)
+            }
         }
     }
 }
@@ -268,6 +293,7 @@ mod tests {
     use super::{as_written, class_type};
     use crate::ast::Decl;
     use crate::diag::DiagSink;
+    use crate::frontend::FrontendSpelled as Spelled;
     use krusty_plugin_ir::{KspType, KspTypeArgument};
 
     /// Which levels of `List<String>`, or of `String` when `generic` is false, the top-level
@@ -296,7 +322,7 @@ mod tests {
             },
             false => class_type("kotlin.String"),
         };
-        let ty = as_written(&file, spelling, ty);
+        let ty = as_written(&file, spelling, Some(Spelled::NONE), ty).unwrap();
         let mut levels = vec![ty.unannotated];
         for argument in &ty.arguments {
             if let KspTypeArgument::Invariant(argument) = argument {
