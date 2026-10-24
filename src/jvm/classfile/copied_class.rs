@@ -88,6 +88,23 @@ impl ClassWriter {
     /// the declaration, its annotations, then the code and its local variables. The body then
     /// passes through kotlinc's method optimizations, which every class writer applies.
     pub(crate) fn add_copied_method(&mut self, method: &ClassMethod) -> Result<(), CopyError> {
+        self.add_copied_method_at(method, BodyStage::Emitted)
+    }
+
+    /// [`Self::add_copied_method`] for a body the coroutine transformer built: kotlinc's optimizer
+    /// takes it as it takes any transformed suspend function.
+    pub(crate) fn add_copied_transformed_method(
+        &mut self,
+        method: &ClassMethod,
+    ) -> Result<(), CopyError> {
+        self.add_copied_method_at(method, BodyStage::Transformed)
+    }
+
+    fn add_copied_method_at(
+        &mut self,
+        method: &ClassMethod,
+        stage: BodyStage,
+    ) -> Result<(), CopyError> {
         if !method.exceptions.is_empty() {
             return Err(CopyError::Unsupported("an Exceptions attribute"));
         }
@@ -152,7 +169,7 @@ impl ClassWriter {
         // kotlinc's optimizing method visitor buffers the body and optimizes it before any of its
         // constants reach the class's pool, so a constant only the original body used is not
         // interned at all.
-        let node = &self.optimized_before_writing(method, node);
+        let node = &self.optimized_before_writing(method, node, stage);
         let assembled = node.assemble(self).map_err(CopyError::Assemble)?;
         info.lvt = assembled
             .local_variables
@@ -185,7 +202,7 @@ impl ClassWriter {
             identity,
             node.clone(),
             None,
-            BodyStage::Emitted,
+            stage,
             &mut pool,
         );
         if let Some(optimized) = optimized {
@@ -195,7 +212,12 @@ impl ClassWriter {
     }
 
     /// `node`, the body of `method`, after kotlinc's optimizations; as it is when they decline it.
-    fn optimized_before_writing(&self, method: &ClassMethod, node: &MethodNode) -> MethodNode {
+    fn optimized_before_writing(
+        &self,
+        method: &ClassMethod,
+        node: &MethodNode,
+        stage: BodyStage,
+    ) -> MethodNode {
         let this = u16::from(method.access & ACC_STATIC == 0);
         let Some(arguments) = descriptors::argument_types(&method.desc) else {
             return node.clone();
@@ -209,7 +231,7 @@ impl ClassWriter {
             owner: &self.internal_name,
             value_classes: &*self.value_classes,
             parameter_slots,
-            post_coroutine: false,
+            post_coroutine: stage == BodyStage::Transformed,
             kept_for_inlining: false,
         };
         let mut optimized = node.clone();

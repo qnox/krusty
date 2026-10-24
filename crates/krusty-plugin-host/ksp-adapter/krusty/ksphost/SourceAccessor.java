@@ -25,6 +25,8 @@ abstract class SourceAccessor implements KSPropertyAccessor {
     // Null when krusty has no record of the modifiers; the query is then refused.
     Set<Modifier> modifiers;
     final List<KSAnnotation> annotations = new ArrayList<>();
+    // The name KSP2 reports; null when krusty does not name it the way KSP2 does yet.
+    String jvmName;
 
     SourceAccessor(SourceProperty property) {
         this.property = property;

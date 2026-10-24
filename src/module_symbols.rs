@@ -421,7 +421,16 @@ impl<'a> ModuleSymbols<'a> {
                 .iter()
                 .map(|(_, has_default)| *has_default)
                 .collect(),
-            types: c.ctor_params.clone(),
+            // Source argument mapping consumes the same symbolic template as constructor
+            // selection. The erased parameters remain the physical callable's ABI shape.
+            types: if c.type_params.is_empty() {
+                c.ctor_params.clone()
+            } else {
+                c.ctor_param_shapes
+                    .iter()
+                    .map(|(parameter, _)| *parameter)
+                    .collect()
+            },
             recv_fun: c
                 .ctor_params
                 .iter()
@@ -2742,6 +2751,39 @@ mod tests {
         assert_eq!(fs.len(), 1);
         assert_eq!(fs[0].callable.params, vec![declared]);
         assert_eq!(fs[0].callable.source_receiver, Some(declared));
+    }
+
+    #[test]
+    fn annotation_application_retains_the_constructor_parameter_template() {
+        let mut symbols = FrontendSymbols::default();
+        let mut annotation = class("demo/Envelope");
+        annotation.flags = annotation.flags.with_annotation(true);
+        let bound = Ty::nullable(Ty::obj("kotlin/Any"));
+        annotation.type_parameters = crate::types::TypeParameters::new(
+            vec!["T".to_string()],
+            vec![bound],
+            vec![crate::types::TypeVariance::Invariant],
+        );
+        let parameter = Ty::obj_args("demo/Leaf", &[Ty::ty_param("T", bound)]);
+        annotation.ctor_params = vec![Ty::obj_args("demo/Leaf", &[Ty::obj("kotlin/Any")])];
+        annotation.ctor_param_shapes = vec![(parameter, false)];
+        annotation.ctor_param_names = vec![("leaf".to_string(), false)];
+        symbols.insert_class(annotation);
+
+        let provider = ModuleSymbols::new(&symbols);
+        let declaration = provider.classifier(type_name("demo/Envelope")).unwrap();
+        let application = declaration.annotation_application().unwrap();
+        assert_eq!(application.parameters.types, vec![parameter]);
+        assert_eq!(application.parameters.names, vec!["leaf"]);
+        assert_eq!(application.parameters.defaults, vec![false]);
+        assert_eq!(
+            application.parameters.types,
+            declaration.constructors[0]
+                .generic_sig
+                .as_ref()
+                .unwrap()
+                .params,
+        );
     }
 
     #[test]

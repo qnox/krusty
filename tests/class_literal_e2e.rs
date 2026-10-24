@@ -6,6 +6,31 @@ use krusty::jvm::classreader::parse_class;
 #[path = "class_literal_array_of_nothing_e2e.rs"]
 mod array_of_nothing;
 
+const CLASS_LITERAL_ARGUMENT_VALUES: &str = r#"import kotlin.reflect.KClass
+class Host {
+    class Token
+    class Holder(val type: KClass<*>)
+}
+object Sink { fun accept(value: KClass<*>): KClass<*> = value }
+fun choose(value: KClass<*>): String = "class"
+fun choose(value: () -> Any): String = "callable"
+fun <T : Any> identity(value: KClass<T>): KClass<T> = value
+fun produce(): Any = Host.Token()
+fun box(): String {
+    val token = Host.Token::class
+    val result = Host.Holder(Host.Token::class).type == token &&
+        Sink.accept(Host.Token::class) == token && identity(Host.Token::class) == token &&
+        choose(Host.Token::class) == "class" && choose(::produce) == "callable" &&
+        choose { Host.Token() } == "callable"
+    return if (result) "OK" else "wrong argument kind"
+}
+"#;
+
+#[test]
+fn class_literals_are_values_beside_postponed_callable_arguments() {
+    common::expect_box_same_as_kotlinc(CLASS_LITERAL_ARGUMENT_VALUES, "ClassLiteralArgumentValues");
+}
+
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")
 }
