@@ -682,7 +682,12 @@ fn all_functions_and_properties_of_source_classifiers_are_what_ksp2_lists() {
 #[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
 fn all_functions_whose_order_krusty_cannot_say_are_refused() {
     let (runtime, env) = runtime();
-    let processor = processor(&runtime, "AllMembers", "allmembers.AllMembersProvider");
+    let processor = processor_in(
+        &runtime,
+        "AllMembers",
+        "allmembers.AllMembersProvider",
+        "ksp-processor-all-members-refusals",
+    );
     for case in [
         "Intersection",
         "Substitution",
