@@ -3241,6 +3241,19 @@ impl Classpath {
         None
     }
 
+    /// The annotations, with their arguments, applied to method `name` `descriptor` of
+    /// `internal`, read from its class file ([`super::classreader::read_method_annotations`]).
+    pub fn method_annotations(
+        &self,
+        internal: TypeName,
+        name: &str,
+        descriptor: &str,
+    ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
+        let internal = super::jvm_class_map::to_jvm_type_name(internal);
+        let bytes = self.class_bytes(crate::jvm::names::classfile_internal_name_of(internal))?;
+        super::classreader::read_method_annotations(&bytes, name, descriptor)
+    }
+
     /// Lazily read (and cache) one method's bytecode body — the inline expander's entry point. Each
     /// `(class, method, descriptor)` body is read and parsed at most once, even across many call sites.
     pub fn method_code(&self, internal: &str, name: &str, descriptor: &str) -> Option<MethodCode> {

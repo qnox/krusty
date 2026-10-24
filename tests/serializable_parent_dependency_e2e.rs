@@ -11,8 +11,12 @@
 //!
 //! A generic superclass's elements are typed by the arguments the subclass gives it.
 //!
+//! An element keeps the property annotations its `$annotations` marker carries: a serial name, a
+//! serializer of its own, `@Contextual`.
+//!
 //! A superclass whose classfile lacks the generated members (it was compiled without the plugin),
-//! or whose element types carry annotations the record does not describe, declines. kotlinc reads
+//! or whose elements carry annotations the record does not describe (on a type argument,
+//! `@Required`, a `@SerialInfo` annotation), declines. kotlinc reads
 //! a library class's own elements by name, so a parent that overrides an inherited element names
 //! it twice; kotlinc rejects its subclasses and krusty declines them.
 
@@ -321,4 +325,155 @@ fn subclasses_inherit_the_elements_of_a_generic_dependency_parent() {
     let on_reference_lib =
         fixture.krusty("main-on-kotlinc-lib", &sources, &reference_cp, &switches);
     assert_same_classes_and_box(&reference, &on_reference_lib, &reference_cp);
+}
+
+const ANNOTATED_LIBRARY: &[(&str, &str)] = &[(
+    "Annotated.kt",
+    "package annotated\n\
+     import kotlinx.serialization.Contextual\n\
+     import kotlinx.serialization.KSerializer\n\
+     import kotlinx.serialization.SerialName\n\
+     import kotlinx.serialization.Serializable\n\
+     import kotlinx.serialization.descriptors.PrimitiveKind\n\
+     import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor\n\
+     import kotlinx.serialization.encoding.Decoder\n\
+     import kotlinx.serialization.encoding.Encoder\n\
+     class Item(val v: Int)\n\
+     object ItemSerializer : KSerializer<Item> {\n\
+     \x20   override val descriptor = PrimitiveSerialDescriptor(\"Item\", PrimitiveKind.INT)\n\
+     \x20   override fun serialize(encoder: Encoder, value: Item) = encoder.encodeInt(value.v)\n\
+     \x20   override fun deserialize(decoder: Decoder) = Item(decoder.decodeInt())\n\
+     }\n\
+     @Serializable\n\
+     open class Labeled(\n\
+     \x20   @SerialName(\"zz\") val a: Int,\n\
+     \x20   @Serializable(with = ItemSerializer::class) val item: Item,\n\
+     \x20   @Contextual val context: Item,\n\
+     \x20   val kept: String = \"k\",\n\
+     )\n",
+)];
+
+const ANNOTATED_MAIN: &str = "import annotated.Item\n\
+                              import annotated.ItemSerializer\n\
+                              import kotlinx.serialization.Serializable\n\
+                              import kotlinx.serialization.json.Json\n\
+                              import kotlinx.serialization.modules.SerializersModule\n\
+                              @Serializable\n\
+                              class Marked(val m: Int) : annotated.Labeled(1, Item(2), Item(3))\n\
+                              fun box(): String {\n\
+                              \x20   val json = Json { serializersModule = SerializersModule { contextual(Item::class, ItemSerializer) } }\n\
+                              \x20   val text = json.encodeToString(Marked.serializer(), Marked(4))\n\
+                              \x20   if (text != \"{\\\"zz\\\":1,\\\"item\\\":2,\\\"context\\\":3,\\\"m\\\":4}\") return text\n\
+                              \x20   val back = json.decodeFromString(Marked.serializer(), text)\n\
+                              \x20   if (back.a != 1 || back.item.v != 2 || back.context.v != 3 || back.kept != \"k\" || back.m != 4) return \"back\"\n\
+                              \x20   return \"OK\"\n\
+                              }\n";
+
+/// A parent element's property annotations travel with it: `@SerialName` renames it on the wire,
+/// and a property-level `@Serializable(with = …)` and `@Contextual` choose its serializer. kotlinc
+/// reads them from the property's `$annotations` marker in the library's class file.
+#[test]
+fn a_parent_element_keeps_its_property_annotations() {
+    let (plugin, mut runtime) = plugin_and_runtime()
+        .expect("the serialization plugin and runtime must be available to this regression");
+    runtime.push(
+        krusty::toolchain::serialization_json_jar()
+            .expect("kotlinx-serialization-json must be available to this regression"),
+    );
+    let switches = vec![format!("-Xplugin={}", plugin.display())];
+    let fixture = PluginFixture::new("serializable-parent-annotated");
+    let reference_lib = fixture.kotlinc("lib", ANNOTATED_LIBRARY, &runtime, &switches);
+    let krusty_lib = fixture.krusty("lib", ANNOTATED_LIBRARY, &runtime, &switches);
+    assert_same_classes(&reference_lib, &krusty_lib);
+    let sources = [("Main.kt", ANNOTATED_MAIN)];
+    let mut reference_cp = runtime.clone();
+    reference_cp.push(reference_lib);
+    let mut krusty_cp = runtime.clone();
+    krusty_cp.push(krusty_lib);
+    let reference = fixture.kotlinc("main", &sources, &reference_cp, &switches);
+    let krusty = fixture.krusty("main", &sources, &krusty_cp, &switches);
+    assert_same_classes_and_box(&reference, &krusty, &krusty_cp);
+    let on_reference_lib =
+        fixture.krusty("main-on-kotlinc-lib", &sources, &reference_cp, &switches);
+    assert_same_classes_and_box(&reference, &on_reference_lib, &reference_cp);
+}
+
+const SERIAL_INFO_LIBRARY: &[(&str, &str)] = &[(
+    "Tagged.kt",
+    "package info\n\
+     import kotlinx.serialization.SerialInfo\n\
+     import kotlinx.serialization.Serializable\n\
+     @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)\n\
+     @SerialInfo\n\
+     @Target(AnnotationTarget.PROPERTY)\n\
+     annotation class Tag(val t: String)\n\
+     @Serializable\n\
+     open class Tagged(@Tag(\"q\") val tagged: String)\n",
+)];
+
+const SERIAL_INFO_MAIN: &str = "import kotlinx.serialization.Serializable\n\
+                                @Serializable\n\
+                                class Child(val c: Int) : info.Tagged(\"t\")\n";
+
+/// A `@SerialInfo` annotation on a parent element is pushed onto the subclass's descriptor, as an
+/// instance of a generated implementation class, which the record does not describe; the subclass
+/// declines.
+#[test]
+fn a_parent_element_with_a_serial_info_annotation_declines() {
+    assert_parent_declines(
+        "serializable-parent-serial-info",
+        SERIAL_INFO_LIBRARY,
+        SERIAL_INFO_MAIN,
+    );
+}
+
+const REQUIRED_LIBRARY: &[(&str, &str)] = &[(
+    "Kept.kt",
+    "package kept\n\
+     import kotlinx.serialization.Required\n\
+     import kotlinx.serialization.Serializable\n\
+     @Serializable\n\
+     open class Kept(@Required val k: String = \"k\")\n",
+)];
+
+const REQUIRED_MAIN: &str = "import kotlinx.serialization.Serializable\n\
+                             @Serializable\n\
+                             class Child(val c: Int) : kept.Kept()\n";
+
+/// `@Required` makes a parent element required although it has a default, and changes how the
+/// parent's own `write$Self` writes it; the subclass declines rather than mark it optional.
+#[test]
+fn a_required_parent_element_declines() {
+    assert_parent_declines(
+        "serializable-parent-required",
+        REQUIRED_LIBRARY,
+        REQUIRED_MAIN,
+    );
+}
+
+/// kotlinc compiles `main` over `library`; krusty declines it over either compiler's build of the
+/// library.
+fn assert_parent_declines(name: &str, library: &[(&str, &str)], main: &str) {
+    let (plugin, runtime) = plugin_and_runtime()
+        .expect("the serialization plugin and runtime must be available to this regression");
+    let switches = vec![format!("-Xplugin={}", plugin.display())];
+    let fixture = PluginFixture::new(name);
+    let reference_lib = fixture.kotlinc("lib", library, &runtime, &switches);
+    let krusty_lib = fixture.krusty("lib", library, &runtime, &switches);
+    let sources = [("Main.kt", main)];
+    let mut reference_cp = runtime.clone();
+    reference_cp.push(reference_lib);
+    fixture.kotlinc("main", &sources, &reference_cp, &switches);
+    let mut krusty_cp = runtime.clone();
+    krusty_cp.push(krusty_lib);
+    assert_eq!(
+        fixture.krusty_rejects("main", &sources, &krusty_cp, &switches),
+        "<fixture>/main/src/Main.kt:1:1: error: krusty: this construct is not yet supported by the IR backend\n\
+         krusty: 1 error(s)\n"
+    );
+    assert_eq!(
+        fixture.krusty_rejects("main-on-kotlinc-lib", &sources, &reference_cp, &switches),
+        "<fixture>/main-on-kotlinc-lib/src/Main.kt:1:1: error: krusty: this construct is not yet supported by the IR backend\n\
+         krusty: 1 error(s)\n"
+    );
 }
