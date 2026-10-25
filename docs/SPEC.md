@@ -13391,6 +13391,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `lib.JBase` with a package-private `void remove()` leave `Walk : Base(), Iterator<String>` (or
   `app.Walk : lib.JBase()`) its public throwing `remove()` stub, as kotlinc emits it. Tests:
   `tests/read_only_stub_inheritability_e2e.rs` (class bytes and box run against kotlinc).
+- **An implemented read-only stub member keeps its bridge.** When the class's own member, a
+  superclass member or an interface default effectively overrides a mutable member of a read-only
+  face, no throwing stub is written, but the mutable declaration's erased descriptor still gets a
+  bridge if it differs from the implementation's: `ACC_PUBLIC|ACC_BRIDGE|ACC_SYNTHETIC`, casting
+  (or unboxing) each argument and calling the class's member at the stub's descriptor, mapped to
+  the class declaration's line and named after the mutable declaration's parameters. So
+  `open class Base { fun set(e: String) }` gives `Walk : Base(), ListIterator<String>` a forwarding
+  `set(Object)` beside its throwing `add(String)` and `add(Object)`, and `fun set(e: Int)` in a
+  `ListIterator<Int>` is reached through `Number.intValue()`. The bridges take the candidates'
+  order, interleaved with the throwing ones. An abstract superclass that has the face writes the
+  bridge, and its subclass does not repeat it. Tests: `tests/read_only_stub_override_bridges_e2e.rs`
+  (class bytes and box runs against kotlinc).
 - **A nested value class over a reference carrier is read as its carrier.** In `ZN(val z: Z1?)`
   with `Z1(val x: En)`, `Z1?` is carried as `En?`, so `zn.z` and `zn.z!!` already are `Z1`'s
   carrier and `.x` of them is that carrier itself, with no cast. krusty took the unboxed property
