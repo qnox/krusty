@@ -110,6 +110,9 @@ pub struct FieldSig {
     /// The deprecation the declaration states: Kotlin's `@Deprecated`, or a Java field's
     /// `Deprecated` attribute.
     pub deprecation: Option<Box<crate::types::DeclaredDeprecation>>,
+    /// Whether the field states annotations (`RuntimeVisibleAnnotations` or
+    /// `RuntimeInvisibleAnnotations`) other than nullability qualifiers.
+    pub annotated: bool,
 }
 
 impl FieldSig {
@@ -627,6 +630,66 @@ pub fn read_class_attribute(bytes: &[u8], attribute: &str) -> Option<Vec<u8>> {
     None
 }
 
+/// The annotations applied to one declared method, with their arguments: its
+/// `RuntimeVisibleAnnotations` and `RuntimeInvisibleAnnotations` in that order. `None` when the
+/// class cannot be read or declares no such method.
+///
+/// [`MethodSig::annotations`] keeps only the classes, as almost no reader needs more; a reader
+/// that needs a method's argument values (a property's annotations on its `$annotations` marker,
+/// which its metadata names) reads them here, from the class file itself.
+pub fn read_method_annotations(
+    bytes: &[u8],
+    name: &str,
+    descriptor: &str,
+) -> Option<Vec<crate::types::ResolvedAnnotation>> {
+    let mut r = Reader { b: bytes, i: 0 };
+    if r.u4().ok()? != 0xCAFEBABE {
+        return None;
+    }
+    r.u2().ok()?; // minor
+    r.u2().ok()?; // major
+    let cp = parse_constant_pool(&mut r).ok()?;
+    let utf8 = |index: u16| match cp.get(index as usize) {
+        Some(C::Utf8(value)) => value.as_str(),
+        _ => "",
+    };
+    r.u2().ok()?; // access_flags
+    r.u2().ok()?; // this_class
+    r.u2().ok()?; // super_class
+    let interfaces = r.u2().ok()?;
+    for _ in 0..interfaces {
+        r.u2().ok()?;
+    }
+    for _ in 0..r.u2().ok()? {
+        r.u2().ok()?; // access
+        r.u2().ok()?; // name
+        r.u2().ok()?; // descriptor
+        skip_attributes(&mut r).ok()?;
+    }
+    for _ in 0..r.u2().ok()? {
+        r.u2().ok()?; // access
+        let method_name = utf8(r.u2().ok()?);
+        let method_descriptor = utf8(r.u2().ok()?);
+        if method_name != name || method_descriptor != descriptor {
+            skip_attributes(&mut r).ok()?;
+            continue;
+        }
+        let mut annotations = Vec::new();
+        for _ in 0..r.u2().ok()? {
+            let attribute = utf8(r.u2().ok()?);
+            let length = usize::try_from(r.u4().ok()?).ok()?;
+            let body = r.take(length).ok()?;
+            if attribute == "RuntimeVisibleAnnotations"
+                || attribute == "RuntimeInvisibleAnnotations"
+            {
+                read_class_annotations(body, &cp, &mut annotations).ok()?;
+            }
+        }
+        return Some(annotations);
+    }
+    None
+}
+
 /// Where one declared method's `Code` attribute lies in its class file: the byte range of the
 /// attribute's body, or `None` for a method declared without one (abstract or native).
 type CodeRange = Option<std::ops::Range<usize>>;
@@ -1090,6 +1153,7 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
             signature: member.attributes.signature,
             nullability: member.attributes.declaration_nullability,
             deprecation: member.attributes.deprecation.declared(kotlin_class),
+            annotated: !member.attributes.annotations.is_empty(),
         })
         .collect();
     // Parameter attributes precede class attributes in the classfile, but an inner constructor's
@@ -1544,6 +1608,18 @@ fn class_literal_type(descriptor: &str) -> Option<crate::types::Ty> {
                 Ty::array(element)
             },
         );
+    }
+    // A collection interface is read the way Kotlin reads a Java type, as the mutable face of the
+    // mapped collection (`Ljava/util/List;` is `MutableList`); both faces name the same class. A
+    // primitive wrapper keeps its class (`Integer.class` is not `int.class`).
+    let class = descriptor
+        .strip_prefix('L')
+        .and_then(|value| value.strip_suffix(';'))
+        .map(crate::types::type_name);
+    if let Some(mutable) =
+        class.and_then(crate::jvm::jvm_class_map::jvm_collection_to_kotlin_mutable_type_name)
+    {
+        return Some(Ty::obj_name(mutable));
     }
     if let Some(classifier) = descriptor_classifier(descriptor) {
         return Some(
@@ -2320,5 +2396,24 @@ mod tests {
             super::source_debug_extension(b"not a class"),
             Err(super::ReadError::NotAClass)
         ));
+    }
+
+    #[test]
+    fn a_class_literal_is_the_type_kotlin_reads_its_class_as() {
+        use crate::types::{type_name, Ty};
+        let read = |descriptor| super::class_literal_type(descriptor).expect(descriptor);
+        assert_eq!(read("V"), Ty::Unit);
+        assert_eq!(read("I"), Ty::Int);
+        assert_eq!(read("Ljava/lang/Integer;"), Ty::obj("java/lang/Integer"));
+        assert_eq!(read("Ljava/lang/String;"), Ty::String);
+        assert_eq!(
+            read("Ljava/util/List;"),
+            Ty::obj_name(type_name("kotlin/collections/MutableList"))
+        );
+        assert_eq!(read("[I"), Ty::array(Ty::Int));
+        assert_eq!(
+            read("[Ljava/lang/String;"),
+            Ty::obj_args_name(crate::types::wk::array(), &[Ty::String])
+        );
     }
 }

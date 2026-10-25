@@ -454,8 +454,25 @@ fn log_is_what_ksp2_reports(
     );
 }
 
-/// [`log_is_what_ksp2_reports`], with the Kotlin files `dependencies` compiled by krusty onto the
-/// classpath.
+/// Compiles the Java file `source` into `out` with the runtime JDK's `javac`.
+fn javac(runtime: &KspRuntime, source: &Path, out: &Path) {
+    let javac = runtime.java_home.join("bin").join("javac");
+    let output = std::process::Command::new(&javac)
+        .arg("-d")
+        .arg(out)
+        .arg(source)
+        .output()
+        .unwrap_or_else(|error| panic!("could not run {}: {error}", javac.display()));
+    assert!(
+        output.status.success(),
+        "javac failed on {}: {}",
+        source.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// [`log_is_what_ksp2_reports`], with `dependencies` compiled onto the classpath: a Kotlin file by
+/// krusty, a Java file by the runtime JDK's `javac`.
 fn log_with_dependencies_is_what_ksp2_reports(
     stem: &str,
     provider: &str,
@@ -470,7 +487,13 @@ fn log_with_dependencies_is_what_ksp2_reports(
         false => {
             let out = scratch(&format!("{scratch_name}-dependencies"));
             for dependency in dependencies {
-                compile(&runtime, dependency, &out);
+                match dependency
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                {
+                    Some("java") => javac(&runtime, dependency, &out),
+                    _ => compile(&runtime, dependency, &out),
+                }
             }
             vec![out]
         }
@@ -556,8 +579,27 @@ fn library_annotation_members_are_what_ksp2_reports() {
         "LibraryMembers",
         "librarymembers.LibraryMembersProvider",
         &[fixtures().join("library-members-source/Source.kt")],
-        &[fixtures().join("library-members/Dependency.kt")],
+        &[
+            fixtures().join("library-members/Dependency.kt"),
+            fixtures().join("library-members/Constants.java"),
+        ],
         "ksp-outputs-library-members",
         "library-members.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn class_literal_arguments_are_what_ksp2_reports() {
+    log_with_dependencies_is_what_ksp2_reports(
+        "Annotations",
+        "annotations.AnnotationsProvider",
+        &[fixtures().join("class-literals/Use.kt")],
+        &[
+            fixtures().join("class-literals/dependency/ClassDefaults.java"),
+            fixtures().join("class-literals/dependency/KotlinDefaults.kt"),
+        ],
+        "ksp-outputs-class-literals",
+        "class-literals.expected",
     );
 }

@@ -24,6 +24,7 @@ pub mod cinterop;
 mod classes;
 mod codegen;
 mod dependency_references;
+mod interface_calls;
 mod interop_libraries;
 mod intrinsics;
 mod linker;

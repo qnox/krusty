@@ -91,7 +91,8 @@ impl ClassWriter {
     /// also contribute their component classifier to `InnerClasses`; primitive arrays have no
     /// classifier entry to record.
     fn record_annotation_class_literal(&mut self, ty: crate::types::Ty) -> u16 {
-        let descriptor = crate::jvm::names::type_descriptor(ty);
+        // `Unit::class` names the class `kotlin.Unit`, never `void`.
+        let descriptor = crate::jvm::names::type_descriptor(crate::types::stored_value_ty(ty));
         let component = descriptor.trim_start_matches('[');
         if let Some(internal) = component
             .strip_prefix('L')

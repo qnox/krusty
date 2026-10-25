@@ -120,7 +120,20 @@ typedef struct KType {
     /* Exact Collection.size getter of a program class, through a typed virtual thunk. This is
        independent of the Iterable walk: a plain Iterable must never be sized by iteration. */
     kt_int (*collection_size)(struct KObject *self);
+    /* Interface dispatch: one entry per interface member number of the module, the same number in
+       every implementor whichever file declares it, so a call through an interface-typed receiver
+       is `itable[number]`. A class's table ends after the highest number it implements, and a type
+       implementing no interface of the program has none: nothing dispatches through it here.
+       Appended, like the names above, so no existing initializer moves. */
+    const kt_fn *itable;
 } KType;
+
+/* The compiler writes each descriptor field at a fixed offset (`ktype` in
+   `codegen/lower/objects.rs`); these pin the C layout to the same numbers. */
+_Static_assert(offsetof(KType, class_names) == 148, "KType.class_names moved");
+_Static_assert(offsetof(KType, collection_size) == 152, "KType.collection_size moved");
+_Static_assert(offsetof(KType, itable) == 160, "KType.itable moved");
+_Static_assert(sizeof(KType) == 168, "KType changed size");
 
 /* What a descriptor publishes about its class's names, in `KType.class_names`.
 

@@ -1,21 +1,26 @@
 # krusty — implementation plan
 
-Direct projected-input diagnostics share input specialization with ordinary selection and retain
-the source argument map, receiver-only constraints and declaration display. Exact ledger controls
-cover out/star receivers, nullability, named/context arguments and explicit receiver precedence.
-Captured vararg admission (#2648) and nested captured-type identity diagnostics (#2649) remain
-separate work; their complete failing controls are preserved.
+JVM return consumers now use authenticated declaration-result slots across reference-preserving
+null assertions. Value-class refinement shares that producer boundary, while inline and suspension
+owners keep their existing result materialization. Full classfile/runtime controls cover ordinary
+generic returns and explicit/local materialization; existing inline, suspension and value-class
+guards constrain the adjacent representation boundaries.
 
-Inner-alias conformance recovery shares constructor-reference publication across direct and
-already-selected alias declarations. The constructor selection responsibility moves out of the
-resolver facade; selected receiver provenance and declaration ABI survive that boundary. Demanded
-source signatures now retain receiver captures before contextual result constraints and reuse the
-ordinary call solver and output-slot specialization. Shared conformance expectations stay unchanged.
+Serialization handoff validation now provisions the pinned runtime and checks nullable value-class
+deserialization parameters against the established plugin contract. Exact common-IR assertions,
+complete generated-owner class bytes and reference JSON behavior guard the same constructor.
 
 Phased, each phase ends in a **green `cargo test`** and a runnable artifact. The pipeline is built
 front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
+
+## Anonymous construction argument scope
+
+Primary constructor argument checking has a dedicated owner. Anonymous base arguments use the
+construction site's lexical scope; named classes retain their constructor-parameter rung. The
+shared constructor selector, argument mapping, contextual lambda checks and forwarding ledger remain
+the same. Direct and aliased parents with colliding inherited property names exercise this boundary.
 
 ## Class application headers
 
@@ -5757,7 +5762,7 @@ non-inline callers, still reads the field directly. Test:
   declarations, with primary and secondary constructors, fields, properties, virtual and `super`
   calls, interface dispatch, `is`/`!is`/`as`/`as?`, and `equals`/`hashCode`/`toString` a class
   declares. The target-neutral layout (hierarchy order, slot numbering by `kotlin.Any` role, the
-  program-wide interface region, bridges) is `src/backend/class_tables/`, shared with Native, which
+  module interface numbering, bridges) is `src/backend/class_tables/`, shared with Native, which
   keeps only byte offsets and symbols on top of it; Wasm builds a struct subtype and a vtable
   struct subtype per class from the same tables (`src/wasm/codegen/classes.rs`). Independently
   analyzed `// MODULE:` units retain one Wasm program state and join generated dependency KLIB
@@ -5765,6 +5770,13 @@ non-inline callers, still reads the field directly. Test:
   their exact form; the committed target-KLIB inventories are the authoritative current backlog.
   Box lanes pass 460 (2.4.0), 460 (2.4.10) and 462 (2.4.20) cases on each target, up from
   181/181/182; Native's counts are unchanged by the shared tables.
+- Interfaces: a class implementing an interface declared in another file, another module or the
+  library (such as `Collection`) is dispatched through module-numbered interface members and
+  per-member stubs written at Wasm finalize (direct, two-way `ref.test`, or a packed itable
+  index), with one `is` test function per interface (`src/wasm/interface_dispatch.rs`,
+  `src/wasm/codegen/interface_members.rs`). The per-file interface region is deleted. The shared
+  box regressions `collectionSizeWithModuleInterface.kt`, `interfaceCheckAcrossFiles.kt` and the
+  three `multimoduleDependencyInterface*.kt` cases run on every lane.
 - Known gap: `x as? C` on a value smart-cast earlier in the body lowers to a `When` with no
   checked type, which Wasm declines rather than infer one.
 - Nullable scalar assertions decline when the operand is a reference but the checked result has
@@ -5963,8 +5975,23 @@ including constructors absent from the consumer's direct selections. A shared so
 shape decision excludes unsupported references without resolving enclosing generic arguments early.
 Official-producer tests separately prove the imported constructor's exact checked-IR identity and
 Native execution through an existing runtime constructor. General imported-class construction and
-storage remain a separate Native capability, with the positive custom-class program retained in
-its follow-up rather than claimed as recovered runtime coverage.
+storage remain a separate Native capability.
+
+## Imported KLIB class initialization
+
+The first #2621 slice realizes final, non-generic ordinary classes constructed inside emitted
+dependency bodies, including nested closures. A shared authenticated plan joins exact primary
+constructor identity, `Any` delegation, actual fields and ordered initialization effects. A private
+instance frame carries receiver/argument identities into explicit stores; ordinary Native layout
+and allocation consume the resulting class. Official-producer fixtures establish JVM results
+before Native execution and preserve the original nested-constructor program. Additional tests
+cover repeated allocation, initializer order, storage distinct from constructor arity, and a
+same-name source classifier's complete refusal diagnostic.
+
+Constructor exports across support units, qualified class facts across producer/source collisions,
+direct source construction, inheritance, secondary/default/vararg/generic constructors and imported
+accessor/member dispatch remain required follow-ups. The first slice explicitly declines identity
+collisions before backend emission. It does not close #2621 or change any outcome baseline.
 
 ## Lossless JVM signature syntax
 
@@ -5978,7 +6005,30 @@ Next, declaration-header layouts (#2576) must authenticate complete captured app
 omissions for #2537/#2532. Raw scope erasure must follow symbolic inheritance specialization, as the
 reference compiler demonstrates; it cannot independently erase a superclass from its own bounds.
 
+## Declared JVM constructor boxing slots
+
+Physical call operands and implicit coercions share scalar boxing followed by ordinary reference
+coercion. Constructor slots consume the existing declaration-owned parameter evidence; neither
+checked argument types nor callable selection are rewritten to obtain a JVM cast. Full-class
+reference controls cover source dependent bounds and independently bounded dependency slots,
+with width, Object, exact-wrapper and runtime controls. The dependency inner-constructor frontend
+prerequisite landed in #2593; its declaration normalization remains separate from this representation fix (#2590).
+
+## Direct projected input diagnostics
+
+Direct projected-input diagnostics share input specialization with ordinary selection and retain
+the source argument map, receiver-only constraints and declaration display. Exact ledger controls
+cover out/star receivers, nullability, named/context arguments and explicit receiver precedence.
+Captured vararg admission (#2648) and nested captured-type identity diagnostics (#2649) remain
+separate work; their complete failing controls are preserved.
+
 ## Receiver-bound constructor constraints
+
+Inner-alias conformance recovery shares constructor-reference publication across direct and
+already-selected alias declarations. The constructor selection responsibility moves out of the
+resolver facade; selected receiver provenance and declaration ABI survive that boundary. Demanded
+source signatures now retain receiver captures before contextual result constraints and reuse the
+ordinary call solver and output-slot specialization. Shared conformance expectations stay unchanged.
 
 Normalize inner constructors with complete own-plus-captured instance results, preserving independent
 callable formals while removing captured formals from the inference variables. One receiver context
@@ -5991,8 +6041,8 @@ diagnostics. Rejected signature recovery preserves that completed application wi
 inference. Provider selection moves
 out of the resolver facade into its owning module. Shared classifier-bound checking also retains
 the full enclosing application for alias targets instead of validating own bounds in isolation.
-JVM boxing-cast byte parity remains separate in #2590; the bound slice proves complete ABI
-signatures, reference runtime and exact diagnostics.
+JVM boxing-cast byte parity uses the declared-slot representation rule above (#2590); the bound
+slice independently proves complete ABI signatures, reference runtime and exact diagnostics.
 The #2592 alias slice normalizes the selected lexical/file/import alias into the ordinary receiver
 candidate family. Alias-owned formals control written arity and inference; the selected physical
 constructor and enclosing receiver remain declaration-owned. Signature publication consumes the
@@ -6003,6 +6053,11 @@ priority, reordered and unused alias formals, named arguments, and independent c
 Alias/value-class runtime controls also retain the target declaration's generic versus concrete
 constructor carriers for source, own-produced and reference-produced dependencies.
 
+Late extension admission now uses strict receiver assignability or the existing satisfiable
+postponed-frame trial. The common operation also serves unbound constructor-reference receivers;
+selection cannot commit its trial bindings. This repairs the two existing builder-inference
+regressions introduced by the alias receiver guard while retaining concrete receiver refusal.
+
 Original parameter declarations now survive selected callable/member conversion independently of
 the specialized applicability signature. Constructor publication reads that same declaration shape;
 the JVM retains generic value-class boxes while concrete value-class slots keep their carriers.
@@ -6011,7 +6066,9 @@ dependency runtime tests read both generic and concrete stored values. The selec
 and conversion move out of the resolver facade, and plugin plans keep their declaration payload
 indirect, retiring two large-enum lint findings without changing the indexed FIR/IR representation.
 
-Late extension admission now uses strict receiver assignability or the existing satisfiable
-postponed-frame trial. The common operation also serves unbound constructor-reference receivers;
-selection cannot commit its trial bindings. This repairs the two existing builder-inference
-regressions introduced by the alias receiver guard while retaining concrete receiver refusal.
+JVM class-initializer entry establishes its implicit callable frame before emitting expressions.
+Their nested lexical ranges close before each static field store, which restores its source line
+after an inline value resets the caller line. Ordinary method local-table ordering is preserved.
+Full-class/runtime controls cover consecutive initializers, object and companion storage with an
+`init` block, and ordinary callable bodies. The batched bytecode oracle now isolates fixture packages
+and fails compilation errors (#2639).
