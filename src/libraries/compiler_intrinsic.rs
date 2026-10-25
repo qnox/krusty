@@ -184,3 +184,12 @@ pub enum CompilerIntrinsic {
     /// declaration is ordinary virtual dispatch.
     PrimitiveIteratorNext,
 }
+
+impl CompilerIntrinsic {
+    /// Whether the declaration's own body says nothing of what a call does: it only throws, and
+    /// the compiler supplies the whole behavior from the selected type argument. Such a call is
+    /// never expanded from that body, even where the library serializes it as an inline template.
+    pub fn replaces_its_body(self) -> bool {
+        matches!(self, Self::TypeOf | Self::EnumEntries)
+    }
+}

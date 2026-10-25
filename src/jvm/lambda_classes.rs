@@ -311,6 +311,13 @@ fn site_in_roots(
     })
 }
 
+/// The values of `fid`'s lambda when every one is an argument an inline call splices: no code
+/// calls the lambda, each call places its body.
+pub(super) fn spliced_values(ir: &IrFile, fid: FunId) -> Option<Vec<ExprId>> {
+    let nodes = reachable_lambdas(ir, fid, true);
+    (!nodes.is_empty() && nodes.iter().all(|&node| inline_call_argument(ir, node))).then_some(nodes)
+}
+
 /// The `Lambda` nodes building `fid`'s value that some emitted root still reaches. Earlier passes
 /// rebuild roots into fresh nodes and leave the old ones behind in the arena, so an unreachable
 /// node builds no value. Property/static initializers matter here too: a suspend lambda stored by
@@ -554,8 +561,13 @@ fn inline_call_argument(ir: &IrFile, node: ExprId) -> bool {
         let IrExpr::Call { args, .. } = expression else {
             return false;
         };
+        // So is one of a classpath call whose published modifiers mark it `noinline`.
         (ir.inline_call_sites.contains(&call) || ir.module_inline_calls.contains(&call))
-            && args.contains(&node)
+            && args.iter().enumerate().any(|(parameter, &argument)| {
+                argument == node
+                    && crate::jvm::inline_parameters::is_inline_parameter(ir, call, parameter)
+                        != Some(false)
+            })
     })
 }
 

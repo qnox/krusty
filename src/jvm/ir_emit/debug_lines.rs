@@ -137,6 +137,10 @@ impl Emitter<'_> {
         {
             return;
         }
+        if self.ir.kept_start_lines.contains(&expression) {
+            self.mark_kept_start_line(expression, code);
+            return;
+        }
         let Some(&line) = self.ir.expr_source_lines.get(&expression) else {
             return;
         };

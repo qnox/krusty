@@ -233,7 +233,7 @@ pub(super) fn read_class(bytes: &[u8]) -> Result<ClassNode, ClassReadError> {
     for declaration in declarations {
         let code = if declaration.has_code {
             let body = bodies
-                .method_code(&declaration.method.name, &declaration.method.desc)
+                .method_code_with_unmapped_lines(&declaration.method.name, &declaration.method.desc)
                 .ok_or(Malformed("unreadable Code attribute"))?;
             let node = MethodNode::read(
                 declaration.method.access,

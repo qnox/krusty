@@ -252,6 +252,15 @@ impl Obj {
     }
 
     /// An ELF `RELA` relocation of type `r_type` at `offset` in `section`.
+    /// Make `section` the one member of a COMDAT group signed by `symbol`.
+    pub(super) fn comdat(&mut self, symbol: SymbolId, section: SectionId) {
+        self.object.add_comdat(object::write::Comdat {
+            kind: object::ComdatKind::Any,
+            symbol,
+            sections: vec![section],
+        });
+    }
+
     pub(super) fn reloc(
         &mut self,
         section: SectionId,

@@ -20,6 +20,9 @@ pub enum SyntheticOriginKind {
     /// An implicit context argument a call passes. kotlinc builds it without source offsets, so it
     /// carries no line of its own: the call's line is marked at its dispatch.
     ContextArgument,
+    /// A script statement's read of an implicit receiver from its constructor parameter. kotlinc
+    /// builds it without source offsets too, so the call's line is marked after it.
+    ScriptReceiver,
     /// An operand a compiler plugin's expression plan composes from a frontend-selected
     /// declaration rather than from source syntax, such as the companion accessor call that
     /// supplies kotlinx's `serializer<T>()`. It belongs to the planned expression's line.

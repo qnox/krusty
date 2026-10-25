@@ -408,6 +408,8 @@ impl BodyFirChecker<'_> {
                 selected.context_args.iter().map(Some),
                 selected.sig.vararg_index,
             )?,
+            parameter_types: self
+                .published_parameter_types(self.file.expr_span(expression), &selected.sig.params)?,
         })
     }
 
@@ -498,6 +500,7 @@ impl BodyFirChecker<'_> {
                 ),
             }),
             arguments: arguments.into_boxed_slice(),
+            parameter_types: self.published_parameter_types(span, &selected.sig.params)?,
         })
     }
 

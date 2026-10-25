@@ -48,6 +48,9 @@ pub enum IrCapturedDeclaration {
     Variable,
     /// A value parameter of an enclosing callable, or a constructor's capture-prefix value.
     Parameter,
+    /// A script's implicit receiver `ordinal`, which a script statement reads from its
+    /// constructor parameter.
+    ScriptReceiver { ordinal: u32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,6 +77,10 @@ pub enum IrGeneratedParameterRole {
     HolderReceiver,
     /// The enclosing instance an inner class's constructor takes first.
     OuterInstance,
+    /// A script's implicit receiver, numbered in its definition's order.
+    ScriptReceiver {
+        ordinal: u32,
+    },
     ValueClassCarrier,
     ValueClassEqualsOperand {
         ordinal: u8,

@@ -37,6 +37,8 @@ pub(super) struct TransformedSuspensions {
     /// The suspension point a local declaration's initializer is, while that initializer is
     /// emitted: kotlinc's `visitVariable` marks the initializer's line before casting its value.
     initializer: Option<ExprId>,
+    /// The body is a suspend lambda's placed one, whose calls pass the bare fake continuation.
+    placed_lambda: bool,
 }
 
 /// What a suspension point leaves on the stack after its invoke.
@@ -68,7 +70,13 @@ impl Emitter<'_> {
         if !self.is_fake_continuation(e) {
             return false;
         }
-        self.load_fake_continuation(code);
+        if self.transformed_suspensions.placed_lambda {
+            // `addFakeContinuationMarker`: the call takes the `null` as its continuation.
+            code.suspend_marker(SuspendMarker::FakeContinuation as i32, self.cw);
+            code.aconst_null();
+        } else {
+            self.load_fake_continuation(code);
+        }
         true
     }
 
@@ -309,6 +317,7 @@ impl Emitter<'_> {
             fake_continuations: machine.fake_continuations.iter().copied().collect(),
             inlined: HashSet::default(),
             initializer: None,
+            placed_lambda: false,
         };
         self.suspend_lambda_parameter_reads = machine
             .lambda
@@ -316,6 +325,45 @@ impl Emitter<'_> {
             .map(|lambda| lambda.parameter_reads.iter().copied().collect())
             .unwrap_or_default();
         slot
+    }
+
+    /// Arm the emission of a suspend lambda's placed body: its points are `machine`'s, each passing
+    /// a fake continuation, and the lambda's `$completion` is in `slot`. The state to restore once
+    /// the body is emitted.
+    pub(super) fn arm_placed_suspend_lambda(
+        &mut self,
+        machine: &TransformedMachine,
+        slot: u16,
+    ) -> (TransformedSuspensions, Option<u16>) {
+        let continuation = self.continuation_slot.replace(slot);
+        let suspensions = std::mem::replace(
+            &mut self.transformed_suspensions,
+            TransformedSuspensions {
+                results: machine
+                    .suspensions
+                    .iter()
+                    .map(|suspension| (suspension.call, suspension.result))
+                    .collect(),
+                resumed_boxes: machine
+                    .suspensions
+                    .iter()
+                    .filter_map(|suspension| Some((suspension.call, suspension.resumed_box?)))
+                    .collect(),
+                fake_continuations: machine.fake_continuations.iter().copied().collect(),
+                placed_lambda: true,
+                ..TransformedSuspensions::default()
+            },
+        );
+        (suspensions, continuation)
+    }
+
+    /// Restore what [`Self::arm_placed_suspend_lambda`] returned.
+    pub(super) fn disarm_placed_suspend_lambda(
+        &mut self,
+        (suspensions, continuation): (TransformedSuspensions, Option<u16>),
+    ) {
+        self.transformed_suspensions = suspensions;
+        self.continuation_slot = continuation;
     }
 
     /// Leave `calls`, points of the machine just armed, unmarked: the body is kept for inlining
@@ -477,4 +525,14 @@ pub(super) fn add_spill_fields(cw: &mut ClassWriter, outcome: Option<&CoroutineO
     for field in fields {
         cw.add_field_sig(0, &field.name, &field.descriptor, None);
     }
+}
+
+/// The continuations of functions with no method of their own, which nothing constructs: a
+/// suspend lambda's every call places its body.
+pub(super) fn unwritten_continuations(ir: &IrFile, env: &super::EmitEnv) -> HashSet<TypeName> {
+    (0..ir.functions.len() as u32)
+        .filter(|&function| super::standalone_method_is_elided(ir, function, env))
+        .filter_map(|function| env.emit_time_machines.transformed(function))
+        .map(|machine| crate::types::type_name(&machine.continuation_class))
+        .collect()
 }

@@ -2583,6 +2583,19 @@ impl StreamedHeaderModule {
             .map(|position| &self.stubs[position])
     }
 
+    /// The qualified identity of a top-level `typealias` declaration.
+    pub(crate) fn type_alias_identity(
+        &self,
+        declaration: DeclarationId,
+    ) -> Option<crate::types::TypeName> {
+        let stub = self
+            .stub(declaration)
+            .filter(|stub| stub.kind == crate::fir::DeclarationKind::TypeAlias)?;
+        let name = self.lookup_names.get(stub.lookup_name?)?;
+        let package = self.sources.get(stub.source)?.package;
+        Some(crate::types::type_name_child(package, name))
+    }
+
     /// Position in `stubs` of one declaration's inventoried stub.
     fn stub_position(&self, declaration: DeclarationId) -> Option<usize> {
         if let Some(position) = self
@@ -2845,7 +2858,10 @@ pub fn stream_file_stub_inventory(
             SourceKind::KotlinScript => crate::frontend::parse_script(
                 source.text,
                 source.file_stem,
-                &crate::script_definitions::ScriptDefinition::standard(),
+                &source
+                    .script_definition
+                    .cloned()
+                    .unwrap_or_else(crate::script_definitions::ScriptDefinition::standard),
                 &features,
                 diags,
             ),

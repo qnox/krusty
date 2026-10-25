@@ -399,6 +399,10 @@ impl Checker<'_> {
             .cloned()
             .collect::<Vec<_>>();
         declarations.extend(checked_local.into_iter().flatten().cloned());
+        for declaration in &mut declarations {
+            declaration.generic_sig =
+                crate::libraries::constructor_generic_signature(internal, classifier, declaration);
+        }
         declarations
     }
 
@@ -434,6 +438,7 @@ impl Checker<'_> {
             LibraryConstructorOptions {
                 arg_names,
                 applied_classifier: alias_target,
+                bound_outer: Some(receiver),
                 expected,
                 priority: ConstructorPriorityTier::All,
                 selected,

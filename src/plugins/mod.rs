@@ -93,7 +93,8 @@ pub struct FrontendResolvedSingletonCall {
 #[derive(Clone, Debug)]
 pub struct FrontendSelectedMemberCall {
     pub receiver: Ty,
-    pub member: crate::libraries::LibraryMember,
+    /// Selected declaration payload, kept indirect so synthesized operand variants stay compact.
+    pub member: Box<crate::libraries::LibraryMember>,
     pub ret: Ty,
     pub suspend: bool,
 }
@@ -244,6 +245,39 @@ pub struct FrontendPropertyFacts {
     pub is_lateinit: bool,
     /// The whole declaration, modifiers and annotations included.
     pub declaration_span: crate::diag::Span,
+}
+
+/// A source class as the module's checked declarations describe it once Pass 1 has finished:
+/// every file of the module can read what a plugin decides from it, so the decision is made once,
+/// by the plugin, and later phases copy it rather than re-derive it.
+pub struct FrontendDeclaredClass<'a> {
+    pub kind: crate::libraries::TypeKind,
+    /// A `value class`, which no subclass extends.
+    pub is_value: bool,
+    /// The checked applications of the class's annotations, with their folded named arguments.
+    pub applied_annotations: &'a [crate::types::ResolvedAnnotation],
+    /// The superclass as the class declares it, type arguments included; `None` for `Any`.
+    pub superclass: Option<Ty>,
+    /// The class's own properties in declaration order: primary-constructor properties first, then
+    /// the properties declared in its body.
+    pub properties: &'a [FrontendDeclaredProperty],
+}
+
+/// One property of a [`FrontendDeclaredClass`].
+pub struct FrontendDeclaredProperty {
+    pub name: Box<str>,
+    /// The checked property type.
+    pub ty: Ty,
+    /// Resolved annotation identities on the property declaration.
+    pub annotations: Box<[TypeName]>,
+    /// Whether the property stores a value: a primary-constructor property, or a body property that
+    /// is not abstract, delegated or external and either accessor-less or with a getter that
+    /// reads `field` (or an initializer or explicit backing field).
+    pub has_backing_field: bool,
+    /// A primary-constructor property's default value, or a body property's initializer.
+    pub has_default: bool,
+    /// The written type carries a type-use annotation somewhere, or its spelling is not settled.
+    pub type_annotated: bool,
 }
 
 /// An error a frontend plugin checker reports against a source declaration.
@@ -702,6 +736,18 @@ pub trait IrPlugin {
     ) {
     }
 
+    /// The serial elements of a source class whose `write$Self` and deserialization constructor
+    /// the plugin commits to generating, published before any file is lowered so that a subclass
+    /// in another file of the module inherits them as one in a dependency would. `None` for a
+    /// class the plugin generates no such members for, or whose elements it cannot describe
+    /// exactly.
+    fn declared_serializable_elements(
+        &self,
+        _class: &FrontendDeclaredClass<'_>,
+    ) -> Option<crate::types::SerializableClassElements> {
+        None
+    }
+
     /// Select the primary constructor through which the plugin's generated code constructs a class
     /// one of the classifier's annotations names, reporting a constructor that breaks the plugin's
     /// contract instead. Runs once per source classifier, while its declarations are live.
@@ -814,13 +860,13 @@ pub fn complete_enabled(
     let external = external_serializers(
         ir,
         classifiers,
-        serialization::inherited_element_types(&parents),
+        serialization::inherited_element_types(ir, &parents),
     );
     let ctx = ctx
         .with_serial_info_annotations(serial_info_annotations(ir, classifiers))
         .with_external_serializers(external)
         .with_runtime_serializers(runtime_serializers(classifiers))
-        .with_external_serializer_objects(declared_serializer_objects(ir, classifiers))
+        .with_external_serializer_objects(declared_serializer_objects(ir, classifiers, &parents))
         .with_external_serializable_parents(parents);
     plugins.host(module_name).complete(ir, &ctx);
 }
@@ -848,10 +894,12 @@ fn triggered(ir: &IrFile, plugins: &registry::NativePlugins, ctx: &PluginContext
 
 /// The provider-confirmed kind of every serializer class a property's `@Serializable(with = …)`
 /// names, on the property itself or on its declared type and type arguments, that this compilation
-/// does not declare (a declared one is classified from its own IR class).
+/// does not declare (a declared one is classified from its own IR class). An element a serializable
+/// superclass compiled apart from this file publishes names its serializer the same way.
 fn declared_serializer_objects(
     ir: &IrFile,
     classifiers: &dyn crate::types::ClassifierFactSource,
+    parents: &serialization::ExternalSerializableParents,
 ) -> crate::fx_hash::HashMap<TypeName, bool> {
     let serializable = crate::types::type_name(serialization::SERIALIZABLE_FQ);
     let declared = ir
@@ -874,8 +922,15 @@ fn declared_serializer_objects(
     for spelling in ir.prop_declared_spellings.values() {
         serialization::named_serializers(&spelling.ret, &mut type_annotations);
     }
+    let inherited = parents.values().flatten().flat_map(|record| {
+        record
+            .elements
+            .iter()
+            .filter_map(|element| element.serializer)
+    });
     property_annotations
         .chain(type_annotations)
+        .chain(inherited)
         .filter(|serializer| !declared.contains(serializer))
         .filter_map(|serializer| Some((serializer, classifiers.classifier_is_object(serializer)?)))
         .collect()
@@ -1269,6 +1324,15 @@ impl PluginHost {
             plugin.check_frontend_class(ctx, &mut diagnostics);
         }
         diagnostics
+    }
+
+    pub fn declared_serializable_elements(
+        &self,
+        class: &FrontendDeclaredClass<'_>,
+    ) -> Option<crate::types::SerializableClassElements> {
+        self.plugins
+            .iter()
+            .find_map(|plugin| plugin.declared_serializable_elements(class))
     }
 
     pub fn plan_frontend_expressions(
