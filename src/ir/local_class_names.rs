@@ -166,7 +166,9 @@ fn progression_source(
             stepped: Some(stepped),
             ..
         } => progression_source(stepped, names),
-        super::IrProgressionSource::Literal { .. } | super::IrProgressionSource::Value { .. } => {}
+        super::IrProgressionSource::Literal { .. }
+        | super::IrProgressionSource::Value { .. }
+        | super::IrProgressionSource::Indices { .. } => {}
     }
 }
 

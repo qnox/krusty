@@ -13915,6 +13915,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   receiver whose element entry is a `var` or needs a conversion, which keep iterating
   `IndexedValue`s. (`tests/for_in_with_index_e2e.rs`.)
 
+- **A `for` loop over the stdlib's `indices` counts from 0 to the receiver's size, as kotlinc's
+  `IndicesHandler` does.** The provider gives the `CompilerIntrinsic::Indices` role to the read-only
+  `indices: IntRange` extension property of `kotlin.collections` on `Array<out T>`, a signed
+  primitive array or `Collection<*>`, and of `kotlin.text` on `CharSequence`, matched on the complete
+  declaration (`property_realization`). For a loop iterable that reads such a property, directly or
+  under `reversed()` and `step`, resolution selects the size member on the class the declaration
+  receives (`size` of the array or of `Collection`, `length` of `CharSequence`; `IterationPlans`).
+  The loop is then `0 until size` with `size` read once on the receiver before the loop, the
+  receiver cast to that class when its static class is another one (`List` is cast to
+  `Collection`, `String` to `CharSequence`). No `IntRange` is built. Under `reversed()` or `step`
+  the bound reverts to the inclusive `size + -1` (`revertToLastInclusive` of the handler's
+  `last.decrement()`), which they then count from. A user extension property named `indices` is
+  read and iterated as written. Not yet ported, so still building the range: membership
+  (`i in xs.indices`), `withIndex()` over `indices`, and an unsigned array's `indices`, which
+  kotlinc counts to the static `UIntArray.getSize-impl` (the role requires a signed array's
+  element). (`tests/indices_loop_e2e.rs`, `indices_roles_require_the_complete_extension_property`.)
+
 - **A `checkcast` right before an `aastore` is removed, as kotlinc's
   `RedundantCheckcastsBeforeAastoreMethodTransformer` does.** The pass runs after jump negation and
   before the final dead-code elimination (`bytecode_passes/checkcasts_before_aastore.rs`, step
