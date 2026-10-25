@@ -45,15 +45,42 @@ class MultiplatformJvmTarget(unittest.TestCase):
         self.assertEqual((summary['classes'], summary['identical']), (3, 1))
         self.assertEqual(summary['rows'], [
             dict(task=':core:compileKotlinJvm', dir='core/build/classes/kotlin/jvm/main', built=True,
-                 fallback=None, classes=2, identical=1, only_kotlinc=0, only_krusty=0),
+                 fallback=None, error=None, classes=2, identical=1, only_kotlinc=0, only_krusty=0),
             dict(task=':core:compileTestKotlinJvm', dir='core/build/classes/kotlin/jvm/test',
-                 built=False, fallback='unsupported plugin', classes=1, identical=0,
+                 built=False, fallback='unsupported plugin', error=None, classes=1, identical=0,
                  only_kotlinc=None, only_krusty=None),
         ])
         # A listed task kotlinc wrote no class for is reported apart, never dropped.
         self.assertEqual(summary['no_reference_classes'], [
             dict(task=':core:compileBenchKotlinJvm', dir='core/build/classes/kotlin/jvm/bench',
                  krusty_classes=1),
+        ])
+
+
+
+class FailedCompile(unittest.TestCase):
+    def test_a_failed_compile_reports_the_first_error_under_its_replacement_task(self):
+        with tempfile.TemporaryDirectory() as work:
+            out = os.path.join(work, 'out', 'p')
+            checkout = os.path.join(work, 'src', 'p')
+            write(f'{out}/kotlinc/a/build/classes/kotlin/main/A.class', b'A')
+            write(f'{out}/kotlinc/b/build/classes/kotlin/main/B.class', b'B')
+            write(f'{work}/logs/p.kotlinc.compilations.tsv',
+                  b':a:compileKotlin\ta/build/classes/kotlin/main\n'
+                  b':b:compileKotlin\tb/build/classes/kotlin/main\n')
+            write(f'{work}/logs/p.krusty.log', (
+                '> Task :a:compileKotlinWithKrusty\n'
+                f'e: file://{checkout}/a/src/main/kotlin/A.kt:3:5 Unresolved reference: foo\n'
+                f'e: file://{checkout}/a/src/main/kotlin/A.kt:4:5 Unresolved reference: bar\n'
+                '> Task :a:compileKotlinWithKrusty FAILED\n'
+                '> Task :b:compileKotlinWithKrusty\n').encode())
+            subprocess.run([sys.executable, os.path.join(HERE, 'compare.py'), work, 'p', '0'],
+                           check=True, stdout=subprocess.DEVNULL)
+            with open(f'{out}/compare.json') as f:
+                summary = json.load(f)
+        self.assertEqual([(r['task'], r['built'], r['error']) for r in summary['rows']], [
+            (':a:compileKotlin', False, 'e: a/src/main/kotlin/A.kt:3:5 Unresolved reference: foo'),
+            (':b:compileKotlin', False, 'krusty wrote no class'),
         ])
 
 

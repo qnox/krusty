@@ -5,7 +5,8 @@ build with the krusty Gradle plugin).
 usage: compare.py <work dir> <name> <reference build exit code>
 
 Reads <work dir>/out/<name>/{kotlinc,krusty}, <work dir>/logs/<name>.kotlinc.compilations.tsv (the
-reference build's compile tasks and their output directories) and <work dir>/logs/<name>.krusty.log. Writes
+reference build's compile tasks and their output directories) and <work dir>/logs/<name>.krusty.log
+(fallback reasons and the first error of each failed compile). Writes
 <work dir>/out/<name>/compare.json and prints one line per compilation.
 """
 import glob
@@ -32,6 +33,36 @@ def fallbacks(log_path):
         if detail:
             reason += ' (' + '; '.join(detail) + ')'
         found[task] = reason
+    return found
+
+
+ERROR_LINE = re.compile(r'^(e: |error: )|: error: |panicked at ')
+TASK_HEADER = re.compile(r'^> Task (\S+)')
+
+
+def failures(log_path, checkout):
+    """The first error each compile task logged in the krusty build: {task path: message}. Gradle
+    heads a task's output with `> Task <path>`; the replacement task is the compile task's path
+    with `WithKrusty` appended. Paths inside the checkout are shown relative to it."""
+    found = {}
+    try:
+        lines = open(log_path, errors='replace').read().splitlines()
+    except OSError:
+        return found
+    task = None
+    prefixes = ('file://' + checkout + '/', checkout + '/')
+    for line in lines:
+        header = TASK_HEADER.match(line)
+        if header:
+            task = header.group(1).split(' ')[0]
+            if task.endswith('WithKrusty'):
+                task = task[:-len('WithKrusty')]
+            continue
+        if task and task not in found and ERROR_LINE.search(line):
+            message = line.strip()
+            for prefix in prefixes:
+                message = message.replace(prefix, '')
+            found[task] = message[:300]
     return found
 
 
@@ -73,7 +104,9 @@ def compare(work, name):
     """The compared compilations, and the listed compile tasks for which kotlinc wrote no class
     (a source set without sources): those are reported apart, with any classes krusty wrote."""
     kotlinc, krusty = os.path.join(work, 'out', name, 'kotlinc'), os.path.join(work, 'out', name, 'krusty')
-    found = fallbacks(os.path.join(work, 'logs', name + '.krusty.log'))
+    log = os.path.join(work, 'logs', name + '.krusty.log')
+    found = fallbacks(log)
+    errors = failures(log, os.path.join(work, 'src', name))
     rows, empty = [], []
     for task, rel in compilations(os.path.join(work, 'logs', name + '.kotlinc.compilations.tsv')):
         reference = files(os.path.join(kotlinc, rel))
@@ -88,7 +121,10 @@ def compare(work, name):
         classes = sum(1 for k in reference if k.endswith('.class'))
         identical = sum(1 for k, p in reference.items()
                         if k.endswith('.class') and k in candidate and same_bytes(p, candidate[k]))
-        rows.append(dict(task=task, dir=rel, built=built, fallback=fallback, classes=classes,
+        error = None
+        if not built and fallback is None:
+            error = errors.get(task, 'krusty wrote no class')
+        rows.append(dict(task=task, dir=rel, built=built, fallback=fallback, error=error, classes=classes,
                          identical=identical if built else 0,
                          only_kotlinc=len(set(reference) - set(candidate)) if built else None,
                          only_krusty=len(set(candidate) - set(reference)) if built else None))
@@ -117,6 +153,7 @@ def main():
         state = 'ok ' if r['built'] else ('KTC' if r['fallback'] else 'ERR')
         print(f"  {state} {r['task']} ({r['dir']}): {r['identical']}/{r['classes']}"
               + (f" left to kotlinc: {r['fallback']}" if r['fallback'] else '')
+              + (f" error: {r['error']}" if r['error'] else '')
               + (f" only_kotlinc={r['only_kotlinc']} only_krusty={r['only_krusty']}" if r['built'] else ''))
     for r in empty:
         print(f"  --- {r['task']} ({r['dir']}): kotlinc wrote no class; krusty wrote {r['krusty_classes']}")

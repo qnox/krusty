@@ -26,7 +26,7 @@ if [ -z "$row" ]; then
   echo "unknown corpus project: $name" >&2
   exit 2
 fi
-IFS=$'\t' read -r _ url commit gradle_root jdk pin <<<"$row"
+IFS=$'\t' read -r _ url commit gradle_root jdk pin android_variant <<<"$row"
 
 kotlin=$(sed 's/#.*//' "$repo_root/kotlin-versions" | awk 'NF { print $1 }' | sort -V | tail -n 1)
 if [ -z "$kotlin" ]; then
@@ -57,6 +57,9 @@ fi
 java_home_var=JAVA_HOME_${jdk}_X64
 export JAVA_HOME=${!java_home_var:-$JAVA_HOME}
 export LANG=C.UTF-8 LC_ALL=C.UTF-8
+if [ "${android_variant:--}" != - ]; then
+  export CORPUS_ANDROID_VARIANT=$android_variant
+fi
 
 # One build of the Gradle root, then its compile outputs moved to out/<mode>: the directories the
 # build's own compile-task inventory lists, so the next build starts without them. The Gradle exit

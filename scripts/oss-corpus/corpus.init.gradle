@@ -1,15 +1,18 @@
-// Adds `corpusCompile`: every Kotlin/JVM (non-Android) compile task in the build, and lists them in
+// Adds `corpusCompile`: every Kotlin/JVM compile task in the build, and lists them in
 // `$CORPUS_COMPILATIONS` when it is set. Tasks are picked by name before they are realized:
 // realizing every registered task would configure unrelated ones (a GraalVM native-image task
-// fails without its JDK).
+// fails without its JDK). An Android project contributes only the compiles of the variant named by
+// `$CORPUS_ANDROID_VARIANT` (main, unit test and instrumented test); without it, none.
 gradle.projectsEvaluated { g ->
     def root = g.rootProject
     def picked = []
+    def variant = System.getenv('CORPUS_ANDROID_VARIANT')
+    def androidTask = variant ? ~"compile${variant.capitalize()}(UnitTest|AndroidTest)?Kotlin" : null
     root.allprojects { p ->
-        def android = ['com.android.base', 'com.android.library', 'com.android.application']
-            .any { p.plugins.hasPlugin(it) }
-        if (android || p.plugins.hasPlugin('org.gradle.kotlin.kotlin-dsl.base')) return
-        p.tasks.names.findAll { it ==~ /compile.*Kotlin.*/ }.each { n ->
+        if (p.plugins.hasPlugin('org.gradle.kotlin.kotlin-dsl.base')) return
+        def android = p.plugins.hasPlugin('com.android.base')
+        if (android && androidTask == null) return
+        p.tasks.names.findAll { android ? it ==~ androidTask : it ==~ /compile.*Kotlin.*/ }.each { n ->
             def t = p.tasks.named(n).get()
             if (t.class.name.replace('_Decorated', '') == 'org.jetbrains.kotlin.gradle.tasks.KotlinCompile') {
                 picked << t
