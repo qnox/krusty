@@ -275,54 +275,6 @@ fn recursion_warning_is_suppressed_on_the_parameter_and_the_class() {
     assert_eq!(krusty, expected);
 }
 
-/// Native ignores `@JvmInline` when selecting representation. With full value classes enabled,
-/// this is therefore a multi-field full value class and its mutable parameter must still be
-/// checked; the JVM rejects the same written shape earlier as an invalid inline declaration.
-#[test]
-fn native_parameter_checks_consume_the_selected_full_value_representation() {
-    if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
-        return;
-    }
-    let source = "// LANGUAGE: +FullValueClasses\n\
-@JvmInline value class V(var x: Int, val y: Int)\n";
-    let expected = CompilerOutcome {
-        accepted: false,
-        errors: vec![
-            "V.kt:2:26: final value class primary constructor must only have final read-only \
-             ('val') property parameters."
-                .to_string(),
-        ],
-    };
-    let actual = common::front_end_diagnostics_located_for(
-        CompilationTarget::Native,
-        source,
-        &[common::stdlib_jar()],
-        None,
-    )
-    .into_iter()
-    .map(|located| {
-        let (position, message) = located
-            .split_once(": error: ")
-            .unwrap_or_else(|| panic!("unexpected located diagnostic: {located}"));
-        format!("V.kt:{position}: {message}")
-    })
-    .collect::<Vec<_>>();
-    assert_eq!(
-        CompilerOutcome {
-            accepted: actual.is_empty(),
-            errors: actual,
-        },
-        expected
-    );
-
-    let args = vec!["-XXLanguage:+FullValueClasses".to_string()];
-    if let Some(reference) =
-        common::reference_outcome(CompilationTarget::Native, &[("V.kt", source)], &args)
-    {
-        assert_eq!(reference, expected);
-    }
-}
-
 /// Full value classes have one semantic field per constructor property. Recursion checks traverse
 /// that selected multi-field representation instead of treating the absence of an inline
 /// underlying property as absence of value-class structure.

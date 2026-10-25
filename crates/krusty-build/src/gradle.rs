@@ -224,6 +224,9 @@ fn diagnostic_tails(stderr: &str, stdout: &str) -> String {
 }
 
 #[cfg(test)]
+mod verify_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use krusty::plugins::registry::PluginDiagnostic;
@@ -1381,6 +1384,70 @@ error: warnings found and -Werror specified\n";
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A Kotlin Multiplatform project's JVM compilations reach krusty as kotlinc's fragments: each
+    /// source set of the compilation is a fragment listing its own sources, refining the source
+    /// sets it depends on. The `expect` declared in `commonMain` is actualized in `jvmMain`, and the
+    /// application runs.
+    #[test]
+    #[ignore = "downloads Gradle and the Kotlin Gradle plugin"]
+    fn multiplatform_jvm_compiles_through_krusty() {
+        let fixture = IntegrationFixture::new("krusty-multiplatform", write_multiplatform_build);
+        let root = &fixture.root;
+        let output = fixture
+            .build()
+            .tasks([":runJvm"])
+            .run_output()
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            output
+                .lines()
+                .filter(|line| line.starts_with("greeting="))
+                .collect::<Vec<_>>(),
+            ["greeting=hello from jvm"],
+            "{output}"
+        );
+
+        let runs = invocations(&std::fs::read_to_string(&fixture.log).expect("invocation log"));
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        let run = &runs[0];
+        let common = root.join("src/commonMain/kotlin/app/Greeting.kt");
+        let jvm = root.join("src/jvmMain/kotlin/app/Platform.kt");
+        let fragment_arguments = run
+            .iter()
+            .filter(|argument| {
+                argument.starts_with("-Xfragment") || *argument == "-Xmulti-platform"
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fragment_arguments,
+            [
+                "-Xmulti-platform".to_string(),
+                "-Xfragments=commonMain,jvmMain".to_string(),
+                format!("-Xfragment-sources=commonMain:{}", common.display()),
+                format!("-Xfragment-sources=jvmMain:{}", jvm.display()),
+                "-Xfragment-refines=jvmMain:commonMain".to_string(),
+            ],
+            "{run:?}"
+        );
+        let free = run
+            .iter()
+            .take_while(|argument| !argument.starts_with('-'))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            free,
+            [common.display().to_string(), jvm.display().to_string()],
+            "{run:?}"
+        );
+        for class in ["GreetingKt", "PlatformKt"] {
+            let path = format!("build/classes/kotlin/jvm/main/app/{class}.class");
+            assert!(root.join(&path).is_file(), "missing {path}");
+        }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// A project applying `kotlin("kapt")` with a real annotation processor. kapt's stub
     /// generation is a KotlinJvmCompile that runs kotlinc with the kapt plugin, so it is left to
     /// kotlinc, visibly; the main compile after annotation processing goes through krusty, and the
@@ -1424,6 +1491,68 @@ error: warnings found and -Werror specified\n";
         );
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn write_multiplatform_build(root: &Path, plugin_version: &str, kgp_version: &str) {
+        let write = |rel: &str, body: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            let body = body
+                .replace("PLUGIN_VERSION", plugin_version)
+                .replace("KGP_VERSION", kgp_version);
+            std::fs::write(path, body).expect("write");
+        };
+        write(
+            "settings.gradle.kts",
+            r#"
+pluginManagement {
+    repositories {
+        providers.gradleProperty("krusty.plugin.repository").orNull?.let {
+            maven { url = uri(it) }
+        }
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "multiplatform"
+"#,
+        );
+        write(
+            "build.gradle.kts",
+            r#"
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
+plugins {
+    kotlin("multiplatform") version "KGP_VERSION"
+    id("dev.krustythecompiler") version "PLUGIN_VERSION"
+}
+
+repositories {
+    mavenCentral()
+}
+
+kotlin {
+    jvm {
+        compilerOptions.jvmTarget.set(JvmTarget.JVM_17)
+    }
+}
+
+val jvmMain = kotlin.jvm().compilations.getByName("main")
+tasks.register<JavaExec>("runJvm") {
+    classpath(jvmMain.output.allOutputs, jvmMain.runtimeDependencyFiles)
+    mainClass.set("app.PlatformKt")
+}
+"#,
+        );
+        write(
+            "src/commonMain/kotlin/app/Greeting.kt",
+            "package app\n\nexpect fun platform(): String\n\nfun greeting(): String = \"hello from \" + platform()\n",
+        );
+        write(
+            "src/jvmMain/kotlin/app/Platform.kt",
+            "package app\n\nactual fun platform(): String = \"jvm\"\n\nfun main() {\n    println(\"greeting=\" + greeting())\n}\n",
+        );
     }
 
     /// The corpus comparison applies the plugin to an unmodified build through
@@ -2147,10 +2276,10 @@ fun main() {
     /// single-use daemons time out connecting. One fixture runs at a time.
     static GRADLE_INTEGRATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    struct IntegrationFixture {
+    pub(super) struct IntegrationFixture {
         _serial: std::sync::MutexGuard<'static, ()>,
-        root: PathBuf,
-        log: PathBuf,
+        pub(super) root: PathBuf,
+        pub(super) log: PathBuf,
         /// The recording proxy's log of support checks, apart from the compiles in `log`.
         probes: PathBuf,
         proxy: PathBuf,
@@ -2160,7 +2289,7 @@ fun main() {
     }
 
     impl IntegrationFixture {
-        fn new(prefix: &str, write: fn(&Path, &str, &str)) -> Self {
+        pub(super) fn new(prefix: &str, write: fn(&Path, &str, &str)) -> Self {
             // A failed test poisons the lock; the next fixture still needs it.
             let serial = GRADLE_INTEGRATION
                 .lock()
@@ -2233,7 +2362,7 @@ fun main() {
             }
         }
 
-        fn build(&self) -> GradleBuild {
+        pub(super) fn build(&self) -> GradleBuild {
             let build = GradleBuild::new(&self.root, repository_plugin_project(), &self.proxy)
                 .property("kotlinPluginVersion", &self.kgp)
                 .property("krustyPluginVersion", &self.plugin_version)
@@ -2487,7 +2616,7 @@ fun main() {
         runs.pop().expect("single module invocation")
     }
 
-    fn invocations(text: &str) -> Vec<Vec<String>> {
+    pub(super) fn invocations(text: &str) -> Vec<Vec<String>> {
         let mut out = Vec::new();
         let mut current = Vec::new();
         for line in text.lines() {

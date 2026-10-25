@@ -18,7 +18,10 @@ mod constructor;
 use constructor::DeclaredCapture;
 mod lambda_inlining;
 use lambda_inlining::FieldLambda;
+mod nested_objects;
+use nested_objects::NestedObjects;
 mod sam_wrapper;
+mod suspend_methods;
 mod type_remapper;
 
 use crate::fx_hash::HashMap;
@@ -33,9 +36,12 @@ use crate::jvm::method_node::{Insn, MethodNode, Node};
 use crate::jvm::source_map::{DependencyMap, SourceMap};
 
 use super::class_roles::ClassRoles;
+use super::name_generator::NameGenerator;
 use super::{InlineError, ObjectLambda};
 
 pub(crate) use sam_wrapper::copy_sam_wrapper;
+pub(crate) use suspend_methods::CallSiteSource;
+use suspend_methods::ContinuationMachine;
 pub(crate) use type_remapper::{MalformedType, TypeRemapper};
 
 const ALOAD: u8 = 0x19;
@@ -57,6 +63,7 @@ const DEBUG_METADATA_DESC: &str = "Lkotlin/coroutines/jvm/internal/DebugMetadata
 const SOURCE_DEBUG_EXTENSION_DESC: &str = "Lkotlin/jvm/internal/SourceDebugExtension;";
 /// The package of the coroutine base classes (`isCoroutineSuperClass`).
 const COROUTINE_BASE_PACKAGE: &str = "kotlin/coroutines/jvm/internal/";
+const CONTINUATION_IMPL: &str = "kotlin/coroutines/jvm/internal/ContinuationImpl";
 
 /// Why an anonymous object could not be regenerated.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,6 +80,8 @@ pub(crate) enum RegenerationError {
     Inlining(Box<InlineError>),
     /// The stack a lambda was inlined over could not be saved around it.
     FixStack(crate::jvm::bytecode_passes::fix_stack::FixStackError),
+    /// The coroutine transformer could not build a suspend method of the copy.
+    Coroutine(crate::jvm::bytecode_passes::coroutines::CoroutineError),
 }
 
 impl From<MalformedType> for RegenerationError {
@@ -90,6 +99,8 @@ pub(crate) struct CallSite<'a> {
     /// Whether the method is a public inline function, which makes the copy public ABI too
     /// (`isInPublicInlineScope`).
     pub public_inline_scope: bool,
+    /// Where the call is, which the copy's suspend methods report.
+    pub source: CallSiteSource<'a>,
 }
 
 /// One object to regenerate (`AnonymousObjectTransformationInfo`).
@@ -99,6 +110,9 @@ pub(crate) struct Regeneration<'a> {
     /// The descriptor the inline body calls the original's constructor through.
     pub constructor_desc: &'a str,
     pub call_site: CallSite<'a>,
+    /// The class the inline call is written in, which owns the copies of the SAM wrappers the
+    /// copy's methods construct.
+    pub calling_class: &'a str,
     /// The inline function's type arguments at the call, each as `(parameter name, signature)`.
     pub type_arguments: &'a [(String, String)],
     /// Anonymous classes already regenerated earlier in the same inlined body. A later copy can
@@ -118,6 +132,9 @@ pub(crate) struct Regeneration<'a> {
     pub classes: &'a dyn ClassRoles,
     /// The caller's value classes, which the copy's code boxes like the caller's.
     pub value_classes: &'a Rc<ValueClassDescriptors>,
+    /// The state machine whose continuation this copy is, when it is the continuation of a copied
+    /// suspend method (`isContinuation`).
+    pub continuation: Option<&'a ContinuationMachine>,
 }
 
 /// The regenerated class.
@@ -128,6 +145,21 @@ pub(crate) struct Regenerated {
     pub constructor_desc: String,
     /// A method of the copy still calls `reifiedOperationMarker`.
     pub reified_parameters_remain: bool,
+    /// The classes the copy regenerated in turn: the continuations of its suspend methods.
+    pub nested: Vec<(String, Vec<u8>)>,
+    /// The SAM wrappers the copy's methods construct, copied into the calling class. The calling
+    /// class shares one copy of each among its inline calls, so the call site writes only the
+    /// first.
+    pub sam_wrappers: Vec<SamWrapperCopy>,
+}
+
+/// A SAM wrapper copied into the calling class.
+#[derive(Debug)]
+pub(crate) struct SamWrapperCopy {
+    /// The wrapper the inline body constructs.
+    pub original: String,
+    pub name: String,
+    pub bytes: Vec<u8>,
 }
 
 /// `isCapturedFieldName`: a field an object's constructor fills from a captured value.
@@ -137,14 +169,37 @@ pub(super) fn is_captured_field_name(name: &str) -> bool {
         || name == "receiver$0"
 }
 
-/// Copy `regeneration.original` as `regeneration.new_class`.
+/// Copy `regeneration.original` as `regeneration.new_class`, whose own regenerated classes are
+/// named by `names`.
 pub(crate) fn regenerate(
     regeneration: &Regeneration<'_>,
+    names: &mut NameGenerator,
 ) -> Result<Regenerated, RegenerationError> {
     let original = regeneration.original;
     let old = original.name.as_str();
     let new = regeneration.new_class;
-    check_supported(original, regeneration.classes)?;
+    let (constructor, methods) = split_constructor(original)?;
+    let for_inline = suspend_methods::ForInlineCopies::of(&methods);
+    // The continuation each `$$forInline` copy builds, which the copy names in place of a nested
+    // object of its own.
+    let mut continuations = Vec::new();
+    for method in &methods {
+        if let (Some(_), Some(code)) = (
+            suspend_methods::for_inline_original(&method.name),
+            &method.code,
+        ) {
+            let continuation = suspend_methods::fake_continuation_class(code)?.ok_or(
+                RegenerationError::Unsupported("a $$forInline method without a continuation"),
+            )?;
+            continuations.push(continuation.to_string());
+        }
+    }
+    check_supported(
+        original,
+        regeneration.classes,
+        &continuations,
+        regeneration.continuation.is_some(),
+    )?;
     let mut remapper = TypeRemapper::with_type_arguments(regeneration.type_arguments);
     for (original, copy) in regeneration.prior_classes {
         remapper.add_mapping(original, copy);
@@ -194,6 +249,8 @@ pub(crate) fn regenerate(
                 METADATA_DESC => metadata = Some(annotation),
                 // The copy's map is written with the class; kotlinc drops the original's.
                 SOURCE_DEBUG_EXTENSION_DESC => {}
+                // So is a continuation's `@DebugMetadata`, which its machine describes.
+                DEBUG_METADATA_DESC if regeneration.continuation.is_some() => {}
                 _ => {
                     let mut annotation = annotation.clone();
                     remapper.remap_annotation(&mut annotation)?;
@@ -224,7 +281,6 @@ pub(crate) fn regenerate(
     }
 
     let mut lines = CopiedLines::of(original)?;
-    let (constructor, methods) = split_constructor(original)?;
     let constructor_code = constructor
         .code
         .as_ref()
@@ -293,44 +349,171 @@ pub(crate) fn regenerate(
     })
     .map_err(RegenerationError::Copy)?;
 
+    // The continuations of copies that need none, whose `InnerClasses` rows go with them.
+    let mut dropped_continuations = Vec::new();
+    let mut nested = Vec::new();
+    let mut sam_wrappers = Vec::new();
     for method in methods {
+        if for_inline.skips(method) {
+            continue;
+        }
         let mut method = method.clone();
         if let Some(code) = &mut method.code {
             reified_parameters_remain |= specialize_copied(code, regeneration.reified)?;
         }
         check_captured_field_accesses(&method, old, &declared)?;
-        if let Some(code) = method
-            .code
-            .as_ref()
-            .filter(|code| lambda_inlining::reads_lambda(code, &lambdas))
-        {
-            let mut code = code.clone();
-            remap_declaration(&mut method, &mut remapper)?;
-            remapper.remap_method(&mut code)?;
-            method.code = Some(lambda_inlining::inline_into(
-                &code,
-                new,
-                &lambdas,
-                &mut lines,
-                regeneration.caller_lines,
-            )?);
+        // The continuation a `$$forInline` copy builds is regenerated as the copy's next object
+        // when the inliner meets its construction.
+        let continuation = match (
+            suspend_methods::for_inline_original(&method.name),
+            &method.code,
+        ) {
+            (Some(_), Some(code)) => {
+                let original = suspend_methods::fake_continuation_class(code)?
+                    .ok_or(RegenerationError::Unsupported(
+                        "a $$forInline method without a continuation",
+                    ))?
+                    .to_string();
+                let copy = names.next_object().class().to_string();
+                remapper.add_mapping(&original, &copy);
+                Some((original, copy))
+            }
+            _ => None,
+        };
+        remap_declaration(&mut method, &mut remapper)?;
+        if let Some(code) = &method.code {
+            // Only a `$$forInline` copy's machine takes the suspension points a suspend lambda
+            // brings: kotlinc writes one for every suspend method that invokes such a lambda.
+            if continuation.is_none() && lambda_inlining::reads_suspend_lambda(code, &lambdas) {
+                return Err(RegenerationError::Unsupported(
+                    "a suspend lambda in a method without a $$forInline copy",
+                ));
+            }
+            let code = if lambda_inlining::reads_lambda(code, &lambdas) {
+                let mut code = code.clone();
+                remapper.remap_method(&mut code)?;
+                let mut objects = NestedObjects {
+                    regeneration,
+                    names: &mut *names,
+                    method: suspend_methods::for_inline_original(&method.name)
+                        .unwrap_or(&method.name),
+                    descriptor: &method.desc,
+                    renamed: Vec::new(),
+                    classes: Vec::new(),
+                    sam_wrappers: Vec::new(),
+                };
+                let code = lambda_inlining::inline_into(
+                    &code,
+                    new,
+                    &lambdas,
+                    &mut lines,
+                    regeneration.caller_lines,
+                    &mut objects,
+                )?;
+                for (original, copy) in &objects.renamed {
+                    remapper.add_mapping(original, copy);
+                }
+                nested.extend(objects.classes);
+                sam_wrappers.extend(objects.sam_wrappers);
+                code
+            } else {
+                if code.instructions().any(|insn| {
+                    references_other_regenerated_class(
+                        insn,
+                        regeneration.classes,
+                        old,
+                        &continuations,
+                    )
+                }) {
+                    return Err(RegenerationError::Unsupported("a nested anonymous object"));
+                }
+                copy_body(code, &remapper, &mut lines)?
+            };
+            method.code = Some(code);
+        }
+        let Some((original_continuation, continuation)) = continuation else {
             cw.add_copied_method(&method)
                 .map_err(RegenerationError::Copy)?;
             continue;
-        }
-        remap_declaration(&mut method, &mut remapper)?;
-        if let Some(code) = &method.code {
-            method.code = Some(copy_body(code, &remapper, &mut lines)?);
-        }
-        cw.add_copied_method(&method)
+        };
+        // `newStateMachineForNamedFunction`: the copy is the method itself, its state machine built
+        // over the inlined body.
+        let name = suspend_methods::for_inline_original(&method.name)
+            .unwrap_or_default()
+            .to_string();
+        let mut body = method
+            .code
+            .take()
+            .unwrap_or_else(|| unreachable!("a $$forInline copy with a continuation has code"));
+        body.name.clone_from(&name);
+        method.name = name;
+        let (body, machine) =
+            suspend_methods::transform(body, new, &continuation, &regeneration.call_site.source)?;
+        method.code = Some(body);
+        cw.add_copied_transformed_method(&method)
             .map_err(RegenerationError::Copy)?;
+        let Some(machine) = machine else {
+            dropped_continuations.push(original_continuation);
+            continue;
+        };
+        // The continuation is regenerated as a class of the copy's, enclosed by the method its
+        // machine belongs to.
+        let bytes = regeneration
+            .classes
+            .class_file(&original_continuation)
+            .ok_or(RegenerationError::Unsupported(
+                "a continuation whose class file is not on the classpath",
+            ))?;
+        let original_continuation = ClassNode::read(&bytes)
+            .map_err(|_| RegenerationError::Unsupported("a continuation that does not read"))?;
+        let constructor_desc = split_constructor(&original_continuation)?.0.desc.clone();
+        let mut prior_classes = regeneration.prior_classes.to_vec();
+        prior_classes.push((old.to_string(), new.to_string()));
+        let regenerated = regenerate(
+            &Regeneration {
+                original: &original_continuation,
+                new_class: &continuation,
+                constructor_desc: &constructor_desc,
+                call_site: CallSite {
+                    owner: new,
+                    method: &method.name,
+                    descriptor: &method.desc,
+                    public_inline_scope: false,
+                    source: regeneration.call_site.source,
+                },
+                prior_classes: &prior_classes,
+                lambdas: &[],
+                continuation: Some(&machine),
+                ..*regeneration
+            },
+            names
+                .object(&continuation)
+                .unwrap_or_else(|| unreachable!("the continuation's name was taken")),
+        )?;
+        nested.extend(regenerated.nested);
+        sam_wrappers.extend(regenerated.sam_wrappers);
+        nested.push((continuation, regenerated.bytes));
     }
 
-    cw.set_source_file(original.source_file.clone());
-    cw.set_source_map(lines.map);
+    if !lines.lineless {
+        cw.set_source_file(original.source_file.clone());
+        cw.set_source_map(lines.map);
+    }
     for inner in &original.inner_classes {
+        if dropped_continuations.contains(&inner.name) {
+            continue;
+        }
+        // The copy's code names a SAM wrapper's copy, but kotlinc rewrites only the `new` for it,
+        // so the class's own `InnerClasses` row still names the original wrapper.
+        let copied_wrapper = sam_wrappers
+            .iter()
+            .any(|wrapper: &SamWrapperCopy| wrapper.original == inner.name);
         let spec = InnerClassSpec {
-            inner: remapper.map_type(&inner.name)?,
+            inner: if copied_wrapper {
+                inner.name.clone()
+            } else {
+                remapper.map_type(&inner.name)?
+            },
             outer: inner
                 .outer_name
                 .as_deref()
@@ -359,11 +542,28 @@ pub(crate) fn regenerate(
     cw.seed_class(call_site.owner);
     cw.seed_name_and_type(call_site.method, call_site.descriptor);
     cw.set_enclosing_method(call_site.owner, call_site.method, call_site.descriptor);
+    // The machine's spill fields and `@DebugMetadata`, which the transformer adds to the
+    // continuation once it built the machine. A spill field the original's own machine declared
+    // is already copied.
+    if let Some(machine) = regeneration.continuation {
+        for field in &machine.fields {
+            let copied = original
+                .fields
+                .iter()
+                .any(|own| own.name == field.name && own.desc == field.descriptor);
+            if !copied {
+                cw.add_field_sig(0, &field.name, &field.descriptor, None);
+            }
+        }
+        cw.set_debug_metadata(&machine.debug_metadata);
+    }
     cw.intern_source_and_map();
     Ok(Regenerated {
         bytes: cw.finish(),
         constructor_desc: plan.desc,
         reified_parameters_remain,
+        nested,
+        sam_wrappers,
     })
 }
 
@@ -487,22 +687,31 @@ fn plan_lambdas<'a>(
 fn check_supported(
     original: &ClassNode,
     classes: &dyn ClassRoles,
+    continuations: &[String],
+    continuation: bool,
 ) -> Result<(), RegenerationError> {
-    if original
-        .super_name
-        .as_deref()
-        .is_some_and(|name| name.starts_with(COROUTINE_BASE_PACKAGE))
+    // A continuation copied for a suspend method's machine is the one coroutine the port
+    // regenerates.
+    let copied_continuation =
+        continuation && original.super_name.as_deref() == Some(CONTINUATION_IMPL);
+    if !copied_continuation
+        && original
+            .super_name
+            .as_deref()
+            .is_some_and(|name| name.starts_with(COROUTINE_BASE_PACKAGE))
     {
         return Err(RegenerationError::Unsupported("a coroutine"));
     }
-    if original
-        .visible_annotations
-        .iter()
-        .any(|annotation| annotation.desc == DEBUG_METADATA_DESC)
+    // A copied continuation's `@DebugMetadata` is the copy's machine's, written anew.
+    if !copied_continuation
+        && original
+            .visible_annotations
+            .iter()
+            .any(|annotation| annotation.desc == DEBUG_METADATA_DESC)
     {
         return Err(RegenerationError::Unsupported("coroutine debug metadata"));
     }
-    if original.source_file.is_none() {
+    if original.source_file.is_none() && !copied_continuation {
         return Err(RegenerationError::Unsupported(
             "a class without a source file",
         ));
@@ -531,9 +740,12 @@ fn check_supported(
                 "a class initializer requiring reification",
             ));
         }
-        if code
-            .instructions()
-            .any(|insn| references_other_regenerated_class(insn, classes, &original.name))
+        // A method's nested objects are regenerated while its lambdas are inlined into it; a
+        // constructor or initializer is copied as it is.
+        if matches!(method.name.as_str(), "<init>" | "<clinit>")
+            && code.instructions().any(|insn| {
+                references_other_regenerated_class(insn, classes, &original.name, continuations)
+            })
         {
             return Err(RegenerationError::Unsupported("a nested anonymous object"));
         }
@@ -543,13 +755,20 @@ fn check_supported(
 
 /// Whether `insn` constructs or loads an object other than `self_name` that a copy would
 /// regenerate in turn. The class's own `<clinit>` constructs itself; that is the singleton, not a
-/// nested object.
+/// nested object. Neither is the continuation of a suspend method, which its copy builds anew.
 fn references_other_regenerated_class(
     insn: &Insn,
     classes: &dyn ClassRoles,
     self_name: &str,
+    continuations: &[String],
 ) -> bool {
-    let other = |name: &str| name != self_name && classes.is_regenerated(name);
+    let other = |name: &str| {
+        name != self_name
+            && !continuations
+                .iter()
+                .any(|continuation| continuation == name)
+            && classes.is_regenerated(name)
+    };
     match insn {
         Insn::Type { op: NEW, class } => other(class),
         Insn::Method {
@@ -663,16 +882,37 @@ struct CopiedLines {
     original: Option<DependencyMap>,
     source_file: String,
     path: String,
+    /// The original has no line at all, nor a map: kotlinc's mapper then maps nothing, and the
+    /// copy carries neither a `SourceFile` nor a map (a continuation's, which only forwards).
+    lineless: bool,
 }
 
 impl CopiedLines {
     fn of(original: &ClassNode) -> Result<CopiedLines, RegenerationError> {
-        let source_file = original
-            .source_file
-            .clone()
-            .ok_or(RegenerationError::Unsupported(
+        let lineless = || CopiedLines {
+            map: SourceMap::default(),
+            original: None,
+            path: original.name.clone(),
+            source_file: String::new(),
+            lineless: true,
+        };
+        let has_lines = || {
+            original
+                .methods
+                .iter()
+                .filter_map(|method| method.code.as_ref())
+                .flat_map(|code| &code.nodes)
+                .any(|entry| matches!(entry, Node::Line { .. }))
+        };
+        // A continuation kotlinc writes without a source file has no lines either.
+        let Some(source_file) = original.source_file.clone() else {
+            if original.source_debug.is_none() && !has_lines() {
+                return Ok(lineless());
+            }
+            return Err(RegenerationError::Unsupported(
                 "a class without a source file",
-            ))?;
+            ));
+        };
         let (map, parsed) = match &original.source_debug {
             Some(text) => {
                 let parsed = DependencyMap::parse(text)
@@ -690,7 +930,7 @@ impl CopiedLines {
             }
             // `SMAP.identityMapping`: the class's own file, as far as its highest line.
             None => {
-                let lines = original
+                let Some(lines) = original
                     .methods
                     .iter()
                     .filter_map(|method| method.code.as_ref())
@@ -700,9 +940,12 @@ impl CopiedLines {
                         _ => None,
                     })
                     .max()
-                    .ok_or(RegenerationError::Unsupported(
-                        "a class without line numbers",
-                    ))?;
+                else {
+                    return Ok(CopiedLines {
+                        source_file,
+                        ..lineless()
+                    });
+                };
                 (
                     SourceMap::for_regenerated_class(&source_file, &original.name, lines),
                     None,
@@ -714,6 +957,7 @@ impl CopiedLines {
             original: parsed,
             path: original.name.clone(),
             source_file,
+            lineless: false,
         })
     }
 

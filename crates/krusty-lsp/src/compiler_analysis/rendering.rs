@@ -102,6 +102,8 @@ pub(crate) fn render_ty(ty: Ty) -> String {
         TyKind::InProjection(inner) => format!("in {}", render_ty(inner)),
         TyKind::OutProjection(inner) => format!("out {}", render_ty(inner)),
         TyKind::StarProjection(_) => "*".to_string(),
+        // A Java raw argument shows as the formal's erasure, the lower bound of the raw interval.
+        TyKind::RawProjection(erased) => render_ty(erased),
         // Editor surface: a declaration the resolution engine has not resolved yet has no type to
         // show. It reaches here only while analysis is mid-flight.
         TyKind::Pending => "…".to_string(),

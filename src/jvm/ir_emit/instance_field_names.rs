@@ -66,6 +66,7 @@ fn class_names(ir: &IrFile, class: &IrClass) -> NameAllocation {
         .iter()
         .zip(super::super::capture_names::class_captures(ir, class))
         .filter_map(|(argument, names)| Some((argument.field_index? as usize, names?.field)))
+        .chain(script_receiver_fields(class))
         .collect();
     let fields = class
         .fields
@@ -98,6 +99,26 @@ fn class_names(ir: &IrFile, class: &IrClass) -> NameAllocation {
         })
         .collect();
     allocate_names(fields, statics)
+}
+
+/// kotlinc names the field a script keeps an implicit receiver in after the receiver's classifier:
+/// `$$implicitReceiver_Project`, and `$$implicitReceiver_Int` for a primitive one.
+fn script_receiver_fields(class: &IrClass) -> impl Iterator<Item = (usize, String)> + '_ {
+    class.ctor_args.iter().filter_map(|argument| {
+        let crate::ir::IrCtorParameterProvenance::ScriptReceiver { .. } = argument.provenance
+        else {
+            return None;
+        };
+        let receiver = argument.declared_ty.unwrap_or(argument.ty).non_null();
+        let classifier = receiver.obj_internal().map_or_else(
+            || receiver.name(),
+            |name| name.nested_segment_ref().to_string(),
+        );
+        Some((
+            argument.field_index? as usize,
+            format!("$$implicitReceiver_{classifier}"),
+        ))
+    })
 }
 
 fn allocate_names(fields: Vec<FieldInput>, statics: HashSet<(String, String)>) -> NameAllocation {

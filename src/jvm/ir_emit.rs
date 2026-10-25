@@ -156,6 +156,7 @@ mod suspend_lambda_class;
 mod value_class_adapters;
 use value_class_adapters::{emit_value_class_box_adapter, emit_value_class_unbox_adapter};
 mod transformed_suspensions;
+use lambda_implementation_placement::standalone_method_is_elided;
 mod try_emission;
 use annotation_impl::emit_annotation_impl_class;
 use array_elements::reference_array_scalar_adapter;
@@ -1009,10 +1010,7 @@ fn emit_jvm_interface_companion_surface(
             Ty::Unit,
             clinit_statics.iter().map(|&(_, _, init)| init),
         );
-        emitter.regeneration_site = Some(
-            bytecode_inline_call::RegenerationSite::class_initializer(env.signature_symbols),
-        );
-        emitter.record_locals = true;
+        emitter.enter_class_initializer(env.signature_symbols);
         let mut clinit = CodeBuilder::new(0);
         emitter.emit_delegated_property_array(env, c.fq_name, &fq_name, &mut clinit);
         if array {
@@ -1638,6 +1636,7 @@ fn emit_pass(
         out.extend(drain_lambda_classes(env, opts));
         out.extend(env.run.machine_classes.borrow_mut().drain(..));
     }
+    let unwritten_continuations = transformed_suspensions::unwritten_continuations(ir, env);
     // Each class — with its optional `@Metadata` (the provider returns `None` for the default emit).
     for (class_id, c) in ir.classes.iter().enumerate() {
         let class_id = class_id as ClassId;
@@ -1646,6 +1645,9 @@ fn emit_pass(
         if let Some(crate::jvm::classfile::CoroutineOutcome::TailCalls) =
             env.run.transformed_coroutine(&fq_name)
         {
+            continue;
+        }
+        if unwritten_continuations.contains(&c.fq_name) {
             continue;
         }
         let cm = class_meta(&fq_name);
@@ -3415,8 +3417,6 @@ fn emit_interface_class(
     if emitted_default_impls {
         let holder = format!("{fq_name}$DefaultImpls");
         // The outer interface must publish the same nested-class relation as the synthetic holder.
-        // Seed after metadata so the class constant lands in kotlinc's class-visit order.
-        cw.seed_class(&holder);
         cw.add_inner_class(crate::jvm::classfile::InnerClassSpec {
             inner: holder,
             outer: Some(fq_name.clone()),
@@ -3997,10 +3997,7 @@ fn emit_enum_class(
                 .flat_map(|entry| entry.argument_prelude.iter().chain(&entry.args).copied())
                 .chain(ir.companion_clinit_body(c.fq_name)),
         );
-        e.regeneration_site = Some(bytecode_inline_call::RegenerationSite::class_initializer(
-            env.signature_symbols,
-        ));
-        e.record_locals = true;
+        e.enter_class_initializer(env.signature_symbols);
         let mut clinit = CodeBuilder::new(0);
         e.emit_delegated_property_array(env, c.fq_name, &fq, &mut clinit);
         if delegated_property_array::exists(env, c.fq_name) {
@@ -4227,15 +4224,6 @@ fn emit_method(
         return;
     }
     emit_method_inner(ir, fid, static_owner, owner, facade, cw, instance, env);
-}
-
-/// Whether this common-IR function has no standalone JVM declaration.
-///
-/// Both sets are explicit lowering/discovery decisions. In particular, `body == None` is not enough:
-/// it also represents real abstract declarations, while an inline-splice implementation loses its
-/// body only after the body has been consumed into its call site.
-fn standalone_method_is_elided(ir: &IrFile, fid: u32, env: &EmitEnv) -> bool {
-    ir.inline_only_fns.contains(&fid) || env.run.dead_lambdas.borrow().contains(&fid)
 }
 
 /// Emit `fid`'s body as a `$DefaultImpls` static: same code and slot layout as the instance method
@@ -5116,6 +5104,8 @@ struct Emitter<'a> {
     local_delegate_access: &'a crate::jvm::local_delegate_accessors::HelperAccess,
     suspended_result_returns: &'a crate::jvm::suspend::SuspendedResultReturns,
     intrinsic_probe_continuations: &'a crate::jvm::suspend::IntrinsicProbeContinuations,
+    /// The machines kotlinc's transformer builds, which a placed suspend lambda's points join.
+    emit_time_machines: &'a crate::jvm::suspend::EmitTimeMachines,
     /// The exact source class whose code this emitter is writing. A generated holder has no
     /// source-static ownership; it must route every private static access through the owner.
     static_owner: Option<StaticOwner>,
@@ -5320,6 +5310,7 @@ impl<'a> Emitter<'a> {
             suspended_result_returns: env.suspended_result_returns,
             self_companion: singleton_instance_load::self_companion(ir, static_owner),
             intrinsic_probe_continuations: env.intrinsic_probe_continuations,
+            emit_time_machines: env.emit_time_machines,
             static_owner,
             function: None,
             type_parameter_function: None,
@@ -5770,7 +5761,7 @@ impl<'a> Emitter<'a> {
                 index,
                 value,
             } => self.emit_set_field(e, receiver, class, index, value, code),
-            IrExpr::SetStatic { index, value } => self.emit_set_static(index, value, code),
+            IrExpr::SetStatic { index, value } => self.emit_set_static(e, index, value, code),
             IrExpr::Checked(_) => {
                 unreachable!("checked operation passed jvm_can_emit without a JVM realization")
             }

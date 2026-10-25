@@ -550,18 +550,7 @@ impl Emitter<'_> {
                 "value_classes",
                 "box coercion arg={arg} physical={physical_arg:?} semantic={semantic:?}"
             );
-            box_prim_free(
-                self.cw,
-                code,
-                semantic_scalar_adapter(semantic, physical_arg),
-            );
-            // kotlinc materializes the box at its wrapper type and coerces that to the target, so a
-            // target between the wrapper and `Object` (`Number`, `Comparable`) is a `checkcast`.
-            if !semantic.is_unsigned() {
-                if let Some(wrapper) = semantic.non_null().boxed_ref() {
-                    self.coerce_reference_on_stack(wrapper, target, code);
-                }
-            }
+            self.box_scalar_as_reference(semantic, physical_arg, target, code);
         } else if physical_arg.is_reference() && target.is_jvm_scalar() {
             // kotlinc's platform-type assertion hands on its checked value as an `Object`, so the
             // unbox after it goes through `Number` even from a declared wrapper (`Integer!`).

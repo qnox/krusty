@@ -180,11 +180,26 @@ fn published_chain(libraries: &JvmLibraries, classifier: TypeName) -> Option<Pub
                 .is_some_and(|parent| generates_serializer(&parent.annotations));
             if !parent_generates {
                 Vec::new()
-            } else if superclass.type_args().is_empty() {
-                published_chain(libraries, parent)?.wire
             } else {
-                // A generic parent's elements need its type arguments, which no record carries.
-                return None;
+                // A generic parent's elements are typed over its own type parameters; the class
+                // inherits them typed by the arguments it gives the parent.
+                let formals = &SymbolSource::classifier(libraries, parent)?
+                    .type_parameters
+                    .type_params;
+                let arguments = superclass.type_args();
+                if formals.len() != arguments.len() {
+                    return None;
+                }
+                let bindings = formals
+                    .iter()
+                    .cloned()
+                    .zip(arguments.iter().copied())
+                    .collect::<crate::fx_hash::HashMap<_, _>>();
+                published_chain(libraries, parent)?
+                    .wire
+                    .into_iter()
+                    .map(|(name, ty)| (name, ty_subst_keep_unbound(ty, &bindings)))
+                    .collect()
             }
         }
         None => Vec::new(),
@@ -235,11 +250,15 @@ fn published_chain(libraries: &JvmLibraries, classifier: TypeName) -> Option<Pub
                 .iter()
                 .find(|property| property.name.as_str() == &**name)
                 .filter(|property| stored(property))?;
-            // Annotations on the element or inside its type (a serial name, a serializer of its
-            // own) change its wire shape, and this record carries none.
-            if property.annotation_method.is_some() || element.annotated_type {
+            // Annotations inside the element's type (a serializer of its own for a type argument)
+            // change its wire shape, and this record carries none.
+            if element.annotated_type {
                 return None;
             }
+            let annotations = match &property.annotation_method {
+                Some(method) => element_annotations(libraries, classifier, method)?,
+                None => ElementAnnotations::default(),
+            };
             let ty = shape
                 .declared_callables
                 .get(&**name)?
@@ -268,6 +287,9 @@ fn published_chain(libraries: &JvmLibraries, classifier: TypeName) -> Option<Pub
                 name: name.clone(),
                 ty,
                 optional,
+                serial_name: annotations.serial_name,
+                serializer: annotations.serializer,
+                contextual: annotations.contextual,
             })
         })
         .collect::<Option<Box<[_]>>>()?;
@@ -278,16 +300,92 @@ fn published_chain(libraries: &JvmLibraries, classifier: TypeName) -> Option<Pub
     );
     // The annotation says the class asked for a generated serializer; only the generated members
     // themselves say the plugin ran and what they take.
-    if !has_generated_parent_abi(&class.methods, classifier, &wire) {
+    let type_parameters = shape.type_parameters.type_params.len();
+    if !has_generated_parent_abi(&class.methods, classifier, type_parameters, &wire) {
         return None;
     }
     Some(PublishedChain {
         record: crate::types::SerializableClassElements {
+            type_parameters: shape
+                .type_parameters
+                .type_params
+                .iter()
+                .map(|parameter| Box::from(parameter.as_str()))
+                .collect(),
             elements,
             superclass,
         },
         wire,
     })
+}
+
+/// What a library element's property annotations say about its wire shape.
+#[derive(Default)]
+struct ElementAnnotations {
+    serial_name: Option<crate::kt_string::KtString>,
+    serializer: Option<TypeName>,
+    contextual: bool,
+}
+
+/// Read the annotations a library property keeps on its `$annotations` marker `method`, as
+/// kotlinc's plugin reads a superclass element's: `@SerialName`, a property-level
+/// `@Serializable(with = …)` and `@Contextual`. `None` when one changes the element in a way the
+/// record cannot state: `@Required`, `@Polymorphic`, or a `@SerialInfo` annotation the subclass's
+/// descriptor would have to carry.
+fn element_annotations(
+    libraries: &JvmLibraries,
+    classifier: TypeName,
+    method: &crate::jvm::metadata::MetaJvmMethodSig,
+) -> Option<ElementAnnotations> {
+    use crate::types::AnnotationValue;
+    let applications = libraries
+        .cp
+        .method_annotations(classifier, &method.name, &method.desc)?;
+    let mut annotations = ElementAnnotations::default();
+    for application in applications {
+        let argument = |name: &str| {
+            application
+                .arguments
+                .iter()
+                .find(|(argument, _)| argument == name)
+                .map(|(_, value)| value)
+        };
+        match application.annotation {
+            name if name == type_name("kotlinx/serialization/SerialName") => {
+                let Some(AnnotationValue::String(value)) = argument("value") else {
+                    return None;
+                };
+                annotations.serial_name = Some(value.clone());
+            }
+            name if name == type_name("kotlinx/serialization/Serializable") => {
+                let Some(AnnotationValue::Class(serializer)) = argument("with") else {
+                    return None;
+                };
+                annotations.serializer = Some(serializer.kotlin_class_internal()?);
+            }
+            name if name == type_name("kotlinx/serialization/Contextual") => {
+                annotations.contextual = true;
+            }
+            name if name == type_name("kotlinx/serialization/Required")
+                || name == type_name("kotlinx/serialization/Polymorphic") =>
+            {
+                return None
+            }
+            name => {
+                let serial_info = type_name("kotlinx/serialization/SerialInfo");
+                let marked = SymbolSource::classifier(libraries, name).is_some_and(|annotation| {
+                    annotation
+                        .annotations
+                        .iter()
+                        .any(|meta| meta.annotation == serial_info)
+                });
+                if marked {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(annotations)
 }
 
 /// `@Serializable` without its own `with` serializer: the plugin generates the serializer.
@@ -300,19 +398,21 @@ fn generates_serializer(annotations: &[crate::types::ResolvedAnnotation]) -> boo
 }
 
 /// Whether `methods` hold exactly the members the serialization plugin generates on an
-/// inheritable class without type parameters whose wire is `wire`: a public static
-/// `write$Self(self, output, descriptor)` and a public deserialization constructor taking the
-/// `seen` masks, each element as the subclass's delegation passes it, and the marker.
+/// inheritable class with `type_parameters` type parameters whose wire is `wire`: a public static
+/// `write$Self(self, output, descriptor, typeSerial0, …)` and a public deserialization constructor
+/// taking the `seen` masks, each element as the subclass's delegation passes it, and the marker.
 fn has_generated_parent_abi(
     methods: &[crate::jvm::classreader::MethodSig],
     classifier: TypeName,
+    type_parameters: usize,
     wire: &[(Box<str>, Ty)],
 ) -> bool {
     const PUBLIC: u16 = 0x0001;
     const STATIC: u16 = 0x0008;
     let write_self = format!(
-        "(L{};Lkotlinx/serialization/encoding/CompositeEncoder;Lkotlinx/serialization/descriptors/SerialDescriptor;)V",
-        classifier.render()
+        "(L{};Lkotlinx/serialization/encoding/CompositeEncoder;Lkotlinx/serialization/descriptors/SerialDescriptor;{})V",
+        classifier.render(),
+        "Lkotlinx/serialization/KSerializer;".repeat(type_parameters)
     );
     let mut constructor = String::from("(");
     constructor.push_str(&"I".repeat(wire.len() / 32 + 1));
@@ -480,16 +580,26 @@ mod tests {
         assert!(has_generated_parent_abi(
             &[write_self.clone(), constructor("ILjava/util/List;")],
             classifier,
+            0,
             &wire,
         ));
         assert!(!has_generated_parent_abi(
             &[write_self.clone(), constructor("ILjava/lang/String;")],
             classifier,
+            0,
             &wire,
         ));
         assert!(!has_generated_parent_abi(
             &[constructor("ILjava/util/List;")],
             classifier,
+            0,
+            &wire,
+        ));
+        // A generic class's `write$Self` takes one serializer per type parameter.
+        assert!(!has_generated_parent_abi(
+            &[write_self, constructor("ILjava/util/List;")],
+            classifier,
+            1,
             &wire,
         ));
     }

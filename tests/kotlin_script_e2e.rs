@@ -181,3 +181,95 @@ fn imports_do_not_rebind_the_template_parameter_type_like_kotlinc() {
         ),
     ]);
 }
+
+/// A script template whose definition gives the script an implicit `Host` receiver and a default
+/// import, as Gradle's do.
+const HOST_TEMPLATE: &str = "package t\n\
+\n\
+import kotlin.script.experimental.annotations.KotlinScript\n\
+import kotlin.script.experimental.api.*\n\
+\n\
+class Host {\n\
+\x20   val name = \"host\"\n\
+\x20   val tag = \"host tag\"\n\
+\x20   fun greet(s: String) = \"hi $s from $name\"\n\
+}\n\
+\n\
+@KotlinScript(fileExtension = \"host.kts\", compilationConfiguration = HostConfig::class)\n\
+abstract class HostScript(val target: Host) {\n\
+\x20   val tag = \"template tag\"\n\
+}\n\
+\n\
+object HostConfig : ScriptCompilationConfiguration({\n\
+\x20   implicitReceivers(Host::class)\n\
+\x20   defaultImports(\"kotlin.math.abs\")\n\
+\x20   isStandalone(false)\n\
+})\n";
+
+/// `HostConfig`, as the data krusty compiles against.
+fn host_definition() -> krusty::script_definitions::ScriptDefinition {
+    krusty::script_definitions::ScriptDefinition {
+        template: Some("t.HostScript".to_string()),
+        constructor_parameters: vec![krusty::script_definitions::ScriptParameter {
+            name: "target".to_string(),
+            classifier: "t.Host".to_string(),
+            type_arguments: Vec::new(),
+        }],
+        implicit_receivers: vec!["t.Host".to_string()],
+        default_imports: vec!["kotlin.math.abs".to_string()],
+    }
+}
+
+fn assert_host_scripts_match_kotlinc(scripts: &[(&str, &str)]) {
+    let classes = common::script_classes_against_kotlinc(
+        &[("Host.kt", HOST_TEMPLATE)],
+        "t.HostScript",
+        scripts,
+        &host_definition(),
+    );
+    let differences = classes.differences();
+    assert!(
+        differences.is_empty(),
+        "classes differ from kotlinc's:\n\n{}",
+        differences.join("\n\n")
+    );
+}
+
+#[test]
+fn an_implicit_receiver_is_a_constructor_value_its_members_reach_like_kotlinc() {
+    assert_host_scripts_match_kotlinc(&[(
+        "greet.host.kts",
+        "val who = \"you\"\n\
+         println(greet(who))\n\
+         fun twice() = greet(name) + abs(-1)\n\
+         println(twice())\n",
+    )]);
+}
+
+#[test]
+fn script_and_template_members_win_over_the_implicit_receiver_like_kotlinc() {
+    assert_host_scripts_match_kotlinc(&[(
+        "order.host.kts",
+        "val name = \"script\"\n\
+         println(tag)\n\
+         println(greet(name))\n\
+         listOf(1).forEach { greet(\"$it\") }\n\
+         val reader = { greet(tag) }\n",
+    )]);
+}
+
+/// A lambda in a statement captures the receiver's constructor parameter, whether it is inlined or
+/// escapes; a lambda in a property initializer reads the field through the script instance.
+#[test]
+fn statement_lambdas_capture_the_implicit_receiver_parameter_like_kotlinc() {
+    assert_host_scripts_match_kotlinc(&[(
+        "lambdas.host.kts",
+        "val f: () -> String = { greet(\"a\") }\n\
+         println(listOf(1).map { greet(\"$it\") })\n\
+         if (true) {\n\
+         \x20   val g = { greet(name) }\n\
+         \x20   println(g())\n\
+         }\n\
+         fun local() = greet(\"member\")\n",
+    )]);
+}
