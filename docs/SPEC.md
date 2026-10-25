@@ -13339,6 +13339,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   itself has no `LineNumberTable`. krusty gave the primary's stub no table, and a secondary's lost
   its defaults' lines because a constructor's default expressions were checked without attaching
   their source lines. Tests: `tests/value_class_constructor_default_lines_e2e.rs`.
+- **A value class's lifted functions follow its representation members.** kotlinc's inline-class
+  lowering appends `<init>`, `constructor-impl`, `box-impl`, `unbox-impl` and `equals-impl0` after
+  the declared members and `Any` overrides; local functions (`m_impl$local`) and indy lambdas
+  (`m_impl$lambda$0`) are lifted by later lowerings, so they come after all of those, in their
+  lifted order. krusty placed them after the last declared member. Tests:
+  `tests/value_class_lifted_member_order_e2e.rs`.
 - **An owner reads its explicit backing field, typed as the field.** Inside the class that
   declares `val a: Any field = V(1)`, a read whose receiver's static type is exactly that class is
   kotlinc's `IrGetField` of the field, not a call of `getA()`: `a.x` over a value class
