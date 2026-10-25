@@ -1222,7 +1222,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   for top-level fns (`FnMeta::visibility` from the signature) and members
   (`IrFile::internal_methods`, alongside the dispatch-relevant `private_methods`),
   `Constructor.flags` for a DECLARED primary-ctor visibility (`class C protected constructor(…)` →
-  4, private → 2 — `IrFile::ctor_visibilities`), and `TypeAlias.flags` (`internal typealias`,
+  4, private → 2, internal → an explicit 0 — `IrFile::ctor_visibilities`), and `TypeAlias.flags` (`internal typealias`,
   parser now keeps the modifier in `File::type_alias_visibility`). A declared ctor visibility also
   reaches the JVM `<init>` access flags (protected/private; `internal` stays JVM-public, the
   boundary lives in metadata alone), including the all-defaults convenience `<init>()`, which
@@ -13429,6 +13429,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   enclosed by the `constructor-impl` realizing it, whose owner is the value class. Tests:
   `tests/value_class_constructor_bodies_e2e.rs`. Corpus: `inlineClasses/secondaryConstructorsWithBody`,
   `inlineClasses/defaultParameterValues/inlineClassPrimaryConstructorWithInlineClassValueGeneric`.
+- **A value class's `constructor-impl$default` maps the constructor's lines.** The stub that fills
+  a value-class constructor's omitted arguments is built like a function's `$default`: its entry and
+  the closing `constructor-impl` call stand on the constructor's own line (the primary's
+  `constructor` keyword or parameter-list `(`, the line its rebuilt `<init>` uses; a secondary's
+  `constructor` keyword), and each masked fill on its default expression's line. `constructor-impl`
+  itself has no `LineNumberTable`. krusty gave the primary's stub no table, and a secondary's lost
+  its defaults' lines because a constructor's default expressions were checked without attaching
+  their source lines. Tests: `tests/value_class_constructor_default_lines_e2e.rs`.
+- **A value class's lifted functions follow its representation members.** kotlinc's inline-class
+  lowering appends `<init>`, `constructor-impl`, `box-impl`, `unbox-impl` and `equals-impl0` after
+  the declared members and `Any` overrides; local functions (`m_impl$local`) and indy lambdas
+  (`m_impl$lambda$0`) are lifted by later lowerings, so they come after all of those, in their
+  lifted order. krusty placed them after the last declared member. Tests:
+  `tests/value_class_lifted_member_order_e2e.rs`.
 - **An owner reads its explicit backing field, typed as the field.** Inside the class that
   declares `val a: Any field = V(1)`, a read whose receiver's static type is exactly that class is
   kotlinc's `IrGetField` of the field, not a call of `getA()`: `a.x` over a value class
@@ -20808,11 +20822,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   ARGUMENT expressions were discarded at the parse site, so both had to be carried through lowering
   (the same retention split a function's and a secondary constructor's get). Three placement facts,
   each verified byte-for-byte against kotlinc 2.4.10:
-  - The flags word is not a plain OR. `Constructor.flags` is OMITTED at its proto default 6
-    (visibility PUBLIC), which krusty represents as 0; setting `HAS_ANNOTATIONS` forces the field to be
-    written, so the omitted default must be MATERIALIZED first — an annotated public primary ctor
-    writes 7, not 1 (which would read back as visibility INTERNAL). A declared `private`/`protected`
-    primary already carries a non-zero word (2 / 4) and just gains the bit.
+  - The flags word is the declaration's real `Constructor.flags`, OMITTED only at its proto default 6
+    (visibility PUBLIC); setting `HAS_ANNOTATIONS` forces the field to be written, so an annotated
+    public primary ctor writes 7, not 1 (which would read back as visibility INTERNAL). A declared
+    `private`/`protected`/`internal` primary carries 2 / 4 / 0 and just gains the bit; the internal
+    0 is written explicitly, as kotlinc writes it. krusty used 0 to mean the omitted default, so an
+    `internal constructor` read back as public. Tests:
+    `tests/internal_primary_constructor_metadata_e2e.rs` (an ordinary, annotated, data and value
+    class).
   - The annotation type INTERNS at the constructor's own annotation visit, which ASM runs after
     `visitMethod` and before `visitParameterAnnotation`: `Lp/Mark;` lands between the ctor descriptor
     and the body's first entry, ahead of any `@NotNull` parameter annotation.
