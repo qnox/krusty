@@ -1,10 +1,10 @@
 # krusty — implementation plan
 
-Inner-alias conformance recovery shares constructor-reference publication across direct and
-already-selected alias declarations. The constructor selection responsibility moves out of the
-resolver facade; selected receiver provenance and declaration ABI survive that boundary. Demanded
-source signatures now retain receiver captures before contextual result constraints and reuse the
-ordinary call solver and output-slot specialization. Shared conformance expectations stay unchanged.
+JVM return consumers now use authenticated declaration-result slots across reference-preserving
+null assertions. Value-class refinement shares that producer boundary, while inline and suspension
+owners keep their existing result materialization. Full classfile/runtime controls cover ordinary
+generic returns and explicit/local materialization; existing inline, suspension and value-class
+guards constrain the adjacent representation boundaries.
 
 Phased, each phase ends in a **green `cargo test`** and a runnable artifact. The pipeline is built
 front-to-back so the streaming/arena shape is real from the start, then widened.
@@ -6011,6 +6011,12 @@ with width, Object, exact-wrapper and runtime controls. The dependency inner-con
 prerequisite landed in #2593; its declaration normalization remains separate from this representation fix (#2590).
 
 ## Receiver-bound constructor constraints
+
+Inner-alias conformance recovery shares constructor-reference publication across direct and
+already-selected alias declarations. The constructor selection responsibility moves out of the
+resolver facade; selected receiver provenance and declaration ABI survive that boundary. Demanded
+source signatures now retain receiver captures before contextual result constraints and reuse the
+ordinary call solver and output-slot specialization. Shared conformance expectations stay unchanged.
 
 Normalize inner constructors with complete own-plus-captured instance results, preserving independent
 callable formals while removing captured formals from the inference variables. One receiver context

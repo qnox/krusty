@@ -422,8 +422,15 @@ impl Source<'_> {
             })
         };
         property.jvm_signature = ty.and_then(|ty| platform.type_signature(ty));
-        property.getter.jvm_name =
-            platform.accessor_name(&property.name, false, ty, accessor_annotations(false), site);
+        if let Some(getter) = &mut property.getter {
+            getter.jvm_name = platform.accessor_name(
+                &property.name,
+                false,
+                ty,
+                accessor_annotations(false),
+                site,
+            );
+        }
         if let Some(setter) = &mut property.setter {
             setter.jvm_name =
                 platform.accessor_name(&property.name, true, ty, accessor_annotations(true), site);
@@ -532,7 +539,7 @@ impl Source<'_> {
             type_parameters: property.type_params.is_empty().then(Vec::new),
             extension_receiver: receiver_slot(receiver, scope),
             ty,
-            getter,
+            getter: Some(getter),
             setter,
             jvm_signature: None,
         };
@@ -600,7 +607,7 @@ impl Source<'_> {
             type_parameters: Some(Vec::new()),
             extension_receiver: KspTypeSlot::Absent,
             ty: header.constructor_property_type(index),
-            getter,
+            getter: Some(getter),
             setter,
             jvm_signature: None,
         };
@@ -949,7 +956,7 @@ impl Source<'_> {
                 type_parameters: Some(Vec::new()),
                 extension_receiver: KspTypeSlot::Absent,
                 ty: Some(applied("kotlin.enums.EnumEntries")),
-                getter: super::accessors::compiler_getter(),
+                getter: Some(super::accessors::compiler_getter()),
                 setter: None,
                 jvm_signature: None,
             };

@@ -1,5 +1,33 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## JVM generic result consumption
+
+A checked generic call's declaration-result coercion can retain its recorded reference slot until
+the return consumer materializes that value. The exact coercion marker and physical producer own
+that decision. A source null assertion checks and preserves the same value; its call slot is
+realized after generic erasure and refined with value-class declaration evidence. Inline regions,
+compiled inline calls and transformed suspension results retain their own materialization boundary.
+
+Named local storage and explicit source casts still materialize their declared types. Value-class
+returns distinguish declaration carriers from values boxed through a bare type parameter. A source
+assertion's extra nullability coercion retains the same authenticated declaration boundary rather
+than materializing an intermediate substituted type. Complete classfile and reference runtime
+controls, including single evaluation, live in
+`tests/consumer_materialized_result_e2e.rs`.
+
+## Class application header ownership
+
+A classpath classifier's generic layout is read from declaration headers before its members are
+published. Its own formals precede those captured from authenticated enclosing-instance edges.
+Inner bounds are hydrated in that enclosing scope, and shadowed captures keep distinct identities.
+Reading this layout does not construct the enclosing classifier's member record.
+
+Static nested classes capture no outer formals. A local or anonymous `InnerClasses` entry with no
+outer does not invent a member-class capture. Kotlin class metadata owns Kotlin formals; mapped
+physical Java classifiers retain invariant variance while semantic Kotlin views retain their
+declared variance. Missing headers, cyclic owners and unavailable bound scopes decline instead of
+becoming nongeneric declarations or guessed `Any` bounds.
+
 ## Selected alias references and receiver captures
 
 An alias constructor selected through an extension lookup facet publishes a constructor reference
@@ -16,19 +44,6 @@ arguments. Exact corpus regressions, outer-instance runtime and projection varia
 `bound_inner_alias_inference_e2e` and `projected_receiver_extension_e2e`; existing alias receiver and
 bound diagnostic ledgers remain intact. Anonymous public-result ABI approximation and complete
 closed-projection diagnostic parity remain separate follow-ups with preserved failing oracles.
-
-## Class application header ownership
-
-A classpath classifier's generic layout is read from declaration headers before its members are
-published. Its own formals precede those captured from authenticated enclosing-instance edges.
-Inner bounds are hydrated in that enclosing scope, and shadowed captures keep distinct identities.
-Reading this layout does not construct the enclosing classifier's member record.
-
-Static nested classes capture no outer formals. A local or anonymous `InnerClasses` entry with no
-outer does not invent a member-class capture. Kotlin class metadata owns Kotlin formals; mapped
-physical Java classifiers retain invariant variance while semantic Kotlin views retain their
-declared variance. Missing headers, cyclic owners and unavailable bound scopes decline instead of
-becoming nongeneric declarations or guessed `Any` bounds.
 
 **Status:** PoC / experiment. NOT a production Kotlin compiler.
 
@@ -16445,8 +16460,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   public`); `kotlin.Annotation` declares nothing and inherits `kotlin.Any`'s functions. A library
   modifier set is the visibility (none for Java package-private), the modality, `infix`, and
   `operator` together with `override`; an accessor lists its modality only when it is not `open`.
-  The members of other classifiers, and of an annotation class whose members carry annotations,
-  are refused for those queries. (`crates/krusty-plugin-host/tests/ksp.rs`,
+  A constant a Java annotation declares is a `JAVA_LIB` `final public` property with the
+  `JAVA_STATIC` modifier and neither getter nor setter, listed after the constructor and before
+  the nested classifiers and left out of `getAllProperties`; a reference array is
+  `Array<out E>`, a mapped class its Kotlin classifier. The members of other classifiers, of an
+  annotation class whose members carry annotations, and of one declaring a generic, raw generic
+  or collection-typed constant are refused for those queries. (`crates/krusty-plugin-host/tests/ksp.rs`,
   `library_annotation_members_are_what_ksp2_reports`.)
 - **KSP maps names between Kotlin and the JVM by kotlinc's class map.** `mapKotlinNameToJava` and
   `mapJavaNameToKotlin` answer what kotlinc's `JavaToKotlinClassMap` does for the classifier the
