@@ -17950,6 +17950,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   resulting exit on the setter body (`IrFile::record_accessor_body_exit`), and the accessor that
   appends the `return` marks it (`UnitBodyExit`). Test: `tests/setter_return_line_e2e.rs`.
 
+- **A getter's expression body returns at the expression's END line.** fir2ir builds the return of
+  `get() = expression` as it builds a function's, at the expression's end offset, so a getter whose
+  expression spans lines (`get() = grow(⏎ 2)`, `get() = "b" +⏎ v`) returns on its last line. Property
+  lowering records the getter's expression end as its accessor body exit, from the same rule a
+  function body uses (`implicit_return_end`), and the accessor that appends the `return` marks it.
+  A delegated getter keeps its value's start line. Test: `tests/getter_return_line_e2e.rs`.
+
 - **A bridge casts its delegated result to any different reference return type but `Object` or an
   array.** kotlinc's bridge materializes the result of the call it delegates to at the bridge's own
   return type, and `StackValue.coerce` writes a `checkcast` between two different reference types
