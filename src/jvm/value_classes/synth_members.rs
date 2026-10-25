@@ -398,6 +398,12 @@ pub(super) fn synth_value_members(
         ir.jvm_value_class_representation_order.insert(cfid, 0);
         realized.constructor_impls.insert((internal_name, 0), cfid);
         ir.jvm_value_class_constructor_impls.insert(cfid, 0);
+        // `constructor-impl` itself records no line, but its `$default` stub stands on the source
+        // constructor's own line, like the rebuilt `<init>` above.
+        let constructor_line = ir.classes[class_id as usize].primary_ctor_lines.decl_line;
+        if constructor_line != 0 {
+            ir.fn_sig_lines.insert(cfid, constructor_line);
+        }
         crate::jvm::method_parameters::record_function(ir, cfid, &[&fname], &[]);
         // Unlike a source value-class member converted to `member-impl`, this generated function's
         // carrier is its declared constructor parameter, not a former dispatch receiver. Keeping an

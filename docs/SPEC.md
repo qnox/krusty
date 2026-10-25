@@ -13331,6 +13331,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   enclosed by the `constructor-impl` realizing it, whose owner is the value class. Tests:
   `tests/value_class_constructor_bodies_e2e.rs`. Corpus: `inlineClasses/secondaryConstructorsWithBody`,
   `inlineClasses/defaultParameterValues/inlineClassPrimaryConstructorWithInlineClassValueGeneric`.
+- **A value class's `constructor-impl$default` maps the constructor's lines.** The stub that fills
+  a value-class constructor's omitted arguments is built like a function's `$default`: its entry and
+  the closing `constructor-impl` call stand on the constructor's own line (the primary's
+  `constructor` keyword or parameter-list `(`, the line its rebuilt `<init>` uses; a secondary's
+  `constructor` keyword), and each masked fill on its default expression's line. `constructor-impl`
+  itself has no `LineNumberTable`. krusty gave the primary's stub no table, and a secondary's lost
+  its defaults' lines because a constructor's default expressions were checked without attaching
+  their source lines. Tests: `tests/value_class_constructor_default_lines_e2e.rs`.
 - **An owner reads its explicit backing field, typed as the field.** Inside the class that
   declares `val a: Any field = V(1)`, a read whose receiver's static type is exactly that class is
   kotlinc's `IrGetField` of the field, not a call of `getA()`: `a.x` over a value class
