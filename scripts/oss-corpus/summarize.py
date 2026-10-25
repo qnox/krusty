@@ -34,6 +34,22 @@ def plugin_name(kind, value):
     return value
 
 
+# Jars on every Kotlin compile's plugin classpath: the scripting plugin the Kotlin Gradle plugin
+# always adds, and its dependencies. They say nothing about what a project chose.
+DEFAULT_COMPILER_JARS = re.compile(
+    r'^(kotlin-stdlib|annotations|kotlin-script-runtime|kotlin-reflect|trove4j|kotlin-scripting-.*)$')
+
+
+def chosen(kind, plugin):
+    """Whether a surveyed plugin is one the project applies, not Gradle core, a plugin class
+    without an id, or a default compiler classpath jar."""
+    if kind == 'gradle':
+        return not plugin.startswith('org.gradle.') and not plugin.rsplit('.', 1)[-1][:1].isupper()
+    if kind == 'compiler':
+        return not DEFAULT_COMPILER_JARS.match(plugin)
+    return True
+
+
 def read_plugins(directory, names):
     """{project: {kind: {plugin: modules using it}}} from each project's plugin survey."""
     surveys = {}
@@ -49,7 +65,9 @@ def read_plugins(directory, names):
                 fields = line.rstrip('\n').split('\t')
                 if len(fields) == 3:
                     kind, module, value = fields
-                    kinds[kind][plugin_name(kind, value)].add(module)
+                    plugin = plugin_name(kind, value)
+                    if chosen(kind, plugin):
+                        kinds[kind][plugin].add(module)
         surveys[name] = {kind: {p: len(m) for p, m in plugins.items()} for kind, plugins in kinds.items()}
     return surveys
 

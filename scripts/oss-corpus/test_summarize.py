@@ -59,6 +59,10 @@ class Summary(unittest.TestCase):
             os.makedirs(f'{work}/logs/x')
             with open(f'{work}/logs/x/zeta.plugins.tsv', 'w') as f:
                 f.write('gradle\t:a\torg.jetbrains.kotlin.jvm\ngradle\t:b\torg.jetbrains.kotlin.jvm\n'
+                        'gradle\t:a\torg.gradle.java\n'
+                        'gradle\t:a\torg.jetbrains.kotlin.gradle.plugin.BuildMetricsPlugin\n'
+                        'compiler\t:b\tkotlin-scripting-jvm-2.4.20.jar\n'
+                        'compiler\t:b\tkotlin-stdlib-2.4.20.jar\n'
                         'compiler\t:b\tkotlin-compose-compiler-plugin-embeddable-2.4.20.jar\n')
             with open(f'{work}/logs/Alpha.plugins.tsv', 'w') as f:
                 f.write('gradle\t:\torg.jetbrains.kotlin.jvm\n')

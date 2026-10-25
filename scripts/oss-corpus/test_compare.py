@@ -65,9 +65,11 @@ class FailedCompile(unittest.TestCase):
             checkout = os.path.join(work, 'src', 'p')
             write(f'{out}/kotlinc/a/build/classes/kotlin/main/A.class', b'A')
             write(f'{out}/kotlinc/b/build/classes/kotlin/main/B.class', b'B')
+            write(f'{out}/kotlinc/c/build/classes/kotlin/main/C.class', b'C')
             write(f'{work}/logs/p.kotlinc.compilations.tsv',
                   b':a:compileKotlin\ta/build/classes/kotlin/main\n'
-                  b':b:compileKotlin\tb/build/classes/kotlin/main\n')
+                  b':b:compileKotlin\tb/build/classes/kotlin/main\n'
+                  b':c:compileKotlin\tc/build/classes/kotlin/main\n')
             write(f'{work}/logs/p.krusty.log', (
                 '> Task :a:compileKotlinWithKrusty\n'
                 f'e: file://{checkout}/a/src/main/kotlin/A.kt:3:5 Unresolved reference: foo\n'
@@ -81,6 +83,7 @@ class FailedCompile(unittest.TestCase):
         self.assertEqual([(r['task'], r['built'], r['error']) for r in summary['rows']], [
             (':a:compileKotlin', False, 'e: a/src/main/kotlin/A.kt:3:5 Unresolved reference: foo'),
             (':b:compileKotlin', False, 'krusty wrote no class'),
+            (':c:compileKotlin', False, 'not run: a task it depends on failed'),
         ])
 
 

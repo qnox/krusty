@@ -41,14 +41,15 @@ TASK_HEADER = re.compile(r'^> Task (\S+)')
 
 
 def failures(log_path, checkout):
-    """The first error each compile task logged in the krusty build: {task path: message}. Gradle
-    heads a task's output with `> Task <path>`; the replacement task is the compile task's path
-    with `WithKrusty` appended. Paths inside the checkout are shown relative to it."""
-    found = {}
+    """The compile tasks the krusty build ran, and the first error each logged: ({task path},
+    {task path: message}). Gradle heads every task it runs, and its output, with `> Task <path>`;
+    the replacement task is the compile task's path with `WithKrusty` appended. Paths inside the
+    checkout are shown relative to it."""
+    ran, found = set(), {}
     try:
         lines = open(log_path, errors='replace').read().splitlines()
     except OSError:
-        return found
+        return ran, found
     task = None
     prefixes = ('file://' + checkout + '/', checkout + '/')
     for line in lines:
@@ -57,13 +58,14 @@ def failures(log_path, checkout):
             task = header.group(1).split(' ')[0]
             if task.endswith('WithKrusty'):
                 task = task[:-len('WithKrusty')]
+            ran.add(task)
             continue
         if task and task not in found and ERROR_LINE.search(line):
             message = line.strip()
             for prefix in prefixes:
                 message = message.replace(prefix, '')
             found[task] = message[:300]
-    return found
+    return ran, found
 
 
 def compilations(manifest):
@@ -106,7 +108,7 @@ def compare(work, name):
     kotlinc, krusty = os.path.join(work, 'out', name, 'kotlinc'), os.path.join(work, 'out', name, 'krusty')
     log = os.path.join(work, 'logs', name + '.krusty.log')
     found = fallbacks(log)
-    errors = failures(log, os.path.join(work, 'src', name))
+    ran, errors = failures(log, os.path.join(work, 'src', name))
     rows, empty = [], []
     for task, rel in compilations(os.path.join(work, 'logs', name + '.kotlinc.compilations.tsv')):
         reference = files(os.path.join(kotlinc, rel))
@@ -123,7 +125,9 @@ def compare(work, name):
                         if k.endswith('.class') and k in candidate and same_bytes(p, candidate[k]))
         error = None
         if not built and fallback is None:
-            error = errors.get(task, 'krusty wrote no class')
+            # With --continue, Gradle skips a compile whose dependency failed.
+            error = errors.get(task, 'krusty wrote no class' if task in ran
+                               else 'not run: a task it depends on failed')
         rows.append(dict(task=task, dir=rel, built=built, fallback=fallback, error=error, classes=classes,
                          identical=identical if built else 0,
                          only_kotlinc=len(set(reference) - set(candidate)) if built else None,

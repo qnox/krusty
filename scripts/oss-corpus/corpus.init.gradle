@@ -70,13 +70,22 @@ gradle.projectsEvaluated { g ->
             def id = ids.find { it.contains('.') } ?: ids.find() ?: plugin.class.name.replace('_Decorated', '')
             lines << "gradle\t${p.path}\t${id}"
         }
+        // kotlin-dsl compiles stay with kotlinc and are not compared; their plugins are Gradle's.
+        if (p.plugins.hasPlugin('org.gradle.kotlin.kotlin-dsl.base')) return
         p.tasks.names.findAll { it ==~ /compile.*Kotlin.*/ }.each { n ->
             try {
                 def t = p.tasks.named(n).get()
                 if (t.class.name.replace('_Decorated', '') != 'org.jetbrains.kotlin.gradle.tasks.KotlinCompile') return
                 t.pluginClasspath.files.each { f -> lines << "compiler\t${p.path}\t${f.name}" }
-                (t.compilerOptions.freeCompilerArgs.getOrElse([]).findAll { it.startsWith('-Xplugin') || it.startsWith('-P') }).each {
-                    lines << "compiler-arg\t${p.path}\t${it}"
+                // `-P plugin:<id>:<option>=<value>` takes its value as the next argument; record the plugin id.
+                def args = t.compilerOptions.freeCompilerArgs.getOrElse([])
+                args.eachWithIndex { a, i ->
+                    def option = a == '-P' && i + 1 < args.size() ? args[i + 1] : a.startsWith('-P') ? a.substring(2) : null
+                    if (option?.startsWith('plugin:')) {
+                        lines << "compiler-arg\t${p.path}\t-P plugin:${option.split(':')[1]}"
+                    } else if (a.startsWith('-Xplugin')) {
+                        lines << "compiler-arg\t${p.path}\t-Xplugin"
+                    }
                 }
             } catch (Throwable ignored) {}
         }
