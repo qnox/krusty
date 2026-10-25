@@ -1,7 +1,7 @@
 //! Invocation-owned records, observed only after the task has drained its child processes.
 //!
-//! Exclusive creation assigns a numeric slot before writing. Slots stay claimed until the
-//! completed run is consumed, so a later writer cannot acquire an earlier writer's ownership.
+//! Exclusive creation of an empty owner file assigns a numeric slot before writing. Slots stay
+//! claimed until the completed run is consumed, so a later writer cannot acquire an earlier writer's ownership.
 //! Numeric claim order preserves dependency/KSP order without depending on completion order.
 
 use std::io::{self, ErrorKind};
@@ -50,11 +50,16 @@ impl InvocationRecords {
             }
             let slot = self.directory.join(index.to_string());
             let files = std::fs::read_dir(&slot)?.collect::<io::Result<Vec<_>>>()?;
-            if files.len() != 1
-                || files[0].file_name() != "arguments"
-                || !files[0].file_type()?.is_file()
-            {
+            if files.len() != 2 {
                 return Err(self.invalid("incomplete invocation slot"));
+            }
+            for file in &files {
+                if !file.file_type()?.is_file()
+                    || (file.file_name() != "arguments"
+                        && (file.file_name() != "owner" || file.metadata()?.len() != 0))
+                {
+                    return Err(self.invalid("incomplete invocation slot"));
+                }
             }
             let path = slot.join("arguments");
             let arguments = std::fs::read(&path)?;
@@ -170,6 +175,7 @@ mod tests {
         records.create().unwrap();
         let first = records.path().join("0");
         std::fs::create_dir(&first).unwrap();
+        std::fs::write(first.join("owner"), b"").unwrap();
         success(run(
             &super::super::recorder(),
             &records,
@@ -201,10 +207,35 @@ mod tests {
             let slot = records.path().join(name);
             std::fs::create_dir(&slot).unwrap();
             std::fs::write(slot.join("arguments"), payload).unwrap();
+            std::fs::write(slot.join("owner"), b"").unwrap();
             assert_eq!(
                 records.read_snapshot().unwrap_err().kind(),
                 ErrorKind::InvalidData
             );
+        }
+    }
+
+    #[test]
+    fn a_complete_payload_requires_an_exclusive_owner_file() {
+        for owner in ["missing", "directory", "nonempty"] {
+            let temp = TempDir::new("invocation-record-owner");
+            let records = InvocationRecords::new(&temp.0);
+            records.create().unwrap();
+            let slot = records.path().join("0");
+            std::fs::create_dir(&slot).unwrap();
+            let payload = b"argument\n----\n";
+            std::fs::write(slot.join("arguments"), payload).unwrap();
+            match owner {
+                "missing" => {}
+                "directory" => std::fs::create_dir(slot.join("owner")).unwrap(),
+                "nonempty" => std::fs::write(slot.join("owner"), b"not a claim").unwrap(),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                records.read_snapshot().unwrap_err().kind(),
+                ErrorKind::InvalidData
+            );
+            assert_eq!(std::fs::read(slot.join("arguments")).unwrap(), payload);
         }
     }
 

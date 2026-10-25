@@ -181,6 +181,7 @@ fn a_malformed_record_reports_the_slot_bytes_and_completed_child_output() {
         r#"#!/bin/sh
 if [ "${1:-}" = compilation-fingerprint ]; then exit 1; fi
 mkdir "$KRUSTY_RECORD/0" || exit 9
+(set -C; : > "$KRUSTY_RECORD/0/owner") || exit 9
 printf 'broken\000' > "$KRUSTY_RECORD/0/arguments"
 printf 'producer stdout\n'
 printf 'producer stderr\n' >&2

@@ -866,7 +866,7 @@ pub fn complete_enabled(
         .with_serial_info_annotations(serial_info_annotations(ir, classifiers))
         .with_external_serializers(external)
         .with_runtime_serializers(runtime_serializers(classifiers))
-        .with_external_serializer_objects(declared_serializer_objects(ir, classifiers))
+        .with_external_serializer_objects(declared_serializer_objects(ir, classifiers, &parents))
         .with_external_serializable_parents(parents);
     plugins.host(module_name).complete(ir, &ctx);
 }
@@ -894,10 +894,12 @@ fn triggered(ir: &IrFile, plugins: &registry::NativePlugins, ctx: &PluginContext
 
 /// The provider-confirmed kind of every serializer class a property's `@Serializable(with = …)`
 /// names, on the property itself or on its declared type and type arguments, that this compilation
-/// does not declare (a declared one is classified from its own IR class).
+/// does not declare (a declared one is classified from its own IR class). An element a serializable
+/// superclass compiled apart from this file publishes names its serializer the same way.
 fn declared_serializer_objects(
     ir: &IrFile,
     classifiers: &dyn crate::types::ClassifierFactSource,
+    parents: &serialization::ExternalSerializableParents,
 ) -> crate::fx_hash::HashMap<TypeName, bool> {
     let serializable = crate::types::type_name(serialization::SERIALIZABLE_FQ);
     let declared = ir
@@ -920,8 +922,15 @@ fn declared_serializer_objects(
     for spelling in ir.prop_declared_spellings.values() {
         serialization::named_serializers(&spelling.ret, &mut type_annotations);
     }
+    let inherited = parents.values().flatten().flat_map(|record| {
+        record
+            .elements
+            .iter()
+            .filter_map(|element| element.serializer)
+    });
     property_annotations
         .chain(type_annotations)
+        .chain(inherited)
         .filter(|serializer| !declared.contains(serializer))
         .filter_map(|serializer| Some((serializer, classifiers.classifier_is_object(serializer)?)))
         .collect()

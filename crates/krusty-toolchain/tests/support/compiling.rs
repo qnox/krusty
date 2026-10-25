@@ -43,6 +43,8 @@ use crate::support::kotlin::{version, Compiler, Resolving};
 use crate::support::oracle::{scratch, script, Output};
 
 mod invocation_records;
+#[cfg(test)]
+mod recorder_lock;
 pub use invocation_records::InvocationRecords;
 
 pub const JDK: &str = "jdk";
@@ -61,9 +63,15 @@ const WRITE_INVOCATION: &str = r#"record_invocation() {
   record_index=0
   while :; do
     record_slot="$KRUSTY_RECORD/$record_index"
-    if mkdir "$record_slot" 2>/dev/null; then break; fi
-    if [ ! -d "$record_slot" ]; then
+    if ! mkdir "$record_slot" 2>/dev/null && [ ! -d "$record_slot" ]; then
       echo "recorder: cannot claim invocation slot $record_slot" >&2
+      exit 7
+    fi
+    # Directory creation is structural: some mkdir implementations also report a
+    # racing creator's directory as success. Only exclusive file creation owns it.
+    if (set -C; : > "$record_slot/owner") 2>/dev/null; then break; fi
+    if [ ! -f "$record_slot/owner" ]; then
+      printf '%s\n' "cannot claim invocation slot: $record_slot" >&2
       exit 7
     fi
     record_index=$((record_index + 1))
