@@ -13083,6 +13083,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   in a class taking `Nothing?` is `foo(Ljava/lang/Void;)V`, so the class declares a bridge named
   like the supertype's member that casts the argument and calls the override. Tests:
   `tests/value_class_bounded_parameter_bridge_e2e.rs`. Corpus: `inlineClasses/kt51254`.
+- **A bridge passes a supertype's own value-class parameter as its carrier.** `Store<T>.put(id:
+  Id, value: T)` mangles by its own `Id` parameter and is `put-<hash>(ILjava/lang/Object;)` on the
+  interface. A value class implementing `Store<Id>` declares the bridge on its box under that
+  mangled name, with the `Id` slot already its carrier: only the erased `T` argument is cast and
+  unboxed before the call to the member's static over the carrier, and the `Id` argument (an
+  `int`, or the `String` of a reference-backed `Name`, `Name?` included) is passed through as it
+  arrives. An ordinary class implementing the interface takes the same bridge. krusty kept the
+  value-class owner's bridge under the source name with the unerased `Id` parameter, and unboxed
+  every value-class argument the static member takes, so a reference carrier failed with a
+  `ClassCastException` and an `int` one never implemented the interface member. Tests:
+  `tests/value_class_carrier_parameter_bridge_e2e.rs`.
 - **A generic bridge over `X?` keeps null when `X?` is erased to its carrier.** `X?` over a
   non-null reference is `X`'s carrier holding the null, so an override `echo(t: Tag?): Tag?` of
   `Echo<T>.echo(t: T): T` is `echo-<hash>(String)String`. Its bridge `echo(Object)Object` unboxes
