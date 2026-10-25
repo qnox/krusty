@@ -5789,7 +5789,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   references, an unread literal against kotlinc's bytes; a callee with a `try` beside stacked
   operands, non-local jumps and a bound value-class reference run);
   `tests/inline_same_module_non_local_jumps_e2e.rs` (a `break` with and without a value, a non-local
-  return from a function and from a secondary constructor against kotlinc's bytes and run; a
+  return from a function and from a secondary constructor, and a value class's inline member, whose
+  `-impl` static takes the receiver first so the lambda's modifier fact moves one position with the
+  operands (`value_classes::impl_call_parameters::align`), against kotlinc's bytes and run; a
   `continue` the loop body runs on after runs, its bytes differing from kotlinc's by the threaded
   conditional exit the MethodInliner port writes against a library's body too).
 
