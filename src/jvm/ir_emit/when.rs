@@ -318,6 +318,19 @@ impl Emitter<'_> {
         } else {
             self.mark_kept_start_line(expression, code);
         }
+        if let [(Some(null_test), rhs), (None, lhs)] = branches {
+            if let Some(&line) = self.ir.whens.elvises.get(&expression) {
+                self.emit_folded_elvis(
+                    expression,
+                    line,
+                    (*null_test, *rhs, *lhs),
+                    Emission::new(is_stmt, result_ty, entry_height, end, None),
+                    code,
+                );
+                discard_joined_value(keeps_value, result_ty, code);
+                return;
+            }
+        }
         for (index, (cond, body)) in branches.iter().enumerate() {
             match cond {
                 Some(c) => {
@@ -330,25 +343,7 @@ impl Emitter<'_> {
                         code.set_stack(entry_height);
                         continue;
                     }
-                    if is_stmt {
-                        // Statement emission handles both physical-void operations and explicit
-                        // `Unit.INSTANCE`; semantic `Ty::Unit` alone cannot distinguish them.
-                        self.emit(*body, code);
-                    } else {
-                        self.emit_value(*body, code);
-                        self.adapt_physical_operand_for(
-                            *body,
-                            self.value_ty(*body),
-                            result_ty,
-                            code,
-                        );
-                    }
-                    let body_diverges = if is_stmt {
-                        self.discarding_diverges(*body)
-                    } else {
-                        self.diverges(*body)
-                    };
-                    if !body_diverges {
+                    if !self.emit_when_arm(*body, is_stmt, result_ty, code) {
                         // Fall through only across empty ELSE branches. An empty conditional branch
                         // still evaluates its condition, which the selected arm must skip.
                         let nothing_follows = branches[index + 1..]
@@ -370,18 +365,8 @@ impl Emitter<'_> {
                     code.set_stack(entry_height);
                 }
                 None => {
-                    if is_stmt {
-                        self.emit(*body, code);
-                    } else {
-                        self.emit_value(*body, code);
-                        self.adapt_physical_operand_for(
-                            *body,
-                            self.value_ty(*body),
-                            result_ty,
-                            code,
-                        );
-                    }
                     // The else is last — it falls through to `end` (no goto needed).
+                    let _ = self.emit_when_arm(*body, is_stmt, result_ty, code);
                 }
             }
         }
@@ -396,5 +381,64 @@ impl Emitter<'_> {
         self.bind(end, code);
         land_joined_value(is_stmt, entry_height, result_ty, code);
         discard_joined_value(keeps_value, result_ty, code);
+    }
+
+    /// Emit one arm at the `when`'s join, answering whether it diverges. Statement emission handles
+    /// both physical-void operations and explicit `Unit.INSTANCE`; semantic `Ty::Unit` alone cannot
+    /// distinguish them.
+    fn emit_when_arm(
+        &mut self,
+        body: u32,
+        is_stmt: bool,
+        result_ty: Ty,
+        code: &mut CodeBuilder,
+    ) -> bool {
+        if is_stmt {
+            self.emit(body, code);
+            self.discarding_diverges(body)
+        } else {
+            self.emit_value(body, code);
+            self.adapt_physical_operand_for(body, self.value_ty(body), result_ty, code);
+            self.diverges(body)
+        }
+    }
+
+    /// An elvis as kotlinc's `JvmSafeCallChainFoldingLowering.foldElvis` rebuilds it: the left
+    /// value's branch first, `when { tmp != null -> tmp; else -> rhs }`. Its null test jumps to the
+    /// right side and the left value falls through — `ifnull R; <lhs>; goto E; R: <rhs>; E:`.
+    /// Where the left value needs no conversion, `NegatedJumpsMethodTransformer` turns the jump over
+    /// the `goto` into `ifnonnull E`, the layout the written null-first order would give.
+    ///
+    /// The right side's branch is the fold's `irTrue` condition at the elvis's own position, which
+    /// `visitConst` marks on a `nop` as every Boolean constant: the right side's line therefore
+    /// starts after the `pop` the temporary's elimination puts at the null target, never on it.
+    fn emit_folded_elvis(
+        &mut self,
+        expression: u32,
+        line: u32,
+        (null_test, rhs, lhs): (u32, u32, u32),
+        emission: Emission,
+        code: &mut CodeBuilder,
+    ) {
+        let null_path = code.new_label();
+        // A null test folded to a constant `true` jumps unconditionally, and the left value is dead.
+        let always_null = self.emit_when_condition(null_test, null_path, true, code);
+        if !always_null && !self.emit_when_arm(lhs, emission.is_stmt, emission.result_ty, code) {
+            code.goto(emission.end);
+        }
+        self.bind(null_path, code);
+        code.set_stack(emission.entry_height);
+        if line != 0 {
+            self.mark_expression_line(expression, line, code);
+            code.nop();
+        }
+        let _ = self.emit_when_arm(rhs, emission.is_stmt, emission.result_ty, code);
+        self.bind(emission.end, code);
+        land_joined_value(
+            emission.is_stmt,
+            emission.entry_height,
+            emission.result_ty,
+            code,
+        );
     }
 }

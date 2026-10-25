@@ -6,7 +6,7 @@ use super::classpath_annotation_classes::{
     is_java_annotation_element, java_annotation_element_type,
 };
 use super::*;
-use crate::jvm::classreader::{ClassInfo, FieldSig};
+use crate::jvm::classreader::{ClassInfo, FieldSig, MethodAnnotations};
 use crate::jvm::jvm_class_map;
 use crate::libraries::{
     DeclaredConstructor, DeclaredMembers, DeclaredParameter, DeclaredProperty, ParamList, TypeKind,
@@ -45,7 +45,15 @@ impl JvmLibraries {
             .filter(|field| field.access & ACC_SYNTHETIC == 0)
             .map(|field| self.java_constant(field))
             .collect::<Option<Vec<_>>>()?;
-        java_annotation_members(classifier, &class, constants)
+        let annotated_element = class
+            .methods
+            .iter()
+            .any(|method| is_java_annotation_element(method) && !method.annotations.is_empty());
+        let element_annotations = match annotated_element {
+            true => self.cp.class_method_annotations(classifier)?,
+            false => Vec::new(),
+        };
+        java_annotation_members(classifier, &class, constants, &element_annotations)
     }
 
     /// The property Kotlin reads off a constant a Java interface declares, which is public, static
@@ -63,6 +71,7 @@ impl JvmLibraries {
             visibility: Visibility::Public,
             modality: KotlinModality::Final,
             from_java_method: false,
+            getter_annotations: Vec::new(),
             annotated: field.annotated || field.nullability.is_some(),
         })
     }
@@ -139,6 +148,7 @@ fn kotlin_annotation_members(classifier: TypeName, class: &ClassInfo) -> Option<
                     false => KotlinModality::Open,
                 },
                 from_java_method: false,
+                getter_annotations: Vec::new(),
                 annotated,
             })
         })
@@ -159,13 +169,15 @@ fn kotlin_annotation_members(classifier: TypeName, class: &ClassInfo) -> Option<
     })
 }
 
-/// A Java annotation class's members: a property Kotlin reads off each element, the constructor
-/// Kotlin reads off them, whose array `value` is a `vararg`, its constants, and its nested
-/// classifiers in `InnerClasses` order.
+/// A Java annotation class's members: a property Kotlin reads off each element, whose getter
+/// states what the element's method states (`element_annotations`), the constructor Kotlin reads
+/// off them, whose array `value` is a `vararg`, its constants, and its nested classifiers in
+/// `InnerClasses` order.
 fn java_annotation_members(
     classifier: TypeName,
     class: &ClassInfo,
     constants: Vec<DeclaredProperty>,
+    element_annotations: &[MethodAnnotations],
 ) -> Option<DeclaredMembers> {
     let mut properties = Vec::new();
     let mut parameters = Vec::new();
@@ -181,6 +193,17 @@ fn java_annotation_members(
             is_vararg,
             method.has_annotation_default,
         )?);
+        let getter_annotations = element_annotations
+            .iter()
+            .find(|read| read.name == method.name && read.descriptor == method.descriptor)
+            .map_or_else(Vec::new, |read| read.annotations.clone());
+        // Kotlin reads a Java annotation it maps as its Kotlin counterpart, and a nullability
+        // qualifier into the type; neither is described yet.
+        let annotated = method.return_nullability.is_some()
+            || getter_annotations.len() < method.annotations.len()
+            || getter_annotations
+                .iter()
+                .any(|annotation| kotlin_maps_java_annotation(annotation.annotation));
         properties.push(DeclaredProperty {
             name: method.name.clone(),
             ty,
@@ -188,7 +211,8 @@ fn java_annotation_members(
             visibility: Visibility::Public,
             modality: KotlinModality::Final,
             from_java_method: true,
-            annotated: !method.annotations.is_empty(),
+            getter_annotations,
+            annotated,
         });
     }
     let nested = class
@@ -216,6 +240,15 @@ fn java_annotation_members(
         static_properties: constants,
         nested,
     })
+}
+
+/// Whether Kotlin reads the Java annotation class `annotation` as a Kotlin one: `Deprecated` and
+/// the meta-annotations.
+fn kotlin_maps_java_annotation(annotation: TypeName) -> bool {
+    annotation == crate::types::type_name("java/lang/Deprecated")
+        || annotation
+            .parent()
+            .is_some_and(|package| package.matches("java/lang/annotation"))
 }
 
 /// The parameters of a constructor's metadata parameter list, a `vararg` one as its element.

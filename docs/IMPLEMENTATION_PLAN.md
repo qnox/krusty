@@ -6,6 +6,10 @@ owners keep their existing result materialization. Full classfile/runtime contro
 generic returns and explicit/local materialization; existing inline, suspension and value-class
 guards constrain the adjacent representation boundaries.
 
+Serialization handoff validation now provisions the pinned runtime and checks nullable value-class
+deserialization parameters against the established plugin contract. Exact common-IR assertions,
+complete generated-owner class bytes and reference JSON behavior guard the same constructor.
+
 Phased, each phase ends in a **green `cargo test`** and a runnable artifact. The pipeline is built
 front-to-back so the streaming/arena shape is real from the start, then widened.
 
@@ -5989,6 +5993,12 @@ direct source construction, inheritance, secondary/default/vararg/generic constr
 accessor/member dispatch remain required follow-ups. The first slice explicitly declines identity
 collisions before backend emission. It does not close #2621 or change any outcome baseline.
 
+## Enclosing formal field signatures
+
+JVM field and property-accessor signature formatting consumes retained enclosing-method formals
+through the declaration type-use formatter. Own classifier formals, nullable/bounded captures and
+concrete declarations share that boundary; physical field descriptors retain their existing erasure.
+
 ## Lossless JVM signature syntax
 
 The signature reader has an application-construction boundary that retains all written class
@@ -6010,7 +6020,21 @@ reference controls cover source dependent bounds and independently bounded depen
 with width, Object, exact-wrapper and runtime controls. The dependency inner-constructor frontend
 prerequisite landed in #2593; its declaration normalization remains separate from this representation fix (#2590).
 
+## Direct projected input diagnostics
+
+Direct projected-input diagnostics share input specialization with ordinary selection and retain
+the source argument map, receiver-only constraints and declaration display. Exact ledger controls
+cover out/star receivers, nullability, named/context arguments and explicit receiver precedence.
+Captured vararg admission (#2648) and nested captured-type identity diagnostics (#2649) remain
+separate work; their complete failing controls are preserved.
+
 ## Receiver-bound constructor constraints
+
+Inner-alias conformance recovery shares constructor-reference publication across direct and
+already-selected alias declarations. The constructor selection responsibility moves out of the
+resolver facade; selected receiver provenance and declaration ABI survive that boundary. Demanded
+source signatures now retain receiver captures before contextual result constraints and reuse the
+ordinary call solver and output-slot specialization. Shared conformance expectations stay unchanged.
 
 Normalize inner constructors with complete own-plus-captured instance results, preserving independent
 callable formals while removing captured formals from the inference variables. One receiver context
@@ -6025,8 +6049,29 @@ out of the resolver facade into its owning module. Shared classifier-bound check
 the full enclosing application for alias targets instead of validating own bounds in isolation.
 JVM boxing-cast byte parity uses the declared-slot representation rule above (#2590); the bound
 slice independently proves complete ABI signatures, reference runtime and exact diagnostics.
-Inferred return types of receiver-bound alias calls remain a separate signature-lookup follow-up
-in #2592; declared alias calls and direct inferred calls are covered here.
+The #2592 alias slice normalizes the selected lexical/file/import alias into the ordinary receiver
+candidate family. Alias-owned formals control written arity and inference; the selected physical
+constructor and enclosing receiver remain declaration-owned. Signature publication consumes the
+same named-argument substitution as body checking, retaining the alias expansion without a second
+lookup. Rigid underlying constructor formals retain scoped diagnostic owners from declaration
+substitutions. Source/dependency oracles cover full ABI, receiver and target bounds, scope/member
+priority, reordered and unused alias formals, named arguments, and independent constructor formals.
+Alias/value-class runtime controls also retain the target declaration's generic versus concrete
+constructor carriers for source, own-produced and reference-produced dependencies.
+
+Constructor argument expectations now live in a declaration-owned resolver module. Bound admission
+uses the existing complete constructor-bound checker over the actual mapped declarations before
+supplying nested result context; independently inferred arguments remain intact. Failed receiver
+selection completes untyped lambda inputs from the retained candidate and source argument mapping,
+then rechecks only affected bodies without the rejected expected result. Normal checking and
+recovery share the function input layout, including contexts and anonymous receiver slots. Exact
+source/dependency diagnostics and admitted-context controls cover #2587. Explicit invalid-bound
+lambda diagnostic ordering remains a separate follow-up in #2629.
+
+Late extension admission now uses strict receiver assignability or the existing satisfiable
+postponed-frame trial. The common operation also serves unbound constructor-reference receivers;
+selection cannot commit its trial bindings. This repairs the two existing builder-inference
+regressions introduced by the alias receiver guard while retaining concrete receiver refusal.
 
 Original parameter declarations now survive selected callable/member conversion independently of
 the specialized applicability signature. Constructor publication reads that same declaration shape;
@@ -6040,4 +6085,5 @@ JVM class-initializer entry establishes its implicit callable frame before emitt
 Their nested lexical ranges close before each static field store, which restores its source line
 after an inline value resets the caller line. Ordinary method local-table ordering is preserved.
 Full-class/runtime controls cover consecutive initializers, object and companion storage with an
-`init` block, and ordinary callable bodies. Restoring the batched bytecode oracle remains #2637.
+`init` block, and ordinary callable bodies. The batched bytecode oracle now isolates fixture packages
+and fails compilation errors (#2639).

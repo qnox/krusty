@@ -25,7 +25,7 @@ pub(super) struct LocalMethodDependency {
 
 /// Result of joining an `override` method to its own declaration for override matching.
 pub(super) enum OverrideImplementation {
-    Bound(crate::libraries::FunctionInfo),
+    Bound(Box<crate::libraries::FunctionInfo>),
     Absent,
     /// This phase cannot bind the parser method to a stable declaration.
     Unbound,
@@ -343,10 +343,9 @@ impl Checker<'_> {
             return declared
                 .into_iter()
                 .find(|candidate| candidate.source_member == Some(source_member))
-                .map_or(
-                    OverrideImplementation::Absent,
-                    OverrideImplementation::Bound,
-                );
+                .map_or(OverrideImplementation::Absent, |candidate| {
+                    OverrideImplementation::Bound(Box::new(candidate))
+                });
         }
         // A visit whose active binding does not own this parser method cannot bind it; the
         // Pass-2 visit of the declaring unit owns that binding and this diagnostic.
@@ -357,7 +356,7 @@ impl Checker<'_> {
             .into_iter()
             .find(|candidate| candidate.stable_declaration == Some(declaration))
         {
-            return OverrideImplementation::Bound(found);
+            return OverrideImplementation::Bound(Box::new(found));
         }
         let header = self.body_local_method_candidate(
             class_scope,
@@ -372,10 +371,10 @@ impl Checker<'_> {
             self.module
                 .finalized_function(declaration, *owner, owner_is_interface)
         }) {
-            return OverrideImplementation::Bound(finalized);
+            return OverrideImplementation::Bound(Box::new(finalized));
         }
         header.map_or(OverrideImplementation::Absent, |(_, candidate)| {
-            OverrideImplementation::Bound(candidate)
+            OverrideImplementation::Bound(Box::new(candidate))
         })
     }
 
