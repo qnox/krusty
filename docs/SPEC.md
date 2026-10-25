@@ -6741,6 +6741,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   so `f(when\n(x) { … })` and `f(object : Base\n(1) { … })` parse as one expression. Tests:
   `parenthesized_line_breaks_e2e`.
 
+- **A `when` condition is newline-insensitive, and a line break may follow a range or type-test
+  operator.** kotlinc's `parseWhenCondition` disables newlines for each condition, so `x` then
+  `!in 1..3 ->` on the next line is one condition, as is `!is` then `String ->`. Outside a `when`
+  condition a line break still may not precede a binary operator, but it may follow one:
+  `rangeExpression` and `infixFunctionCall` allow `NL*` after `..`, `..<`, `until` and `downTo`
+  (`x in 1..` then `3`, `for (i in 1..` then `3)`), and `isOperator NL* type` lets `x !is` leave its
+  type on the next line. Plain line breaks only; an explicit `;` still ends the operand. Test:
+  `split_membership_conditions_e2e`.
+
 - **`$` before a backtick interpolates only a complete escaped identifier.** A backtick, one or more
   characters that are neither a backtick nor a line break, then a closing backtick; any other `$`
   is literal template text (`"$`"`). Test:
@@ -19378,6 +19387,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/unsigned_range_contains_e2e.rs` (full-byte against kotlinc). The common backend realizes the checked membership for every target, as
   it realizes counted loops. Tests: `range_literal_membership_e2e` (class bytes and run against
   kotlinc), box `ranges/contains/comparisonWithRangeBoundEliminated.kt`.
+
+- **A constant range bound kotlinc derives keeps the written constant's line.** `convertIrConst`
+  (the exclusive bound of `RangeToHandler`/`DownToHandler`, used by membership and counted loops)
+  and `castIfNecessary` (a constant converted to the comparison type) build the new constant with
+  `IrConstImpl(startOffset, endOffset, …)` of the written one. Codegen marks a constant's line where
+  it is loaded, so `x !in` on one line and `1..3` on the next marks the bound's line before
+  `iconst_4`, then the `in` line again at the comparison's jump; `for (i in 1..` then `3)` marks the
+  bound's line before the loop test's `iconst_4`. Every other node the lowering generates keeps
+  the construct's line. Test: `split_membership_conditions_e2e` (class bytes and run against
+  kotlinc).
 
 - **Membership in a `Comparable` range literal is kotlinc's `ComparableRangeToHandler`.** When the
   range is built by the stdlib's `operator fun <T : Comparable<T>> T.rangeTo(that: T): ClosedRange<T>`

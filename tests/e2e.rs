@@ -1702,6 +1702,8 @@ mod source_map_annotation_parts_e2e;
 mod special_collection_bridge_e2e;
 #[path = "splice_nullable_value_class_lambda_e2e.rs"]
 mod splice_nullable_value_class_lambda_e2e;
+#[path = "split_membership_conditions_e2e.rs"]
+mod split_membership_conditions_e2e;
 #[path = "static_access_type_arguments_e2e.rs"]
 mod static_access_type_arguments_e2e;
 #[path = "string_when_switch_e2e.rs"]
