@@ -16436,6 +16436,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   query only, and the build falls back to KSP2.
   (`crates/krusty-plugin-host/tests/ksp.rs`, `class_headers_are_what_ksp2_reports`;
   `ksp_round` unit test `a_header_has_its_written_modifiers_type_parameters_and_supertypes`.)
+- **A KSP classifier's star-projected type has a star per type parameter.**
+  `asStarProjectedType()` on a source or library classifier applies it to `*` for each of its type
+  parameters (`Map<*, *>`, `headers.Base<*, *>`), then, while the classifier is `inner`, for each
+  of its enclosing class's (`Holder<A>.Inner<B>` is `Inner<*, *>`, an inner `Bare` of it `Bare<*>`),
+  and to nothing when there are none. Each star is `SYNTHETIC`, with no type and no parent, and
+  renders as `STAR null`. The type is not nullable, its text is the simple name with the stars
+  (`Entry<*, *>`), and it equals
+  the same type a source declaration names (`Middle<*>` written in a supertype), with the same
+  hash, as KSP2 2.3.12 reports.
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `class_headers_are_what_ksp2_reports` and
+  `library_classes_are_what_ksp2_reports`.)
 - **KSP members are listed as KSP2 lists them.** A file lists its functions and properties in
   source order, then its classifiers and type aliases in source order. A class lists its
   constructor properties, then its properties and functions interleaved in source order, then a
@@ -16532,9 +16543,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   resolves to that type alias. An annotation argument naming an entry of a library enum is that
   entry: an `ENUM_ENTRY` declaration of the enum class with its name, qualified name, parent and
   origin. A Java class whose generic signature cannot be read has its other facts but answers
-  neither its type parameters nor its supertypes, rather than claiming it has none. An inner
-  class, a Java package-private class, and a supertype written as a typealias with arguments are refused
-  for that query only.
+  neither its type parameters nor its supertypes, rather than claiming it has none. A Kotlin inner
+  class adds `inner` to its modifiers (`final inner public`). A Java inner class, a Java
+  package-private class, and a supertype written as a typealias with arguments are refused for
+  that query only.
   The fixture's dependency (`dependency/Dependency.kt`) is built by krusty for the tests and by
   kotlinc only to record KSP2's transcript.
   (`crates/krusty-plugin-host/tests/ksp.rs`, `library_classes_are_what_ksp2_reports`;
