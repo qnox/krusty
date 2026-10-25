@@ -27,10 +27,10 @@ impl ProductionSignatureSemantics<'_> {
         bound: Option<crate::fir::DeclarationId>,
     ) -> Option<crate::symbol_resolver::ScopedClassifier> {
         match bound {
-            Some(declaration) => Some(crate::symbol_resolver::ScopedClassifier {
-                classifier: self.bound_classifier_identity(declaration),
-                alias: None,
-            }),
+            Some(declaration) => Some(crate::symbol_resolver::ScopedClassifier::new(
+                self.bound_classifier_identity(declaration),
+                None,
+            )),
             None => self.qualified_scoped_classifier_binding(scope, spelling).0,
         }
     }
@@ -751,10 +751,7 @@ impl ProductionSignatureSemantics<'_> {
                 current = candidate;
             }
             Some((
-                Some(crate::symbol_resolver::ScopedClassifier {
-                    classifier: current,
-                    alias: None,
-                }),
+                Some(crate::symbol_resolver::ScopedClassifier::new(current, None)),
                 None,
             ))
         })

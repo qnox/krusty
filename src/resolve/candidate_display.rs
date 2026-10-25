@@ -32,6 +32,17 @@ impl Checker<'_> {
         function: &crate::libraries::FunctionInfo,
     ) -> String {
         match function.bound_inner_constructor {
+            Some(_) if function.constructor_alias.is_some() => {
+                let signature = &function
+                    .constructor_alias
+                    .as_deref()
+                    .expect("an alias constructor retains its declaration")
+                    .signature;
+                Self::generic_constructor_display(
+                    signature,
+                    &function.member_with_return(signature.ret),
+                )
+            }
             Some(constructor) => Self::bound_inner_constructor_display(constructor, function),
             None => Self::generic_callable_display(name, function),
         }

@@ -6016,6 +6016,12 @@ prerequisite landed in #2593; its declaration normalization remains separate fro
 
 ## Receiver-bound constructor constraints
 
+Inner-alias conformance recovery shares constructor-reference publication across direct and
+already-selected alias declarations. The constructor selection responsibility moves out of the
+resolver facade; selected receiver provenance and declaration ABI survive that boundary. Demanded
+source signatures now retain receiver captures before contextual result constraints and reuse the
+ordinary call solver and output-slot specialization. Shared conformance expectations stay unchanged.
+
 Normalize inner constructors with complete own-plus-captured instance results, preserving independent
 callable formals while removing captured formals from the inference variables. One receiver context
 re-keys normalized enclosing arguments onto the inner declaration's captured identities, including
@@ -6029,8 +6035,20 @@ out of the resolver facade into its owning module. Shared classifier-bound check
 the full enclosing application for alias targets instead of validating own bounds in isolation.
 JVM boxing-cast byte parity uses the declared-slot representation rule above (#2590); the bound
 slice independently proves complete ABI signatures, reference runtime and exact diagnostics.
-Inferred return types of receiver-bound alias calls remain a separate signature-lookup follow-up
-in #2592; declared alias calls and direct inferred calls are covered here.
+The #2592 alias slice normalizes the selected lexical/file/import alias into the ordinary receiver
+candidate family. Alias-owned formals control written arity and inference; the selected physical
+constructor and enclosing receiver remain declaration-owned. Signature publication consumes the
+same named-argument substitution as body checking, retaining the alias expansion without a second
+lookup. Rigid underlying constructor formals retain scoped diagnostic owners from declaration
+substitutions. Source/dependency oracles cover full ABI, receiver and target bounds, scope/member
+priority, reordered and unused alias formals, named arguments, and independent constructor formals.
+Alias/value-class runtime controls also retain the target declaration's generic versus concrete
+constructor carriers for source, own-produced and reference-produced dependencies.
+
+Late extension admission now uses strict receiver assignability or the existing satisfiable
+postponed-frame trial. The common operation also serves unbound constructor-reference receivers;
+selection cannot commit its trial bindings. This repairs the two existing builder-inference
+regressions introduced by the alias receiver guard while retaining concrete receiver refusal.
 
 Original parameter declarations now survive selected callable/member conversion independently of
 the specialized applicability signature. Constructor publication reads that same declaration shape;
@@ -6044,4 +6062,5 @@ JVM class-initializer entry establishes its implicit callable frame before emitt
 Their nested lexical ranges close before each static field store, which restores its source line
 after an inline value resets the caller line. Ordinary method local-table ordering is preserved.
 Full-class/runtime controls cover consecutive initializers, object and companion storage with an
-`init` block, and ordinary callable bodies. Restoring the batched bytecode oracle remains #2637.
+`init` block, and ordinary callable bodies. The batched bytecode oracle now isolates fixture packages
+and fails compilation errors (#2639).

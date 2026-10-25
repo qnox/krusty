@@ -30,6 +30,12 @@ pub(super) fn demanded_source_result(
                 .zip(explicit_type_arguments.iter().copied()),
         );
     }
+    // A projected receiver supplies a capture, rather than the readable/writeable face of that
+    // capture. Retain it before applying the expected result, as checked-call inference does.
+    if let (Some(declared), Some(actual)) = (callable.source_receiver, receiver) {
+        crate::symbol_resolver::unify_ty_from_symbols(source, declared, actual, &mut bindings);
+    }
+    let receiver_bindings = bindings.clone();
     let expected_bindings =
         callable
             .generic_sig
@@ -54,20 +60,12 @@ pub(super) fn demanded_source_result(
             |actual, bound| admits(source, actual, bound),
         );
     }
-    if let (Some(declared), Some(actual)) = (callable.source_receiver, receiver) {
-        crate::symbol_resolver::unify_inferred_ty_with_source(
-            source,
-            declared,
-            actual,
-            &mut bindings,
-        );
-    }
     if let Some(generic) = callable.generic_sig.as_ref() {
         let inferred =
             crate::symbol_resolver::infer_generic_call_constraints_with_receiver_from_symbols(
                 source,
                 generic,
-                None,
+                receiver,
                 argument_constraints(source, callable, generic, arguments, argument_kinds),
                 callable.vararg_index,
             );
@@ -76,7 +74,7 @@ pub(super) fn demanded_source_result(
             source,
             generic,
             explicit_type_arguments,
-            &GSigBinds::default(),
+            &receiver_bindings,
             &mut bindings,
             inferred.bindings,
         );
@@ -92,7 +90,14 @@ pub(super) fn demanded_source_result(
             explicit_type_arguments,
         );
     }
-    crate::symbol_resolver::ty_subst_keep_unbound(signature.result.get(), &bindings)
+    crate::symbol_resolver::instantiate_slot(
+        source,
+        callable.generic_sig.as_ref(),
+        signature.result.get(),
+        &bindings,
+        crate::symbol_resolver::TypePosition::Out,
+        crate::symbol_resolver::UnboundSpecialization::Preserve,
+    )
 }
 
 fn admits(source: &dyn SymbolSource, actual: Ty, bound: Ty) -> bool {
