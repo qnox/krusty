@@ -182,13 +182,22 @@ impl<'a> RegenerationSite<'a> {
         } else {
             name.clone()
         };
+        // A copy is public ABI when the code it is written in is (`isInPublicInlineScope`): a
+        // non-private inline function, or a lambda class that function's ABI publishes.
+        let public_inline = (ir.inline_fns.contains(&function)
+            && !ir.method_visibility(function).is_private())
+            || ir.classes.iter().any(|class| {
+                class
+                    .lambda
+                    .as_ref()
+                    .is_some_and(|lambda| lambda.invoke == function && lambda.public_inline_abi)
+            });
         Some(RegenerationSite {
             method,
             descriptor,
             function: numbered_under,
             special: false,
-            public_inline: ir.inline_fns.contains(&function)
-                && !ir.method_visibility(function).is_private(),
+            public_inline,
             owner,
             symbols: env.signature_symbols,
         })

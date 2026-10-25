@@ -206,3 +206,91 @@ fn a_reified_lambda_nested_in_a_regenerated_lambda_is_regenerated_too() {
         "OK"
     );
 }
+
+/// Asserts the module's class inventory matches kotlinc's and that each class in `identical` has
+/// kotlinc's exact bytes.
+fn assert_inventory_and_bytes(sources: &[(&str, &str)], identical: &[&str]) {
+    let classes = common::classes_against_kotlinc_module(sources);
+    assert_eq!(
+        classes.krusty.keys().collect::<Vec<_>>(),
+        classes.reference.keys().collect::<Vec<_>>()
+    );
+    for name in identical {
+        assert!(
+            classes.krusty.get(*name) == classes.reference.get(*name),
+            "{name} differs from kotlinc's bytes"
+        );
+    }
+}
+
+/// A lambda a callee declares inlines another reified callee, whose own lambda its method
+/// regenerates. A call site that regenerates the outer lambda reads that helper copy too, so the
+/// helper is kept among the classes compiled with the callee, even when another file declares it.
+const REIFIED_HELPER_DECLARATION: &str = r#"inline fun <reified T> inner(): (Any) -> Boolean = { it is T }
+
+inline fun <reified T> outer(): (Any) -> Boolean = { inner<T>()(it) }
+"#;
+
+const REIFIED_HELPER_CALLER: &str = r#"fun box(): String {
+    val matches = outer<String>()
+    return if (matches("s") && !matches(1)) "OK" else "fail"
+}
+"#;
+
+#[test]
+fn a_reified_helper_regenerated_in_a_declared_lambda_is_read_by_the_call_site() {
+    assert_inventory_and_bytes(
+        &[
+            ("Declaration.kt", REIFIED_HELPER_DECLARATION),
+            ("Caller.kt", REIFIED_HELPER_CALLER),
+        ],
+        &[
+            "CallerKt",
+            "CallerKt$box$$inlined$outer$1$1",
+            "DeclarationKt$outer$1$invoke$$inlined$inner$1",
+        ],
+    );
+    common::expect_box_ok_files_with_stdlib(
+        &[
+            ("Declaration.kt", REIFIED_HELPER_DECLARATION),
+            ("Caller.kt", REIFIED_HELPER_CALLER),
+        ],
+        "Caller",
+    );
+}
+
+/// A copy whose nested copy still needs an enclosing reified parameter needs it too: the
+/// forwarding callee's copy is marked where it is loaded, and a call site specializes it again
+/// instead of reusing it.
+const FORWARDED_NESTED_DECLARATION: &str = r#"inline fun <reified T> make(): () -> (Any) -> Boolean = { { value -> value is T } }
+
+inline fun <reified U> again() = make<U>()
+"#;
+
+const FORWARDED_NESTED_CALLER: &str = r#"fun box(): String {
+    val matches = again<String>()()
+    return if (matches("s") && !matches(1)) "OK" else "fail"
+}
+"#;
+
+#[test]
+fn a_copy_whose_nested_copy_stays_reified_is_specialized_at_the_call_site() {
+    assert_inventory_and_bytes(
+        &[
+            ("Declaration.kt", FORWARDED_NESTED_DECLARATION),
+            ("Caller.kt", FORWARDED_NESTED_CALLER),
+        ],
+        &[
+            "CallerKt",
+            "DeclarationKt",
+            "DeclarationKt$again$$inlined$make$1$1",
+        ],
+    );
+    common::expect_box_ok_files_with_stdlib(
+        &[
+            ("Declaration.kt", FORWARDED_NESTED_DECLARATION),
+            ("Caller.kt", FORWARDED_NESTED_CALLER),
+        ],
+        "Caller",
+    );
+}

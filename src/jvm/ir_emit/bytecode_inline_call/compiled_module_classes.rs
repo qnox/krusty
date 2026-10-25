@@ -82,12 +82,17 @@ pub(super) fn compile_declared_classes(
             meta.as_ref(),
             &mut extra,
         );
+        // The objects the class's methods regenerated for their own inline calls are read by a
+        // call site that regenerates the class in turn, as the callee's own are.
         if foreign {
             // The declaring file writes the class and everything its emission produced.
-            env.run.machine_classes.borrow_mut().truncate(machines);
+            let regenerated = env.run.machine_classes.borrow_mut().split_off(machines);
+            classes.read_only(regenerated);
             env.run.lambda_classes.borrow_mut().truncate(plans);
             classes.files.borrow_mut().insert(fq_name, Rc::new(bytes));
         } else {
+            let regenerated = env.run.machine_classes.borrow()[machines..].to_vec();
+            classes.read_only(regenerated);
             classes
                 .files
                 .borrow_mut()

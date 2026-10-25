@@ -424,6 +424,7 @@ pub(crate) fn regenerate(
                     renamed: Vec::new(),
                     classes: Vec::new(),
                     sam_wrappers: Vec::new(),
+                    reified_parameters_remain: false,
                 };
                 let code = lambda_inlining::inline_into(
                     &code,
@@ -438,6 +439,7 @@ pub(crate) fn regenerate(
                 }
                 nested.extend(objects.classes);
                 sam_wrappers.extend(objects.sam_wrappers);
+                reified_parameters_remain |= objects.reified_parameters_remain;
                 code
             } else {
                 copy_body(code, &remapper, &mut lines)?

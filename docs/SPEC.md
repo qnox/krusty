@@ -5874,11 +5874,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   result casts once, and an `Object` needs none). The redundant-cast pass keeps the cast only in a
   method that still holds a reified-operation marker, so a join whose branch an inlining call
   specializes still verifies. A callee is compiled after every same-module callee that its
-  body or a class it declares inlines. Tests:
+  body or a class it declares inlines. The objects a declared class's methods regenerate for their
+  own inline calls are read with the class, whichever file writes them, so a call site that
+  regenerates the class regenerates them in turn. A copy whose nested copy still names a reified
+  parameter of an enclosing inline function names it too (kotlinc merges the nested
+  transformation's `reifiedTypeParametersUsages`), so its load keeps the marker and a call site
+  specializes it again. A copy is public ABI when the code it is written in is: a non-private
+  inline function, a lambda class that function's ABI publishes, or, for a nested copy, its root
+  call's scope (`RegeneratedClassContext` keeps the root `callSiteInfo`). Tests:
   `tests/inline_same_module_lambda_bodies_e2e.rs` (same-file and cross-file lambdas reused and
   regenerated, a reified lambda marked at its load, a reified default lambda, a reified `when`
-  join, a lambda whose function type names a reified parameter, and a reified lambda nested in a
-  regenerated one, against kotlinc's bytes or class inventory and as runs),
+  join, a lambda whose function type names a reified parameter, a reified lambda nested in a
+  regenerated one, a reified helper regenerated in a declared lambda, and a forwarded copy whose
+  nested copy stays reified, against kotlinc's bytes or class inventory and as runs),
   `tests/escaping_reified_lambda_e2e.rs` (local-function, accessor, class-SAM, class-lambda and
   suspend callers), `tests/nested_inline_delegate_e2e.rs`,
   `tests/sam_wrapper_class_e2e.rs::a_cross_file_inline_copy_constructs_the_declarations_sam_wrapper` and `jvm::inliner::tests::a_same_module_body_reuses_an_object_only_its_reification_marker_regenerates`.
