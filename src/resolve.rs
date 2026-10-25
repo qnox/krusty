@@ -2672,7 +2672,7 @@ pub struct SymbolTable {
     /// CLASSIFIER, which is all name resolution needs; `@Metadata` must describe the expansion so a
     /// consumer can place a use site's arguments. Every valid source alias has one; an unresolved
     /// declaration is a frontend error and compilation stops before emission.
-    pub source_alias_expansions: HashMap<TypeName, (Vec<String>, Ty)>,
+    pub source_alias_expansions: HashMap<TypeName, crate::libraries::TypeAliasTemplate>,
     /// Source SPELLINGS of declared types, keyed by stable Pass-1 identity — see
     /// [`crate::spelling`]. `@Metadata` records a `typealias` named in a declared type as
     /// `Type.abbreviated_type`, and `Ty` is fully expanded by the time the builders see it, so the
@@ -23268,11 +23268,11 @@ mod tests {
         assert_eq!(extension.receiver, Ty::String);
         assert_eq!(extension.ty, Ty::Char);
         assert_eq!(
-            symbols.source_alias_expansions[&type_name("Count")].1,
+            symbols.source_alias_expansions[&type_name("Count")].expansion,
             Ty::Long
         );
         assert_eq!(
-            symbols.source_alias_expansions[&type_name("Box/Alias")].1,
+            symbols.source_alias_expansions[&type_name("Box/Alias")].expansion,
             Ty::String
         );
         let class = symbols

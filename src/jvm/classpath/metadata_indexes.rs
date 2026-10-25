@@ -364,12 +364,14 @@ fn insert_type_aliases(class: &ClassInfo, keep: impl Fn(TypeName) -> bool, index
         index.type_aliases.insert(alias.name, target);
         index.alias_expansions.insert(
             alias.name,
-            (
+            crate::libraries::AliasExpansion {
+                identity: alias.name,
+                declaration_name: alias.declaration_name.clone().map(Arc::new),
                 target,
-                alias.formals.clone(),
-                alias.expansion,
-                alias.expansion_spelling.clone(),
-            ),
+                formals: alias.formals.clone(),
+                expansion: alias.expansion,
+                expansion_spelling: alias.expansion_spelling.clone(),
+            },
         );
     }
 }

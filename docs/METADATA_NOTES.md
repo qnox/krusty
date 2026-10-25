@@ -1,5 +1,15 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Alias declaration-name evidence
+
+Package and Class type-alias tables supply the alias's exact simple name and declaring container.
+Package metadata honors its `pn` relocation; classifier ownership comes from the raw Class
+`fq_name` evidence, independently of the alias's existing lookup key and physical classfile owner.
+An unavailable classifier declaration name stays unknown. Classpath indexes, paired stdlib lookup
+and provider normalization retain that fact independently of target normalization. Metadata output
+still needs the separate identity-keyed declaration-name lookup; alias semantic keys are not
+descriptor payloads and an expansion target's owner never substitutes for the alias's own owner.
+
 ## Declaration-name evidence
 
 Kotlin metadata class IDs delimit the package with `/` and lexical classifier ownership with `.`;

@@ -3527,8 +3527,8 @@ impl JvmLibraries {
     /// source dependencies publish the semantic source arity. Providers must agree before the
     /// resolver selects the declaration; core must not accept two physical spellings afterward.
     fn semantic_type_alias_target(&self, identity: TypeName) -> Option<TypeName> {
-        let (target, _, expansion, _) = self.cp.type_alias_expansion(identity)?;
-        Self::normalized_type_alias_target(target, expansion)
+        let alias = self.cp.type_alias_expansion(identity)?;
+        Self::normalized_type_alias_target(alias.target, alias.expansion)
     }
 
     fn normalized_type_alias_target(target: TypeName, expansion: Ty) -> Option<TypeName> {
@@ -4837,21 +4837,20 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 
     fn type_alias_expansion(&self, internal: TypeName) -> Option<crate::libraries::AliasExpansion> {
-        self.cp.type_alias_expansion(internal).and_then(
-            |(target, formals, expansion, expansion_spelling)| {
-                let target = Self::normalized_type_alias_target(target, expansion)?;
-                Some(crate::libraries::AliasExpansion {
-                    identity: internal,
-                    target: self.canonical_source_type_name(target),
-                    formals,
-                    expansion_spelling,
-                    // Metadata may name a mapped JVM collection as the expanded classifier. Normalize
-                    // the complete template at the provider boundary so core resolution only sees
-                    // source identities, including inside projections, function types, and nullability.
-                    expansion: canonicalize_jvm_collections(expansion),
-                })
-            },
-        )
+        self.cp.type_alias_expansion(internal).and_then(|alias| {
+            let target = Self::normalized_type_alias_target(alias.target, alias.expansion)?;
+            Some(crate::libraries::AliasExpansion {
+                identity: internal,
+                declaration_name: alias.declaration_name,
+                target: self.canonical_source_type_name(target),
+                formals: alias.formals,
+                expansion_spelling: alias.expansion_spelling,
+                // Metadata may name a mapped JVM collection as the expanded classifier. Normalize
+                // the complete template at the provider boundary so core resolution only sees
+                // source identities, including inside projections, function types, and nullability.
+                expansion: canonicalize_jvm_collections(alias.expansion),
+            })
+        })
     }
 
     fn canonical_source_type_name(&self, internal: TypeName) -> TypeName {

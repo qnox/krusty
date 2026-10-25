@@ -101,6 +101,7 @@ impl<'a> StreamedModuleSymbols<'a> {
         let header = self.index.type_alias_by_identity(identity)?;
         Some(crate::libraries::AliasExpansion {
             identity: header.identity,
+            declaration_name: header.declaration_name.clone().map(std::sync::Arc::new),
             target: header.target,
             formals: self
                 .index
@@ -140,6 +141,7 @@ impl<'a> StreamedModuleSymbols<'a> {
         };
         Some(crate::libraries::AliasExpansion {
             identity: header.identity,
+            declaration_name: header.declaration_name.clone().map(std::sync::Arc::new),
             target: header.target,
             formals: self
                 .index

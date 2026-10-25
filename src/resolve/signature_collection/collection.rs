@@ -4297,6 +4297,10 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
         for (alias, formals, target) in &file_type_aliases[file_index] {
             let alias = SourceAlias {
                 identity: crate::types::type_name_child(package, alias),
+                declaration_name: crate::types::ClassifierDeclarationName::TopLevel {
+                    package,
+                    name: alias.as_str().into(),
+                },
                 nested_in: None,
                 formals,
                 target,
@@ -4385,6 +4389,10 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     .fold(package, crate::types::type_name_child);
                 let source_alias = SourceAlias {
                     identity: crate::types::type_name_child(owner, &alias.name),
+                    declaration_name: crate::types::ClassifierDeclarationName::Nested {
+                        owner: alias_owner,
+                        name: alias.name.as_str().into(),
+                    },
                     nested_in: Some((alias_owner, &alias.name)),
                     formals: &alias.type_params,
                     target: &alias.target,
