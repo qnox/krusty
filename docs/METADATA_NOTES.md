@@ -13,6 +13,12 @@ semantic layout when applicable; Java class signatures supply the remaining decl
 class formals come from non-static `InnerClasses` outer edges, with bound hydration before own-first
 capture/shadow renaming. Local or anonymous entries without an outer are not member capture edges.
 
+Inferred exposed anonymous results are approximated before their declaration signatures enter
+metadata. Their authenticated own/captured application supplies the declared parent and bounds;
+ordinary written stars retain their declaration meaning. Function parents keep the complete
+semantic function shape. Private factory and lambda implementation signatures remain exact rather
+than being rewritten to match the exposed declaration's denotable result.
+
 Layout reads use class headers and builtin declaration tables, not the enclosing `LibraryType` or
 its members. Physical mapped Java requests keep invariant formals independently of a Kotlin view's
 declared variance. This changes no metadata wire fields or physical descriptors. Missing lexical

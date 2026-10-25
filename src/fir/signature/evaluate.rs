@@ -2105,6 +2105,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
         Ok(ResolvedSignature {
             parameters: parameters?,
             result: approximated,
+            inferred_body_result: (approximated != declaration_result).then_some(evaluated),
             result_abbreviation,
         })
     }

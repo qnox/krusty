@@ -163,7 +163,10 @@ pub(super) fn preserve_receiver_identity_bindings(
     }
 }
 
-fn compose_position(position: TypePosition, variance: crate::types::TypeVariance) -> TypePosition {
+pub(crate) fn compose_position(
+    position: TypePosition,
+    variance: crate::types::TypeVariance,
+) -> TypePosition {
     use crate::types::TypeVariance;
     match (position, variance) {
         (TypePosition::Invariant, _) | (_, TypeVariance::Invariant) => TypePosition::Invariant,

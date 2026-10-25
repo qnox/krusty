@@ -6,6 +6,12 @@ resolver facade; selected receiver provenance and declaration ABI survive that b
 source signatures now retain receiver captures before contextual result constraints and reuse the
 ordinary call solver and output-slot specialization. Shared conformance expectations stay unchanged.
 
+Anonymous factory results retain exact checked applications until declaration publication. The
+publication owner authenticates anonymous declarations and complete own/captured arguments, applies
+declared bounds and parent/function shapes, and follows generic/function variance. Compact headers
+retain declaration-name spans for exact ambiguous-parent diagnostics. Private and local-member
+results remain exact; shared outcomes and operand ABI ownership are unchanged.
+
 Phased, each phase ends in a **green `cargo test`** and a runnable artifact. The pipeline is built
 front-to-back so the streaming/arena shape is real from the start, then widened.
 

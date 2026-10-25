@@ -7570,6 +7570,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   array of that supertype, and the copied class is not cast back to the declaration class.
   Tests: `tests/reified_anonymous_object_e2e.rs`, box
   `reified/kt39256_privateInlineWithAnonymousObject.kt`.
+- **Anonymous result exposure belongs to declaration publication.** A public inferred function
+  calling a private anonymous-object factory exposes the applied declared parent, just as a direct
+  anonymous result does. The expression and private non-inline factory retain the exact anonymous
+  application while their members are checked. Local-class members also retain exact results.
+  Publication preserves declaration-owned type arguments and bounds: a captured bounded star can
+  expose `Bounded<out Number>`, while an ordinary written `Token<*>` remains a star. Nested results
+  follow variance, so invariant `Box<Anonymous>` exposes `Box<out Parent>`, and a returned callback
+  exposes its result without changing the callback implementation's private result ABI. Function
+  parents retain their receiver/context/suspend shape. No declared parent exposes `Any`; multiple
+  parents require an explicit result type, with the diagnostic at the declaration's written name.
+  Tests: `tests/projected_receiver_extension_e2e.rs::inferred_receiver_capture_signatures_match_kotlinc`
+  and the `anonymous_factory_` ABI, runtime and complete diagnostic controls in the same module.
 - **A hoisted anonymous object retains its construction site's lexical classifier scope.** The parser
   stores an anonymous object's class as a file-level synthetic declaration, but its member signatures,
   supertype arguments, superclass constructor arguments, and inferred member returns may still name a

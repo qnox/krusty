@@ -34,6 +34,9 @@ impl ResolvedTy {
 pub struct ResolvedSignature {
     pub parameters: Box<[ResolvedTy]>,
     pub result: ResolvedTy,
+    /// Exact inferred body evidence when declaration publication approximated its result. This is
+    /// checking context for the original body, never a caller-visible result or emitted ABI slot.
+    pub(super) inferred_body_result: Option<ResolvedTy>,
     /// The typealias an inferred result was reached through, kotlinc's abbreviation attribute on
     /// the result type (`val text = StringBuilder()` has type `java.lang.StringBuilder`
     /// abbreviated as `kotlin.text.StringBuilder`). It never takes part in type identity: only
@@ -54,6 +57,10 @@ pub struct ResolvedTypeAbbreviation {
 }
 
 impl ResolvedSignature {
+    pub(crate) fn inferred_body_result(&self) -> Option<ResolvedTy> {
+        self.inferred_body_result
+    }
+
     pub fn new(
         parameters: impl IntoIterator<Item = Ty>,
         result: Ty,
@@ -66,6 +73,7 @@ impl ResolvedSignature {
         Ok(Self {
             parameters,
             result: ResolvedTy::new(result)?,
+            inferred_body_result: None,
             result_abbreviation: None,
         })
     }

@@ -96,8 +96,9 @@ pub(crate) use member_hierarchy::{
     InnerAliasOuterApplication, OverrideInputShape,
 };
 pub(crate) use member_specialization::{
-    apply_property_bindings, instantiate_signature_parameters, instantiate_signature_result,
-    instantiate_slot, instantiate_vararg_element, specialize_inline_collection_transform,
+    apply_property_bindings, compose_position as compose_type_position,
+    instantiate_signature_parameters, instantiate_signature_result, instantiate_slot,
+    instantiate_vararg_element, specialize_inline_collection_transform,
     specialize_inline_iteration_traversal, specialize_signature_input_type,
     specialize_signature_output_type, specialize_signature_receiver_type, TypePosition,
     UnboundSpecialization,

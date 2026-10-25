@@ -14,7 +14,6 @@ pub(super) mod scoped_constraint_frames;
 mod value_flow_constraints;
 
 pub(super) use constructor_expectations::ReceiverLevelCall;
-use result_approximation::denotable_signature_result;
 use result_constraints::signature_call_result_constraint;
 
 impl ProductionSignatureSemantics<'_> {
@@ -934,32 +933,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         declaration: crate::fir::DeclarationId,
         result: crate::fir::ResolvedTy,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        // Only a script's `$$result` may be `Nothing`: the script ends by throwing.
-        if result.get() == Ty::Nothing
-            && self.headers.stub(declaration).is_some_and(|stub| {
-                stub.kind == crate::fir::DeclarationKind::Property
-                    && !stub.flags.has(crate::fir::DeclarationFlags::SCRIPT_RESULT)
-            })
-        {
-            return Err(self.record_missing_signature(declaration));
-        }
-        let anchor = self
-            .headers
-            .declarations
-            .anchor(declaration)
-            .ok_or_else(Self::failure)?;
-        let scope = crate::fir::SignatureScope {
-            owner: declaration,
-            source: anchor.source,
-        };
-        let denotable = self.with_signature_type_scope(scope, |lexical| {
-            lexical
-                .lexical_tparam_identities()
-                .into_iter()
-                .collect::<crate::fx_hash::HashSet<_>>()
-        })?;
-        crate::fir::ResolvedTy::new(denotable_signature_result(result.get(), &denotable))
-            .map_err(|_| Self::failure())
+        result_approximation::declaration_result(self, declaration, result)
     }
 
     fn classifier_type(

@@ -2,6 +2,43 @@
 
 use crate::types::{Ty, TyKind};
 
+mod anonymous_results;
+
+/// Publish a denotable declaration result without changing the checked expression that produced it.
+pub(super) fn declaration_result(
+    semantics: &super::ProductionSignatureSemantics<'_>,
+    declaration: crate::fir::DeclarationId,
+    result: crate::fir::ResolvedTy,
+) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
+    // Only a script's `$$result` may be `Nothing`: the script ends by throwing.
+    if result.get() == Ty::Nothing
+        && semantics.headers.stub(declaration).is_some_and(|stub| {
+            stub.kind == crate::fir::DeclarationKind::Property
+                && !stub.flags.has(crate::fir::DeclarationFlags::SCRIPT_RESULT)
+        })
+    {
+        return Err(semantics.record_missing_signature(declaration));
+    }
+    let anchor = semantics
+        .headers
+        .declarations
+        .anchor(declaration)
+        .ok_or_else(super::ProductionSignatureSemantics::failure)?;
+    let scope = crate::fir::SignatureScope {
+        owner: declaration,
+        source: anchor.source,
+    };
+    let denotable = semantics.with_signature_type_scope(scope, |lexical| {
+        lexical
+            .lexical_tparam_identities()
+            .into_iter()
+            .collect::<crate::fx_hash::HashSet<_>>()
+    })?;
+    let result = anonymous_results::declaration_result(semantics, declaration, result.get())?;
+    crate::fir::ResolvedTy::new(denotable_signature_result(result, &denotable))
+        .map_err(|_| super::ProductionSignatureSemantics::failure())
+}
+
 /// Remove solver-local projection captures from an inferred declaration result. A capture is
 /// readable through its upper bound at the result root; inside a generic argument it is exposed as
 /// a star projection so the published signature does not claim an invariant type callers cannot
