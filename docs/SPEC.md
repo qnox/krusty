@@ -1020,6 +1020,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   local-variable table lists the marker, then those locals, then the parameters. A block nested
   inside those statements still closes where that block ends. Test:
   `tests/inline_repeat_local_e2e.rs`.
+- **An initializer's lexical inline ranges close before the value is stored.** Callable-scope
+  entry gives `<clinit>` its implicit method body, so initializer expressions own nested lexical
+  scopes. Their marker and operand ranges close at the expression boundary, allowing the next
+  initializer to reuse its slots. A store restores its source line after an inlined value resets
+  the caller line; that debug boundary preserves the existing closing `nop`. Class-initializer
+  line tables retain these intentional returns to the same line at distinct bytecode offsets.
+  Tests: `tests/initializer_inline_local_scopes_e2e.rs`.
 - **An inlined lambda's implicit-result end stays on the path that evaluated it.** Common IR
   records the exact result expression and its end line; the backend marks that line after the
   expression succeeds, before local-return paths rejoin it. For a returned `try`, the `nop`

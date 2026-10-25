@@ -145,6 +145,32 @@ struct Ran {
     _temp: support::TempDir,
 }
 
+#[test]
+fn same_label_temporary_directories_preserve_each_live_owners_state() {
+    let first = support::TempDir::new("compile-live-owner");
+    let first_path = first.0.clone();
+    std::fs::create_dir(first.0.join("record.lock")).unwrap();
+    std::fs::write(first.0.join("record"), "first invocation\n").unwrap();
+
+    let second = support::TempDir::new("compile-live-owner");
+    assert_eq!(
+        std::fs::read_to_string(first.0.join("record")).expect("the first owner's record survives"),
+        "first invocation\n"
+    );
+    assert!(first.0.join("record.lock").is_dir());
+    assert_ne!(first.0, second.0);
+    let second_path = second.0.clone();
+    drop(second);
+    assert!(!second_path.exists());
+    assert_eq!(
+        std::fs::read_to_string(first.0.join("record")).unwrap(),
+        "first invocation\n"
+    );
+    assert!(first.0.join("record.lock").is_dir());
+    drop(first);
+    assert!(!first_path.exists());
+}
+
 fn krusty_toolchain(
     run: &str,
     case: &CompileCase,
@@ -152,6 +178,15 @@ fn krusty_toolchain(
     configure: impl Fn(&mut Command),
 ) -> Ran {
     let temp = support::TempDir::new(&format!("compile-{run}"));
+    krusty_toolchain_in(temp, case, tasks, configure)
+}
+
+fn krusty_toolchain_in(
+    temp: support::TempDir,
+    case: &CompileCase,
+    tasks: &[&str],
+    configure: impl Fn(&mut Command),
+) -> Ran {
     let directory = temp.0.clone();
     let root = support::materialize(&temp, &case.project);
     Resolving::write_repository(&directory, &case.repository);
@@ -1077,7 +1112,7 @@ fn timed_run(
     let case = diamond();
     let temp = support::TempDir::new(&format!("compile-{run}"));
     let events = temp.0.join("events");
-    let ran = krusty_toolchain(run, &case, tasks, |command| {
+    let ran = krusty_toolchain_in(temp, &case, tasks, |command| {
         command
             .env("KRUSTY_EVENTS", &events)
             .env("KRUSTY_RECORDER_SLEEP", "0.4");
