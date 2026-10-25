@@ -6787,6 +6787,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `object : Base(…)` header, keep the enclosing mode, so `f(when\n(x) { … })` and `f(object :
   Base\n(1) { … })` parse as one expression. Tests: `parenthesized_line_breaks_e2e`.
 
+- **A `when` condition is newline-insensitive, and a line break may follow a range or type-test
+  operator.** kotlinc's `parseWhenCondition` disables newlines for each condition, so `x` then
+  `!in 1..3 ->` on the next line is one condition, as is `!is` then `String ->`. Outside a `when`
+  condition a line break still may not precede a binary operator, but it may follow one:
+  `rangeExpression` and `infixFunctionCall` allow `NL*` after `..`, `..<`, `until` and `downTo`
+  (`x in 1..` then `3`, `for (i in 1..` then `3)`), and `isOperator NL* type` lets `x !is` leave its
+  type on the next line. Plain line breaks only; an explicit `;` still ends the operand. Test:
+  `split_line_conditions_parse_e2e`.
+
 - **`$` before a backtick interpolates only a complete escaped identifier.** A backtick, one or more
   characters that are neither a backtick nor a line break, then a closing backtick; any other `$`
   is literal template text (`"$`"`). Test:
