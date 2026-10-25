@@ -18,10 +18,9 @@
 //! `A`-typed value reach `B`'s override with one indexed read. Every table begins with
 //! `kotlin.Any`'s three slots — `equals`, `hashCode`, `toString`, in that order — and reserves the
 //! next one for a function value's `invoke` ([`FUNCTION_SLOT`]). Interface members are numbered
-//! once for the whole file, above every class's own slots ([`InterfaceRegion`]) — the layout
-//! [`build`] answers. [`build_numbered`] answers the other one: interface members numbered once for
-//! the whole MODULE ([`module_interfaces`]) and held in a separate interface table per class
-//! ([`planned_itable`]), so a call through an interface of another file needs only the number.
+//! once for the whole MODULE ([`module_interfaces`]) and held in a separate interface table per
+//! class ([`planned_itable`]), so a call through an interface of another file needs only the
+//! number: the layout [`build_numbered`] answers.
 //!
 //! Property accessors are members too. A property that is `open` (or overrides one) dispatches
 //! through a getter (and, for a `var`, a setter) slot; when the source declares no accessor body,
@@ -41,7 +40,6 @@ mod class_vtable;
 #[cfg(test)]
 pub(crate) mod fixtures;
 mod hierarchy;
-mod interface_slots;
 mod members;
 pub(crate) mod module_classes;
 pub(crate) mod module_interfaces;
@@ -213,36 +211,6 @@ pub(crate) struct ClassTable {
     pub interface_bridges: HashMap<SlotKey, Slot>,
 }
 
-/// Where the interface members' shared numbering sits in every class's table: from `base`, one
-/// slot per member. Every class table is exactly `base + members` long once it is placed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct InterfaceRegion {
-    pub base: u32,
-    pub members: u32,
-}
-
-/// The tables of every class in a file, indexed by `ClassId`, plus the order in which a
-/// superclass precedes its subclasses.
-#[derive(Debug)]
-pub(crate) struct ClassTables {
-    pub tables: Vec<ClassTable>,
-    pub order: Vec<ClassId>,
-    /// Every interface each class implements, transitively. Indexed by `ClassId`.
-    pub interfaces: Vec<Vec<ClassId>>,
-    pub region: InterfaceRegion,
-}
-
-impl ClassTables {
-    pub(crate) fn table(&self, class: ClassId) -> &ClassTable {
-        &self.tables[class as usize]
-    }
-
-    /// The slot a member dispatches through, looked up on the class the call names.
-    pub(crate) fn slot(&self, class: ClassId, key: &SlotKey) -> Option<u32> {
-        self.table(class).slots.get(key).copied()
-    }
-}
-
 /// How many slots `kotlin.Any` occupies at the front of every table.
 pub(crate) const ANY_SLOTS: u32 = 3;
 
@@ -257,24 +225,6 @@ fn any_vtable() -> (Vec<Slot>, HashMap<SlotKey, u32>) {
         .into_iter()
         .collect();
     (vtable, slots)
-}
-
-/// Build the table of every class in `ir`, superclasses first, with the interface members numbered
-/// once for the file above every class's own slots. A class `plan` numbers takes its numbers from
-/// it, so a file that dispatches through the class reads the same ones.
-pub(crate) fn build(
-    representation: &dyn Representation,
-    ir: &IrFile,
-    plan: &module_slots::ModuleSlotPlan,
-) -> Result<ClassTables, Unsupported> {
-    let (mut tables, order, interfaces) = class_tables(representation, ir, plan)?;
-    let region = interface_slots::place_interface_slots(ir, &order, &mut tables, &interfaces)?;
-    Ok(ClassTables {
-        tables,
-        order,
-        interfaces,
-        region,
-    })
 }
 
 /// The class tables of every class in `ir`, with the interface members' module-wide numbers in a
@@ -313,6 +263,17 @@ pub(crate) struct NumberedClassTables {
     /// Every interface of this file each class implements, transitively. Indexed by `ClassId`.
     pub interfaces: Vec<Vec<ClassId>>,
     pub interface_tables: planned_itable::InterfaceTables,
+}
+
+impl NumberedClassTables {
+    pub(crate) fn table(&self, class: ClassId) -> &ClassTable {
+        &self.tables[class as usize]
+    }
+
+    /// The class slot a member dispatches through, looked up on the class the call names.
+    pub(crate) fn slot(&self, class: ClassId, key: &SlotKey) -> Option<u32> {
+        self.table(class).slots.get(key).copied()
+    }
 }
 
 type FileTables = (Vec<ClassTable>, Vec<ClassId>, Vec<Vec<ClassId>>);

@@ -15274,8 +15274,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   or the body the most derived interface declaring the member supplies, which a subclass inherits.
   A function default declared in another file is that file's exported member entry point, taking
   the receiver and the member's declared carriers. A call through an interface in any file, and a
-  property read or write through one, loads the receiver's interface table and calls the entry at
-  the member's number. Refused, by file: a property default of an interface of another file, a
+  property read or write through one, calls the member's stub, which the link writes from every
+  type of the program (`docs/NATIVE.md`, "Interface calls: decided at the link"): a direct call
+  when one function implements the member, a type comparison when two do and one of them is reached
+  from a single type, and otherwise the entry at the member's number in the receiver's interface
+  table. Refused, by file: a property default of an interface of another file, a
   default of another file reached through a bridge, an implementation of an interface member of
   another file that carries values differently, an interface member implemented by a declaration
   this file has no slot for (one outside the module), an instantiable class leaving a member with
@@ -15290,7 +15293,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_generic_member_reaches_an_implementation_through_its_bridge`,
   `a_lambda_converted_to_a_functional_interface_answers_another_file`,
   `a_default_declared_in_another_file_answers_for_an_implementor`,
-  `a_default_reached_through_a_bridge_of_another_file_declines`).
+  `a_default_reached_through_a_bridge_of_another_file_declines`) and
+  `tests/native_interface_call_stubs_e2e.rs`.
 - **Native: the public C ABI is primitives, String, and a Unit result.** A public top-level
   function whose parameters are primitives or `String` and whose result is one of those types or
   `Unit` is declared in the module's C header and exported under that declaration. The export runs
@@ -21516,12 +21520,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   instance is a struct whose first field is its dispatch table, followed by its superclasses'
   fields root first and then its own; it is declared a subtype of its superclass's struct, so
   `is`, `!is`, `as` and `as?` against a class are `ref.test`/`ref.cast`, and against an interface
-  test every class of the file implementing it. Slot numbers come from the target-neutral tables
-  Native also uses (`src/backend/class_tables/`): `equals`, `hashCode`, `toString` first by role,
-  one reserved slot, the class's own members, then a program-wide interface region in which an
-  interface member has the same number in every implementing class. Class, interface and `Any`
-  values are carried as `(ref null eq)`, so an override never needs a signature of its own; an
-  override carried differently from the member it overrides (a bridge) declines. `==` on a class
+  call that interface's test function, which tests every struct of the program implementing it.
+  Class slot numbers come from the target-neutral tables Native also uses
+  (`src/backend/class_tables/`): `equals`, `hashCode`, `toString` first by role, one reserved
+  slot, then the class's own members. Interface members are numbered once per module
+  (`ModuleInterfaces`) and published by their backend-neutral identity
+  (`src/backend/interface_identity.rs`), so a dependent module's class implementing a dependency
+  or library interface records its implementation against the declaring module's number. As
+  Native's linker does, Wasm's finalize step writes one stub per interface member once every
+  module is known: a direct call when one function implements it, a `ref.test` choice between
+  two, otherwise an index into the receiver's immutable itable array, packed so no class has two
+  members at one index. An implementation whose reference parameters are narrower than the
+  member's gets an erased-signature thunk that casts them down; one that would have to box a
+  primitive declines (`an interface member implemented with a value it would have to box`).
+  Class, interface and `Any` values are carried as `(ref null eq)`. `==` on a class
   value calls its `equals` slot null-safely, whose default is identity. Erasing a reference to
   `Any?` preserves structural `==` and `!=`: runtime Strings compare UTF-16 contents, class
   instances dispatch their actual `equals` slot, and other GC references use identity. Both
