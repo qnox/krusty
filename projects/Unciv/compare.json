@@ -1,0 +1,95 @@
+{
+ "name": "Unciv",
+ "reference_exit": 0,
+ "loc": {
+  "kotlin": 139231,
+  "java": 1184
+ },
+ "compilations": 4,
+ "built": 0,
+ "classes": 3341,
+ "identical": 0,
+ "rows": [
+  {
+   "task": ":core:compileKotlin",
+   "dir": "core/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 3060,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":desktop:compileKotlin",
+   "dir": "desktop/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 44,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":server:compileKotlin",
+   "dir": "server/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 42,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":tests:compileTestKotlin",
+   "dir": "tests/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 195,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  }
+ ],
+ "no_reference_classes": [
+  {
+   "task": ":compileKotlinJvm",
+   "dir": "build/classes/kotlin/jvm/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":compileTestKotlinJvm",
+   "dir": "build/classes/kotlin/jvm/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":core:compileTestKotlin",
+   "dir": "core/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":desktop:compileTestKotlin",
+   "dir": "desktop/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":server:compileTestKotlin",
+   "dir": "server/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":tests:compileKotlin",
+   "dir": "tests/build/classes/kotlin/main",
+   "krusty_classes": 0
+  }
+ ],
+ "measured": {
+  "date": "2026-10-25",
+  "commit": "0e127f350d9a74cd4fb5fb36d85f789e65bf8841",
+  "run": "https://github.com/qnox/krusty/actions/runs/40196119897"
+ }
+}

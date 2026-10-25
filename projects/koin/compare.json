@@ -1,0 +1,255 @@
+{
+ "name": "koin",
+ "reference_exit": 0,
+ "loc": {
+  "kotlin": 33677,
+  "java": 123
+ },
+ "compilations": 19,
+ "built": 4,
+ "classes": 3705,
+ "identical": 76,
+ "rows": [
+  {
+   "task": ":core:benchmark:compileKotlinJvm",
+   "dir": "core/benchmark/build/classes/kotlin/jvm/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 2022,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":core:koin-annotations:compileKotlinJvm",
+   "dir": "core/koin-annotations/build/classes/kotlin/jvm/main",
+   "built": true,
+   "fallback": null,
+   "error": null,
+   "classes": 21,
+   "identical": 7,
+   "only_kotlinc": 0,
+   "only_krusty": 0
+  },
+  {
+   "task": ":core:koin-core-annotations:compileKotlinJvm",
+   "dir": "core/koin-core-annotations/build/classes/kotlin/jvm/main",
+   "built": true,
+   "fallback": null,
+   "error": null,
+   "classes": 2,
+   "identical": 2,
+   "only_kotlinc": 0,
+   "only_krusty": 0
+  },
+  {
+   "task": ":core:koin-core-coroutines:compileKotlinJvm",
+   "dir": "core/koin-core-coroutines/build/classes/kotlin/jvm/main",
+   "built": false,
+   "fallback": null,
+   "error": "projects/core/koin-core-coroutines/src/commonMain/kotlin/org/koin/core/KoinWaitExt.kt:17:7: error: @file:JvmMultifileClass is not supported for JVM compilation yet; its part classes and delegating facade require distinct physical owners",
+   "classes": 22,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":core:koin-core-coroutines:compileTestKotlinJvm",
+   "dir": "core/koin-core-coroutines/build/classes/kotlin/jvm/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 426,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":core:koin-core:compileKotlinJvm",
+   "dir": "core/koin-core/build/classes/kotlin/jvm/main",
+   "built": true,
+   "fallback": null,
+   "error": null,
+   "classes": 212,
+   "identical": 65,
+   "only_kotlinc": 3,
+   "only_krusty": 0
+  },
+  {
+   "task": ":core:koin-core:compileTestKotlinJvm",
+   "dir": "core/koin-core/build/classes/kotlin/jvm/test",
+   "built": false,
+   "fallback": null,
+   "error": "projects/core/koin-core/src/commonTest/kotlin/org/koin/core/ClosedScopeAPI.kt:253:42: error: type mismatch: inferred type is T but Scope was expected",
+   "classes": 738,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":core:koin-test-coroutines:compileKotlinJvm",
+   "dir": "core/koin-test-coroutines/build/classes/kotlin/jvm/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":core:koin-test-coroutines:compileTestKotlinJvm",
+   "dir": "core/koin-test-coroutines/build/classes/kotlin/jvm/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 5,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":core:koin-test-junit4:compileKotlin",
+   "dir": "core/koin-test-junit4/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 8,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":core:koin-test-junit4:compileTestKotlin",
+   "dir": "core/koin-test-junit4/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 52,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":core:koin-test-junit5:compileKotlin",
+   "dir": "core/koin-test-junit5/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 7,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":core:koin-test-junit5:compileTestKotlin",
+   "dir": "core/koin-test-junit5/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 42,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":core:koin-test:compileKotlinJvm",
+   "dir": "core/koin-test/build/classes/kotlin/jvm/main",
+   "built": false,
+   "fallback": null,
+   "error": "projects/core/koin-test/src/commonMain/kotlin/org/koin/test/check/CheckModules.kt:154:22: error: none of the following candidates is applicable:",
+   "classes": 36,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":core:koin-test:compileTestKotlinJvm",
+   "dir": "core/koin-test/build/classes/kotlin/jvm/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 34,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":ktor:koin-ktor:compileKotlinJvm",
+   "dir": "ktor/koin-ktor/build/classes/kotlin/jvm/main",
+   "built": false,
+   "fallback": null,
+   "error": "projects/ktor/koin-ktor/src/commonMain/kotlin/org/koin/ktor/ext/ApplicationExt.kt:22:29: error: unresolved reference 'KOIN_ATTRIBUTE_KEY'.",
+   "classes": 22,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":ktor:koin-ktor:compileTestKotlinJvm",
+   "dir": "ktor/koin-ktor/build/classes/kotlin/jvm/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 51,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":ktor:koin-logger-slf4j:compileKotlin",
+   "dir": "ktor/koin-logger-slf4j/build/classes/kotlin/main",
+   "built": true,
+   "fallback": null,
+   "error": null,
+   "classes": 3,
+   "identical": 2,
+   "only_kotlinc": 0,
+   "only_krusty": 0
+  },
+  {
+   "task": ":plugins:koin-gradle-plugin:compileKotlin",
+   "dir": "plugins/koin-gradle-plugin/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  }
+ ],
+ "no_reference_classes": [
+  {
+   "task": ":core:benchmark:compileTestKotlinJvm",
+   "dir": "core/benchmark/build/classes/kotlin/jvm/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":core:koin-annotations:compileTestKotlinJvm",
+   "dir": "core/koin-annotations/build/classes/kotlin/jvm/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":core:koin-core-annotations:compileTestKotlinJvm",
+   "dir": "core/koin-core-annotations/build/classes/kotlin/jvm/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":ktor:koin-logger-slf4j:compileTestKotlin",
+   "dir": "ktor/koin-logger-slf4j/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":plugins:koin-gradle-plugin:compileTestKotlin",
+   "dir": "plugins/koin-gradle-plugin/build/classes/kotlin/test",
+   "krusty_classes": 0
+  }
+ ],
+ "measured": {
+  "date": "2026-10-25",
+  "commit": "0e127f350d9a74cd4fb5fb36d85f789e65bf8841",
+  "run": "https://github.com/qnox/krusty/actions/runs/40196119897"
+ }
+}

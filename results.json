@@ -1,0 +1,3538 @@
+{
+ "projects": [
+  {
+   "name": "Exposed",
+   "reference_exit": 0,
+   "loc": {
+    "kotlin": 138105,
+    "java": 0
+   },
+   "compilations": 43,
+   "built": 0,
+   "classes": 8100,
+   "identical": 0,
+   "rows": [
+    {
+     "task": ":exposed-core:compileKotlin",
+     "dir": "exposed-core/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 533,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-crypt:compileKotlin",
+     "dir": "exposed-crypt/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 21,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-crypt:compileTestKotlin",
+     "dir": "exposed-crypt/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 23,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-dao-r2dbc-tests:compileTestKotlin",
+     "dir": "exposed-dao-r2dbc-tests/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 1758,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-dao-r2dbc:compileKotlin",
+     "dir": "exposed-dao-r2dbc/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 121,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-dao:compileKotlin",
+     "dir": "exposed-dao/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 44,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-gradle-plugin:compileKotlin",
+     "dir": "exposed-gradle-plugin/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 15,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-gradle-plugin:compileTestKotlin",
+     "dir": "exposed-gradle-plugin/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 6,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-java-time:compileKotlin",
+     "dir": "exposed-java-time/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 34,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-java-time:compileTestKotlin",
+     "dir": "exposed-java-time/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 73,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-jdbc-r2dbc-tests:compileKotlin",
+     "dir": "exposed-jdbc-r2dbc-tests/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 2,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-jdbc-r2dbc-tests:compileTestKotlin",
+     "dir": "exposed-jdbc-r2dbc-tests/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 3,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-jdbc:compileKotlin",
+     "dir": "exposed-jdbc/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 117,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-jodatime:compileKotlin",
+     "dir": "exposed-jodatime/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 23,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-jodatime:compileTestKotlin",
+     "dir": "exposed-jodatime/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 55,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-json:compileKotlin",
+     "dir": "exposed-json/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 19,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-json:compileTestKotlin",
+     "dir": "exposed-json/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 169,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-kotlin-datetime:compileKotlin",
+     "dir": "exposed-kotlin-datetime/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 37,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-kotlin-datetime:compileTestKotlin",
+     "dir": "exposed-kotlin-datetime/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 80,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-maven-plugin:compileKotlin",
+     "dir": "exposed-maven-plugin/build/classes/java/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 3,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-maven-plugin:compileTestKotlin",
+     "dir": "exposed-maven-plugin/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 27,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-migration-core:compileKotlin",
+     "dir": "exposed-migration-core/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 1,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-migration-jdbc:compileKotlin",
+     "dir": "exposed-migration-jdbc/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 1,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-migration-jdbc:compileTestKotlin",
+     "dir": "exposed-migration-jdbc/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 137,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-migration-r2dbc:compileKotlin",
+     "dir": "exposed-migration-r2dbc/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 10,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-migration-r2dbc:compileTestKotlin",
+     "dir": "exposed-migration-r2dbc/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 193,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-money:compileKotlin",
+     "dir": "exposed-money/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 6,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-money:compileTestKotlin",
+     "dir": "exposed-money/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 10,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-plugin-core:compileKotlin",
+     "dir": "exposed-plugin-core/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 13,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-plugin-core:compileTestKotlin",
+     "dir": "exposed-plugin-core/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 10,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-r2dbc-tests:compileKotlin",
+     "dir": "exposed-r2dbc-tests/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 54,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-r2dbc-tests:compileTestKotlin",
+     "dir": "exposed-r2dbc-tests/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 2727,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-r2dbc:compileKotlin",
+     "dir": "exposed-r2dbc/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 354,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-spring-boot-starter:compileKotlin",
+     "dir": "exposed-spring-boot-starter/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 6,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-spring-boot-starter:compileTestKotlin",
+     "dir": "exposed-spring-boot-starter/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 20,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-spring-boot4-starter:compileKotlin",
+     "dir": "exposed-spring-boot4-starter/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 6,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-spring-boot4-starter:compileTestKotlin",
+     "dir": "exposed-spring-boot4-starter/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 20,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-tests:compileKotlin",
+     "dir": "exposed-tests/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 19,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":exposed-tests:compileTestKotlin",
+     "dir": "exposed-tests/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 1222,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":spring-transaction:compileKotlin",
+     "dir": "spring-transaction/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 6,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":spring-transaction:compileTestKotlin",
+     "dir": "spring-transaction/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 58,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":spring7-transaction:compileKotlin",
+     "dir": "spring7-transaction/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 6,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":spring7-transaction:compileTestKotlin",
+     "dir": "spring7-transaction/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 58,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    }
+   ],
+   "no_reference_classes": [
+    {
+     "task": ":compileKotlin",
+     "dir": "build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":compileTestKotlin",
+     "dir": "build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":exposed-core:compileTestKotlin",
+     "dir": "exposed-core/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":exposed-dao-r2dbc-tests:compileKotlin",
+     "dir": "exposed-dao-r2dbc-tests/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":exposed-dao-r2dbc:compileTestKotlin",
+     "dir": "exposed-dao-r2dbc/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":exposed-dao:compileTestKotlin",
+     "dir": "exposed-dao/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":exposed-jdbc:compileTestKotlin",
+     "dir": "exposed-jdbc/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":exposed-migration-core:compileTestKotlin",
+     "dir": "exposed-migration-core/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":exposed-r2dbc:compileTestKotlin",
+     "dir": "exposed-r2dbc/build/classes/kotlin/test",
+     "krusty_classes": 0
+    }
+   ],
+   "measured": {
+    "date": "2026-10-25",
+    "commit": "0e127f350d9a74cd4fb5fb36d85f789e65bf8841",
+    "run": "https://github.com/qnox/krusty/actions/runs/40196119897"
+   },
+   "stars": 9301,
+   "misses": [
+    [
+     "krusty wrote no class",
+     43
+    ]
+   ],
+   "plugins": {
+    "compiler": {
+     "annotations": 26,
+     "kotlin-script-runtime": 26,
+     "kotlin-scripting-common": 26,
+     "kotlin-scripting-compiler-embeddable": 26,
+     "kotlin-scripting-compiler-impl-embeddable": 26,
+     "kotlin-scripting-jvm": 26,
+     "kotlin-stdlib": 26,
+     "kotlin-serialization-compiler-plugin-embeddable": 9
+    },
+    "gradle": {
+     "com.avast.gradle.docker-compose": 1,
+     "com.vanniktech.maven.publish": 24,
+     "com.vanniktech.maven.publish.base": 24,
+     "io.gitlab.arturbosch.detekt": 28,
+     "org.gradle.base": 28,
+     "org.gradle.build-init": 28,
+     "org.gradle.help-tasks": 28,
+     "org.gradle.java": 26,
+     "org.gradle.java-base": 26,
+     "org.gradle.jvm-ecosystem": 27,
+     "org.gradle.jvm-test-suite": 26,
+     "org.gradle.jvm-toolchains": 26,
+     "org.gradle.kotlin.kotlin-dsl-project": 28,
+     "org.gradle.kotlin.kotlin-dsl-root-project": 1,
+     "org.gradle.lifecycle-base": 28,
+     "org.gradle.maven-publish": 24,
+     "org.gradle.publishing": 24,
+     "org.gradle.reporting-base": 28,
+     "org.gradle.software-reporting-tasks": 28,
+     "org.gradle.test-suite-base": 26,
+     "org.gradle.wrapper": 28,
+     "org.jetbrains.dokka": 22,
+     "org.jetbrains.dokka.gradle.DokkaBasePlugin": 22,
+     "org.jetbrains.dokka.gradle.adapters.JavaAdapter": 22,
+     "org.jetbrains.dokka.gradle.adapters.KotlinAdapter": 22,
+     "org.jetbrains.dokka.gradle.formats.DokkaHtmlPlugin": 22,
+     "org.jetbrains.kotlin.gradle.plugin.BuildMetricsPlugin": 26,
+     "org.jetbrains.kotlin.gradle.scripting.internal.ScriptingKotlinGradleSubplugin": 26,
+     "org.jetbrains.kotlin.jvm": 26,
+     "org.jetbrains.kotlin.plugin.scripting": 26,
+     "org.jetbrains.kotlinx.binary-compatibility-validator": 1,
+     "org.jetbrains.kotlinx.kover": 26,
+     "org.gradle.java-platform": 1,
+     "org.gradle.signing": 23,
+     "org.jetbrains.kotlin.plugin.serialization": 9,
+     "com.gradle.plugin-publish": 1,
+     "org.gradle.java-gradle-plugin": 1,
+     "org.gradle.java-library": 1,
+     "org.gradle.plugin-compatibility": 1,
+     "org.gradle.plugin.devel.plugins.MavenPluginPublishPlugin": 1,
+     "org.gradlex.maven-plugin-development": 1,
+     "org.gradle.version-catalog": 1
+    }
+   }
+  },
+  {
+   "name": "koin",
+   "reference_exit": 0,
+   "loc": {
+    "kotlin": 33677,
+    "java": 123
+   },
+   "compilations": 19,
+   "built": 4,
+   "classes": 3705,
+   "identical": 76,
+   "rows": [
+    {
+     "task": ":core:benchmark:compileKotlinJvm",
+     "dir": "core/benchmark/build/classes/kotlin/jvm/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 2022,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":core:koin-annotations:compileKotlinJvm",
+     "dir": "core/koin-annotations/build/classes/kotlin/jvm/main",
+     "built": true,
+     "fallback": null,
+     "error": null,
+     "classes": 21,
+     "identical": 7,
+     "only_kotlinc": 0,
+     "only_krusty": 0
+    },
+    {
+     "task": ":core:koin-core-annotations:compileKotlinJvm",
+     "dir": "core/koin-core-annotations/build/classes/kotlin/jvm/main",
+     "built": true,
+     "fallback": null,
+     "error": null,
+     "classes": 2,
+     "identical": 2,
+     "only_kotlinc": 0,
+     "only_krusty": 0
+    },
+    {
+     "task": ":core:koin-core-coroutines:compileKotlinJvm",
+     "dir": "core/koin-core-coroutines/build/classes/kotlin/jvm/main",
+     "built": false,
+     "fallback": null,
+     "error": "projects/core/koin-core-coroutines/src/commonMain/kotlin/org/koin/core/KoinWaitExt.kt:17:7: error: @file:JvmMultifileClass is not supported for JVM compilation yet; its part classes and delegating facade require distinct physical owners",
+     "classes": 22,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":core:koin-core-coroutines:compileTestKotlinJvm",
+     "dir": "core/koin-core-coroutines/build/classes/kotlin/jvm/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 426,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":core:koin-core:compileKotlinJvm",
+     "dir": "core/koin-core/build/classes/kotlin/jvm/main",
+     "built": true,
+     "fallback": null,
+     "error": null,
+     "classes": 212,
+     "identical": 65,
+     "only_kotlinc": 3,
+     "only_krusty": 0
+    },
+    {
+     "task": ":core:koin-core:compileTestKotlinJvm",
+     "dir": "core/koin-core/build/classes/kotlin/jvm/test",
+     "built": false,
+     "fallback": null,
+     "error": "projects/core/koin-core/src/commonTest/kotlin/org/koin/core/ClosedScopeAPI.kt:253:42: error: type mismatch: inferred type is T but Scope was expected",
+     "classes": 738,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":core:koin-test-coroutines:compileKotlinJvm",
+     "dir": "core/koin-test-coroutines/build/classes/kotlin/jvm/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 1,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":core:koin-test-coroutines:compileTestKotlinJvm",
+     "dir": "core/koin-test-coroutines/build/classes/kotlin/jvm/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 5,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":core:koin-test-junit4:compileKotlin",
+     "dir": "core/koin-test-junit4/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 8,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":core:koin-test-junit4:compileTestKotlin",
+     "dir": "core/koin-test-junit4/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 52,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":core:koin-test-junit5:compileKotlin",
+     "dir": "core/koin-test-junit5/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 7,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":core:koin-test-junit5:compileTestKotlin",
+     "dir": "core/koin-test-junit5/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 42,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":core:koin-test:compileKotlinJvm",
+     "dir": "core/koin-test/build/classes/kotlin/jvm/main",
+     "built": false,
+     "fallback": null,
+     "error": "projects/core/koin-test/src/commonMain/kotlin/org/koin/test/check/CheckModules.kt:154:22: error: none of the following candidates is applicable:",
+     "classes": 36,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":core:koin-test:compileTestKotlinJvm",
+     "dir": "core/koin-test/build/classes/kotlin/jvm/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 34,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":ktor:koin-ktor:compileKotlinJvm",
+     "dir": "ktor/koin-ktor/build/classes/kotlin/jvm/main",
+     "built": false,
+     "fallback": null,
+     "error": "projects/ktor/koin-ktor/src/commonMain/kotlin/org/koin/ktor/ext/ApplicationExt.kt:22:29: error: unresolved reference 'KOIN_ATTRIBUTE_KEY'.",
+     "classes": 22,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":ktor:koin-ktor:compileTestKotlinJvm",
+     "dir": "ktor/koin-ktor/build/classes/kotlin/jvm/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 51,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":ktor:koin-logger-slf4j:compileKotlin",
+     "dir": "ktor/koin-logger-slf4j/build/classes/kotlin/main",
+     "built": true,
+     "fallback": null,
+     "error": null,
+     "classes": 3,
+     "identical": 2,
+     "only_kotlinc": 0,
+     "only_krusty": 0
+    },
+    {
+     "task": ":plugins:koin-gradle-plugin:compileKotlin",
+     "dir": "plugins/koin-gradle-plugin/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 1,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    }
+   ],
+   "no_reference_classes": [
+    {
+     "task": ":core:benchmark:compileTestKotlinJvm",
+     "dir": "core/benchmark/build/classes/kotlin/jvm/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":core:koin-annotations:compileTestKotlinJvm",
+     "dir": "core/koin-annotations/build/classes/kotlin/jvm/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":core:koin-core-annotations:compileTestKotlinJvm",
+     "dir": "core/koin-core-annotations/build/classes/kotlin/jvm/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":ktor:koin-logger-slf4j:compileTestKotlin",
+     "dir": "ktor/koin-logger-slf4j/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":plugins:koin-gradle-plugin:compileTestKotlin",
+     "dir": "plugins/koin-gradle-plugin/build/classes/kotlin/test",
+     "krusty_classes": 0
+    }
+   ],
+   "measured": {
+    "date": "2026-10-25",
+    "commit": "0e127f350d9a74cd4fb5fb36d85f789e65bf8841",
+    "run": "https://github.com/qnox/krusty/actions/runs/40196119897"
+   },
+   "stars": 10022,
+   "misses": [
+    [
+     "krusty wrote no class",
+     11
+    ],
+    [
+     "projects/core/koin-core-coroutines/src/commonMain/kotlin/org/koin/core/KoinWaitExt.kt:17:7: error: @file:JvmMultifileClass is not supported for JVM compilation yet; its part classes and delegating facade require distinct physical owners",
+     1
+    ],
+    [
+     "projects/core/koin-core/src/commonTest/kotlin/org/koin/core/ClosedScopeAPI.kt:253:42: error: type mismatch: inferred type is T but Scope was expected",
+     1
+    ],
+    [
+     "projects/core/koin-test/src/commonMain/kotlin/org/koin/test/check/CheckModules.kt:154:22: error: none of the following candidates is applicable:",
+     1
+    ],
+    [
+     "projects/ktor/koin-ktor/src/commonMain/kotlin/org/koin/ktor/ext/ApplicationExt.kt:22:29: error: unresolved reference 'KOIN_ATTRIBUTE_KEY'.",
+     1
+    ]
+   ],
+   "plugins": {
+    "compiler": {
+     "kotlin-compose-compiler-plugin-embeddable": 6,
+     "annotations": 17,
+     "kotlin-script-runtime": 17,
+     "kotlin-scripting-common": 17,
+     "kotlin-scripting-compiler-embeddable": 17,
+     "kotlin-scripting-compiler-impl-embeddable": 17,
+     "kotlin-scripting-jvm": 17,
+     "kotlin-stdlib": 17,
+     "kotlin-allopen-compiler-plugin-embeddable": 1
+    },
+    "compiler-arg": {
+     "-P": 4
+    },
+    "gradle": {
+     "com.gradleup.nmcp.aggregation": 1,
+     "org.gradle.base": 28,
+     "org.gradle.build-init": 34,
+     "org.gradle.help-tasks": 34,
+     "org.gradle.kotlin.kotlin-dsl-project": 28,
+     "org.gradle.kotlin.kotlin-dsl-root-project": 1,
+     "org.gradle.lifecycle-base": 34,
+     "org.gradle.software-reporting-tasks": 34,
+     "org.gradle.wrapper": 34,
+     "org.jetbrains.dokka": 34,
+     "org.jetbrains.dokka.gradle.DokkaBasePlugin": 34,
+     "org.jetbrains.dokka.gradle.adapters.AndroidAdapter": 34,
+     "org.jetbrains.dokka.gradle.adapters.JavaAdapter": 34,
+     "org.jetbrains.dokka.gradle.adapters.KotlinAdapter": 34,
+     "org.jetbrains.dokka.gradle.formats.DokkaHtmlPlugin": 34,
+     "org.jetbrains.kotlin.gradle.targets.js.nodejs.NodeJsPlugin": 12,
+     "org.jetbrains.kotlin.gradle.targets.js.nodejs.NodeJsRootPlugin": 1,
+     "org.jetbrains.kotlin.gradle.targets.js.yarn.YarnPlugin": 1,
+     "org.jetbrains.kotlin.gradle.targets.wasm.nodejs.WasmNodeJsPlugin": 11,
+     "org.jetbrains.kotlin.gradle.targets.wasm.nodejs.WasmNodeJsRootPlugin": 1,
+     "org.jetbrains.kotlin.gradle.targets.wasm.yarn.WasmYarnPlugin": 1,
+     "org.jetbrains.kotlinx.binary-compatibility-validator": 1,
+     "com.android.build.gradle.LibraryPlugin": 14,
+     "com.android.build.gradle.api.AndroidBasePlugin": 14,
+     "com.android.internal.library": 14,
+     "com.android.internal.version-check": 14,
+     "com.gradleup.nmcp": 26,
+     "org.gradle.java-base": 26,
+     "org.gradle.jvm-ecosystem": 27,
+     "org.gradle.jvm-toolchains": 26,
+     "org.gradle.maven-publish": 26,
+     "org.gradle.publishing": 26,
+     "org.gradle.reporting-base": 26,
+     "org.gradle.signing": 26,
+     "org.jetbrains.kotlin.android": 9,
+     "org.jetbrains.kotlin.gradle.plugin.BuildMetricsPlugin": 26,
+     "org.gradle.java-platform": 1,
+     "org.jetbrains.kotlin.plugin.compose": 6,
+     "org.jetbrains.compose": 4,
+     "org.jetbrains.compose.hot-reload": 4,
+     "org.jetbrains.kotlin.gradle.scripting.internal.ScriptingKotlinGradleSubplugin": 17,
+     "org.jetbrains.kotlin.gradle.targets.js.npm.NpmResolverPlugin": 11,
+     "org.jetbrains.kotlin.gradle.targets.wasm.binaryen.BinaryenPlugin": 10,
+     "org.jetbrains.kotlin.gradle.targets.wasm.npm.WasmNpmResolverPlugin": 10,
+     "org.jetbrains.kotlin.multiplatform": 13,
+     "org.jetbrains.kotlin.plugin.scripting": 17,
+     "org.jetbrains.kotlin.plugin.allopen": 1,
+     "org.jetbrains.kotlinx.benchmark": 1,
+     "org.gradle.java": 4,
+     "org.gradle.jvm-test-suite": 4,
+     "org.gradle.test-suite-base": 4,
+     "org.jetbrains.kotlin.jvm": 4,
+     "org.gradle.groovy": 1,
+     "org.gradle.groovy-base": 1
+    }
+   }
+  },
+  {
+   "name": "kotlinx.coroutines",
+   "reference_exit": 1,
+   "loc": {
+    "kotlin": 102096,
+    "java": 897
+   },
+   "compilations": 0,
+   "built": 0,
+   "classes": 0,
+   "identical": 0,
+   "rows": [],
+   "no_reference_classes": [],
+   "measured": {
+    "date": "2026-10-25",
+    "commit": "0e127f350d9a74cd4fb5fb36d85f789e65bf8841",
+    "run": "https://github.com/qnox/krusty/actions/runs/40196119897"
+   },
+   "stars": 13824,
+   "misses": [],
+   "plugins": {
+    "compiler": {
+     "annotations": 1,
+     "gradle-api": 1,
+     "gradle-installation-beacon": 1,
+     "gradle-kotlin-dsl": 1,
+     "gradle-kotlin-dsl-shared-runtime": 1,
+     "gradle-kotlin-dsl-tooling-models": 1,
+     "groovy": 1,
+     "groovy-ant": 1,
+     "groovy-astbuilder": 1,
+     "groovy-console": 1,
+     "groovy-datetime": 1,
+     "groovy-dateutil": 1,
+     "groovy-groovydoc": 1,
+     "groovy-json": 1,
+     "groovy-nio": 1,
+     "groovy-sql": 1,
+     "groovy-templates": 1,
+     "groovy-test": 1,
+     "groovy-xml": 1,
+     "javaparser-core": 1,
+     "kotlin-assignment-compiler-plugin-embeddable": 1,
+     "kotlin-reflect": 1,
+     "kotlin-sam-with-receiver-compiler-plugin-embeddable": 1,
+     "kotlin-script-runtime": 1,
+     "kotlin-scripting-common": 1,
+     "kotlin-scripting-compiler-embeddable": 1,
+     "kotlin-scripting-compiler-impl-embeddable": 1,
+     "kotlin-scripting-jvm": 1,
+     "kotlin-stdlib": 1
+    },
+    "gradle": {
+     "org.gradle.base": 1,
+     "org.gradle.build-init": 1,
+     "org.gradle.groovy": 1,
+     "org.gradle.groovy-base": 1,
+     "org.gradle.help-tasks": 1,
+     "org.gradle.java": 1,
+     "org.gradle.java-base": 1,
+     "org.gradle.java-gradle-plugin": 1,
+     "org.gradle.java-library": 1,
+     "org.gradle.jvm-ecosystem": 1,
+     "org.gradle.jvm-test-suite": 1,
+     "org.gradle.jvm-toolchains": 1,
+     "org.gradle.kotlin.embedded-kotlin": 1,
+     "org.gradle.kotlin.kotlin-dsl": 1,
+     "org.gradle.kotlin.kotlin-dsl-project": 1,
+     "org.gradle.kotlin.kotlin-dsl-root-project": 1,
+     "org.gradle.kotlin.kotlin-dsl.base": 1,
+     "org.gradle.kotlin.kotlin-dsl.compiler-settings": 1,
+     "org.gradle.kotlin.kotlin-dsl.precompiled-script-plugins": 1,
+     "org.gradle.lifecycle-base": 1,
+     "org.gradle.reporting-base": 1,
+     "org.gradle.software-reporting-tasks": 1,
+     "org.gradle.test-suite-base": 1,
+     "org.gradle.wrapper": 1,
+     "org.jetbrains.kotlin.gradle.plugin.KotlinBaseApiPlugin": 1,
+     "org.jetbrains.kotlin.gradle.scripting.internal.ScriptingKotlinGradleSubplugin": 1,
+     "org.jetbrains.kotlin.jvm": 1,
+     "org.jetbrains.kotlin.plugin.assignment": 1,
+     "org.jetbrains.kotlin.plugin.sam.with.receiver": 1,
+     "org.jetbrains.kotlin.plugin.scripting": 1
+    }
+   }
+  },
+  {
+   "name": "ktor",
+   "reference_exit": 1,
+   "loc": {
+    "kotlin": 259031,
+    "java": 85
+   },
+   "compilations": 0,
+   "built": 0,
+   "classes": 0,
+   "identical": 0,
+   "rows": [],
+   "no_reference_classes": [],
+   "measured": {
+    "date": "2026-10-25",
+    "commit": "0e127f350d9a74cd4fb5fb36d85f789e65bf8841",
+    "run": "https://github.com/qnox/krusty/actions/runs/40196119897"
+   },
+   "stars": 14554,
+   "misses": [],
+   "plugins": {
+    "compiler": {
+     "annotations": 1,
+     "gradle-api": 1,
+     "gradle-installation-beacon": 1,
+     "gradle-kotlin-dsl": 1,
+     "gradle-kotlin-dsl-shared-runtime": 1,
+     "gradle-kotlin-dsl-tooling-models": 1,
+     "groovy": 1,
+     "groovy-ant": 1,
+     "groovy-astbuilder": 1,
+     "groovy-datetime": 1,
+     "groovy-dateutil": 1,
+     "groovy-groovydoc": 1,
+     "groovy-json": 1,
+     "groovy-nio": 1,
+     "groovy-templates": 1,
+     "groovy-xml": 1,
+     "javaparser-core": 1,
+     "kotlin-assignment-compiler-plugin-embeddable": 1,
+     "kotlin-reflect": 1,
+     "kotlin-sam-with-receiver-compiler-plugin-embeddable": 1,
+     "kotlin-script-runtime": 1,
+     "kotlin-scripting-common": 1,
+     "kotlin-scripting-compiler-embeddable": 1,
+     "kotlin-scripting-compiler-impl-embeddable": 1,
+     "kotlin-scripting-jvm": 1,
+     "kotlin-serialization-compiler-plugin-embeddable": 1,
+     "kotlin-stdlib": 1
+    },
+    "gradle": {
+     "org.gradle.base": 1,
+     "org.gradle.build-init": 1,
+     "org.gradle.help-tasks": 1,
+     "org.gradle.java": 1,
+     "org.gradle.java-base": 1,
+     "org.gradle.java-gradle-plugin": 1,
+     "org.gradle.java-library": 1,
+     "org.gradle.jvm-ecosystem": 1,
+     "org.gradle.jvm-test-suite": 1,
+     "org.gradle.jvm-toolchains": 1,
+     "org.gradle.kotlin.dsl.plugins.embedded.EmbeddedKotlinPlugin": 1,
+     "org.gradle.kotlin.kotlin-dsl": 1,
+     "org.gradle.kotlin.kotlin-dsl-project": 1,
+     "org.gradle.kotlin.kotlin-dsl.base": 1,
+     "org.gradle.kotlin.kotlin-dsl.compiler-settings": 1,
+     "org.gradle.kotlin.kotlin-dsl.precompiled-script-plugins": 1,
+     "org.gradle.lifecycle-base": 1,
+     "org.gradle.reporting-base": 1,
+     "org.gradle.software-reporting-tasks": 1,
+     "org.gradle.test-suite-base": 1,
+     "org.gradle.wrapper": 1,
+     "org.jetbrains.kotlin.gradle.plugin.BuildMetricsPlugin": 1,
+     "org.jetbrains.kotlin.gradle.plugin.KotlinBaseApiPlugin": 1,
+     "org.jetbrains.kotlin.gradle.scripting.internal.ScriptingKotlinGradleSubplugin": 1,
+     "org.jetbrains.kotlin.jvm": 1,
+     "org.jetbrains.kotlin.plugin.assignment": 1,
+     "org.jetbrains.kotlin.plugin.sam.with.receiver": 1,
+     "org.jetbrains.kotlin.plugin.scripting": 1,
+     "org.jetbrains.kotlin.plugin.serialization": 1
+    }
+   }
+  },
+  {
+   "name": "leakcanary",
+   "reference_exit": 0,
+   "loc": {
+    "kotlin": 100627,
+    "java": 172
+   },
+   "compilations": 34,
+   "built": 6,
+   "classes": 1798,
+   "identical": 22,
+   "rows": [
+    {
+     "task": ":leakcanary:leakcanary-core:compileKotlin",
+     "dir": "leakcanary/leakcanary-core/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 23,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":leakcanary:leakcanary-core:compileTestKotlin",
+     "dir": "leakcanary/leakcanary-core/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 3,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":leakcanary:leakcanary-deobfuscation-gradle-plugin:compileKotlin",
+     "dir": "leakcanary/leakcanary-deobfuscation-gradle-plugin/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "leakcanary/leakcanary-deobfuscation-gradle-plugin/src/main/java/com/squareup/leakcanary/deobfuscation/LeakCanaryLeakDeobfuscationPlugin.kt:50:57: error: argument type mismatch: actual type is 'Any', but 'Variant' was expected.",
+     "classes": 6,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":leakcanary:leakcanary-deobfuscation-gradle-plugin:compileTestKotlin",
+     "dir": "leakcanary/leakcanary-deobfuscation-gradle-plugin/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 2,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":leakcanary:leakcanary-gc:compileKotlin",
+     "dir": "leakcanary/leakcanary-gc/build/classes/kotlin/main",
+     "built": true,
+     "fallback": null,
+     "error": null,
+     "classes": 4,
+     "identical": 3,
+     "only_kotlinc": 0,
+     "only_krusty": 0
+    },
+    {
+     "task": ":leakcanary:leakcanary-jvm-test:compileKotlin",
+     "dir": "leakcanary/leakcanary-jvm-test/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 4,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":leakcanary:leakcanary-jvm-test:compileTestKotlin",
+     "dir": "leakcanary/leakcanary-jvm-test/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 3,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":leakcanary:leakcanary-test-core:compileKotlin",
+     "dir": "leakcanary/leakcanary-test-core/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 7,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":leakcanary:leakcanary-test-core:compileTestKotlin",
+     "dir": "leakcanary/leakcanary-test-core/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 5,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":object-watcher:object-watcher:compileKotlin",
+     "dir": "object-watcher/object-watcher/build/classes/kotlin/main",
+     "built": true,
+     "fallback": null,
+     "error": null,
+     "classes": 25,
+     "identical": 17,
+     "only_kotlinc": 2,
+     "only_krusty": 0
+    },
+    {
+     "task": ":object-watcher:object-watcher:compileTestKotlin",
+     "dir": "object-watcher/object-watcher/build/classes/kotlin/test",
+     "built": true,
+     "fallback": null,
+     "error": null,
+     "classes": 2,
+     "identical": 0,
+     "only_kotlinc": 1,
+     "only_krusty": 0
+    },
+    {
+     "task": ":shark:shark-android:compileKotlin",
+     "dir": "shark/shark-android/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 151,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":shark:shark-android:compileTestKotlin",
+     "dir": "shark/shark-android/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 47,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":shark:shark-cli:compileKotlin",
+     "dir": "shark/shark-cli/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 28,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":shark:shark-dive:shark-dive-agent:compileKotlin",
+     "dir": "shark/shark-dive/shark-dive-agent/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 63,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":shark:shark-dive:shark-dive-agent:compileTestKotlin",
+     "dir": "shark/shark-dive/shark-dive-agent/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 25,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":shark:shark-dive:shark-dive-app:compileKotlin",
+     "dir": "shark/shark-dive/shark-dive-app/build/classes/kotlin/main",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-P' conflicts with compiler plugin configuration; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 301,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":shark:shark-dive:shark-dive-app:compileTestKotlin",
+     "dir": "shark/shark-dive/shark-dive-app/build/classes/kotlin/test",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-P' conflicts with compiler plugin configuration; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 145,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":shark:shark-dive:shark-dive-core:compileKotlin",
+     "dir": "shark/shark-dive/shark-dive-core/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 297,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":shark:shark-dive:shark-dive-core:compileTestKotlin",
+     "dir": "shark/shark-dive/shark-dive-core/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 101,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":shark:shark-dive:shark-dive-eval:compileKotlin",
+     "dir": "shark/shark-dive/shark-dive-eval/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 8,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":shark:shark-dive:shark-dive-eval:compileTestKotlin",
+     "dir": "shark/shark-dive/shark-dive-eval/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 3,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":shark:shark-dive:shark-dive-jdwp:compileKotlin",
+     "dir": "shark/shark-dive/shark-dive-jdwp/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 12,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":shark:shark-dive:shark-dive-jdwp:compileTestKotlin",
+     "dir": "shark/shark-dive/shark-dive-jdwp/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 5,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":shark:shark-graph:compileKotlin",
+     "dir": "shark/shark-graph/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 74,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":shark:shark-graph:compileTestKotlin",
+     "dir": "shark/shark-graph/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 33,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":shark:shark-hprof-test:compileKotlin",
+     "dir": "shark/shark-hprof-test/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 7,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":shark:shark-hprof:compileKotlin",
+     "dir": "shark/shark-hprof/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "shark/shark-hprof/src/main/java/shark/HprofDeobfuscator.kt:1:1: error: internal error: checked FIR construction failed: Check(BodyCheckFailure { span: Some(Span { lo: 4167, hi: 4254 }), kind: UnpublishableType(Error) })",
+     "classes": 107,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":shark:shark-hprof:compileTestKotlin",
+     "dir": "shark/shark-hprof/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 16,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":shark:shark-log:compileKotlin",
+     "dir": "shark/shark-log/build/classes/kotlin/main",
+     "built": true,
+     "fallback": null,
+     "error": null,
+     "classes": 2,
+     "identical": 1,
+     "only_kotlinc": 0,
+     "only_krusty": 0
+    },
+    {
+     "task": ":shark:shark-log:compileTestKotlin",
+     "dir": "shark/shark-log/build/classes/kotlin/test",
+     "built": true,
+     "fallback": null,
+     "error": null,
+     "classes": 2,
+     "identical": 1,
+     "only_kotlinc": 0,
+     "only_krusty": 0
+    },
+    {
+     "task": ":shark:shark-test:compileKotlin",
+     "dir": "shark/shark-test/build/classes/kotlin/main",
+     "built": true,
+     "fallback": null,
+     "error": null,
+     "classes": 2,
+     "identical": 0,
+     "only_kotlinc": 0,
+     "only_krusty": 0
+    },
+    {
+     "task": ":shark:shark:compileKotlin",
+     "dir": "shark/shark/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 228,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":shark:shark:compileTestKotlin",
+     "dir": "shark/shark/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 57,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    }
+   ],
+   "no_reference_classes": [
+    {
+     "task": ":leakcanary:leakcanary-gc:compileTestKotlin",
+     "dir": "leakcanary/leakcanary-gc/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":shark:shark-cli:compileTestKotlin",
+     "dir": "shark/shark-cli/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":shark:shark-dive:shark-dive-app:compileDevKotlin",
+     "dir": "shark/shark-dive/shark-dive-app/build/classes/kotlin/dev",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":shark:shark-hprof-test:compileTestKotlin",
+     "dir": "shark/shark-hprof-test/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":shark:shark-test:compileTestKotlin",
+     "dir": "shark/shark-test/build/classes/kotlin/test",
+     "krusty_classes": 0
+    }
+   ],
+   "measured": {
+    "date": "2026-10-25",
+    "commit": "0e127f350d9a74cd4fb5fb36d85f789e65bf8841",
+    "run": "https://github.com/qnox/krusty/actions/runs/40196119897"
+   },
+   "stars": 30003,
+   "misses": [
+    [
+     "krusty wrote no class",
+     24
+    ],
+    [
+     "left to kotlinc: krusty does not implement everything it requests (freeCompilerArg '-P' conflicts with compiler plugin configuration; configure the structured Gradle input instead)",
+     2
+    ],
+    [
+     "leakcanary/leakcanary-deobfuscation-gradle-plugin/src/main/java/com/squareup/leakcanary/deobfuscation/LeakCanaryLeakDeobfuscationPlugin.kt:50:57: error: argument type mismatch: actual type is 'Any', but 'Variant' was expected.",
+     1
+    ],
+    [
+     "shark/shark-hprof/src/main/java/shark/HprofDeobfuscator.kt:1:1: error: internal error: checked FIR construction failed: Check(BodyCheckFailure { span: Some(Span { lo: 4167, hi: 4254 }), kind: UnpublishableType(Error) })",
+     1
+    ]
+   ],
+   "plugins": {
+    "compiler": {
+     "annotations": 20,
+     "kotlin-build-tools-api": 1,
+     "kotlin-compiler-embeddable": 1,
+     "kotlin-compose-compiler-plugin-embeddable": 2,
+     "kotlin-daemon-embeddable": 1,
+     "kotlin-parcelize-compiler": 1,
+     "kotlin-reflect": 1,
+     "kotlin-script-runtime": 20,
+     "kotlin-stdlib": 20,
+     "kotlinx-coroutines-core-jvm": 1,
+     "symbol-processing-api": 1,
+     "kotlin-scripting-common": 19,
+     "kotlin-scripting-compiler-embeddable": 19,
+     "kotlin-scripting-compiler-impl-embeddable": 19,
+     "kotlin-scripting-jvm": 19
+    },
+    "compiler-arg": {
+     "-P": 1
+    },
+    "gradle": {
+     "Build_gradle$DokkaGfmPlugin": 28,
+     "org.gradle.build-init": 48,
+     "org.gradle.help-tasks": 48,
+     "org.gradle.kotlin.kotlin-dsl-project": 42,
+     "org.gradle.lifecycle-base": 42,
+     "org.gradle.software-reporting-tasks": 48,
+     "org.gradle.wrapper": 48,
+     "org.jetbrains.dokka.gradle.DokkaBasePlugin": 28,
+     "io.gitlab.arturbosch.detekt": 47,
+     "org.gradle.reporting-base": 47,
+     "com.android.build.gradle.LibraryPlugin": 19,
+     "com.android.build.gradle.api.AndroidBasePlugin": 22,
+     "com.android.internal.library": 19,
+     "com.android.internal.version-check": 22,
+     "com.vanniktech.maven.publish": 27,
+     "com.vanniktech.maven.publish.base": 27,
+     "org.gradle.base": 41,
+     "org.gradle.java-base": 41,
+     "org.gradle.jvm-ecosystem": 41,
+     "org.gradle.jvm-toolchains": 41,
+     "org.gradle.maven-publish": 27,
+     "org.gradle.publishing": 27,
+     "org.gradle.signing": 27,
+     "org.jetbrains.dokka-javadoc": 27,
+     "org.jetbrains.dokka.gradle.adapters.AndroidAdapter": 16,
+     "org.jetbrains.dokka.gradle.adapters.JavaAdapter": 27,
+     "org.jetbrains.dokka.gradle.adapters.KotlinAdapter": 27,
+     "org.jetbrains.kotlin.gradle.plugin.KotlinBaseApiPlugin": 22,
+     "com.android.build.gradle.AppPlugin": 3,
+     "com.android.internal.application": 3,
+     "com.google.dagger.hilt.android": 1,
+     "com.google.devtools.ksp": 1,
+     "org.jetbrains.kotlin.plugin.compose": 2,
+     "org.jetbrains.kotlin.plugin.parcelize": 1,
+     "app.cash.sqldelight": 1,
+     "org.gradle.java": 19,
+     "org.gradle.jvm-test-suite": 19,
+     "org.gradle.test-suite-base": 19,
+     "org.jetbrains.kotlin.gradle.scripting.internal.ScriptingKotlinGradleSubplugin": 19,
+     "org.jetbrains.kotlin.jvm": 19,
+     "org.jetbrains.kotlin.plugin.scripting": 19,
+     "org.gradle.java-gradle-plugin": 1,
+     "org.gradle.java-library": 1,
+     "org.gradle.plugin.devel.plugins.MavenPluginPublishPlugin": 1,
+     "org.gradle.application": 2,
+     "org.gradle.distribution": 2,
+     "org.gradle.distribution-base": 2,
+     "org.jetbrains.compose": 1,
+     "org.jetbrains.compose.hot-reload": 1
+    }
+   }
+  },
+  {
+   "name": "Maestro",
+   "reference_exit": 0,
+   "loc": {
+    "kotlin": 65644,
+    "java": 0
+   },
+   "compilations": 19,
+   "built": 1,
+   "classes": 2156,
+   "identical": 26,
+   "rows": [
+    {
+     "task": ":maestro-ai:compileKotlin",
+     "dir": "maestro-ai/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "maestro-ai/src/main/java/maestro/ai/cloud/ApiClient.kt:1:1: error: krusty: this construct is not yet supported by the IR backend",
+     "classes": 84,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":maestro-cli:compileKotlin",
+     "dir": "maestro-cli/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 357,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":maestro-cli:compileTestKotlin",
+     "dir": "maestro-cli/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 44,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":maestro-client:compileKotlin",
+     "dir": "maestro-client/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 385,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":maestro-client:compileTestKotlin",
+     "dir": "maestro-client/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 178,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":maestro-ios-driver:compileKotlin",
+     "dir": "maestro-ios-driver/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "maestro-ios-driver/src/main/kotlin/util/LocalSimulatorUtils.kt:239:50: error: unresolved reference 'Path'.",
+     "classes": 84,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":maestro-ios-driver:compileTestKotlin",
+     "dir": "maestro-ios-driver/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 18,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":maestro-ios:compileKotlin",
+     "dir": "maestro-ios/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 8,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":maestro-ios:compileTestKotlin",
+     "dir": "maestro-ios/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 6,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":maestro-orchestra-models:compileKotlin",
+     "dir": "maestro-orchestra-models/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 101,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":maestro-orchestra-models:compileTestKotlin",
+     "dir": "maestro-orchestra-models/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 26,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":maestro-orchestra:compileKotlin",
+     "dir": "maestro-orchestra/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 284,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":maestro-orchestra:compileTestKotlin",
+     "dir": "maestro-orchestra/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 186,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":maestro-test:compileKotlin",
+     "dir": "maestro-test/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 39,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":maestro-test:compileTestKotlin",
+     "dir": "maestro-test/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 260,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":maestro-utils:compileKotlin",
+     "dir": "maestro-utils/build/classes/kotlin/main",
+     "built": true,
+     "fallback": null,
+     "error": null,
+     "classes": 37,
+     "identical": 26,
+     "only_kotlinc": 0,
+     "only_krusty": 0
+    },
+    {
+     "task": ":maestro-utils:compileTestKotlin",
+     "dir": "maestro-utils/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "maestro-utils/src/test/kotlin/MaestroTimerTest.kt:19:9: error: unresolved reference 'assertEquals'.",
+     "classes": 22,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":maestro-web:compileKotlin",
+     "dir": "maestro-web/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "maestro-web/src/main/kotlin/maestro/web/cdp/CdpClient.kt:1:1: error: krusty: JVM backend inline error: call arity mismatch",
+     "classes": 25,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":maestro-web:compileTestKotlin",
+     "dir": "maestro-web/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 12,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    }
+   ],
+   "no_reference_classes": [
+    {
+     "task": ":compileKotlin",
+     "dir": "build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":compileTestKotlin",
+     "dir": "build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":maestro-ai:compileTestKotlin",
+     "dir": "maestro-ai/build/classes/kotlin/test",
+     "krusty_classes": 0
+    }
+   ],
+   "measured": {
+    "date": "2026-10-25",
+    "commit": "0e127f350d9a74cd4fb5fb36d85f789e65bf8841",
+    "run": "https://github.com/qnox/krusty/actions/runs/40196119897"
+   },
+   "stars": 16207,
+   "misses": [
+    [
+     "krusty wrote no class",
+     14
+    ],
+    [
+     "maestro-ai/src/main/java/maestro/ai/cloud/ApiClient.kt:1:1: error: krusty: this construct is not yet supported by the IR backend",
+     1
+    ],
+    [
+     "maestro-ios-driver/src/main/kotlin/util/LocalSimulatorUtils.kt:239:50: error: unresolved reference 'Path'.",
+     1
+    ],
+    [
+     "maestro-utils/src/test/kotlin/MaestroTimerTest.kt:19:9: error: unresolved reference 'assertEquals'.",
+     1
+    ],
+    [
+     "maestro-web/src/main/kotlin/maestro/web/cdp/CdpClient.kt:1:1: error: krusty: JVM backend inline error: call arity mismatch",
+     1
+    ]
+   ],
+   "plugins": {
+    "compiler": {
+     "annotations": 11,
+     "kotlin-script-runtime": 11,
+     "kotlin-scripting-common": 11,
+     "kotlin-scripting-compiler-embeddable": 11,
+     "kotlin-scripting-compiler-impl-embeddable": 11,
+     "kotlin-scripting-jvm": 11,
+     "kotlin-stdlib": 11,
+     "kotlin-serialization-compiler-plugin-embeddable": 4
+    },
+    "gradle": {
+     "com.vanniktech.maven.publish": 11,
+     "com.vanniktech.maven.publish.base": 11,
+     "io.gitlab.arturbosch.detekt": 3,
+     "org.gradle.base": 12,
+     "org.gradle.build-init": 15,
+     "org.gradle.help-tasks": 15,
+     "org.gradle.java": 12,
+     "org.gradle.java-base": 12,
+     "org.gradle.jvm-ecosystem": 12,
+     "org.gradle.jvm-test-suite": 12,
+     "org.gradle.jvm-toolchains": 12,
+     "org.gradle.kotlin.kotlin-dsl-project": 12,
+     "org.gradle.kotlin.kotlin-dsl-root-project": 1,
+     "org.gradle.lifecycle-base": 12,
+     "org.gradle.maven-publish": 11,
+     "org.gradle.publishing": 11,
+     "org.gradle.reporting-base": 12,
+     "org.gradle.software-reporting-tasks": 15,
+     "org.gradle.test-suite-base": 12,
+     "org.gradle.wrapper": 15,
+     "org.jetbrains.kotlin.gradle.plugin.BuildMetricsPlugin": 11,
+     "org.jetbrains.kotlin.gradle.scripting.internal.ScriptingKotlinGradleSubplugin": 11,
+     "org.jetbrains.kotlin.jvm": 11,
+     "org.jetbrains.kotlin.plugin.scripting": 11,
+     "org.gradle.application": 2,
+     "org.gradle.distribution": 2,
+     "org.gradle.distribution-base": 2,
+     "org.gradle.signing": 10,
+     "org.jetbrains.kotlin.plugin.serialization": 4,
+     "com.github.jengelman.gradle.plugins.shadow.ShadowApplicationPlugin": 1,
+     "com.github.jengelman.gradle.plugins.shadow.ShadowBasePlugin": 1,
+     "com.github.jengelman.gradle.plugins.shadow.ShadowJavaPlugin": 1,
+     "com.github.johnrengelman.shadow": 1,
+     "org.jreleaser": 1,
+     "com.google.osdetector": 1,
+     "com.google.protobuf": 1
+    }
+   }
+  },
+  {
+   "name": "moshi",
+   "reference_exit": 0,
+   "loc": {
+    "kotlin": 16749,
+    "java": 13212
+   },
+   "compilations": 12,
+   "built": 0,
+   "classes": 512,
+   "identical": 0,
+   "rows": [
+    {
+     "task": ":examples:compileKotlin",
+     "dir": "examples/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 9,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":moshi-adapters:compileKotlin",
+     "dir": "moshi-adapters/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 9,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":moshi-kotlin-codegen:compileKotlin",
+     "dir": "moshi-kotlin-codegen/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 47,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":moshi-kotlin-codegen:compileTestKotlin",
+     "dir": "moshi-kotlin-codegen/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 1,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":moshi-kotlin-tests:codegen-only:compileTestKotlin",
+     "dir": "moshi-kotlin-tests/codegen-only/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 191,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":moshi-kotlin-tests:compileTestKotlin",
+     "dir": "moshi-kotlin-tests/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 116,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":moshi-kotlin-tests:extra-moshi-test-module:compileKotlin",
+     "dir": "moshi-kotlin-tests/extra-moshi-test-module/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 1,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":moshi-kotlin:compileKotlin",
+     "dir": "moshi-kotlin/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 23,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":moshi-kotlin:compileTestKotlin",
+     "dir": "moshi-kotlin/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 2,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":moshi:compileJava16Kotlin",
+     "dir": "moshi/build/classes/kotlin/java16",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 3,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":moshi:compileKotlin",
+     "dir": "moshi/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "moshi/src/main/java/com/squareup/moshi/-JsonValueReader.kt:348:31: error: return type mismatch: expected 'Void?', actual 'Nothing?'.",
+     "classes": 102,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":moshi:compileTestKotlin",
+     "dir": "moshi/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 8,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    }
+   ],
+   "no_reference_classes": [
+    {
+     "task": ":examples:compileTestKotlin",
+     "dir": "examples/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":moshi-adapters:compileTestKotlin",
+     "dir": "moshi-adapters/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":moshi-kotlin-tests:codegen-only:compileKotlin",
+     "dir": "moshi-kotlin-tests/codegen-only/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":moshi-kotlin-tests:compileKotlin",
+     "dir": "moshi-kotlin-tests/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":moshi-kotlin-tests:extra-moshi-test-module:compileTestKotlin",
+     "dir": "moshi-kotlin-tests/extra-moshi-test-module/build/classes/kotlin/test",
+     "krusty_classes": 0
+    }
+   ],
+   "measured": {
+    "date": "2026-10-25",
+    "commit": "0e127f350d9a74cd4fb5fb36d85f789e65bf8841",
+    "run": "https://github.com/qnox/krusty/actions/runs/40196119897"
+   },
+   "stars": 10166,
+   "misses": [
+    [
+     "krusty wrote no class",
+     11
+    ],
+    [
+     "moshi/src/main/java/com/squareup/moshi/-JsonValueReader.kt:348:31: error: return type mismatch: expected 'Void?', actual 'Nothing?'.",
+     1
+    ]
+   ],
+   "plugins": {
+    "compiler": {
+     "annotations": 8,
+     "kotlin-script-runtime": 8,
+     "kotlin-scripting-common": 8,
+     "kotlin-scripting-compiler-embeddable": 8,
+     "kotlin-scripting-compiler-impl-embeddable": 8,
+     "kotlin-scripting-jvm": 8,
+     "kotlin-stdlib": 8,
+     "symbol-processing-api": 3
+    },
+    "gradle": {
+     "com.diffplug.spotless": 1,
+     "org.gradle.base": 12,
+     "org.gradle.build-init": 12,
+     "org.gradle.help-tasks": 12,
+     "org.gradle.kotlin.kotlin-dsl-project": 12,
+     "org.gradle.lifecycle-base": 12,
+     "org.gradle.software-reporting-tasks": 12,
+     "org.gradle.wrapper": 12,
+     "org.jetbrains.dokka": 4,
+     "org.jetbrains.dokka.gradle.DokkaBasePlugin": 4,
+     "org.jetbrains.dokka.gradle.formats.DokkaHtmlPlugin": 4,
+     "com.google.devtools.ksp": 3,
+     "org.gradle.java": 11,
+     "org.gradle.java-base": 11,
+     "org.gradle.jvm-ecosystem": 11,
+     "org.gradle.jvm-test-suite": 11,
+     "org.gradle.jvm-toolchains": 11,
+     "org.gradle.reporting-base": 11,
+     "org.gradle.test-suite-base": 11,
+     "org.jetbrains.kotlin.gradle.plugin.BuildMetricsPlugin": 8,
+     "org.jetbrains.kotlin.gradle.scripting.internal.ScriptingKotlinGradleSubplugin": 8,
+     "org.jetbrains.kotlin.jvm": 8,
+     "org.jetbrains.kotlin.plugin.scripting": 8,
+     "com.vanniktech.maven.publish": 4,
+     "com.vanniktech.maven.publish.base": 4,
+     "org.gradle.maven-publish": 4,
+     "org.gradle.publishing": 4,
+     "org.gradle.signing": 4,
+     "org.jetbrains.dokka.gradle.adapters.JavaAdapter": 3,
+     "org.jetbrains.dokka.gradle.adapters.KotlinAdapter": 3,
+     "me.champeau.gradle.japicmp": 2,
+     "org.gradle.java-library": 3
+    }
+   }
+  },
+  {
+   "name": "okhttp",
+   "reference_exit": 1,
+   "loc": {
+    "kotlin": 126665,
+    "java": 3816
+   },
+   "compilations": 0,
+   "built": 0,
+   "classes": 0,
+   "identical": 0,
+   "rows": [],
+   "no_reference_classes": [
+    {
+     "task": ":logging-interceptor:compileJava9Kotlin",
+     "dir": "okhttp-logging-interceptor/build/classes/kotlin/java9",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":logging-interceptor:compileJava9TestKotlin",
+     "dir": "okhttp-logging-interceptor/build/classes/kotlin/java9Test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":logging-interceptor:compileKotlin",
+     "dir": "okhttp-logging-interceptor/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":logging-interceptor:compileOsgiKotlin",
+     "dir": "okhttp-logging-interceptor/build/classes/kotlin/osgi",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":logging-interceptor:compileTestKotlin",
+     "dir": "okhttp-logging-interceptor/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":mockwebserver3-junit4:compileJava9Kotlin",
+     "dir": "mockwebserver-junit4/build/classes/kotlin/java9",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":mockwebserver3-junit4:compileJava9TestKotlin",
+     "dir": "mockwebserver-junit4/build/classes/kotlin/java9Test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":mockwebserver3-junit4:compileKotlin",
+     "dir": "mockwebserver-junit4/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":mockwebserver3-junit4:compileTestKotlin",
+     "dir": "mockwebserver-junit4/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":mockwebserver3-junit5:compileJava9Kotlin",
+     "dir": "mockwebserver-junit5/build/classes/kotlin/java9",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":mockwebserver3-junit5:compileJava9TestKotlin",
+     "dir": "mockwebserver-junit5/build/classes/kotlin/java9Test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":mockwebserver3-junit5:compileKotlin",
+     "dir": "mockwebserver-junit5/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":mockwebserver3-junit5:compileTestKotlin",
+     "dir": "mockwebserver-junit5/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":mockwebserver3:compileJava9Kotlin",
+     "dir": "mockwebserver/build/classes/kotlin/java9",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":mockwebserver3:compileJava9TestKotlin",
+     "dir": "mockwebserver/build/classes/kotlin/java9Test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":mockwebserver3:compileKotlin",
+     "dir": "mockwebserver/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":mockwebserver3:compileTestKotlin",
+     "dir": "mockwebserver/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":mockwebserver:compileJava9Kotlin",
+     "dir": "mockwebserver-deprecated/build/classes/kotlin/java9",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":mockwebserver:compileJava9TestKotlin",
+     "dir": "mockwebserver-deprecated/build/classes/kotlin/java9Test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":mockwebserver:compileKotlin",
+     "dir": "mockwebserver-deprecated/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":mockwebserver:compileTestKotlin",
+     "dir": "mockwebserver-deprecated/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okcurl:compileKotlin",
+     "dir": "okcurl/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okcurl:compileTestKotlin",
+     "dir": "okcurl/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-brotli:compileJava9Kotlin",
+     "dir": "okhttp-brotli/build/classes/kotlin/java9",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-brotli:compileJava9TestKotlin",
+     "dir": "okhttp-brotli/build/classes/kotlin/java9Test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-brotli:compileKotlin",
+     "dir": "okhttp-brotli/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-brotli:compileOsgiKotlin",
+     "dir": "okhttp-brotli/build/classes/kotlin/osgi",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-brotli:compileTestKotlin",
+     "dir": "okhttp-brotli/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-coroutines:compileJava9Kotlin",
+     "dir": "okhttp-coroutines/build/classes/kotlin/java9",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-coroutines:compileJava9TestKotlin",
+     "dir": "okhttp-coroutines/build/classes/kotlin/java9Test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-coroutines:compileKotlin",
+     "dir": "okhttp-coroutines/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-coroutines:compileOsgiKotlin",
+     "dir": "okhttp-coroutines/build/classes/kotlin/osgi",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-coroutines:compileTestKotlin",
+     "dir": "okhttp-coroutines/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-dnsoverhttps:compileJava9Kotlin",
+     "dir": "okhttp-dnsoverhttps/build/classes/kotlin/java9",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-dnsoverhttps:compileJava9TestKotlin",
+     "dir": "okhttp-dnsoverhttps/build/classes/kotlin/java9Test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-dnsoverhttps:compileKotlin",
+     "dir": "okhttp-dnsoverhttps/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-dnsoverhttps:compileOsgiKotlin",
+     "dir": "okhttp-dnsoverhttps/build/classes/kotlin/osgi",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-dnsoverhttps:compileTestKotlin",
+     "dir": "okhttp-dnsoverhttps/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-hpacktests:compileKotlin",
+     "dir": "okhttp-hpacktests/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-hpacktests:compileTestKotlin",
+     "dir": "okhttp-hpacktests/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-idna-mapping-table:compileKotlin",
+     "dir": "okhttp-idna-mapping-table/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-idna-mapping-table:compileTestKotlin",
+     "dir": "okhttp-idna-mapping-table/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-java-net-cookiejar:compileJava9Kotlin",
+     "dir": "okhttp-java-net-cookiejar/build/classes/kotlin/java9",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-java-net-cookiejar:compileJava9TestKotlin",
+     "dir": "okhttp-java-net-cookiejar/build/classes/kotlin/java9Test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-java-net-cookiejar:compileKotlin",
+     "dir": "okhttp-java-net-cookiejar/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-java-net-cookiejar:compileOsgiKotlin",
+     "dir": "okhttp-java-net-cookiejar/build/classes/kotlin/osgi",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-java-net-cookiejar:compileTestKotlin",
+     "dir": "okhttp-java-net-cookiejar/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-osgi-tests:compileKotlin",
+     "dir": "okhttp-osgi-tests/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-osgi-tests:compileTestKotlin",
+     "dir": "okhttp-osgi-tests/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-sse:compileJava9Kotlin",
+     "dir": "okhttp-sse/build/classes/kotlin/java9",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-sse:compileJava9TestKotlin",
+     "dir": "okhttp-sse/build/classes/kotlin/java9Test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-sse:compileKotlin",
+     "dir": "okhttp-sse/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-sse:compileOsgiKotlin",
+     "dir": "okhttp-sse/build/classes/kotlin/osgi",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-sse:compileTestKotlin",
+     "dir": "okhttp-sse/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-testing-support:compileKotlin",
+     "dir": "okhttp-testing-support/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-testing-support:compileTestKotlin",
+     "dir": "okhttp-testing-support/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-tls:compileJava9Kotlin",
+     "dir": "okhttp-tls/build/classes/kotlin/java9",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-tls:compileJava9TestKotlin",
+     "dir": "okhttp-tls/build/classes/kotlin/java9Test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-tls:compileKotlin",
+     "dir": "okhttp-tls/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-tls:compileOsgiKotlin",
+     "dir": "okhttp-tls/build/classes/kotlin/osgi",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-tls:compileTestKotlin",
+     "dir": "okhttp-tls/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-urlconnection:compileJava9Kotlin",
+     "dir": "okhttp-urlconnection/build/classes/kotlin/java9",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-urlconnection:compileJava9TestKotlin",
+     "dir": "okhttp-urlconnection/build/classes/kotlin/java9Test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-urlconnection:compileKotlin",
+     "dir": "okhttp-urlconnection/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-urlconnection:compileOsgiKotlin",
+     "dir": "okhttp-urlconnection/build/classes/kotlin/osgi",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-urlconnection:compileTestKotlin",
+     "dir": "okhttp-urlconnection/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-zstd:compileKotlin",
+     "dir": "okhttp-zstd/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-zstd:compileOsgiKotlin",
+     "dir": "okhttp-zstd/build/classes/kotlin/osgi",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp-zstd:compileTestKotlin",
+     "dir": "okhttp-zstd/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp:compileKotlinJvm",
+     "dir": "okhttp/build/classes/kotlin/jvm/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okhttp:compileTestKotlinJvm",
+     "dir": "okhttp/build/classes/kotlin/jvm/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":samples:compare:compileKotlin",
+     "dir": "samples/compare/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":samples:compare:compileTestKotlin",
+     "dir": "samples/compare/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":samples:crawler:compileKotlin",
+     "dir": "samples/crawler/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":samples:crawler:compileTestKotlin",
+     "dir": "samples/crawler/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":samples:guide:compileKotlin",
+     "dir": "samples/guide/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":samples:guide:compileTestKotlin",
+     "dir": "samples/guide/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":samples:simple-client:compileKotlin",
+     "dir": "samples/simple-client/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":samples:simple-client:compileTestKotlin",
+     "dir": "samples/simple-client/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":samples:slack:compileKotlin",
+     "dir": "samples/slack/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":samples:slack:compileTestKotlin",
+     "dir": "samples/slack/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":samples:static-server:compileKotlin",
+     "dir": "samples/static-server/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":samples:static-server:compileTestKotlin",
+     "dir": "samples/static-server/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":samples:tlssurvey:compileKotlin",
+     "dir": "samples/tlssurvey/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":samples:tlssurvey:compileTestKotlin",
+     "dir": "samples/tlssurvey/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":samples:unixdomainsockets:compileKotlin",
+     "dir": "samples/unixdomainsockets/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":samples:unixdomainsockets:compileTestKotlin",
+     "dir": "samples/unixdomainsockets/build/classes/kotlin/test",
+     "krusty_classes": 0
+    }
+   ],
+   "measured": {
+    "date": "2026-10-25",
+    "commit": "0e127f350d9a74cd4fb5fb36d85f789e65bf8841",
+    "run": "https://github.com/qnox/krusty/actions/runs/40196119897"
+   },
+   "stars": 47095,
+   "misses": [],
+   "plugins": {
+    "compiler": {
+     "burst-kotlin-plugin": 3,
+     "annotations": 27,
+     "kotlin-script-runtime": 27,
+     "kotlin-scripting-common": 27,
+     "kotlin-scripting-compiler-embeddable": 27,
+     "kotlin-scripting-compiler-impl-embeddable": 27,
+     "kotlin-scripting-jvm": 27,
+     "kotlin-stdlib": 27,
+     "kotlin-serialization-compiler-plugin-embeddable": 1,
+     "symbol-processing-api": 2
+    },
+    "gradle": {
+     "okhttp.dokka-multimodule-conventions": 1,
+     "org.gradle.build-init": 33,
+     "org.gradle.help-tasks": 33,
+     "org.gradle.kotlin.kotlin-dsl-project": 32,
+     "org.gradle.software-reporting-tasks": 33,
+     "org.gradle.wrapper": 33,
+     "app.cash.burst": 3,
+     "app.cash.burst.gradle.BurstKotlinPlugin": 3,
+     "com.android.build.gradle.LibraryPlugin": 2,
+     "com.android.build.gradle.api.AndroidBasePlugin": 3,
+     "com.android.internal.library": 2,
+     "com.android.internal.version-check": 29,
+     "de.mannodermaus.android-junit": 1,
+     "okhttp.base-conventions": 31,
+     "org.gradle.base": 31,
+     "org.gradle.java-base": 30,
+     "org.gradle.jvm-ecosystem": 31,
+     "org.gradle.jvm-toolchains": 30,
+     "org.gradle.lifecycle-base": 31,
+     "org.gradle.reporting-base": 30,
+     "org.jetbrains.kotlin.gradle.plugin.BuildMetricsPlugin": 30,
+     "org.jetbrains.kotlin.gradle.plugin.KotlinBaseApiPlugin": 3,
+     "com.android.build.gradle.AppPlugin": 1,
+     "com.android.internal.application": 1,
+     "com.android.build.gradle.LintPlugin": 26,
+     "com.android.internal.lint": 26,
+     "com.diffplug.spotless": 26,
+     "com.gradleup.tapmoc": 27,
+     "com.vanniktech.maven.publish.base": 16,
+     "me.champeau.mrjar.MultiReleaseJarPlugin$Inject_": 12,
+     "okhttp.jvm-conventions": 27,
+     "okhttp.publish-conventions": 16,
+     "okhttp.quality-conventions": 26,
+     "okhttp.testing-conventions": 27,
+     "org.gradle.checkstyle": 26,
+     "org.gradle.java": 26,
+     "org.gradle.jvm-test-suite": 26,
+     "org.gradle.maven-publish": 16,
+     "org.gradle.publishing": 16,
+     "org.gradle.signing": 16,
+     "org.gradle.test-suite-base": 26,
+     "org.jetbrains.kotlin.gradle.scripting.internal.ScriptingKotlinGradleSubplugin": 27,
+     "org.jetbrains.kotlin.jvm": 26,
+     "org.jetbrains.kotlin.plugin.scripting": 27,
+     "org.jetbrains.kotlinx.binary-compatibility-validator": 16,
+     "ru.vyarus.animalsniffer": 26,
+     "com.github.jengelman.gradle.plugins.shadow.ShadowBasePlugin": 2,
+     "com.github.jengelman.gradle.plugins.shadow.ShadowJavaPlugin": 2,
+     "com.github.johnrengelman.shadow": 2,
+     "com.gradleup.shadow": 2,
+     "org.graalvm.buildtools.gradle.NativeImagePlugin$Inject_": 1,
+     "com.android.build.gradle.api.KotlinMultiplatformAndroidPlugin": 1,
+     "com.android.internal.kotlin.multiplatform.library": 1,
+     "io.github.usefulness.maven-sympathy": 1,
+     "org.jetbrains.kotlin.multiplatform": 1,
+     "org.jetbrains.kotlin.plugin.serialization": 1,
+     "org.gradle.java-platform": 1,
+     "org.gradle.application": 2,
+     "org.gradle.distribution": 2,
+     "org.gradle.distribution-base": 2,
+     "com.google.devtools.ksp": 2
+    }
+   }
+  },
+  {
+   "name": "okio",
+   "reference_exit": 1,
+   "loc": {
+    "kotlin": 46812,
+    "java": 2398
+   },
+   "compilations": 0,
+   "built": 0,
+   "classes": 0,
+   "identical": 0,
+   "rows": [],
+   "no_reference_classes": [
+    {
+     "task": ":okio-fakefilesystem:compileKotlinJvm",
+     "dir": "okio-fakefilesystem/build/classes/kotlin/jvm/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okio-fakefilesystem:compileTestKotlinJvm",
+     "dir": "okio-fakefilesystem/build/classes/kotlin/jvm/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okio-testing-support:compileKotlinJvm",
+     "dir": "okio-testing-support/build/classes/kotlin/jvm/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okio-testing-support:compileTestKotlinJvm",
+     "dir": "okio-testing-support/build/classes/kotlin/jvm/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okio:compileKotlinJvm",
+     "dir": "okio/build/classes/kotlin/jvm/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okio:compileTestKotlinJvm",
+     "dir": "okio/build/classes/kotlin/jvm/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okio:jvm:jmh:compileJmhKotlin",
+     "dir": "okio/jvm/jmh/build/classes/kotlin/jmh",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okio:jvm:jmh:compileKotlin",
+     "dir": "okio/jvm/jmh/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":okio:jvm:jmh:compileTestKotlin",
+     "dir": "okio/jvm/jmh/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":samples:compileKotlinJvm",
+     "dir": "samples/build/classes/kotlin/jvm/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":samples:compileTestKotlinJvm",
+     "dir": "samples/build/classes/kotlin/jvm/test",
+     "krusty_classes": 0
+    }
+   ],
+   "measured": {
+    "date": "2026-10-25",
+    "commit": "0e127f350d9a74cd4fb5fb36d85f789e65bf8841",
+    "run": "https://github.com/qnox/krusty/actions/runs/40196119897"
+   },
+   "stars": 9052,
+   "misses": [],
+   "plugins": {
+    "compiler": {
+     "annotations": 5,
+     "burst-kotlin-plugin": 2,
+     "kotlin-script-runtime": 5,
+     "kotlin-scripting-common": 5,
+     "kotlin-scripting-compiler-embeddable": 5,
+     "kotlin-scripting-compiler-impl-embeddable": 5,
+     "kotlin-scripting-jvm": 5,
+     "kotlin-stdlib": 5
+    },
+    "gradle": {
+     "com.vanniktech.maven.publish.base": 7,
+     "org.gradle.base": 12,
+     "org.gradle.build-init": 12,
+     "org.gradle.help-tasks": 12,
+     "org.gradle.kotlin.kotlin-dsl-project": 11,
+     "org.gradle.lifecycle-base": 12,
+     "org.gradle.maven-publish": 7,
+     "org.gradle.publishing": 7,
+     "org.gradle.signing": 7,
+     "org.gradle.software-reporting-tasks": 12,
+     "org.gradle.wrapper": 12,
+     "org.jetbrains.kotlin.gradle.targets.js.nodejs.NodeJsPlugin": 5,
+     "org.jetbrains.kotlin.gradle.targets.js.nodejs.NodeJsRootPlugin": 1,
+     "org.jetbrains.kotlin.gradle.targets.js.yarn.YarnPlugin": 1,
+     "org.jetbrains.kotlin.gradle.targets.wasm.nodejs.WasmNodeJsPlugin": 5,
+     "org.jetbrains.kotlin.gradle.targets.wasm.nodejs.WasmNodeJsRootPlugin": 1,
+     "org.jetbrains.kotlin.gradle.targets.wasm.yarn.WasmYarnPlugin": 1,
+     "com.android.build.gradle.LibraryPlugin": 2,
+     "com.android.build.gradle.api.AndroidBasePlugin": 2,
+     "com.android.internal.library": 2,
+     "com.android.internal.version-check": 2,
+     "com.diffplug.spotless": 11,
+     "org.gradle.java-base": 9,
+     "org.gradle.jvm-ecosystem": 10,
+     "org.gradle.jvm-toolchains": 9,
+     "org.gradle.reporting-base": 9,
+     "org.jetbrains.kotlin.gradle.plugin.BuildMetricsPlugin": 9,
+     "org.jetbrains.kotlin.gradle.plugin.KotlinBaseApiPlugin": 2,
+     "app.cash.burst": 4,
+     "app.cash.burst.gradle.BurstKotlinPlugin": 4,
+     "build-support": 6,
+     "org.jetbrains.dokka": 5,
+     "org.jetbrains.dokka.gradle.DokkaBasePlugin": 5,
+     "org.jetbrains.dokka.gradle.adapters.JavaAdapter": 5,
+     "org.jetbrains.dokka.gradle.adapters.KotlinAdapter": 5,
+     "org.jetbrains.dokka.gradle.formats.DokkaHtmlPlugin": 5,
+     "org.jetbrains.kotlin.gradle.scripting.internal.ScriptingKotlinGradleSubplugin": 7,
+     "org.jetbrains.kotlin.gradle.targets.js.npm.NpmResolverPlugin": 4,
+     "org.jetbrains.kotlin.gradle.targets.wasm.binaryen.BinaryenPlugin": 4,
+     "org.jetbrains.kotlin.gradle.targets.wasm.npm.WasmNpmResolverPlugin": 3,
+     "org.jetbrains.kotlin.multiplatform": 6,
+     "org.jetbrains.kotlin.plugin.scripting": 7,
+     "org.jetbrains.kotlinx.binary-compatibility-validator": 5,
+     "org.jetbrains.dokka.gradle.adapters.AndroidAdapter": 1,
+     "org.gradle.java-platform": 1,
+     "me.champeau.jmh": 1,
+     "org.gradle.java": 1,
+     "org.gradle.jvm-test-suite": 1,
+     "org.gradle.test-suite-base": 1,
+     "org.jetbrains.kotlin.jvm": 1,
+     "com.gradleup.tapmoc": 1,
+     "org.gradle.distribution": 1,
+     "org.gradle.distribution-base": 1
+    }
+   }
+  },
+  {
+   "name": "quarkdown",
+   "reference_exit": 0,
+   "loc": {
+    "kotlin": 87771,
+    "java": 23
+   },
+   "compilations": 37,
+   "built": 0,
+   "classes": 2345,
+   "identical": 0,
+   "rows": [
+    {
+     "task": ":quarkdown-cli:compileKotlin",
+     "dir": "quarkdown-cli/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 89,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-cli:compileTestKotlin",
+     "dir": "quarkdown-cli/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 32,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-core-test-fixtures:compileKotlin",
+     "dir": "quarkdown-core-test-fixtures/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 10,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-core:compileKotlinJvm",
+     "dir": "quarkdown-core/build/classes/kotlin/jvm/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 1043,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-core:compileTestKotlinJvm",
+     "dir": "quarkdown-core/build/classes/kotlin/jvm/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 263,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-html-pdf:compileKotlin",
+     "dir": "quarkdown-html-pdf/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 10,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-html-pdf:compileTestKotlin",
+     "dir": "quarkdown-html-pdf/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 1,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-html:compileKotlinJvm",
+     "dir": "quarkdown-html/build/classes/kotlin/jvm/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 88,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-html:compileTestKotlinJvm",
+     "dir": "quarkdown-html/build/classes/kotlin/jvm/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 15,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-install-layout-navigator:compileKotlinJvm",
+     "dir": "quarkdown-install-layout-navigator/build/classes/kotlin/jvm/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 13,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-install-layout-navigator:compileTestKotlinJvm",
+     "dir": "quarkdown-install-layout-navigator/build/classes/kotlin/jvm/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 1,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-interaction:compileKotlin",
+     "dir": "quarkdown-interaction/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 24,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-interaction:compileTestKotlin",
+     "dir": "quarkdown-interaction/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 6,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-locale-table-processor:compileKotlin",
+     "dir": "quarkdown-locale-table-processor/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 7,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-locale-table-processor:compileTestKotlin",
+     "dir": "quarkdown-locale-table-processor/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 1,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-lsp:compileKotlinJvm",
+     "dir": "quarkdown-lsp/build/classes/kotlin/jvm/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 85,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-lsp:compileTestKotlinJvm",
+     "dir": "quarkdown-lsp/build/classes/kotlin/jvm/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 18,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-markdown:compileKotlin",
+     "dir": "quarkdown-markdown/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 5,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-markdown:compileTestKotlin",
+     "dir": "quarkdown-markdown/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 2,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-native-library-annotations:compileKotlinJvm",
+     "dir": "quarkdown-native-library-annotations/build/classes/kotlin/jvm/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 4,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-native-library-processor:compileKotlin",
+     "dir": "quarkdown-native-library-processor/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 68,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-native-library-processor:compileTestKotlin",
+     "dir": "quarkdown-native-library-processor/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 40,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-package-manager:compileKotlinJvm",
+     "dir": "quarkdown-package-manager/build/classes/kotlin/jvm/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 56,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-package-manager:compileTestKotlinJvm",
+     "dir": "quarkdown-package-manager/build/classes/kotlin/jvm/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 27,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-plaintext:compileKotlinJvm",
+     "dir": "quarkdown-plaintext/build/classes/kotlin/jvm/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 3,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-plaintext:compileTestKotlinJvm",
+     "dir": "quarkdown-plaintext/build/classes/kotlin/jvm/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 2,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-quarkdoc-reader:compileKotlinJvm",
+     "dir": "quarkdown-quarkdoc-reader/build/classes/kotlin/jvm/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 20,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-quarkdoc-reader:compileTestKotlinJvm",
+     "dir": "quarkdown-quarkdoc-reader/build/classes/kotlin/jvm/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 2,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-quarkdoc:compileKotlin",
+     "dir": "quarkdown-quarkdoc/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 114,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-quarkdoc:compileTestKotlin",
+     "dir": "quarkdown-quarkdoc/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 21,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-server:compileKotlin",
+     "dir": "quarkdown-server/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 35,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-server:compileTestKotlin",
+     "dir": "quarkdown-server/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 42,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-stdlib:compileKotlinJvm",
+     "dir": "quarkdown-stdlib/build/classes/kotlin/jvm/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 92,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-stdlib:compileTestKotlinJvm",
+     "dir": "quarkdown-stdlib/build/classes/kotlin/jvm/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 16,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-template:compileKotlin",
+     "dir": "quarkdown-template/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 2,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-template:compileTestKotlin",
+     "dir": "quarkdown-template/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 1,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":quarkdown-test:compileTestKotlin",
+     "dir": "quarkdown-test/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 87,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    }
+   ],
+   "no_reference_classes": [
+    {
+     "task": ":compileKotlin",
+     "dir": "build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":compileTestKotlin",
+     "dir": "build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":quarkdown-core-test-fixtures:compileTestKotlin",
+     "dir": "quarkdown-core-test-fixtures/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":quarkdown-libs:compileKotlin",
+     "dir": "quarkdown-libs/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":quarkdown-libs:compileTestKotlin",
+     "dir": "quarkdown-libs/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":quarkdown-native-library-annotations:compileTestKotlinJvm",
+     "dir": "quarkdown-native-library-annotations/build/classes/kotlin/jvm/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":quarkdown-test:compileKotlin",
+     "dir": "quarkdown-test/build/classes/kotlin/main",
+     "krusty_classes": 0
+    }
+   ],
+   "measured": {
+    "date": "2026-10-25",
+    "commit": "0e127f350d9a74cd4fb5fb36d85f789e65bf8841",
+    "run": "https://github.com/qnox/krusty/actions/runs/40196119897"
+   },
+   "stars": 16323,
+   "misses": [
+    [
+     "krusty wrote no class",
+     37
+    ]
+   ],
+   "plugins": {
+    "compiler": {
+     "annotations": 22,
+     "kotlin-script-runtime": 22,
+     "kotlin-scripting-common": 22,
+     "kotlin-scripting-compiler-embeddable": 22,
+     "kotlin-scripting-compiler-impl-embeddable": 22,
+     "kotlin-scripting-jvm": 22,
+     "kotlin-stdlib": 22,
+     "symbol-processing-api": 3,
+     "kotlin-serialization-compiler-plugin-embeddable": 3
+    },
+    "gradle": {
+     "io.github.ben-manes.versions": 22,
+     "org.gradle.application": 2,
+     "org.gradle.base": 22,
+     "org.gradle.build-init": 22,
+     "org.gradle.distribution": 2,
+     "org.gradle.distribution-base": 2,
+     "org.gradle.help-tasks": 22,
+     "org.gradle.java": 13,
+     "org.gradle.java-base": 22,
+     "org.gradle.jvm-ecosystem": 22,
+     "org.gradle.jvm-test-suite": 13,
+     "org.gradle.jvm-toolchains": 22,
+     "org.gradle.kotlin.kotlin-dsl-project": 22,
+     "org.gradle.lifecycle-base": 22,
+     "org.gradle.reporting-base": 22,
+     "org.gradle.software-reporting-tasks": 22,
+     "org.gradle.test-suite-base": 13,
+     "org.gradle.wrapper": 22,
+     "org.jetbrains.dokka": 22,
+     "org.jetbrains.dokka.gradle.DokkaBasePlugin": 22,
+     "org.jetbrains.dokka.gradle.adapters.JavaAdapter": 22,
+     "org.jetbrains.dokka.gradle.adapters.KotlinAdapter": 22,
+     "org.jetbrains.dokka.gradle.formats.DokkaHtmlPlugin": 22,
+     "org.jetbrains.kotlin.gradle.plugin.BuildMetricsPlugin": 22,
+     "org.jetbrains.kotlin.gradle.scripting.internal.ScriptingKotlinGradleSubplugin": 22,
+     "org.jetbrains.kotlin.jvm": 13,
+     "org.jetbrains.kotlin.plugin.scripting": 22,
+     "org.jlleitschuh.gradle.ktlint": 22,
+     "org.jlleitschuh.gradle.ktlint.KtlintBasePlugin": 22,
+     "se.patrikerdes.use-latest-versions": 22,
+     "quarkdown.jvm": 12,
+     "com.google.devtools.ksp": 3,
+     "com.quarkdown.amber": 1,
+     "org.jetbrains.kotlin.multiplatform": 9,
+     "quarkdown.multiplatform": 9,
+     "com.github.node-gradle.node": 1,
+     "io.miret.etienne.sass": 1,
+     "org.jetbrains.kotlin.plugin.serialization": 3,
+     "gg.jte.gradle": 1
+    }
+   }
+  },
+  {
+   "name": "Unciv",
+   "reference_exit": 0,
+   "loc": {
+    "kotlin": 139231,
+    "java": 1184
+   },
+   "compilations": 4,
+   "built": 0,
+   "classes": 3341,
+   "identical": 0,
+   "rows": [
+    {
+     "task": ":core:compileKotlin",
+     "dir": "core/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 3060,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":desktop:compileKotlin",
+     "dir": "desktop/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 44,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":server:compileKotlin",
+     "dir": "server/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 42,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":tests:compileTestKotlin",
+     "dir": "tests/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "krusty wrote no class",
+     "classes": 195,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    }
+   ],
+   "no_reference_classes": [
+    {
+     "task": ":compileKotlinJvm",
+     "dir": "build/classes/kotlin/jvm/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":compileTestKotlinJvm",
+     "dir": "build/classes/kotlin/jvm/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":core:compileTestKotlin",
+     "dir": "core/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":desktop:compileTestKotlin",
+     "dir": "desktop/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":server:compileTestKotlin",
+     "dir": "server/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":tests:compileKotlin",
+     "dir": "tests/build/classes/kotlin/main",
+     "krusty_classes": 0
+    }
+   ],
+   "measured": {
+    "date": "2026-10-25",
+    "commit": "0e127f350d9a74cd4fb5fb36d85f789e65bf8841",
+    "run": "https://github.com/qnox/krusty/actions/runs/40196119897"
+   },
+   "stars": 11486,
+   "misses": [
+    [
+     "krusty wrote no class",
+     4
+    ]
+   ],
+   "plugins": {
+    "compiler": {
+     "annotations": 6,
+     "kotlin-script-runtime": 5,
+     "kotlin-scripting-common": 5,
+     "kotlin-scripting-compiler-embeddable": 5,
+     "kotlin-scripting-compiler-impl-embeddable": 5,
+     "kotlin-scripting-jvm": 5,
+     "kotlin-serialization-compiler-plugin-embeddable": 3,
+     "kotlin-stdlib": 6,
+     "purity-compiler-plugin": 6
+    },
+    "gradle": {
+     "io.github.yairm210.purity-plugin": 6,
+     "io.gitlab.arturbosch.detekt": 1,
+     "org.gradle.base": 6,
+     "org.gradle.build-init": 6,
+     "org.gradle.eclipse": 6,
+     "org.gradle.help-tasks": 6,
+     "org.gradle.idea": 6,
+     "org.gradle.java-base": 6,
+     "org.gradle.jvm-ecosystem": 6,
+     "org.gradle.jvm-toolchains": 6,
+     "org.gradle.kotlin.kotlin-dsl-project": 6,
+     "org.gradle.lifecycle-base": 6,
+     "org.gradle.reporting-base": 6,
+     "org.gradle.software-reporting-tasks": 6,
+     "org.gradle.wrapper": 6,
+     "org.jetbrains.kotlin.gradle.plugin.BuildMetricsPlugin": 6,
+     "org.jetbrains.kotlin.gradle.scripting.internal.ScriptingKotlinGradleSubplugin": 5,
+     "org.jetbrains.kotlin.multiplatform": 1,
+     "org.jetbrains.kotlin.plugin.scripting": 5,
+     "org.jetbrains.kotlin.plugin.serialization": 3,
+     "com.android.build.gradle.AppPlugin": 1,
+     "com.android.build.gradle.api.AndroidBasePlugin": 1,
+     "com.android.internal.application": 1,
+     "com.android.internal.version-check": 1,
+     "org.jetbrains.kotlin.gradle.plugin.KotlinBaseApiPlugin": 1,
+     "org.gradle.java": 4,
+     "org.gradle.jvm-test-suite": 4,
+     "org.gradle.test-suite-base": 4,
+     "org.jetbrains.kotlin.jvm": 4
+    }
+   }
+  }
+ ]
+}

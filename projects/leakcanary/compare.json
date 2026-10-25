@@ -1,0 +1,420 @@
+{
+ "name": "leakcanary",
+ "reference_exit": 0,
+ "loc": {
+  "kotlin": 100627,
+  "java": 172
+ },
+ "compilations": 34,
+ "built": 6,
+ "classes": 1798,
+ "identical": 22,
+ "rows": [
+  {
+   "task": ":leakcanary:leakcanary-core:compileKotlin",
+   "dir": "leakcanary/leakcanary-core/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 23,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":leakcanary:leakcanary-core:compileTestKotlin",
+   "dir": "leakcanary/leakcanary-core/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 3,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":leakcanary:leakcanary-deobfuscation-gradle-plugin:compileKotlin",
+   "dir": "leakcanary/leakcanary-deobfuscation-gradle-plugin/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "leakcanary/leakcanary-deobfuscation-gradle-plugin/src/main/java/com/squareup/leakcanary/deobfuscation/LeakCanaryLeakDeobfuscationPlugin.kt:50:57: error: argument type mismatch: actual type is 'Any', but 'Variant' was expected.",
+   "classes": 6,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":leakcanary:leakcanary-deobfuscation-gradle-plugin:compileTestKotlin",
+   "dir": "leakcanary/leakcanary-deobfuscation-gradle-plugin/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 2,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":leakcanary:leakcanary-gc:compileKotlin",
+   "dir": "leakcanary/leakcanary-gc/build/classes/kotlin/main",
+   "built": true,
+   "fallback": null,
+   "error": null,
+   "classes": 4,
+   "identical": 3,
+   "only_kotlinc": 0,
+   "only_krusty": 0
+  },
+  {
+   "task": ":leakcanary:leakcanary-jvm-test:compileKotlin",
+   "dir": "leakcanary/leakcanary-jvm-test/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 4,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":leakcanary:leakcanary-jvm-test:compileTestKotlin",
+   "dir": "leakcanary/leakcanary-jvm-test/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 3,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":leakcanary:leakcanary-test-core:compileKotlin",
+   "dir": "leakcanary/leakcanary-test-core/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 7,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":leakcanary:leakcanary-test-core:compileTestKotlin",
+   "dir": "leakcanary/leakcanary-test-core/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 5,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":object-watcher:object-watcher:compileKotlin",
+   "dir": "object-watcher/object-watcher/build/classes/kotlin/main",
+   "built": true,
+   "fallback": null,
+   "error": null,
+   "classes": 25,
+   "identical": 17,
+   "only_kotlinc": 2,
+   "only_krusty": 0
+  },
+  {
+   "task": ":object-watcher:object-watcher:compileTestKotlin",
+   "dir": "object-watcher/object-watcher/build/classes/kotlin/test",
+   "built": true,
+   "fallback": null,
+   "error": null,
+   "classes": 2,
+   "identical": 0,
+   "only_kotlinc": 1,
+   "only_krusty": 0
+  },
+  {
+   "task": ":shark:shark-android:compileKotlin",
+   "dir": "shark/shark-android/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 151,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":shark:shark-android:compileTestKotlin",
+   "dir": "shark/shark-android/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 47,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":shark:shark-cli:compileKotlin",
+   "dir": "shark/shark-cli/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 28,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":shark:shark-dive:shark-dive-agent:compileKotlin",
+   "dir": "shark/shark-dive/shark-dive-agent/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 63,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":shark:shark-dive:shark-dive-agent:compileTestKotlin",
+   "dir": "shark/shark-dive/shark-dive-agent/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 25,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":shark:shark-dive:shark-dive-app:compileKotlin",
+   "dir": "shark/shark-dive/shark-dive-app/build/classes/kotlin/main",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-P' conflicts with compiler plugin configuration; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 301,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":shark:shark-dive:shark-dive-app:compileTestKotlin",
+   "dir": "shark/shark-dive/shark-dive-app/build/classes/kotlin/test",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-P' conflicts with compiler plugin configuration; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 145,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":shark:shark-dive:shark-dive-core:compileKotlin",
+   "dir": "shark/shark-dive/shark-dive-core/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 297,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":shark:shark-dive:shark-dive-core:compileTestKotlin",
+   "dir": "shark/shark-dive/shark-dive-core/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 101,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":shark:shark-dive:shark-dive-eval:compileKotlin",
+   "dir": "shark/shark-dive/shark-dive-eval/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 8,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":shark:shark-dive:shark-dive-eval:compileTestKotlin",
+   "dir": "shark/shark-dive/shark-dive-eval/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 3,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":shark:shark-dive:shark-dive-jdwp:compileKotlin",
+   "dir": "shark/shark-dive/shark-dive-jdwp/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 12,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":shark:shark-dive:shark-dive-jdwp:compileTestKotlin",
+   "dir": "shark/shark-dive/shark-dive-jdwp/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 5,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":shark:shark-graph:compileKotlin",
+   "dir": "shark/shark-graph/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 74,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":shark:shark-graph:compileTestKotlin",
+   "dir": "shark/shark-graph/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 33,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":shark:shark-hprof-test:compileKotlin",
+   "dir": "shark/shark-hprof-test/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 7,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":shark:shark-hprof:compileKotlin",
+   "dir": "shark/shark-hprof/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "shark/shark-hprof/src/main/java/shark/HprofDeobfuscator.kt:1:1: error: internal error: checked FIR construction failed: Check(BodyCheckFailure { span: Some(Span { lo: 4167, hi: 4254 }), kind: UnpublishableType(Error) })",
+   "classes": 107,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":shark:shark-hprof:compileTestKotlin",
+   "dir": "shark/shark-hprof/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 16,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":shark:shark-log:compileKotlin",
+   "dir": "shark/shark-log/build/classes/kotlin/main",
+   "built": true,
+   "fallback": null,
+   "error": null,
+   "classes": 2,
+   "identical": 1,
+   "only_kotlinc": 0,
+   "only_krusty": 0
+  },
+  {
+   "task": ":shark:shark-log:compileTestKotlin",
+   "dir": "shark/shark-log/build/classes/kotlin/test",
+   "built": true,
+   "fallback": null,
+   "error": null,
+   "classes": 2,
+   "identical": 1,
+   "only_kotlinc": 0,
+   "only_krusty": 0
+  },
+  {
+   "task": ":shark:shark-test:compileKotlin",
+   "dir": "shark/shark-test/build/classes/kotlin/main",
+   "built": true,
+   "fallback": null,
+   "error": null,
+   "classes": 2,
+   "identical": 0,
+   "only_kotlinc": 0,
+   "only_krusty": 0
+  },
+  {
+   "task": ":shark:shark:compileKotlin",
+   "dir": "shark/shark/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 228,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":shark:shark:compileTestKotlin",
+   "dir": "shark/shark/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 57,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  }
+ ],
+ "no_reference_classes": [
+  {
+   "task": ":leakcanary:leakcanary-gc:compileTestKotlin",
+   "dir": "leakcanary/leakcanary-gc/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":shark:shark-cli:compileTestKotlin",
+   "dir": "shark/shark-cli/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":shark:shark-dive:shark-dive-app:compileDevKotlin",
+   "dir": "shark/shark-dive/shark-dive-app/build/classes/kotlin/dev",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":shark:shark-hprof-test:compileTestKotlin",
+   "dir": "shark/shark-hprof-test/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":shark:shark-test:compileTestKotlin",
+   "dir": "shark/shark-test/build/classes/kotlin/test",
+   "krusty_classes": 0
+  }
+ ],
+ "measured": {
+  "date": "2026-10-25",
+  "commit": "0e127f350d9a74cd4fb5fb36d85f789e65bf8841",
+  "run": "https://github.com/qnox/krusty/actions/runs/40196119897"
+ }
+}

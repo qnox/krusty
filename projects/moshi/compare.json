@@ -1,0 +1,178 @@
+{
+ "name": "moshi",
+ "reference_exit": 0,
+ "loc": {
+  "kotlin": 16749,
+  "java": 13212
+ },
+ "compilations": 12,
+ "built": 0,
+ "classes": 512,
+ "identical": 0,
+ "rows": [
+  {
+   "task": ":examples:compileKotlin",
+   "dir": "examples/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 9,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":moshi-adapters:compileKotlin",
+   "dir": "moshi-adapters/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 9,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":moshi-kotlin-codegen:compileKotlin",
+   "dir": "moshi-kotlin-codegen/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 47,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":moshi-kotlin-codegen:compileTestKotlin",
+   "dir": "moshi-kotlin-codegen/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":moshi-kotlin-tests:codegen-only:compileTestKotlin",
+   "dir": "moshi-kotlin-tests/codegen-only/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 191,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":moshi-kotlin-tests:compileTestKotlin",
+   "dir": "moshi-kotlin-tests/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 116,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":moshi-kotlin-tests:extra-moshi-test-module:compileKotlin",
+   "dir": "moshi-kotlin-tests/extra-moshi-test-module/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":moshi-kotlin:compileKotlin",
+   "dir": "moshi-kotlin/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 23,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":moshi-kotlin:compileTestKotlin",
+   "dir": "moshi-kotlin/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 2,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":moshi:compileJava16Kotlin",
+   "dir": "moshi/build/classes/kotlin/java16",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 3,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":moshi:compileKotlin",
+   "dir": "moshi/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "moshi/src/main/java/com/squareup/moshi/-JsonValueReader.kt:348:31: error: return type mismatch: expected 'Void?', actual 'Nothing?'.",
+   "classes": 102,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":moshi:compileTestKotlin",
+   "dir": "moshi/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 8,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  }
+ ],
+ "no_reference_classes": [
+  {
+   "task": ":examples:compileTestKotlin",
+   "dir": "examples/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":moshi-adapters:compileTestKotlin",
+   "dir": "moshi-adapters/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":moshi-kotlin-tests:codegen-only:compileKotlin",
+   "dir": "moshi-kotlin-tests/codegen-only/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":moshi-kotlin-tests:compileKotlin",
+   "dir": "moshi-kotlin-tests/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":moshi-kotlin-tests:extra-moshi-test-module:compileTestKotlin",
+   "dir": "moshi-kotlin-tests/extra-moshi-test-module/build/classes/kotlin/test",
+   "krusty_classes": 0
+  }
+ ],
+ "measured": {
+  "date": "2026-10-25",
+  "commit": "0e127f350d9a74cd4fb5fb36d85f789e65bf8841",
+  "run": "https://github.com/qnox/krusty/actions/runs/40196119897"
+ }
+}

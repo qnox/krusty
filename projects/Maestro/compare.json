@@ -1,0 +1,245 @@
+{
+ "name": "Maestro",
+ "reference_exit": 0,
+ "loc": {
+  "kotlin": 65644,
+  "java": 0
+ },
+ "compilations": 19,
+ "built": 1,
+ "classes": 2156,
+ "identical": 26,
+ "rows": [
+  {
+   "task": ":maestro-ai:compileKotlin",
+   "dir": "maestro-ai/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "maestro-ai/src/main/java/maestro/ai/cloud/ApiClient.kt:1:1: error: krusty: this construct is not yet supported by the IR backend",
+   "classes": 84,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":maestro-cli:compileKotlin",
+   "dir": "maestro-cli/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 357,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":maestro-cli:compileTestKotlin",
+   "dir": "maestro-cli/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 44,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":maestro-client:compileKotlin",
+   "dir": "maestro-client/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 385,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":maestro-client:compileTestKotlin",
+   "dir": "maestro-client/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 178,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":maestro-ios-driver:compileKotlin",
+   "dir": "maestro-ios-driver/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "maestro-ios-driver/src/main/kotlin/util/LocalSimulatorUtils.kt:239:50: error: unresolved reference 'Path'.",
+   "classes": 84,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":maestro-ios-driver:compileTestKotlin",
+   "dir": "maestro-ios-driver/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 18,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":maestro-ios:compileKotlin",
+   "dir": "maestro-ios/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 8,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":maestro-ios:compileTestKotlin",
+   "dir": "maestro-ios/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 6,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":maestro-orchestra-models:compileKotlin",
+   "dir": "maestro-orchestra-models/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 101,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":maestro-orchestra-models:compileTestKotlin",
+   "dir": "maestro-orchestra-models/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 26,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":maestro-orchestra:compileKotlin",
+   "dir": "maestro-orchestra/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 284,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":maestro-orchestra:compileTestKotlin",
+   "dir": "maestro-orchestra/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 186,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":maestro-test:compileKotlin",
+   "dir": "maestro-test/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 39,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":maestro-test:compileTestKotlin",
+   "dir": "maestro-test/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 260,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":maestro-utils:compileKotlin",
+   "dir": "maestro-utils/build/classes/kotlin/main",
+   "built": true,
+   "fallback": null,
+   "error": null,
+   "classes": 37,
+   "identical": 26,
+   "only_kotlinc": 0,
+   "only_krusty": 0
+  },
+  {
+   "task": ":maestro-utils:compileTestKotlin",
+   "dir": "maestro-utils/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "maestro-utils/src/test/kotlin/MaestroTimerTest.kt:19:9: error: unresolved reference 'assertEquals'.",
+   "classes": 22,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":maestro-web:compileKotlin",
+   "dir": "maestro-web/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "maestro-web/src/main/kotlin/maestro/web/cdp/CdpClient.kt:1:1: error: krusty: JVM backend inline error: call arity mismatch",
+   "classes": 25,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":maestro-web:compileTestKotlin",
+   "dir": "maestro-web/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 12,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  }
+ ],
+ "no_reference_classes": [
+  {
+   "task": ":compileKotlin",
+   "dir": "build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":compileTestKotlin",
+   "dir": "build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":maestro-ai:compileTestKotlin",
+   "dir": "maestro-ai/build/classes/kotlin/test",
+   "krusty_classes": 0
+  }
+ ],
+ "measured": {
+  "date": "2026-10-25",
+  "commit": "0e127f350d9a74cd4fb5fb36d85f789e65bf8841",
+  "run": "https://github.com/qnox/krusty/actions/runs/40196119897"
+ }
+}

@@ -1,0 +1,463 @@
+{
+ "name": "quarkdown",
+ "reference_exit": 0,
+ "loc": {
+  "kotlin": 87771,
+  "java": 23
+ },
+ "compilations": 37,
+ "built": 0,
+ "classes": 2345,
+ "identical": 0,
+ "rows": [
+  {
+   "task": ":quarkdown-cli:compileKotlin",
+   "dir": "quarkdown-cli/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 89,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-cli:compileTestKotlin",
+   "dir": "quarkdown-cli/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 32,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-core-test-fixtures:compileKotlin",
+   "dir": "quarkdown-core-test-fixtures/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 10,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-core:compileKotlinJvm",
+   "dir": "quarkdown-core/build/classes/kotlin/jvm/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1043,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-core:compileTestKotlinJvm",
+   "dir": "quarkdown-core/build/classes/kotlin/jvm/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 263,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-html-pdf:compileKotlin",
+   "dir": "quarkdown-html-pdf/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 10,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-html-pdf:compileTestKotlin",
+   "dir": "quarkdown-html-pdf/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-html:compileKotlinJvm",
+   "dir": "quarkdown-html/build/classes/kotlin/jvm/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 88,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-html:compileTestKotlinJvm",
+   "dir": "quarkdown-html/build/classes/kotlin/jvm/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 15,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-install-layout-navigator:compileKotlinJvm",
+   "dir": "quarkdown-install-layout-navigator/build/classes/kotlin/jvm/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 13,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-install-layout-navigator:compileTestKotlinJvm",
+   "dir": "quarkdown-install-layout-navigator/build/classes/kotlin/jvm/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-interaction:compileKotlin",
+   "dir": "quarkdown-interaction/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 24,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-interaction:compileTestKotlin",
+   "dir": "quarkdown-interaction/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 6,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-locale-table-processor:compileKotlin",
+   "dir": "quarkdown-locale-table-processor/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 7,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-locale-table-processor:compileTestKotlin",
+   "dir": "quarkdown-locale-table-processor/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-lsp:compileKotlinJvm",
+   "dir": "quarkdown-lsp/build/classes/kotlin/jvm/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 85,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-lsp:compileTestKotlinJvm",
+   "dir": "quarkdown-lsp/build/classes/kotlin/jvm/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 18,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-markdown:compileKotlin",
+   "dir": "quarkdown-markdown/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 5,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-markdown:compileTestKotlin",
+   "dir": "quarkdown-markdown/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 2,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-native-library-annotations:compileKotlinJvm",
+   "dir": "quarkdown-native-library-annotations/build/classes/kotlin/jvm/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 4,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-native-library-processor:compileKotlin",
+   "dir": "quarkdown-native-library-processor/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 68,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-native-library-processor:compileTestKotlin",
+   "dir": "quarkdown-native-library-processor/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 40,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-package-manager:compileKotlinJvm",
+   "dir": "quarkdown-package-manager/build/classes/kotlin/jvm/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 56,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-package-manager:compileTestKotlinJvm",
+   "dir": "quarkdown-package-manager/build/classes/kotlin/jvm/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 27,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-plaintext:compileKotlinJvm",
+   "dir": "quarkdown-plaintext/build/classes/kotlin/jvm/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 3,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-plaintext:compileTestKotlinJvm",
+   "dir": "quarkdown-plaintext/build/classes/kotlin/jvm/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 2,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-quarkdoc-reader:compileKotlinJvm",
+   "dir": "quarkdown-quarkdoc-reader/build/classes/kotlin/jvm/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 20,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-quarkdoc-reader:compileTestKotlinJvm",
+   "dir": "quarkdown-quarkdoc-reader/build/classes/kotlin/jvm/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 2,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-quarkdoc:compileKotlin",
+   "dir": "quarkdown-quarkdoc/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 114,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-quarkdoc:compileTestKotlin",
+   "dir": "quarkdown-quarkdoc/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 21,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-server:compileKotlin",
+   "dir": "quarkdown-server/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 35,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-server:compileTestKotlin",
+   "dir": "quarkdown-server/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 42,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-stdlib:compileKotlinJvm",
+   "dir": "quarkdown-stdlib/build/classes/kotlin/jvm/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 92,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-stdlib:compileTestKotlinJvm",
+   "dir": "quarkdown-stdlib/build/classes/kotlin/jvm/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 16,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-template:compileKotlin",
+   "dir": "quarkdown-template/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 2,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-template:compileTestKotlin",
+   "dir": "quarkdown-template/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":quarkdown-test:compileTestKotlin",
+   "dir": "quarkdown-test/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 87,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  }
+ ],
+ "no_reference_classes": [
+  {
+   "task": ":compileKotlin",
+   "dir": "build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":compileTestKotlin",
+   "dir": "build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":quarkdown-core-test-fixtures:compileTestKotlin",
+   "dir": "quarkdown-core-test-fixtures/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":quarkdown-libs:compileKotlin",
+   "dir": "quarkdown-libs/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":quarkdown-libs:compileTestKotlin",
+   "dir": "quarkdown-libs/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":quarkdown-native-library-annotations:compileTestKotlinJvm",
+   "dir": "quarkdown-native-library-annotations/build/classes/kotlin/jvm/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":quarkdown-test:compileKotlin",
+   "dir": "quarkdown-test/build/classes/kotlin/main",
+   "krusty_classes": 0
+  }
+ ],
+ "measured": {
+  "date": "2026-10-25",
+  "commit": "0e127f350d9a74cd4fb5fb36d85f789e65bf8841",
+  "run": "https://github.com/qnox/krusty/actions/runs/40196119897"
+ }
+}

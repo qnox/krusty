@@ -1,0 +1,75 @@
+{
+ "name": "okio",
+ "reference_exit": 1,
+ "loc": {
+  "kotlin": 46812,
+  "java": 2398
+ },
+ "compilations": 0,
+ "built": 0,
+ "classes": 0,
+ "identical": 0,
+ "rows": [],
+ "no_reference_classes": [
+  {
+   "task": ":okio-fakefilesystem:compileKotlinJvm",
+   "dir": "okio-fakefilesystem/build/classes/kotlin/jvm/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okio-fakefilesystem:compileTestKotlinJvm",
+   "dir": "okio-fakefilesystem/build/classes/kotlin/jvm/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okio-testing-support:compileKotlinJvm",
+   "dir": "okio-testing-support/build/classes/kotlin/jvm/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okio-testing-support:compileTestKotlinJvm",
+   "dir": "okio-testing-support/build/classes/kotlin/jvm/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okio:compileKotlinJvm",
+   "dir": "okio/build/classes/kotlin/jvm/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okio:compileTestKotlinJvm",
+   "dir": "okio/build/classes/kotlin/jvm/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okio:jvm:jmh:compileJmhKotlin",
+   "dir": "okio/jvm/jmh/build/classes/kotlin/jmh",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okio:jvm:jmh:compileKotlin",
+   "dir": "okio/jvm/jmh/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okio:jvm:jmh:compileTestKotlin",
+   "dir": "okio/jvm/jmh/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":samples:compileKotlinJvm",
+   "dir": "samples/build/classes/kotlin/jvm/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":samples:compileTestKotlinJvm",
+   "dir": "samples/build/classes/kotlin/jvm/test",
+   "krusty_classes": 0
+  }
+ ],
+ "measured": {
+  "date": "2026-10-25",
+  "commit": "0e127f350d9a74cd4fb5fb36d85f789e65bf8841",
+  "run": "https://github.com/qnox/krusty/actions/runs/40196119897"
+ }
+}

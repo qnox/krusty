@@ -1,0 +1,455 @@
+{
+ "name": "okhttp",
+ "reference_exit": 1,
+ "loc": {
+  "kotlin": 126665,
+  "java": 3816
+ },
+ "compilations": 0,
+ "built": 0,
+ "classes": 0,
+ "identical": 0,
+ "rows": [],
+ "no_reference_classes": [
+  {
+   "task": ":logging-interceptor:compileJava9Kotlin",
+   "dir": "okhttp-logging-interceptor/build/classes/kotlin/java9",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":logging-interceptor:compileJava9TestKotlin",
+   "dir": "okhttp-logging-interceptor/build/classes/kotlin/java9Test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":logging-interceptor:compileKotlin",
+   "dir": "okhttp-logging-interceptor/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":logging-interceptor:compileOsgiKotlin",
+   "dir": "okhttp-logging-interceptor/build/classes/kotlin/osgi",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":logging-interceptor:compileTestKotlin",
+   "dir": "okhttp-logging-interceptor/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mockwebserver3-junit4:compileJava9Kotlin",
+   "dir": "mockwebserver-junit4/build/classes/kotlin/java9",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mockwebserver3-junit4:compileJava9TestKotlin",
+   "dir": "mockwebserver-junit4/build/classes/kotlin/java9Test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mockwebserver3-junit4:compileKotlin",
+   "dir": "mockwebserver-junit4/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mockwebserver3-junit4:compileTestKotlin",
+   "dir": "mockwebserver-junit4/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mockwebserver3-junit5:compileJava9Kotlin",
+   "dir": "mockwebserver-junit5/build/classes/kotlin/java9",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mockwebserver3-junit5:compileJava9TestKotlin",
+   "dir": "mockwebserver-junit5/build/classes/kotlin/java9Test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mockwebserver3-junit5:compileKotlin",
+   "dir": "mockwebserver-junit5/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mockwebserver3-junit5:compileTestKotlin",
+   "dir": "mockwebserver-junit5/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mockwebserver3:compileJava9Kotlin",
+   "dir": "mockwebserver/build/classes/kotlin/java9",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mockwebserver3:compileJava9TestKotlin",
+   "dir": "mockwebserver/build/classes/kotlin/java9Test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mockwebserver3:compileKotlin",
+   "dir": "mockwebserver/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mockwebserver3:compileTestKotlin",
+   "dir": "mockwebserver/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mockwebserver:compileJava9Kotlin",
+   "dir": "mockwebserver-deprecated/build/classes/kotlin/java9",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mockwebserver:compileJava9TestKotlin",
+   "dir": "mockwebserver-deprecated/build/classes/kotlin/java9Test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mockwebserver:compileKotlin",
+   "dir": "mockwebserver-deprecated/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mockwebserver:compileTestKotlin",
+   "dir": "mockwebserver-deprecated/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okcurl:compileKotlin",
+   "dir": "okcurl/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okcurl:compileTestKotlin",
+   "dir": "okcurl/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-brotli:compileJava9Kotlin",
+   "dir": "okhttp-brotli/build/classes/kotlin/java9",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-brotli:compileJava9TestKotlin",
+   "dir": "okhttp-brotli/build/classes/kotlin/java9Test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-brotli:compileKotlin",
+   "dir": "okhttp-brotli/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-brotli:compileOsgiKotlin",
+   "dir": "okhttp-brotli/build/classes/kotlin/osgi",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-brotli:compileTestKotlin",
+   "dir": "okhttp-brotli/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-coroutines:compileJava9Kotlin",
+   "dir": "okhttp-coroutines/build/classes/kotlin/java9",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-coroutines:compileJava9TestKotlin",
+   "dir": "okhttp-coroutines/build/classes/kotlin/java9Test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-coroutines:compileKotlin",
+   "dir": "okhttp-coroutines/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-coroutines:compileOsgiKotlin",
+   "dir": "okhttp-coroutines/build/classes/kotlin/osgi",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-coroutines:compileTestKotlin",
+   "dir": "okhttp-coroutines/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-dnsoverhttps:compileJava9Kotlin",
+   "dir": "okhttp-dnsoverhttps/build/classes/kotlin/java9",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-dnsoverhttps:compileJava9TestKotlin",
+   "dir": "okhttp-dnsoverhttps/build/classes/kotlin/java9Test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-dnsoverhttps:compileKotlin",
+   "dir": "okhttp-dnsoverhttps/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-dnsoverhttps:compileOsgiKotlin",
+   "dir": "okhttp-dnsoverhttps/build/classes/kotlin/osgi",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-dnsoverhttps:compileTestKotlin",
+   "dir": "okhttp-dnsoverhttps/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-hpacktests:compileKotlin",
+   "dir": "okhttp-hpacktests/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-hpacktests:compileTestKotlin",
+   "dir": "okhttp-hpacktests/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-idna-mapping-table:compileKotlin",
+   "dir": "okhttp-idna-mapping-table/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-idna-mapping-table:compileTestKotlin",
+   "dir": "okhttp-idna-mapping-table/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-java-net-cookiejar:compileJava9Kotlin",
+   "dir": "okhttp-java-net-cookiejar/build/classes/kotlin/java9",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-java-net-cookiejar:compileJava9TestKotlin",
+   "dir": "okhttp-java-net-cookiejar/build/classes/kotlin/java9Test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-java-net-cookiejar:compileKotlin",
+   "dir": "okhttp-java-net-cookiejar/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-java-net-cookiejar:compileOsgiKotlin",
+   "dir": "okhttp-java-net-cookiejar/build/classes/kotlin/osgi",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-java-net-cookiejar:compileTestKotlin",
+   "dir": "okhttp-java-net-cookiejar/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-osgi-tests:compileKotlin",
+   "dir": "okhttp-osgi-tests/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-osgi-tests:compileTestKotlin",
+   "dir": "okhttp-osgi-tests/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-sse:compileJava9Kotlin",
+   "dir": "okhttp-sse/build/classes/kotlin/java9",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-sse:compileJava9TestKotlin",
+   "dir": "okhttp-sse/build/classes/kotlin/java9Test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-sse:compileKotlin",
+   "dir": "okhttp-sse/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-sse:compileOsgiKotlin",
+   "dir": "okhttp-sse/build/classes/kotlin/osgi",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-sse:compileTestKotlin",
+   "dir": "okhttp-sse/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-testing-support:compileKotlin",
+   "dir": "okhttp-testing-support/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-testing-support:compileTestKotlin",
+   "dir": "okhttp-testing-support/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-tls:compileJava9Kotlin",
+   "dir": "okhttp-tls/build/classes/kotlin/java9",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-tls:compileJava9TestKotlin",
+   "dir": "okhttp-tls/build/classes/kotlin/java9Test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-tls:compileKotlin",
+   "dir": "okhttp-tls/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-tls:compileOsgiKotlin",
+   "dir": "okhttp-tls/build/classes/kotlin/osgi",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-tls:compileTestKotlin",
+   "dir": "okhttp-tls/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-urlconnection:compileJava9Kotlin",
+   "dir": "okhttp-urlconnection/build/classes/kotlin/java9",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-urlconnection:compileJava9TestKotlin",
+   "dir": "okhttp-urlconnection/build/classes/kotlin/java9Test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-urlconnection:compileKotlin",
+   "dir": "okhttp-urlconnection/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-urlconnection:compileOsgiKotlin",
+   "dir": "okhttp-urlconnection/build/classes/kotlin/osgi",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-urlconnection:compileTestKotlin",
+   "dir": "okhttp-urlconnection/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-zstd:compileKotlin",
+   "dir": "okhttp-zstd/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-zstd:compileOsgiKotlin",
+   "dir": "okhttp-zstd/build/classes/kotlin/osgi",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp-zstd:compileTestKotlin",
+   "dir": "okhttp-zstd/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp:compileKotlinJvm",
+   "dir": "okhttp/build/classes/kotlin/jvm/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":okhttp:compileTestKotlinJvm",
+   "dir": "okhttp/build/classes/kotlin/jvm/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":samples:compare:compileKotlin",
+   "dir": "samples/compare/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":samples:compare:compileTestKotlin",
+   "dir": "samples/compare/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":samples:crawler:compileKotlin",
+   "dir": "samples/crawler/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":samples:crawler:compileTestKotlin",
+   "dir": "samples/crawler/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":samples:guide:compileKotlin",
+   "dir": "samples/guide/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":samples:guide:compileTestKotlin",
+   "dir": "samples/guide/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":samples:simple-client:compileKotlin",
+   "dir": "samples/simple-client/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":samples:simple-client:compileTestKotlin",
+   "dir": "samples/simple-client/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":samples:slack:compileKotlin",
+   "dir": "samples/slack/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":samples:slack:compileTestKotlin",
+   "dir": "samples/slack/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":samples:static-server:compileKotlin",
+   "dir": "samples/static-server/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":samples:static-server:compileTestKotlin",
+   "dir": "samples/static-server/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":samples:tlssurvey:compileKotlin",
+   "dir": "samples/tlssurvey/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":samples:tlssurvey:compileTestKotlin",
+   "dir": "samples/tlssurvey/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":samples:unixdomainsockets:compileKotlin",
+   "dir": "samples/unixdomainsockets/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":samples:unixdomainsockets:compileTestKotlin",
+   "dir": "samples/unixdomainsockets/build/classes/kotlin/test",
+   "krusty_classes": 0
+  }
+ ],
+ "measured": {
+  "date": "2026-10-25",
+  "commit": "0e127f350d9a74cd4fb5fb36d85f789e65bf8841",
+  "run": "https://github.com/qnox/krusty/actions/runs/40196119897"
+ }
+}
