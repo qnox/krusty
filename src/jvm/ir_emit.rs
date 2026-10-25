@@ -201,7 +201,7 @@ use declared_property_accessor::{
     declared_property_accessor_jvm, emit_backing_field_read_adaptation,
     emit_backing_field_write_adaptation,
 };
-use signature_formatter::{JvmSignatureFormatter, Wildcards};
+use signature_formatter::{JvmPropertySignatures, JvmSignatureFormatter, Wildcards};
 use singleton_instance::{add_singleton_instance_field, emit_singleton_instance_clinit};
 use synth_debug_tables::attach_synth_debug_tables;
 use type_parameter_signatures::{jvm_class_signature, jvm_type_params};
@@ -4833,7 +4833,7 @@ fn emit_placed_method(
 /// carries its (recursively formatted) type arguments. `None` for a shape not representable here.
 /// The generic `Signature` element for a parameterized concrete type (`List<String>` →
 /// `Ljava/util/List<Ljava/lang/String;>;`); `None` when erasure loses nothing. `T?` unwraps (generics
-/// survive nullability). Bare type parameters are handled separately via `field_signatures`.
+/// survive nullability). Retained formals include an enclosing declaration's parameters.
 /// A FIELD's generic `Signature`, which follows the return-position rule: no declaration-site
 /// wildcards. A constructor PARAMETER of the same declared type takes them, so it goes through
 /// [`parameterized_sig_at`] with the parameter mode instead.
@@ -4846,30 +4846,7 @@ fn parameterized_sig_at(
     ty: &Ty,
     wildcards: Wildcards,
 ) -> Option<String> {
-    let inner = match ty.kind() {
-        TyKind::Nullable(t) | TyKind::PlatformNullable(t) => t,
-        _ => *ty,
-    };
-    match inner.kind() {
-        TyKind::Obj(_, args) if !args.is_empty() => {
-            let sig = formatter.ty_at(&inner, wildcards)?;
-            (sig != ir_type_desc(&inner)).then_some(sig)
-        }
-        TyKind::Fun(_) => {
-            let sig = formatter.ty_at(&inner, wildcards)?;
-            (sig != ir_type_desc(&inner)).then_some(sig)
-        }
-        _ => None,
-    }
-}
-
-/// The three JVM generic `Signature` attributes that realize one Kotlin property declaration.
-/// Storage location (instance field, object static, or file-facade static) does not change these
-/// declaration signatures, so every physical emitter consumes this common shape.
-struct JvmPropertySignatures {
-    field: Option<String>,
-    getter: Option<String>,
-    setter: Option<String>,
+    formatter.declaration_type_use(ty, wildcards)
 }
 
 fn property_jvm_signatures(
@@ -4877,18 +4854,7 @@ fn property_jvm_signatures(
     ty: &Ty,
     type_parameter: Option<&str>,
 ) -> JvmPropertySignatures {
-    if let Some(parameter) = type_parameter {
-        return JvmPropertySignatures {
-            field: Some(format!("T{parameter};")),
-            getter: Some(format!("()T{parameter};")),
-            setter: Some(format!("(T{parameter};)V")),
-        };
-    }
-    JvmPropertySignatures {
-        field: parameterized_sig(formatter, ty),
-        getter: method_parameterized_sig(formatter, &[], ty),
-        setter: method_parameterized_sig(formatter, std::slice::from_ref(ty), &Ty::Unit),
-    }
+    formatter.property_signatures(ty, type_parameter)
 }
 
 /// A method's generic `Signature`, from whichever source applies: its own declared type parameters, the

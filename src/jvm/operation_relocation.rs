@@ -55,6 +55,9 @@ pub(super) fn clone_below_representation_wrapper(ir: &mut IrFile, source: ExprId
     move_fact!(static_extension_receivers);
     move_fact!(call_inline_modifiers);
     move_fact!(value_class_unbox_type_operation_edges);
+    // The static a value-class member or constructor call was realized as: a private one reached
+    // from another class goes through its accessor, which only the call itself names.
+    move_fact!(jvm_member_targets);
     ir.move_generated_operand_start(source, target);
     ir.move_compiled_inline_call(source, target);
 
@@ -151,5 +154,21 @@ mod tests {
         assert!(ir.starts_at_generated_operand(target));
         assert_eq!(ir.compiled_inline_call(source), None);
         assert_eq!(ir.compiled_inline_call(target), Some(7));
+    }
+
+    #[test]
+    fn a_realized_member_target_moves_to_the_cloned_call() {
+        let mut ir = IrFile::default();
+        let source = ir.add_expr(IrExpr::Call {
+            callee: Box::new(crate::ir::Callee::Local(3)),
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+        ir.record_realized_member_target(source, Some(3), None);
+
+        let target = clone_below_representation_wrapper(&mut ir, source);
+
+        assert_eq!(ir.jvm_member_targets.get(&source), None);
+        assert_eq!(ir.jvm_member_targets.get(&target), Some(&3));
     }
 }

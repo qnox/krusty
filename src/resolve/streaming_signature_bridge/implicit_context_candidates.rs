@@ -114,7 +114,7 @@ impl ProductionSignatureSemantics<'_> {
                 &fixed_formals,
             ) {
                 Ok((candidate, _)) => available.push(candidate),
-                Err(candidate) => unavailable.push(candidate),
+                Err(candidate) => unavailable.push(*candidate),
             }
         }
         (available, unavailable)
@@ -131,7 +131,7 @@ impl ProductionSignatureSemantics<'_> {
             crate::libraries::FunctionInfo,
             crate::symbol_resolver::GSigBinds,
         ),
-        crate::libraries::FunctionInfo,
+        Box<crate::libraries::FunctionInfo>,
     > {
         let mut signature = candidate.semantic_signature().into_owned();
         let context_count = candidate.context_count.min(signature.params.len());
@@ -152,7 +152,7 @@ impl ProductionSignatureSemantics<'_> {
             candidate.callable.name,
         );
         if !complete {
-            return Err(candidate);
+            return Err(Box::new(candidate));
         }
         signature.params = signature.params[context_count..]
             .iter()

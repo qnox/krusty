@@ -1,8 +1,7 @@
 //! Classifier-only traversal of the shared import scope tower.
 //!
-//! Callable collection deliberately drops records without callable facets. Classifier selection
-//! walks the same packages without that filter so a constructor-only name remains visible and
-//! aliases resolving to one identity collapse before ambiguity is decided. The order is not the
+//! Classifier selection retains records without callable facets so a constructor-only name remains
+//! visible and aliases resolving to one identity collapse before ambiguity is decided. The order is not the
 //! callable order: a classifier declared in a `.kotlin_builtins` fragment is a simple default
 //! import and outranks a star import. A stdlib class in the same package is only a default star.
 
@@ -18,6 +17,114 @@ use super::{CandidateSelection, FunctionScopeRef};
 pub(crate) struct ScopedClassifier {
     pub(crate) classifier: TypeName,
     pub(crate) alias: Option<crate::libraries::AliasExpansion>,
+    pub(crate) scope_rung: crate::libraries::CallableScopeRung,
+    pub(crate) scope_rank: u32,
+}
+
+impl ScopedClassifier {
+    pub(crate) fn new(
+        classifier: TypeName,
+        alias: Option<crate::libraries::AliasExpansion>,
+    ) -> Self {
+        Self {
+            classifier,
+            alias,
+            scope_rung: crate::libraries::CallableScopeRung::Unscoped,
+            scope_rank: 0,
+        }
+    }
+}
+
+fn candidate_from_record(record: &crate::libraries::ResolvedSymbols) -> Option<ScopedClassifier> {
+    record.classifier_name.map(|classifier| {
+        ScopedClassifier::new(
+            classifier,
+            match &record.classifier_declaration {
+                Some(crate::libraries::ClassifierDeclaration::TypeAlias(alias)) => {
+                    Some(alias.clone())
+                }
+                Some(crate::libraries::ClassifierDeclaration::Ordinary(_)) | None => None,
+            },
+        )
+    })
+}
+
+fn retain_classifier_candidate(
+    candidates: &mut Vec<ScopedClassifier>,
+    candidate: ScopedClassifier,
+) {
+    match candidates
+        .iter_mut()
+        .find(|previous| previous.classifier == candidate.classifier)
+    {
+        Some(previous) => {
+            if previous.alias.as_ref().map(|alias| alias.identity)
+                != candidate.alias.as_ref().map(|alias| alias.identity)
+            {
+                previous.alias = None;
+            }
+        }
+        None => candidates.push(candidate),
+    }
+}
+
+/// Select the classifier facet from the same records already read for a receiver call. Import
+/// classifier precedence differs from callable precedence, but never requires another name query.
+fn select_from_collected_levels(
+    levels: &[super::scope_level_callables::FunctionScopeLevel],
+) -> CandidateSelection<ScopedClassifier> {
+    use super::scope_level_callables::FunctionScopeLevelKind as Kind;
+    for (kind, rank, builtin_only) in [
+        (Kind::Flat, 0, false),
+        (Kind::Explicit, 0, false),
+        (Kind::CurrentPackage, 0, false),
+        (Kind::Import, 2, true),
+        (Kind::Import, 1, false),
+        (Kind::Import, 2, false),
+        (Kind::Import, 3, false),
+    ] {
+        let mut candidates = Vec::new();
+        for level in levels
+            .iter()
+            .filter(|level| level.kind == kind && level.rank == rank)
+        {
+            for record in &level.symbols {
+                let Some(mut candidate) = candidate_from_record(record) else {
+                    continue;
+                };
+                if builtin_only
+                    && !(record.builtin_classifier
+                        && named_default_package(candidate.classifier.namespace()))
+                {
+                    continue;
+                }
+                candidate.scope_rung = level.kind.callable_scope_rung();
+                candidate.scope_rank = level.rank;
+                if kind == Kind::Explicit {
+                    if !candidates.iter().any(|previous: &ScopedClassifier| {
+                        previous.classifier == candidate.classifier
+                            && previous.alias.as_ref().map(|alias| alias.identity)
+                                == candidate.alias.as_ref().map(|alias| alias.identity)
+                    }) {
+                        candidates.push(candidate);
+                    }
+                } else {
+                    retain_classifier_candidate(&mut candidates, candidate);
+                }
+            }
+        }
+        match choose(candidates) {
+            CandidateSelection::None => {}
+            selected => return selected,
+        }
+    }
+    CandidateSelection::None
+}
+
+fn named_default_package(package: TypeName) -> bool {
+    crate::resolve::KOTLIN_NAMED_DEFAULT_IMPORT_PACKAGES
+        .iter()
+        .any(|name| package == crate::types::type_name(&name.replace('.', "/")))
 }
 
 /// The classifier candidates `name` denotes in `owners` (packages, or classifiers whose nested
@@ -31,45 +138,17 @@ pub(crate) fn scoped_classifier_candidates_at_scope_level<S: SymbolSource + ?Siz
 ) -> Vec<ScopedClassifier> {
     let mut candidates: Vec<ScopedClassifier> = Vec::new();
     for &owner in owners {
-        let candidate = if source.classifier(owner).is_some() {
-            let nested = owner
-                .existing_nested_child(name)
-                .unwrap_or_else(|| crate::types::type_name_nested_child(owner, name));
-            source
-                .classifier(nested)
-                .filter(|classifier| classifier.is_nested && nested.nested_owner() == Some(owner))
-                .map(|_| ScopedClassifier {
-                    classifier: nested,
-                    alias: None,
-                })
+        let namespace = if source.classifier(owner).is_some() {
+            SymbolNamespace::Classifier(owner)
         } else {
-            let record = source.symbols(SymbolNamespace::Package(owner), name);
-            record.classifier_name.map(|classifier| ScopedClassifier {
-                classifier,
-                alias: match &record.classifier_declaration {
-                    Some(crate::libraries::ClassifierDeclaration::TypeAlias(alias)) => {
-                        Some(alias.clone())
-                    }
-                    Some(crate::libraries::ClassifierDeclaration::Ordinary(_)) | None => None,
-                },
-            })
+            SymbolNamespace::Package(owner)
         };
+        let record = source.symbols(namespace, name);
+        let candidate = candidate_from_record(&record);
         let Some(candidate) = candidate else {
             continue;
         };
-        match candidates
-            .iter_mut()
-            .find(|previous| previous.classifier == candidate.classifier)
-        {
-            Some(previous) => {
-                let same_alias = previous.alias.as_ref().map(|alias| alias.identity)
-                    == candidate.alias.as_ref().map(|alias| alias.identity);
-                if !same_alias {
-                    previous.alias = None;
-                }
-            }
-            None => candidates.push(candidate),
-        }
+        retain_classifier_candidate(&mut candidates, candidate);
     }
     candidates
 }
@@ -97,7 +176,9 @@ pub(crate) fn explicit_classifier_candidates<S: SymbolSource + ?Sized>(
             previous.classifier == classifier
                 && previous.alias.as_ref().map(|alias| alias.identity) == alias_identity
         }) {
-            candidates.push(ScopedClassifier { classifier, alias });
+            let mut selected = ScopedClassifier::new(classifier, alias);
+            selected.scope_rung = crate::libraries::CallableScopeRung::ExplicitImport;
+            candidates.push(selected);
         }
     }
     candidates
@@ -114,6 +195,28 @@ impl<T> CandidateSelection<T> {
 }
 
 impl super::SymbolResolver<'_> {
+    /// Lexical classifier declarations precede the file/import tower for a receiver alias call.
+    /// The selected declaration, including an ordinary classifier that shadows an alias, is final.
+    pub(super) fn scoped_receiver_constructor_classifier(
+        &self,
+        name: &str,
+        levels: &[super::scope_level_callables::FunctionScopeLevel],
+    ) -> CandidateSelection<ScopedClassifier> {
+        for (rank, &owner) in self.lexical_classes.iter().enumerate() {
+            let mut candidates =
+                scoped_classifier_candidates_at_scope_level(&self.src, name, &[owner]);
+            for candidate in &mut candidates {
+                candidate.scope_rank =
+                    u32::try_from(rank).expect("lexical scope depth exceeds callable rank");
+            }
+            match choose(candidates) {
+                CandidateSelection::None => {}
+                selected => return selected,
+            }
+        }
+        select_from_collected_levels(levels)
+    }
+
     /// [`Self::classifier_in_scope`] with the alias declaration that named the selection, if any.
     pub(crate) fn scoped_classifier_in_scope(
         &self,
@@ -132,6 +235,7 @@ impl super::SymbolResolver<'_> {
 pub(crate) struct ClassifierImportLevel {
     pub(crate) packages: Vec<TypeName>,
     pub(crate) builtins_only: bool,
+    pub(crate) callable_position: (crate::libraries::CallableScopeRung, u32),
 }
 
 impl From<Vec<TypeName>> for ClassifierImportLevel {
@@ -139,6 +243,7 @@ impl From<Vec<TypeName>> for ClassifierImportLevel {
         Self {
             packages,
             builtins_only: false,
+            callable_position: (crate::libraries::CallableScopeRung::Unscoped, 0),
         }
     }
 }
@@ -163,6 +268,9 @@ pub(crate) fn scoped_classifier_candidates_at_import_level<S: SymbolSource + ?Si
     level: &ClassifierImportLevel,
 ) -> Vec<ScopedClassifier> {
     let mut candidates = scoped_classifier_candidates_at_scope_level(source, name, &level.packages);
+    for candidate in &mut candidates {
+        (candidate.scope_rung, candidate.scope_rank) = level.callable_position;
+    }
     if level.builtins_only {
         candidates.retain(|candidate| {
             let (namespace, leaf) = SymbolNamespace::classifier_key(candidate.classifier);
@@ -184,36 +292,36 @@ pub(crate) fn scoped_classifier_candidates_at_import_level<S: SymbolSource + ?Si
 pub(crate) fn classifier_precedence_levels(
     levels: &[Vec<TypeName>; 4],
 ) -> Vec<ClassifierImportLevel> {
-    let named_default = |package: TypeName| {
-        crate::resolve::KOTLIN_NAMED_DEFAULT_IMPORT_PACKAGES
-            .iter()
-            .any(|name| package == crate::types::type_name(&name.replace('.', "/")))
-    };
     let named = levels[2]
         .iter()
         .copied()
-        .filter(|&package| named_default(package))
+        .filter(|&package| named_default_package(package))
         .collect();
     vec![
         ClassifierImportLevel {
             packages: levels[0].clone(),
             builtins_only: false,
+            callable_position: (crate::libraries::CallableScopeRung::CurrentPackage, 0),
         },
         ClassifierImportLevel {
             packages: named,
             builtins_only: true,
+            callable_position: (crate::libraries::CallableScopeRung::Import, 2),
         },
         ClassifierImportLevel {
             packages: levels[1].clone(),
             builtins_only: false,
+            callable_position: (crate::libraries::CallableScopeRung::Import, 1),
         },
         ClassifierImportLevel {
             packages: levels[2].clone(),
             builtins_only: false,
+            callable_position: (crate::libraries::CallableScopeRung::Import, 2),
         },
         ClassifierImportLevel {
             packages: levels[3].clone(),
             builtins_only: false,
+            callable_position: (crate::libraries::CallableScopeRung::Import, 3),
         },
     ]
 }

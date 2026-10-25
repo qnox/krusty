@@ -5,10 +5,12 @@ use super::*;
 use crate::types::TyKind;
 
 mod constructor_positions;
+mod declaration_types;
 mod type_arguments;
 mod value_class_positions;
 
 pub(super) use constructor_positions::ConstructorParameter;
+pub(super) use declaration_types::JvmPropertySignatures;
 
 /// Whether declaration-site variance becomes a JVM wildcard at the position being formatted.
 ///
