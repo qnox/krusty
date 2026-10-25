@@ -1,5 +1,12 @@
 # krusty — implementation plan
 
+## Source classifier inventory identities
+
+Replace lookup-spelling splitting in the foreign-source classifier inventory with the existing
+declaration-owned name operation. Preserve exact segments, owner edges, visibility, order and
+non-local exclusions without interning undeclared prefixes. This producer correction is separate
+from the remaining metadata class-ID encoder and dependency/alias-name fact handoff.
+
 ## Classifier declaration-name handoff
 
 Retain an optional declaration-owned package/owner and exact segment across source bootstrap,
