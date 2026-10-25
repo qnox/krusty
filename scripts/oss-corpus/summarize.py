@@ -72,12 +72,30 @@ def read_plugins(directory, names):
     return surveys
 
 
+def fallback_reason(reason):
+    """A fallback reason reduced to what krusty refused: `compiler plugin <id>` and
+    `argument <flag>` items, or the reason itself when it names neither."""
+    items = []
+    # The plugin is named twice, by id and by jar; the jar is the fallback for a plugin without an id.
+    plugins = (re.findall(r"unsupported compiler plugin 'plugin id '([^']+)''", reason)
+               or re.findall(r"unsupported compiler plugin '[^']*/([^/']+?)(?:-\d[\w.+-]*)?\.jar'", reason))
+    for plugin in plugins:
+        item = 'compiler plugin ' + plugin
+        if item not in items:
+            items.append(item)
+    for argument in re.findall(r"kotlinc argument '([^']+)'", reason):
+        item = 'argument ' + argument
+        if item not in items:
+            items.append(item)
+    return ', '.join(items) if items else reason
+
+
 def misses(project):
     """(reason, compilations) for every compilation krusty did not build, most frequent first."""
     reasons = collections.Counter()
     for row in project['rows']:
         if not row['built']:
-            reason = (f"left to kotlinc: {row['fallback']}" if row.get('fallback')
+            reason = (f"left to kotlinc: {fallback_reason(row['fallback'])}" if row.get('fallback')
                       else row.get('error') or 'krusty wrote no class')
             reasons[reason] += 1
     return reasons.most_common()

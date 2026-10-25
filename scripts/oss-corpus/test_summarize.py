@@ -45,7 +45,11 @@ class Summary(unittest.TestCase):
             reports = []
             for p in (
                 project('zeta', [row(':a:compileKotlin', True, 4, 3),
-                                 row(':b:compileKotlin', False, 2, 0, fallback='compose'),
+                                 row(':b:compileKotlin', False, 2, 0, fallback=(
+                                     "krusty does not implement everything it requests (krusty does not "
+                                     "implement the kotlinc argument '-Xfoo'; krusty: unsupported compiler "
+                                     "plugin '/c/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': no; "
+                                     "krusty: unsupported compiler plugin 'plugin id 'androidx.compose'': no)")),
                                  row(':c:compileKotlin', False, 1, 0, fallback='compose')]),
                 project('Alpha', [row(':compileKotlin', False, 5, 0, error='e: A.kt:1:1 boom')],
                         reference_exit=1),
@@ -84,7 +88,8 @@ class Summary(unittest.TestCase):
 - **Alpha**
   - 1 × e: A.kt:1:1 boom
 - **zeta**
-  - 2 × left to kotlinc: compose
+  - 1 × left to kotlinc: compiler plugin androidx.compose, argument -Xfoo
+  - 1 × left to kotlinc: compose
 
 ## Gradle plugins
 
@@ -100,7 +105,8 @@ class Summary(unittest.TestCase):
 ''')
         self.assertEqual([(p['name'], p['stars'], p['misses']) for p in document['projects']], [
             ('Alpha', 7, [['e: A.kt:1:1 boom', 1]]),
-            ('zeta', 12345, [['left to kotlinc: compose', 2]]),
+            ('zeta', 12345, [['left to kotlinc: compiler plugin androidx.compose, argument -Xfoo', 1],
+                             ['left to kotlinc: compose', 1]]),
         ])
 
 
