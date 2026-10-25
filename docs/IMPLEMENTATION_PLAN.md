@@ -1,5 +1,11 @@
 # krusty — implementation plan
 
+JVM return consumers now use authenticated declaration-result slots across reference-preserving
+null assertions. Value-class refinement shares that producer boundary, while inline and suspension
+owners keep their existing result materialization. Full classfile/runtime controls cover ordinary
+generic returns and explicit/local materialization; existing inline, suspension and value-class
+guards constrain the adjacent representation boundaries.
+
 Phased, each phase ends in a **green `cargo test`** and a runnable artifact. The pipeline is built
 front-to-back so the streaming/arena shape is real from the start, then widened.
 
