@@ -13414,6 +13414,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Base<T : CharSequence>` gets `set(Object)` that checkcasts to `CharSequence` and calls
   `set(CharSequence)`. The nearest implementation is the bridge's target. Tests:
   `tests/read_only_stub_generic_override_e2e.rs` (class bytes and box runs against kotlinc).
+- **A read-only stub's member is implemented only by a member with a compatible result.** As in
+  kotlinc's override check, a member whose parameters match the mutable member's implements it only
+  when its result, in the class's substitution context, is a subtype of the mutable member's. The
+  check uses the published classifier hierarchy. So `fun set(e: String): Int`, declared by the
+  class or inherited from a Kotlin or Java superclass, and `Base<T>.set(e: T): T` under
+  `Base<String>` leave `Walk : ListIterator<String>` its throwing `set(String)` stub and
+  `set(Object)` bridge. `fun set(e: String): Nothing` does implement it, and its bridge calls the
+  member's `Void` descriptor and pops the result. Tests: `tests/read_only_stub_override_return_e2e.rs`
+  (class bytes and box runs against kotlinc).
 - **A nested value class over a reference carrier is read as its carrier.** In `ZN(val z: Z1?)`
   with `Z1(val x: En)`, `Z1?` is carried as `En?`, so `zn.z` and `zn.z!!` already are `Z1`'s
   carrier and `.x` of them is that carrier itself, with no cast. krusty took the unboxed property

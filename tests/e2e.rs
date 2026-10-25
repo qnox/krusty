@@ -2202,6 +2202,8 @@ mod read_only_stub_generic_override_e2e;
 mod read_only_stub_inheritability_e2e;
 #[path = "read_only_stub_override_bridges_e2e.rs"]
 mod read_only_stub_override_bridges_e2e;
+#[path = "read_only_stub_override_return_e2e.rs"]
+mod read_only_stub_override_return_e2e;
 #[path = "redundant_checkcast_e2e.rs"]
 mod redundant_checkcast_e2e;
 #[path = "redundant_checkcasts_before_aastore_e2e.rs"]

@@ -10,6 +10,7 @@
 //! faces whose stubs this backend realizes so far. The plans remain backend facts; common IR never
 //! carries a stub.
 
+use crate::assignable::{is_subtype, TyCtx, TypeOracle};
 use crate::backend::BackendClassifierSource;
 use crate::fx_hash::{HashMap, HashSet};
 use crate::ir::{IrClass, IrFile};
@@ -94,8 +95,9 @@ pub(super) enum StubBody {
         /// The source order of the class's own implementing member, which places its bridge among
         /// the ordinary ones; `u32::MAX` for an inherited member, whose bridge follows them.
         order: u32,
-        /// The implementing member's physical JVM parameters, which the bridge calls.
+        /// The implementing member's physical JVM parameters and result, which the bridge calls.
         target: Vec<Ty>,
+        target_result: Ty,
     },
 }
 
@@ -213,12 +215,26 @@ fn class_stubs(
         .into_iter()
         .filter(|stub| present.insert((stub.name.clone(), stub.descriptor())))
         .filter_map(|stub| {
-            let Some(target) = implemented.get(&stub.parameter_key()) else {
+            // kotlinc's override check: a member with a matching signature implements the
+            // candidate only when its result is a subtype of the candidate's, so
+            // `fun set(e: String): Int` leaves `set` its throwing stub.
+            let Some(implementation) =
+                implemented
+                    .get(&stub.parameter_key())
+                    .filter(|implementation| {
+                        is_subtype(
+                            &TyCtx::new(),
+                            &ClassifierHierarchy(classifiers),
+                            implementation.result,
+                            stub.result,
+                        )
+                    })
+            else {
                 return Some(stub);
             };
             // A generic implementation can already have the erased descriptor itself.
             let (erased, _) = stub.bridge.as_ref()?;
-            if parameter_descriptor(target) == parameter_descriptor(erased) {
+            if parameter_descriptor(&implementation.parameters) == parameter_descriptor(erased) {
                 return None;
             }
             let order = own_order
@@ -228,7 +244,8 @@ fn class_stubs(
             Some(ReadOnlyStub {
                 body: StubBody::Implemented {
                     order,
-                    target: target.clone(),
+                    target: implementation.parameters.clone(),
+                    target_result: implementation.physical_result,
                 },
                 ..stub
             })
@@ -357,8 +374,31 @@ struct Superclass {
     /// The members it declares abstract (kotlinc's abstract-superclass filter).
     abstract_members: HashSet<(String, String)>,
     /// The members it implements, inherited by the class as non-abstract fake overrides, keyed in
-    /// the class's substitution context, with each one's physical JVM parameters.
-    implemented_members: HashMap<(String, String), Vec<Ty>>,
+    /// the class's substitution context.
+    implemented_members: HashMap<(String, String), Implementation>,
+}
+
+/// A member that may implement a candidate, as the class reaches it.
+#[derive(Clone)]
+struct Implementation {
+    /// Its result in the class's substitution context, compared with the candidate's.
+    result: Ty,
+    /// Its physical JVM parameters and result, which a bridge to it calls.
+    parameters: Vec<Ty>,
+    physical_result: Ty,
+}
+
+/// The erased classifier hierarchy the backend publishes, for the override check's result
+/// subtyping. Unknown classifiers prove no relationship.
+struct ClassifierHierarchy<'a>(&'a dyn BackendClassifierSource);
+
+impl TypeOracle for ClassifierHierarchy<'_> {
+    fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
+        ty.kotlin_class_internal()
+            .and_then(|class| self.0.classifier(class))
+            .map(|fact| fact.supertypes.iter().copied().map(Ty::obj_name).collect())
+            .unwrap_or_default()
+    }
 }
 
 fn superclass_bindings(
@@ -475,18 +515,25 @@ fn superclass_chain(
                     // In the class's substitution context, so `Base<T>.set(e: T)` under
                     // `Base<String>` implements `set(String)`. The class calls it at its own
                     // physical descriptor.
-                    let parameters = match semantic {
-                        Some((parameters, _)) => {
+                    let (parameters, result) = match semantic {
+                        Some((parameters, result)) => {
                             let bindings =
                                 source_superclass_bindings(ir, current, source, applied(current)?)?;
-                            substituted(parameters, &bindings)
+                            (
+                                substituted(parameters, &bindings),
+                                ty_subst(*result, &bindings),
+                            )
                         }
-                        None => function.params.clone(),
+                        None => (function.params.clone(), function.ret),
                     };
                     superclass
                         .implemented_members
                         .entry((function.name.clone(), parameter_descriptor(&parameters)))
-                        .or_insert_with(|| jvm_tys(&function.params));
+                        .or_insert_with(|| Implementation {
+                            result,
+                            parameters: jvm_tys(&function.params),
+                            physical_result: jvm_declared_ty(&function.ret),
+                        });
                 } else if source.is_abstract {
                     let bindings =
                         source_superclass_bindings(ir, current, source, applied(current)?)?;
@@ -578,7 +625,7 @@ fn superclass_chain(
             }
             // Concrete realizations (including generated stubs) and Java methods keep their
             // existing physical-member accounting, separate from Kotlin abstract declarations.
-            let (Some(parameters), Some((physical, _))) = (
+            let (Some(parameters), Some((physical, physical_result))) = (
                 method.descriptor.split_once(')').map(|(params, _)| params),
                 crate::jvm::physical_type::method_operand_tys(&method.descriptor),
             ) else {
@@ -600,7 +647,7 @@ fn superclass_chain(
                 })
                 .flatten()
                 .and_then(|declaration| declaration.generic_sig.as_ref());
-                let key = match declaration {
+                let (key, result) = match declaration {
                     Some(signature) => {
                         let bindings = superclass_bindings(
                             current,
@@ -613,14 +660,22 @@ fn superclass_chain(
                             .chain(&signature.params)
                             .copied()
                             .collect();
-                        parameter_descriptor(&substituted(&declared, &bindings))
+                        (
+                            parameter_descriptor(&substituted(&declared, &bindings)),
+                            ty_subst(signature.ret, &bindings),
+                        )
                     }
-                    None => raw_key,
+                    // A Java or generated method's result is its descriptor's.
+                    None => (raw_key, physical_result),
                 };
                 superclass
                     .implemented_members
                     .entry((method.name.clone(), key))
-                    .or_insert(physical);
+                    .or_insert(Implementation {
+                        result,
+                        parameters: physical,
+                        physical_result,
+                    });
             } else if is_abstract {
                 superclass
                     .abstract_members
@@ -675,8 +730,8 @@ fn implemented_members(
     ir: &IrFile,
     class: &IrClass,
     chain: &[Superclass],
-) -> HashMap<(String, String), Vec<Ty>> {
-    let mut implemented: HashMap<(String, String), Vec<Ty>> = HashMap::default();
+) -> HashMap<(String, String), Implementation> {
+    let mut implemented: HashMap<(String, String), Implementation> = HashMap::default();
     for function in class
         .methods
         .iter()
@@ -688,13 +743,17 @@ fn implemented_members(
                 function.name.clone(),
                 parameter_descriptor(&function.params),
             ))
-            .or_insert_with(|| jvm_tys(&function.params));
+            .or_insert_with(|| Implementation {
+                result: function.ret,
+                parameters: jvm_tys(&function.params),
+                physical_result: jvm_declared_ty(&function.ret),
+            });
     }
     for superclass in chain {
-        for (key, physical) in &superclass.implemented_members {
+        for (key, implementation) in &superclass.implemented_members {
             implemented
                 .entry(key.clone())
-                .or_insert_with(|| physical.clone());
+                .or_insert_with(|| implementation.clone());
         }
     }
     for default in ir
@@ -709,7 +768,11 @@ fn implemented_members(
                     name.to_string(),
                     parameter_descriptor(&default.applied_parameters),
                 ))
-                .or_insert_with(|| jvm_tys(&default.applied_parameters));
+                .or_insert_with(|| Implementation {
+                    result: default.applied_result,
+                    parameters: jvm_tys(&default.applied_parameters),
+                    physical_result: jvm_declared_ty(&default.applied_result),
+                });
         }
     }
     implemented
