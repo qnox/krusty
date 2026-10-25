@@ -192,10 +192,12 @@ fn krusty_toolchain_in(
     Resolving::write_repository(&directory, &case.repository);
     compiling::lay_out(&directory);
     let output = run_task(&directory, &root, tasks, configure);
-    let record = std::fs::read_to_string(directory.join(compiling::RECORD)).unwrap_or_default();
+    let record = compiling::InvocationRecords::new(&directory)
+        .read_snapshot()
+        .unwrap();
     Ran {
         output,
-        record: placed(&directory.display().to_string(), record.as_bytes()),
+        record: placed(&directory.display().to_string(), &record),
         outputs: compiling::artifact_outputs(&directory, None),
         directory,
         _temp: temp,
@@ -707,9 +709,9 @@ fn an_unchanged_ksp_run_is_skipped() {
         placed(&first.output.root, &first.output.stderr)
     );
     let project = first.directory.join(Resolving::PROJECT);
-    let record = first.directory.join(compiling::RECORD);
+    let record = compiling::InvocationRecords::new(&first.directory);
     let ksp_runs = || {
-        runs_ksp(&std::fs::read_to_string(&record).unwrap())
+        runs_ksp(&String::from_utf8(record.read_snapshot().unwrap()).unwrap())
             .into_iter()
             .filter(|&ksp| ksp)
             .count()
@@ -1387,12 +1389,11 @@ fn a_module_whose_inputs_and_output_are_unchanged_is_not_compiled_again() {
     };
     let first = krusty_toolchain("avoidance", &case, &[":app:compileJvm"], fingerprinted);
     let project = first.directory.join(Resolving::PROJECT);
-    let record = first.directory.join(compiling::RECORD);
+    let record = compiling::InvocationRecords::new(&first.directory);
     // The modules each run compiles, in plan order (`left` and `right` compile together, so sorted).
     let compiled = |ran: &Output| {
         // A run that compiles nothing writes no record.
-        let modules = modules(&std::fs::read_to_string(&record).unwrap_or_default());
-        let _ = std::fs::remove_file(&record);
+        let modules = modules(&String::from_utf8(record.consume_after_run().unwrap()).unwrap());
         let mut together = modules.clone();
         if let Some(middle) = together.get_mut(1..3).filter(|_| modules.len() == 4) {
             middle.sort();

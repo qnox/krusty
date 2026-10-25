@@ -4,9 +4,10 @@
 //! A run is laid out as `kotlin::Resolving` lays it out (`<directory>` in compared output), with a
 //! JDK beside the project (`jdk`: a `release` file naming `JAVA_VERSION="25.0.2"`, an empty
 //! `bin/javac`, and a `bin/java` that records the KSP runs both make, which is all either reads of
-//! it) and the file the recording krusty writes (`record`). `KRUSTY_BIN` names that recorder: it appends its arguments to the record, one
-//! per line, then a `----` line, each invocation whole under a lock (a `record.lock` directory),
-//! since the toolchain compiles independent modules at the same time; it exits 0, or with status 3
+//! it) and the directory the recording krusty writes (`record`). `KRUSTY_BIN` names that recorder:
+//! each invocation claims its own numbered slot and publishes its arguments, one per line, then
+//! a `----` line. Completed slots are collected in claim order after the task drains its children;
+//! no writer appends to another invocation or releases a shared lock. It exits 0, or with status 3
 //! for the module `KRUSTY_RECORDER_FAIL` names. Nothing is compiled, so a `compilation-fingerprint`
 //! request fails unrecorded and the Build Tools API implementation always compiles.
 //!
@@ -41,26 +42,58 @@ use std::sync::OnceLock;
 use crate::support::kotlin::{version, Compiler, Resolving};
 use crate::support::oracle::{scratch, script, Output};
 
+mod invocation_records;
+pub use invocation_records::InvocationRecords;
+
 pub const JDK: &str = "jdk";
-pub const RECORD: &str = "record";
 /// The line the recorder writes after each invocation's arguments.
 pub const END_OF_INVOCATION: &str = "----";
 /// The line an oracle entry's stdout holds between the record and the run's artifact outputs.
 pub const OUTPUTS: &str = "==== outputs";
 
-const RECORDER: &str = "#!/bin/sh
+/// Shared by the compiler, plugin compiler and Java/KSP recorders. A claimed slot is never
+/// released while children run; only the completed-run consumer may reset the record directory.
+const WRITE_INVOCATION: &str = r#"record_invocation() {
+  if [ ! -d "$KRUSTY_RECORD" ]; then
+    echo "recorder: missing invocation directory $KRUSTY_RECORD" >&2
+    exit 7
+  fi
+  record_index=0
+  while :; do
+    record_slot="$KRUSTY_RECORD/$record_index"
+    if mkdir "$record_slot" 2>/dev/null; then break; fi
+    if [ ! -d "$record_slot" ]; then
+      echo "recorder: cannot claim invocation slot $record_slot" >&2
+      exit 7
+    fi
+    record_index=$((record_index + 1))
+  done
+  if ! {
+    for recorded_argument in "$@"; do printf '%s\n' "$recorded_argument" || exit 7; done
+    printf '%s\n' '----'
+  } > "$record_slot/pending"; then
+    echo "recorder: cannot write invocation slot $record_slot" >&2
+    exit 7
+  fi
+  if ! mv "$record_slot/pending" "$record_slot/arguments"; then
+    echo "recorder: cannot publish invocation slot $record_slot" >&2
+    exit 7
+  fi
+}
+"#;
+
+fn recording_script(body: &str) -> String {
+    format!("#!/bin/sh\n{WRITE_INVOCATION}{body}")
+}
+
+const RECORDER: &str = "
 # The recorder writes no classes, so it takes no compilation fingerprint: the Build Tools API
 # implementation then compiles every time, and only compilations are recorded.
 if [ \"${1:-}\" = compilation-fingerprint ]; then exit 1; fi
 for argument in \"$@\"; do
   case $argument in -module-name=*) module=${argument#-module-name=} ;; esac
 done
-until mkdir \"$KRUSTY_RECORD.lock\" 2>/dev/null; do sleep 0.01; done
-{
-  for argument in \"$@\"; do printf '%s\\n' \"$argument\"; done
-  printf '%s\\n' '----'
-} >> \"$KRUSTY_RECORD\"
-rmdir \"$KRUSTY_RECORD.lock\"
+record_invocation \"$@\"
 if [ -n \"${KRUSTY_RECORDER_FAIL:-}\" ] && [ \"$module\" = \"$KRUSTY_RECORDER_FAIL\" ]; then
   echo \"recorder: failing $module\" >&2
   exit 3
@@ -89,7 +122,7 @@ fi
 /// drive (in `-project-base-dir`): it copies what the module's `ksp-generates` directory holds into
 /// KSP's output directory (`-output-base-dir`), as if it generated those files, and when the module
 /// holds a `ksp-fails` file, it prints that file on stderr and exits with status 5.
-const JAVA_RECORDER: &str = "#!/bin/sh
+const JAVA_RECORDER: &str = "
 arguments=$(
   for argument in \"$@\"; do
     case $argument in
@@ -98,9 +131,7 @@ arguments=$(
     esac
   done
 )
-until mkdir \"$KRUSTY_RECORD.lock\" 2>/dev/null; do sleep 0.01; done
-printf '%s\\n%s\\n' \"$arguments\" '----' >> \"$KRUSTY_RECORD\"
-rmdir \"$KRUSTY_RECORD.lock\"
+record_invocation \"$arguments\"
 base=$(printf '%s\\n' \"$arguments\" | sed -n 's/^-project-base-dir=//p')
 output=$(printf '%s\\n' \"$arguments\" | sed -n 's/^-output-base-dir=//p')
 if [ -d \"$base/ksp-generates\" ]; then
@@ -113,7 +144,7 @@ if [ -f \"$base/ksp-fails\" ]; then
 fi
 ";
 
-const TOOLCHAIN_RECORDER: &str = "#!/bin/sh
+const TOOLCHAIN_RECORDER: &str = "
 for argument in \"$@\"; do
   case $argument in -module-name=*) module=${argument#-module-name=} ;; esac
 done
@@ -140,12 +171,7 @@ wait_for_event() {
   done
 }
 event start
-until mkdir \"$KRUSTY_RECORD.lock\" 2>/dev/null; do sleep 0.01; done
-{
-  for argument in \"$@\"; do printf '%s\\n' \"$argument\"; done
-  printf '%s\\n' '----'
-} >> \"$KRUSTY_RECORD\"
-rmdir \"$KRUSTY_RECORD.lock\"
+record_invocation \"$@\"
 if [ -n \"${KRUSTY_RECORDER_FAIL:-}\" ] && [ \"$module\" = \"$KRUSTY_RECORDER_FAIL\" ]; then
   if [ -n \"${KRUSTY_RECORDER_FAILURE_COMPANION:-}\" ]; then
     wait_for_event \"$KRUSTY_RECORDER_FAILURE_COMPANION\" start
@@ -181,10 +207,13 @@ fn recorders() -> &'static Path {
             std::env::temp_dir().join(format!("krusty-toolchain-recorder-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
         for (name, script) in [
-            ("krusty", RECORDER.to_string()),
+            ("krusty", recording_script(RECORDER)),
             ("krusty-compiling-plugin", plugin_compiling_recorder()),
-            ("krusty-toolchain-krusty", TOOLCHAIN_RECORDER.to_string()),
-            ("java", JAVA_RECORDER.to_string()),
+            (
+                "krusty-toolchain-krusty",
+                recording_script(TOOLCHAIN_RECORDER),
+            ),
+            ("java", recording_script(JAVA_RECORDER)),
         ] {
             let path = directory.join(name);
             std::fs::write(&path, script).unwrap();
@@ -200,7 +229,7 @@ pub fn recorder() -> PathBuf {
 }
 
 fn plugin_compiling_recorder() -> String {
-    format!("{RECORDER}{PLUGIN_COMPILATION}")
+    recording_script(&format!("{RECORDER}{PLUGIN_COMPILATION}"))
 }
 
 /// The recording krusty krusty-toolchain runs.
@@ -221,6 +250,7 @@ fn make_executable(path: &Path) {
 /// Lay out what a task needs in a run's `directory` beside the project and the local Maven
 /// repository: the JDK and an empty shared cache.
 pub fn lay_out(directory: &Path) {
+    InvocationRecords::new(directory).create().unwrap();
     let jdk = directory.join(JDK);
     std::fs::create_dir_all(jdk.join("bin")).unwrap();
     std::fs::write(jdk.join("release"), "JAVA_VERSION=\"25.0.2\"\n").unwrap();
@@ -237,7 +267,7 @@ pub fn environment(command: &mut Command, directory: &Path, krusty: &Path) {
         .env("JAVA_HOME", directory.join(JDK))
         .env("KOTLIN_SHARED_CACHE_DIR", directory.join(Resolving::CACHE))
         .env("KRUSTY_BIN", krusty)
-        .env("KRUSTY_RECORD", directory.join(RECORD))
+        .env("KRUSTY_RECORD", InvocationRecords::new(directory).path())
         .env_remove("KRUSTY_RECORDER_FAIL")
         .env_remove("KRUSTY_RECORDER_SLEEP")
         .env_remove("KRUSTY_RECORDER_FAIL_LATE")
@@ -335,11 +365,14 @@ pub struct RecordingKrusty;
 impl Compiler for RecordingKrusty {
     fn identity(&self) -> Vec<(String, Vec<u8>)> {
         let mut identity = vec![
-            ("recorder".to_string(), RECORDER.as_bytes().to_vec()),
+            (
+                "recorder".to_string(),
+                recording_script(RECORDER).into_bytes(),
+            ),
             ("outputs".to_string(), OUTPUTS.as_bytes().to_vec()),
             (
                 "java recorder".to_string(),
-                JAVA_RECORDER.as_bytes().to_vec(),
+                recording_script(JAVA_RECORDER).into_bytes(),
             ),
         ];
         identity.extend(implementation_sources());
@@ -368,7 +401,7 @@ impl Compiler for RecordingKrusty {
 fn collect(directory: &Path, ran: Output, skipped: Option<&str>) -> Output {
     let mut printed = ran.stdout;
     printed.extend_from_slice(&ran.stderr);
-    let mut stdout = std::fs::read(directory.join(RECORD)).unwrap_or_default();
+    let mut stdout = InvocationRecords::new(directory).read_snapshot().unwrap();
     stdout.extend_from_slice(format!("{OUTPUTS}\n").as_bytes());
     stdout.extend_from_slice(artifact_outputs(directory, skipped).as_bytes());
     Output {
@@ -408,6 +441,10 @@ impl Compiler for RecordingKrustyCompilingPlugin<'_> {
             ),
             ("plugin".to_string(), self.plugin.as_bytes().to_vec()),
             ("outputs".to_string(), OUTPUTS.as_bytes().to_vec()),
+            (
+                "java recorder".to_string(),
+                recording_script(JAVA_RECORDER).into_bytes(),
+            ),
         ];
         identity.extend(implementation_sources());
         identity
