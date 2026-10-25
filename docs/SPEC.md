@@ -14037,8 +14037,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
 - **A `for` loop over the stdlib's `indices` counts from 0 to the receiver's size, as kotlinc's
   `IndicesHandler` does.** The provider gives the `CompilerIntrinsic::Indices` role to the read-only
-  `indices: IntRange` extension property of `kotlin.collections` on `Array<out T>`, a signed
-  primitive array or `Collection<*>`, and of `kotlin.text` on `CharSequence`, matched on the complete
+  `indices: IntRange` extension property of `kotlin.collections` on `Array<out T>`, a primitive
+  or unsigned array or `Collection<*>`, and of `kotlin.text` on `CharSequence`, matched on the complete
   declaration (`property_realization`). For a loop iterable that reads such a property, directly or
   under `reversed()` and `step`, resolution selects the size member on the class the declaration
   receives (`size` of the array or of `Collection`, `length` of `CharSequence`; `IterationPlans`).
@@ -14048,9 +14048,31 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the bound reverts to the inclusive `size + -1` (`revertToLastInclusive` of the handler's
   `last.decrement()`), which they then count from. A user extension property named `indices` is
   read and iterated as written. Not yet ported, so still building the range: membership
-  (`i in xs.indices`), `withIndex()` over `indices`, and an unsigned array's `indices`, which
-  kotlinc counts to the static `UIntArray.getSize-impl` (the role requires a signed array's
-  element). (`tests/indices_loop_e2e.rs`, `indices_roles_require_the_complete_extension_property`.)
+  (`i in xs.indices`) and `withIndex()` over `indices`.
+  (`tests/indices_loop_e2e.rs`, `indices_roles_require_the_complete_extension_property`.)
+
+- **An `indices` loop over an unsigned array is bounded by its value class's own `size`.**
+  kotlinc's `ArrayIndicesHandler` matches `isUnsignedArray()` on the JVM
+  (`optimizeLoopsOverUnsignedArrays`) and reads the bound once through
+  `UIntArray.getSize-impl([I)I`, the member the loop's resolution selects on the receiver's class.
+  Its metadata declares `UIntArray` a value class over `IntArray`, so the JVM backend realizes that
+  dispatched member as a value-class member: it neither looks for a JVM array helper nor names the
+  carrier `[I` as the owner, both of which apply only to a classifier that is not a value class
+  (`member_dispatch::is_value_class`). The reversed and stepped forms count from the inclusive
+  `size + -1` as for any array. A plain `xs.size` reads the same member. The shared
+  primitive-array table lists the unsigned arrays with their carriers, so both the core
+  declarations and the backend check for the value class first. The core `ArraySize` intrinsic
+  belongs to `Array` and the signed primitive arrays (`add_core_builtin_declarations`). An unsigned
+  array gets it only when no library declares the class's `size`. The `size` the stdlib declares
+  stays an ordinary member, not the carrier's `arraylength`.
+  Treated as the JVM array `[I`, the dispatched read would seek a static array helper
+  `getSize([I)I` that no class declares, which is a missing dependency realization. The Native
+  backend stores an unsigned array as its signed carrier, so it realizes that member as the
+  carrier's length when the getter's declaring classifier is an unsigned array whose frozen
+  value-class declaration stores a signed primitive array (`is_unsigned_array_carrier_size`). Not yet ported: `xs[i]` and
+  `xs[i] = v` on an unsigned array, which krusty still realizes as the carrier's
+  `iaload`/`iastore` where kotlinc calls `get-pVg5ArA`/`set-VXSXFK8`.
+  (`tests/unsigned_array_indices_e2e.rs`.)
 
 - **A `checkcast` right before an `aastore` is removed, as kotlinc's
   `RedundantCheckcastsBeforeAastoreMethodTransformer` does.** The pass runs after jump negation and

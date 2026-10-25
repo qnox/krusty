@@ -41,11 +41,29 @@ pub(super) fn virtual_owner(
     dispatch: Option<TypeName>,
     receiver: Option<crate::types::Ty>,
 ) -> Result<(TypeName, bool), MissingClassifier> {
-    if let Some(array) = receiver.filter(|ty| ty.non_null().is_array()) {
+    if let Some(array) = receiver.filter(|ty| {
+        ty.non_null().is_array()
+            && !ty
+                .non_null()
+                .obj_internal()
+                .is_some_and(|name| is_value_class(classifiers, name))
+    }) {
         let internal = crate::jvm::names::type_descriptor(array.non_null());
         return Ok((crate::types::type_name(&internal), false));
     }
     call_owner(classifiers, declared, declared_interface, dispatch)
+}
+
+/// Whether `classifier` is declared a value class. An unsigned array is one over a primitive
+/// array: it has its own class file, and its members are that class's `-impl` statics rather than
+/// operations of the JVM array type that carries it.
+pub(super) fn is_value_class(
+    classifiers: &CheckedDispatchClassifiers<'_>,
+    classifier: TypeName,
+) -> bool {
+    classifiers
+        .classifier(classifier)
+        .is_some_and(|class| class.value_class)
 }
 
 fn receiver_owner(

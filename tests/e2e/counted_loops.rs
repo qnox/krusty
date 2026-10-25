@@ -10,3 +10,5 @@ mod for_in_with_index_e2e;
 mod indices_loop_e2e;
 #[path = "../range_step_e2e.rs"]
 mod range_step_e2e;
+#[path = "../unsigned_array_indices_e2e.rs"]
+mod unsigned_array_indices_e2e;
