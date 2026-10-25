@@ -106,6 +106,15 @@ pub enum FirProgressionSource {
     },
     /// `nested.reversed()`.
     Reversed(Box<FirProgressionSource>),
+    /// `receiver.indices` of an array, a `Collection` or a `CharSequence` (kotlinc's
+    /// `IndicesHandler`): counted from 0 until `size`, the member selected on the class the
+    /// `indices` declaration receives, read once on the receiver. `view` is that class when the
+    /// receiver's own static class is another one, which kotlinc casts it to before the read.
+    Indices {
+        receiver: super::FirReceiver,
+        view: Option<Ty>,
+        size: super::FirPropertyTarget,
+    },
 }
 
 impl FirProgressionSource {

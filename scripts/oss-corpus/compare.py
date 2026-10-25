@@ -5,7 +5,8 @@ build with the krusty Gradle plugin).
 usage: compare.py <work dir> <name> <reference build exit code>
 
 Reads <work dir>/out/<name>/{kotlinc,krusty}, <work dir>/logs/<name>.kotlinc.compilations.tsv (the
-reference build's compile tasks and their output directories) and <work dir>/logs/<name>.krusty.log. Writes
+reference build's compile tasks and their output directories) and <work dir>/logs/<name>.krusty.log
+(fallback reasons and the first error of each failed compile). Writes
 <work dir>/out/<name>/compare.json and prints one line per compilation.
 """
 import glob
@@ -33,6 +34,61 @@ def fallbacks(log_path):
             reason += ' (' + '; '.join(detail) + ')'
         found[task] = reason
     return found
+
+
+ERROR_LINE = re.compile(r'^(e: |error: )|: error: |panicked at ')
+TASK_HEADER = re.compile(r'^> Task (\S+)')
+
+
+def failures(log_path, checkout):
+    """The compile tasks the krusty build ran, and the first error each logged: ({task path},
+    {task path: message}). Gradle heads every task it runs, and its output, with `> Task <path>`;
+    the replacement task is the compile task's path with `WithKrusty` appended. Paths inside the
+    checkout are shown relative to it."""
+    ran, found = set(), {}
+    try:
+        lines = open(log_path, errors='replace').read().splitlines()
+    except OSError:
+        return ran, found
+    task = None
+    prefixes = ('file://' + checkout + '/', checkout + '/')
+    for line in lines:
+        header = TASK_HEADER.match(line)
+        if header:
+            task = header.group(1).split(' ')[0]
+            if task.endswith('WithKrusty'):
+                task = task[:-len('WithKrusty')]
+            ran.add(task)
+            continue
+        if task and task not in found and ERROR_LINE.search(line):
+            message = line.strip()
+            for prefix in prefixes:
+                message = message.replace(prefix, '')
+            found[task] = message[:300]
+    return ran, found
+
+
+def build_failure(log_path):
+    """The innermost message of the first `* What went wrong:` block of a Gradle log, or None."""
+    try:
+        lines = open(log_path, errors='replace').read().splitlines()
+    except OSError:
+        return None
+    for i, line in enumerate(lines):
+        if line.startswith('* What went wrong:'):
+            # Each cause is a `>` line indented under the one it explains; other lines continue
+            # the message above them, such as a link to the Gradle documentation.
+            innermost, depth = None, -1
+            for detail in lines[i + 1:]:
+                if not detail.strip() or detail.startswith('* '):
+                    break
+                indent = len(detail) - len(detail.lstrip())
+                if innermost is None:
+                    innermost = detail.strip()
+                elif detail.lstrip().startswith('>') and indent > depth:
+                    innermost, depth = detail.strip().lstrip('> ').strip(), indent
+            return innermost[:300] if innermost else None
+    return None
 
 
 def compilations(manifest):
@@ -73,7 +129,16 @@ def compare(work, name):
     """The compared compilations, and the listed compile tasks for which kotlinc wrote no class
     (a source set without sources): those are reported apart, with any classes krusty wrote."""
     kotlinc, krusty = os.path.join(work, 'out', name, 'kotlinc'), os.path.join(work, 'out', name, 'krusty')
-    found = fallbacks(os.path.join(work, 'logs', name + '.krusty.log'))
+    log = os.path.join(work, 'logs', name + '.krusty.log')
+    found = fallbacks(log)
+    ran, errors = failures(log, os.path.join(work, 'src', name))
+    # A krusty build that fails before running any compile (configuration, plugin resolution)
+    # says why once, for every compile it never reached.
+    not_run = 'not run: a task it depends on failed'
+    if not any(task in ran for task, _ in compilations(os.path.join(work, 'logs', name + '.kotlinc.compilations.tsv'))):
+        failure = build_failure(log)
+        if failure:
+            not_run = 'not run: the krusty build failed: ' + failure
     rows, empty = [], []
     for task, rel in compilations(os.path.join(work, 'logs', name + '.kotlinc.compilations.tsv')):
         reference = files(os.path.join(kotlinc, rel))
@@ -88,7 +153,11 @@ def compare(work, name):
         classes = sum(1 for k in reference if k.endswith('.class'))
         identical = sum(1 for k, p in reference.items()
                         if k.endswith('.class') and k in candidate and same_bytes(p, candidate[k]))
-        rows.append(dict(task=task, dir=rel, built=built, fallback=fallback, classes=classes,
+        error = None
+        if not built and fallback is None:
+            # With --continue, Gradle skips a compile whose dependency failed.
+            error = errors.get(task, 'krusty wrote no class' if task in ran else not_run)
+        rows.append(dict(task=task, dir=rel, built=built, fallback=fallback, error=error, classes=classes,
                          identical=identical if built else 0,
                          only_kotlinc=len(set(reference) - set(candidate)) if built else None,
                          only_krusty=len(set(candidate) - set(reference)) if built else None))
@@ -117,6 +186,7 @@ def main():
         state = 'ok ' if r['built'] else ('KTC' if r['fallback'] else 'ERR')
         print(f"  {state} {r['task']} ({r['dir']}): {r['identical']}/{r['classes']}"
               + (f" left to kotlinc: {r['fallback']}" if r['fallback'] else '')
+              + (f" error: {r['error']}" if r['error'] else '')
               + (f" only_kotlinc={r['only_kotlinc']} only_krusty={r['only_krusty']}" if r['built'] else ''))
     for r in empty:
         print(f"  --- {r['task']} ({r['dir']}): kotlinc wrote no class; krusty wrote {r['krusty_classes']}")

@@ -16,6 +16,7 @@ impl<'a> Checker<'a> {
         body: ExprId,
         result: Ty,
         declared: bool,
+        declaration: Option<crate::fir::DeclarationId>,
     ) {
         let actual = if declared {
             let checked = self.expr_declared(scope, body, result);
@@ -23,7 +24,12 @@ impl<'a> Checker<'a> {
             self.narrow_platform_value(result, body, PlatformNarrowing::Declaration);
             actual
         } else {
-            self.expr_expected(scope, body, result)
+            let expected = super::expected_expression::declaration_body_type(
+                self.resolved_index,
+                declaration,
+                result,
+            );
+            self.expr_expected(scope, body, expected)
         };
         self.expect_assignable(result, actual, self.span(body), "getter body");
         self.finish_executable_root(body);

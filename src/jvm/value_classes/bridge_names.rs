@@ -33,8 +33,12 @@ impl BridgeNaming<'_> {
     /// A supertype member with a value-class parameter of its own (`foo(i: T?)` with
     /// `T : Inlined` erases to `foo-<hash>(Inlined)`) is mangled whatever the override takes. The
     /// bridge takes that name and parameter, and calls the override by the override's own name.
+    /// A value class's interface entry already carries the member's own mangled name and physical
+    /// parameters, so it answers to nothing further.
     pub(super) fn answer_to_value_class_parameters(&self, bridge: &mut Bridge, target: &str) {
-        if !mentions_value_class(&bridge.erased_params, Ty::Unit, self.under) {
+        if bridge.kind == BridgeKind::ValueClassInterfaceEntry
+            || !mentions_value_class(&bridge.erased_params, Ty::Unit, self.under)
+        {
             return;
         }
         bridge.name = self.mangled(bridge, &bridge.erased_params);

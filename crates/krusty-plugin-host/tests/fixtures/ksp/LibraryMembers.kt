@@ -30,6 +30,7 @@ class LibraryMembersProcessor(private val env: SymbolProcessorEnvironment) : Sym
         "dependency.Choices",
         "dependency.Constants",
         "dependency.Constants.Entry",
+        "dependency.Aliased",
     )
 
     override fun process(resolver: Resolver): List<KSAnnotated> {
@@ -42,11 +43,48 @@ class LibraryMembersProcessor(private val env: SymbolProcessorEnvironment) : Sym
                 continue
             }
             env.logger.warn("$name ${declaration.classKind} ${declaration.origin}")
-            for (member in declaration.declarations) env.logger.warn("  declares ${member(member)}")
+            for (member in declaration.declarations) {
+                env.logger.warn("  declares ${member(member)}")
+                annotations(member)
+            }
             for (property in declaration.getAllProperties()) env.logger.warn("  property ${member(property)}")
             for (function in declaration.getAllFunctions()) env.logger.warn("  function ${member(function)}")
         }
         return emptyList()
+    }
+
+    /** Logs the annotations of a declared member, its getter, and its parameters. */
+    private fun annotations(member: KSDeclaration) {
+        for (annotation in member.annotations) env.logger.warn("    annotated ${annotation(annotation)}")
+        if (member is KSPropertyDeclaration) {
+            member.getter?.annotations?.forEach { env.logger.warn("    getter annotated ${annotation(it)}") }
+        }
+        if (member is KSFunctionDeclaration) {
+            for (parameter in member.parameters) {
+                for (annotation in parameter.annotations) {
+                    env.logger.warn("    parameter ${parameter.name?.asString()} annotated ${annotation(annotation)}")
+                }
+            }
+        }
+    }
+
+    private fun annotation(annotation: KSAnnotation): String =
+        "@" + annotation.shortName.asString() +
+            "=" + annotation.annotationType.resolve().declaration.qualifiedName?.asString() +
+            " target=" + annotation.useSiteTarget +
+            " origin=" + annotation.origin +
+            annotation.arguments.joinToString(", ", " (", ")") {
+                "${it.name?.asString()}=${value(it.value)} ${it.origin}"
+            }
+
+    private fun value(value: Any?): String = when (value) {
+        null -> "null"
+        is String -> "\"" + value + "\""
+        is KSType -> "type " + (value.declaration.qualifiedName?.asString() ?: "?")
+        is KSClassDeclaration -> "entry " + value.qualifiedName?.asString()
+        is KSAnnotation -> annotation(value)
+        is List<*> -> value.joinToString(", ", "[", "]") { value(it) }
+        else -> value.toString() + ":" + value.javaClass.simpleName
     }
 
     private fun member(declaration: KSDeclaration): String {

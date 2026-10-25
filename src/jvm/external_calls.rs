@@ -925,6 +925,7 @@ pub(super) fn realize(
                 | crate::libraries::CompilerIntrinsic::ProgressionStep
                 | crate::libraries::CompilerIntrinsic::ProgressionReversed
                 | crate::libraries::CompilerIntrinsic::WithIndex
+                | crate::libraries::CompilerIntrinsic::Indices(_)
                 | crate::libraries::CompilerIntrinsic::UnsignedCompare { .. }
                 | crate::libraries::CompilerIntrinsic::PrimitiveIteratorNext
                 | crate::libraries::CompilerIntrinsic::NumericConversion

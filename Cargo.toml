@@ -12,7 +12,7 @@ categories = ["compilers", "development-tools"]
 autotests = false
 
 [workspace]
-members = ["crates/krusty-build", "crates/krusty-cli", "crates/krusty-lsp", "crates/krusty-plugin-host", "crates/krusty-plugin-ir", "crates/krusty-toolchain"]
+members = ["crates/krusty-build", "crates/krusty-cli", "crates/krusty-lsp", "crates/krusty-plugin-host", "crates/krusty-plugin-ir", "crates/krusty-test-support", "crates/krusty-toolchain"]
 default-members = [".", "crates/krusty-cli"]
 resolver = "2"
 

@@ -647,8 +647,8 @@ mod contract_user_e2e;
 mod contravariant_sam_adapter_e2e;
 #[path = "coroutine_intrinsics_e2e.rs"]
 mod coroutine_intrinsics_e2e;
-#[path = "counted_loop_shape_e2e.rs"]
-mod counted_loop_shape_e2e;
+#[path = "e2e/counted_loops.rs"]
+mod counted_loops;
 #[path = "cross_file_companion_fun_e2e.rs"]
 mod cross_file_companion_fun_e2e;
 #[path = "cross_file_ctor_default_e2e.rs"]
@@ -825,6 +825,8 @@ mod duplicate_param_check_e2e;
 mod eager_lambda_analysis_e2e;
 #[path = "editor_failed_signature_recovery_e2e.rs"]
 mod editor_failed_signature_recovery_e2e;
+#[path = "elvis_branch_order_e2e.rs"]
+mod elvis_branch_order_e2e;
 #[path = "elvis_newline_continuation_e2e.rs"]
 mod elvis_newline_continuation_e2e;
 #[path = "elvis_nullability_join_e2e.rs"]
@@ -1021,8 +1023,6 @@ mod floating_remainder_e2e;
 mod fn_typed_default_e2e;
 #[path = "for_destructuring_components_e2e.rs"]
 mod for_destructuring_components_e2e;
-#[path = "for_in_with_index_e2e.rs"]
-mod for_in_with_index_e2e;
 #[path = "for_iterable_elvis_e2e.rs"]
 mod for_iterable_elvis_e2e;
 #[path = "for_typed_loop_var_e2e.rs"]
@@ -1687,6 +1687,8 @@ mod reified_type_arguments_e2e;
 mod result_generic_override_argument_e2e;
 #[path = "safe_call_null_line_e2e.rs"]
 mod safe_call_null_line_e2e;
+#[path = "safe_call_return_line_e2e.rs"]
+mod safe_call_return_line_e2e;
 #[path = "sam_lambda_parameter_inference_e2e.rs"]
 mod sam_lambda_parameter_inference_e2e;
 #[path = "same_module_inline_frame_markers_e2e.rs"]
@@ -1731,6 +1733,8 @@ mod upper_bound_violations_e2e;
 mod value_class_bound_reference_receiver_e2e;
 #[path = "value_class_bounded_parameter_bridge_e2e.rs"]
 mod value_class_bounded_parameter_bridge_e2e;
+#[path = "value_class_carrier_parameter_bridge_e2e.rs"]
+mod value_class_carrier_parameter_bridge_e2e;
 #[path = "value_class_constructor_bodies_e2e.rs"]
 mod value_class_constructor_bodies_e2e;
 #[path = "value_class_constructor_default_e2e.rs"]
@@ -1789,6 +1793,8 @@ mod value_class_nullable_function_result_e2e;
 mod value_class_object_carrier_generic_result_e2e;
 #[path = "value_class_parameters_e2e.rs"]
 mod value_class_parameters_e2e;
+#[path = "value_class_private_constructor_access_e2e.rs"]
+mod value_class_private_constructor_access_e2e;
 #[path = "value_class_private_member_access_e2e.rs"]
 mod value_class_private_member_access_e2e;
 #[path = "value_class_return_mangling_e2e.rs"]
@@ -2387,8 +2393,6 @@ mod qualified_name_e2e;
 mod range_literal_membership_e2e;
 #[path = "range_property_e2e.rs"]
 mod range_property_e2e;
-#[path = "range_step_e2e.rs"]
-mod range_step_e2e;
 #[path = "raw_string_interpolation_e2e.rs"]
 mod raw_string_interpolation_e2e;
 #[path = "receiver_fn_value_invoke_e2e.rs"]

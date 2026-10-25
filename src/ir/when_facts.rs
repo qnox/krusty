@@ -15,4 +15,10 @@ pub(crate) struct IrWhenFacts {
     /// their `when` keyword. An `if`, and a `when` lowering builds, is not one. kotlinc's JVM codegen
     /// marks that line and a `nop` before the branches of such a `when` unless it becomes a switch.
     pub(crate) source_lines: HashMap<ExprId, u32>,
+    /// The `when` each elvis (`a ?: b`) lowers to, as fir2ir builds it, with the elvis's source line
+    /// (`0` when it has none): the first branch tests the left value's temporary against `null` and
+    /// yields the right side, the `else` yields the left value. A backend whose platform compiler
+    /// rebuilds an elvis's branches at the elvis's own position uses this provenance rather than
+    /// recognizing the shape.
+    pub(crate) elvises: HashMap<ExprId, u32>,
 }
