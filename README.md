@@ -8,16 +8,16 @@ on master); `projects/` holds each project's latest result and `history.tsv` eve
 | Project | Stars | Kotlin LOC | Java LOC | Reference build | Compilations built by krusty | Identical classes | Measured |
 | --- | ---: | ---: | ---: | --- | ---: | ---: | --- |
 | Exposed | 9,301 | 138,105 | 0 | ok | 0 / 43 | 0 / 8,100 (0.0%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
-| koin | 10,022 | 33,677 | 123 | ok | 4 / 19 | 76 / 3,705 (2.1%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
+| koin | 10,022 | 33,677 | 123 | ok | 4 / 19 | 76 / 3,705 (2.1%) | [2026-10-25, krusty e911a36](https://github.com/qnox/krusty/actions/runs/40212685036) |
 | kotlinx.coroutines | 13,824 | 102,096 | 897 | ok | 0 / 34 | 0 / 9,482 (0.0%) | [2026-10-25, krusty b5979a1](https://github.com/qnox/krusty/actions/runs/40201721357) |
-| ktor | 14,554 | 259,026 | 85 | ok | 0 / 220 | 0 / 15,418 (0.0%) | [2026-10-25, krusty b5979a1](https://github.com/qnox/krusty/actions/runs/40201721357) |
-| leakcanary | 30,003 | 100,627 | 172 | ok | 6 / 34 | 22 / 1,798 (1.2%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
+| ktor | 14,554 | 259,026 | 85 | ok | 0 / 220 | 0 / 15,418 (0.0%) | [2026-10-25, krusty e911a36](https://github.com/qnox/krusty/actions/runs/40212685036) |
+| leakcanary | 30,004 | 100,627 | 172 | ok | 6 / 34 | 22 / 1,798 (1.2%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
 | Maestro | 16,208 | 65,644 | 0 | ok | 1 / 19 | 26 / 2,156 (1.2%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
 | mirai | 14,793 | 156,072 | 559 | ok | 0 / 51 | 0 / 2,536 (0.0%) | [2026-10-25, krusty b5979a1](https://github.com/qnox/krusty/actions/runs/40201721357) |
 | moshi | 10,166 | 16,749 | 13,212 | ok | 0 / 12 | 0 / 512 (0.0%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
-| nowinandroid | 21,966 | 26,596 | 0 | ok | 24 / 58 | 221 / 1,110 (19.9%) | [2026-10-25, krusty cf34959](https://github.com/qnox/krusty/actions/runs/40199492852) |
+| nowinandroid | 21,967 | 26,596 | 0 | ok | 24 / 58 | 221 / 1,110 (19.9%) | [2026-10-25, krusty cf34959](https://github.com/qnox/krusty/actions/runs/40199492852) |
 | okhttp | 47,095 | 126,665 | 3,816 | ok | 9 / 38 | 37 / 1,483 (2.5%) | [2026-10-25, krusty 323386f](https://github.com/qnox/krusty/actions/runs/40208384415) |
-| okio | 9,052 | 46,812 | 2,398 | failed (exit 1) | 0 / 6 | 0 / 343 (0.0%) | [2026-10-25, krusty cf34959](https://github.com/qnox/krusty/actions/runs/40199492852) |
+| okio | 9,052 | 46,812 | 2,398 | failed (exit 1) | 0 / 6 | 0 / 343 (0.0%) | [2026-10-25, krusty e911a36](https://github.com/qnox/krusty/actions/runs/40212685036) |
 | quarkdown | 16,323 | 87,771 | 23 | ok | 0 / 37 | 0 / 2,345 (0.0%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
 | Unciv | 11,486 | 139,231 | 1,184 | ok | 0 / 4 | 0 / 3,341 (0.0%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
 | **Measured total** | | | | | **44 / 569** | **382 / 51,986 (0.7%)** | |
@@ -27,7 +27,7 @@ on master); `projects/` holds each project's latest result and `history.tsv` eve
 - **Exposed**
   - 43 × krusty wrote no class
 - **koin**
-  - 11 × krusty wrote no class
+  - 11 × not run: a task it depends on failed
   - 1 × projects/core/koin-core-coroutines/src/commonMain/kotlin/org/koin/core/KoinWaitExt.kt:17:7: error: @file:JvmMultifileClass is not supported for JVM compilation yet; its part classes and delegating facade require distinct physical owners
   - 1 × projects/core/koin-core/src/commonTest/kotlin/org/koin/core/ClosedScopeAPI.kt:253:42: error: type mismatch: inferred type is T but Scope was expected
   - 1 × projects/core/koin-test/src/commonMain/kotlin/org/koin/test/check/CheckModules.kt:154:22: error: none of the following candidates is applicable:
@@ -36,7 +36,7 @@ on master); `projects/` holds each project's latest result and `history.tsv` eve
   - 30 × left to kotlinc: krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)
   - 4 × left to kotlinc: krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead; freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)
 - **ktor**
-  - 220 × not run: the krusty build failed: For more information, please refer to https://docs.gradle.org/9.7.1/userguide/declaring_repositories.html#declaring_content_exclusively_found_in_one_repository in the Gradle documentation.
+  - 220 × left to kotlinc: argument -Xreport-all-warnings, argument -Xrender-internal-diagnostic-names
 - **leakcanary**
   - 24 × krusty wrote no class
   - 2 × left to kotlinc: krusty does not implement everything it requests (freeCompilerArg '-P' conflicts with compiler plugin configuration; configure the structured Gradle input instead)
@@ -70,7 +70,7 @@ on master); `projects/` holds each project's latest result and `history.tsv` eve
   - 1 × okio-fakefilesystem/src/commonMain/kotlin/okio/fakefilesystem/FileMetadataCommon.kt:16:7: error: @file:JvmMultifileClass is not supported for JVM compilation yet; its part classes and delegating facade require distinct physical owners
   - 1 × okio/jvm/jmh/src/jmh/java/com/squareup/okio/benchmarks/BenchmarkUtils.kt:31:12: error: unresolved reference 'commonToUtf8String'.
   - 1 × krusty: error: -Xjdk-release=8 compiles against the JDK 8 API from ct.sym, which krusty does not implement; the selected JDK is 21
-  - 1 × krusty wrote no class
+  - 1 × not run: a task it depends on failed
 - **quarkdown**
   - 37 × krusty wrote no class
 - **Unciv**
@@ -141,4 +141,5 @@ on master); `projects/` holds each project's latest result and `history.tsv` eve
 
 | Plugin | Projects | Modules |
 | --- | ---: | ---: |
-| `-P` | 2 | 5 |
+| `-P plugin:androidx.compose.compiler.plugins.kotlin` | 1 | 4 |
+| `-P` | 1 | 1 |

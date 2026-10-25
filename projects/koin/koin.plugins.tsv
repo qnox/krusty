@@ -124,10 +124,10 @@ compiler	:plugins:koin-gradle-plugin	kotlin-scripting-compiler-embeddable-2.4.21
 compiler	:plugins:koin-gradle-plugin	kotlin-scripting-compiler-impl-embeddable-2.4.21.jar
 compiler	:plugins:koin-gradle-plugin	kotlin-scripting-jvm-2.4.21.jar
 compiler	:plugins:koin-gradle-plugin	kotlin-stdlib-2.4.21.jar
-compiler-arg	:compose:koin-compose	-P
-compiler-arg	:compose:koin-compose-navigation3	-P
-compiler-arg	:compose:koin-compose-viewmodel	-P
-compiler-arg	:compose:koin-compose-viewmodel-navigation	-P
+compiler-arg	:compose:koin-compose	-P plugin:androidx.compose.compiler.plugins.kotlin
+compiler-arg	:compose:koin-compose-navigation3	-P plugin:androidx.compose.compiler.plugins.kotlin
+compiler-arg	:compose:koin-compose-viewmodel	-P plugin:androidx.compose.compiler.plugins.kotlin
+compiler-arg	:compose:koin-compose-viewmodel-navigation	-P plugin:androidx.compose.compiler.plugins.kotlin
 gradle	:	com.gradleup.nmcp.aggregation
 gradle	:	org.gradle.base
 gradle	:	org.gradle.build-init
