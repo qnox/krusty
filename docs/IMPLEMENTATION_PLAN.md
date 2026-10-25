@@ -1,5 +1,13 @@
 # krusty — implementation plan
 
+## Builtin declaration-name producers
+
+Populate the existing declaration-name fact from admitted core/function/array factories and raw
+`.kotlin_builtins` declarations. Carry the selected builtin identity alongside its name through
+signature and classless/mapped shape publication; retain exact physical declaration authority.
+Reuse the current inventories and mappings. Metadata name lookup/encoding, source classifier
+projection and optional-annotation name retention remain separate follow-ups.
+
 ## Classifier declaration-name handoff
 
 Retain an optional declaration-owned package/owner and exact segment across source bootstrap,

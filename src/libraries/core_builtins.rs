@@ -638,6 +638,10 @@ impl crate::symbol_source::SymbolSource for EmptySymbolSource {
                 return std::rc::Rc::new(ResolvedSymbols::default());
             };
             let mut classifier = LibraryType::declaration_header();
+            classifier.declaration_name = Some(crate::types::ClassifierDeclarationName::TopLevel {
+                package,
+                name: name.into(),
+            });
             classifier.kind = TypeKind::Interface;
             classifier.type_parameters =
                 TypeParameters::invariant(vec!["R".to_string()], vec![Vec::new()]);
@@ -666,12 +670,16 @@ impl crate::symbol_source::SymbolSource for EmptySymbolSource {
                 ..ResolvedSymbols::default()
             });
         };
-        let Some(classifier) = Self::builtin_classifier(name, internal) else {
+        let Some(mut classifier) = Self::builtin_classifier(name, internal) else {
             return std::rc::Rc::new(ResolvedSymbols {
                 callables,
                 ..ResolvedSymbols::default()
             });
         };
+        classifier.declaration_name = Some(crate::types::ClassifierDeclarationName::TopLevel {
+            package,
+            name: name.into(),
+        });
         std::rc::Rc::new(ResolvedSymbols {
             builtin_classifier: false,
             classifier_name: Some(internal),
@@ -687,6 +695,43 @@ impl crate::symbol_source::SymbolSource for EmptySymbolSource {
 mod tests {
     use super::*;
     use crate::symbol_source::SymbolSource;
+
+    #[test]
+    fn builtin_declaration_names_belong_to_admitted_core_packages() {
+        use crate::symbol_source::SymbolNamespace;
+        use crate::types::ClassifierDeclarationName;
+
+        for (package, name) in [
+            ("kotlin", "Int"),
+            ("kotlin", "Array"),
+            ("kotlin", "EqualityBound"),
+            ("kotlin/reflect", "KProperty"),
+            ("kotlin/reflect", "KFunction"),
+        ] {
+            let package = crate::types::type_name(package);
+            let identity = crate::types::type_name_child(package, name);
+            let symbols = EmptySymbolSource.symbols(SymbolNamespace::Package(package), name);
+            assert_eq!(symbols.classifier_name, Some(identity));
+            assert_eq!(
+                symbols.classifier.as_ref().unwrap().declaration_name,
+                Some(ClassifierDeclarationName::TopLevel {
+                    package,
+                    name: name.into(),
+                })
+            );
+            assert!(EmptySymbolSource
+                .symbols(SymbolNamespace::Classifier(identity), name)
+                .classifier
+                .is_none());
+            assert!(EmptySymbolSource
+                .symbols(
+                    SymbolNamespace::Package(crate::types::type_name("other_core")),
+                    name
+                )
+                .classifier
+                .is_none());
+        }
+    }
 
     #[test]
     fn top_level_core_classifier_formals_never_capture_an_enclosing_declaration() {
