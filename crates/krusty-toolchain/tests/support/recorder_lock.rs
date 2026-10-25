@@ -70,7 +70,7 @@ exit 0
                 payload.clone(),
             ])
             .env("PATH", &path)
-            .env("KRUSTY_RECORD", &record)
+            .env("KRUSTY_RECORD", record)
             .env("KRUSTY_CLAIM_RACE", &barrier)
             .env("KRUSTY_CLAIM_ACTOR", actor)
             .env("KRUSTY_REAL_MKDIR", real_mkdir.trim_end())
