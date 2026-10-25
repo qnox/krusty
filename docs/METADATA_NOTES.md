@@ -1,5 +1,13 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Anonymous superclass argument bindings
+
+Base expressions of an anonymous object are checked before its dispatch-property scope exists.
+The selected lexical value and complete applied parent flow through ordinary constructor checking;
+an inherited property of the same spelling does not change generic inference. Complete JVM class
+headers and member tables are compared with kotlinc in the constructor-alias regression. No metadata
+wire fields, declaration identities or backend-specific substitutions change at this boundary.
+
 ## Class formal layouts before member publication
 
 Kotlin class metadata supplies own formals and bounds. A mapped builtin declaration supplies its
@@ -1098,3 +1106,11 @@ physical inputs. This is an in-memory declaration fact, with no Kotlin metadata 
 JVM annotation interfaces use the same retained `InnerClasses` inventory as other declared
 classifiers. Declared children and enclosing rows remain discoverable without a method or element
 referencing them. This changes the JVM class table, not Kotlin metadata or annotation values.
+
+## Initializer inline debug ranges
+
+Class-initializer entry establishes the implicit callable frame. Initializer expressions record
+their local-variable ranges at nested lexical boundaries, and each store restores its source line
+after an inlined value. Class-initializer table curation preserves intentional marks at distinct
+offsets, including returns to the same source line. The JVM uses these debug points to preserve
+inline markers and closing anchors; Kotlin metadata and constructor descriptors are unchanged.
