@@ -12,6 +12,10 @@ declared bounds and parent/function shapes, and follows generic/function varianc
 retain declaration-name spans for exact ambiguous-parent diagnostics. Private and local-member
 results remain exact; shared outcomes and operand ABI ownership are unchanged.
 
+JVM field and property-accessor signature formatting consumes retained enclosing-method formals
+through the declaration type-use formatter. Own classifier formals, nullable/bounded captures and
+concrete declarations share that boundary; physical field descriptors retain their existing erasure.
+
 Phased, each phase ends in a **green `cargo test`** and a runnable artifact. The pipeline is built
 front-to-back so the streaming/arena shape is real from the start, then widened.
 
