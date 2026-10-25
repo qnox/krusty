@@ -6710,14 +6710,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_package_private_member_type_cannot_leave_its_package_through_a_subclass`, and siblings.
 
 - **Line breaks inside parentheses and brackets do not end an expression.** kotlinc's parser
-  disables newlines inside `(…)` and `[…]` (call arguments, indices, collection literals,
-  parenthesized expressions and conditions, a `when` subject) and re-enables them inside every `{…}`
-  body it opens there (block, lambda, `when` body, object literal). A line-leading `+`, `or`, or other
-  binary operator inside parentheses therefore continues the expression, while a statement in a
-  lambda argument still ends at its line break. Only the `{…}` body re-enables them: the `when`
-  keyword and subject, and an object literal's `object : Base(…)` header, keep the enclosing mode,
-  so `f(when\n(x) { … })` and `f(object : Base\n(1) { … })` parse as one expression. Tests:
-  `parenthesized_line_breaks_e2e`.
+  disables newlines inside `(…)` and `[…]` (every value-argument list, whether of a call, a safe
+  call, a supertype or enum-entry constructor, or a `this`/`super` delegation; annotation arguments;
+  indices, collection literals, parenthesized expressions and conditions, a `when` subject) and
+  re-enables them inside every `{…}` body it opens there (block, lambda, `when` body, object
+  literal). A line-leading `+`, `or`, or other binary operator inside parentheses therefore
+  continues the expression, while a statement in a lambda argument still ends at its line break.
+  Only the `{…}` body re-enables them: the `when` keyword and subject, and an object literal's
+  `object : Base(…)` header, keep the enclosing mode, so `f(when\n(x) { … })` and `f(object :
+  Base\n(1) { … })` parse as one expression. Tests: `parenthesized_line_breaks_e2e`.
 
 - **`$` before a backtick interpolates only a complete escaped identifier.** A backtick, one or more
   characters that are neither a backtick nor a line break, then a closing backtick; any other `$`
