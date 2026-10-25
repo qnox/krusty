@@ -31,6 +31,34 @@ pub(super) struct NestedObjects<'r, 'a> {
 }
 
 impl AnonymousObjects for NestedObjects<'_, '_> {
+    fn same_module(&self) -> bool {
+        self.regeneration.same_module
+    }
+
+    fn regenerate_singleton(
+        &mut self,
+        class: &str,
+        prior_classes: &[(String, String)],
+    ) -> Result<RegeneratedObject, InlineError> {
+        let unsupported =
+            |reason| InlineError::Regeneration(RegenerationError::Unsupported(reason));
+        let bytes = self
+            .regeneration
+            .classes
+            .class_file(class)
+            .ok_or(unsupported(
+                "a nested object whose class file is not on the classpath",
+            ))?;
+        let original = ClassNode::read(&bytes)
+            .map_err(|_| unsupported("a nested object class that does not read"))?;
+        let constructor = super::split_constructor(&original)
+            .map_err(InlineError::Regeneration)?
+            .0
+            .desc
+            .clone();
+        self.regenerate(class, &constructor, &[], prior_classes)
+    }
+
     fn regenerate(
         &mut self,
         class: &str,

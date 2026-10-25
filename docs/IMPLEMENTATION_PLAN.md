@@ -5569,9 +5569,16 @@ regress.
     properties read through their getter in an inline body, and unread delegated-property operands
     passed as `null`: 19 more box files are byte-identical on 2.4.20 (3,832 to 3,851), none
     regresses.
+    ✓ Callee bodies with lambdas (`LambdaInBody`): the classes a callee declares compiled with it
+    (another file's under that file's identity, read but not written), reused at a same-module
+    call unless the call specializes them, `needClassReification` at the instance load instead of
+    the class initializer, objects regenerated in inline functions under their own names, and
+    a reified `when` branch of the join's own class cast again; a copy regenerates the objects its
+    methods name, specializes a suspend lambda and every type argument, and drops its initializer's
+    marker: 6 more box files are byte-identical on 2.4.21 (4,025 to 4,031) and none regresses.
     ☐ `$default` calls, non-public callees of another file, suspend callers and callees,
     `crossinline` parameters, literals with non-local jumps, calls in default arguments, and callee
-    bodies with lambdas, local classes or enum switches.
+    bodies with local classes or enum switches.
 - ☐ 7. Delete `InlineBodyPlan` and its resolver/FIR threading once the coroutine state machine runs
   on inlined bytecode (the plans exist only to reach IR before `lower_suspend`).
 

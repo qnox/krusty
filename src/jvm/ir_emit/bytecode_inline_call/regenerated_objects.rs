@@ -50,16 +50,68 @@ pub(in crate::jvm::ir_emit) struct RegenerationSite<'a> {
     pub function: String,
     /// A constructor or another JVM special method: copies are numbered under `$special`.
     pub special: bool,
+    /// The method is a non-private inline function, whose copies are public ABI too
+    /// (`isInPublicInlineScope`).
+    pub public_inline: bool,
+    /// The class the copies are named after and enclosed by when it is not the emitting class: a
+    /// lambda realized as a class of its own whose body the emitting class implements.
+    pub owner: Option<String>,
     pub symbols: &'a dyn BackendClassifierSource,
+}
+
+/// Whether `function` is a property's getter or setter.
+fn is_property_accessor(ir: &IrFile, function: u32) -> bool {
+    ir.local_property_layouts
+        .values()
+        .any(|layout| match layout {
+            crate::ir::IrLocalPropertyLayout::TopLevelStorage { getter, setter, .. }
+            | crate::ir::IrLocalPropertyLayout::Member { getter, setter, .. } => {
+                *getter == Some(function) || *setter == Some(function)
+            }
+            crate::ir::IrLocalPropertyLayout::TopLevelAccessor { getter, setter, .. }
+            | crate::ir::IrLocalPropertyLayout::MemberExtension { getter, setter, .. } => {
+                *getter == function || *setter == Some(function)
+            }
+        })
+}
+
+/// The JVM descriptor of the method a lambda realized as a class of its own implements: its SAM
+/// method's erased descriptor, or `invoke`'s over `Object`s.
+fn class_realized_method_descriptor(ir: &IrFile, function: u32) -> Option<String> {
+    ir.exprs.iter().find_map(|expression| match expression {
+        IrExpr::Lambda {
+            impl_fn,
+            arity,
+            captures,
+            sam,
+            ..
+        } if *impl_fn == function => match sam {
+            Some(target) => super::super::lambda_class::sam_bootstrap_descriptors(
+                ir,
+                function,
+                target,
+                captures.len(),
+            )
+            .ok()
+            .map(|descriptors| descriptors.erased_method),
+            None => Some(format!(
+                "({})Ljava/lang/Object;",
+                "Ljava/lang/Object;".repeat(*arity as usize)
+            )),
+        },
+        _ => None,
+    })
 }
 
 impl<'a> RegenerationSite<'a> {
     /// The site of the function `function`, emitted as its own method under `descriptor`: a
-    /// declared function, a suspend lambda's `invokeSuspend`, or a lambda's implementation method.
+    /// declared function, a suspend lambda's `invokeSuspend`, a lambda class's `invoke`, or a
+    /// lambda's implementation method.
     /// kotlinc numbers each copy under the emitted method's name and points its `EnclosingMethod`
     /// at that method, except from a lambda's method, where it names the function the lambda is
-    /// written in. This stage regenerates objects nowhere else: not in a `$DefaultImpls` copy
-    /// (`own_method` false), an accessor, or an inline function, whose copies kotlinc names or
+    /// written in. An inline function's copies are its own, as kotlinc's are, and public ABI
+    /// when the function is not private. This stage regenerates objects nowhere else: not in a
+    /// `$DefaultImpls` copy (`own_method` false) or an accessor, whose copies kotlinc names or
     /// writes differently. A constructor is [`Self::constructor`].
     pub(in crate::jvm::ir_emit) fn of_function(
         ir: &IrFile,
@@ -68,21 +120,50 @@ impl<'a> RegenerationSite<'a> {
         descriptor: &str,
         env: &EmitEnv<'a>,
     ) -> Option<RegenerationSite<'a>> {
-        if !own_method || ir.inline_fns.contains(&function) {
+        if !own_method {
             return None;
         }
         let declaration = &ir.functions[function as usize];
         let name = &declaration.name;
-        let declared = ir.fn_decl_lines.contains_key(&function)
-            && ir.fn_source_names.get(&function) == Some(name);
+        // Another file's inline function, compiled here for its callers, is declared there.
+        let declared = (ir.fn_decl_lines.contains_key(&function)
+            && ir.fn_source_names.get(&function) == Some(name))
+            || ir.foreign_inline_templates.contains(&function);
         let suspend_lambda_body = declaration
             .dispatch_receiver
             .and_then(|class| env.emit_time_machines.suspend_lambda(class))
             .is_some_and(|lambda| lambda.invoke_suspend == function);
-        let (method, descriptor) = if declared || suspend_lambda_body {
+        // A `-Xlambdas=class` lambda's body is its class's `invoke`, a method of its own.
+        let class_lambda_body = declaration
+            .dispatch_receiver
+            .and_then(|class| ir.class_id_by_name(class))
+            .and_then(|class| ir.classes.get(class as usize)?.lambda.as_ref())
+            .is_some_and(|lambda| lambda.invoke == function);
+        let facade = env.facade_class.render();
+        let mut owner = None;
+        if is_property_accessor(ir, function) {
+            // An accessor's name is special: kotlinc numbers its copies under `$special`.
+            return Some(Self::special(name, descriptor, env.signature_symbols));
+        }
+        let (method, descriptor) = if declared || suspend_lambda_body || class_lambda_body {
             (name.clone(), descriptor.to_string())
+        } else if ir.local_function_spans.contains_key(&function) {
+            // A local function is its lifted method.
+            (name.clone(), descriptor.to_string())
+        } else if let Some((class, method)) =
+            super::super::lambda_class_names::class_realized_function_location(
+                ir,
+                function,
+                &facade,
+                env.lambda_modes,
+            )
+        {
+            // A lambda realized as a class of its own: kotlinc writes the body in that class's
+            // method, which encloses and names the copies.
+            let descriptor = class_realized_method_descriptor(ir, function)?;
+            owner = Some(class);
+            (method, descriptor)
         } else if ir.lambda_origins.contains_key(&function) {
-            let facade = env.facade_class.render();
             let (_, method) = super::super::enclosure::lambda_body_enclosure(
                 ir,
                 env.override_results,
@@ -95,11 +176,20 @@ impl<'a> RegenerationSite<'a> {
         } else {
             return None;
         };
+        // Copies of a class-realized lambda's body are named after the method it implements.
+        let numbered_under = if owner.is_some() {
+            method.clone()
+        } else {
+            name.clone()
+        };
         Some(RegenerationSite {
             method,
             descriptor,
-            function: name.clone(),
+            function: numbered_under,
             special: false,
+            public_inline: ir.inline_fns.contains(&function)
+                && !ir.method_visibility(function).is_private(),
+            owner,
             symbols: env.signature_symbols,
         })
     }
@@ -126,6 +216,8 @@ impl<'a> RegenerationSite<'a> {
             descriptor: descriptor.to_string(),
             function: String::new(),
             special: true,
+            public_inline: false,
+            owner: None,
             symbols,
         }
     }
@@ -151,6 +243,15 @@ impl RegeneratedObjectNames {
     /// Forget every name handed out: a discarded emit pass must not number the next one's copies.
     pub(in crate::jvm::ir_emit) fn clear(&self) {
         self.0.borrow_mut().clear();
+    }
+
+    /// The names handed out so far, to hand out again after a compilation that is not written.
+    pub(super) fn snapshot(&self) -> HashMap<String, ClassNameGenerators> {
+        self.0.borrow().clone()
+    }
+
+    pub(super) fn restore(&self, names: HashMap<String, ClassNameGenerators>) {
+        *self.0.borrow_mut() = names;
     }
 }
 
@@ -178,6 +279,8 @@ pub(super) struct CallObjects<'a> {
     source_file: Option<String>,
     /// The call's line, zero-based as kotlinc's IR reports it to a copy's state machine.
     call_line: Option<u16>,
+    /// The callee is a same-module function inlined from the body this pass compiled for it.
+    same_module: bool,
 }
 
 impl<'a> Emitter<'a> {
@@ -211,6 +314,7 @@ impl<'a> Emitter<'a> {
             caller_lines,
             value_classes: self.cw.value_classes(),
             reified,
+            same_module: self.ir.compiled_inline_call(call_expression).is_some(),
             source_file: self.cw.source_file_name(),
             call_line: self
                 .ir
@@ -241,6 +345,10 @@ impl CallObjects<'_> {
 }
 
 impl AnonymousObjects for CallObjects<'_> {
+    fn same_module(&self) -> bool {
+        self.same_module
+    }
+
     fn regenerate(
         &mut self,
         class: &str,
@@ -254,6 +362,9 @@ impl AnonymousObjects for CallObjects<'_> {
             .site
             .as_ref()
             .ok_or(unsupported("an object inlined outside a named function"))?;
+        // The class the copies are named after: the emitting class, or the class a lambda body it
+        // implements is realized as.
+        let owner = site.owner.clone().unwrap_or_else(|| self.owner.clone());
         let type_arguments = self
             .type_arguments(site)
             .ok_or(unsupported("a type argument without a generic signature"))?;
@@ -263,7 +374,7 @@ impl AnonymousObjects for CallObjects<'_> {
         let original = ClassNode::read(&bytes)
             .map_err(|_| unsupported("an object class that does not read"))?;
         let mut names = self.run.regenerated_object_names.0.borrow_mut();
-        let generators = names.entry(self.owner.clone()).or_default();
+        let generators = names.entry(owner.clone()).or_default();
         let mut scratch;
         let generators = if self.commit {
             generators
@@ -273,7 +384,7 @@ impl AnonymousObjects for CallObjects<'_> {
         };
         // A SAM wrapper is copied, not regenerated: kotlinc replays it under the calling class's
         // name once and shares the copy among that class's inline calls.
-        let wrapper = sam_wrapper_copy_name(self.bodies, generators, &self.owner, class)
+        let wrapper = sam_wrapper_copy_name(self.bodies, generators, &owner, class)
             .map_err(InlineError::Regeneration)?;
         if let Some((new_class, first)) = wrapper {
             let bytes = copy_sam_wrapper(&original, &new_class, self.major)
@@ -292,7 +403,7 @@ impl AnonymousObjects for CallObjects<'_> {
         }
         let kotlin_name = (!site.special).then_some(site.function.as_str());
         let object_names = generators
-            .for_function(&self.owner, kotlin_name)
+            .for_function(&owner, kotlin_name)
             .for_inlined_method(&self.callee)
             .next_object();
         let new_class = object_names.class().to_string();
@@ -302,10 +413,10 @@ impl AnonymousObjects for CallObjects<'_> {
                 new_class: &new_class,
                 constructor_desc,
                 call_site: CallSite {
-                    owner: &self.owner,
+                    owner: &owner,
                     method: &site.method,
                     descriptor: &site.descriptor,
-                    public_inline_scope: false,
+                    public_inline_scope: site.public_inline,
                     source: CallSiteSource {
                         file: self.source_file.as_deref().unwrap_or_default(),
                         line: self.call_line,
@@ -322,6 +433,7 @@ impl AnonymousObjects for CallObjects<'_> {
                 value_classes: &self.value_classes,
                 reified: &self.reified,
                 continuation: None,
+                same_module: self.same_module,
             },
             object_names,
         )
@@ -329,7 +441,7 @@ impl AnonymousObjects for CallObjects<'_> {
         let mut shared_wrappers = Vec::new();
         for wrapper in regenerated.sam_wrappers {
             let (name, first) = generators
-                .sam_wrapper(&self.owner, &wrapper.original)
+                .sam_wrapper(&owner, &wrapper.original)
                 .ok_or(unsupported("a SAM wrapper without its ABI name segment"))?;
             debug_assert_eq!(name, wrapper.name, "one name for the calling class's copy");
             if first {
