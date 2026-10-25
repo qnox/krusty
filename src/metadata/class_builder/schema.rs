@@ -216,22 +216,15 @@ fn build_ctor(
 ) -> Pb {
     let mut ctor = Pb::new();
     // `HAS_ANNOTATIONS` (bit 0) follows from the declaration's annotations, exactly like a
-    // function's — whether or not the records below are written. Setting
-    // it
-    // forces the flags field to be WRITTEN, so the proto default the caller was relying on has to be
-    // materialized first: a public primary constructor carries 0 here precisely because 6 (visibility
-    // PUBLIC) is the default and the field is omitted at that value — OR-ing bit 0 onto the 0 would
-    // write 1 (visibility INTERNAL) where kotlinc writes 7.
-    let flags = if !shape.annotations.declares_annotations() {
-        shape.flags
+    // function's — whether or not the records below are written. The field is written whenever the
+    // flags differ from the proto default 6 (a public constructor): an internal constructor's
+    // visibility bits are 0, so kotlinc writes an explicit 0, or 1 with annotations.
+    let flags = if shape.annotations.declares_annotations() {
+        shape.flags | HAS_ANNOTATIONS
     } else {
-        (if shape.flags == 0 {
-            PUBLIC_CTOR_FLAGS
-        } else {
-            shape.flags
-        }) | HAS_ANNOTATIONS
+        shape.flags
     };
-    if flags != 0 {
+    if flags != PUBLIC_CTOR_FLAGS {
         ctor.field_varint(1, flags); // Constructor.flags = 1
     }
     for (i, (pname, pty)) in shape.params.iter().enumerate() {
@@ -512,7 +505,7 @@ pub(crate) fn class_message(
     // indices too.
     let mut requirements = VersionRequirementTable::default();
 
-    // f8 = constructors: the primary (flags 0), then any secondary constructors — each interning in
+    // f8 = constructors: the primary, then any secondary constructors — each interning in
     // order (kotlinc emits the ctor JVM name `<init>` explicitly, not omitted).
     let ctor_param_tparams = tail
         .ctor_param_tparams
