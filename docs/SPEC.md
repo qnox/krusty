@@ -16532,9 +16532,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A constant a Java annotation declares is a `JAVA_LIB` `final public` property with the
   `JAVA_STATIC` modifier and neither getter nor setter, listed after the constructor and before
   the nested classifiers and left out of `getAllProperties`; a reference array is
-  `Array<out E>`, a mapped class its Kotlin classifier. The members of other classifiers, of an
-  annotation class whose members carry annotations, and of one declaring a generic, raw generic
-  or collection-typed constant are refused for those queries. (`crates/krusty-plugin-host/tests/ksp.rs`,
+  `Array<out E>`, a mapped class its Kotlin classifier. What a Java annotation element's method
+  states, visible then invisible annotations, is on the property's getter with origin `JAVA`; a
+  written argument is `JAVA` and a default `SYNTHETIC`, and a written argument of an annotation
+  a library class states takes the class's origin. The members of other classifiers, of a Kotlin
+  annotation class whose members carry annotations, of a Java one whose element states a
+  nullability qualifier or an annotation Kotlin maps (`Deprecated`, the meta-annotations), and of
+  one declaring a generic, raw generic or collection-typed constant are refused for those
+  queries. (`crates/krusty-plugin-host/tests/ksp.rs`,
   `library_annotation_members_are_what_ksp2_reports`.)
 - **KSP maps names between Kotlin and the JVM by kotlinc's class map.** `mapKotlinNameToJava` and
   `mapJavaNameToKotlin` answer what kotlinc's `JavaToKotlinClassMap` does for the classifier the
