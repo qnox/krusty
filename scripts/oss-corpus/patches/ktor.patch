@@ -24,3 +24,38 @@ index 1d5384b..9413a68 100644
 -        else -> error("Unexpected type: ${this::class.qualifiedName}")
 -    }
 +// ABI validation is left out: Kotlin 2.4 removed the `enabled` property this convention set.
+diff --git a/build-logic/src/main/kotlin/ktorbuild/internal/Accessors.kt b/build-logic/src/main/kotlin/ktorbuild/internal/Accessors.kt
+index 7b4ec94..e74d76b 100644
+--- a/build-logic/src/main/kotlin/ktorbuild/internal/Accessors.kt
++++ b/build-logic/src/main/kotlin/ktorbuild/internal/Accessors.kt
+@@ -12,7 +12,6 @@ import org.gradle.api.plugins.JavaPluginExtension
+ import org.gradle.kotlin.dsl.getByType
+ import org.jetbrains.kotlin.gradle.dsl.KotlinMultiplatformExtension
+ import org.jetbrains.kotlin.gradle.dsl.KotlinProjectExtension
+-import org.jetbrains.kotlin.gradle.dsl.abi.AbiValidationVariantSpec
+ 
+ /*
+  * Gradle doesn't generate accessors for plugins defined in this module,
+@@ -28,9 +27,6 @@ internal val Project.kotlin: KotlinMultiplatformExtension get() = extensions.get
+ internal fun Project.kotlin(configure: KotlinMultiplatformExtension.() -> Unit) =
+     extensions.configure("kotlin", configure)
+ 
+-internal fun KotlinProjectExtension.abiValidation(configure: AbiValidationVariantSpec.() -> Unit) =
+-    extensions.configure("abiValidation", configure)
+-
+ internal fun KotlinMultiplatformExtension.android(action: KotlinMultiplatformAndroidLibraryTarget.() -> Unit) {
+     (this as ExtensionAware).extensions.configure("android", action)
+ }
+diff --git a/build-logic/src/main/kotlin/ktorbuild/internal/TrackedKotlinHierarchy.kt b/build-logic/src/main/kotlin/ktorbuild/internal/TrackedKotlinHierarchy.kt
+index 73bb785..21f6040 100644
+--- a/build-logic/src/main/kotlin/ktorbuild/internal/TrackedKotlinHierarchy.kt
++++ b/build-logic/src/main/kotlin/ktorbuild/internal/TrackedKotlinHierarchy.kt
+@@ -115,8 +115,6 @@ private class KotlinHierarchyTrackerImpl(
+     override fun withJs() = addTarget("js")
+     override fun withJvm() = addTarget("jvm")
+ 
+-    @Deprecated("Renamed to 'withWasmJs'", replaceWith = ReplaceWith("withWasmJs()"))
+-    override fun withWasm() = withWasmJs()
+     override fun withWasmJs() = addTarget("wasmJs")
+     override fun withWasmWasi() = addTarget("wasmWasi")
+     override fun withAndroidTarget() = addTarget("android")
