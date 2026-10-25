@@ -1,0 +1,11 @@
+diff --git a/gradle.properties b/gradle.properties
+index ac6c0db..8ae9b1a 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -24,3 +24,6 @@ org.gradle.jvmargs=-Dfile.encoding=UTF-8
+ # AGP 9.0 Settings
+ android.builtInKotlin=true
+ android.newDsl=true
++
++# Kotlin 2.4 infers kotlin-test-junit5 beside the declared kotlin-test-junit; keep the declared one.
++kotlin.test.infer.jvm.variant=false

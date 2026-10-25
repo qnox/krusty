@@ -1,9 +1,16 @@
 // Applies the krusty Gradle plugin to every Kotlin/JVM, Android and Kotlin Multiplatform project of
 // the build, from the local Maven repository the corpus workflow unpacked.
+// Only the main build: buildSrc and included builds are the project's build logic, and their
+// settings may declare exclusive repository content that forbids the buildscript repository below.
+if (gradle.parent != null) return
 def repo = new File(System.getenv('KRUSTY_PLUGIN_REPOSITORY')).toURI()
 def version = System.getenv('KRUSTY_PLUGIN_VERSION')
 settingsEvaluated { s ->
-    s.pluginManagement.repositories { maven { url = repo } }
+    s.pluginManagement.repositories {
+        // Declaring a repository replaces the implicit Gradle Plugin Portal; keep it.
+        if (isEmpty()) gradlePluginPortal()
+        maven { url = repo }
+    }
 }
 gradle.rootProject { p ->
     p.buildscript.repositories { maven { url = repo } }

@@ -36,12 +36,21 @@ cover the comparison, the output inventory, the pin rewrite, the setup failures,
 results branch.
 
 `run.sh` rewrites each project's Kotlin version pin to the newest release in `kotlin-versions`.
-Two projects carry a patch for that bump:
+These projects carry a patch for that bump:
 
 - `Maestro`: `JvmTarget` moved to `org.jetbrains.kotlin.gradle.dsl`, and the Android app module is
   left out of the build.
 - `moshi`: kotlinc 2.4 warns that `-Xannotation-default-target=param-property` is redundant, and
   the build treats warnings as errors.
+- `kotlinx.coroutines` and `ktor`: Kotlin 2.4 removed the ABI validation `enabled` property their
+  build logic sets, so ABI validation is left out.
+- `okhttp`: Kotlin 2.4 infers `kotlin-test-junit5` beside the declared `kotlin-test-junit`; the
+  inference is turned off.
+- `okio`: the Burst compiler plugin moves to a release built for Kotlin 2.4.
+
+Only the main build is measured: buildSrc and included builds are build logic, and the init scripts
+leave them alone. Gradle runs without the configuration cache and isolated projects, since the init
+scripts read every project of the build.
 
 Run one project locally with:
 

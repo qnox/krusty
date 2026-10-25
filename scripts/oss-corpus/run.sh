@@ -62,8 +62,9 @@ if [ "${android_variant:--}" != - ]; then
 fi
 
 # One build of the Gradle root, then its compile outputs moved to out/<mode>: the directories the
-# build's own compile-task inventory lists, so the next build starts without them. The Gradle exit
-# status is left in `status`; a broken inventory or snapshot fails the run.
+# build's own compile-task inventory lists, so the next build starts without them. The init scripts
+# read every project of the build, so the configuration cache and isolated projects are off. The
+# Gradle exit status is left in `status`; a broken inventory or snapshot fails the run.
 build() {
   local mode=$1
   shift
@@ -75,7 +76,8 @@ build() {
   (
     cd "$root"
     CORPUS_COMPILATIONS=$manifest timeout 5400 ./gradlew --no-daemon -I "$here/corpus.init.gradle" \
-      "$@" corpusCompile --continue --rerun-tasks --no-configure-on-demand
+      "$@" corpusCompile --continue --rerun-tasks --no-configure-on-demand \
+      --no-configuration-cache -Dorg.gradle.isolated-projects=false
   ) >"$logs/$name.$mode.log" 2>&1 || code=$?
   echo "$name $mode exit $code seconds $(($(date +%s) - start))" >>"$logs/STATUS"
   if [ -f "$manifest" ]; then

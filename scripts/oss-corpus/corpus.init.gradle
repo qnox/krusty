@@ -2,7 +2,9 @@
 // `$CORPUS_COMPILATIONS` when it is set. Tasks are picked by name before they are realized:
 // realizing every registered task would configure unrelated ones (a GraalVM native-image task
 // fails without its JDK). An Android project contributes only the compiles of the variant named by
-// `$CORPUS_ANDROID_VARIANT` (main, unit test and instrumented test); without it, none.
+// `$CORPUS_ANDROID_VARIANT` (main, unit test and instrumented test); without it, none. Only the main
+// build counts: buildSrc and included builds are the project's build logic.
+if (gradle.parent != null) return
 gradle.projectsEvaluated { g ->
     def root = g.rootProject
     def picked = []

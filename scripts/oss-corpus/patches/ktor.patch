@@ -1,0 +1,26 @@
+diff --git a/build-logic/src/main/kotlin/ktorbuild.compatibility.gradle.kts b/build-logic/src/main/kotlin/ktorbuild.compatibility.gradle.kts
+index 1d5384b..9413a68 100644
+--- a/build-logic/src/main/kotlin/ktorbuild.compatibility.gradle.kts
++++ b/build-logic/src/main/kotlin/ktorbuild.compatibility.gradle.kts
+@@ -1,20 +1,4 @@
+ /*
+  * Copyright 2014-2025 JetBrains s.r.o and contributors. Use of this source code is governed by the Apache 2.0 license.
+  */
+-@file:OptIn(ExperimentalAbiValidation::class)
+-
+-import ktorbuild.internal.abiValidation
+-import org.jetbrains.kotlin.gradle.dsl.abi.*
+-import org.jetbrains.kotlin.gradle.dsl.kotlinExtension
+-
+-kotlinExtension.abiValidation {
+-    enabled = true
+-}
+-
+-// The property 'enabled' is not a part of the AbiValidationVariantSpec, so we need this bridge-method to unify enabling
+-private val AbiValidationVariantSpec.enabled: Property<Boolean>
+-    get() = when (this) {
+-        is AbiValidationMultiplatformExtension -> this.enabled
+-        is AbiValidationExtension -> this.enabled
+-        else -> error("Unexpected type: ${this::class.qualifiedName}")
+-    }
++// ABI validation is left out: Kotlin 2.4 removed the `enabled` property this convention set.
