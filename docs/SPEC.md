@@ -5780,12 +5780,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   used at its erased `Object` type is not cast: `StackValue.coerce` between equal types writes
   nothing, so the inlined lambda's exact result type reaches the caller and the trailing narrowing
   `checkcast` folds away. A bound reference whose value-class receiver is boxed until `!!` captures
-  the unboxed value (`unbox-impl`), as the reference's adapter takes it. A literal that jumps
-  non-locally keeps the call expanded in IR (the backend places such literals only on its byte
-  splice). Tests: `tests/inline_same_module_bytes_e2e.rs` (literal lambdas in same-file and
-  cross-file calls, function values from locals and callable references, an unread literal against
-  kotlinc's bytes; a callee with a `try` beside stacked operands, non-local jumps and a bound
-  value-class reference run).
+  the unboxed value (`unbox-impl`), as the reference's adapter takes it. A literal that leaves its
+  body non-locally (a `return` of the caller, a `break` or `continue` of a loop around the call) is
+  inlined from the compiled body as well: its node ends each such jump with a marked return that the
+  inliner turns into the caller's own jump (`jvm::ir_emit::non_local_jumps`), as kotlinc's
+  `visitBreakContinue` and non-local returns do. Tests: `tests/inline_same_module_bytes_e2e.rs`
+  (literal lambdas in same-file and cross-file calls, function values from locals and callable
+  references, an unread literal against kotlinc's bytes; a callee with a `try` beside stacked
+  operands, non-local jumps and a bound value-class reference run);
+  `tests/inline_same_module_non_local_jumps_e2e.rs` (a `break` with and without a value, a non-local
+  return from a function and from a secondary constructor against kotlinc's bytes and run; a
+  `continue` the loop body runs on after runs, its bytes differing from kotlinc's by the threaded
+  conditional exit the MethodInliner port writes against a library's body too).
 
 - **An inline call's body is placed as kotlinc's `MethodInliner` places it.** Four rules hold for
   every inline callee, compiled in this module or read from a dependency. A `noinline` literal of a
@@ -9646,6 +9652,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   deep and each asking the reference compiler the same question, and
   `member_and_extension_tailrec_agree_with_kotlinc` — a `StackOverflowError` on one side and an
   answer on the other is the divergence they report).
+
+  **A self-call returned non-locally from an inline lambda is a tail call.** An inline call keeps
+  its literal lambda as the lambda's prepared template (`IrExpr::Lambda::inline_body`), which
+  `inline_returns::prepare_inline_template` gave a depth-zero `return` for each return of the
+  function written in it. kotlinc's `TailRecursionCallsCollector` visits those returns as tail
+  positions, so `act { return test(n + 1) }` in a `tailrec fun test` loops. The sweep enters the
+  template in the lambda's own frame (`Frame::of_inline_body`): the template numbers its values
+  from the lambda's frame, captures first, so a parameter or `this` of the function is the capture
+  that reads it, and the step writes that capture (which the inliner binds to the caller's own
+  slot) and takes its temporaries above the lambda's slots, then leaves the lambda for the loop by a
+  non-local `continue`. A self-call whose lambda does not capture every parameter the step writes,
+  or that leaves a parameter to its default (which reads the function's frame), stays a call. The
+  bytes differ from kotlinc's, which shares the receiver through a `Ref` its inliner then unwraps.
+  Tests: `tests/inline_same_module_non_local_jumps_e2e.rs`
+  (`a_tailrec_self_call_returned_from_an_inline_lambda_loops`: a member, a two-parameter function
+  and a call in nested lambdas, each a million deep); `src/fir_lower/tailrec/tests.rs`.
 
   **An assertion or coercion wrapped around the call does not consume the tail position.** A
   platform-narrowing not-null assertion — the checker's answer when a sibling branch of the same

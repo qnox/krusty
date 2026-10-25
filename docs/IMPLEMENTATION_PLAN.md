@@ -5576,9 +5576,16 @@ regress.
     a reified `when` branch of the join's own class cast again; a copy regenerates the objects its
     methods name, specializes a suspend lambda and every type argument, and drops its initializer's
     marker: 6 more box files are byte-identical on 2.4.21 (4,025 to 4,031) and none regresses.
+    ✓ Literals with non-local jumps (`NonLocalJumpInLambda`): a lambda that returns from its caller
+    or breaks or continues a loop around the call is inlined from the compiled body through the
+    MethodInliner port's marked returns, and a `tailrec` self-call returned from such a lambda
+    still loops (the sweep enters the lambda's template in the lambda's frame): 5 more box files
+    are byte-identical on 2.4.21 (the four `inlinedBreakContinue` shapes and
+    `secondaryConstructors/withNonLocalReturn`), none regresses, and all 7,184 applicable files
+    run.
     ☐ `$default` calls, non-public callees of another file, suspend callers and callees,
-    `crossinline` parameters, literals with non-local jumps, calls in default arguments, and callee
-    bodies with local classes or enum switches.
+    `crossinline` parameters, calls in default arguments, and callee bodies with local classes or
+    enum switches.
 - ☐ 7. Delete `InlineBodyPlan` and its resolver/FIR threading once the coroutine state machine runs
   on inlined bytecode (the plans exist only to reach IR before `lower_suspend`).
 
