@@ -5816,9 +5816,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the body compiled for a call; its argument is kotlinc's `ReificationArgument.asString`: a `[` per
   nested array level, the parameter's source name, and `?` for a marked-nullable element
   (`ReifiedMarkers::arrays`). The inliner makes `[T` the array class of the call-site class.
-  A non-public callee is inlined from its compiled body when it is declared in the caller's own
-  file (its body is compiled into the same class); one declared in another file stays expanded
-  (`NonPublicCallee`), since its body may reach that file's private declarations. A local
+  A non-public callee is inlined from its compiled body wherever it is declared, as kotlinc's
+  `IrSourceCompilerForInline` compiles every same-module callee with its own file: the body of a
+  non-private inline function reaches its file's private functions through the `access$` accessors
+  its own class publishes, so the copy runs in any class of the module. Another file's internal
+  member template takes its declaring class's module-mangled JVM name (`foo$main`), which names the
+  body's `$i$f$` frame marker as kotlinc's does. A local
   delegated property read in a compiled callee calls the accessor its declaring class exports
   (`access$<function>$lambda-N`), as kotlinc's compiled body does: the template of a call inlined
   from its compiled body counts as emitted code when local-delegate accesses are realized, even
@@ -5831,7 +5834,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   arrays including `[T` and `T?`, and a private same-file callee against kotlinc's bytes; a jagged
   reified-array callee runs), `tests/reified_local_delegate_e2e.rs` (a reified callee with a local
   delegate, across files and in an object), and
-  `source_map::tests::the_copier_reads_lines_the_optimizer_dropped`.
+  `source_map::tests::the_copier_reads_lines_the_optimizer_dropped`,
+  `tests/inline_same_module_internal_bodies_e2e.rs` (internal generic, accessor-calling and member
+  callees of another file against kotlinc's bytes, and run).
 
 - **A same-module inline body that declares a lambda is inlined from its compiled body.** kotlinc
   compiles the callee through its file's class codegen, so the classes of the lambdas (and callable
