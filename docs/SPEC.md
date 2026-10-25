@@ -1,5 +1,24 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Classifier declaration-name ownership
+
+A non-local classifier retains its exact declaration segment and either its package or its
+declaring classifier. A literal `$` belongs to that segment. This declaration evidence is
+independent of an enclosing-instance capture, and belongs to the compilation snapshot rather than
+the global interned-name tree. A missing fact remains unknown; a known top-level declaration is
+positive evidence that there is no declaring classifier.
+
+Source headers, Kotlin metadata class IDs and structural classfile self entries normalize this
+fact at their declaration boundary. It survives signature publication, module symbols, common IR
+construction and frozen backend facts. Tests in `src/backend/module_facts.rs` cover repeated
+snapshots and capture independence; provider tests cover literal-dollar and actual nested names.
+This handoff does not yet change JVM name or metadata emission.
+
+Kotlin metadata remains authoritative when its annotation is present, including an empty or
+synthetic payload. Missing declaration ownership does not authorize a classfile-name guess. Local
+visibility and metadata local-name indices both exclude non-local ownership; a public member of a
+local class still carries a local class ID.
+
 ## JVM generic result consumption
 
 A checked generic call's declaration-result coercion can retain its recorded reference slot until

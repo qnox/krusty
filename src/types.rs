@@ -10,9 +10,10 @@ mod overridden_declaration;
 mod semantic_call_role;
 mod semantic_callable_owner;
 pub use classifier_declarations::{
-    ClassifierDeclarationFacts, ClassifierDeclarationKind, DeclaredValueClass,
-    GeneratedClassifierFact, GeneratedClassifierKind, GeneratedClassifierPurpose,
-    SerializableClassElements, SerializableElement, SerializationGeneratedMemberStatuses,
+    ClassifierDeclarationFacts, ClassifierDeclarationKind, ClassifierDeclarationName,
+    DeclaredValueClass, GeneratedClassifierFact, GeneratedClassifierKind,
+    GeneratedClassifierPurpose, SerializableClassElements, SerializableElement,
+    SerializationGeneratedMemberStatuses,
 };
 pub use deprecation::{
     DeclaredDeprecation, DeprecatedDeclaration, DeprecatedSinceKotlin, Deprecation,
