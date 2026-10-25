@@ -1786,6 +1786,8 @@ mod value_class_nullable_function_result_e2e;
 mod value_class_object_carrier_generic_result_e2e;
 #[path = "value_class_parameters_e2e.rs"]
 mod value_class_parameters_e2e;
+#[path = "value_class_private_constructor_access_e2e.rs"]
+mod value_class_private_constructor_access_e2e;
 #[path = "value_class_private_member_access_e2e.rs"]
 mod value_class_private_member_access_e2e;
 #[path = "value_class_return_mangling_e2e.rs"]

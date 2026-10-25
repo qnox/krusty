@@ -13083,6 +13083,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   in a class taking `Nothing?` is `foo(Ljava/lang/Void;)V`, so the class declares a bridge named
   like the supertype's member that casts the argument and calls the override. Tests:
   `tests/value_class_bounded_parameter_bridge_e2e.rs`. Corpus: `inlineClasses/kt51254`.
+- **A private value-class constructor is reached through `access$constructor-impl`.** A value
+  class's constructor is realized as the static `constructor-impl` over its carrier, which is
+  `private` when the declared primary or secondary constructor is (its `constructor-impl$default`
+  is then package-private). The companion, a nested class, an anonymous object, and a lambda in
+  the companion are other JVM classes: each calls the box's `public static final synthetic
+  access$constructor-impl`, which forwards to the private static, while the class's own members
+  call it directly. The call is recorded against the selected constructor's own `constructor-impl`,
+  so the accessor is the one any private static member gets, and the record follows the call
+  below a `box-impl` placed around it. krusty emitted every `constructor-impl` public and called
+  it directly from each scope. Tests: `tests/value_class_private_constructor_access_e2e.rs`.
+  Corpus: `inlineClasses/contextsAndAccessors/accessPrivateInlineClassConstructorFromCompanion`,
+  `…FromLambda`, `inlineClasses/secondaryConstructorVisibilies`.
 - **A bridge passes a supertype's own value-class parameter as its carrier.** `Store<T>.put(id:
   Id, value: T)` mangles by its own `Id` parameter and is `put-<hash>(ILjava/lang/Object;)` on the
   interface. A value class implementing `Store<Id>` declares the bridge on its box under that
