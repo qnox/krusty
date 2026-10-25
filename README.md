@@ -13,12 +13,14 @@ on master); `projects/` holds each project's latest result and `history.tsv` eve
 | ktor | 14,554 | 259,031 | 85 | failed (exit 1) | 0 / 0 | 0 / 0 | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
 | leakcanary | 30,003 | 100,627 | 172 | ok | 6 / 34 | 22 / 1,798 (1.2%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
 | Maestro | 16,207 | 65,644 | 0 | ok | 1 / 19 | 26 / 2,156 (1.2%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
+| mirai | 14,792 | 156,072 | 559 | ok | 0 / 51 | 0 / 2,536 (0.0%) | [2026-10-25, krusty cf34959](https://github.com/qnox/krusty/actions/runs/40199492852) |
 | moshi | 10,166 | 16,749 | 13,212 | ok | 0 / 12 | 0 / 512 (0.0%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
-| okhttp | 47,095 | 126,665 | 3,816 | failed (exit 1) | 0 / 0 | 0 / 0 | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
-| okio | 9,052 | 46,812 | 2,398 | failed (exit 1) | 0 / 0 | 0 / 0 | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
+| nowinandroid | 21,966 | 26,596 | 0 | ok | 24 / 58 | 221 / 1,110 (19.9%) | [2026-10-25, krusty cf34959](https://github.com/qnox/krusty/actions/runs/40199492852) |
+| okhttp | 47,095 | 126,665 | 3,816 | failed (exit 1) | 2 / 2 | 7 / 14 (50.0%) | [2026-10-25, krusty cf34959](https://github.com/qnox/krusty/actions/runs/40199492852) |
+| okio | 9,052 | 46,812 | 2,398 | failed (exit 1) | 0 / 6 | 0 / 343 (0.0%) | [2026-10-25, krusty cf34959](https://github.com/qnox/krusty/actions/runs/40199492852) |
 | quarkdown | 16,323 | 87,771 | 23 | ok | 0 / 37 | 0 / 2,345 (0.0%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
 | Unciv | 11,486 | 139,231 | 1,184 | ok | 0 / 4 | 0 / 3,341 (0.0%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
-| **Measured total** | | | | | **11 / 168** | **124 / 21,957 (0.6%)** | |
+| **Measured total** | | | | | **35 / 277** | **345 / 25,603 (1.3%)** | |
 
 ## Missed compilations
 
@@ -41,9 +43,24 @@ on master); `projects/` holds each project's latest result and `history.tsv` eve
   - 1 × maestro-ios-driver/src/main/kotlin/util/LocalSimulatorUtils.kt:239:50: error: unresolved reference 'Path'.
   - 1 × maestro-utils/src/test/kotlin/MaestroTimerTest.kt:19:9: error: unresolved reference 'assertEquals'.
   - 1 × maestro-web/src/main/kotlin/maestro/web/cdp/CdpClient.kt:1:1: error: krusty: JVM backend inline error: call arity mismatch
+- **mirai**
+  - 51 × krusty wrote no class
 - **moshi**
   - 11 × krusty wrote no class
   - 1 × moshi/src/main/java/com/squareup/moshi/-JsonValueReader.kt:348:31: error: return type mismatch: expected 'Void?', actual 'Nothing?'.
+- **nowinandroid**
+  - 21 × left to kotlinc: krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error — remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error — remove the plugin or compile this module with kotlinc.)
+  - 9 × left to kotlinc: krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'; krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error — remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error — remove the plugin or compile this module with kotlinc.)
+  - 1 × core/data/src/test/kotlin/com/google/samples/apps/nowinandroid/core/data/repository/OfflineFirstNewsRepositoryTest.kt:323:18: error: overload resolution ambiguity
+  - 1 × left to kotlinc: krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers')
+  - 1 × core/datastore/src/test/kotlin/com/google/samples/apps/nowinandroid/core/datastore/IntToStringIdsMigrationTest.kt:1:1: error: internal error: module signatures were not finalized and no source diagnostic explains it
+  - 1 × left to kotlinc: krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'; krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies')
+- **okio**
+  - 2 × left to kotlinc: krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/app.cash.burst/burst-kotlin-plugin/2.14.0/18ea5fbb5fc62dbafd0552da69c94e5d1059e59e/burst-kotlin-plugin-2.14.0.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error — remove the plugin or compile this module with kotlinc.)
+  - 1 × okio-fakefilesystem/src/commonMain/kotlin/okio/fakefilesystem/FileMetadataCommon.kt:16:7: error: @file:JvmMultifileClass is not supported for JVM compilation yet; its part classes and delegating facade require distinct physical owners
+  - 1 × okio/jvm/jmh/src/jmh/java/com/squareup/okio/benchmarks/BenchmarkUtils.kt:31:12: error: unresolved reference 'commonToUtf8String'.
+  - 1 × krusty: error: -Xjdk-release=8 compiles against the JDK 8 API from ct.sym, which krusty does not implement; the selected JDK is 21
+  - 1 × krusty wrote no class
 - **quarkdown**
   - 37 × krusty wrote no class
 - **Unciv**
@@ -53,52 +70,52 @@ on master); `projects/` holds each project's latest result and `history.tsv` eve
 
 | Plugin | Projects | Modules |
 | --- | ---: | ---: |
-| `org.gradle.build-init` | 11 | 212 |
-| `org.gradle.help-tasks` | 11 | 212 |
-| `org.gradle.software-reporting-tasks` | 11 | 212 |
-| `org.gradle.wrapper` | 11 | 212 |
-| `org.gradle.lifecycle-base` | 11 | 201 |
-| `org.gradle.kotlin.kotlin-dsl-project` | 11 | 195 |
-| `org.gradle.base` | 11 | 194 |
-| `org.gradle.reporting-base` | 11 | 193 |
-| `org.gradle.jvm-ecosystem` | 11 | 189 |
-| `org.gradle.java-base` | 11 | 185 |
-| `org.gradle.jvm-toolchains` | 11 | 185 |
-| `org.jetbrains.kotlin.gradle.scripting.internal.ScriptingKotlinGradleSubplugin` | 11 | 144 |
-| `org.jetbrains.kotlin.plugin.scripting` | 11 | 144 |
-| `org.gradle.java` | 11 | 118 |
-| `org.gradle.jvm-test-suite` | 11 | 118 |
-| `org.gradle.test-suite-base` | 11 | 118 |
-| `org.jetbrains.kotlin.jvm` | 11 | 114 |
-| `org.jetbrains.kotlin.gradle.plugin.BuildMetricsPlugin` | 9 | 139 |
+| `org.jetbrains.kotlin.gradle.scripting.internal.ScriptingKotlinGradleSubplugin` | 13 | 197 |
+| `org.jetbrains.kotlin.plugin.scripting` | 13 | 197 |
+| `org.jetbrains.kotlin.jvm` | 13 | 163 |
+| `org.gradle.build-init` | 12 | 257 |
+| `org.gradle.help-tasks` | 12 | 257 |
+| `org.gradle.software-reporting-tasks` | 12 | 257 |
+| `org.gradle.wrapper` | 12 | 257 |
+| `org.gradle.lifecycle-base` | 12 | 237 |
+| `org.gradle.kotlin.kotlin-dsl-project` | 12 | 231 |
+| `org.gradle.base` | 12 | 230 |
+| `org.gradle.reporting-base` | 12 | 228 |
+| `org.gradle.jvm-ecosystem` | 12 | 224 |
+| `org.gradle.java-base` | 12 | 220 |
+| `org.gradle.jvm-toolchains` | 12 | 220 |
+| `org.gradle.java` | 12 | 122 |
+| `org.gradle.jvm-test-suite` | 12 | 122 |
+| `org.gradle.test-suite-base` | 12 | 122 |
+| `org.jetbrains.kotlin.gradle.plugin.BuildMetricsPlugin` | 10 | 174 |
+| `org.jetbrains.kotlin.plugin.serialization` | 8 | 70 |
 | `org.gradle.maven-publish` | 7 | 115 |
 | `org.gradle.publishing` | 7 | 115 |
 | `org.gradle.signing` | 7 | 113 |
+| `com.android.internal.version-check` | 7 | 107 |
+| `com.android.build.gradle.api.AndroidBasePlugin` | 7 | 77 |
+| `org.jetbrains.kotlin.gradle.plugin.KotlinBaseApiPlugin` | 7 | 61 |
 | `org.jetbrains.dokka.gradle.DokkaBasePlugin` | 6 | 115 |
 | `org.jetbrains.dokka.gradle.adapters.JavaAdapter` | 6 | 113 |
 | `org.jetbrains.dokka.gradle.adapters.KotlinAdapter` | 6 | 113 |
+| `org.jetbrains.dokka` | 6 | 90 |
 | `com.vanniktech.maven.publish.base` | 6 | 89 |
-| `org.jetbrains.kotlin.gradle.plugin.KotlinBaseApiPlugin` | 6 | 30 |
-| `org.jetbrains.kotlin.plugin.serialization` | 6 | 21 |
-| `org.jetbrains.dokka` | 5 | 87 |
-| `org.jetbrains.dokka.gradle.formats.DokkaHtmlPlugin` | 5 | 87 |
-| `com.android.internal.version-check` | 5 | 68 |
 
 ## Kotlin compiler plugins
 
 | Plugin | Projects | Modules |
 | --- | ---: | ---: |
-| `annotations` | 11 | 144 |
-| `kotlin-stdlib` | 11 | 144 |
-| `kotlin-script-runtime` | 11 | 143 |
-| `kotlin-scripting-common` | 11 | 142 |
-| `kotlin-scripting-compiler-embeddable` | 11 | 142 |
-| `kotlin-scripting-compiler-impl-embeddable` | 11 | 142 |
-| `kotlin-scripting-jvm` | 11 | 142 |
-| `kotlin-serialization-compiler-plugin-embeddable` | 6 | 21 |
+| `annotations` | 13 | 197 |
+| `kotlin-stdlib` | 13 | 197 |
+| `kotlin-script-runtime` | 13 | 196 |
+| `kotlin-scripting-common` | 13 | 195 |
+| `kotlin-scripting-compiler-embeddable` | 13 | 195 |
+| `kotlin-scripting-compiler-impl-embeddable` | 13 | 195 |
+| `kotlin-scripting-jvm` | 13 | 195 |
+| `kotlin-serialization-compiler-plugin-embeddable` | 7 | 30 |
 | `symbol-processing-api` | 4 | 9 |
+| `kotlin-compose-compiler-plugin-embeddable` | 3 | 22 |
 | `kotlin-reflect` | 3 | 3 |
-| `kotlin-compose-compiler-plugin-embeddable` | 2 | 8 |
 | `burst-kotlin-plugin` | 2 | 5 |
 | `gradle-api` | 2 | 2 |
 | `gradle-installation-beacon` | 2 | 2 |

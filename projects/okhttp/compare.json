@@ -5,11 +5,34 @@
   "kotlin": 126665,
   "java": 3816
  },
- "compilations": 0,
- "built": 0,
- "classes": 0,
- "identical": 0,
- "rows": [],
+ "compilations": 2,
+ "built": 2,
+ "classes": 14,
+ "identical": 7,
+ "rows": [
+  {
+   "task": ":okhttp-idna-mapping-table:compileKotlin",
+   "dir": "okhttp-idna-mapping-table/build/classes/kotlin/main",
+   "built": true,
+   "fallback": null,
+   "error": null,
+   "classes": 13,
+   "identical": 7,
+   "only_kotlinc": 0,
+   "only_krusty": 0
+  },
+  {
+   "task": ":okhttp-idna-mapping-table:compileTestKotlin",
+   "dir": "okhttp-idna-mapping-table/build/classes/kotlin/test",
+   "built": true,
+   "fallback": null,
+   "error": null,
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": 0,
+   "only_krusty": 0
+  }
+ ],
  "no_reference_classes": [
   {
    "task": ":logging-interceptor:compileJava9Kotlin",
@@ -209,16 +232,6 @@
   {
    "task": ":okhttp-hpacktests:compileTestKotlin",
    "dir": "okhttp-hpacktests/build/classes/kotlin/test",
-   "krusty_classes": 0
-  },
-  {
-   "task": ":okhttp-idna-mapping-table:compileKotlin",
-   "dir": "okhttp-idna-mapping-table/build/classes/kotlin/main",
-   "krusty_classes": 0
-  },
-  {
-   "task": ":okhttp-idna-mapping-table:compileTestKotlin",
-   "dir": "okhttp-idna-mapping-table/build/classes/kotlin/test",
    "krusty_classes": 0
   },
   {
@@ -449,7 +462,7 @@
  ],
  "measured": {
   "date": "2026-10-25",
-  "commit": "0e127f350d9a74cd4fb5fb36d85f789e65bf8841",
-  "run": "https://github.com/qnox/krusty/actions/runs/40196119897"
+  "commit": "cf34959a9fd4d1d8b424730bd8775da493e7ea90",
+  "run": "https://github.com/qnox/krusty/actions/runs/40199492852"
  }
 }

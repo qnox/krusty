@@ -1,5 +1,5 @@
 compiler	:okio	annotations-13.0.jar
-compiler	:okio	burst-kotlin-plugin-2.10.2.jar
+compiler	:okio	burst-kotlin-plugin-2.14.0.jar
 compiler	:okio	kotlin-script-runtime-2.4.21.jar
 compiler	:okio	kotlin-scripting-common-2.4.21.jar
 compiler	:okio	kotlin-scripting-compiler-embeddable-2.4.21.jar
@@ -14,7 +14,7 @@ compiler	:okio-fakefilesystem	kotlin-scripting-compiler-impl-embeddable-2.4.21.j
 compiler	:okio-fakefilesystem	kotlin-scripting-jvm-2.4.21.jar
 compiler	:okio-fakefilesystem	kotlin-stdlib-2.4.21.jar
 compiler	:okio-testing-support	annotations-13.0.jar
-compiler	:okio-testing-support	burst-kotlin-plugin-2.10.2.jar
+compiler	:okio-testing-support	burst-kotlin-plugin-2.14.0.jar
 compiler	:okio-testing-support	kotlin-script-runtime-2.4.21.jar
 compiler	:okio-testing-support	kotlin-scripting-common-2.4.21.jar
 compiler	:okio-testing-support	kotlin-scripting-compiler-embeddable-2.4.21.jar

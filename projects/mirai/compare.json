@@ -1,0 +1,782 @@
+{
+ "name": "mirai",
+ "reference_exit": 0,
+ "loc": {
+  "kotlin": 156072,
+  "java": 559
+ },
+ "compilations": 51,
+ "built": 0,
+ "classes": 2536,
+ "identical": 0,
+ "rows": [
+  {
+   "task": ":ci-release-helper:compileKotlin",
+   "dir": "ci-release-helper/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 19,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console-compiler-common:compileKotlin",
+   "dir": "mirai-console/tools/compiler-common/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 8,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console-frontend-base:compileKotlin",
+   "dir": "mirai-console/frontend/mirai-console-frontend-base/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 35,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console-frontend-base:compileTestKotlin",
+   "dir": "mirai-console/frontend/mirai-console-frontend-base/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 2,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console-gradle:compileIntegTestKotlin",
+   "dir": "mirai-console/tools/gradle-plugin/build/classes/kotlin/integTest",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 4,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console-gradle:compileKotlin",
+   "dir": "mirai-console/tools/gradle-plugin/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 38,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console-intellij:compileKotlin",
+   "dir": "mirai-console/tools/intellij-plugin/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 210,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console-intellij:compileTestKotlin",
+   "dir": "mirai-console/tools/intellij-plugin/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 5,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console-terminal:compileKotlin",
+   "dir": "mirai-console/frontend/mirai-console-terminal/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 61,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console-terminal:compileTestKotlin",
+   "dir": "mirai-console/frontend/mirai-console-terminal/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 6,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.codegen:compileKotlin",
+   "dir": "mirai-console/backend/codegen/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 56,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:MCITSelfTestPlugin:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/MCITSelfTestPlugin/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 26,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 19,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:mirai-plugin-compatibility:mirai-jar-after-2_11-without-new:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/mirai-plugin-compatibility/mirai-jar-after-2_11-without-new/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:mirai-plugin-compatibility:mirai-jar-after-2_11:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/mirai-plugin-compatibility/mirai-jar-after-2_11/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:mirai-plugin-compatibility:mirai-jar-before-2_11:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/mirai-plugin-compatibility/mirai-jar-before-2_11/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:mirai-plugin-compatibility:same-pkg-1:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/mirai-plugin-compatibility/same-pkg-1/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:mirai-plugin-compatibility:same-pkg-2:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/mirai-plugin-compatibility/same-pkg-2/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:never-override-jdk-modules:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/never-override-jdk-modules/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:never-override-jdk-modules:module-jdk-module:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/never-override-jdk-modules/module-jdk-module/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:options-properties:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/options-properties/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:options-properties:independent-plugin:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/options-properties/independent-plugin/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:plugin-can-depends-on-mirai-console:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/plugin-can-depends-on-mirai-console/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:plugin-dep-dependon-dep-issue-2054:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/plugin-dep-dependon-dep-issue-2054/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:plugin-dep-dependon-dep-issue-2054:module-moda:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/plugin-dep-dependon-dep-issue-2054/module-moda/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:plugin-dep-dependon-dep-issue-2054:module-modb:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/plugin-dep-dependon-dep-issue-2054/module-modb/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:plugin-dep-dependon-dep-issue-2054:module-private-issue2108:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/plugin-dep-dependon-dep-issue-2054/module-private-issue2108/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:plugin-dep-dependon-dep-issue-2054:second-plugin:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/plugin-dep-dependon-dep-issue-2054/second-plugin/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 3,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:plugin-depend-on-other:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/plugin-depend-on-other/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 5,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:plugin-dynamic-dependencies-download:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/plugin-dynamic-dependencies-download/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:plugin-resolve-self-dependencies-over-console-ones:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/plugin-resolve-self-dependencies-over-console-ones/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 2,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:plugin-use-console-deps-fallback:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/plugin-use-console-deps-fallback/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:plugin-with-pluginyml-can-use-libraries-while-clinit:clinit-library:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/plugin-with-pluginyml-can-use-libraries-while-clinit/clinit-library/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:plugin-with-pluginyml-can-use-libraries-while-clinit:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/plugin-with-pluginyml-can-use-libraries-while-clinit/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 2,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:plugin-with-pluginyml:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/plugin-with-pluginyml/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:service-loader:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/service-loader/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 3,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:service-loader:module-service-loader-impl:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/service-loader/module-service-loader-impl/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:service-loader:module-service-loader-typedef:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/service-loader/module-service-loader-typedef/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console.integration-test:service-loader:service-loader-2dep-plugin:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/service-loader/service-loader-2dep-plugin/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 4,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console:compileKotlin",
+   "dir": "mirai-console/backend/mirai-console/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1077,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-console:compileTestKotlin",
+   "dir": "mirai-console/backend/mirai-console/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 257,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-core-mock:compileKotlin",
+   "dir": "mirai-core-mock/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 359,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-core-mock:compileTestKotlin",
+   "dir": "mirai-core-mock/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 289,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-deps-test:compileTestKotlin",
+   "dir": "mirai-deps-test/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 15,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-dokka:compileKotlin",
+   "dir": "mirai-dokka/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 5,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-logging-log4j2:compileKotlin",
+   "dir": "logging/mirai-logging-log4j2/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-logging-log4j2:compileTestKotlin",
+   "dir": "logging/mirai-logging-log4j2/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-logging-slf4j-logback:compileTestKotlin",
+   "dir": "logging/mirai-logging-slf4j-logback/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-logging-slf4j-simple:compileTestKotlin",
+   "dir": "logging/mirai-logging-slf4j-simple/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mirai-logging-slf4j:compileTestKotlin",
+   "dir": "logging/mirai-logging-slf4j/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "krusty wrote no class",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  }
+ ],
+ "no_reference_classes": [
+  {
+   "task": ":ci-release-helper:compileTestKotlin",
+   "dir": "ci-release-helper/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console-compiler-common:compileTestKotlin",
+   "dir": "mirai-console/tools/compiler-common/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console-gradle:compileTestKotlin",
+   "dir": "mirai-console/tools/gradle-plugin/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.codegen:compileTestKotlin",
+   "dir": "mirai-console/backend/codegen/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:MCITSelfTestPlugin:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/MCITSelfTestPlugin/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:mirai-plugin-compatibility:compileKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/mirai-plugin-compatibility/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:mirai-plugin-compatibility:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/mirai-plugin-compatibility/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:mirai-plugin-compatibility:mirai-jar-after-2_11-without-new:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/mirai-plugin-compatibility/mirai-jar-after-2_11-without-new/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:mirai-plugin-compatibility:mirai-jar-after-2_11:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/mirai-plugin-compatibility/mirai-jar-after-2_11/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:mirai-plugin-compatibility:mirai-jar-before-2_11:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/mirai-plugin-compatibility/mirai-jar-before-2_11/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:mirai-plugin-compatibility:same-pkg-1:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/mirai-plugin-compatibility/same-pkg-1/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:mirai-plugin-compatibility:same-pkg-2:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/mirai-plugin-compatibility/same-pkg-2/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:never-override-jdk-modules:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/never-override-jdk-modules/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:never-override-jdk-modules:module-jdk-module:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/never-override-jdk-modules/module-jdk-module/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:options-properties:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/options-properties/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:options-properties:independent-plugin:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/options-properties/independent-plugin/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:plugin-can-depends-on-mirai-console:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/plugin-can-depends-on-mirai-console/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:plugin-dep-dependon-dep-issue-2054:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/plugin-dep-dependon-dep-issue-2054/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:plugin-dep-dependon-dep-issue-2054:module-moda:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/plugin-dep-dependon-dep-issue-2054/module-moda/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:plugin-dep-dependon-dep-issue-2054:module-modb:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/plugin-dep-dependon-dep-issue-2054/module-modb/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:plugin-dep-dependon-dep-issue-2054:module-private-issue2108:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/plugin-dep-dependon-dep-issue-2054/module-private-issue2108/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:plugin-dep-dependon-dep-issue-2054:second-plugin:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/plugin-dep-dependon-dep-issue-2054/second-plugin/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:plugin-depend-on-other:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/plugin-depend-on-other/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:plugin-dynamic-dependencies-download:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/plugin-dynamic-dependencies-download/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:plugin-resolve-self-dependencies-over-console-ones:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/plugin-resolve-self-dependencies-over-console-ones/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:plugin-use-console-deps-fallback:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/plugin-use-console-deps-fallback/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:plugin-with-pluginyml-can-use-libraries-while-clinit:clinit-library:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/plugin-with-pluginyml-can-use-libraries-while-clinit/clinit-library/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:plugin-with-pluginyml-can-use-libraries-while-clinit:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/plugin-with-pluginyml-can-use-libraries-while-clinit/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:plugin-with-pluginyml:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/plugin-with-pluginyml/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:service-loader:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/service-loader/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:service-loader:module-service-loader-impl:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/service-loader/module-service-loader-impl/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:service-loader:module-service-loader-typedef:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/service-loader/module-service-loader-typedef/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-console.integration-test:service-loader:service-loader-2dep-plugin:compileTestKotlin",
+   "dir": "mirai-console/backend/integration-test/testers/service-loader/service-loader-2dep-plugin/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-core-all:compileKotlin",
+   "dir": "mirai-core-all/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-core-all:compileTestKotlin",
+   "dir": "mirai-core-all/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-deps-test:compileKotlin",
+   "dir": "mirai-deps-test/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-dokka:compileTestKotlin",
+   "dir": "mirai-dokka/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-logging-slf4j-logback:compileKotlin",
+   "dir": "logging/mirai-logging-slf4j-logback/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-logging-slf4j-simple:compileKotlin",
+   "dir": "logging/mirai-logging-slf4j-simple/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":mirai-logging-slf4j:compileKotlin",
+   "dir": "logging/mirai-logging-slf4j/build/classes/kotlin/main",
+   "krusty_classes": 0
+  }
+ ],
+ "measured": {
+  "date": "2026-10-25",
+  "commit": "cf34959a9fd4d1d8b424730bd8775da493e7ea90",
+  "run": "https://github.com/qnox/krusty/actions/runs/40199492852"
+ }
+}
