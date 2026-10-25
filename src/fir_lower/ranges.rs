@@ -172,6 +172,31 @@ impl BodyLowering<'_> {
         }))
     }
 
+    /// `value in receiver.indices`: membership in `0 until size`, which the backend realizes as
+    /// kotlinc's `RangeContainsLowering` does, from the size read the `indices` loop also reads.
+    pub(super) fn indices_contains_expression(
+        &mut self,
+        value: FirExprId,
+        indices: &crate::fir::FirIndices,
+        comparison: Ty,
+    ) -> Result<ExprId, FirLoweringFailure> {
+        let start = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+        let end = self.indices_size(indices)?;
+        self.ir.logical_types.insert(end, Ty::Int);
+        let value = self.expression(value)?;
+        Ok(self.ir.add_expr(IrExpr::Checked(Box::new(
+            IrCheckedOperation::RangeContains {
+                operation: FirRangeOperation::Until,
+                value,
+                start,
+                end,
+                negated: false,
+                counter: comparison,
+                unsigned_compare: None,
+            },
+        ))))
+    }
+
     fn range_membership(
         &mut self,
         operation: FirRangeOperation,

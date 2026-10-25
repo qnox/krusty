@@ -582,6 +582,7 @@ fn library_annotation_members_are_what_ksp2_reports() {
         &[
             fixtures().join("library-members/Dependency.kt"),
             fixtures().join("library-members/Constants.java"),
+            fixtures().join("library-members/Aliased.java"),
         ],
         "ksp-outputs-library-members",
         "library-members.expected",

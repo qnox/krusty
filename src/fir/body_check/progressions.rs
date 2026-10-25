@@ -227,6 +227,9 @@ impl BodyFirChecker<'_> {
         if let Some(built) = self.progression_builder(source, checked)? {
             return Ok(Some(built));
         }
+        if let Some(indices) = self.checked_indices(source, checked)? {
+            return Ok(Some(FirProgressionSource::Indices(indices)));
+        }
         let Some(expression) = self.body.expr(checked) else {
             return Ok(None);
         };
@@ -390,6 +393,58 @@ impl BodyFirChecker<'_> {
             _ => return None,
         };
         Some((intrinsic, *receiver_source, receiver.value, argument))
+    }
+
+    /// `IndicesHandler`: an `indices` read is the range from 0 until the size member resolution
+    /// selected on the class the declaration receives. The read's own receiver, with its checked
+    /// conversion, is the receiver of that size read.
+    pub(super) fn checked_indices(
+        &self,
+        source: ExprId,
+        checked: FirExprId,
+    ) -> Result<Option<crate::fir::FirIndices>, BodyCheckFailure> {
+        let Some(plan) = self.info.indices_size(source) else {
+            return Ok(None);
+        };
+        let span = self.file.expr_span(source);
+        let Some(FirExprKind::PropertyRead {
+            extension_receiver: Some(receiver),
+            dispatch_receiver: None,
+            ..
+        }) = self.body.expr(checked).map(|expression| &expression.kind)
+        else {
+            return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
+        };
+        let receiver = *receiver;
+        let receiver_ty = match receiver.conversion.map(|conversion| conversion.kind) {
+            Some(
+                FirConversionKind::SmartCast { to }
+                | FirConversionKind::NullabilityWidening { to }
+                | FirConversionKind::PlatformNarrowing { to, .. },
+            ) => Some(to.get()),
+            _ => self.body.expr(receiver.value).map(|value| value.ty.get()),
+        };
+        let class = |ty: Ty| ty.non_null().obj_internal();
+        let view = (receiver_ty.and_then(class) != class(plan.view)).then_some(plan.view);
+        let size = self.property_target_at(
+            span,
+            None,
+            Some(super::properties::ExternalPropertyTarget {
+                property: plan.size.property,
+                receiver: Some(plan.view),
+                parameters: Vec::new(),
+                result: plan.size.ty,
+                extension_receiver_parameter: None,
+                metadata_constant_read: false,
+            }),
+            false,
+            &[],
+        )?;
+        Ok(Some(crate::fir::FirIndices {
+            receiver,
+            view,
+            size,
+        }))
     }
 
     /// `DefaultProgressionHandler`: a value of a progression class is read through its `first`,

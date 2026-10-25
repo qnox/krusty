@@ -89,6 +89,7 @@ struct ProductionSignatureSemantics<'a> {
     headers: &'a crate::fir::StreamedHeaderModule,
     table: &'a SymbolTable,
     classifier_types: &'a HashMap<crate::fir::DeclarationId, crate::types::TypeName>,
+    classifier_parents: &'a classifier_parents::ParentInventory,
     parameters: HashMap<crate::fir::DeclarationId, Box<[crate::fir::ResolvedTy]>>,
     extension_receivers: &'a HashMap<crate::fir::DeclarationId, crate::fir::ResolvedTy>,
     source_orders: HashMap<crate::fir::DeclarationId, u32>,
@@ -133,6 +134,7 @@ struct DeclarationTypeParameters {
     bounds: Vec<Vec<Ty>>,
 }
 
+#[derive(Clone)]
 struct ProductionSignatureDiagnostic {
     declaration: crate::fir::DeclarationId,
     file: u32,
@@ -3418,12 +3420,14 @@ pub(crate) fn finalized_streamed_signature_index(
         }
     }
     let empty_extension_receivers = HashMap::default();
+    let empty_classifier_parents = classifier_parents::ParentInventory::default();
     let selected_types = selected_type_facts::SelectedTypeFacts::default();
     let bound_local_alias_templates = BoundLocalAliasTemplates::for_graph(&graph);
     let explicit_type_semantics = ProductionSignatureSemantics {
         headers,
         table,
         classifier_types: &classifier_types,
+        classifier_parents: &empty_classifier_parents,
         parameters: HashMap::default(),
         extension_receivers: &empty_extension_receivers,
         source_orders: HashMap::default(),
@@ -4141,46 +4145,34 @@ pub(crate) fn finalized_streamed_signature_index(
             Err(_) => failed.push(stub.id),
         }
     }
-    let mut resolved_classifier_parents = HashMap::default();
-    for (declaration, parents) in graph.explicit_classifier_parents() {
-        let superclass = match parents.superclass {
-            Some(expression) => {
-                let Some(parent) =
-                    explicit_type_semantics.resolve_compact_graph_type(&graph, expression)
-                else {
-                    failed.push(declaration);
-                    continue;
-                };
-                Some(parent)
-            }
-            None => None,
-        };
-        let resolved_supertypes = graph
-            .operands(parents.supertypes)
-            .iter()
-            .map(|expression| {
-                explicit_type_semantics.resolve_compact_graph_type(&graph, *expression)
-            })
-            .collect::<Option<Vec<_>>>();
-        let Some(resolved_supertypes) = resolved_supertypes else {
-            failed.push(declaration);
-            continue;
-        };
-        resolved_classifier_parents.insert(declaration, (superclass, resolved_supertypes));
-    }
+    let resolved_classifier_parents =
+        classifier_parents::resolve_graph_parents(&graph, &explicit_type_semantics, &mut failed);
     let compact_cycle_edges =
         compact_classifier_cycle_edges(table, &classifier_types, &resolved_classifier_parents);
+    let parent_diagnostic_start = explicit_type_semantics.diagnostics.borrow().len();
+    let classifier_parents = classifier_parents::inventory(
+        &explicit_type_semantics,
+        &resolved_classifier_parents,
+        &compact_cycle_edges,
+    );
     failed.sort_by_key(|declaration| declaration.raw());
     failed.dedup();
     let explicit_diagnostics = explicit_type_semantics.diagnostics.borrow();
-    diagnostics::emit_unconditional(diags, &explicit_diagnostics);
+    // Parent findings retain their original classifier-publication position. Their cached facts
+    // are needed by inference now, but the later header publication replays those findings once.
+    diagnostics::emit_unconditional(diags, &explicit_diagnostics[..parent_diagnostic_start]);
     if !failed.is_empty() {
         crate::trace_compiler!(
             "fir",
             "signature finalization rejected declarations before solver: {failed:?}",
         );
         let failed_declarations = failed.iter().copied().collect::<HashSet<_>>();
-        diagnostics::emit_failures(diags, &explicit_diagnostics, &failed_declarations, false);
+        diagnostics::emit_failures(
+            diags,
+            &explicit_diagnostics[..parent_diagnostic_start],
+            &failed_declarations,
+            false,
+        );
     }
     let explicit_publication_diagnostics = explicit_diagnostics.len();
     drop(explicit_diagnostics);
@@ -4206,6 +4198,7 @@ pub(crate) fn finalized_streamed_signature_index(
         headers,
         table,
         classifier_types: &classifier_types,
+        classifier_parents: &classifier_parents,
         parameters: inferred_parameters,
         extension_receivers: &resolved_receivers,
         source_orders,
@@ -4547,17 +4540,11 @@ pub(crate) fn finalized_streamed_signature_index(
         else {
             unreachable!("a classifier stub must own a classifier header")
         };
-        let Some((superclass, interfaces, source_supertypes)) =
-            classifier_parents::compact_classifier_parents(
-                headers,
-                &semantics,
-                stub.id,
-                stub.source,
-                classifier,
-                resolved_classifier_parents.get(&stub.id),
-                &compact_cycle_edges,
-            )
-        else {
+        let parent_facts = classifier_parents
+            .get(&stub.id)
+            .expect("a source classifier retains its canonical parent normalization");
+        parent_facts.publish_diagnostics(&semantics);
+        let Some(parents) = &parent_facts.parents else {
             // Preserve an undemanded body-local classifier for Pass 2; one demanded by a non-local
             // inferred signature has compact parents and must finalize here.
             if stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
@@ -4581,6 +4568,9 @@ pub(crate) fn finalized_streamed_signature_index(
             );
             skip_classifier!(stub.id);
         };
+        let superclass = parents.superclass;
+        let interfaces = parents.interfaces.clone();
+        let source_supertypes = &parents.source_supertypes;
         let interface_delegations = headers
             .syntax
             .interface_delegations(delegations)

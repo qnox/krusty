@@ -17,7 +17,6 @@ use crate::metadata::builder::TypeAliasMeta;
 use crate::metadata::class_builder::{
     CapturedTypeParameters, ClassDeclaration, ClassMemberOrder, ClassTail, CtorMeta, EnumEntryMeta,
     FnMeta, PropMeta, EQUALS_FN_FLAGS, FN_IS_SUSPEND, HASHCODE_TOSTRING_FN_FLAGS,
-    OBJECT_CTOR_FLAGS, SEALED_CTOR_FLAGS,
 };
 use crate::metadata::declaration_flags::{
     class_flags, data_component_flags, data_copy_flags, declaration_visibility_bits, function_flags,
@@ -1069,13 +1068,15 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         // An `enum class`'s primary ctor is private too — entries are the only instances.
         // A DECLARED constructor visibility (`class C protected constructor(…)`) takes
         // precedence: the consumer must reject constructions the declaration forbids.
-        primary_ctor_flags: match ir.ctor_visibilities.get(&c.fq_name_id()) {
-            Some(Visibility::Protected) => SEALED_CTOR_FLAGS,
-            Some(Visibility::Private) => OBJECT_CTOR_FLAGS,
-            _ if c.is_sealed => SEALED_CTOR_FLAGS,
-            _ if c.is_singleton() || c.is_enum => OBJECT_CTOR_FLAGS,
-            _ => 0,
-        },
+        // A sealed class's is protected, and an `internal constructor` keeps its own visibility.
+        primary_ctor_flags: primary_constructor_flags(
+            match ir.ctor_visibilities.get(&c.fq_name_id()).copied() {
+                Some(declared @ (Visibility::Protected | Visibility::Private)) => declared,
+                _ if c.is_sealed => Visibility::Protected,
+                _ if c.is_singleton() || c.is_enum => Visibility::Private,
+                declared => declared.unwrap_or(Visibility::Public),
+            },
+        ),
         type_params: c.type_params.clone(),
         type_param_bounds: ir
             .class_signature(&c.fq_name())
@@ -1758,6 +1759,11 @@ fn secondary_constructor(
     })
 }
 
+/// `Constructor.flags` of a primary constructor: its visibility alone.
+fn primary_constructor_flags(visibility: Visibility) -> u64 {
+    declaration_visibility_bits(visibility) << 1
+}
+
 /// `Constructor.flags` of a secondary constructor: `IS_SECONDARY` and its visibility.
 fn secondary_constructor_flags(visibility: Visibility) -> u64 {
     const IS_SECONDARY: u64 = 16;
@@ -1766,8 +1772,9 @@ fn secondary_constructor_flags(visibility: Visibility) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::secondary_constructors;
     use super::{generated_function_flags, generated_functions, SecondaryConstructorRecord};
-    use super::{secondary_constructor, secondary_constructor_flags, secondary_constructors};
+    use super::{primary_constructor_flags, secondary_constructor, secondary_constructor_flags};
     use crate::ir::{
         CtorDelegateTarget, DeclarationAnnotations, IrFile, IrFunction,
         IrGeneratedDeclarationDebug, IrGeneratedFunctionMetadata, IrGeneratedFunctionMetadataScope,
@@ -1911,6 +1918,14 @@ mod tests {
         assert_eq!(secondary_constructor_flags(Visibility::Private), 18);
         assert_eq!(secondary_constructor_flags(Visibility::Protected), 20);
         assert_eq!(secondary_constructor_flags(Visibility::Public), 22);
+    }
+
+    #[test]
+    fn primary_constructor_flags_encode_exact_semantic_visibility() {
+        assert_eq!(primary_constructor_flags(Visibility::Internal), 0);
+        assert_eq!(primary_constructor_flags(Visibility::Private), 2);
+        assert_eq!(primary_constructor_flags(Visibility::Protected), 4);
+        assert_eq!(primary_constructor_flags(Visibility::Public), 6);
     }
 
     fn generated_function(ir: &mut IrFile, body: bool) -> u32 {

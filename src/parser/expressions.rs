@@ -371,6 +371,7 @@ impl Parser<'_> {
                                 },
                                 Span::new(lspan.lo, cspan.hi),
                             );
+                            self.file.operator_token_spans.insert(call.0, membership);
                             lhs = if negated {
                                 let negation = self.file.add_expr(
                                     Expr::Unary {
@@ -877,7 +878,7 @@ impl Parser<'_> {
                 TokenKind::Dot => {
                     let dot_span = self.bump().span;
                     if self.eat(TokenKind::LParen) {
-                        let callable = self.parse_expr();
+                        let callable = self.with_newlines_insignificant(Self::parse_expr);
                         let end = self.tok().span;
                         self.expect(TokenKind::RParen, "')'");
                         let lspan = self.file.expr_spans[lhs.0 as usize];
@@ -955,9 +956,8 @@ impl Parser<'_> {
                 TokenKind::LParen => {
                     let open_paren = self.bump().span;
                     let label = self.lambda_label_of_callee(lhs);
-                    let (args, names, name_spans) = self.with_newlines_insignificant(|parser| {
-                        parser.with_lambda_label(Some(label), Self::parse_call_argument_list)
-                    });
+                    let (args, names, name_spans) =
+                        self.with_lambda_label(Some(label), Self::parse_call_argument_list);
                     let lspan = self.file.expr_spans[lhs.0 as usize];
                     let end = self.tok().span;
                     self.expect(TokenKind::RParen, "')'");
@@ -1808,6 +1808,7 @@ impl Parser<'_> {
                         },
                         Span::new(start.lo, cspan.hi),
                     );
+                    self.file.operator_token_spans.insert(call.0, membership);
                     if negated {
                         let negation = self.file.add_expr(
                             Expr::Unary {

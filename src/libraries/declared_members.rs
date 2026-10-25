@@ -3,7 +3,7 @@
 //! against them: no inherited member, no member a platform class adds, and every type as declared.
 
 pub use crate::metadata::semantic::KotlinModality;
-use crate::types::{Ty, TyKind, TypeName, Visibility};
+use crate::types::{ResolvedAnnotation, Ty, TyKind, TypeName, Visibility};
 
 /// The members a library classifier declares, each list in declaration order.
 #[derive(Clone, Debug, PartialEq)]
@@ -41,7 +41,9 @@ pub struct DeclaredProperty {
     pub modality: KotlinModality,
     /// Kotlin reads it off a Java declaration that is not a property: an annotation element.
     pub from_java_method: bool,
-    /// Whether the declaration states annotations, which this view does not carry yet.
+    /// The annotations its getter states: those a Java annotation element's method states.
+    pub getter_annotations: Vec<ResolvedAnnotation>,
+    /// Whether the declaration states annotations this view does not carry.
     pub annotated: bool,
 }
 
