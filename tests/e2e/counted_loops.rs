@@ -1,4 +1,5 @@
-//! Counted `for` loop coverage: loop shape, progression steps, `withIndex()`, and `indices`.
+//! Counted `for` loop coverage: loop shape, progression steps, `withIndex()`, and `indices`,
+//! including membership in `indices`.
 
 use super::common;
 
@@ -6,6 +7,8 @@ use super::common;
 mod counted_loop_shape_e2e;
 #[path = "../for_in_with_index_e2e.rs"]
 mod for_in_with_index_e2e;
+#[path = "../indices_contains_e2e.rs"]
+mod indices_contains_e2e;
 #[path = "../indices_loop_e2e.rs"]
 mod indices_loop_e2e;
 #[path = "../range_step_e2e.rs"]

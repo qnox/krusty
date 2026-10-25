@@ -196,7 +196,7 @@ use member_extension_properties::MemberExtensionProperty;
 mod member_overload_clash;
 mod missing_dependency_supertypes;
 mod named_class_constructors;
-mod operator_calls;
+pub(crate) mod operator_calls;
 mod operator_declarations;
 mod opt_in_usage;
 use operator_calls::{
@@ -11978,8 +11978,7 @@ impl<'a> Checker<'a> {
                     let span = self.span(expression);
                     self.expect_assignable(declared, actual, span, "extension receiver");
                 }
-                self.expr_lowers
-                    .insert(expression, ExprLowering::ExtensionPropertyGet { access });
+                self.record_extension_property_get(expression, access);
             }
         }
         ty

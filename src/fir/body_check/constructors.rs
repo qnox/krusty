@@ -1321,6 +1321,11 @@ pub(super) fn check_and_dispatch_signature_constructor_defaults(
         },
     )
     .map_err(CheckedBodyDriverFailure::Check)?;
+    // The default expressions carry their source lines, as a function's defaults do: a value
+    // class's `constructor-impl$default` maps each masked fill to its expression's line.
+    checker
+        .body
+        .attach_debug_lines(source, file, checker.origins);
     checker.body.set_default_fragment();
     ordinary_sink.accept(owner, checker.body);
     Ok(())
