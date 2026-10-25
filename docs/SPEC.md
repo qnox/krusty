@@ -19577,6 +19577,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   it realizes counted loops. Tests: `range_literal_membership_e2e` (class bytes and run against
   kotlinc), box `ranges/contains/comparisonWithRangeBoundEliminated.kt`.
 
+- **A constant range bound kotlinc derives keeps the written constant's line.** `convertIrConst`
+  (the exclusive bound of `RangeToHandler`/`DownToHandler`, used by membership and counted loops)
+  and `castIfNecessary` (a constant converted to the comparison type) build the new constant with
+  `IrConstImpl(startOffset, endOffset, …)` of the written one. Codegen marks a constant's line where
+  it is loaded, so `x !in` on one line and `1..3` on the next marks the bound's line before
+  `iconst_4`, then the `in` line again at the comparison's jump; `for (i in 1..` then `3)` marks the
+  bound's line before the loop test's `iconst_4`. Every other node the lowering generates keeps
+  the construct's line. Test: `split_membership_conditions_e2e` (class bytes and run against
+  kotlinc).
+
 - **Membership in a `Comparable` range literal is kotlinc's `ComparableRangeToHandler`.** When the
   range is built by the stdlib's `operator fun <T : Comparable<T>> T.rangeTo(that: T): ClosedRange<T>`
   (the provider role `CompilerIntrinsic::ComparableRangeTo`, attached from the complete normalized
