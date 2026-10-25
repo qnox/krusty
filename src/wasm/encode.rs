@@ -325,6 +325,14 @@ impl Module {
         (self.globals.len() - 1) as u32
     }
 
+    /// Replace the constant expression immutable global `global` starts as: for a value only the
+    /// whole program decides, written once every file has been lowered.
+    pub(super) fn set_constant_init(&mut self, global: u32, init: Code) {
+        let global = &mut self.globals[global as usize];
+        assert!(!global.mutable, "only a constant global's init is replaced");
+        global.init = Some(init);
+    }
+
     /// Record that the code takes a reference to `function`, which `ref.func` requires.
     pub(super) fn reference_function(&mut self, function: u32) {
         if !self.referenced.contains(&function) {
@@ -711,6 +719,10 @@ impl Code {
 
     pub(super) fn array_new_data(&mut self, ty: u32, segment: u32) -> &mut Self {
         self.gc(0x09).index(ty).index(segment)
+    }
+
+    pub(super) fn array_get(&mut self, ty: u32) -> &mut Self {
+        self.gc(0x0b).index(ty)
     }
 
     pub(super) fn array_get_u(&mut self, ty: u32) -> &mut Self {
