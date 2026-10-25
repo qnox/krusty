@@ -5745,7 +5745,7 @@ non-inline callers, still reads the field directly. Test:
   declarations, with primary and secondary constructors, fields, properties, virtual and `super`
   calls, interface dispatch, `is`/`!is`/`as`/`as?`, and `equals`/`hashCode`/`toString` a class
   declares. The target-neutral layout (hierarchy order, slot numbering by `kotlin.Any` role, the
-  program-wide interface region, bridges) is `src/backend/class_tables/`, shared with Native, which
+  module interface numbering, bridges) is `src/backend/class_tables/`, shared with Native, which
   keeps only byte offsets and symbols on top of it; Wasm builds a struct subtype and a vtable
   struct subtype per class from the same tables (`src/wasm/codegen/classes.rs`). Independently
   analyzed `// MODULE:` units retain one Wasm program state and join generated dependency KLIB
@@ -5753,6 +5753,13 @@ non-inline callers, still reads the field directly. Test:
   their exact form; the committed target-KLIB inventories are the authoritative current backlog.
   Box lanes pass 460 (2.4.0), 460 (2.4.10) and 462 (2.4.20) cases on each target, up from
   181/181/182; Native's counts are unchanged by the shared tables.
+- Interfaces: a class implementing an interface declared in another file, another module or the
+  library (such as `Collection`) is dispatched through module-numbered interface members and
+  per-member stubs written at Wasm finalize (direct, two-way `ref.test`, or a packed itable
+  index), with one `is` test function per interface (`src/wasm/interface_dispatch.rs`,
+  `src/wasm/codegen/interface_members.rs`). The per-file interface region is deleted. The shared
+  box regressions `collectionSizeWithModuleInterface.kt`, `interfaceCheckAcrossFiles.kt` and the
+  three `multimoduleDependencyInterface*.kt` cases run on every lane.
 - Known gap: `x as? C` on a value smart-cast earlier in the body lowers to a `When` with no
   checked type, which Wasm declines rather than infer one.
 - Nullable scalar assertions decline when the operand is a reference but the checked result has
@@ -5951,8 +5958,23 @@ including constructors absent from the consumer's direct selections. A shared so
 shape decision excludes unsupported references without resolving enclosing generic arguments early.
 Official-producer tests separately prove the imported constructor's exact checked-IR identity and
 Native execution through an existing runtime constructor. General imported-class construction and
-storage remain a separate Native capability, with the positive custom-class program retained in
-its follow-up rather than claimed as recovered runtime coverage.
+storage remain a separate Native capability.
+
+## Imported KLIB class initialization
+
+The first #2621 slice realizes final, non-generic ordinary classes constructed inside emitted
+dependency bodies, including nested closures. A shared authenticated plan joins exact primary
+constructor identity, `Any` delegation, actual fields and ordered initialization effects. A private
+instance frame carries receiver/argument identities into explicit stores; ordinary Native layout
+and allocation consume the resulting class. Official-producer fixtures establish JVM results
+before Native execution and preserve the original nested-constructor program. Additional tests
+cover repeated allocation, initializer order, storage distinct from constructor arity, and a
+same-name source classifier's complete refusal diagnostic.
+
+Constructor exports across support units, qualified class facts across producer/source collisions,
+direct source construction, inheritance, secondary/default/vararg/generic constructors and imported
+accessor/member dispatch remain required follow-ups. The first slice explicitly declines identity
+collisions before backend emission. It does not close #2621 or change any outcome baseline.
 
 ## Lossless JVM signature syntax
 
@@ -5965,6 +5987,15 @@ independent physical descriptor checks.
 Next, declaration-header layouts (#2576) must authenticate complete captured applications and raw
 omissions for #2537/#2532. Raw scope erasure must follow symbolic inheritance specialization, as the
 reference compiler demonstrates; it cannot independently erase a superclass from its own bounds.
+
+## Declared JVM constructor boxing slots
+
+Physical call operands and implicit coercions share scalar boxing followed by ordinary reference
+coercion. Constructor slots consume the existing declaration-owned parameter evidence; neither
+checked argument types nor callable selection are rewritten to obtain a JVM cast. Full-class
+reference controls cover source dependent bounds and independently bounded dependency slots,
+with width, Object, exact-wrapper and runtime controls. The dependency inner-constructor frontend
+prerequisite landed in #2593; its declaration normalization remains separate from this representation fix (#2590).
 
 ## Receiver-bound constructor constraints
 
@@ -5979,8 +6010,8 @@ diagnostics. Rejected signature recovery preserves that completed application wi
 inference. Provider selection moves
 out of the resolver facade into its owning module. Shared classifier-bound checking also retains
 the full enclosing application for alias targets instead of validating own bounds in isolation.
-JVM boxing-cast byte parity remains separate in #2590; the bound slice proves complete ABI
-signatures, reference runtime and exact diagnostics.
+JVM boxing-cast byte parity uses the declared-slot representation rule above (#2590); the bound
+slice independently proves complete ABI signatures, reference runtime and exact diagnostics.
 Inferred return types of receiver-bound alias calls remain a separate signature-lookup follow-up
 in #2592; declared alias calls and direct inferred calls are covered here.
 

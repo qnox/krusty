@@ -72,10 +72,8 @@ enum ElementSource {
 /// One element of the wire shape, as the descriptor, `childSerializers` and `deserialize` see it.
 #[derive(Clone, Debug)]
 pub(super) struct WireElement {
-    /// The class in this file whose property declares the element, for the per-property
-    /// annotation questions. `None` for an element of a superclass compiled apart from this file,
-    /// which carries no annotations.
-    pub(super) declared: Option<ClassId>,
+    /// Where the per-property annotation questions are answered.
+    pub(super) declared: ElementDeclaration,
     pub(super) name: String,
     /// The backing field's type.
     pub(super) ty: Ty,
@@ -85,33 +83,67 @@ pub(super) struct WireElement {
     pub(super) optional: bool,
 }
 
+/// The declaration behind a [`WireElement`].
+#[derive(Clone, Debug)]
+pub(super) enum ElementDeclaration {
+    /// A property of this class in this file.
+    Property(ClassId),
+    /// An element of a superclass compiled apart from this file, with the property annotations
+    /// its provider read. Its type carries no annotations.
+    Published {
+        serial_name: Option<KtString>,
+        serializer: Option<TypeName>,
+        contextual: bool,
+    },
+}
+
 impl WireElement {
     /// The serializer the element's property names with `@Serializable(with = …)`.
     pub(super) fn declared_serializer(&self, ctx: &PluginContext, ir: &IrFile) -> Option<TypeName> {
-        super::declared_serializer_of(ctx, ir, self.declared?, &self.name)
+        match &self.declared {
+            ElementDeclaration::Property(class) => {
+                super::declared_serializer_of(ctx, ir, *class, &self.name)
+            }
+            ElementDeclaration::Published { serializer, .. } => *serializer,
+        }
     }
 
-    /// Whether the element's property is `@Contextual`.
+    /// Whether the element is serialized with a `ContextualSerializer`. A serializer the property
+    /// names takes precedence.
     pub(super) fn is_contextual(&self, ctx: &PluginContext, ir: &IrFile) -> bool {
-        self.declared
-            .is_some_and(|class| super::property_is_contextual(ctx, ir, class, &self.name))
+        match &self.declared {
+            ElementDeclaration::Property(class) => {
+                super::property_is_contextual(ctx, ir, *class, &self.name)
+            }
+            ElementDeclaration::Published {
+                serializer,
+                contextual,
+                ..
+            } => *contextual && serializer.is_none(),
+        }
     }
 
     /// The element's declared type as its property spells it, type-use annotations included.
     pub(super) fn type_spelling(&self, ctx: &PluginContext, ir: &IrFile) -> crate::ir::Spelled {
-        self.declared.map_or_else(
-            || crate::ir::Spelled::NONE.clone(),
-            |class| {
-                super::type_argument_serializers::declared_type_spelling(ctx, ir, class, &self.name)
-            },
-        )
+        match &self.declared {
+            ElementDeclaration::Property(class) => {
+                super::type_argument_serializers::declared_type_spelling(
+                    ctx, ir, *class, &self.name,
+                )
+            }
+            ElementDeclaration::Published { .. } => crate::ir::Spelled::NONE.clone(),
+        }
     }
 
     /// The element's name on the wire.
     pub(super) fn serial_name(&self, ctx: &PluginContext, ir: &IrFile) -> KtString {
-        self.declared
-            .and_then(|class| super::serial_name_of(ctx, ir, class, &self.name))
-            .unwrap_or_else(|| KtString::from(self.name.clone()))
+        match &self.declared {
+            ElementDeclaration::Property(class) => {
+                super::serial_name_of(ctx, ir, *class, &self.name)
+            }
+            ElementDeclaration::Published { serial_name, .. } => serial_name.clone(),
+        }
+        .unwrap_or_else(|| KtString::from(self.name.clone()))
     }
 }
 
@@ -233,7 +265,11 @@ impl SerialElements {
                     // that superclass's type parameters; the class sees its own arguments.
                     let ty = ty_subst_keep_unbound(element.ty, &self.inherited_bindings);
                     wire.push(WireElement {
-                        declared: None,
+                        declared: ElementDeclaration::Published {
+                            serial_name: element.serial_name.clone(),
+                            serializer: element.serializer,
+                            contextual: element.contextual,
+                        },
                         name: element.name.to_string(),
                         ty,
                         serializer_ty: ty,
@@ -262,7 +298,7 @@ impl SerialElements {
                 ty_subst_keep_unbound(ty, &self.inherited_bindings)
             };
             wire.push(WireElement {
-                declared: Some(class),
+                declared: ElementDeclaration::Property(class),
                 name,
                 ty,
                 serializer_ty,

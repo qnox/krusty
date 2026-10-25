@@ -66,6 +66,45 @@ page. The runtime is built non-PIC with a small code model, so the handful of re
 psABI defines for that model is all it applies. The limits are listed in
 `docs/IMPLEMENTATION_PLAN.md` ("Native linker").
 
+### Interface calls: decided at the link
+
+A call through a member of a module interface goes to the member's stub, `kt_itf_<module>_<n>`,
+which no object defines. Every object records, for each type it emits that has instances, which
+function stands at each number of the type's interface table (section
+`.kt_interface_implementations.<module>`, read by the link and not loaded). A record holds the
+member number rather than a reference to the stub: an implementation's own signature can differ
+from the member's (a value-class property implementing a generic one), and the stubs that exist
+are exactly the ones calls use. Only the link sees every type
+of the program, so it decides each member there, in the spirit of the JVM's devirtualization of
+interfaces with one or two implementations, but ahead of time and without deoptimization:
+
+- one function implements the member: the stub symbol is bound to that function, so every call is
+  a direct call;
+- two functions implement it, and one of them is reached from a single type: the stub compares the
+  receiver's type with that type and jumps directly to either function;
+- otherwise: the stub reads `receiver.type.itable[i]` and jumps through it.
+
+A stub never makes a frame: it jumps, so the implementation returns straight to the caller. The
+records are what makes this sound, so every type descriptor with instances writes them; a
+descriptor that is only ever a supertype (an interface, an abstract or sealed class) writes none.
+
+A member number means something only in the module that numbered it. Each module therefore also
+names, per number, the KLIB declaration identity of every interface function standing there
+(section `.kt_interface_identities.<module>`), and a class of a dependent module that implements a
+dependency's interface records its implementation by that identity
+(`.kt_interface_dependency_implementations`), its own override or the dependency's exported
+default. The link joins the two, so a dependency's stub sees every implementation in the program.
+A property's getter and setter are named by the property's own KLIB signature and the accessor's
+role, so an implementation overriding the property and one inheriting the dependency's exported
+accessor default are recorded the same way.
+
+The interface tables are the link's as well. Only a member whose stub looks a table up needs an
+entry, so the link numbers just those members, program-wide, each at the lowest index that no
+other such member holds in a table of a type implementing it, builds each type's table from the
+records, and points the type's `KType.itable` at it; the code generator leaves the field empty.
+Two members no type implements both share an index, so a table is as short as the members its
+type actually reaches through a table lookup.
+
 ### Importing from shared libraries: Go's split
 
 Which programs depend on a C library at run time follows Go and its cgo mode:

@@ -132,3 +132,91 @@ fn dependency_defaults_come_from_annotation_default() {
         class_names(&classes.reference)
     );
 }
+
+// PLATFORM-SPECIFIC: these pin the JVM class tokens a class-literal default lowers to.
+const WRAPPER_DECLARATIONS: &str = "package sample\n\
+import kotlin.reflect.KClass\n\
+annotation class ClassDefaults(\n\
+    val boxed: KClass<*> = java.lang.Integer::class,\n\
+    val primitive: KClass<*> = Int::class,\n\
+    val both: Array<KClass<*>> = [java.lang.Integer::class, Int::class],\n\
+)\n";
+
+const WRAPPER_USE: &str = "package sample\n\
+@ClassDefaults\n\
+class Annotated\n\
+fun describe(annotation: ClassDefaults): String =\n\
+    (listOf(annotation.boxed, annotation.primitive) + annotation.both).joinToString { it.java.name }\n\
+fun box(): String {\n\
+    val read = Annotated::class.java.getAnnotation(ClassDefaults::class.java)\n\
+    if (describe(read) != \"java.lang.Integer, int, java.lang.Integer, int\") return \"read: \" + describe(read)\n\
+    val built = ClassDefaults()\n\
+    if (describe(built) != \"int, int, int, int\") return \"built: \" + describe(built)\n\
+    return \"OK\"\n\
+}\n";
+
+/// A Kotlin dependency's `AnnotationDefault` names `java.lang.Integer` for `java.lang.Integer::class`,
+/// which is `Int::class` in Kotlin: kotlinc constructs the default as `int`, while reading the
+/// application back through reflection keeps the wrapper.
+#[test]
+fn a_dependency_wrapper_class_default_is_the_kotlin_primitive_like_kotlinc() {
+    let library = common::kotlinc_library(WRAPPER_DECLARATIONS).expect("reference toolchain");
+    assert_eq!(
+        common::kotlinc_box_files_result_with_classpath(
+            &[("Use.kt", WRAPPER_USE)],
+            "sample.UseKt",
+            std::slice::from_ref(&library),
+        ),
+        "OK"
+    );
+    assert_eq!(
+        common::expect_box_run_against_kotlinc(WRAPPER_DECLARATIONS, WRAPPER_USE).as_deref(),
+        Some("OK")
+    );
+    assert_eq!(
+        common::expect_box_run_against(
+            "annotation_wrapper_class_defaults",
+            WRAPPER_DECLARATIONS,
+            WRAPPER_USE
+        )
+        .as_deref(),
+        Some("OK")
+    );
+}
+
+// PLATFORM-SPECIFIC: `Unit::class` is the JVM class `kotlin.Unit`, never `void`.
+const UNIT_CLASS: &str = "package sample\n\
+import kotlin.reflect.KClass\n\
+annotation class Kind(val value: KClass<*> = Unit::class)\n\
+@Kind(Unit::class)\n\
+class Written\n\
+@Kind\n\
+class Defaulted\n\
+fun box(): String {\n\
+    val written = Written::class.java.getAnnotation(Kind::class.java).value.java.name\n\
+    val defaulted = Defaulted::class.java.getAnnotation(Kind::class.java).value.java.name\n\
+    val built = Kind().value.java.name\n\
+    if (written != \"kotlin.Unit\" || defaulted != \"kotlin.Unit\" || built != \"kotlin.Unit\") {\n\
+        return \"$written $defaulted $built\"\n\
+    }\n\
+    return \"OK\"\n\
+}\n";
+
+#[test]
+fn a_unit_class_literal_argument_and_default_name_kotlin_unit_like_kotlinc() {
+    let sources = [("Kind.kt", UNIT_CLASS)];
+    assert_eq!(
+        common::kotlinc_box_files_result(&sources, "sample.KindKt"),
+        "OK"
+    );
+    assert_eq!(
+        common::compile_and_run_files_with_stdlib(&sources).as_deref(),
+        Some("OK")
+    );
+    let classes = common::classes_against_kotlinc_module(&sources);
+    assert_eq!(
+        element_defaults(&classes.krusty, "sample/Kind"),
+        element_defaults(&classes.reference, "sample/Kind"),
+        "Kind: AnnotationDefault values diverge from kotlinc"
+    );
+}

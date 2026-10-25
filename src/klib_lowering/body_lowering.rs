@@ -16,6 +16,7 @@ use crate::fx_hash::{HashMap, HashSet};
 mod arrays;
 mod blocks;
 mod calls;
+mod class_initializers;
 mod class_literals;
 mod closures;
 mod compiler_blocks;
@@ -84,7 +85,11 @@ pub(super) trait CallLinker {
     fn link(&mut self, ir: &mut IrFile, callee: &KlibPublicIdSignature) -> Lowered<LinkedCallee>;
 
     /// The dependency constructor a constructor call of the public declaration `callee` invokes.
-    fn link_constructor(&mut self, callee: &KlibPublicIdSignature) -> Lowered<LinkedConstructor>;
+    fn link_constructor(
+        &mut self,
+        ir: &mut IrFile,
+        callee: &KlibPublicIdSignature,
+    ) -> Lowered<LinkedConstructor>;
 
     /// The dependency property a call of its accessor `callee` reads or writes.
     fn link_accessor(&mut self, callee: &KlibAccessorIdSignature) -> Lowered<LinkedAccessor>;
@@ -159,6 +164,7 @@ pub(super) struct BodyLowering<'a> {
     /// The coercions of an erased body's values to their erasure, which a conversion back to the
     /// declared type cancels.
     erasure_coercions: HashSet<ExprId>,
+    initialization: Option<class_initializers::InitializationFrame<'a>>,
 }
 
 impl<'a> BodyLowering<'a> {
@@ -184,6 +190,7 @@ impl<'a> BodyLowering<'a> {
             loops: Vec::new(),
             breakable_loops: HashSet::default(),
             erasure_coercions: HashSet::default(),
+            initialization: None,
         }
     }
 
@@ -367,8 +374,31 @@ impl<'a> BodyLowering<'a> {
                 let ty = self.ty(expression, "type operator")?;
                 return self.type_operator(*operator, *operand, *argument, ty);
             }
-            KlibIrExprKind::GetField { .. } => return unsupported("a field read"),
-            KlibIrExprKind::SetField { .. } => return unsupported("a field write"),
+            KlibIrExprKind::GetField {
+                symbol,
+                receiver,
+                super_qualifier,
+                ..
+            } => {
+                if super_qualifier.is_some() {
+                    return unsupported("a superclass field read");
+                }
+                let ty = self.ty(expression, "field read")?;
+                return self.initialized_field(symbol, *receiver, None, ty);
+            }
+            KlibIrExprKind::SetField {
+                symbol,
+                receiver,
+                value,
+                super_qualifier,
+                ..
+            } => {
+                if super_qualifier.is_some() {
+                    return unsupported("a superclass field write");
+                }
+                let ty = self.ty(expression, "field write")?;
+                return self.initialized_field(symbol, *receiver, Some(*value), ty);
+            }
             KlibIrExprKind::GetObject(symbol) => {
                 let ty = self.ty(expression, "object value")?;
                 return self.object_value(symbol, ty);

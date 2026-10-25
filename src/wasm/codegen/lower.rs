@@ -33,6 +33,8 @@ pub(super) fn is_direct_operation(operation: crate::backend::BackendCompilerIntr
         || operation == crate::backend::BackendCompilerIntrinsic::ThrowableMessage
 }
 
+use crate::backend::class_tables::module_interfaces::ModuleInterfaces;
+use crate::backend::class_tables::module_slots::ModuleSlotPlan;
 use crate::backend::{CheckedBackendCallables, DependencyExportSignatures};
 use crate::ir::{
     module_override_callable, Callee, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic,
@@ -59,17 +61,44 @@ pub(super) struct LoweredFile {
     pub(super) initializer: Option<u32>,
 }
 
-/// Lower every function and class of `ir` into `module`.
+/// One file's checked IR and the facts frozen beside it.
+pub(super) struct FileInput<'a> {
+    pub(super) ir: &'a IrFile,
+    pub(super) properties: &'a RealizedProperties,
+    pub(super) callables: &'a CheckedBackendCallables,
+    pub(super) dependency_exports: &'a DependencyExportSignatures,
+    /// The source module the file belongs to, which numbers its interfaces' members.
+    pub(super) module_name: &'a str,
+    pub(super) plan: &'a ModuleSlotPlan,
+}
+
+/// The program a file is lowered into.
+pub(super) struct ModuleState<'a> {
+    pub(super) module: &'a mut Module,
+    pub(super) runtime: &'a mut Runtime,
+    pub(super) callables: &'a mut CallableRegistry,
+    pub(super) properties: &'a mut PropertyRegistry,
+}
+
+/// Lower every function and class of `file` into the program.
 pub(super) fn lower_file(
-    ir: &IrFile,
-    properties: &RealizedProperties,
-    callables: &CheckedBackendCallables,
-    dependency_exports: &DependencyExportSignatures,
-    module: &mut Module,
-    runtime: &mut Runtime,
-    callable_registry: &mut CallableRegistry,
-    property_registry: &mut PropertyRegistry,
+    file: FileInput<'_>,
+    state: ModuleState<'_>,
 ) -> Result<LoweredFile, Unsupported> {
+    let FileInput {
+        ir,
+        properties,
+        callables,
+        dependency_exports,
+        module_name,
+        plan,
+    } = file;
+    let ModuleState {
+        module,
+        runtime,
+        callables: callable_registry,
+        properties: property_registry,
+    } = state;
     for property in &ir.statics {
         if property.owner.is_some() {
             return Err("a static property of a class".to_string());
@@ -136,15 +165,29 @@ pub(super) fn lower_file(
     let classes = if ir.classes.is_empty() {
         None
     } else {
-        Some(super::classes::declare(
-            ir,
-            module,
-            &mut runtime.objects,
-            &indices,
-            properties,
-        )?)
+        let mut classes =
+            super::classes::declare(ir, module, &mut runtime.objects, &indices, properties, plan)?;
+        super::interface_members::record(
+            &super::interface_members::Recording {
+                ir,
+                module_name,
+                numbers: plan.interfaces(),
+                functions: &indices,
+                callables,
+                exports: dependency_exports,
+            },
+            &mut classes,
+            &mut super::interface_members::Destination {
+                module: &mut *module,
+                objects: &mut runtime.objects,
+                callables: &mut *callable_registry,
+            },
+        )?;
+        Some(classes)
     };
     let context = FileContext {
+        module_name,
+        numbers: plan.interfaces(),
         ir,
         functions: &indices,
         default_functions: &default_indices,
@@ -284,9 +327,37 @@ pub(super) fn lower_file(
     })
 }
 
+/// Lower `ir` alone into `started`, as the one file of a module declaring no interface.
+#[cfg(test)]
+fn lower_alone(
+    ir: &IrFile,
+    properties: &RealizedProperties,
+    started: &mut super::Started,
+) -> Result<LoweredFile, Unsupported> {
+    lower_file(
+        FileInput {
+            ir,
+            properties,
+            callables: &CheckedBackendCallables::default(),
+            dependency_exports: &DependencyExportSignatures::default(),
+            module_name: "main",
+            plan: &ModuleSlotPlan::empty(),
+        },
+        ModuleState {
+            module: &mut started.module,
+            runtime: &mut started.runtime,
+            callables: &mut started.callables,
+            properties: &mut started.properties,
+        },
+    )
+}
+
 /// What every body of one file reads: the file, and where its functions, properties and classes
 /// went in the module.
 struct FileContext<'a> {
+    module_name: &'a str,
+    /// The module-wide numbers of the module's interface members.
+    numbers: &'a ModuleInterfaces,
     ir: &'a IrFile,
     /// The Wasm function of each emitted function, by `FunId`.
     functions: &'a [Option<u32>],
@@ -479,6 +550,8 @@ struct Loop {
 }
 
 struct Body<'a> {
+    module_name: &'a str,
+    numbers: &'a ModuleInterfaces,
     ir: &'a IrFile,
     module: &'a mut Module,
     runtime: &'a mut Runtime,
@@ -554,6 +627,8 @@ impl<'a> Body<'a> {
                 .map(|(slot, ty)| (slot as u32, *ty)),
         );
         Self {
+            module_name: context.module_name,
+            numbers: context.numbers,
             ir: context.ir,
             module,
             runtime,
@@ -1029,7 +1104,9 @@ impl<'a> Body<'a> {
                 op: op @ (IrTypeOp::Cast | IrTypeOp::CastNonNull),
                 arg,
                 type_operand,
-            } if self.class_of_type(type_operand).is_some() => {
+            } if self.class_of_type(type_operand).is_some()
+                || self.interface_of_type(type_operand).is_some() =>
+            {
                 self.cast(arg, type_operand, op == IrTypeOp::CastNonNull)?
             }
             IrExpr::TypeOp {
@@ -1689,17 +1766,7 @@ mod tests {
         });
         let mut started = super::super::Started::new(target);
         let properties = crate::backend::local_properties::realize(&mut ir).unwrap();
-        lower_file(
-            &ir,
-            &properties,
-            &CheckedBackendCallables::default(),
-            &DependencyExportSignatures::default(),
-            &mut started.module,
-            &mut started.runtime,
-            &mut started.callables,
-            &mut started.properties,
-        )
-        .map(|_| ())
+        lower_alone(&ir, &properties, &mut started).map(|_| ())
     }
 
     #[test]
