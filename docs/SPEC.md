@@ -9960,6 +9960,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   removes the elvis's check, where it proves the value non-null (a `new`, a string constant).
   Common lowering therefore never fuses the two guards on the selector's type. Test:
   `tests/elvis_over_safe_call_e2e.rs`.
+- **An elvis lays out its left value first.** fir2ir builds `a ?: b` as
+  `{ val tmp = a; when { tmp == null -> b; else -> tmp } }`, and kotlinc's
+  `JvmSafeCallChainFoldingLowering.foldElvis` rebuilds it as `when { tmp != null -> tmp; else -> b }`.
+  The JVM layout is therefore `ifnull R; <tmp>; goto E; R: <b>; E:`. Where the left value needs no
+  conversion, the negated-jumps pass turns that into `ifnonnull E`. Where it is unboxed (`Int?` to
+  `Int`), the `intValue` stays in the fall-through branch. The fold's right-side branch is an
+  `irTrue` condition at the elvis's position, which marks the elvis's line on a `nop`, so the right
+  side's own line starts after the `pop` at the null target, never on it. Common lowering keeps
+  fir2ir's order and records the `when` as an elvis with its line, and the JVM emitter applies the
+  fold. Test:
+  `tests/elvis_branch_order_e2e.rs`.
 
 - **An integer-constant branch takes a sibling primitive.** An `if`, `when`, elvis, or `try` with no
   expected type still adapts an integer-constant branch to the non-null primitive of the other
