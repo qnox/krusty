@@ -2196,6 +2196,8 @@ mod private_constructor_accessors_e2e;
 mod private_inline_property_ref_e2e;
 #[path = "read_only_iterator_stubs_e2e.rs"]
 mod read_only_iterator_stubs_e2e;
+#[path = "read_only_stub_inheritability_e2e.rs"]
+mod read_only_stub_inheritability_e2e;
 #[path = "redundant_checkcast_e2e.rs"]
 mod redundant_checkcast_e2e;
 #[path = "redundant_checkcasts_before_aastore_e2e.rs"]
