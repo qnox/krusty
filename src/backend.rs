@@ -11,6 +11,7 @@ mod dependency_facts;
 mod dependency_metadata;
 mod dependency_signature;
 mod entry;
+pub(crate) mod interface_identity;
 pub(crate) mod local_properties;
 mod module_facts;
 
