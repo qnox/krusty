@@ -29,10 +29,12 @@ on:
 permissions:
   contents: read
 
-# One corpus run at a time; a scheduled run waits for a manual one instead of cancelling it.
+# One corpus run at a time. Neither a running nor a pending run is cancelled: `queue: max` keeps
+# every waiting run queued instead of the single pending slot a newer run would replace.
 concurrency:
   group: oss-corpus
   cancel-in-progress: false
+  queue: max
 
 jobs:
   prepare:
