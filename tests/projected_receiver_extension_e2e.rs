@@ -95,3 +95,97 @@ fun box(): String {
 fn receiver_captures_preserve_invariant_covariant_contravariant_and_star_results() {
     common::expect_box_same_as_kotlinc(CAPTURED_RECEIVERS, "projected_receiver_capture_results");
 }
+
+#[test]
+fn receiver_captures_reject_incompatible_explicit_arguments_and_closed_writes() {
+    let source = r#"
+interface Token<A>
+fun <T> Token<T>.echo(value: T): T = value
+fun wrongExplicit(value: Token<in Number>) = value.echo<String>("wrong")
+fun closedOut(value: Token<out Number>) = value.echo(7)
+fun closedStar(value: Token<*>) = value.echo(7)
+"#;
+    common::assert_errors_match_kotlinc(&[("Main.kt", source)], &[]);
+}
+
+#[test]
+fn closed_receiver_input_named_argument_diagnostics_match_kotlinc() {
+    let source = r#"
+interface Bucket<A>
+fun <T> Bucket<T>.put(prefix: String, value: T) {}
+fun closed(value: Bucket<out Number>) = value.put(value = 7, prefix = "ok")
+fun star(value: Bucket<*>) = value.put(prefix = "ok", value = 7)
+"#;
+    common::assert_errors_match_kotlinc(&[("Main.kt", source)], &[]);
+}
+
+#[test]
+fn named_whole_array_varargs_retain_the_mapped_array_slot_in_recovery() {
+    let source = r#"
+interface Bucket<A>
+fun <T> Bucket<T>.put(vararg values: T, prefix: String) {}
+fun wrong(value: Bucket<Number>, elements: Array<Number>) =
+    value.put(values = elements, prefix = 7)
+"#;
+    common::assert_errors_match_kotlinc(&[("Main.kt", source)], &[]);
+}
+
+#[test]
+fn closed_receiver_input_nullable_argument_diagnostics_match_kotlinc() {
+    let source = r#"
+interface Bucket<A>
+fun <T> Bucket<T>.put(value: T?) {}
+fun allowed(value: Bucket<out Number>, star: Bucket<*>) {
+    value.put(null)
+    star.put(null)
+}
+fun closed(value: Bucket<out Number>) = value.put(7)
+fun star(value: Bucket<*>) = value.put(7)
+"#;
+    common::assert_errors_match_kotlinc(&[("Main.kt", source)], &[]);
+}
+
+#[test]
+fn closed_receiver_input_unrelated_argument_diagnostics_match_kotlinc() {
+    let source = r#"
+interface Bucket<A>
+fun <T> Bucket<T>.fixed(value: String) {}
+fun <T> Bucket<T>.bottom(value: Nothing) {}
+fun unrelated(value: Bucket<out Number>) = value.fixed(7)
+fun declaredBottom(value: Bucket<*>) = value.bottom(7)
+"#;
+    common::assert_errors_match_kotlinc(&[("Main.kt", source)], &[]);
+}
+
+#[test]
+fn closed_receiver_input_context_argument_diagnostics_match_kotlinc() {
+    let source = r#"
+// LANGUAGE: +ContextParameters
+interface Bucket<A>
+context(prefix: String)
+fun <T> Bucket<T>.put(value: T) {}
+context(prefix: String)
+fun closed(value: Bucket<out Number>) = value.put(7)
+context(prefix: String)
+fun star(value: Bucket<*>) = value.put(7)
+"#;
+    common::assert_errors_match_kotlinc(&[("Main.kt", source)], &[]);
+}
+
+#[test]
+fn direct_receiver_inputs_follow_each_declared_projection() {
+    let source = r#"
+interface Bucket<A, B>
+fun <A, B> Bucket<A, B>.first(value: A) {}
+fun <A, B> Bucket<A, B>.second(value: B) {}
+fun outThenStar(value: Bucket<out Number, *>) {
+    value.first(7)
+    value.second(7)
+}
+fun starThenOut(value: Bucket<*, out Number>) {
+    value.first(7)
+    value.second(7)
+}
+"#;
+    common::assert_errors_match_kotlinc(&[("Main.kt", source)], &[]);
+}

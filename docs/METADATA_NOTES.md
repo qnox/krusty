@@ -1136,6 +1136,14 @@ parameters. A satisfiable trial specializes both receiver sides before strict co
 publishing new declaration facts. Alias expansion, selected constructor identity and retained
 declaration parameters remain unchanged; no metadata wire or physical ABI change is involved.
 
+## Projected receiver input diagnostics
+
+Projected receiver input restrictions are compiler-internal facts from the shared position-aware
+specialization walk. They change no metadata type, physical descriptor or provider identity.
+Receiver constraints remain distinct from expected-result constraints, and nested projections
+retain their original declaration shape; the direct-input diagnostic does not invent a captured
+classifier or globally rewrite stars.
+
 ## Annotation classifier nesting
 
 JVM annotation interfaces use the same retained `InnerClasses` inventory as other declared

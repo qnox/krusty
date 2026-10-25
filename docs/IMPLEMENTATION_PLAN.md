@@ -6014,6 +6014,14 @@ reference controls cover source dependent bounds and independently bounded depen
 with width, Object, exact-wrapper and runtime controls. The dependency inner-constructor frontend
 prerequisite landed in #2593; its declaration normalization remains separate from this representation fix (#2590).
 
+## Direct projected input diagnostics
+
+Direct projected-input diagnostics share input specialization with ordinary selection and retain
+the source argument map, receiver-only constraints and declaration display. Exact ledger controls
+cover out/star receivers, nullability, named/context arguments and explicit receiver precedence.
+Captured vararg admission (#2648) and nested captured-type identity diagnostics (#2649) remain
+separate work; their complete failing controls are preserved.
+
 ## Receiver-bound constructor constraints
 
 Inner-alias conformance recovery shares constructor-reference publication across direct and

@@ -36,6 +36,20 @@ physical Java classifiers retain invariant variance while semantic Kotlin views 
 declared variance. Missing headers, cyclic owners and unavailable bound scopes decline instead of
 becoming nongeneric declarations or guessed `Any` bounds.
 
+## Direct projected receiver inputs
+
+Rejected-call diagnostics retain the canonical input specialization's reason when an out or star
+capture closes a direct value parameter. The mapped source argument owns the prohibition span and
+the retained declaration owns its display. Nullability preserves that direct-input evidence;
+nested function and classifier inputs keep their own mismatch diagnostics. A literal `Nothing`
+parameter or an unrelated projected receiver does not establish a prohibition.
+
+Only receiver constraints authenticate this evidence. An expected result type cannot introduce a
+receiver projection, and explicit type arguments retain their receiver-mismatch precedence.
+Named whole-array varargs retain their array slot during recovery. Complete differential controls
+live in `tests/projected_receiver_extension_e2e.rs`; captured vararg admission and nested captured
+type identities remain separate follow-ups in #2648 and #2649.
+
 ## Selected alias references and receiver captures
 
 An alias constructor selected through an extension lookup facet publishes a constructor reference
