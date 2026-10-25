@@ -41,6 +41,9 @@ use std::sync::OnceLock;
 use crate::support::kotlin::{version, Compiler, Resolving};
 use crate::support::oracle::{scratch, script, Output};
 
+#[cfg(test)]
+mod recorder_lock;
+
 pub const JDK: &str = "jdk";
 pub const RECORD: &str = "record";
 /// The line the recorder writes after each invocation's arguments.
@@ -55,12 +58,12 @@ if [ \"${1:-}\" = compilation-fingerprint ]; then exit 1; fi
 for argument in \"$@\"; do
   case $argument in -module-name=*) module=${argument#-module-name=} ;; esac
 done
-until mkdir \"$KRUSTY_RECORD.lock\" 2>/dev/null; do sleep 0.01; done
+until (set -C; : > \"$KRUSTY_RECORD.lock\") 2>/dev/null; do sleep 0.01; done
 {
   for argument in \"$@\"; do printf '%s\\n' \"$argument\"; done
   printf '%s\\n' '----'
 } >> \"$KRUSTY_RECORD\"
-rmdir \"$KRUSTY_RECORD.lock\"
+rm \"$KRUSTY_RECORD.lock\"
 if [ -n \"${KRUSTY_RECORDER_FAIL:-}\" ] && [ \"$module\" = \"$KRUSTY_RECORDER_FAIL\" ]; then
   echo \"recorder: failing $module\" >&2
   exit 3
@@ -98,9 +101,9 @@ arguments=$(
     esac
   done
 )
-until mkdir \"$KRUSTY_RECORD.lock\" 2>/dev/null; do sleep 0.01; done
+until (set -C; : > \"$KRUSTY_RECORD.lock\") 2>/dev/null; do sleep 0.01; done
 printf '%s\\n%s\\n' \"$arguments\" '----' >> \"$KRUSTY_RECORD\"
-rmdir \"$KRUSTY_RECORD.lock\"
+rm \"$KRUSTY_RECORD.lock\"
 base=$(printf '%s\\n' \"$arguments\" | sed -n 's/^-project-base-dir=//p')
 output=$(printf '%s\\n' \"$arguments\" | sed -n 's/^-output-base-dir=//p')
 if [ -d \"$base/ksp-generates\" ]; then
@@ -140,12 +143,12 @@ wait_for_event() {
   done
 }
 event start
-until mkdir \"$KRUSTY_RECORD.lock\" 2>/dev/null; do sleep 0.01; done
+until (set -C; : > \"$KRUSTY_RECORD.lock\") 2>/dev/null; do sleep 0.01; done
 {
   for argument in \"$@\"; do printf '%s\\n' \"$argument\"; done
   printf '%s\\n' '----'
 } >> \"$KRUSTY_RECORD\"
-rmdir \"$KRUSTY_RECORD.lock\"
+rm \"$KRUSTY_RECORD.lock\"
 if [ -n \"${KRUSTY_RECORDER_FAIL:-}\" ] && [ \"$module\" = \"$KRUSTY_RECORDER_FAIL\" ]; then
   if [ -n \"${KRUSTY_RECORDER_FAILURE_COMPANION:-}\" ]; then
     wait_for_event \"$KRUSTY_RECORDER_FAILURE_COMPANION\" start

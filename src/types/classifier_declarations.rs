@@ -88,6 +88,12 @@ pub struct SerializableElement {
     /// The input may omit the element: its property is not a primary-constructor parameter
     /// without a default value.
     pub optional: bool,
+    /// The element's name on the wire when the property's `@SerialName` gives one.
+    pub serial_name: Option<crate::kt_string::KtString>,
+    /// The serializer the property's `@Serializable(with = …)` names.
+    pub serializer: Option<TypeName>,
+    /// The property is `@Contextual`.
+    pub contextual: bool,
 }
 
 /// Declaration facts of a classifier, as its declaring compilation fixed them.

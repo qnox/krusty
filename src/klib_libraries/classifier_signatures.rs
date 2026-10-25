@@ -41,6 +41,8 @@ pub(super) struct SignedClassifier {
     /// Exact declaring KLIB module identity, when this classifier came from an archive.
     pub(super) module: Option<String>,
     pub(super) modality: KotlinModality,
+    pub(super) is_value: bool,
+    pub(super) primary_constructor: Option<KlibPublicIdSignature>,
     pub(super) type_parameters: ClassTypeParameters,
     /// Whether this classifier's KLIB is a friend of the current compilation.
     pub(super) internal_friend: bool,
@@ -176,6 +178,21 @@ pub(super) fn sign_package_classes(
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        let mut primaries = class
+            .constructors
+            .iter()
+            .zip(&constructor_signatures)
+            .filter(|(constructor, _)| constructor.is_primary)
+            .map(|(_, signature)| signature.clone());
+        let primary_constructor = primaries.next();
+        if primaries.next().is_some() {
+            return Err(unsignable(
+                package,
+                &local,
+                "duplicate primary constructor declarations",
+            ));
+        }
+
         // The class itself stays in place: a class nested in it still reads it as its container.
         let class = classes.get_mut(&name).expect("the class was just read");
         let mut constructors = Vec::new();
@@ -265,6 +282,8 @@ pub(super) fn sign_package_classes(
                 shape,
                 module: module.map(str::to_owned),
                 modality: class.modality,
+                is_value: crate::metadata::semantic::class_is_value(class.metadata_flags),
+                primary_constructor,
                 type_parameters,
                 internal_friend,
                 constructors,

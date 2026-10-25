@@ -8265,6 +8265,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   signature, arguments and nullability included (`Map<String, String>`, `String?`, a class type
   parameter), and never from the field's erased classifier. Test:
   `tests/classpath_jvmfield_property_type_e2e.rs`.
+- **`Unit::class` is an annotation argument naming `kotlin.Unit`.** Written as an argument or as an
+  annotation parameter's default, `Unit::class` folds to a constant, and the class file records the
+  class `Lkotlin/Unit;`, never `void`. A dependency annotation's `java.lang.Integer::class` default
+  is `Int::class` to kotlinc, so a Kotlin-metadata class reads that `AnnotationDefault` as the
+  primitive and a construction loads `int`; reflection over an application still reports the
+  recorded `java.lang.Integer`. A Java annotation keeps the wrapper. Tests (JVM-specific):
+  `tests/annotation_instance_defaults_e2e.rs`.
 - **A primitive class literal is the primitive's class.** `Int::class` loads `Integer.TYPE` (the
   `int` class) before `Reflection.getOrCreateKotlinClass`, as kotlinc's `generateClassInstance`
   does for a primitive without `wrapPrimitives`. `T::class` over a reified type parameter loads the
@@ -11639,10 +11646,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   same list (field 18000) and constructor flags, and trusts the annotation only when the classfile
   has the generated members with their exact descriptors: a public static `write$Self(self,
   output, descriptor)` and a public constructor taking the `seen` masks, each element's
-  deserialization parameter type in wire order, and the marker. A dependency superclass compiled
-  without the plugin, whose element or element type
-  carries annotations (`List<@Serializable(with = S::class) Item>` serializes with `S`), that
-  publishes no order for its stored properties, declines the file rather than guess.
+  deserialization parameter type in wire order, and the marker. An element's property annotations
+  live on its `get<Name>$annotations()` marker, which the property's metadata names; kotlinc reads
+  them there, and krusty reads that method's annotations with their arguments from the class
+  file. `@SerialName` renames the element in the subclass's descriptor. A property-level
+  `@Serializable(with = S::class)` makes `S` the element's serializer, and `@Contextual` makes it a
+  `ContextualSerializer`; an annotation that does not concern serialization changes nothing. `S`
+  must be an object: a serializer class needs a constructor call, and only a source annotation
+  carries the frontend's checked constructor selection, so a class serializer declines (tracked
+  as a follow-up) rather than have the plugin pick a constructor by name. A
+  dependency superclass compiled without the plugin, an element that is `@Required` or
+  `@Polymorphic` or carries a `@SerialInfo` annotation (which the subclass's descriptor would push
+  as an instance of a generated implementation class), an element type that carries annotations
+  (`List<@Serializable(with = S::class) Item>` serializes with `S`), or a superclass that
+  publishes no order for its stored properties declines the file rather than guess.
   A generic dependency superclass's elements are typed over its own type parameters, which its
   metadata names. A subclass inherits them typed by the arguments it gives the superclass, and
   further up the chain the arguments each class gives its own superclass are substituted the same
@@ -11678,6 +11695,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and can read only the receiver, so its locals are renumbered from above every constructor's
   values.
   Test: `tests/serializable_parent_same_module_e2e.rs`.
+- **A serializable class's `init` blocks run in its deserialization constructor.** kotlinc runs
+  each `init` block there too, at its place among the property initializers, after the
+  superclass delegation and the constructor properties' stores. A block that reads a constructor
+  property reads it off the object the constructor has already stored, and its locals move above
+  the constructor's parameters (the marker included), as a copied default's do. kotlinc copies the
+  block's statements into the constructor itself, so a block's local stays in the
+  `LocalVariableTable` through the constructor's return and is listed ahead of `this`, as a
+  generated constructor's other body locals are. Only the `init` block itself is spliced: a nested
+  scope, an inline call's region, or any other block inside it keeps its own block and the facts
+  recorded on it, so its locals end where kotlinc's do. The seen-bit test
+  of an optional element that follows a block is attributed to the class's start line, like its
+  store. krusty skipped the blocks, so a decoded object missed their side effects. A block that
+  reads a constructor parameter which is not a property has nothing to read there and keeps the
+  file unsupported.
+  Test: `tests/serializable_init_replay_e2e.rs`.
+- **A labelled return to a lambda is allowed in a class initializer.** An `init` block or a
+  property initializer has no declaration a `return` could leave, so kotlinc reports `'return' is
+  prohibited here.` for a return that targets it, inside a lambda or not. A return labelled with an
+  enclosing lambda (`step { if (id < 0) return@step }`) leaves only that lambda and is accepted.
+  krusty rejected both, because it checked the declaration before resolving the return's target.
+  Test: `tests/initializer_lambda_return_e2e.rs`.
 - **A serializable default that reads another property keeps kotlinc's line numbers.** When
   `write$Self` or the deserialization constructor evaluates a default such as `id + 1`,
   `"n" + code` or `this.id * 2`, kotlinc marks the default's own line where it starts and keeps
@@ -15244,8 +15282,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   or the body the most derived interface declaring the member supplies, which a subclass inherits.
   A function default declared in another file is that file's exported member entry point, taking
   the receiver and the member's declared carriers. A call through an interface in any file, and a
-  property read or write through one, loads the receiver's interface table and calls the entry at
-  the member's number. Refused, by file: a property default of an interface of another file, a
+  property read or write through one, calls the member's stub, which the link writes from every
+  type of the program (`docs/NATIVE.md`, "Interface calls: decided at the link"): a direct call
+  when one function implements the member, a type comparison when two do and one of them is reached
+  from a single type, and otherwise the entry at the member's number in the receiver's interface
+  table. Refused, by file: a property default of an interface of another file, a
   default of another file reached through a bridge, an implementation of an interface member of
   another file that carries values differently, an interface member implemented by a declaration
   this file has no slot for (one outside the module), an instantiable class leaving a member with
@@ -15260,7 +15301,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_generic_member_reaches_an_implementation_through_its_bridge`,
   `a_lambda_converted_to_a_functional_interface_answers_another_file`,
   `a_default_declared_in_another_file_answers_for_an_implementor`,
-  `a_default_reached_through_a_bridge_of_another_file_declines`).
+  `a_default_reached_through_a_bridge_of_another_file_declines`) and
+  `tests/native_interface_call_stubs_e2e.rs`.
 - **Native: the public C ABI is primitives, String, and a Unit result.** A public top-level
   function whose parameters are primitives or `String` and whose result is one of those types or
   `Unit` is declared in the module's C header and exported under that declaration. The export runs
@@ -16291,8 +16333,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   element it did not write, in declaration order (origin `SYNTHETIC`); `defaultArguments` are
   every element default. An omitted vararg element is not listed, an explicit empty spread is an
   empty list, and a spread is flattened. Values are folded constants: boxed primitives, a string,
-  an enum entry as its `ENUM_ENTRY` class declaration, a class literal as the class applied to a
-  star for each type parameter, a nested annotation (`SYNTHETIC` when it is a default) with its own
+  an enum entry as its `ENUM_ENTRY` class declaration, a class literal written in source as the
+  class applied to a star for each type parameter, a class literal read from a class file as the
+  Kotlin classifier its JVM class reads as with no type arguments (`void` and `Unit` as
+  `kotlin.Unit`, a primitive and its wrapper as the Kotlin primitive, `int[]` as `kotlin.IntArray`,
+  `String[]` as `kotlin.Array<kotlin.String>`, a Java collection interface as its mutable Kotlin
+  form even when a Kotlin library wrote `List::class`), a nested annotation (`SYNTHETIC` when it is a default) with its own
   arguments in the order it wrote them and its omitted vararg element not listed, and a list for
   an array. A library annotation's defaults are those its class file records, so a vararg
   element declared without one has an empty one. An unprefixed annotation on a constructor `val`
@@ -16303,11 +16349,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   modifiers. An annotation on a classifier, function or constructor has the `shortName` the
   source wrote, an import alias's name when it used one; one on a property, parameter or
   accessor, and a nested one, has its class's simple name. An annotation whose arguments the
-  frontend did not fold, an array class literal, and a
+  frontend did not fold, an array class literal written in source, and a
   non-public compiler-made accessor's modifiers are refused for that
   query only.
-  (`crates/krusty-plugin-host/tests/ksp.rs`, `annotation_arguments_and_accessors_are_what_ksp2_reports`;
-  frontend tests `pass_one_publishes_folded_annotation_element_defaults` and
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `annotation_arguments_and_accessors_are_what_ksp2_reports`,
+  `class_literal_arguments_are_what_ksp2_reports`; frontend tests `pass_one_publishes_folded_annotation_element_defaults` and
   `pass_one_publishes_value_parameter_annotations_as_written`.)
 - **A KSP library class is the declaration KSP2 reads from the classpath.** A processor reaches a
   classpath classifier by name (`getClassDeclarationByName`) or through a source supertype, and
@@ -19064,7 +19110,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   identity and provider handle. Unreferenced declarations and parameter defaults are not roots;
   direct-only inventories used to authenticate intrinsic support remain unchanged. The public
   producer test checks an imported constructor's frozen checked-IR facts separately from Native
-  execution of a supported runtime constructor. This does not implement imported class storage.
+  execution of a supported runtime constructor. Imported ordinary-class storage has a separate
+  admission contract below.
+
+- **Imported ordinary classes initialize from their declared storage.** A reached KLIB constructor
+  can materialize a final, non-generic ordinary class whose sole primary constructor delegates to
+  `Any` and runs its own instance initializer. Exact producer/class/constructor identities, metadata
+  modifiers, receiver and field types must agree with the serialized declarations. Storage comes
+  from actual field declarations, never constructor positions. Constructor arguments remain plain
+  frame values; explicit stores and anonymous initializer blocks execute in declaration order on
+  each fresh instance. The private initialization frame retains its instance receiver and argument
+  identities, including captured values. Preparation and lowering use the same admission plan and
+  follow initializer calls through the existing producer-origin graph.
+  Unsupported inheritance, secondary/default/vararg constructors, value/inner/expect classes,
+  generic classes and member dispatch remain separate capabilities. Existing target runtime
+  constructors retain their frozen external contract. Before target emission, a same-name source
+  classifier, different producer or separately materialized support unit declines explicitly until
+  qualified class facts and constructor exports can connect them safely. No partial support export
+  is published. Tests: `tests/klib_closure_frames_e2e.rs` (unchanged nested constructor execution,
+  ordered initialization and repeated allocation, independent storage/argument layout, and exact
+  source-classifier collision diagnostics), with the JVM oracle preceding Native checks.
 
 - **A KLIB template lowers the forms kotlinc's prepared copy introduces.** A constructor call
   constructs by the provider identity of the exact serialized constructor, with the provider's
@@ -21463,12 +21528,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   instance is a struct whose first field is its dispatch table, followed by its superclasses'
   fields root first and then its own; it is declared a subtype of its superclass's struct, so
   `is`, `!is`, `as` and `as?` against a class are `ref.test`/`ref.cast`, and against an interface
-  test every class of the file implementing it. Slot numbers come from the target-neutral tables
-  Native also uses (`src/backend/class_tables/`): `equals`, `hashCode`, `toString` first by role,
-  one reserved slot, the class's own members, then a program-wide interface region in which an
-  interface member has the same number in every implementing class. Class, interface and `Any`
-  values are carried as `(ref null eq)`, so an override never needs a signature of its own; an
-  override carried differently from the member it overrides (a bridge) declines. `==` on a class
+  call that interface's test function, which tests every struct of the program implementing it.
+  Class slot numbers come from the target-neutral tables Native also uses
+  (`src/backend/class_tables/`): `equals`, `hashCode`, `toString` first by role, one reserved
+  slot, then the class's own members. Interface members are numbered once per module
+  (`ModuleInterfaces`) and published by their backend-neutral identity
+  (`src/backend/interface_identity.rs`), so a dependent module's class implementing a dependency
+  or library interface records its implementation against the declaring module's number. As
+  Native's linker does, Wasm's finalize step writes one stub per interface member once every
+  module is known: a direct call when one function implements it, a `ref.test` choice between
+  two, otherwise an index into the receiver's immutable itable array, packed so no class has two
+  members at one index. An implementation whose reference parameters are narrower than the
+  member's gets an erased-signature thunk that casts them down; one that would have to box a
+  primitive declines (`an interface member implemented with a value it would have to box`).
+  Class, interface and `Any` values are carried as `(ref null eq)`. `==` on a class
   value calls its `equals` slot null-safely, whose default is identity. Erasing a reference to
   `Any?` preserves structural `==` and `!=`: runtime Strings compare UTF-16 contents, class
   instances dispatch their actual `equals` slot, and other GC references use identity. Both
@@ -21533,6 +21606,22 @@ Field descriptor authentication uses physical syntax independently of the constr
 The standalone reader keeps its existing innermost-only interpretation and refuses fields whose
 outer arguments it discards. This boundary supplies lossless evidence for the raw/captured application
 follow-ups; it does not itself publish new raw or captured application semantics.
+
+## JVM boxing at declared operand slots
+
+A scalar consumed by a reference slot is boxed at its own wrapper type, then coerced to the
+slot's reference type with the ordinary JVM reference-coercion rule. A constructor's selected
+declaration retains that slot even when call-site substitution makes its argument a concrete
+scalar: `Outer<O : Number>.Inner<T : O>(T)` receives a boxed `Int` followed by a `Number`
+checkcast, as does an independently bounded `Box<T : Number>(T)`. An `Object` slot or the same
+wrapper needs no extra cast. Unsigned scalars retain their value-class adaptation.
+
+Tests: `tests/constructor_boxing_casts_e2e.rs` compares complete classes with kotlinc for dependent
+and independent source bounds, direct reference parameters, and independently bounded dependency
+parameters. Long, Object and exact-wrapper slots constrain the boundary; source and dependency
+runtime controls check values and single argument evaluation. Dependency inner-constructor
+receiver specialization is supplied by the landed #2593 frontend change; the owned dependency
+controls here retain their independently bounded declarations.
 
 ## Constructor declarations survive receiver specialization
 
