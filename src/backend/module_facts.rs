@@ -1082,6 +1082,23 @@ mod tests {
     }
 
     #[test]
+    fn classifier_declaration_names_retain_companion_segments() {
+        use crate::types::{type_name, ClassifierDeclarationName};
+        let outer = type_name("ownership/companions/Outer");
+        for (source, name) in [
+            ("package ownership.companions\nclass Outer { companion object { class Child } }", "Companion"),
+            ("package ownership.companions\nclass Outer { companion object `Named$Literal` { class Child } }", "Named$Literal"),
+        ] {
+            let facts = classifier_name_snapshot(source);
+            let companion = outer.nested_child(name);
+            assert_eq!(facts.classifier(companion).unwrap().declaration_name,
+                Some(ClassifierDeclarationName::Nested { owner: outer, name: name.into() }));
+            assert_eq!(facts.classifier(companion.nested_child("Child")).unwrap().declaration_name,
+                Some(ClassifierDeclarationName::Nested { owner: companion, name: "Child".into() }));
+        }
+    }
+
+    #[test]
     fn classifier_declaration_names_belong_to_each_snapshot() {
         use crate::types::{type_name, type_name_child, ClassifierDeclarationName};
         let package = type_name("ownership/snapshot");
