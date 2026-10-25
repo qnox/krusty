@@ -215,7 +215,7 @@ impl<'a> FileLowering<'a> {
             .and_then(|owner| self.ir.class_id_by_name(owner))
             .and_then(|class| {
                 let key = model::function_key(self.ir, class, key.function);
-                self.model.slot(class, &key)
+                self.dispatch_of(class, &key)
             });
         if declaration.dispatch_receiver.is_some() && !value_receiver && virtual_slot.is_none() {
             // Calling the declaration directly would run the base's body for a receiver whose
@@ -272,7 +272,7 @@ impl<'a> FileLowering<'a> {
                 .collect();
             let returned = match virtual_slot {
                 Some(slot) => {
-                    body.dispatch(arguments[0], slot, &slots[1..], result, &arguments[1..])?
+                    body.dispatch_through(arguments[0], slot, &slots[1..], result, &arguments[1..])?
                 }
                 None => {
                     let target = target

@@ -426,6 +426,11 @@ pub(crate) fn class_is_data(flags: u64) -> bool {
     flags & (1 << 10) != 0
 }
 
+/// `IS_VALUE` belongs to the metadata class word, independently of an inline representation.
+pub(crate) fn class_is_value(flags: u64) -> bool {
+    flags & (1 << 13) != 0
+}
+
 pub(crate) fn declaration_visibility(flags: u64) -> Visibility {
     match (flags >> 1) & 0x7 {
         1 | 4 => Visibility::Private,

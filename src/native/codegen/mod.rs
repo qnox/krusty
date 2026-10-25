@@ -253,7 +253,7 @@ impl Backend for CraneliftBackend {
             let classes = file.classifiers.module().classes();
             let plan = match super::value_classes::NativeValueClasses::of_module_classes(
                 classes.iter().map(|(name, _)| name),
-                classes.iter().flat_map(|(_, class)| class.carried_types()),
+                classes.carried_types(),
                 &file.classifiers,
             ) {
                 Ok(values) => super::classes::module_plan(classes, &values),
@@ -337,6 +337,7 @@ impl Backend for CraneliftBackend {
                 module_name: file.module_name,
                 unit_kind: file.kind,
                 dependency_exports: &dependency_exports,
+                dependency_signatures: &file.dependency_exports,
                 dependency_symbols: &state.dependency_symbols,
             },
             self.target,
