@@ -157,22 +157,25 @@ impl Checker<'_> {
                 constructor,
                 bound_constructor,
             } => {
-                if let Some(bound) = bound_constructor {
+                let reported_bound = bound_constructor.is_some_and(|bound| {
                     let display = format!("{}.{}", bound.outer.source_name(), constructor);
-                    if self.report_bound_inner_constructor_type_arguments(
+                    self.report_bound_inner_constructor_type_arguments(
                         call, &explicit, &bound, &display,
-                    ) {
-                        return;
-                    }
-                }
-                if !self.report_explicit_constructor_type_argument_bounds(
-                    call,
-                    classifier,
-                    !args.is_empty(),
-                    &explicit,
-                    &constructor,
-                ) {
+                    )
+                });
+                if !reported_bound
+                    && !self.report_explicit_constructor_type_argument_bounds(
+                        call,
+                        classifier,
+                        !args.is_empty(),
+                        &explicit,
+                        &constructor,
+                    )
+                {
                     self.expect_assignable(expected, actual, self.span(call), "type argument");
+                }
+                for &argument in args {
+                    self.report_unbound_call_result_type_parameter(scope, argument);
                 }
             }
         }

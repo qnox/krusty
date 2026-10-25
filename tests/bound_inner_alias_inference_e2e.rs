@@ -60,6 +60,145 @@ const DECLARATIONS: &str = "class Outer<O : Number> { inner class Inner<T : O>(v
     typealias Flip<T, O> = Outer<O>.Inner<T>\n\
     typealias Ignored<U> = Outer<Long>.Inner<Long>\n";
 
+const CALLBACK_DECLARATIONS: &str =
+    "class CallbackOuter<O> { inner class Inner<T>(block: (T) -> String) }\n\
+    typealias Callback<T> = CallbackOuter<Number>.Inner<T>\n";
+
+fn assert_failed_callback_context(declarations: &str, call: &str, expected_count: usize) {
+    let result = common::compiler_diagnostics(
+        &[("Use.kt", &format!("{declarations}{call}"))],
+        &[common::stdlib_jar()],
+    );
+    assert_eq!(
+        common::compiler_errors(&result.reference_stderr).len(),
+        expected_count
+    );
+    common::expect_identical_rejection(&result, "failed alias constructor lambda context");
+}
+
+#[test]
+fn failed_constructor_context_reports_the_open_formal_on_the_written_lambda_parameter() {
+    assert_failed_callback_context(
+        CALLBACK_DECLARATIONS,
+        "fun callback(o: CallbackOuter<Int>) = o.Callback { value -> value.toString() }\n",
+        3,
+    );
+}
+
+#[test]
+fn failed_constructor_context_preserves_an_explicit_lambda_parameter_type() {
+    assert_failed_callback_context(
+        CALLBACK_DECLARATIONS,
+        "fun callback(o: CallbackOuter<Int>) = o.Callback { value: String -> value.toString() }\n",
+        2,
+    );
+}
+
+#[test]
+fn failed_constructor_context_preserves_an_explicit_constructor_type_argument() {
+    assert_failed_callback_context(
+        CALLBACK_DECLARATIONS,
+        "fun callback(o: CallbackOuter<Int>) = o.Callback<String> { value -> value.toString() }\n",
+        1,
+    );
+}
+
+#[test]
+fn failed_constructor_context_does_not_remove_an_independent_lambda_input() {
+    assert_failed_callback_context(
+        "class CallbackOuter<O> { inner class Result<T>(block: (Int) -> T) }\n\
+        typealias Callback<T> = CallbackOuter<Number>.Result<T>\n",
+        "fun callback(o: CallbackOuter<Int>) = o.Callback { value -> value }\n",
+        2,
+    );
+}
+
+#[test]
+fn failed_constructor_context_uses_named_argument_mapping_for_lambda_inputs() {
+    assert_failed_callback_context(
+        "class CallbackOuter<O> { inner class Inner<T>(plain: (Int) -> String, dependent: (T) -> String) }\n\
+        typealias Callback<T> = CallbackOuter<Number>.Inner<T>\n",
+        "fun callback(o: CallbackOuter<Int>) = o.Callback(dependent = { value -> value.toString() }, plain = { n -> n.toString() })\n",
+        3,
+    );
+}
+
+#[test]
+fn failed_constructor_context_preserves_other_inputs_in_the_same_lambda() {
+    assert_failed_callback_context(
+        "class CallbackOuter<O> { inner class Inner<T>(block: (Int, T) -> String) }\n\
+        typealias Callback<T> = CallbackOuter<Number>.Inner<T>\n",
+        "fun callback(o: CallbackOuter<Int>) = o.Callback { fixed, open -> fixed.inc().toString() + open.toString() }\n",
+        3,
+    );
+}
+
+#[test]
+fn failed_constructor_context_does_not_use_the_rejected_result_to_type_a_lambda() {
+    assert_failed_callback_context(
+        CALLBACK_DECLARATIONS,
+        "fun callback(o: CallbackOuter<Int>): Callback<String> = o.Callback { value -> value.length.toString() }\n",
+        4,
+    );
+}
+
+#[test]
+fn failed_constructor_context_tracks_an_anonymous_functions_receiver_parameter() {
+    assert_failed_callback_context(
+        "class CallbackOuter<O> { inner class Inner<T>(block: T.() -> String) }\n\
+        typealias Callback<T> = CallbackOuter<Number>.Inner<T>\n",
+        "fun callback(o: CallbackOuter<Int>) = o.Callback(fun(value) = value.toString())\n",
+        3,
+    );
+}
+
+#[test]
+fn failed_constructor_context_tracks_vararg_function_elements() {
+    assert_failed_callback_context(
+        "class CallbackOuter<O> { inner class Inner<T>(vararg blocks: (T) -> String) }\n\
+        typealias Callback<T> = CallbackOuter<Number>.Inner<T>\n",
+        "fun callback(o: CallbackOuter<Int>) = o.Callback({ value -> value.toString() })\n",
+        3,
+    );
+}
+
+#[test]
+fn failed_constructor_context_tracks_declared_function_classifiers() {
+    assert_failed_callback_context(
+        "class CallbackOuter<O> { inner class Inner<T>(block: kotlin.Function1<T, String>) }\n\
+        typealias Callback<T> = CallbackOuter<Number>.Inner<T>\n",
+        "fun callback(o: CallbackOuter<Int>) = o.Callback { value -> value.toString() }\n",
+        3,
+    );
+}
+
+#[test]
+fn failed_constructor_context_uses_dependency_alias_lambda_formals() {
+    let library = common::kotlinc_lib_out(&[("Declarations.kt", CALLBACK_DECLARATIONS)])
+        .expect("reference provisions the callback alias");
+    for (call, expected_count) in [
+        ("fun callback(o: CallbackOuter<Int>) = o.Callback { value -> value.toString() }\n", 3),
+        ("fun callback(o: CallbackOuter<Int>) = o.Callback { value: String -> value.toString() }\n", 2),
+    ] {
+        let result = common::compiler_diagnostics(
+            &[("Use.kt", call)],
+            &[library.clone(), common::stdlib_jar()],
+        );
+        assert_eq!(common::compiler_errors(&result.reference_stderr).len(), expected_count);
+        common::expect_identical_rejection(&result, "dependency alias lambda context");
+    }
+}
+
+#[test]
+fn admitted_constructor_context_preserves_expected_lambda_input_inference() {
+    let source = format!(
+        "{CALLBACK_DECLARATIONS}\
+        fun callback(o: CallbackOuter<Number>): Callback<String> = o.Callback {{ value -> value.length.toString() }}\n\
+        fun box(): String {{ callback(CallbackOuter<Number>()); return \"OK\" }}\n"
+    );
+    common::expect_box_same_as_kotlinc(&source, "admitted_constructor_lambda_context");
+}
+
 const CALLS: &str = "fun fixed(o: Outer<Long>) = o.Fixed(1)\n\
     fun explicit(o: Outer<Number>) = o.Generic<Long>(1)\n\
     fun inferred(o: Outer<Number>) = o.Generic(1)\n\

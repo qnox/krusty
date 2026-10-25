@@ -1136,6 +1136,13 @@ specialization; callable/member projection and constructor publication carry it 
 it from the specialized signature. Constructor outer-instance and default-marker slots remain
 physical inputs. This is an in-memory declaration fact, with no Kotlin metadata wire change.
 
+Failed constructor argument recovery consumes those same normalized declaration signatures and
+receiver bindings. It does not infer function shape from classifier spelling or recover declarations
+from rendered diagnostic text. Nominal function classifiers normalize through provider evidence;
+vararg elements and anonymous receiver parameters retain their declared semantic slots. Alias
+candidate diagnostics keep the unspecialized declaration signature while input recovery retains
+independent substitutions. No wire model or constructor ABI changes are required by #2587.
+
 Receiver admission distinguishes active call-owned inference variables from rigid declaration
 parameters. A satisfiable trial specializes both receiver sides before strict comparison without
 publishing new declaration facts. Alias expansion, selected constructor identity and retained
