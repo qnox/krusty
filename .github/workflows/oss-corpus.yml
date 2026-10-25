@@ -204,7 +204,8 @@ jobs:
             echo "corpus-results is unchanged"
             exit 0
           fi
-          git -C "$tree" -c user.name='github-actions[bot]' \
-            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-            commit -q -m "Corpus results for ${GITHUB_SHA::7} ($(date -u +%F))"
+          # AGENTS.md: every commit, this data branch's included, is the maintainer's.
+          GIT_AUTHOR_NAME='Anton Efimchuk' GIT_AUTHOR_EMAIL='anton.efimchuk@gmail.com' \
+            GIT_COMMITTER_NAME='Anton Efimchuk' GIT_COMMITTER_EMAIL='anton.efimchuk@gmail.com' \
+            git -C "$tree" commit -q -m "Corpus results for ${GITHUB_SHA::7} ($(date -u +%F))"
           git -C "$tree" push -q origin corpus-results
