@@ -1,13 +1,13 @@
 {
  "name": "okhttp",
- "reference_exit": 1,
+ "reference_exit": 0,
  "loc": {
   "kotlin": 126665,
   "java": 3816
  },
- "compilations": 37,
+ "compilations": 38,
  "built": 9,
- "classes": 1481,
+ "classes": 1483,
  "identical": 37,
  "rows": [
   {
@@ -127,6 +127,17 @@
    "fallback": null,
    "error": "not run: a task it depends on failed",
    "classes": 11,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":okcurl:compileTestKotlin",
+   "dir": "okcurl/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "not run: a task it depends on failed",
+   "classes": 2,
    "identical": 0,
    "only_kotlinc": null,
    "only_krusty": null
@@ -475,11 +486,6 @@
    "krusty_classes": 0
   },
   {
-   "task": ":okcurl:compileTestKotlin",
-   "dir": "okcurl/build/classes/kotlin/test",
-   "krusty_classes": 0
-  },
-  {
    "task": ":okhttp-brotli:compileJava9Kotlin",
    "dir": "okhttp-brotli/build/classes/kotlin/java9",
    "krusty_classes": 0
@@ -672,7 +678,7 @@
  ],
  "measured": {
   "date": "2026-10-25",
-  "commit": "b5979a1e2f54abd23bbf8a46d0a77f763acbd4fd",
-  "run": "https://github.com/qnox/krusty/actions/runs/40201721357"
+  "commit": "323386f4e9641c11bfa5ec639a971c9f85e09ae3",
+  "run": "https://github.com/qnox/krusty/actions/runs/40208384415"
  }
 }

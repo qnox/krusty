@@ -13,14 +13,14 @@ on master); `projects/` holds each project's latest result and `history.tsv` eve
 | ktor | 14,554 | 259,026 | 85 | ok | 0 / 220 | 0 / 15,418 (0.0%) | [2026-10-25, krusty b5979a1](https://github.com/qnox/krusty/actions/runs/40201721357) |
 | leakcanary | 30,003 | 100,627 | 172 | ok | 6 / 34 | 22 / 1,798 (1.2%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
 | Maestro | 16,208 | 65,644 | 0 | ok | 1 / 19 | 26 / 2,156 (1.2%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
-| mirai | 14,792 | 156,072 | 559 | ok | 0 / 51 | 0 / 2,536 (0.0%) | [2026-10-25, krusty b5979a1](https://github.com/qnox/krusty/actions/runs/40201721357) |
+| mirai | 14,793 | 156,072 | 559 | ok | 0 / 51 | 0 / 2,536 (0.0%) | [2026-10-25, krusty b5979a1](https://github.com/qnox/krusty/actions/runs/40201721357) |
 | moshi | 10,166 | 16,749 | 13,212 | ok | 0 / 12 | 0 / 512 (0.0%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
 | nowinandroid | 21,966 | 26,596 | 0 | ok | 24 / 58 | 221 / 1,110 (19.9%) | [2026-10-25, krusty cf34959](https://github.com/qnox/krusty/actions/runs/40199492852) |
-| okhttp | 47,095 | 126,665 | 3,816 | failed (exit 1) | 9 / 37 | 37 / 1,481 (2.5%) | [2026-10-25, krusty b5979a1](https://github.com/qnox/krusty/actions/runs/40201721357) |
+| okhttp | 47,095 | 126,665 | 3,816 | ok | 9 / 38 | 37 / 1,483 (2.5%) | [2026-10-25, krusty 323386f](https://github.com/qnox/krusty/actions/runs/40208384415) |
 | okio | 9,052 | 46,812 | 2,398 | failed (exit 1) | 0 / 6 | 0 / 343 (0.0%) | [2026-10-25, krusty cf34959](https://github.com/qnox/krusty/actions/runs/40199492852) |
 | quarkdown | 16,323 | 87,771 | 23 | ok | 0 / 37 | 0 / 2,345 (0.0%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
 | Unciv | 11,486 | 139,231 | 1,184 | ok | 0 / 4 | 0 / 3,341 (0.0%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
-| **Measured total** | | | | | **35 / 531** | **345 / 50,503 (0.7%)** | |
+| **Measured total** | | | | | **44 / 569** | **382 / 51,986 (0.7%)** | |
 
 ## Missed compilations
 
@@ -54,19 +54,19 @@ on master); `projects/` holds each project's latest result and `history.tsv` eve
   - 11 × krusty wrote no class
   - 1 × moshi/src/main/java/com/squareup/moshi/-JsonValueReader.kt:348:31: error: return type mismatch: expected 'Void?', actual 'Nothing?'.
 - **nowinandroid**
-  - 21 × left to kotlinc: krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error — remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error — remove the plugin or compile this module with kotlinc.)
-  - 9 × left to kotlinc: krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'; krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error — remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error — remove the plugin or compile this module with kotlinc.)
+  - 21 × left to kotlinc: compiler plugin androidx.compose.compiler.plugins.kotlin, argument -Xallow-unstable-dependencies
+  - 9 × left to kotlinc: compiler plugin androidx.compose.compiler.plugins.kotlin, argument -Xuse-inline-scopes-numbers, argument -Xallow-unstable-dependencies
   - 1 × core/data/src/test/kotlin/com/google/samples/apps/nowinandroid/core/data/repository/OfflineFirstNewsRepositoryTest.kt:323:18: error: overload resolution ambiguity
-  - 1 × left to kotlinc: krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers')
+  - 1 × left to kotlinc: argument -Xuse-inline-scopes-numbers
   - 1 × core/datastore/src/test/kotlin/com/google/samples/apps/nowinandroid/core/datastore/IntToStringIdsMigrationTest.kt:1:1: error: internal error: module signatures were not finalized and no source diagnostic explains it
-  - 1 × left to kotlinc: krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'; krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies')
+  - 1 × left to kotlinc: argument -Xuse-inline-scopes-numbers, argument -Xallow-unstable-dependencies
 - **okhttp**
-  - 23 × not run: a task it depends on failed
-  - 2 × left to kotlinc: krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/app.cash.burst/burst-kotlin-plugin/2.14.0/18ea5fbb5fc62dbafd0552da69c94e5d1059e59e/burst-kotlin-plugin-2.14.0.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error — remove the plugin or compile this module with kotlinc.)
+  - 24 × not run: a task it depends on failed
+  - 2 × left to kotlinc: compiler plugin burst-kotlin-plugin
   - 2 × left to kotlinc: krusty does not implement everything it requests (freeCompilerArg '-module-name=okhttp' conflicts with compilerOptions.moduleName; configure the structured Gradle input instead)
   - 1 × okhttp-tls/src/main/kotlin/okhttp3/tls/internal/der/Adapters.kt:38:68: error: unresolved reference 'readBoolean'.
 - **okio**
-  - 2 × left to kotlinc: krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/app.cash.burst/burst-kotlin-plugin/2.14.0/18ea5fbb5fc62dbafd0552da69c94e5d1059e59e/burst-kotlin-plugin-2.14.0.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error — remove the plugin or compile this module with kotlinc.)
+  - 2 × left to kotlinc: compiler plugin burst-kotlin-plugin
   - 1 × okio-fakefilesystem/src/commonMain/kotlin/okio/fakefilesystem/FileMetadataCommon.kt:16:7: error: @file:JvmMultifileClass is not supported for JVM compilation yet; its part classes and delegating facade require distinct physical owners
   - 1 × okio/jvm/jmh/src/jmh/java/com/squareup/okio/benchmarks/BenchmarkUtils.kt:31:12: error: unresolved reference 'commonToUtf8String'.
   - 1 × krusty: error: -Xjdk-release=8 compiles against the JDK 8 API from ct.sym, which krusty does not implement; the selected JDK is 21
