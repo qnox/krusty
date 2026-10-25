@@ -415,6 +415,9 @@ impl Checker<'_> {
             .as_deref()
             .map(|alias| self.publish_constructor_alias_rigid_formals(alias))
             .unwrap_or_default();
+        let signature = candidate.semantic_signature();
+        let receiver_bindings = constraints.receiver_bindings(&self.fed_source(), &signature);
+        let whole_arrays = named_whole_array_varargs(parameters, argument_names, &shape.call_sig);
         for (source, &parameter) in parameters.iter().enumerate() {
             let Some((&declared, &actual)) = shape.params.get(parameter).zip(arg_tys.get(source))
             else {
@@ -422,11 +425,46 @@ impl Checker<'_> {
             };
             let expected = if shape.call_sig.vararg_index == Some(parameter)
                 && !self.file.is_spread_arg(args[source])
+                && !whole_arrays[source]
             {
                 declared.array_read_elem().unwrap_or(declared)
             } else {
                 declared
             };
+            let declaration_parameter = shape.parameter_indices[parameter];
+            let raw_input = signature.params[declaration_parameter];
+            let raw_input = if shape.call_sig.vararg_index == Some(parameter)
+                && !self.file.is_spread_arg(args[source])
+                && !whole_arrays[source]
+            {
+                raw_input.array_read_elem().unwrap_or(raw_input)
+            } else {
+                raw_input
+            };
+            let (input, projection) = crate::symbol_resolver::instantiate_input_slot(
+                &self.fed_source(),
+                Some(&signature),
+                raw_input,
+                &receiver_bindings,
+                crate::symbol_resolver::UnboundSpecialization::Preserve,
+            );
+            if let Some(projection) =
+                projection.filter(|_| !self.receiver_is_assignable(actual, input))
+            {
+                let receiver =
+                    self.diagnostic_type_name(constraints.receiver, &[constraints.receiver]);
+                let display = self
+                    .source_callable_display(candidate)
+                    .unwrap_or_else(|| Self::callable_candidate_display(name, candidate));
+                let projection = match projection {
+                    crate::symbol_resolver::InputProjection::Out => "out",
+                    crate::symbol_resolver::InputProjection::Star => "star",
+                };
+                self.diags.error(self.span(args[source]), format!(
+                    "receiver type '{receiver}' contains {projection} projection which prohibits the use of '{display}'."
+                ));
+                continue;
+            }
             if !shape.call_sig.parameter_admits(parameter, expected, actual) {
                 self.report_assignability_error(
                     expected,

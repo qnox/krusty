@@ -1,5 +1,11 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+Projected receiver input restrictions are compiler-internal facts from the shared position-aware
+specialization walk. They change no metadata type, physical descriptor or provider identity.
+Receiver constraints remain distinct from expected-result constraints, and nested projections
+retain their original declaration shape; the direct-input diagnostic does not invent a captured
+classifier or globally rewrite stars.
+
 Selected alias constructor references keep the constructor's original declaration parameters apart
 from the synthetic extension lookup receiver. Projection of that facet removes only its known
 receiver slot; physical descriptor/carrier evidence and stable constructor identity remain intact.

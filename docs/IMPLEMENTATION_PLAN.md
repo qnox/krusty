@@ -1,5 +1,11 @@
 # krusty — implementation plan
 
+Direct projected-input diagnostics share input specialization with ordinary selection and retain
+the source argument map, receiver-only constraints and declaration display. Exact ledger controls
+cover out/star receivers, nullability, named/context arguments and explicit receiver precedence.
+Captured vararg admission (#2648) and nested captured-type identity diagnostics (#2649) remain
+separate work; their complete failing controls are preserved.
+
 Inner-alias conformance recovery shares constructor-reference publication across direct and
 already-selected alias declarations. The constructor selection responsibility moves out of the
 resolver facade; selected receiver provenance and declaration ABI survive that boundary. Demanded
