@@ -9896,8 +9896,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   temporary. A classpath `inline` callee that needs an empty stack (a loop or a `try`) still takes
   the method inliner: the duplicated receiver is that call's own argument and is stored before the
   body. Only a value left underneath the argument keeps the call on the byte splice. After that
-  inline the caller's line is marked again on the null path's `pop`; the expression-body `return`
-  does not repeat it. The same holds when the safe call's receiver is folded out of its temporary
+  inline the caller's line is marked again on the null path's `pop`. The expression-body `return`
+  marks the body's end line as it does after any call, so it adds no entry on a one-line body and
+  marks the last line of a safe call spanning several (`tests/safe_call_return_line_e2e.rs`). The same holds when the safe call's receiver is folded out of its temporary
   (`simplifyKnownSafeCallPatterns`) after a same-module inline selector: kotlinc's label
   normalization merges the null result's line label into the jump's own, and the fold puts the
   `pop` right after that label, so the line describes the `pop`. A discarded null result leaves a
