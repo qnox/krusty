@@ -1,5 +1,55 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## JVM generic result consumption
+
+A checked generic call's declaration-result coercion can retain its recorded reference slot until
+the return consumer materializes that value. The exact coercion marker and physical producer own
+that decision. A source null assertion checks and preserves the same value; its call slot is
+realized after generic erasure and refined with value-class declaration evidence. Inline regions,
+compiled inline calls and transformed suspension results retain their own materialization boundary.
+
+Named local storage and explicit source casts still materialize their declared types. Value-class
+returns distinguish declaration carriers from values boxed through a bare type parameter. A source
+assertion's extra nullability coercion retains the same authenticated declaration boundary rather
+than materializing an intermediate substituted type. Complete classfile and reference runtime
+controls, including single evaluation, live in
+`tests/consumer_materialized_result_e2e.rs`.
+
+## Serialization constructor contract checks
+
+The deserialization-constructor handoff test retains nullable value-class element parameters and
+the nullable semantic serialization marker, with exact parameter names and order. It provisions the
+pinned runtime and requires this fixture to lower. A complete JVM classfile comparison and a
+reference JSON round trip, including missing-field rejection, independently constrain that contract.
+Tests: `tests/plugins_e2e.rs`.
+
+## Class application header ownership
+
+A classpath classifier's generic layout is read from declaration headers before its members are
+published. Its own formals precede those captured from authenticated enclosing-instance edges.
+Inner bounds are hydrated in that enclosing scope, and shadowed captures keep distinct identities.
+Reading this layout does not construct the enclosing classifier's member record.
+
+Static nested classes capture no outer formals. A local or anonymous `InnerClasses` entry with no
+outer does not invent a member-class capture. Kotlin class metadata owns Kotlin formals; mapped
+physical Java classifiers retain invariant variance while semantic Kotlin views retain their
+declared variance. Missing headers, cyclic owners and unavailable bound scopes decline instead of
+becoming nongeneric declarations or guessed `Any` bounds.
+
+## Direct projected receiver inputs
+
+Rejected-call diagnostics retain the canonical input specialization's reason when an out or star
+capture closes a direct value parameter. The mapped source argument owns the prohibition span and
+the retained declaration owns its display. Nullability preserves that direct-input evidence;
+nested function and classifier inputs keep their own mismatch diagnostics. A literal `Nothing`
+parameter or an unrelated projected receiver does not establish a prohibition.
+
+Only receiver constraints authenticate this evidence. An expected result type cannot introduce a
+receiver projection, and explicit type arguments retain their receiver-mismatch precedence.
+Named whole-array varargs retain their array slot during recovery. Complete differential controls
+live in `tests/projected_receiver_extension_e2e.rs`; captured vararg admission and nested captured
+type identities remain separate follow-ups in #2648 and #2649.
+
 ## Selected alias references and receiver captures
 
 An alias constructor selected through an extension lookup facet publishes a constructor reference
@@ -14,22 +64,9 @@ constraints. The same receiver participates in call constraint solving and bindi
 specialization reads a root capture through its bound and preserves projections in invariant type
 arguments. Exact corpus regressions, outer-instance runtime and projection variants live in
 `bound_inner_alias_inference_e2e` and `projected_receiver_extension_e2e`; existing alias receiver and
-bound diagnostic ledgers remain intact. Anonymous public-result ABI follows declaration publication
-below. Complete closed-projection diagnostic parity remains a separate follow-up with preserved
+bound diagnostic ledgers remain intact. Anonymous public-result ABI follows the declaration-publication
+rules. Complete closed-projection diagnostic parity remains a separate follow-up with preserved
 failing oracles.
-
-## Class application header ownership
-
-A classpath classifier's generic layout is read from declaration headers before its members are
-published. Its own formals precede those captured from authenticated enclosing-instance edges.
-Inner bounds are hydrated in that enclosing scope, and shadowed captures keep distinct identities.
-Reading this layout does not construct the enclosing classifier's member record.
-
-Static nested classes capture no outer formals. A local or anonymous `InnerClasses` entry with no
-outer does not invent a member-class capture. Kotlin class metadata owns Kotlin formals; mapped
-physical Java classifiers retain invariant variance while semantic Kotlin views retain their
-declared variance. Missing headers, cyclic owners and unavailable bound scopes decline instead of
-becoming nongeneric declarations or guessed `Any` bounds.
 
 **Status:** PoC / experiment. NOT a production Kotlin compiler.
 
@@ -1044,6 +1081,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   local-variable table lists the marker, then those locals, then the parameters. A block nested
   inside those statements still closes where that block ends. Test:
   `tests/inline_repeat_local_e2e.rs`.
+- **An initializer's lexical inline ranges close before the value is stored.** Callable-scope
+  entry gives `<clinit>` its implicit method body, so initializer expressions own nested lexical
+  scopes. Their marker and operand ranges close at the expression boundary, allowing the next
+  initializer to reuse its slots. A store restores its source line after an inlined value resets
+  the caller line; that debug boundary preserves the existing closing `nop`. Class-initializer
+  line tables retain these intentional returns to the same line at distinct bytecode offsets.
+  Tests: `tests/initializer_inline_local_scopes_e2e.rs`.
 - **An inlined lambda's implicit-result end stays on the path that evaluated it.** Common IR
   records the exact result expression and its end line; the backend marks that line after the
   expression succeeds, before local-return paths rejoin it. For a returned `try`, the `nop`
@@ -15330,8 +15374,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   or the body the most derived interface declaring the member supplies, which a subclass inherits.
   A function default declared in another file is that file's exported member entry point, taking
   the receiver and the member's declared carriers. A call through an interface in any file, and a
-  property read or write through one, loads the receiver's interface table and calls the entry at
-  the member's number. Refused, by file: a property default of an interface of another file, a
+  property read or write through one, calls the member's stub, which the link writes from every
+  type of the program (`docs/NATIVE.md`, "Interface calls: decided at the link"): a direct call
+  when one function implements the member, a type comparison when two do and one of them is reached
+  from a single type, and otherwise the entry at the member's number in the receiver's interface
+  table. Refused, by file: a property default of an interface of another file, a
   default of another file reached through a bridge, an implementation of an interface member of
   another file that carries values differently, an interface member implemented by a declaration
   this file has no slot for (one outside the module), an instantiable class leaving a member with
@@ -15346,7 +15393,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_generic_member_reaches_an_implementation_through_its_bridge`,
   `a_lambda_converted_to_a_functional_interface_answers_another_file`,
   `a_default_declared_in_another_file_answers_for_an_implementor`,
-  `a_default_reached_through_a_bridge_of_another_file_declines`).
+  `a_default_reached_through_a_bridge_of_another_file_declines`) and
+  `tests/native_interface_call_stubs_e2e.rs`.
 - **Native: the public C ABI is primitives, String, and a Unit result.** A public top-level
   function whose parameters are primitives or `String` and whose result is one of those types or
   `Unit` is declared in the module's C header and exported under that declaration. The export runs
@@ -16457,8 +16505,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   public`); `kotlin.Annotation` declares nothing and inherits `kotlin.Any`'s functions. A library
   modifier set is the visibility (none for Java package-private), the modality, `infix`, and
   `operator` together with `override`; an accessor lists its modality only when it is not `open`.
-  The members of other classifiers, and of an annotation class whose members carry annotations,
-  are refused for those queries. (`crates/krusty-plugin-host/tests/ksp.rs`,
+  A constant a Java annotation declares is a `JAVA_LIB` `final public` property with the
+  `JAVA_STATIC` modifier and neither getter nor setter, listed after the constructor and before
+  the nested classifiers and left out of `getAllProperties`; a reference array is
+  `Array<out E>`, a mapped class its Kotlin classifier. The members of other classifiers, of an
+  annotation class whose members carry annotations, and of one declaring a generic, raw generic
+  or collection-typed constant are refused for those queries. (`crates/krusty-plugin-host/tests/ksp.rs`,
   `library_annotation_members_are_what_ksp2_reports`.)
 - **KSP maps names between Kotlin and the JVM by kotlinc's class map.** `mapKotlinNameToJava` and
   `mapJavaNameToKotlin` answer what kotlinc's `JavaToKotlinClassMap` does for the classifier the
@@ -21143,6 +21195,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   earlier parameter. A local function, lambda, or object in an initializer reads the property
   through the instance. The constructor parameter of the same spelling is hidden and is not a
   capture.
+  Anonymous-object super-constructor arguments are checked on the enclosing construction scope,
+  before inherited or declared instance properties enter the tower. In
+  `object : Carrier<List<T>>(listOf(value)) {}`, an enclosing `value: T` therefore remains that
+  lexical value even when `Carrier` declares a property named `value`. An applied typealias for
+  the same parent follows the identical rule. Named classes retain their own constructor-parameter
+  rung, and a missing enclosing value cannot fall back to the uninitialized inherited property.
+  An unavailable dispatch rung reserves the constructor-prefix receiver coordinate without adding
+  instance-property bindings, so enclosing receiver captures retain their checked identities.
+  Tests: `tests/typealias_constructor_inference_e2e.rs` compares complete JVM ABI and runtime
+  behavior with kotlinc. Separate existing gaps in deferred-lambda capture transport and the exact
+  unavailable-member diagnostic retain their full controls in #2657 and #2658.
   An anonymous object moves every super-constructor argument that is not a compile-time constant
   and not a lexical capture out to the construction site, stores it in a temporary, and forwards
   it as a constructor parameter that is not a field (`object : Base(n + 1)`, `object :
@@ -21572,12 +21635,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   instance is a struct whose first field is its dispatch table, followed by its superclasses'
   fields root first and then its own; it is declared a subtype of its superclass's struct, so
   `is`, `!is`, `as` and `as?` against a class are `ref.test`/`ref.cast`, and against an interface
-  test every class of the file implementing it. Slot numbers come from the target-neutral tables
-  Native also uses (`src/backend/class_tables/`): `equals`, `hashCode`, `toString` first by role,
-  one reserved slot, the class's own members, then a program-wide interface region in which an
-  interface member has the same number in every implementing class. Class, interface and `Any`
-  values are carried as `(ref null eq)`, so an override never needs a signature of its own; an
-  override carried differently from the member it overrides (a bridge) declines. `==` on a class
+  call that interface's test function, which tests every struct of the program implementing it.
+  Class slot numbers come from the target-neutral tables Native also uses
+  (`src/backend/class_tables/`): `equals`, `hashCode`, `toString` first by role, one reserved
+  slot, then the class's own members. Interface members are numbered once per module
+  (`ModuleInterfaces`) and published by their backend-neutral identity
+  (`src/backend/interface_identity.rs`), so a dependent module's class implementing a dependency
+  or library interface records its implementation against the declaring module's number. As
+  Native's linker does, Wasm's finalize step writes one stub per interface member once every
+  module is known: a direct call when one function implements it, a `ref.test` choice between
+  two, otherwise an index into the receiver's immutable itable array, packed so no class has two
+  members at one index. An implementation whose reference parameters are narrower than the
+  member's gets an erased-signature thunk that casts them down; one that would have to box a
+  primitive declines (`an interface member implemented with a value it would have to box`).
+  Class, interface and `Any` values are carried as `(ref null eq)`. `==` on a class
   value calls its `equals` slot null-safely, whose default is identity. Erasing a reference to
   `Any?` preserves structural `==` and `!=`: runtime Strings compare UTF-16 contents, class
   instances dispatch their actual `equals` slot, and other GC references use identity. Both
@@ -21672,6 +21743,24 @@ extension receiver, then values. Member projection inserts the extension receive
 parameters once, without inserting it again into the retained declaration vector. Physical outer
 instances and default markers are separate ABI slots. Tests: `libraries::classifier_callables::tests`
 and both value-class dependency controls in `tests/inner_constructor_bounds_e2e.rs`.
+
+## Failed constructor context and argument diagnostics
+
+A constructor application whose fixed class arguments violate every mapped declaration's bounds
+does not lend its result constraints to nested argument calls. Nested constructors still infer from
+their own explicit arguments and independent value arguments. The outer applicability and bound
+errors precede any missing nested result parameter diagnostic.
+
+When a receiver-bound alias constructor is rejected before argument checking, retained declaration
+and receiver bindings still describe its lambda inputs. Missing callable formals are diagnosed at
+the written, untyped input parameters; explicit annotations and independently fixed inputs survive.
+The rejected call's expected result cannot solve those inputs. Ordinary function declarations,
+nominal function classifiers, vararg elements and anonymous-function receiver slots share the same
+parameter layout. Candidate messages render the alias declaration, not a failed instantiated shape.
+Tests: `dependent_constructor_bounds_e2e` and `bound_inner_alias_inference_e2e`, with complete ordered
+kotlinc diagnostic comparisons, reference-built dependencies and valid inference/runtime controls.
+
+## Postponed receiver admission
 
 Extension receiver admission retains satisfiable active builder-inference variables. Selection may
 test the receiver relation against cloned postponed frames, solve those trial bindings and require

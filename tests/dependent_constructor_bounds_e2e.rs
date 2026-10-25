@@ -55,3 +55,52 @@ fn contradictory_completed_constructor_arguments_match_every_reference_diagnosti
         expected
     );
 }
+
+#[test]
+fn failed_constructor_context_does_not_complete_a_nested_dependency_producer() {
+    let library = common::kotlinc_lib_out(&[("Declarations.kt", DECLARATIONS)])
+        .expect("reference compiler provisions the dependent-bound declarations");
+    let result = common::compiler_diagnostics(
+        &[(
+            "Use.kt",
+            "import bounds.*\nfun wrong(): Any = Compound<String, Marked<Int>>(Leaf(1))\n",
+        )],
+        &[library, common::stdlib_jar()],
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr).len(), 3);
+    common::expect_identical_rejection(&result, "failed dependency constructor context");
+}
+
+#[test]
+fn failed_constructor_context_does_not_complete_a_nested_source_producer() {
+    let result = common::compiler_diagnostics(
+        &[
+            ("Declarations.kt", DECLARATIONS),
+            (
+                "Use.kt",
+                "import bounds.*\nfun wrong(): Any = Compound<String, Marked<Int>>(Leaf(1))\n",
+            ),
+        ],
+        &[common::stdlib_jar()],
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr).len(), 3);
+    common::expect_identical_rejection(&result, "failed source constructor context");
+}
+
+#[test]
+fn failed_constructor_context_preserves_independent_nested_argument_inference() {
+    let source = "class Leaf<T>(val value: T)\n\
+        class Compound<T : Number>(val leaf: Leaf<T>)\n\
+        fun wrong() = Compound<String>(Leaf(\"K\"))\n";
+    let result = common::compiler_diagnostics(&[("Use.kt", source)], &[common::stdlib_jar()]);
+    common::expect_identical_rejection(&result, "independent nested argument inference");
+}
+
+#[test]
+fn failed_constructor_context_handles_a_fixed_nested_parameter_declaration() {
+    let source = "class Leaf<T>(val n: Int)\n\
+        class Compound<T : Number>(val leaf: Leaf<String>)\n\
+        fun wrong() = Compound<String>(Leaf(1))\n";
+    let result = common::compiler_diagnostics(&[("Use.kt", source)], &[common::stdlib_jar()]);
+    common::expect_identical_rejection(&result, "fixed nested parameter declaration");
+}

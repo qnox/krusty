@@ -2,10 +2,10 @@
 //!
 //! A call through an interface-typed receiver knows only the interface, so the number it reads has
 //! to mean the same member in every implementor, whichever file declares it. The numbers are
-//! therefore decided once from [`ModuleClasses`], by the rules [`super::interface_slots`] applies
-//! within one file: an interface inherits the numbers of the interfaces it extends; a member that
-//! redeclares an inherited one joins its number unless it needs a bridge there, and keeps the
-//! inherited spelling numbered too; a new member takes the next number. A target that keeps these
+//! therefore decided once from [`ModuleClasses`]: an interface inherits the numbers of the
+//! interfaces it extends; a member that redeclares an inherited one joins its number unless it
+//! needs a bridge there, and keeps the inherited spelling numbered too; a new member takes the
+//! next number. A target that keeps these
 //! numbers in a table of their own indexes that table by the number directly.
 
 use crate::fx_hash::{HashMap, HashSet};

@@ -83,6 +83,7 @@ impl Classpath {
         let mut members = DeclaredMembers {
             functions: Vec::new(),
             properties: Vec::new(),
+            static_properties: Vec::new(),
             constructors: class
                 .constructors
                 .iter()

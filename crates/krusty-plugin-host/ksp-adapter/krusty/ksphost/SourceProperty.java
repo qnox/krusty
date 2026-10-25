@@ -43,6 +43,7 @@ final class SourceProperty implements KSPropertyDeclaration {
     // The extension receiver; `receiverUndescribed` when it has one krusty could not describe.
     KSTypeReference extensionReceiver;
     boolean receiverUndescribed;
+    // Null for a Java field.
     SourceAccessor.Getter getter;
     // Null for a read-only property.
     SourceAccessor.Setter setter;

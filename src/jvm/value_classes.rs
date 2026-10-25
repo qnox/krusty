@@ -1698,7 +1698,7 @@ pub(crate) fn lower_value_classes(
         else {
             continue;
         };
-        if let Some(call) = crate::jvm::call_result_boundaries::terminal_call(&ir.exprs, *arg) {
+        if let Some(call) = crate::jvm::call_result_boundaries::declaration_result_call(ir, *arg) {
             applied_call_results.insert(call, *type_operand);
         }
     }
