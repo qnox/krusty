@@ -33,6 +33,11 @@ its members. Physical mapped Java requests keep invariant formals independently 
 declared variance. This changes no metadata wire fields or physical descriptors. Missing lexical
 formal scopes, including unavailable enclosing-method evidence, do not license placeholder bounds.
 
+Field and property-accessor JVM `Signature` attributes consume the retained semantic formal identity
+even when its declaration belongs to an enclosing method. Nullable and bounded formals keep that
+identity through the common formatter; class-owned formals and concrete declarations use the same
+type-use boundary. Class formal declarations and Kotlin metadata applications retain their own layout.
+
 Wasm's erased-reference binary equality realization uses the already checked operator and the
 runtime GC representation. It changes no metadata, callable identity, or provider authorization;
 explicit dependency `Any.equals` realization remains a separate authenticated-callable contract.
@@ -1131,10 +1136,25 @@ specialization; callable/member projection and constructor publication carry it 
 it from the specialized signature. Constructor outer-instance and default-marker slots remain
 physical inputs. This is an in-memory declaration fact, with no Kotlin metadata wire change.
 
+Failed constructor argument recovery consumes those same normalized declaration signatures and
+receiver bindings. It does not infer function shape from classifier spelling or recover declarations
+from rendered diagnostic text. Nominal function classifiers normalize through provider evidence;
+vararg elements and anonymous receiver parameters retain their declared semantic slots. Alias
+candidate diagnostics keep the unspecialized declaration signature while input recovery retains
+independent substitutions. No wire model or constructor ABI changes are required by #2587.
+
 Receiver admission distinguishes active call-owned inference variables from rigid declaration
 parameters. A satisfiable trial specializes both receiver sides before strict comparison without
 publishing new declaration facts. Alias expansion, selected constructor identity and retained
 declaration parameters remain unchanged; no metadata wire or physical ABI change is involved.
+
+## Projected receiver input diagnostics
+
+Projected receiver input restrictions are compiler-internal facts from the shared position-aware
+specialization walk. They change no metadata type, physical descriptor or provider identity.
+Receiver constraints remain distinct from expected-result constraints, and nested projections
+retain their original declaration shape; the direct-input diagnostic does not invent a captured
+classifier or globally rewrite stars.
 
 ## Annotation classifier nesting
 

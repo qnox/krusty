@@ -226,6 +226,9 @@ fn diagnostic_tails(stderr: &str, stdout: &str) -> String {
 #[cfg(test)]
 mod verify_tests;
 
+#[cfg(all(test, unix))]
+mod recording_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,7 +381,7 @@ mod tests {
         let run_util = || build().tasks([":compiler:util:compileKotlin"]).run();
         run_all().unwrap_or_else(|error| panic!("{error}"));
 
-        let text = std::fs::read_to_string(&log).expect("invocation log");
+        let text = read_invocation_log(&log).expect("invocation log");
         let runs = invocations(&text);
         assert_eq!(runs.len(), 3, "{text}");
         let runtime_at = runs
@@ -599,7 +602,7 @@ mod tests {
 
         // Gradle owns task incrementality: an unchanged graph reuses configuration and does not
         // invoke krusty; later probes pin direct source and upstream classpath invalidation.
-        let _ = std::fs::remove_file(&log);
+        clear_invocation_log(&log);
         let unchanged =
             run_all_output().unwrap_or_else(|error| panic!("unchanged rebuild: {error}"));
         assert!(!log.exists(), "unchanged sources must not exec krusty");
@@ -618,7 +621,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("clean before build-cache restore: {error}"));
         assert!(!root.join("core/util.runtime/build").exists());
         assert!(!root.join("compiler/util/build").exists());
-        let _ = std::fs::remove_file(&log);
+        clear_invocation_log(&log);
         let restored = run_all_output()
             .unwrap_or_else(|error| panic!("build-cache restore after clean: {error}"));
         assert!(!log.exists(), "FROM-CACHE tasks must not exec krusty");
@@ -649,7 +652,7 @@ mod tests {
         )
         .expect("edit util");
         run_util().unwrap_or_else(|error| panic!("edited util: {error}"));
-        let edited = std::fs::read_to_string(&log).expect("edit log");
+        let edited = read_invocation_log(&log).expect("edit log");
         let edited_runs = invocations(&edited);
         assert_eq!(edited_runs.len(), 1, "{edited}");
         let edited_sources = source_names(&edited_runs[0]);
@@ -674,7 +677,7 @@ mod tests {
             pair[0] == "-classpath" && pair[1].contains("util.runtime/build/classes/kotlin/main")
         }));
 
-        let _ = std::fs::remove_file(&log);
+        clear_invocation_log(&log);
         let java_source = root.join("compiler/util/src/org/jetbrains/kotlin/util/JavaOnly.java");
         std::fs::write(
             &java_source,
@@ -682,7 +685,7 @@ mod tests {
         )
         .expect("edit Java source");
         run_util().unwrap_or_else(|error| panic!("edited Java source: {error}"));
-        let java_edited = std::fs::read_to_string(&log).expect("Java edit log");
+        let java_edited = read_invocation_log(&log).expect("Java edit log");
         let java_edited_runs = invocations(&java_edited);
         assert_eq!(java_edited_runs.len(), 1, "{java_edited}");
         assert_eq!(source_names(&java_edited_runs[0]).len(), 7);
@@ -691,7 +694,7 @@ mod tests {
         // Bring the test compilation current after the earlier public main-source edit. The next
         // probe must measure only the upstream classpath change, not deferred friend invalidation.
         run_all().unwrap_or_else(|error| panic!("upstream baseline: {error}"));
-        let _ = std::fs::remove_file(&log);
+        clear_invocation_log(&log);
         let runtime_source =
             root.join("core/util.runtime/src/org/jetbrains/kotlin/util/Runtime.kt");
         std::fs::write(
@@ -704,7 +707,7 @@ mod tests {
         build()
             .run()
             .unwrap_or_else(|error| panic!("edited upstream ABI: {error}"));
-        let upstream_edited = std::fs::read_to_string(&log).expect("upstream edit log");
+        let upstream_edited = read_invocation_log(&log).expect("upstream edit log");
         let upstream_runs = invocations(&upstream_edited);
         let expected_upstream_order = ["Runtime.kt", "Util.kt", "Friend.kt"];
         assert_eq!(
@@ -731,7 +734,7 @@ mod tests {
             );
         }
 
-        let _ = std::fs::remove_file(&log);
+        clear_invocation_log(&log);
         let added = root.join("compiler/util/src/org/jetbrains/kotlin/util/Added.kt");
         std::fs::write(&added, "package org.jetbrains.kotlin.util\nclass Added\n")
             .expect("add source");
@@ -759,7 +762,7 @@ mod tests {
             .is_file());
         assert!(module_metadata.is_file());
 
-        let _ = std::fs::remove_file(&log);
+        clear_invocation_log(&log);
         std::fs::remove_file(&added).expect("remove source");
         std::fs::remove_file(&cleanup_b).expect("remove cleanup source");
         run_util().unwrap_or_else(|error| panic!("removed sources: {error}"));
@@ -780,8 +783,8 @@ mod tests {
         // leaves the compile to kotlinc without asking krusty. Under 2.4.20 the option is one
         // krusty does not implement, so the compile is left to kotlinc too. kotlinc itself runs
         // only where it reads the option: before 2.4.20 the probe stops after the check.
-        let _ = std::fs::remove_file(&log);
-        let _ = std::fs::remove_file(&fixture.probes);
+        clear_invocation_log(&log);
+        clear_invocation_log(&fixture.probes);
         let release = krusty::kotlin_version::KotlinVersion::parse(&kgp)
             .unwrap_or_else(|| panic!("Kotlin Gradle plugin {kgp} is not a release version"));
         let reads_option = release >= krusty::kotlin_version::KotlinVersion::V2_4_20;
@@ -910,8 +913,8 @@ mod tests {
                     "compilerOptions.optIn and freeCompilerArg '-opt-in=krusty.fixture.ExperimentalFirstApi' both request marker 'krusty.fixture.ExperimentalFirstApi'; configure exactly one",
                 ),
             ] {
-                let _ = std::fs::remove_file(&log);
-                let _ = std::fs::remove_file(&fixture.probes);
+                clear_invocation_log(&log);
+                clear_invocation_log(&fixture.probes);
                 let output = build()
                     .property("krusty.negative", case)
                     .tasks([":compiler:util:compileKotlinKrustyCheck"])
@@ -931,8 +934,8 @@ mod tests {
 
             // End to end, such a compile is kotlinc's: the replacement is skipped and the Kotlin
             // task writes the classes. A free `-progressive` is one kotlinc compiles as it is.
-            let _ = std::fs::remove_file(&log);
-            let _ = std::fs::remove_file(&fixture.probes);
+            clear_invocation_log(&log);
+            clear_invocation_log(&fixture.probes);
             let _ = std::fs::remove_dir_all(&kotlin_classes);
             let output = build()
                 .property("krusty.negative", "progressive-free-argument")
@@ -962,7 +965,7 @@ mod tests {
 
             // A Kotlin JVM target that differs from the Java one fails the build, as it does with
             // kotlinc under the default validation mode.
-            let _ = std::fs::remove_file(&log);
+            clear_invocation_log(&log);
             let rendered = build()
                 .property("krusty.negative", "jvm-target")
                 .tasks([":compiler:util:compileKotlin"])
@@ -982,8 +985,8 @@ mod tests {
             assert!(!log.exists(), "jvm-target must fail before execing krusty");
 
             // A compiler plugin krusty does not implement leaves the compile to kotlinc, reported.
-            let _ = std::fs::remove_file(&log);
-            let _ = std::fs::remove_file(&fixture.probes);
+            clear_invocation_log(&log);
+            clear_invocation_log(&fixture.probes);
             let output = build()
                 .property("krusty.negative", "compiler-plugin")
                 .tasks([":compiler:util:compileKotlin"])
@@ -1002,7 +1005,7 @@ mod tests {
             // `compilerOptions.progressiveMode` is a structured input like `javaParameters`: the
             // plugin forwards it as kotlinc's `-progressive`, which krusty honors because it models
             // every progressive feature of the selected release.
-            let _ = std::fs::remove_file(&log);
+            clear_invocation_log(&log);
             build()
                 .property("krusty.negative", "progressive-mode")
                 .tasks([":compiler:util:compileKotlin"])
@@ -1020,7 +1023,7 @@ mod tests {
 
             // Free arguments reach krusty verbatim: the plugin keeps no copy of kotlinc's argument
             // table. An argument krusty does not implement leaves the compile to kotlinc, reported.
-            let _ = std::fs::remove_file(&log);
+            clear_invocation_log(&log);
             let output = build()
                 .property("krusty.negative", "jspecify-free-argument")
                 .tasks([":compiler:util:compileKotlin"])
@@ -1071,8 +1074,8 @@ mod tests {
                         .to_owned(),
                 ),
             ] {
-                let _ = std::fs::remove_file(&log);
-                let _ = std::fs::remove_file(&fixture.probes);
+                clear_invocation_log(&log);
+                clear_invocation_log(&fixture.probes);
                 let _ = std::fs::remove_dir_all(&kotlin_classes);
                 let rendered = match build()
                     .property("krusty.negative", case)
@@ -1112,8 +1115,8 @@ mod tests {
                 ("old-language-version", "-language-version", "language"),
                 ("old-api-version", "-api-version", "API"),
             ] {
-                let _ = std::fs::remove_file(&log);
-                let _ = std::fs::remove_file(&fixture.probes);
+                clear_invocation_log(&log);
+                clear_invocation_log(&fixture.probes);
                 let _ = std::fs::remove_dir_all(&kotlin_classes);
                 let rendered = build()
                     .property("krusty.negative", case)
@@ -1151,7 +1154,7 @@ mod tests {
 
             // A well-formed named policy is forwarded to and applied by the compiler. Disabling a
             // warning does not change classfile bytes, so this compile succeeds normally.
-            let _ = std::fs::remove_file(&log);
+            clear_invocation_log(&log);
             build()
                 .property("krusty.negative", "warning-level")
                 .tasks([":compiler:util:compileKotlin"])
@@ -1171,7 +1174,7 @@ mod tests {
 
             // The standard Gradle languageVersion reaches the compiler unchanged. No krusty-only
             // property and no metadata-only substitution is part of the contract.
-            let _ = std::fs::remove_file(&log);
+            clear_invocation_log(&log);
             std::fs::write(
                 &runtime_source,
                 "package org.jetbrains.kotlin.util\nfun runtimeMarker() = \"runtime\"\nfun languageLevel22() = 1\n",
@@ -1215,7 +1218,7 @@ mod tests {
 warning: opt-in requirement marker 'krusty.fixture.ExperimentalSecondApi' is unresolved. Make sure it's present in the module dependencies.\n\
 error: warnings found and -Werror specified\n";
             for case in ["all-warnings-as-errors", "free-werror", "werror-overlap"] {
-                let _ = std::fs::remove_file(&log);
+                clear_invocation_log(&log);
                 let _ = std::fs::remove_file(&diagnostic_log);
                 let result = build()
                     .property("krusty.negative", case)
@@ -1247,7 +1250,7 @@ error: warnings found and -Werror specified\n";
             // A named level remains an override when the structured global policy is enabled.
             // `-Xcontext-parameters` is redundant at language level 2.4, so success proves that
             // the transported `:warning` exception was applied rather than promoted by `-Werror`.
-            let _ = std::fs::remove_file(&log);
+            clear_invocation_log(&log);
             let _ = std::fs::remove_file(&diagnostic_log);
             build()
                 .property("krusty.negative", "werror-warning-exception")
@@ -1349,7 +1352,7 @@ error: warnings found and -Werror specified\n";
 
         // Only the root project's main compilation execs krusty; its test compilation has no
         // sources, and buildSrc never reaches the compiler bridge.
-        let runs = invocations(&std::fs::read_to_string(&fixture.log).expect("invocation log"));
+        let runs = invocations(&read_invocation_log(&fixture.log).expect("invocation log"));
         assert_eq!(runs.len(), 1, "{runs:?}");
         assert_eq!(source_names(&runs[0]), ["App.kt"], "{runs:?}");
         assert!(
@@ -1362,7 +1365,7 @@ error: warnings found and -Werror specified\n";
             .join("build/classes/kotlin/main/app/AppKt.class")
             .is_file());
 
-        let _ = std::fs::remove_file(&fixture.log);
+        clear_invocation_log(&fixture.log);
         let reused = fixture
             .build()
             .tasks(tasks)
@@ -1407,7 +1410,7 @@ error: warnings found and -Werror specified\n";
             "{output}"
         );
 
-        let runs = invocations(&std::fs::read_to_string(&fixture.log).expect("invocation log"));
+        let runs = invocations(&read_invocation_log(&fixture.log).expect("invocation log"));
         assert_eq!(runs.len(), 1, "{runs:?}");
         let run = &runs[0];
         let common = root.join("src/commonMain/kotlin/app/Greeting.kt");
@@ -1476,7 +1479,7 @@ error: warnings found and -Werror specified\n";
             ],
             "{output}"
         );
-        let runs = invocations(&std::fs::read_to_string(&fixture.log).expect("invocation log"));
+        let runs = invocations(&read_invocation_log(&fixture.log).expect("invocation log"));
         assert_eq!(runs.len(), 1, "{runs:?}");
         assert_eq!(source_names(&runs[0]), ["Job.kt"], "{runs:?}");
         assert!(root
@@ -1589,7 +1592,7 @@ tasks.register<JavaExec>("runJvm") {
             .filter(|line| line.starts_with("krusty: "))
             .collect::<Vec<_>>();
         assert_eq!(reports, Vec::<&str>::new(), "{output}");
-        let runs = invocations(&std::fs::read_to_string(&fixture.log).expect("invocation log"));
+        let runs = invocations(&read_invocation_log(&fixture.log).expect("invocation log"));
         assert_eq!(runs.len(), 1, "{runs:?}");
         assert_eq!(source_names(&runs[0]), ["App.kt"], "{runs:?}");
         assert!(root
@@ -1635,7 +1638,7 @@ tasks.register<JavaExec>("runJvm") {
             "{output}"
         );
 
-        let text = std::fs::read_to_string(log).expect("invocation log");
+        let text = read_invocation_log(log).expect("invocation log");
         let runs = invocations(&text);
         assert_eq!(runs.len(), 2, "{text}");
         let serialization = format!("kotlin-serialization-compiler-plugin-embeddable-{kgp}.jar");
@@ -1670,11 +1673,11 @@ tasks.register<JavaExec>("runJvm") {
 
         // Through the `krustyCompile` aggregate too: it reaches the refused compile's kotlinc task,
         // so `:model` is compiled (by kotlinc) rather than skipped with its replacement.
-        let _ = std::fs::remove_file(log);
+        clear_invocation_log(log);
         let _ = std::fs::remove_dir_all(root.join("model/build/classes/kotlin"));
         std::fs::create_dir_all(root.join("model/build/classes/java/main"))
             .expect("create empty Java output expected on the model classpath");
-        let _ = std::fs::remove_file(&fixture.probes);
+        clear_invocation_log(&fixture.probes);
         let output = fixture
             .build()
             .property("krusty.negative", "compiler-plugin-before-krusty")
@@ -1682,7 +1685,7 @@ tasks.register<JavaExec>("runJvm") {
             .run_output()
             .unwrap_or_else(|error| panic!("a compiler plugin applied before krusty: {error}"));
         assert_assignment_left_to_kotlinc(&output, &fixture.probes, ":model:compileKotlin");
-        let text = std::fs::read_to_string(log).unwrap_or_default();
+        let text = optional_invocation_log(log);
         assert!(
             invocations(&text)
                 .iter()
@@ -1874,8 +1877,8 @@ fun main() {
             assert!(root.join(class).is_file(), "missing {class}");
         }
 
-        let _ = std::fs::remove_file(log);
-        let _ = std::fs::remove_file(&fixture.probes);
+        clear_invocation_log(log);
+        clear_invocation_log(&fixture.probes);
         let output = fixture
             .build()
             .property("krusty.negative", "assignment")
@@ -1914,7 +1917,7 @@ fun main() {
             .tasks([":app:compileReleaseKotlin", ":lib:testDebugUnitTest"])
             .run_output()
             .unwrap_or_else(|error| panic!("{error}"));
-        let text = std::fs::read_to_string(log).expect("invocation log");
+        let text = read_invocation_log(log).expect("invocation log");
         let runs = invocations(&text);
         // :lib release and debug, :lib's unit tests, :app release.
         assert_eq!(runs.len(), 4, "{text}");
@@ -1951,8 +1954,8 @@ fun main() {
 
         // AGP passes `-Xuse-inline-scopes-numbers` to an application's debug compiles. krusty does
         // not implement it yet, so the build reports it and kotlinc compiles that variant.
-        let _ = std::fs::remove_file(log);
-        let _ = std::fs::remove_file(&fixture.probes);
+        clear_invocation_log(log);
+        clear_invocation_log(&fixture.probes);
         let output = fixture
             .build()
             .tasks([":app:compileDebugKotlin"])
@@ -1966,7 +1969,7 @@ fun main() {
                     .to_string(),
             ],
         );
-        let text = std::fs::read_to_string(log).unwrap_or_default();
+        let text = optional_invocation_log(log);
         assert!(
             invocations(&text)
                 .iter()
@@ -2506,7 +2509,7 @@ fun main() {
     /// once. The Gradle cache prefix and artifact version vary by lane, so the exact jar path comes
     /// from the recorded check rather than from Gradle's output.
     fn assert_assignment_left_to_kotlinc(output: &str, probes: &Path, task: &str) {
-        let text = std::fs::read_to_string(probes).expect("support check log");
+        let text = read_invocation_log(probes).expect("support check log");
         let mut assignments = invocations(&text)
             .iter()
             .flat_map(|args| {
@@ -2597,8 +2600,28 @@ fun main() {
             .any(|pair| pair[0] == left && pair[1] == right)
     }
 
+    pub(super) fn read_invocation_log(log: &Path) -> std::io::Result<String> {
+        let bytes = krusty_test_support::InvocationRecords::at(log).read_snapshot()?;
+        String::from_utf8(bytes)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    }
+
+    fn optional_invocation_log(log: &Path) -> String {
+        match std::fs::symlink_metadata(log) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => panic!("read invocation lane: {error}"),
+            Ok(_) => read_invocation_log(log).expect("complete invocation log"),
+        }
+    }
+
+    pub(super) fn clear_invocation_log(log: &Path) {
+        krusty_test_support::InvocationRecords::at(log)
+            .clear_after_run()
+            .expect("clear completed invocation log");
+    }
+
     fn single_invocation(log: &Path) -> Vec<String> {
-        let text = std::fs::read_to_string(log).expect("bridge invocation log");
+        let text = read_invocation_log(log).expect("bridge invocation log");
         let runs = invocations(&text);
         assert_eq!(runs.len(), 1, "{text}");
         runs.into_iter().next().expect("single invocation")
@@ -2607,7 +2630,7 @@ fun main() {
     /// The one compiler invocation for `module`. A requested task may first rebuild a changed
     /// dependency, so the complete Gradle build log need not contain only one invocation.
     fn single_module_invocation(log: &Path, module: &str) -> Vec<String> {
-        let text = std::fs::read_to_string(log).expect("bridge invocation log");
+        let text = read_invocation_log(log).expect("bridge invocation log");
         let mut runs = invocations(&text)
             .into_iter()
             .filter(|arguments| has_pair(arguments, "-module-name", module))
@@ -2634,7 +2657,7 @@ fun main() {
         out
     }
 
-    fn write_krusty_proxy(
+    pub(super) fn write_krusty_proxy(
         path: &Path,
         log: &Path,
         probes: &Path,
@@ -2643,17 +2666,17 @@ fun main() {
     ) {
         let quote = |value: &Path| value.display().to_string().replace('\'', "'\\''");
         let script = r#"#!/bin/sh
+WRITE_INVOCATION
 if [ "$1" = refusals ]; then
-  {
-    echo "----"
-    printf '%s\n' "$@"
-  } >> "PROBESPATH"
+  KRUSTY_RECORD='PROBESPATH'
+else
+  KRUSTY_RECORD='LOGPATH'
+fi
+if ! mkdir -p "$KRUSTY_RECORD"; then exit 7; fi
+record_invocation "$@"
+if [ "$1" = refusals ]; then
   exec 'ACTUAL' "$@"
 fi
-{
-  echo "----"
-  printf '%s\n' "$@"
-} >> "LOGPATH"
 diagnostics="DIAGNOSTICSPATH.$$"
 'ACTUAL' "$@" 2> "$diagnostics"
 status=$?
@@ -2661,6 +2684,7 @@ cat "$diagnostics" >&2
 mv "$diagnostics" "DIAGNOSTICSPATH"
 exit "$status"
 "#
+        .replace("WRITE_INVOCATION", krusty_test_support::WRITE_INVOCATION)
         .replace("LOGPATH", &quote(log))
         .replace("PROBESPATH", &quote(probes))
         .replace("DIAGNOSTICSPATH", &quote(diagnostics))

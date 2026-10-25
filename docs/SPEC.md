@@ -36,6 +36,20 @@ physical Java classifiers retain invariant variance while semantic Kotlin views 
 declared variance. Missing headers, cyclic owners and unavailable bound scopes decline instead of
 becoming nongeneric declarations or guessed `Any` bounds.
 
+## Direct projected receiver inputs
+
+Rejected-call diagnostics retain the canonical input specialization's reason when an out or star
+capture closes a direct value parameter. The mapped source argument owns the prohibition span and
+the retained declaration owns its display. Nullability preserves that direct-input evidence;
+nested function and classifier inputs keep their own mismatch diagnostics. A literal `Nothing`
+parameter or an unrelated projected receiver does not establish a prohibition.
+
+Only receiver constraints authenticate this evidence. An expected result type cannot introduce a
+receiver projection, and explicit type arguments retain their receiver-mismatch precedence.
+Named whole-array varargs retain their array slot during recovery. Complete differential controls
+live in `tests/projected_receiver_extension_e2e.rs`; captured vararg admission and nested captured
+type identities remain separate follow-ups in #2648 and #2649.
+
 ## Selected alias references and receiver captures
 
 An alias constructor selected through an extension lookup facet publishes a constructor reference
@@ -753,6 +767,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the transformer saves the builder. Tests: `tests/suspend_argument_operands_e2e.rs`,
   `tests/suspending_concat_operands_e2e.rs`, `tests/suspend_arg_order_e2e.rs`,
   `fir_lower/tests.rs::suspending_call_operand_stays_a_direct_constructor_argument`.
+- **Anonymous-class fields preserve enclosing method formals in JVM signatures.** A property or
+  capture whose retained type is an enclosing function's `T` carries `TT;`, including nullable
+  `T?` and a bounded `T : Number`. Its descriptor keeps the declared erasure (`Object` or `Number`);
+  default getters and setters carry `()TT;` and `(TT;)V`. Declaration-owned classifier formals use
+  the same formatter. Complete class headers/member tables and runtime are compared with Kotlin
+  in `tests/enclosing_formal_signatures_e2e.rs`.
 - **A suspend lambda that writes a captured `var`.** The cell is a `Ref$ObjectRef<T>`, and the
   lambda's field carries that generic `Signature`, as its constructor does. A suspension result
   stored into the cell's `element` (an `Object`) goes in erased, with no `checkcast` to the
@@ -21706,6 +21726,24 @@ extension receiver, then values. Member projection inserts the extension receive
 parameters once, without inserting it again into the retained declaration vector. Physical outer
 instances and default markers are separate ABI slots. Tests: `libraries::classifier_callables::tests`
 and both value-class dependency controls in `tests/inner_constructor_bounds_e2e.rs`.
+
+## Failed constructor context and argument diagnostics
+
+A constructor application whose fixed class arguments violate every mapped declaration's bounds
+does not lend its result constraints to nested argument calls. Nested constructors still infer from
+their own explicit arguments and independent value arguments. The outer applicability and bound
+errors precede any missing nested result parameter diagnostic.
+
+When a receiver-bound alias constructor is rejected before argument checking, retained declaration
+and receiver bindings still describe its lambda inputs. Missing callable formals are diagnosed at
+the written, untyped input parameters; explicit annotations and independently fixed inputs survive.
+The rejected call's expected result cannot solve those inputs. Ordinary function declarations,
+nominal function classifiers, vararg elements and anonymous-function receiver slots share the same
+parameter layout. Candidate messages render the alias declaration, not a failed instantiated shape.
+Tests: `dependent_constructor_bounds_e2e` and `bound_inner_alias_inference_e2e`, with complete ordered
+kotlinc diagnostic comparisons, reference-built dependencies and valid inference/runtime controls.
+
+## Postponed receiver admission
 
 Extension receiver admission retains satisfiable active builder-inference variables. Selection may
 test the receiver relation against cloned postponed frames, solve those trial bindings and require

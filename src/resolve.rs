@@ -112,7 +112,6 @@ mod condition_exclusions;
 mod conditional_branch;
 mod constant_evaluation;
 mod constructor_arguments;
-use constructor_arguments::ConstructionExpectations;
 mod constructor_commitment;
 mod context_argument_selection;
 mod context_capture;
@@ -122,6 +121,7 @@ mod control_flow_join;
 pub(crate) mod declaration_index;
 pub(crate) mod delegated_properties;
 mod provider_constructor_selection;
+use constructor_arguments::ConstructionExpectations;
 mod script_receivers;
 pub(crate) use delegated_properties::DelegateGetValueTarget;
 mod contract_declarations;
@@ -12960,74 +12960,6 @@ impl<'a> Checker<'a> {
         (properties.len() == 1).then(|| properties.pop()).flatten()
     }
 
-    /// Bind the constructed classifier's type parameters from everything known at the call BEFORE a
-    /// contextual (lambda) argument is checked: explicit type arguments, the expected result, and
-    /// the arguments already typed. `actuals` holds `Ty::Error` for a slot not yet typed.
-    ///
-    /// This is the constructor half of ordinary bidirectional inference. Its one consumer is the
-    /// lambda expectation: `Store<ROOT, DOMAIN>(wrapper: Wrapper<ROOT>, toDomain: (ROOT) -> DOMAIN)`
-    /// must hand `{ dto -> … }` a `dto: RootDto`, not the unbound `ROOT` (which erases to its bound
-    /// and fails every member read in the body).
-    fn construction_type_param_binds(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call: ExprId,
-        internal: TypeName,
-        expected: Option<Ty>,
-        plan: &ConstructionExpectations,
-        actuals: &[Ty],
-    ) -> crate::symbol_resolver::GSigBinds {
-        let mut binds = crate::symbol_resolver::GSigBinds::default();
-        if plan.type_params.is_empty() {
-            return binds;
-        }
-        // Explicit type arguments and the expected constructed type are FIXED, not constraints to
-        // merge: an argument whose own type is still open (`Wrapper("x")` for
-        // `Store<RootDto, …>`) must not widen what the call site already establishes. Apply both
-        // after argument inference, with explicit source spelling last.
-        let mut expected_bindings = crate::symbol_resolver::GSigBinds::default();
-        {
-            let source = self.fed_source();
-            crate::symbol_resolver::seed_unbound_constructor_result_from_symbols(
-                &source,
-                internal,
-                &plan.type_params,
-                &plan.type_param_bounds,
-                expected,
-                &mut expected_bindings,
-            );
-        }
-        let mut explicit = crate::symbol_resolver::GSigBinds::default();
-        if let Some(refs) = self
-            .file
-            .call_type_args
-            .get(&call.0)
-            .map(|syntax| syntax.arguments.clone())
-        {
-            for (name, type_ref) in plan.type_params.iter().zip(refs.iter()) {
-                let ty = self.type_ref_ty_silent(scope, type_ref);
-                if ty != Ty::Error {
-                    explicit.insert(name.clone(), ty);
-                }
-            }
-        }
-        for (slot, shape) in plan.symbolic.iter().enumerate() {
-            let (Some(shape), Some(&actual)) = (*shape, actuals.get(slot)) else {
-                continue;
-            };
-            if actual == Ty::Error || !shape.mentions_ty_param() {
-                continue;
-            }
-            crate::symbol_resolver::unify_inferred_ty(shape, actual, &mut binds);
-        }
-        binds.extend(expected_bindings);
-        binds.extend(explicit);
-        // Only this classifier's own parameters may be substituted: unification can pick up
-        // variables belonging to a nested generic argument, and those are not ours to bind.
-        binds.retain(|name, ty| plan.type_params.contains(name) && *ty != Ty::Error);
-        binds
-    }
-
     /// Resolve and type-check a call to a MODULE (user) class's instance member on receiver type `rt`.
     ///
     /// An implicit receiver is only sugar for `this.`, so this is the ONE place a module-member call is
@@ -18430,6 +18362,14 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
+                let constructor_result_context_admitted = constructor_expectations
+                    .as_ref()
+                    .zip(bare_constructor_classifier)
+                    .is_none_or(|(plan, internal)| {
+                        self.constructor_result_context_admitted(
+                            scope, call, internal, expected, plan,
+                        )
+                    });
                 // An otherwise UN-SHAPED lambda is postponed only when this bare name semantically
                 // denotes a constructible classifier and no top-level callable competes for it. The
                 // classifier lookup is federated, so source/module/dependency origin does not enter
@@ -18610,6 +18550,9 @@ impl<'a> Checker<'a> {
                         .flatten()
                     {
                         if !matches!(self.file.expr(a), Expr::Lambda { .. }) {
+                            if !constructor_result_context_admitted {
+                                return self.expr(scope, a);
+                            }
                             // A source constructor's erased parameter is not an expectation for an
                             // argument whose semantic shape still contains the classifier's own
                             // unfixed type variable. `IC<T : Int>(Array<T>)` called as
@@ -60967,26 +60910,15 @@ impl<'a> Checker<'a> {
         if specialized_params.is_empty() && !signature.params.is_empty() {
             specialized_params = &signature.params;
         }
-        let context_count = signature.context_count.min(specialized_params.len());
-        let context_types = &specialized_params[..context_count];
-        let remaining = &specialized_params[context_count..];
-        // A regular anonymous function can adapt to an extension-function value by spelling the
-        // extension receiver as its ordinary first parameter: `fun(it) { it.member() }` passed to
-        // `R.() -> Unit`. A lambda literal under the same expected type still receives implicit
-        // `this`; the syntax, not a name/arity heuristic, distinguishes the two.
-        let anonymous_declares_physical_parameters = self.file.anon_fun_lambdas.contains(&e.0)
-            && !self.file.anon_fun_receivers.contains_key(&e.0)
-            && matches!(self.file.expr(e), Expr::Lambda { params, .. } if params.len() == remaining.len());
-        let (receiver, value_types) = if (has_receiver || signature.has_receiver)
-            && !anonymous_declares_physical_parameters
-        {
-            match remaining.split_first() {
-                Some((&receiver, value_types)) => (Some(receiver), value_types),
-                None => (None, remaining),
-            }
-        } else {
-            (None, remaining)
-        };
+        let layout = lambda_expectation::FunctionLambdaInputLayout::new(
+            self.file,
+            e,
+            specialized_params,
+            signature.context_count,
+            has_receiver || signature.has_receiver,
+        );
+        let context_types = layout.contexts;
+        let (receiver, value_types) = (layout.receiver, layout.values);
         self.check_lambda_with_implicit_receivers_and_return_labeled(
             scope,
             e,

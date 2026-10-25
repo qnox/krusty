@@ -5993,6 +5993,12 @@ direct source construction, inheritance, secondary/default/vararg/generic constr
 accessor/member dispatch remain required follow-ups. The first slice explicitly declines identity
 collisions before backend emission. It does not close #2621 or change any outcome baseline.
 
+## Enclosing formal field signatures
+
+JVM field and property-accessor signature formatting consumes retained enclosing-method formals
+through the declaration type-use formatter. Own classifier formals, nullable/bounded captures and
+concrete declarations share that boundary; physical field descriptors retain their existing erasure.
+
 ## Lossless JVM signature syntax
 
 The signature reader has an application-construction boundary that retains all written class
@@ -6020,6 +6026,14 @@ Syntax-aware callable applicability lives in `resolve/call_applicability`: sourc
 candidate ranks and selected SAM adaptations share one operation across the existing call paths.
 The resolver facade delegates to that owner, preserving parameter mapping and scoring policy.
 Captured input constraints remain tracked separately in #2648 and #2649.
+
+## Direct projected input diagnostics
+
+Direct projected-input diagnostics share input specialization with ordinary selection and retain
+the source argument map, receiver-only constraints and declaration display. Exact ledger controls
+cover out/star receivers, nullability, named/context arguments and explicit receiver precedence.
+Captured vararg admission (#2648) and nested captured-type identity diagnostics (#2649) remain
+separate work; their complete failing controls are preserved.
 
 ## Receiver-bound constructor constraints
 
@@ -6051,6 +6065,15 @@ substitutions. Source/dependency oracles cover full ABI, receiver and target bou
 priority, reordered and unused alias formals, named arguments, and independent constructor formals.
 Alias/value-class runtime controls also retain the target declaration's generic versus concrete
 constructor carriers for source, own-produced and reference-produced dependencies.
+
+Constructor argument expectations now live in a declaration-owned resolver module. Bound admission
+uses the existing complete constructor-bound checker over the actual mapped declarations before
+supplying nested result context; independently inferred arguments remain intact. Failed receiver
+selection completes untyped lambda inputs from the retained candidate and source argument mapping,
+then rechecks only affected bodies without the rejected expected result. Normal checking and
+recovery share the function input layout, including contexts and anonymous receiver slots. Exact
+source/dependency diagnostics and admitted-context controls cover #2587. Explicit invalid-bound
+lambda diagnostic ordering remains a separate follow-up in #2629.
 
 Late extension admission now uses strict receiver assignability or the existing satisfiable
 postponed-frame trial. The common operation also serves unbound constructor-reference receivers;
