@@ -10,9 +10,9 @@ on master); `projects/` holds each project's latest result and `history.tsv` eve
 | Exposed | 9,301 | 138,105 | 0 | ok | 0 / 43 | 0 / 8,100 (0.0%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
 | koin | 10,022 | 33,677 | 123 | ok | 4 / 19 | 76 / 3,705 (2.1%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
 | kotlinx.coroutines | 13,824 | 102,096 | 897 | ok | 0 / 34 | 0 / 9,482 (0.0%) | [2026-10-25, krusty b5979a1](https://github.com/qnox/krusty/actions/runs/40201721357) |
-| ktor | 14,554 | 259,031 | 85 | failed (exit 1) | 0 / 0 | 0 / 0 | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
+| ktor | 14,554 | 259,026 | 85 | ok | 0 / 220 | 0 / 15,418 (0.0%) | [2026-10-25, krusty b5979a1](https://github.com/qnox/krusty/actions/runs/40201721357) |
 | leakcanary | 30,003 | 100,627 | 172 | ok | 6 / 34 | 22 / 1,798 (1.2%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
-| Maestro | 16,207 | 65,644 | 0 | ok | 1 / 19 | 26 / 2,156 (1.2%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
+| Maestro | 16,208 | 65,644 | 0 | ok | 1 / 19 | 26 / 2,156 (1.2%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
 | mirai | 14,792 | 156,072 | 559 | ok | 0 / 51 | 0 / 2,536 (0.0%) | [2026-10-25, krusty b5979a1](https://github.com/qnox/krusty/actions/runs/40201721357) |
 | moshi | 10,166 | 16,749 | 13,212 | ok | 0 / 12 | 0 / 512 (0.0%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
 | nowinandroid | 21,966 | 26,596 | 0 | ok | 24 / 58 | 221 / 1,110 (19.9%) | [2026-10-25, krusty cf34959](https://github.com/qnox/krusty/actions/runs/40199492852) |
@@ -20,7 +20,7 @@ on master); `projects/` holds each project's latest result and `history.tsv` eve
 | okio | 9,052 | 46,812 | 2,398 | failed (exit 1) | 0 / 6 | 0 / 343 (0.0%) | [2026-10-25, krusty cf34959](https://github.com/qnox/krusty/actions/runs/40199492852) |
 | quarkdown | 16,323 | 87,771 | 23 | ok | 0 / 37 | 0 / 2,345 (0.0%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
 | Unciv | 11,486 | 139,231 | 1,184 | ok | 0 / 4 | 0 / 3,341 (0.0%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
-| **Measured total** | | | | | **35 / 311** | **345 / 35,085 (1.0%)** | |
+| **Measured total** | | | | | **35 / 531** | **345 / 50,503 (0.7%)** | |
 
 ## Missed compilations
 
@@ -35,6 +35,8 @@ on master); `projects/` holds each project's latest result and `history.tsv` eve
 - **kotlinx.coroutines**
   - 30 × left to kotlinc: krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)
   - 4 × left to kotlinc: krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead; freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)
+- **ktor**
+  - 220 × not run: the krusty build failed: For more information, please refer to https://docs.gradle.org/9.7.1/userguide/declaring_repositories.html#declaring_content_exclusively_found_in_one_repository in the Gradle documentation.
 - **leakcanary**
   - 24 × krusty wrote no class
   - 2 × left to kotlinc: krusty does not implement everything it requests (freeCompilerArg '-P' conflicts with compiler plugin configuration; configure the structured Gradle input instead)
@@ -78,23 +80,24 @@ on master); `projects/` holds each project's latest result and `history.tsv` eve
 
 | Plugin | Projects | Modules |
 | --- | ---: | ---: |
-| `org.jetbrains.kotlin.plugin.scripting` | 13 | 214 |
+| `org.jetbrains.kotlin.plugin.scripting` | 13 | 345 |
 | `org.jetbrains.kotlin.jvm` | 13 | 177 |
-| `org.jetbrains.kotlin.plugin.serialization` | 8 | 70 |
-| `com.android.internal.version-check` | 7 | 107 |
-| `org.jetbrains.dokka` | 7 | 105 |
-| `org.jetbrains.kotlin.multiplatform` | 7 | 37 |
-| `com.vanniktech.maven.publish.base` | 6 | 89 |
+| `org.jetbrains.dokka` | 8 | 226 |
+| `org.jetbrains.kotlin.multiplatform` | 8 | 168 |
+| `com.android.internal.version-check` | 8 | 108 |
+| `org.jetbrains.kotlin.plugin.serialization` | 8 | 104 |
+| `com.vanniktech.maven.publish.base` | 7 | 212 |
 | `com.android.internal.library` | 6 | 69 |
+| `com.vanniktech.maven.publish` | 5 | 189 |
 | `com.google.devtools.ksp` | 5 | 33 |
 | `io.gitlab.arturbosch.detekt` | 4 | 79 |
 | `com.diffplug.spotless` | 4 | 72 |
-| `com.vanniktech.maven.publish` | 4 | 66 |
 | `org.jetbrains.kotlinx.binary-compatibility-validator` | 4 | 23 |
 | `com.android.internal.application` | 4 | 7 |
 | `com.google.osdetector` | 4 | 4 |
+| `org.jetbrains.kotlinx.kover` | 3 | 43 |
 | `org.jetbrains.kotlin.plugin.compose` | 3 | 22 |
-| `org.jetbrains.kotlinx.kover` | 2 | 42 |
+| `org.jetbrains.kotlinx.atomicfu` | 2 | 148 |
 | `ru.vyarus.animalsniffer` | 2 | 34 |
 | `com.android.internal.lint` | 2 | 30 |
 | `com.gradleup.tapmoc` | 2 | 28 |
@@ -103,17 +106,16 @@ on master); `projects/` holds each project's latest result and `history.tsv` eve
 | `org.jetbrains.compose` | 2 | 5 |
 | `org.jetbrains.compose.hot-reload` | 2 | 5 |
 | `com.github.johnrengelman.shadow` | 2 | 3 |
+| `com.android.internal.kotlin.multiplatform.library` | 2 | 2 |
 | `com.google.protobuf` | 2 | 2 |
 | `com.gradle.plugin-publish` | 2 | 2 |
 | `me.champeau.jmh` | 2 | 2 |
-| `org.jetbrains.kotlinx.benchmark` | 2 | 2 |
-| `nowinandroid.android.lint` | 1 | 34 |
 
 ## Kotlin compiler plugins
 
 | Plugin | Projects | Modules |
 | --- | ---: | ---: |
-| `kotlin-serialization-compiler-plugin-embeddable` | 7 | 30 |
+| `kotlin-serialization-compiler-plugin-embeddable` | 7 | 62 |
 | `symbol-processing-api` | 4 | 9 |
 | `kotlin-compose-compiler-plugin-embeddable` | 3 | 22 |
 | `burst-kotlin-plugin` | 2 | 5 |
@@ -128,21 +130,12 @@ on master); `projects/` holds each project's latest result and `history.tsv` eve
 | `kotlin-jvm-blocking-bridge-compiler-embeddable` | 1 | 6 |
 | `purity-compiler-plugin` | 1 | 6 |
 | `kotlin-dynamic-delegation-compiler-embeddable` | 1 | 3 |
-| `gradle-api` | 1 | 1 |
-| `gradle-installation-beacon` | 1 | 1 |
-| `gradle-kotlin-dsl` | 1 | 1 |
-| `gradle-kotlin-dsl-shared-runtime` | 1 | 1 |
-| `gradle-kotlin-dsl-tooling-models` | 1 | 1 |
-| `groovy` | 1 | 1 |
-| `groovy-ant` | 1 | 1 |
-| `groovy-astbuilder` | 1 | 1 |
-| `groovy-datetime` | 1 | 1 |
-| `groovy-dateutil` | 1 | 1 |
-| `groovy-groovydoc` | 1 | 1 |
-| `groovy-json` | 1 | 1 |
-| `groovy-nio` | 1 | 1 |
-| `groovy-templates` | 1 | 1 |
-| `groovy-xml` | 1 | 1 |
+| `kotlin-allopen-compiler-plugin-embeddable` | 1 | 1 |
+| `kotlin-build-tools-api` | 1 | 1 |
+| `kotlin-compiler-embeddable` | 1 | 1 |
+| `kotlin-daemon-embeddable` | 1 | 1 |
+| `kotlin-parcelize-compiler` | 1 | 1 |
+| `kotlinx-coroutines-core-jvm` | 1 | 1 |
 
 ## Compiler plugin arguments
 
