@@ -8,7 +8,9 @@
 //!   from the sign of its step at run time;
 //! - `step` (`StepHandler`) checks its argument, negates it to follow the nested progression's
 //!   direction, and recomputes `last` with `getProgressionLastElement`;
-//! - `reversed` (`ReversedHandler`) swaps first and last and negates the step.
+//! - `reversed` (`ReversedHandler`) swaps first and last and negates the step;
+//! - an `indices` read (`IndicesHandler`) counts from 0 until the receiver's size, or to the
+//!   inclusive `size + -1` under `step` and `reversed`.
 
 use crate::fir::FirRangeOperation;
 use crate::ir::{
@@ -256,14 +258,38 @@ impl Realizer<'_> {
                 step,
                 last_element,
             } => {
-                let nested = self.progression_header(nested, ty);
+                let nested = self.nested_header(nested, ty);
                 self.stepped_header(nested, *step, last_element)
             }
             IrProgressionSource::Reversed(nested) => {
-                let nested = self.progression_header(nested, ty);
+                let nested = self.nested_header(nested, ty);
                 self.reversed_header(nested)
             }
+            IrProgressionSource::Indices { size } => {
+                let zero = self.add(IrExpr::Const(IrConst::Int(0)));
+                self.range_literal_header(ty, FirRangeOperation::Until, zero, *size)
+            }
         }
+    }
+
+    /// The header `step` or `reversed` applies to. `IndicesHandler`'s exclusive `size` reverts to
+    /// the inclusive `size + -1` (`revertToLastInclusive` of its `last.decrement()`), which the
+    /// `0..last` it then bounds can step or reverse; any other source is its own header.
+    fn nested_header(&mut self, nested: &IrProgressionSource, ty: Ty) -> ProgressionHeader {
+        let IrProgressionSource::Indices { size } = *nested else {
+            return self.progression_header(nested, ty);
+        };
+        let zero = self.add(IrExpr::Const(IrConst::Int(0)));
+        let minus_one = self.add_checked(IrExpr::Const(IrConst::Int(-1)), Ty::Int);
+        let last = self.add_checked(
+            IrExpr::PrimitiveBinOp {
+                op: IrBinOp::Add,
+                lhs: size,
+                rhs: minus_one,
+            },
+            Ty::Int,
+        );
+        self.range_literal_header(ty, FirRangeOperation::Through, zero, last)
     }
 
     /// `start until end step step` counted rather than built: the `until` becomes `start..end - 1`,

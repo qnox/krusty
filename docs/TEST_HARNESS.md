@@ -16,6 +16,19 @@ case: cleaning it hides the ownership defect.
 building the compiler. It is also part of `just lint`: missing or unrelated manifest baselines must
 fail without emitting a release version, while valid baseline and root counts remain exact.
 
+## Compiler invocation records
+
+Gradle proxies and Kotlin Toolchain fixtures share the std-only, development-only
+`krusty-test-support` invocation recorder. Each writer exclusively claims an empty owner file in a
+numeric slot, writes its argument payload privately, then publishes the completed record. Claims
+precede compiler execution, preserving dependency order without serializing independent compiles.
+
+Read snapshots only after the build drains its children. Missing, malformed and incomplete slots
+are errors. Gradle compile and support-check lanes are created lazily, so an absent lane still
+proves no invocation occurred. Clearing a completed Gradle lane validates it before removal and
+leaves it absent; the toolchain's cumulative snapshot and consume/recreate operations retain their
+existing contracts.
+
 ## Agent Quick Reference
 
 - Use `./run-tests.sh` for the full suite; it provisions kotlinc and the Kotlin codegen/box corpus.

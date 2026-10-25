@@ -64,8 +64,9 @@ constraints. The same receiver participates in call constraint solving and bindi
 specialization reads a root capture through its bound and preserves projections in invariant type
 arguments. Exact corpus regressions, outer-instance runtime and projection variants live in
 `bound_inner_alias_inference_e2e` and `projected_receiver_extension_e2e`; existing alias receiver and
-bound diagnostic ledgers remain intact. Anonymous public-result ABI approximation and complete
-closed-projection diagnostic parity remain separate follow-ups with preserved failing oracles.
+bound diagnostic ledgers remain intact. Anonymous public-result ABI follows the declaration-publication
+rules. Complete closed-projection diagnostic parity remains a separate follow-up with preserved
+failing oracles.
 
 **Status:** PoC / experiment. NOT a production Kotlin compiler.
 
@@ -6835,14 +6836,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_package_private_member_type_cannot_leave_its_package_through_a_subclass`, and siblings.
 
 - **Line breaks inside parentheses and brackets do not end an expression.** kotlinc's parser
-  disables newlines inside `(…)` and `[…]` (call arguments, indices, collection literals,
-  parenthesized expressions and conditions, a `when` subject) and re-enables them inside every `{…}`
-  body it opens there (block, lambda, `when` body, object literal). A line-leading `+`, `or`, or other
-  binary operator inside parentheses therefore continues the expression, while a statement in a
-  lambda argument still ends at its line break. Only the `{…}` body re-enables them: the `when`
-  keyword and subject, and an object literal's `object : Base(…)` header, keep the enclosing mode,
-  so `f(when\n(x) { … })` and `f(object : Base\n(1) { … })` parse as one expression. Tests:
-  `parenthesized_line_breaks_e2e`.
+  disables newlines inside `(…)` and `[…]` (every value-argument list, whether of a call, a safe
+  call, a supertype or enum-entry constructor, or a `this`/`super` delegation; annotation arguments;
+  indices, collection literals, parenthesized expressions and conditions, a `when` subject) and
+  re-enables them inside every `{…}` body it opens there (block, lambda, `when` body, object
+  literal). A line-leading `+`, `or`, or other binary operator inside parentheses therefore
+  continues the expression, while a statement in a lambda argument still ends at its line break.
+  Only the `{…}` body re-enables them: the `when` keyword and subject, and an object literal's
+  `object : Base(…)` header, keep the enclosing mode, so `f(when\n(x) { … })` and `f(object :
+  Base\n(1) { … })` parse as one expression. Tests: `parenthesized_line_breaks_e2e`.
 
 - **`$` before a backtick interpolates only a complete escaped identifier.** A backtick, one or more
   characters that are neither a backtick nor a line break, then a closing backtick; any other `$`
@@ -7678,6 +7680,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   array of that supertype, and the copied class is not cast back to the declaration class.
   Tests: `tests/reified_anonymous_object_e2e.rs`, box
   `reified/kt39256_privateInlineWithAnonymousObject.kt`.
+- **Anonymous result exposure belongs to declaration publication.** A public inferred function
+  calling a private anonymous-object factory exposes the applied declared parent, just as a direct
+  anonymous result does. The expression and private non-inline factory retain the exact anonymous
+  application while their members are checked. Local-class members also retain exact results.
+  Publication preserves declaration-owned type arguments and bounds: a captured bounded star can
+  expose `Bounded<out Number>`, while an ordinary written `Token<*>` remains a star. Nested results
+  follow variance, so invariant `Box<Anonymous>` exposes `Box<out Parent>`, and a returned callback
+  exposes its result without changing the callback implementation's private result ABI. Function
+  parents retain their receiver/context/suspend shape. Negative nominal positions retain the exact
+  anonymous identity, preserving the accepted inputs. An object with no declared parent exposes
+  `Any`; multiple parents require an explicit result type, with the diagnostic at the declaration's
+  written name.
+  Parent templates include complete alias expansions and remain unbound until the anonymous
+  application's capture bindings are applied; classifier headers consume the same canonical facts.
+  Tests: `tests/projected_receiver_extension_e2e.rs::inferred_receiver_capture_signatures_match_kotlinc`
+  and the `anonymous_factory_` ABI, runtime and complete diagnostic controls in the same module.
 - **A hoisted anonymous object retains its construction site's lexical classifier scope.** The parser
   stores an anonymous object's class as a file-level synthetic declaration, but its member signatures,
   supertype arguments, superclass constructor arguments, and inferred member returns may still name a
@@ -9999,8 +10017,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   temporary. A classpath `inline` callee that needs an empty stack (a loop or a `try`) still takes
   the method inliner: the duplicated receiver is that call's own argument and is stored before the
   body. Only a value left underneath the argument keeps the call on the byte splice. After that
-  inline the caller's line is marked again on the null path's `pop`; the expression-body `return`
-  does not repeat it. The same holds when the safe call's receiver is folded out of its temporary
+  inline the caller's line is marked again on the null path's `pop`. The expression-body `return`
+  marks the body's end line as it does after any call, so it adds no entry on a one-line body and
+  marks the last line of a safe call spanning several (`tests/safe_call_return_line_e2e.rs`). The same holds when the safe call's receiver is folded out of its temporary
   (`simplifyKnownSafeCallPatterns`) after a same-module inline selector: kotlinc's label
   normalization merges the null result's line label into the jump's own, and the fold puts the
   `pop` right after that label, so the line describes the `pop`. A discarded null result leaves a
@@ -10016,6 +10035,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   removes the elvis's check, where it proves the value non-null (a `new`, a string constant).
   Common lowering therefore never fuses the two guards on the selector's type. Test:
   `tests/elvis_over_safe_call_e2e.rs`.
+- **An elvis lays out its left value first.** fir2ir builds `a ?: b` as
+  `{ val tmp = a; when { tmp == null -> b; else -> tmp } }`, and kotlinc's
+  `JvmSafeCallChainFoldingLowering.foldElvis` rebuilds it as `when { tmp != null -> tmp; else -> b }`.
+  The JVM layout is therefore `ifnull R; <tmp>; goto E; R: <b>; E:`. Where the left value needs no
+  conversion, the negated-jumps pass turns that into `ifnonnull E`. Where it is unboxed (`Int?` to
+  `Int`), the `intValue` stays in the fall-through branch. The fold's right-side branch is an
+  `irTrue` condition at the elvis's position, which marks the elvis's line on a `nop`, so the right
+  side's own line starts after the `pop` at the null target, never on it. Common lowering keeps
+  fir2ir's order and records the `when` as an elvis with its line, and the JVM emitter applies the
+  fold. Test:
+  `tests/elvis_branch_order_e2e.rs`.
 
 - **An integer-constant branch takes a sibling primitive.** An `if`, `when`, elvis, or `try` with no
   expected type still adapts an integer-constant branch to the non-null primitive of the other
@@ -13208,6 +13238,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   in a class taking `Nothing?` is `foo(Ljava/lang/Void;)V`, so the class declares a bridge named
   like the supertype's member that casts the argument and calls the override. Tests:
   `tests/value_class_bounded_parameter_bridge_e2e.rs`. Corpus: `inlineClasses/kt51254`.
+- **A private value-class constructor is reached through `access$constructor-impl`.** A value
+  class's constructor is realized as the static `constructor-impl` over its carrier, which is
+  `private` when the declared primary or secondary constructor is (its `constructor-impl$default`
+  is then package-private). The companion, a nested class, an anonymous object, and a lambda in
+  the companion are other JVM classes: each calls the box's `public static final synthetic
+  access$constructor-impl`, which forwards to the private static, while the class's own members
+  call it directly. The call is recorded against the selected constructor's own `constructor-impl`,
+  so the accessor is the one any private static member gets, and the record follows the call
+  below a `box-impl` placed around it. krusty emitted every `constructor-impl` public and called
+  it directly from each scope. Tests: `tests/value_class_private_constructor_access_e2e.rs`.
+  Corpus: `inlineClasses/contextsAndAccessors/accessPrivateInlineClassConstructorFromCompanion`,
+  `…FromLambda`, `inlineClasses/secondaryConstructorVisibilies`.
+- **A bridge passes a supertype's own value-class parameter as its carrier.** `Store<T>.put(id:
+  Id, value: T)` mangles by its own `Id` parameter and is `put-<hash>(ILjava/lang/Object;)` on the
+  interface. A value class implementing `Store<Id>` declares the bridge on its box under that
+  mangled name, with the `Id` slot already its carrier: only the erased `T` argument is cast and
+  unboxed before the call to the member's static over the carrier, and the `Id` argument (an
+  `int`, or the `String` of a reference-backed `Name`, `Name?` included) is passed through as it
+  arrives. An ordinary class implementing the interface takes the same bridge. krusty kept the
+  value-class owner's bridge under the source name with the unerased `Id` parameter, and unboxed
+  every value-class argument the static member takes, so a reference carrier failed with a
+  `ClassCastException` and an `int` one never implemented the interface member. Tests:
+  `tests/value_class_carrier_parameter_bridge_e2e.rs`.
 - **A generic bridge over `X?` keeps null when `X?` is erased to its carrier.** `X?` over a
   non-null reference is `X`'s carrier holding the null, so an override `echo(t: Tag?): Tag?` of
   `Echo<T>.echo(t: T): T` is `echo-<hash>(String)String`. Its bridge `echo(Object)Object` unboxes
@@ -14039,6 +14092,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `withIndex()` over `indices` (`IndicesHandler`), and a counted
   receiver whose element entry is a `var` or needs a conversion, which keep iterating
   `IndexedValue`s. (`tests/for_in_with_index_e2e.rs`.)
+
+- **A `for` loop over the stdlib's `indices` counts from 0 to the receiver's size, as kotlinc's
+  `IndicesHandler` does.** The provider gives the `CompilerIntrinsic::Indices` role to the read-only
+  `indices: IntRange` extension property of `kotlin.collections` on `Array<out T>`, a signed
+  primitive array or `Collection<*>`, and of `kotlin.text` on `CharSequence`, matched on the complete
+  declaration (`property_realization`). For a loop iterable that reads such a property, directly or
+  under `reversed()` and `step`, resolution selects the size member on the class the declaration
+  receives (`size` of the array or of `Collection`, `length` of `CharSequence`; `IterationPlans`).
+  The loop is then `0 until size` with `size` read once on the receiver before the loop, the
+  receiver cast to that class when its static class is another one (`List` is cast to
+  `Collection`, `String` to `CharSequence`). No `IntRange` is built. Under `reversed()` or `step`
+  the bound reverts to the inclusive `size + -1` (`revertToLastInclusive` of the handler's
+  `last.decrement()`), which they then count from. A user extension property named `indices` is
+  read and iterated as written. Not yet ported, so still building the range: membership
+  (`i in xs.indices`), `withIndex()` over `indices`, and an unsigned array's `indices`, which
+  kotlinc counts to the static `UIntArray.getSize-impl` (the role requires a signed array's
+  element). (`tests/indices_loop_e2e.rs`, `indices_roles_require_the_complete_extension_property`.)
 
 - **A `checkcast` right before an `aastore` is removed, as kotlinc's
   `RedundantCheckcastsBeforeAastoreMethodTransformer` does.** The pass runs after jump negation and
@@ -16549,9 +16619,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A constant a Java annotation declares is a `JAVA_LIB` `final public` property with the
   `JAVA_STATIC` modifier and neither getter nor setter, listed after the constructor and before
   the nested classifiers and left out of `getAllProperties`; a reference array is
-  `Array<out E>`, a mapped class its Kotlin classifier. The members of other classifiers, of an
-  annotation class whose members carry annotations, and of one declaring a generic, raw generic
-  or collection-typed constant are refused for those queries. (`crates/krusty-plugin-host/tests/ksp.rs`,
+  `Array<out E>`, a mapped class its Kotlin classifier. What a Java annotation element's method
+  states, visible then invisible annotations, is on the property's getter with origin `JAVA`; a
+  written argument is `JAVA` and a default `SYNTHETIC`, and a written argument of an annotation
+  a library class states takes the class's origin. The members of other classifiers, of a Kotlin
+  annotation class whose members carry annotations, of a Java one whose element states a
+  nullability qualifier or an annotation Kotlin maps (`Deprecated`, the meta-annotations), and of
+  one declaring a generic, raw generic or collection-typed constant are refused for those
+  queries. (`crates/krusty-plugin-host/tests/ksp.rs`,
   `library_annotation_members_are_what_ksp2_reports`.)
 - **KSP maps names between Kotlin and the JVM by kotlinc's class map.** `mapKotlinNameToJava` and
   `mapJavaNameToKotlin` answer what kotlinc's `JavaToKotlinClassMap` does for the classifier the

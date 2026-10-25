@@ -1,100 +1,11 @@
-//! Invocation-owned records, observed only after the task has drained its child processes.
-//!
-//! Exclusive creation of an empty owner file assigns a numeric slot before writing. Slots stay
-//! claimed until the completed run is consumed, so a later writer cannot acquire an earlier writer's ownership.
-//! Numeric claim order preserves dependency/KSP order without depending on completion order.
-
-use std::io::{self, ErrorKind};
-use std::path::{Path, PathBuf};
-
-pub struct InvocationRecords {
-    directory: PathBuf,
-}
-
-impl InvocationRecords {
-    pub fn new(run: &Path) -> Self {
-        Self {
-            directory: run.join("record"),
-        }
-    }
-
-    pub fn create(&self) -> io::Result<()> {
-        std::fs::create_dir(&self.directory)
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.directory
-    }
-
-    /// A non-consuming snapshot, including earlier completed runs (KSP avoidance uses this).
-    /// Missing, incomplete or malformed slots are errors, never an empty successful record.
-    pub fn read_snapshot(&self) -> io::Result<Vec<u8>> {
-        let mut slots = Vec::new();
-        for entry in std::fs::read_dir(&self.directory)? {
-            let entry = entry?;
-            let name = entry.file_name();
-            let index = name.to_str().and_then(|name| name.parse::<usize>().ok());
-            let Some(index) = index.filter(|index| name == index.to_string().as_str()) else {
-                return Err(self.invalid("non-numeric invocation slot"));
-            };
-            if !entry.file_type()?.is_dir() {
-                return Err(self.invalid("invocation slot is not a directory"));
-            }
-            slots.push(index);
-        }
-        slots.sort_unstable();
-        let mut record = Vec::new();
-        for (expected, index) in slots.into_iter().enumerate() {
-            if index != expected {
-                return Err(self.invalid("missing invocation slot"));
-            }
-            let slot = self.directory.join(index.to_string());
-            let files = std::fs::read_dir(&slot)?.collect::<io::Result<Vec<_>>>()?;
-            if files.len() != 2 {
-                return Err(self.invalid("incomplete invocation slot"));
-            }
-            for file in &files {
-                if !file.file_type()?.is_file()
-                    || (file.file_name() != "arguments"
-                        && (file.file_name() != "owner" || file.metadata()?.len() != 0))
-                {
-                    return Err(self.invalid("incomplete invocation slot"));
-                }
-            }
-            let path = slot.join("arguments");
-            let arguments = std::fs::read(&path)?;
-            if !arguments.ends_with(b"----\n") {
-                return Err(self.invalid(&format!(
-                    "unterminated invocation record at {} ({} bytes): {arguments:?}",
-                    path.display(),
-                    arguments.len()
-                )));
-            }
-            record.extend(arguments);
-        }
-        Ok(record)
-    }
-
-    /// Call only after all children have terminated. Validate before deleting any evidence.
-    pub fn consume_after_run(&self) -> io::Result<Vec<u8>> {
-        let record = self.read_snapshot()?;
-        std::fs::remove_dir_all(&self.directory)?;
-        self.create()?;
-        Ok(record)
-    }
-
-    fn invalid(&self, message: &str) -> io::Error {
-        io::Error::new(
-            ErrorKind::InvalidData,
-            format!("{}: {message}", self.directory.display()),
-        )
-    }
-}
+pub use krusty_test_support::InvocationRecords;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::support::TempDir;
+    use std::io::ErrorKind;
+    use std::path::Path;
     use std::process::{Command, Output};
 
     fn run(recorder: &Path, records: &InvocationRecords, arguments: &[&str]) -> Output {
@@ -109,6 +20,39 @@ mod tests {
         assert!(output.status.success(), "{output:?}");
         assert_eq!(output.stdout, b"");
         assert_eq!(output.stderr, b"");
+    }
+
+    #[test]
+    fn clearing_a_completed_lane_leaves_it_absent_until_the_next_invocation() {
+        let temp = TempDir::new("invocation-record-clear");
+        let records = InvocationRecords::at(&temp.0.join("compiles"));
+        records.clear_after_run().unwrap();
+        assert!(!records.path().exists());
+        records.create().unwrap();
+        success(run(&super::super::recorder(), &records, &["first"]));
+        assert_eq!(records.read_snapshot().unwrap(), b"first\n----\n");
+        records.clear_after_run().unwrap();
+        assert!(!records.path().exists());
+        records.clear_after_run().unwrap();
+        assert!(!records.path().exists());
+    }
+
+    #[test]
+    fn clearing_an_incomplete_lane_preserves_its_owned_evidence() {
+        let temp = TempDir::new("invocation-record-clear-incomplete");
+        let records = InvocationRecords::at(&temp.0.join("compiles"));
+        records.create().unwrap();
+        let slot = records.path().join("0");
+        std::fs::create_dir(&slot).unwrap();
+        std::fs::write(slot.join("owner"), b"").unwrap();
+        assert_eq!(
+            records.clear_after_run().unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
+        assert_eq!(std::fs::read(slot.join("owner")).unwrap(), b"");
+        std::fs::write(slot.join("arguments"), b"completed\n----\n").unwrap();
+        records.clear_after_run().unwrap();
+        assert!(!records.path().exists());
     }
 
     #[test]
