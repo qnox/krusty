@@ -16412,8 +16412,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   public`); `kotlin.Annotation` declares nothing and inherits `kotlin.Any`'s functions. A library
   modifier set is the visibility (none for Java package-private), the modality, `infix`, and
   `operator` together with `override`; an accessor lists its modality only when it is not `open`.
-  The members of other classifiers, and of an annotation class whose members carry annotations,
-  are refused for those queries. (`crates/krusty-plugin-host/tests/ksp.rs`,
+  A constant a Java annotation declares is a `JAVA_LIB` `final public` property with the
+  `JAVA_STATIC` modifier and neither getter nor setter, listed after the constructor and before
+  the nested classifiers and left out of `getAllProperties`; a reference array is
+  `Array<out E>`, a mapped class its Kotlin classifier. The members of other classifiers, of an
+  annotation class whose members carry annotations, and of one declaring a generic, raw generic
+  or collection-typed constant are refused for those queries. (`crates/krusty-plugin-host/tests/ksp.rs`,
   `library_annotation_members_are_what_ksp2_reports`.)
 - **KSP maps names between Kotlin and the JVM by kotlinc's class map.** `mapKotlinNameToJava` and
   `mapJavaNameToKotlin` answer what kotlinc's `JavaToKotlinClassMap` does for the classifier the

@@ -110,6 +110,9 @@ pub struct FieldSig {
     /// The deprecation the declaration states: Kotlin's `@Deprecated`, or a Java field's
     /// `Deprecated` attribute.
     pub deprecation: Option<Box<crate::types::DeclaredDeprecation>>,
+    /// Whether the field states annotations (`RuntimeVisibleAnnotations` or
+    /// `RuntimeInvisibleAnnotations`) other than nullability qualifiers.
+    pub annotated: bool,
 }
 
 impl FieldSig {
@@ -1150,6 +1153,7 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
             signature: member.attributes.signature,
             nullability: member.attributes.declaration_nullability,
             deprecation: member.attributes.deprecation.declared(kotlin_class),
+            annotated: !member.attributes.annotations.is_empty(),
         })
         .collect();
     // Parameter attributes precede class attributes in the classfile, but an inner constructor's
