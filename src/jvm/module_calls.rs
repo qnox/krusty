@@ -1207,9 +1207,31 @@ fn realize_property(
     let semantic = (value.is_none() && stored != ty).then_some(ty);
     let accessor =
         module_property_accessor_name(property, value.is_some()).map_err(|()| failure)?;
+    let private = private_property_accessor(property, value.is_some(), &accessor);
     if let Some(classifier) = property.owner {
         if property.owner_kind.is_none() {
             return Err(failure);
+        }
+        if let Some(name) = private.filter(|_| property.owner_kind == Some(IrClassifierKind::Class))
+        {
+            // The owner's static accessor takes the instance first.
+            let receiver = crate::types::Ty::obj_name(classifier);
+            let mut physical = vec![receiver];
+            physical.extend(parameters.iter().copied());
+            return Ok((
+                IrExpr::Call {
+                    callee: Box::new(Callee::Static {
+                        owner: classifier,
+                        name,
+                        descriptor: crate::jvm::method_descriptors::ir_method_desc(&physical, &ret),
+                        inline: crate::libraries::InlineKind::None,
+                    }),
+                    dispatch_receiver: Some(dispatch_receiver.ok_or(failure)?),
+                    args: arguments,
+                },
+                physical,
+                semantic,
+            ));
         }
         Ok((
             IrExpr::Call {
@@ -1245,7 +1267,7 @@ fn realize_property(
             IrExpr::Call {
                 callee: Box::new(Callee::CrossFile {
                     facade,
-                    name: accessor,
+                    name: private.unwrap_or(accessor),
                     params: parameters.clone(),
                     ret,
                     module_target: None,
@@ -1258,6 +1280,34 @@ fn realize_property(
             None,
         ))
     }
+}
+
+/// The synthetic accessor through which code of another class reaches a PRIVATE module property.
+/// Only a non-private inline body of the declaring file names one, and its copy runs in the
+/// caller's class, as kotlinc's does: a field-backed accessor is `access$get<X>$p`
+/// (`access$set<X>$p`); one the source declares, or a delegate supplies, is `access$get<X>`
+/// (`access$set<X>`), which calls it. A `const val` is read as its value and has none.
+fn private_property_accessor(
+    property: &IrModuleProperty,
+    setter: bool,
+    accessor: &str,
+) -> Option<String> {
+    use crate::fir::DeclarationFlags;
+    let visibility = if setter {
+        property.setter_visibility
+    } else {
+        property.visibility
+    };
+    if !visibility.is_private() || property.flags.has(DeclarationFlags::CONST) {
+        return None;
+    }
+    let declared = property.flags.has(DeclarationFlags::DELEGATED)
+        || property.flags.has(if setter {
+            DeclarationFlags::CUSTOM_SETTER
+        } else {
+            DeclarationFlags::CUSTOM_GETTER
+        });
+    Some(crate::jvm::private_static_access::member_property_accessor_name(accessor, declared))
 }
 
 /// Resolve each foreign inline template's declaring source unit to its JVM file facade.

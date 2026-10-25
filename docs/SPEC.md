@@ -10430,6 +10430,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   copied body and uses the same accessors.
   Tests: `tests/private_inline_access_e2e.rs`, `tests/private_inline_property_access_e2e.rs`.
   Box `ir/privateSignatures/privateLeakThroughInline.kt`.
+- **A private property an inline body of another file reaches goes through its owner's accessor.**
+  A non-private inline function's body that another file inlines names its file's private
+  properties as module properties, and the JVM realizes each access as the call the declaring
+  class publishes, as kotlinc's copy makes it: `access$get<X>$p` / `access$set<X>$p` on the facade
+  for a field-backed top-level property, `access$get<X>` / `access$set<X>` when the source declares
+  the accessor or a delegate supplies it, and the instance form taking the owner first
+  (`access$getX$p(Owner)`) for a class member. A `const val` is read as its value. A private
+  `lateinit` read through `access$get<X>$p` yields the raw field, so the use site throws while it
+  is unset, as its own class's read does. Calling the property's `getX`, which a private property
+  does not publish, failed with `NoSuchMethodError`.
+  Test: `tests/private_property_inline_access_e2e.rs` (field, declared, delegated, `lateinit` and
+  `const` top-level properties and a member, against kotlinc's bytes and run).
 - **A private member-extension accessor reached from another class calls `access$<name>`.** The
   accessor is an instance method of the declaring class (`getItem(Key)` for `val Key.item`).
   A local class inside the owner is a separate class file, so it cannot call that private method.
