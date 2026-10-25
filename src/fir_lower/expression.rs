@@ -1100,10 +1100,14 @@ impl BodyLowering<'_> {
                     self.ir.null_guards.insert(result);
                     self.ir.elvis_safe_call_guards.insert(result);
                 }
-                self.ir.add_expr(IrExpr::Block {
+                let elvis = self.ir.add_expr(IrExpr::Block {
                     stmts: vec![variable],
                     value: Some(result),
-                })
+                });
+                // kotlinc states the elvis's own line where it begins and again where its value is
+                // stored, and keeps it when the left value or the store marks another line there.
+                self.ir.kept_start_lines.insert(elvis);
+                elvis
             }
             FirExprKind::Throw(value) => {
                 let operand = self.expression(*value)?;
