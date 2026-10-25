@@ -42,10 +42,18 @@ fn an_elvis_lays_out_its_left_value_first() {
          }\n\
          fun nullableResult(a: Int?, b: Int?): Int? = a ?: b\n\
          \n\
+         fun cast(value: Any): String =\n\
+         \x20   value\n\
+         \x20       as? String\n\
+         \x20       ?: \"none\"\n\
+         fun nextLine(s: String?): String = s\n\
+         \x20   ?: \"d\"\n\
+         \n\
          fun box(): String {\n\
          \x20   val total = local() + direct() + summed() + str(null).length + ifForm() + lengthElvis() +\n\
          \x20       longElvis(null).toInt() + doubleElvis(null).toInt() + returning(null) + returning(4) +\n\
-         \x20       strReturning(\"ab\") + chained(null, null) + (nullableResult(null, 5) ?: 0)\n\
+         \x20       strReturning(\"ab\") + chained(null, null) + (nullableResult(null, 5) ?: 0) +\n\
+         \x20       cast(1).length + nextLine(null).length\n\
          \x20   statement(null)\n\
          \x20   if (!flag(null) && anyElvis() == 8 && total > 0) return \"OK\"\n\
          \x20   return \"fail\"\n\

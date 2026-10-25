@@ -1083,7 +1083,8 @@ impl BodyLowering<'_> {
                     branches: vec![(Some(condition), rhs), (None, lhs)],
                 });
                 self.ir.logical_types.insert(result, expression.ty.get());
-                self.ir.whens.elvises.insert(result);
+                let line = self.body.expression_debug_lines(expression_id).source;
+                self.ir.whens.elvises.insert(result, line);
                 // An elvis over a safe call is one more guard of that call's chain: its left
                 // value's null check joins the chain's, and every `null` reaches the right side.
                 let over_safe_call = matches!(

@@ -9896,8 +9896,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `JvmSafeCallChainFoldingLowering.foldElvis` rebuilds it as `when { tmp != null -> tmp; else -> b }`.
   The JVM layout is therefore `ifnull R; <tmp>; goto E; R: <b>; E:`. Where the left value needs no
   conversion, the negated-jumps pass turns that into `ifnonnull E`. Where it is unboxed (`Int?` to
-  `Int`), the `intValue` stays in the fall-through branch. Common lowering keeps fir2ir's order and
-  records the `when` as an elvis, and the JVM emitter applies the fold. Test:
+  `Int`), the `intValue` stays in the fall-through branch. The fold's right-side branch is an
+  `irTrue` condition at the elvis's position, which marks the elvis's line on a `nop`, so the right
+  side's own line starts after the `pop` at the null target, never on it. Common lowering keeps
+  fir2ir's order and records the `when` as an elvis with its line, and the JVM emitter applies the
+  fold. Test:
   `tests/elvis_branch_order_e2e.rs`.
 
 - **An integer-constant branch takes a sibling primitive.** An `if`, `when`, elvis, or `try` with no

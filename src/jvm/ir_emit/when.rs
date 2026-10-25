@@ -319,8 +319,10 @@ impl Emitter<'_> {
             self.mark_kept_start_line(expression, code);
         }
         if let [(Some(null_test), rhs), (None, lhs)] = branches {
-            if self.ir.whens.elvises.contains(&expression) {
+            if let Some(&line) = self.ir.whens.elvises.get(&expression) {
                 self.emit_folded_elvis(
+                    expression,
+                    line,
                     (*null_test, *rhs, *lhs),
                     Emission::new(is_stmt, result_ty, entry_height, end, None),
                     code,
@@ -406,8 +408,14 @@ impl Emitter<'_> {
     /// right side and the left value falls through — `ifnull R; <lhs>; goto E; R: <rhs>; E:`.
     /// Where the left value needs no conversion, `NegatedJumpsMethodTransformer` turns the jump over
     /// the `goto` into `ifnonnull E`, the layout the written null-first order would give.
+    ///
+    /// The right side's branch is the fold's `irTrue` condition at the elvis's own position, which
+    /// `visitConst` marks on a `nop` as every Boolean constant: the right side's line therefore
+    /// starts after the `pop` the temporary's elimination puts at the null target, never on it.
     fn emit_folded_elvis(
         &mut self,
+        expression: u32,
+        line: u32,
         (null_test, rhs, lhs): (u32, u32, u32),
         emission: Emission,
         code: &mut CodeBuilder,
@@ -420,6 +428,10 @@ impl Emitter<'_> {
         }
         self.bind(null_path, code);
         code.set_stack(emission.entry_height);
+        if line != 0 {
+            self.mark_expression_line(expression, line, code);
+            code.nop();
+        }
         let _ = self.emit_when_arm(rhs, emission.is_stmt, emission.result_ty, code);
         self.bind(emission.end, code);
         land_joined_value(
