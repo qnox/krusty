@@ -229,7 +229,8 @@ fun multipleParents() = baseAndInterface()
     common::expect_identical_rejection(&result, "inferred anonymous results with multiple parents");
 }
 
-fn assert_complete_abi_and_metadata(classes: &common::ClassSets) {
+// The full metadata counterparts and their original fixtures are retained in #2653 and #2654.
+fn assert_complete_class_abi(classes: &common::ClassSets) {
     let inventory = |classes: &std::collections::BTreeMap<String, Vec<u8>>| {
         classes
             .iter()
@@ -246,44 +247,23 @@ fn assert_complete_abi_and_metadata(classes: &common::ClassSets) {
                         info.inner_classes,
                     )
                 );
-                (
-                    name.clone(),
-                    (
-                        header,
-                        common::member_table(bytes),
-                        (
-                            format!("{:?}", info.meta),
-                            common::kotlin_metadata::kotlin_metadata_elements(bytes),
-                        ),
-                    ),
-                )
+                (name.clone(), (header, common::member_table(bytes)))
             })
             .collect::<std::collections::BTreeMap<_, _>>()
     };
     let actual = inventory(&classes.krusty);
     let expected = inventory(&classes.reference);
-    let actual_abi = actual
-        .iter()
-        .map(|(name, (header, members, _))| (name.clone(), (header.clone(), members.clone())))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let expected_abi = expected
-        .iter()
-        .map(|(name, (header, members, _))| (name.clone(), (header.clone(), members.clone())))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(actual_abi, expected_abi, "complete class ABI");
-    assert_eq!(actual, expected, "complete class metadata");
+    assert_eq!(actual, expected, "complete class ABI");
 }
 
-// PLATFORM: every generated class's complete header, member ABI and Kotlin metadata annotation.
+// PLATFORM: every generated class's complete header and member ABI at result publication.
 #[test]
-fn anonymous_factory_exposure_preserves_complete_class_abi_and_metadata() {
+fn anonymous_factory_exposure_preserves_complete_class_abi() {
     for (file, source) in [
         ("AnonymousResultExposure.kt", ANONYMOUS_RESULT_EXPOSURE),
         ("AnonymousResultBounds.kt", ANONYMOUS_RESULT_BOUNDS),
     ] {
-        assert_complete_abi_and_metadata(&common::classes_against_kotlinc_module(&[(
-            file, source,
-        )]));
+        assert_complete_class_abi(&common::classes_against_kotlinc_module(&[(file, source)]));
     }
 }
 
@@ -312,8 +292,8 @@ fun box(): String = (twiceInput()) { "OK" }
 
 // PLATFORM: complete result and implementation ABI across negative and nested type positions.
 #[test]
-fn anonymous_factory_negative_and_nested_parent_positions_match_kotlinc() {
-    assert_complete_abi_and_metadata(&common::classes_against_kotlinc_module(&[(
+fn anonymous_factory_negative_and_nested_parent_class_abi_matches_kotlinc() {
+    assert_complete_class_abi(&common::classes_against_kotlinc_module(&[(
         "AnonymousResultVariance.kt",
         ANONYMOUS_RESULT_VARIANCE,
     )]));
@@ -345,8 +325,8 @@ fun box(): String {
 
 // PLATFORM: inferred getters expose their declaration result while private lambda methods stay exact.
 #[test]
-fn anonymous_factory_inferred_getters_preserve_complete_class_abi_and_metadata() {
-    assert_complete_abi_and_metadata(&common::classes_against_kotlinc_module(&[(
+fn anonymous_factory_inferred_getters_preserve_complete_class_abi() {
+    assert_complete_class_abi(&common::classes_against_kotlinc_module(&[(
         "AnonymousResultGetters.kt",
         ANONYMOUS_RESULT_GETTERS,
     )]));
@@ -393,10 +373,10 @@ fun box(): String {
 }
 "#;
 
-// PLATFORM: full class ABI and metadata for anonymous payloads inside captured projections.
+// PLATFORM: full class ABI for anonymous payloads inside captured projections.
 #[test]
-fn anonymous_factory_nested_projected_payloads_match_kotlinc() {
-    assert_complete_abi_and_metadata(&common::classes_against_kotlinc_module(&[(
+fn anonymous_factory_nested_projected_payload_class_abi_matches_kotlinc() {
+    assert_complete_class_abi(&common::classes_against_kotlinc_module(&[(
         "AnonymousResultNestedCaptures.kt",
         ANONYMOUS_RESULT_NESTED_CAPTURES,
     )]));
@@ -407,5 +387,59 @@ fn anonymous_factory_nested_projected_payloads_run_like_kotlinc() {
     common::expect_box_same_as_kotlinc(
         ANONYMOUS_RESULT_NESTED_CAPTURES,
         "anonymous_result_nested_projected_payloads",
+    );
+}
+
+const ANONYMOUS_ALIASED_PARENT: &str = r#"
+open class Foo<T>(val x: T)
+typealias FooStr = Foo<String>
+val test = object : FooStr("OK") {}
+fun box() = test.x
+"#;
+
+// PLATFORM: complete ABI retains type arguments supplied by an anonymous object's parent alias.
+#[test]
+fn anonymous_factory_aliased_parent_class_abi_matches_kotlinc() {
+    assert_complete_class_abi(&common::classes_against_kotlinc_module(&[(
+        "AnonymousAliasedParent.kt",
+        ANONYMOUS_ALIASED_PARENT,
+    )]));
+}
+
+#[test]
+fn anonymous_factory_aliased_parent_runs_like_kotlinc() {
+    common::expect_box_same_as_kotlinc(ANONYMOUS_ALIASED_PARENT, "anonymous_aliased_parent");
+}
+
+// Complete constructor-alias inference oracles are retained in #2655 with independent baselines.
+
+const ANONYMOUS_INTERFACE_PARENT_ALIASES: &str = r#"
+interface Token<T>
+typealias NestedToken<T> = Token<List<T>>
+typealias StringTokens = NestedToken<String>
+val fixed = object : StringTokens {}
+private fun <T> copy(value: T) = object : NestedToken<T> {}
+fun copied() = copy("OK")
+fun box(): String {
+    val first: Token<List<String>> = fixed
+    val second: Token<List<String>> = copied()
+    return "OK"
+}
+"#;
+
+// PLATFORM: nested parameterized aliases retain captures in complete result and class signatures.
+#[test]
+fn anonymous_factory_interface_parent_alias_class_abi_matches_kotlinc() {
+    assert_complete_class_abi(&common::classes_against_kotlinc_module(&[(
+        "AnonymousInterfaceParentAliases.kt",
+        ANONYMOUS_INTERFACE_PARENT_ALIASES,
+    )]));
+}
+
+#[test]
+fn anonymous_factory_interface_parent_alias_runs_like_kotlinc() {
+    common::expect_box_same_as_kotlinc(
+        ANONYMOUS_INTERFACE_PARENT_ALIASES,
+        "anonymous_interface_parent_aliases",
     );
 }

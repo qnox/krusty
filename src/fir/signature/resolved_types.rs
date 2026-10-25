@@ -30,12 +30,21 @@ impl ResolvedTy {
     }
 }
 
+/// The declaration's exposed result and any distinct checking context for its own inferred body.
+/// Both views have removed solver-local parameters; only the exposed view approximates anonymous
+/// implementation types. Callers, metadata and ABI consume `published` exclusively.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeclarationResultTypes {
+    pub published: ResolvedTy,
+    pub inferred_body_result: Option<ResolvedTy>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedSignature {
     pub parameters: Box<[ResolvedTy]>,
     pub result: ResolvedTy,
-    /// Exact inferred body evidence when declaration publication approximated its result. This is
-    /// checking context for the original body, never a caller-visible result or emitted ABI slot.
+    /// Declaration-owned body evidence before anonymous exposure, with solver-local parameters
+    /// removed. This is checking context, never a caller-visible result or emitted ABI slot.
     pub(super) inferred_body_result: Option<ResolvedTy>,
     /// The typealias an inferred result was reached through, kotlinc's abbreviation attribute on
     /// the result type (`val text = StringBuilder()` has type `java.lang.StringBuilder`

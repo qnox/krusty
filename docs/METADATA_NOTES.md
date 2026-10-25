@@ -18,6 +18,15 @@ metadata. Their authenticated own/captured application supplies the declared par
 ordinary written stars retain their declaration meaning. Function parents keep the complete
 semantic function shape. Private factory and lambda implementation signatures remain exact rather
 than being rewritten to match the exposed declaration's denotable result.
+The retained body view removes solver-local callee parameters through the same lexical formal set;
+ordinary result denotability does not introduce a separate checking context.
+Parent templates are the same alias-expanded compact facts later published in classifier headers;
+metadata and anonymous exposure do not reconstruct arguments from transitional collector shapes.
+
+Complete anonymous-class metadata parity remains tracked by #2653 (own versus lexical-capture
+applications) and #2654 (package-local classifier facts and raw payloads). Their unchanged complete
+fixture oracles remain attached to those issues; ABI publication checks do not establish metadata
+payload parity.
 
 Layout reads use class headers and builtin declaration tables, not the enclosing `LibraryType` or
 its members. Physical mapped Java requests keep invariant formals independently of a Kotlin view's

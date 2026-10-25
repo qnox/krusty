@@ -11,6 +11,10 @@ publication owner authenticates anonymous declarations and complete own/captured
 declared bounds and parent/function shapes, and follows generic/function variance. Compact headers
 retain declaration-name spans for exact ambiguous-parent diagnostics. Private and local-member
 results remain exact; shared outcomes and operand ABI ownership are unchanged.
+Canonical compact parent templates, including alias arguments, are computed once before signature
+inference and shared with classifier publication; parent diagnostics retain their publication order.
+Complete anonymous metadata parity stays in #2653/#2654 with its full retained fixture oracles.
+Parameterized alias superclass constructor argument inference remains a separate repair in #2655.
 
 JVM field and property-accessor signature formatting consumes retained enclosing-method formals
 through the declaration type-use formatter. Own classifier formals, nullable/bounded captures and

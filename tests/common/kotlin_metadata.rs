@@ -43,14 +43,13 @@ pub(crate) fn kotlin_metadata_ints(bytes: &[u8]) -> Option<Vec<(String, Vec<i32>
     )
 }
 
-#[derive(Debug, Eq, PartialEq)]
-pub(crate) enum MetadataElement {
+enum MetadataElement {
     Strings(Vec<String>),
     Ints(Vec<i32>),
 }
 
 /// Every element of the class's `@kotlin.Metadata` annotation, in class-file order.
-pub(crate) fn kotlin_metadata_elements(bytes: &[u8]) -> Option<Vec<(String, MetadataElement)>> {
+fn kotlin_metadata_elements(bytes: &[u8]) -> Option<Vec<(String, MetadataElement)>> {
     struct Reader<'a> {
         bytes: &'a [u8],
         at: usize,

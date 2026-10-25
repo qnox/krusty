@@ -932,8 +932,9 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         &self,
         declaration: crate::fir::DeclarationId,
         result: crate::fir::ResolvedTy,
-    ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        result_approximation::declaration_result(self, declaration, result)
+        evaluated_body: crate::fir::ResolvedTy,
+    ) -> Result<crate::fir::DeclarationResultTypes, crate::fir::DiagnosticId> {
+        result_approximation::declaration_result(self, declaration, result, evaluated_body)
     }
 
     fn classifier_type(

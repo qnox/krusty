@@ -38,103 +38,23 @@ pub(super) fn declaration_result(
             .expect("an inferred named declaration retains its diagnostic name span");
         semantics.record_source_diagnostic_at(declaration, stub.source, span, message.to_owned())
     };
+    let parent_templates = |declaration| {
+        semantics
+            .classifier_parents
+            .get(&declaration)?
+            .parents
+            .as_ref()
+            .map(|parents| parents.declared.as_slice())
+    };
     Projection {
         table: semantics.table,
         headers: semantics.headers,
         source: &source,
         reject: &reject,
+        parent_templates: &parent_templates,
         visiting: HashSet::default(),
     }
     .approximate(ty, TypePosition::Out, &GSigBinds::default())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn source_anonymous_results_preserve_wrappers_and_declared_parameter_identities() {
-        let source =
-            "interface Parent<T>\nprivate fun <T> factory(value: T) = object : Parent<T> {}";
-        let inputs =
-            [crate::frontend::SourceInput::kotlin(source).with_file_stem("AnonymousWrappers")];
-        let mut diagnostics = crate::diag::DiagSink::new();
-        let files = [crate::frontend::parse_source_with_detected_features(
-            source,
-            &mut diagnostics,
-        )];
-        let headers = crate::fir::inventory_parsed_source_headers(&inputs, &files);
-        let table = crate::resolve::collect_signatures_with_cp_headers(
-            &files,
-            &headers,
-            Box::new(crate::libraries::EmptySymbolSource),
-            &mut diagnostics,
-        );
-        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-        let anonymous: Vec<_> = table
-            .classes
-            .values()
-            .filter(|class| {
-                class.stable_declaration.is_some_and(|declaration| {
-                    headers
-                        .stub(declaration)
-                        .is_some_and(|stub| stub.flags.has(DeclarationFlags::ANONYMOUS_OBJECT))
-                })
-            })
-            .collect();
-        assert_eq!(anonymous.len(), 1);
-        let class = anonymous[0];
-        assert!(class.type_params.is_empty());
-        assert_eq!(class.captured_type_parameters.type_params.len(), 1);
-        let formal = Ty::ty_param(
-            &class.captured_type_parameters.type_params[0],
-            class.captured_type_parameters.type_param_bounds[0],
-        );
-        let anonymous = Ty::obj_args_name(class.internal_name(), &[formal]);
-        let parents = crate::resolve::applied_hierarchy::source_parent_templates(class);
-        assert_eq!(parents.len(), 1);
-        assert_eq!(parents[0].1.type_args(), &[formal]);
-        let parent = parents[0].1;
-        let module = crate::module_symbols::ModuleSymbols::for_file(&table, class.source_file);
-        let source = CompositeSource::new(vec![&module, &*table.libraries]);
-        let reject = |message: &str| panic!("valid source-derived result rejected: {message}");
-        let mut projection = Projection {
-            table: &table,
-            headers: &headers,
-            source: &source,
-            reject: &reject,
-            visiting: HashSet::default(),
-        };
-        for (actual, expected) in [
-            (anonymous, parent),
-            (Ty::nullable(anonymous), Ty::nullable(parent)),
-            (
-                Ty::platform_nullable(anonymous),
-                Ty::platform_nullable(parent),
-            ),
-            (formal, formal),
-            (Ty::nullable(formal), Ty::nullable(formal)),
-            (Ty::platform_nullable(formal), Ty::platform_nullable(formal)),
-        ] {
-            assert_eq!(
-                projection.approximate(actual, TypePosition::Out, &GSigBinds::default()),
-                Ok(expected),
-                "{actual:?}"
-            );
-        }
-        let definitely_non_null = formal.contributed_through_nullable_formal();
-        assert!(
-            matches!(definitely_non_null.kind(), TyKind::DefinitelyNotNull(inner) if inner == formal)
-        );
-        assert_eq!(
-            projection.approximate(
-                definitely_non_null,
-                TypePosition::Out,
-                &GSigBinds::default()
-            ),
-            Ok(definitely_non_null)
-        );
-    }
 }
 
 fn anonymous_class<'a>(
@@ -185,6 +105,7 @@ struct Projection<'a> {
     headers: &'a crate::fir::StreamedHeaderModule,
     source: &'a dyn SymbolSource,
     reject: &'a dyn Fn(&str) -> DiagnosticId,
+    parent_templates: &'a dyn Fn(DeclarationId) -> Option<&'a [Ty]>,
     visiting: HashSet<Ty>,
 }
 
@@ -216,18 +137,22 @@ impl Projection<'_> {
                 bindings.insert(formal.clone(), Ty::out_projection(bound));
             }
         }
-        let parents = crate::resolve::applied_hierarchy::source_parent_templates(class);
-        match parents.as_slice() {
+        let declaration = class
+            .stable_declaration
+            .expect("an authenticated anonymous classifier retains its declaration");
+        let parents = (self.parent_templates)(declaration).ok_or_else(|| {
+            self.reject(
+                "cannot publish an anonymous result without its normalized declared parents.",
+            )
+        })?;
+        match parents {
             [] => Ok(Some((Ty::obj("kotlin/Any"), bindings))),
-            [(_, parent)] => {
+            [parent] => {
                 // Function shapes carry receiver/context/suspend facts that the nominal parent
                 // classifier cannot express. Keep the template until positional approximation
                 // consumes the complete captured application; structural substitution can create
                 // invalid nested projections such as `in (out Number)`.
-                Ok(Some((
-                    class.callable_signature.unwrap_or(*parent),
-                    bindings,
-                )))
+                Ok(Some((*parent, bindings)))
             }
             _ => {
                 Err(self
@@ -382,5 +307,102 @@ impl Projection<'_> {
             )),
             _ => Ok(ty),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_anonymous_results_preserve_wrappers_and_declared_parameter_identities() {
+        let source =
+            "interface Parent<T>\nprivate fun <T> factory(value: T) = object : Parent<T> {}";
+        let inputs =
+            [crate::frontend::SourceInput::kotlin(source).with_file_stem("AnonymousWrappers")];
+        let mut diagnostics = crate::diag::DiagSink::new();
+        let files = [crate::frontend::parse_source_with_detected_features(
+            source,
+            &mut diagnostics,
+        )];
+        let headers = crate::fir::inventory_parsed_source_headers(&inputs, &files);
+        let table = crate::resolve::collect_signatures_with_cp_headers(
+            &files,
+            &headers,
+            Box::new(crate::libraries::EmptySymbolSource),
+            &mut diagnostics,
+        );
+        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+        let anonymous: Vec<_> = table
+            .classes
+            .values()
+            .filter(|class| {
+                class.stable_declaration.is_some_and(|declaration| {
+                    headers
+                        .stub(declaration)
+                        .is_some_and(|stub| stub.flags.has(DeclarationFlags::ANONYMOUS_OBJECT))
+                })
+            })
+            .collect();
+        assert_eq!(anonymous.len(), 1);
+        let class = anonymous[0];
+        assert!(class.type_params.is_empty());
+        assert_eq!(class.captured_type_parameters.type_params.len(), 1);
+        let formal = Ty::ty_param(
+            &class.captured_type_parameters.type_params[0],
+            class.captured_type_parameters.type_param_bounds[0],
+        );
+        let anonymous = Ty::obj_args_name(class.internal_name(), &[formal]);
+        let parents = class
+            .interfaces
+            .iter_ids()
+            .enumerate()
+            .map(|(index, parent)| Ty::obj_args_name(parent, &class.interface_type_args[index]))
+            .collect::<Vec<_>>();
+        assert_eq!(parents.len(), 1);
+        assert_eq!(parents[0].type_args(), &[formal]);
+        let parent = parents[0];
+        let declaration = class.stable_declaration.unwrap();
+        let parent_templates = |owner| (owner == declaration).then_some(parents.as_slice());
+        let module = crate::module_symbols::ModuleSymbols::for_file(&table, class.source_file);
+        let source = CompositeSource::new(vec![&module, &*table.libraries]);
+        let reject = |message: &str| panic!("valid source-derived result rejected: {message}");
+        let mut projection = Projection {
+            table: &table,
+            headers: &headers,
+            source: &source,
+            reject: &reject,
+            parent_templates: &parent_templates,
+            visiting: HashSet::default(),
+        };
+        for (actual, expected) in [
+            (anonymous, parent),
+            (Ty::nullable(anonymous), Ty::nullable(parent)),
+            (
+                Ty::platform_nullable(anonymous),
+                Ty::platform_nullable(parent),
+            ),
+            (formal, formal),
+            (Ty::nullable(formal), Ty::nullable(formal)),
+            (Ty::platform_nullable(formal), Ty::platform_nullable(formal)),
+        ] {
+            assert_eq!(
+                projection.approximate(actual, TypePosition::Out, &GSigBinds::default()),
+                Ok(expected),
+                "{actual:?}"
+            );
+        }
+        let definitely_non_null = formal.contributed_through_nullable_formal();
+        assert!(
+            matches!(definitely_non_null.kind(), TyKind::DefinitelyNotNull(inner) if inner == formal)
+        );
+        assert_eq!(
+            projection.approximate(
+                definitely_non_null,
+                TypePosition::Out,
+                &GSigBinds::default()
+            ),
+            Ok(definitely_non_null)
+        );
     }
 }

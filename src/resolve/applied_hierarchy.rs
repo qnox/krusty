@@ -6,31 +6,6 @@ use crate::fx_hash::HashMap;
 use super::{ClassSig, SymbolTable};
 use crate::types::{Ty, TypeName};
 
-/// Direct source-parent templates, before applying any receiver arguments. Consumers that must
-/// approximate projected arguments positionally cannot first erase that evidence by substitution.
-pub(super) fn source_parent_templates(class: &ClassSig) -> Vec<(TypeName, Ty)> {
-    let mut parents = class
-        .interfaces
-        .iter_ids()
-        .enumerate()
-        .map(|(index, parent)| {
-            let arguments = class
-                .interface_type_args
-                .get(index)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
-            (parent, Ty::obj_args_name(parent, arguments))
-        })
-        .collect::<Vec<_>>();
-    if let Some(parent) = class.super_internal {
-        parents.insert(
-            class.interfaces_before_superclass as usize,
-            (parent, Ty::obj_args_name(parent, &class.super_type_args)),
-        );
-    }
-    parents
-}
-
 impl SymbolTable {
     /// `class`'s direct parents applied under `bindings`, in declaration order: the superclass
     /// keeps its written slot among the interfaces.
@@ -39,10 +14,36 @@ impl SymbolTable {
         class: &ClassSig,
         bindings: HashMap<String, Ty>,
     ) -> Vec<(TypeName, Ty)> {
-        source_parent_templates(class)
-            .into_iter()
-            .map(|(owner, template)| (owner, crate::symbol_resolver::ty_subst(template, &bindings)))
-            .collect()
+        let mut parents = class
+            .interfaces
+            .iter_ids()
+            .enumerate()
+            .map(|(index, parent)| {
+                let arguments = class
+                    .interface_type_args
+                    .get(index)
+                    .map(|arguments| {
+                        arguments
+                            .iter()
+                            .map(|shape| crate::symbol_resolver::ty_subst(*shape, &bindings))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                (parent, Ty::obj_args_name(parent, &arguments))
+            })
+            .collect::<Vec<_>>();
+        if let Some(parent) = class.super_internal {
+            let arguments = class
+                .super_type_args
+                .iter()
+                .map(|shape| crate::symbol_resolver::ty_subst(*shape, &bindings))
+                .collect::<Vec<_>>();
+            parents.insert(
+                class.interfaces_before_superclass as usize,
+                (parent, Ty::obj_args_name(parent, &arguments)),
+            );
+        }
+        parents
     }
 
     /// Applied source hierarchy, including its first external boundary.

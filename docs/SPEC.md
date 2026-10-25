@@ -14,8 +14,9 @@ constraints. The same receiver participates in call constraint solving and bindi
 specialization reads a root capture through its bound and preserves projections in invariant type
 arguments. Exact corpus regressions, outer-instance runtime and projection variants live in
 `bound_inner_alias_inference_e2e` and `projected_receiver_extension_e2e`; existing alias receiver and
-bound diagnostic ledgers remain intact. Anonymous public-result ABI approximation and complete
-closed-projection diagnostic parity remain separate follow-ups with preserved failing oracles.
+bound diagnostic ledgers remain intact. Anonymous public-result ABI follows declaration publication
+below. Complete closed-projection diagnostic parity remains a separate follow-up with preserved
+failing oracles.
 
 ## Class application header ownership
 
@@ -7584,8 +7585,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   expose `Bounded<out Number>`, while an ordinary written `Token<*>` remains a star. Nested results
   follow variance, so invariant `Box<Anonymous>` exposes `Box<out Parent>`, and a returned callback
   exposes its result without changing the callback implementation's private result ABI. Function
-  parents retain their receiver/context/suspend shape. No declared parent exposes `Any`; multiple
-  parents require an explicit result type, with the diagnostic at the declaration's written name.
+  parents retain their receiver/context/suspend shape. Negative nominal positions retain the exact
+  anonymous identity, preserving the accepted inputs. An object with no declared parent exposes
+  `Any`; multiple parents require an explicit result type, with the diagnostic at the declaration's
+  written name.
+  Parent templates include complete alias expansions and remain unbound until the anonymous
+  application's capture bindings are applied; classifier headers consume the same canonical facts.
   Tests: `tests/projected_receiver_extension_e2e.rs::inferred_receiver_capture_signatures_match_kotlinc`
   and the `anonymous_factory_` ABI, runtime and complete diagnostic controls in the same module.
 - **A hoisted anonymous object retains its construction site's lexical classifier scope.** The parser

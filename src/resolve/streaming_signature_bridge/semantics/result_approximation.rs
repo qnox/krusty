@@ -9,7 +9,8 @@ pub(super) fn declaration_result(
     semantics: &super::ProductionSignatureSemantics<'_>,
     declaration: crate::fir::DeclarationId,
     result: crate::fir::ResolvedTy,
-) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
+    evaluated_body: crate::fir::ResolvedTy,
+) -> Result<crate::fir::DeclarationResultTypes, crate::fir::DiagnosticId> {
     // Only a script's `$$result` may be `Nothing`: the script ends by throwing.
     if result.get() == Ty::Nothing
         && semantics.headers.stub(declaration).is_some_and(|stub| {
@@ -34,9 +35,22 @@ pub(super) fn declaration_result(
             .into_iter()
             .collect::<crate::fx_hash::HashSet<_>>()
     })?;
-    let result = anonymous_results::declaration_result(semantics, declaration, result.get())?;
-    crate::fir::ResolvedTy::new(denotable_signature_result(result, &denotable))
-        .map_err(|_| super::ProductionSignatureSemantics::failure())
+    let exposed = anonymous_results::declaration_result(semantics, declaration, result.get())?;
+    let resolve = |ty| {
+        crate::fir::ResolvedTy::new(denotable_signature_result(ty, &denotable))
+            .map_err(|_| super::ProductionSignatureSemantics::failure())
+    };
+    // Ordinary solver-local approximation must not retain a callee's temporary formal as checking
+    // context. Retain a separate body view only for anonymous exposure, using the same lexical
+    // normalization without applying anonymous exposure to that body.
+    Ok(crate::fir::DeclarationResultTypes {
+        published: resolve(exposed)?,
+        inferred_body_result: if exposed != result.get() {
+            Some(resolve(evaluated_body.get())?)
+        } else {
+            None
+        },
+    })
 }
 
 /// Remove solver-local projection captures from an inferred declaration result. A capture is
