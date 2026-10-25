@@ -385,3 +385,86 @@ fn native_module_abi_symbols_keep_same_named_internal_classifiers_distinct() {
         "Native ABI identities must remain distinct across the exact module graph"
     );
 }
+
+/// Run an owned Native descriptor-layout fixture through the KLIB lane after its JVM oracle.
+// PLATFORM-SPECIFIC: these programs are portable Kotlin, but the Wasm backend still lays out
+// interface members per file, so they cannot be owned box regressions every lane must pass.
+fn native_descriptor_case(source: &str, stem: &str) -> Outcome {
+    super::box_reference_classes::checked_box(source, stem)
+        .unwrap_or_else(|error| panic!("{stem}: required JVM oracle: {error}"));
+    let Some(target) = host() else {
+        if std::env::var_os("KRUSTY_REQUIRE_NATIVE_CONFORMANCE").is_some() {
+            panic!("{stem}: required Native target/KLIB setup is unavailable");
+        }
+        return Outcome::Pass;
+    };
+    let sources = box_lane::prepare_sources(source, stem, TestTarget::Native)
+        .unwrap_or_else(|outcome| panic!("{stem}: {outcome:?}"));
+    let lane = NativeLane {
+        target: Some(target),
+    };
+    lane.compile_and_run(&std::env::temp_dir(), stem, &sources, source)
+}
+
+/// A class whose descriptor carries a `Collection.size` thunk is also called through an interface
+/// of the program, in one compilation: the two descriptor entries are separate fields.
+#[test]
+fn native_a_collection_class_is_sized_and_dispatched_through_separate_fields() {
+    let source = r#"var sizeReads = 0
+
+interface Counted {
+    fun count(): Int
+}
+
+class Values : Collection<Int>, Counted {
+    override val size: Int
+        get() {
+            sizeReads++
+            return 2
+        }
+    override fun isEmpty(): Boolean = false
+    override fun contains(element: Int): Boolean = element == 1 || element == 2
+    override fun containsAll(elements: Collection<Int>): Boolean = false
+    override fun iterator(): Iterator<Int> = listOf(1, 2).iterator()
+    override fun count(): Int = 40
+}
+
+fun countOf(counted: Counted): Int = counted.count()
+
+fun box(): String {
+    val values = Values()
+    val sum = values.size + countOf(values)
+    if (sum != 42) return "sum $sum"
+    if (sizeReads != 1) return "size read $sizeReads times"
+    return "OK"
+}
+"#;
+    let stem = "collectionSizeWithModuleInterface";
+    assert_eq!(
+        native_descriptor_case(source, stem),
+        Outcome::Pass,
+        "{stem}"
+    );
+}
+
+/// A class is an instance of interfaces another file declares.
+#[test]
+fn native_a_class_is_an_instance_of_interfaces_another_file_declares() {
+    let source = r#"// FILE: lib.kt
+interface A
+interface B
+
+// FILE: main.kt
+class C : A, B
+
+fun check(value: Any): Boolean = value is A && value is B
+
+fun box(): String = if (check(C())) "OK" else "FAIL"
+"#;
+    let stem = "interfaceCheckAcrossFiles";
+    assert_eq!(
+        native_descriptor_case(source, stem),
+        Outcome::Pass,
+        "{stem}"
+    );
+}

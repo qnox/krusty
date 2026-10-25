@@ -51,9 +51,15 @@ pub(super) fn declared_serializable_elements(
             name: property.name.clone(),
             ty: property.ty,
             optional: property.has_default,
+            serial_name: None,
+            serializer: None,
+            contextual: false,
         });
     }
+    // The module's checked declarations do not name the type parameters the element types use, so
+    // a generic class's record lists none and a subclass in another file declines.
     Some(SerializableClassElements {
+        type_parameters: Box::default(),
         elements: elements.into_boxed_slice(),
         superclass: class.superclass,
     })

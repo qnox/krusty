@@ -319,6 +319,7 @@ impl CallLinker for TemplateCalls<'_> {
 
     fn link_constructor(
         &mut self,
+        _ir: &mut IrFile,
         callee: &KlibPublicIdSignature,
     ) -> Result<LinkedConstructor, KlibBodyDeclineReason> {
         let identity = self.identity(callee)?;

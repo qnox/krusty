@@ -31,6 +31,9 @@ mod emitted_roots;
 pub(super) struct DependencySupportState {
     snapshot: Option<crate::libraries::DependencyBodySnapshot>,
     emitted: HashMap<KlibDependencyCallable, Option<PublishedSingletonDispatch>>,
+    /// Until constructor exports connect support units, do not emit distinct physical copies of
+    /// one logical class, or alias equal classifier names from different producer modules.
+    materialized_classes: HashMap<TypeName, KlibDependencyCallable>,
 }
 
 #[derive(Clone, Copy)]
@@ -227,6 +230,33 @@ pub(super) fn emit_dependencies<B: Backend>(
             return Vec::new();
         }
 
+        let materialized = unit
+            .materialized_classes()
+            .map(|(classifier, identity)| (classifier, identity.clone()))
+            .collect::<Vec<_>>();
+        for (classifier, identity) in &materialized {
+            // Current-module representation facts take precedence in the checked backend view.
+            // They cannot describe an unrelated imported class with the same unqualified key.
+            if module_facts.classifier(*classifier).is_some()
+                || module_facts.is_body_local(*classifier)
+                || source.ir.class_id_by_name(*classifier).is_some()
+            {
+                diags.error(
+                    Span::new(0, 0),
+                    "cannot materialize a dependency class that collides with a current-module classifier",
+                );
+                return Vec::new();
+            }
+            if let Some(previous) = support_state.materialized_classes.get(classifier) {
+                let message = if previous == identity {
+                    "cannot materialize an imported class in separate dependency support units before constructor exports are available"
+                } else {
+                    "cannot materialize equal classifier names from different KLIB producers in one target program"
+                };
+                diags.error(Span::new(0, 0), message);
+                return Vec::new();
+            }
+        }
         let mut exports = DependencyExportSignatures::default();
         let closed = unit
             .callable_functions()
@@ -334,6 +364,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             return Vec::new();
         }
         support_state.emitted.extend(published);
+        support_state.materialized_classes.extend(materialized);
         artifacts.extend(outputs);
     }
     artifacts
@@ -407,9 +438,37 @@ fn prepare_bodyless_externals(
         if !visited.insert(identity.clone()) {
             continue;
         }
-        for callee in
-            bodies.emitted_body_callables(&identity, crate::klib_lowering::emitted_closure_function)
+        let constructor = match capabilities
+            .callees
+            .authenticates_constructor(&identity, bodies)
         {
+            Ok(constructor) => constructor,
+            Err(reason) => {
+                diags.error(
+                    Span::new(0, 0),
+                    format!("invalid KLIB constructor declaration: {reason:?}"),
+                );
+                return false;
+            }
+        };
+        let edges = if constructor {
+            match capabilities
+                .callees
+                .constructor_initialization_callees(&identity, bodies)
+            {
+                Ok(edges) => edges.unwrap_or_default(),
+                Err(reason) => {
+                    diags.error(
+                        Span::new(0, 0),
+                        format!("invalid KLIB class initialization: {reason:?}"),
+                    );
+                    return false;
+                }
+            }
+        } else {
+            bodies.emitted_body_callables(&identity, crate::klib_lowering::emitted_closure_function)
+        };
+        for callee in edges {
             if externals.contains_key(&callee) {
                 continue;
             }
@@ -422,9 +481,10 @@ fn prepare_bodyless_externals(
                         return false;
                     };
                     externals.insert(
-                        callee,
+                        callee.clone(),
                         EmittedDependencyCallable::constructor(external.target()),
                     );
+                    pending.push_back(callee);
                     continue;
                 }
                 Ok(false) => {}
