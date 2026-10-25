@@ -109,5 +109,25 @@ class FailedBuild(unittest.TestCase):
         ])
 
 
+    def test_a_link_under_the_cause_is_not_the_failure(self):
+        with tempfile.TemporaryDirectory() as work:
+            out = os.path.join(work, 'out', 'p')
+            write(f'{out}/kotlinc/a/build/classes/kotlin/main/A.class', b'A')
+            write(f'{work}/logs/p.kotlinc.compilations.tsv', b':a:compileKotlin\ta/build/classes/kotlin/main\n')
+            write(f'{work}/logs/p.krusty.log', (
+                '* What went wrong:\n'
+                "A problem occurred configuring root project 'p'.\n"
+                '> You cannot add repositories here.\n'
+                '  For more information, please refer to the Gradle documentation.\n'
+                '\n'
+                '* Try:\n').encode())
+            subprocess.run([sys.executable, os.path.join(HERE, 'compare.py'), work, 'p', '0'],
+                           check=True, stdout=subprocess.DEVNULL)
+            with open(f'{out}/compare.json') as f:
+                summary = json.load(f)
+        self.assertEqual([r['error'] for r in summary['rows']], [
+            'not run: the krusty build failed: You cannot add repositories here.',
+        ])
+
 if __name__ == '__main__':
     unittest.main()

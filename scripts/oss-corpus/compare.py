@@ -76,12 +76,18 @@ def build_failure(log_path):
         return None
     for i, line in enumerate(lines):
         if line.startswith('* What went wrong:'):
-            block = []
+            # Each cause is a `>` line indented under the one it explains; other lines continue
+            # the message above them, such as a link to the Gradle documentation.
+            innermost, depth = None, -1
             for detail in lines[i + 1:]:
                 if not detail.strip() or detail.startswith('* '):
                     break
-                block.append(detail.strip().lstrip('> ').strip())
-            return block[-1][:300] if block else None
+                indent = len(detail) - len(detail.lstrip())
+                if innermost is None:
+                    innermost = detail.strip()
+                elif detail.lstrip().startswith('>') and indent > depth:
+                    innermost, depth = detail.strip().lstrip('> ').strip(), indent
+            return innermost[:300] if innermost else None
     return None
 
 

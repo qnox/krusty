@@ -1,20 +1,15 @@
 // Applies the krusty Gradle plugin to every Kotlin/JVM, Android and Kotlin Multiplatform project of
 // the build, from the local Maven repository the corpus workflow unpacked.
-// Only the main build: buildSrc and included builds are the project's build logic, and their
-// settings may declare exclusive repository content that forbids the buildscript repository below.
+// Only the main build: buildSrc and included builds are the project's build logic.
 if (gradle.parent != null) return
-def repo = new File(System.getenv('KRUSTY_PLUGIN_REPOSITORY')).toURI()
 def version = System.getenv('KRUSTY_PLUGIN_VERSION')
-settingsEvaluated { s ->
-    s.pluginManagement.repositories {
-        // Declaring a repository replaces the implicit Gradle Plugin Portal; keep it.
-        if (isEmpty()) gradlePluginPortal()
-        maven { url = repo }
-    }
-}
+// The plugin jar goes on the root build classpath as a file, with no repository: a build that
+// declares exclusive repository content forbids adding one to `buildscript.repositories`, and the
+// jar has no dependencies of its own.
+def jar = new File(System.getenv('KRUSTY_PLUGIN_REPOSITORY'),
+        "dev/krustythecompiler/krusty-gradle-plugin/$version/krusty-gradle-plugin-${version}.jar")
 gradle.rootProject { p ->
-    p.buildscript.repositories { maven { url = repo } }
-    p.buildscript.dependencies { classpath "dev.krustythecompiler:krusty-gradle-plugin:$version" }
+    p.buildscript.dependencies { classpath p.files(jar) }
 }
 gradle.allprojects { p ->
     p.pluginManager.withPlugin('org.jetbrains.kotlin.jvm') { p.pluginManager.apply('dev.krustythecompiler') }
