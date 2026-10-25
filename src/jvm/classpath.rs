@@ -65,7 +65,7 @@ use self::method_body_cache::{
 };
 use self::property_access::*;
 use self::value_class_erasure::{
-    meta_descriptor_position, meta_param_exact, metadata_carrier_matches,
+    meta_descriptor_position, meta_param_exact, metadata_carrier_matches, metadata_parameter_class,
     metadata_value_class_bound_carrier, metadata_value_class_underlying,
 };
 
@@ -1361,9 +1361,7 @@ fn meta_callable_aligns(
                 {
                     return metadata_carrier_matches(carrier, d, false, value_underlying);
                 }
-                let class = signature_parameter
-                    .and_then(|parameter| parameter.non_null().obj_internal())
-                    .or(m.ty);
+                let class = metadata_parameter_class(signature_parameter, f, is_interface).or(m.ty);
                 meta_param_compat(class, m.nullable(), d, value_underlying)
             })
     {
@@ -1397,9 +1395,7 @@ fn meta_callable_aligns(
             {
                 return metadata_carrier_matches(carrier, d, true, value_underlying);
             }
-            let class = signature_parameter
-                .and_then(|parameter| parameter.non_null().obj_internal())
-                .or(m.ty);
+            let class = metadata_parameter_class(signature_parameter, f, is_interface).or(m.ty);
             meta_param_exact(class, m.nullable(), d, value_underlying)
         })
         .count();

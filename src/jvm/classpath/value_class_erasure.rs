@@ -57,18 +57,20 @@ pub(super) fn meta_param_exact(
     }
 }
 
-/// JVM carrier of a metadata type parameter whose primary class bound is a value class.
-pub(super) fn metadata_value_class_bound_carrier(
+/// The bound a metadata type parameter erases to on the JVM, kotlinc's `erasedUpperBound`: the
+/// first written bound that is a class rather than an interface or a type parameter, else the
+/// first written bound, followed through type-parameter bounds to a classifier. Metadata keeps the
+/// written order, so the class bound need not lead. `None` for an unbounded parameter or a cycle.
+pub(super) fn metadata_primary_bound(
     ty: Ty,
     signature: &crate::libraries::GenericSig,
     is_interface: &dyn Fn(TypeName) -> bool,
-    value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
 ) -> Option<Ty> {
     let mut current = ty;
     let mut seen = crate::fx_hash::HashSet::default();
-    let class_bound = loop {
+    loop {
         let TyKind::TyParam(name, _) = current.non_null().kind() else {
-            break current;
+            return Some(current);
         };
         if !seen.insert(name) {
             return None;
@@ -92,19 +94,41 @@ pub(super) fn metadata_value_class_bound_carrier(
                         .is_none_or(|classifier| !is_interface(classifier)),
                 }
             })
-            .or_else(|| {
-                bounds
-                    .iter()
-                    .copied()
-                    .find(|bound| bound.non_null().is_ty_param())
-            })?;
+            .or_else(|| bounds.first().copied())?;
         let nullable = current.is_nullable() || next.is_nullable();
         current = if nullable {
             Ty::nullable(next.non_null())
         } else {
             next.non_null()
         };
-    };
+    }
+}
+
+/// The classifier a metadata parameter's JVM descriptor names: its own class, or for a type
+/// parameter the primary bound it erases to.
+pub(super) fn metadata_parameter_class(
+    parameter: Option<Ty>,
+    function: &crate::jvm::metadata::MetaFn,
+    is_interface: &dyn Fn(TypeName) -> bool,
+) -> Option<TypeName> {
+    let parameter = parameter?;
+    if !parameter.non_null().is_ty_param() {
+        return parameter.non_null().obj_internal();
+    }
+    let signature = function.generic_sig.as_ref()?;
+    metadata_primary_bound(parameter, signature, is_interface)?
+        .non_null()
+        .obj_internal()
+}
+
+/// JVM carrier of a metadata type parameter whose primary class bound is a value class.
+pub(super) fn metadata_value_class_bound_carrier(
+    ty: Ty,
+    signature: &crate::libraries::GenericSig,
+    is_interface: &dyn Fn(TypeName) -> bool,
+    value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
+) -> Option<Ty> {
+    let class_bound = metadata_primary_bound(ty, signature, is_interface)?;
     let nullable = class_bound.is_nullable();
     let classifier = class_bound.non_null().obj_internal()?;
     let projected = metadata_value_class_underlying(classifier, nullable, value_underlying)?;
