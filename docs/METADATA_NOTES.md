@@ -254,10 +254,11 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   (f100) interns its `d2` strings BEFORE the annotations, while the annotation field serializes first
   (ascending field number). An annotated `suspend fun f(a: Int)` therefore lands
   `…, "a", "(ILkotlin/coroutines/Continuation;)Ljava/lang/Object;", "Lp/Mark;"` in `d2`.
-- The PRIMARY constructor's flags word is the one case where `| HAS_ANNOTATIONS` is not enough.
-  `Constructor.flags` has proto default 6 (visibility PUBLIC) and is omitted at that value, so krusty
-  carries a public primary ctor as 0; the bit forces the field out, and the default has to be
-  materialized on the way (0 → 6 → 7). `class C @Mark constructor(val x: Int)` in kotlinc 2.4.10:
+- The PRIMARY constructor's flags word is written whenever it differs from the proto default 6
+  (visibility PUBLIC). krusty carries the real word (6 for a public primary ctor) and omits it only
+  at 6, so the bit takes a public ctor to an explicit 7, and an `internal constructor`, whose
+  visibility bits are 0, is written as an explicit 0 (1 with annotations), as kotlinc writes it.
+  `class C @Mark constructor(val x: Int)` in kotlinc 2.4.10:
   `08 07 | 12 06 …value parameter… | 1a 02 08 06 (Constructor.annotation, d2[6] = "Lp/Mark;") |
   a2 06 04 …constructorSignature…`, with `Lp/Mark;` interned between `"(I)V"` and `"getX"`. A
   secondary ctor never hits this — its 22 is already explicit, so 22 → 23 is a plain OR.

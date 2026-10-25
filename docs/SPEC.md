@@ -1176,7 +1176,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   for top-level fns (`FnMeta::visibility` from the signature) and members
   (`IrFile::internal_methods`, alongside the dispatch-relevant `private_methods`),
   `Constructor.flags` for a DECLARED primary-ctor visibility (`class C protected constructor(…)` →
-  4, private → 2 — `IrFile::ctor_visibilities`), and `TypeAlias.flags` (`internal typealias`,
+  4, private → 2, internal → an explicit 0 — `IrFile::ctor_visibilities`), and `TypeAlias.flags` (`internal typealias`,
   parser now keeps the modifier in `File::type_alias_visibility`). A declared ctor visibility also
   reaches the JVM `<init>` access flags (protected/private; `internal` stays JVM-public, the
   boundary lives in metadata alone), including the all-defaults convenience `<init>()`, which
@@ -20668,11 +20668,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   ARGUMENT expressions were discarded at the parse site, so both had to be carried through lowering
   (the same retention split a function's and a secondary constructor's get). Three placement facts,
   each verified byte-for-byte against kotlinc 2.4.10:
-  - The flags word is not a plain OR. `Constructor.flags` is OMITTED at its proto default 6
-    (visibility PUBLIC), which krusty represents as 0; setting `HAS_ANNOTATIONS` forces the field to be
-    written, so the omitted default must be MATERIALIZED first — an annotated public primary ctor
-    writes 7, not 1 (which would read back as visibility INTERNAL). A declared `private`/`protected`
-    primary already carries a non-zero word (2 / 4) and just gains the bit.
+  - The flags word is the declaration's real `Constructor.flags`, OMITTED only at its proto default 6
+    (visibility PUBLIC); setting `HAS_ANNOTATIONS` forces the field to be written, so an annotated
+    public primary ctor writes 7, not 1 (which would read back as visibility INTERNAL). A declared
+    `private`/`protected`/`internal` primary carries 2 / 4 / 0 and just gains the bit; the internal
+    0 is written explicitly, as kotlinc writes it. krusty used 0 to mean the omitted default, so an
+    `internal constructor` read back as public. Tests:
+    `tests/internal_primary_constructor_metadata_e2e.rs` (an ordinary, annotated, data and value
+    class).
   - The annotation type INTERNS at the constructor's own annotation visit, which ASM runs after
     `visitMethod` and before `visitParameterAnnotation`: `Lp/Mark;` lands between the ctor descriptor
     and the body's first entry, ahead of any `@NotNull` parameter annotation.
