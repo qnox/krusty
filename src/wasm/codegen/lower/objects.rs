@@ -7,18 +7,25 @@
 //! `$Object` for its table. The frontend proved the value is of the class; the cast is what tells
 //! the validator.
 
+use crate::backend::class_tables::module_slots::PlanKey;
 use crate::backend::class_tables::{function_key, local_property_target, AnyMember, Slot, SlotKey};
-use crate::fir::{PropertyId, ResolvedFunctionOverrideTarget, ResolvedPropertyOverrideTarget};
+use crate::backend::interface_identity::member_identity;
+use crate::fir::{
+    CallableId, ExternalCallableId, PropertyId, ResolvedFunctionOverrideTarget,
+    ResolvedPropertyOverrideTarget,
+};
 use crate::ir::{
     Callee, ClassId, CtorDelegateTarget, FunId, IrLocalPropertyLayout, IrSuperCallKind, IrTypeOp,
     IrVirtualTarget,
 };
-use crate::types::{Ty, TyKind};
+use crate::types::{Ty, TyKind, TypeName};
 
 use super::super::super::encode::{BlockType, Code, Function, HeapType, Module, ValType};
-use super::super::super::objects::REFERENCE;
+use super::super::super::interface_dispatch::MemberRef;
+use super::super::super::objects::{slot_field, REFERENCE};
 use super::super::super::runtime::{Runtime, EQZ32, OR32};
 use super::super::classes::{Accessor, FileClasses};
+use super::super::interface_members::{accessor_types, member_signature};
 use super::super::property_registry::{MemberProperty, MemberPropertyDefinition, TopLevelProperty};
 use super::{carrier, Body, FileContext, Unsupported, STRING};
 
@@ -213,16 +220,32 @@ impl Body<'_> {
         args: &[u32],
     ) -> Result<(), Unsupported> {
         let key = function_key(self.ir, class, function);
-        let slot = self
-            .file_classes()?
-            .tables
-            .slot(class, &key)
-            .ok_or_else(|| {
-                format!(
-                    "a method with no dispatch slot (`{}`)",
-                    self.ir.functions[function as usize].name
-                )
-            })?;
+        let slot = self.file_classes()?.tables.slot(class, &key);
+        if slot.is_none() && self.ir.classes[class as usize].is_interface {
+            let call = self
+                .ir
+                .checked_callable_functions
+                .iter()
+                .filter(|(_, candidate)| **candidate == function)
+                .map(|(callable, _)| *callable)
+                .min()
+                .map(|callable| self.interface_function(callable))
+                .transpose()?
+                .flatten()
+                .ok_or_else(|| {
+                    format!(
+                        "an interface member with no module-wide number (`{}`)",
+                        self.ir.functions[function as usize].name
+                    )
+                })?;
+            return self.interface_call(call, receiver, args);
+        }
+        let slot = slot.ok_or_else(|| {
+            format!(
+                "a method with no dispatch slot (`{}`)",
+                self.ir.functions[function as usize].name
+            )
+        })?;
         let params = self.ir.functions[function as usize].params.clone();
         if params.len() != args.len() {
             return Err("a call whose arguments do not match its parameters".into());
@@ -260,6 +283,19 @@ impl Body<'_> {
         if params.len() != args.len() {
             return Err("a property call whose arguments do not match its accessor".into());
         }
+        if self.ir.classes[class as usize].is_interface {
+            let key = if setter {
+                PlanKey::Setter(property)
+            } else {
+                PlanKey::Getter(property)
+            };
+            let number = self.numbers.number(key).ok_or_else(|| {
+                "an interface member-extension property with no module-wide number".to_string()
+            })?;
+            let result = self.ir.functions[function as usize].ret;
+            let call = self.numbered_member(number, params, result)?;
+            return self.interface_call(call, receiver, args);
+        }
         let target = ResolvedPropertyOverrideTarget::Module(property);
         let key = if setter {
             SlotKey::Setter(target)
@@ -287,9 +323,11 @@ impl Body<'_> {
         let ty = classes
             .slot_type(class, slot)
             .ok_or("a call through a slot with no signature")?;
+        // An interface's own table is `kotlin.Any`'s: its members are called through their stubs.
         let table_type = match classes.forms[class as usize].table_type {
             Some(table_type) => table_type,
-            None => classes.file_table,
+            None if slot < AnyMember::ALL.len() as u32 => self.runtime.objects.any_table,
+            None => return Err("a call through an interface's own table".to_string()),
         };
         let this = self.local(REFERENCE);
         self.value(receiver, self.object_type(class))?;
@@ -301,8 +339,172 @@ impl Body<'_> {
         self.table_of_object();
         self.code
             .ref_cast(false, HeapType::Concrete(table_type))
-            .struct_get(table_type, slot)
+            .struct_get(table_type, slot_field(slot))
             .call_ref(ty);
+        Ok(())
+    }
+
+    /// The member of this module's interfaces numbered `number`, taking `params` after its
+    /// receiver and answering `result`.
+    fn numbered_member(
+        &mut self,
+        number: u32,
+        params: Vec<Ty>,
+        result: Ty,
+    ) -> Result<InterfaceCall, Unsupported> {
+        let signature = member_signature(&params, result)?;
+        let member = self.runtime.objects.interfaces.numbered(
+            self.module,
+            self.module_name,
+            number,
+            signature,
+        )?;
+        Ok(InterfaceCall { member, params })
+    }
+
+    /// The call through the interface function `callable`, when it is a member of this module's
+    /// interfaces.
+    fn interface_function(
+        &mut self,
+        callable: CallableId,
+    ) -> Result<Option<InterfaceCall>, Unsupported> {
+        let key = PlanKey::Callable(callable);
+        let Some(number) = self.numbers.number(key) else {
+            return Ok(None);
+        };
+        let (params, result) = self
+            .numbers
+            .function_carriers(key)
+            .ok_or("an interface member with no carriers")?;
+        self.numbered_member(number, params.to_vec(), result)
+            .map(Some)
+    }
+
+    /// The call through the getter, or with `setter` the setter, of `property`, when it is a
+    /// property of this module's interfaces.
+    fn interface_accessor(
+        &mut self,
+        property: PropertyId,
+        setter: bool,
+    ) -> Result<Option<InterfaceCall>, Unsupported> {
+        let key = if setter {
+            PlanKey::Setter(property)
+        } else {
+            PlanKey::Getter(property)
+        };
+        let Some(number) = self.numbers.number(key) else {
+            return Ok(None);
+        };
+        let ty = match self.ir.local_property_layouts.get(&property) {
+            Some(IrLocalPropertyLayout::Member {
+                ty,
+                context_parameters,
+                ..
+            }) if context_parameters.is_empty() => *ty,
+            // A member extension of an interface is called through its accessor's dispatch.
+            Some(IrLocalPropertyLayout::MemberExtension { .. }) => return Ok(None),
+            Some(_) => return Err("an interface property with context parameters".to_string()),
+            None => {
+                let reference = self
+                    .ir
+                    .referenced_module_properties
+                    .get(&property)
+                    .ok_or("an interface property of another file with no module record")?;
+                if reference.extension_receiver.is_some() {
+                    return Ok(None);
+                }
+                if !reference.context_parameters.is_empty() {
+                    return Err("an interface property with context parameters".to_string());
+                }
+                reference.ty
+            }
+        };
+        let (params, result) = accessor_types(ty, setter);
+        self.numbered_member(number, params, result).map(Some)
+    }
+
+    /// The call through the member of a source module's interface the dependency declaration
+    /// `target` is, by the identity that module published for it.
+    fn dependency_interface_function(
+        &mut self,
+        target: ExternalCallableId,
+        params: Option<&[Ty]>,
+    ) -> Result<Option<InterfaceCall>, Unsupported> {
+        let Some(identity) = self
+            .callables
+            .callable(target)
+            .and_then(|fact| fact.dependency_callable.as_ref())
+        else {
+            return Ok(None);
+        };
+        let Some(member) = self
+            .runtime
+            .objects
+            .interfaces
+            .identified(&member_identity(identity))
+        else {
+            return Ok(None);
+        };
+        let params = params
+            .ok_or("a call through a dependency's interface member with no parameter types")?;
+        Ok(Some(InterfaceCall {
+            member,
+            params: params.to_vec(),
+        }))
+    }
+
+    /// `receiver.f(args)` through the stub of an interface member.
+    fn interface_call(
+        &mut self,
+        call: InterfaceCall,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        if call.params.len() != args.len() {
+            return Err("a call whose arguments do not match its parameters".into());
+        }
+        self.value(receiver, any())?;
+        for (arg, param) in args.iter().zip(&call.params) {
+            self.value(*arg, *param)?;
+        }
+        let stub = self
+            .runtime
+            .objects
+            .interfaces
+            .stub(self.module, call.member);
+        self.code.call(stub);
+        Ok(())
+    }
+
+    /// `receiver.f(args)` for an interface member redeclaring one of `kotlin.Any`'s, through the
+    /// slot every object's table holds it in.
+    fn any_member_call(
+        &mut self,
+        slot: u32,
+        callable: CallableId,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        let (params, _) = self
+            .numbers
+            .function_carriers(PlanKey::Callable(callable))
+            .ok_or("an interface member with no carriers")?;
+        let params = params.to_vec();
+        if params.len() != args.len() {
+            return Err("a call whose arguments do not match its parameters".into());
+        }
+        let this = self.local(REFERENCE);
+        self.value(receiver, any())?;
+        self.code.local_tee(this);
+        for (arg, param) in args.iter().zip(&params) {
+            self.value(*arg, *param)?;
+        }
+        self.code.local_get(this);
+        self.table_of_object();
+        let any_table = self.runtime.objects.any_table;
+        self.code
+            .struct_get(any_table, slot)
+            .call_ref(self.runtime.objects.any_slot_types[slot as usize]);
         Ok(())
     }
 
@@ -355,8 +557,31 @@ impl Body<'_> {
             Callee::Virtual {
                 owner,
                 target: Some(target),
+                params,
                 ..
             } => {
+                let call = match target {
+                    IrVirtualTarget::Function(ResolvedFunctionOverrideTarget::Module(callable)) => {
+                        if let Some(slot) = self.numbers.fixed_slot(*callable) {
+                            return self.any_member_call(slot, *callable, receiver, args);
+                        }
+                        self.interface_function(*callable)?
+                    }
+                    IrVirtualTarget::Function(ResolvedFunctionOverrideTarget::External(target)) => {
+                        let params = params.as_ref().map(|(params, _)| &params[..]);
+                        self.dependency_interface_function(*target, params)?
+                    }
+                    IrVirtualTarget::PropertyGetter(ResolvedPropertyOverrideTarget::Module(
+                        property,
+                    )) => self.interface_accessor(*property, false)?,
+                    IrVirtualTarget::PropertySetter(ResolvedPropertyOverrideTarget::Module(
+                        property,
+                    )) => self.interface_accessor(*property, true)?,
+                    _ => None,
+                };
+                if let Some(call) = call {
+                    return self.interface_call(call, receiver, args);
+                }
                 let class = self
                     .classes
                     .and(self.ir.class_id_by_name(*owner))
@@ -464,6 +689,11 @@ impl Body<'_> {
                 return Ok(());
             }
         }
+        if let Some(receiver) = receiver {
+            if let Some(call) = self.interface_accessor(target, false)? {
+                return self.interface_call(call, receiver, &[]);
+            }
+        }
         if !self.ir.local_property_layouts.contains_key(&target) {
             if let Some(entry) = self.module_member_property(target)? {
                 let receiver = receiver.ok_or_else(|| {
@@ -525,6 +755,11 @@ impl Body<'_> {
                 self.value(value, storage.ty)?;
                 self.code.global_set(storage.global);
                 return Ok(());
+            }
+        }
+        if let Some(receiver) = receiver {
+            if let Some(call) = self.interface_accessor(target, true)? {
+                return self.interface_call(call, receiver, &[value]);
             }
         }
         if !self.ir.local_property_layouts.contains_key(&target) {
@@ -660,14 +895,13 @@ impl Body<'_> {
         Ok(Some(storage))
     }
 
-    /// `x as C`: the value, cast to class `C` of this file.
+    /// `x as C`: the value, cast to class `C` of this file or to an interface of the module.
     pub(super) fn cast(&mut self, arg: u32, target: Ty, non_null: bool) -> Result<(), Unsupported> {
-        let class = self.class_of_type(target).expect("checked by the caller");
         self.value(arg, any())?;
-        if self.ir.classes[class as usize].is_interface {
+        if let Some(interface) = self.interface_of_type(target) {
             let value = self.local(REFERENCE);
             self.code.local_tee(value);
-            self.instance_test(class, !non_null)?;
+            self.interface_test(interface, !non_null);
             self.code
                 .if_(BlockType::Value(REFERENCE))
                 .local_get(value)
@@ -675,10 +909,35 @@ impl Body<'_> {
                 .unreachable()
                 .end();
         } else {
+            let class = self.class_of_type(target).expect("checked by the caller");
             let structure = self.file_classes()?.structure(class);
             self.code.ref_cast(!non_null, HeapType::Concrete(structure));
         }
         Ok(())
+    }
+
+    /// The interface `ty` names, when it is one of this file or numbered for the module.
+    pub(super) fn interface_of_type(&self, ty: Ty) -> Option<TypeName> {
+        let TyKind::Obj(name, _) = ty.non_null().kind() else {
+            return None;
+        };
+        let interface = match self.ir.class_id_by_name(name) {
+            Some(class) => self.ir.classes[class as usize].is_interface,
+            None => self.numbers.interface(name).is_some(),
+        };
+        interface.then_some(name)
+    }
+
+    /// Replace the reference on the stack with whether it is an instance of `interface` — or
+    /// null, when `nullable`.
+    fn interface_test(&mut self, interface: TypeName, nullable: bool) {
+        let value = self.local(REFERENCE);
+        self.code.local_set(value);
+        let test = self.runtime.objects.interfaces.test(self.module, interface);
+        self.code.local_get(value).call(test);
+        if nullable {
+            self.code.local_get(value).ref_is_null().op(OR32);
+        }
     }
 
     /// `is`, `!is` and `as?`.
@@ -706,9 +965,10 @@ impl Body<'_> {
             TyKind::Obj(name, _) if name == crate::types::wk::any() => {
                 self.code.ref_test(nullable, HeapType::Eq);
             }
-            _ => match self.class_of_type(tested) {
-                Some(class) => self.instance_test(class, nullable)?,
-                None => {
+            _ => match (self.interface_of_type(tested), self.class_of_type(tested)) {
+                (Some(interface), _) => self.interface_test(interface, nullable),
+                (None, Some(class)) => self.instance_test(class, nullable)?,
+                (None, None) => {
                     return Err(format!("a type test against `{}`", super::describe(tested)));
                 }
             },
@@ -737,38 +997,13 @@ impl Body<'_> {
     /// Replace the reference on the stack with whether it is an instance of `class` — or null,
     /// when `nullable`.
     fn instance_test(&mut self, class: ClassId, nullable: bool) -> Result<(), Unsupported> {
-        let classes = self.file_classes()?;
-        if !self.ir.classes[class as usize].is_interface {
-            let structure = classes.structure(class);
-            self.code.ref_test(nullable, HeapType::Concrete(structure));
+        let declaration = &self.ir.classes[class as usize];
+        if declaration.is_interface {
+            self.interface_test(declaration.fq_name, nullable);
             return Ok(());
         }
-        // An interface has no struct of its own: an instance of it is an instance of one of the
-        // file's classes implementing it. A class from another file cannot implement it, since
-        // such a class declines.
-        let implementors: Vec<u32> = self
-            .ir
-            .classes
-            .iter()
-            .enumerate()
-            .filter(|(id, candidate)| {
-                !candidate.is_interface && classes.tables.interfaces[*id].contains(&class)
-            })
-            .map(|(id, _)| classes.structure(id as ClassId))
-            .collect();
-        let value = self.local(REFERENCE);
-        self.code.local_set(value);
-        if nullable {
-            self.code.local_get(value).ref_is_null();
-        } else {
-            self.code.i32_const(0);
-        }
-        for structure in implementors {
-            self.code
-                .local_get(value)
-                .ref_test(false, HeapType::Concrete(structure))
-                .op(OR32);
-        }
+        let structure = self.file_classes()?.structure(class);
+        self.code.ref_test(nullable, HeapType::Concrete(structure));
         Ok(())
     }
 
@@ -876,6 +1111,12 @@ impl Body<'_> {
             .ref_as_non_null();
         Ok(())
     }
+}
+
+/// A call through an interface member: its stub, and the parameters it takes after the receiver.
+struct InterfaceCall {
+    member: MemberRef,
+    params: Vec<Ty>,
 }
 
 /// `kotlin.Any`, the type every class value is read as before its class is tested.
@@ -1172,13 +1413,13 @@ fn emit_module_property_dispatch(
         .ok_or_else(|| "a module property slot with no signature".to_string())?;
     let table_type = classes.forms[class as usize]
         .table_type
-        .unwrap_or(classes.file_table);
+        .ok_or_else(|| "a module property slot of a class with no table".to_string())?;
     let object = runtime.objects.object;
     code.local_get(0)
         .ref_cast(false, HeapType::Concrete(object))
         .struct_get(object, 0)
         .ref_cast(false, HeapType::Concrete(table_type))
-        .struct_get(table_type, slot)
+        .struct_get(table_type, slot_field(slot))
         .call_ref(ty);
     Ok(())
 }
