@@ -236,6 +236,25 @@ impl BodyLowering<'_> {
             FirProgressionSource::Reversed(nested) => {
                 IrProgressionSource::Reversed(Box::new(self.progression_source(nested)?))
             }
+            FirProgressionSource::Indices {
+                receiver,
+                view,
+                size,
+            } => {
+                let receiver =
+                    self.expression_with_conversion(receiver.value, receiver.conversion)?;
+                let receiver = match view {
+                    Some(view) => self.ir.add_expr(IrExpr::TypeOp {
+                        op: crate::ir::IrTypeOp::Cast,
+                        arg: receiver,
+                        type_operand: *view,
+                    }),
+                    None => receiver,
+                };
+                IrProgressionSource::Indices {
+                    size: self.member_property_read_on(size, receiver)?,
+                }
+            }
         })
     }
 
@@ -298,6 +317,17 @@ impl BodyLowering<'_> {
         target: &crate::fir::FirPropertyTarget,
         value: ExprId,
     ) -> Result<ExprId, FirLoweringFailure> {
+        let receiver_value = self.ir.add_expr(self.ir.expr(value).clone());
+        self.member_property_read_on(target, receiver_value)
+    }
+
+    /// A read of a selected member property on the receiver expression `receiver_value`, which it
+    /// takes as its operand.
+    fn member_property_read_on(
+        &mut self,
+        target: &crate::fir::FirPropertyTarget,
+        receiver_value: ExprId,
+    ) -> Result<ExprId, FirLoweringFailure> {
         let crate::fir::FirPropertyTarget::External {
             property,
             receiver,
@@ -311,7 +341,6 @@ impl BodyLowering<'_> {
         else {
             return Err(FirLoweringFailure::UnsupportedLoopMember);
         };
-        let receiver_value = self.ir.add_expr(self.ir.expr(value).clone());
         let read = self
             .external_property_access(super::source_calls::ExternalPropertyRequest {
                 target: *property,

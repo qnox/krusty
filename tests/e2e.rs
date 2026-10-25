@@ -647,8 +647,8 @@ mod contract_user_e2e;
 mod contravariant_sam_adapter_e2e;
 #[path = "coroutine_intrinsics_e2e.rs"]
 mod coroutine_intrinsics_e2e;
-#[path = "counted_loop_shape_e2e.rs"]
-mod counted_loop_shape_e2e;
+#[path = "e2e/counted_loops.rs"]
+mod counted_loops;
 #[path = "cross_file_companion_fun_e2e.rs"]
 mod cross_file_companion_fun_e2e;
 #[path = "cross_file_ctor_default_e2e.rs"]
@@ -1021,8 +1021,6 @@ mod floating_remainder_e2e;
 mod fn_typed_default_e2e;
 #[path = "for_destructuring_components_e2e.rs"]
 mod for_destructuring_components_e2e;
-#[path = "for_in_with_index_e2e.rs"]
-mod for_in_with_index_e2e;
 #[path = "for_iterable_elvis_e2e.rs"]
 mod for_iterable_elvis_e2e;
 #[path = "for_typed_loop_var_e2e.rs"]
@@ -2391,8 +2389,6 @@ mod qualified_name_e2e;
 mod range_literal_membership_e2e;
 #[path = "range_property_e2e.rs"]
 mod range_property_e2e;
-#[path = "range_step_e2e.rs"]
-mod range_step_e2e;
 #[path = "raw_string_interpolation_e2e.rs"]
 mod raw_string_interpolation_e2e;
 #[path = "receiver_fn_value_invoke_e2e.rs"]
