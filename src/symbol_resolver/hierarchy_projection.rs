@@ -162,7 +162,7 @@ pub(crate) fn direct_supertypes(source: &dyn SymbolSource, ty: Ty) -> Vec<Ty> {
     let Some(classifier) = source.classifier(internal) else {
         return Vec::new();
     };
-    let applied = direct_supertypes_from_classifier(&classifier, ty);
+    let applied = projected_supertypes(source, &classifier, ty);
     projection_cache_insert(ty, &applied);
     applied
 }
@@ -262,6 +262,49 @@ pub(crate) fn apply_subtype_arguments_from_supertype(
     } else {
         subtype
     }
+}
+
+/// The direct supertypes of `ty` as `classifier` declares them, applied to `ty`'s arguments. The
+/// supertypes of a Java raw type are raw: `Child extends Parent<C>` read raw is `Parent` raw over
+/// `C`'s erasure, and a supertype argument that is not one of `Child`'s formals erases `Parent`
+/// to its own raw application.
+pub(super) fn projected_supertypes(
+    source: &dyn SymbolSource,
+    classifier: &crate::libraries::LibraryType,
+    ty: Ty,
+) -> Vec<Ty> {
+    if !super::raw_member_view::is_raw_receiver(ty) || classifier.supertype_templates.is_empty() {
+        return direct_supertypes_from_classifier(classifier, ty);
+    }
+    let formals = classifier.type_params();
+    let arguments = ty.non_null().type_args();
+    let raw_argument = |argument: Ty| match argument.kind() {
+        TyKind::TyParam(name, _) => formals
+            .iter()
+            .position(|formal| *formal == *name)
+            .and_then(|index| arguments.get(index).copied()),
+        _ => None,
+    };
+    classifier
+        .supertype_templates
+        .iter()
+        .zip(direct_supertypes_from_classifier(classifier, ty))
+        .map(|(template, applied)| match template.kind() {
+            // `Parent<C>` keeps `C`'s raw argument, so the inherited members read `C`'s erasure
+            // before they are erased in turn.
+            TyKind::Obj(name, template_arguments) if !template_arguments.is_empty() => {
+                match template_arguments
+                    .iter()
+                    .map(|argument| raw_argument(*argument))
+                    .collect::<Option<Vec<_>>>()
+                {
+                    Some(raw) => Ty::obj_args_name(name, &raw),
+                    None => super::raw_member_view::erase(source, applied),
+                }
+            }
+            _ => applied,
+        })
+        .collect()
 }
 
 pub(super) fn direct_supertypes_from_classifier(

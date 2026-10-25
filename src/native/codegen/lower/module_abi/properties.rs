@@ -115,8 +115,10 @@ fn plan(declaration: &PropertyDeclaration) -> Result<PropertyAbi, Unsupported> {
     let placement = match declaration.owner {
         None => PropertyPlacement::Package,
         Some(owner) => match owner.kind {
-            OwnerKind::Interface => {
-                return Err("a cross-file interface property".into());
+            // The declaring file's entry point reads through the receiver's interface table,
+            // so an implementor in any file answers.
+            OwnerKind::Interface if flags.has(DeclarationFlags::CONST) => {
+                return Err("a cross-file interface constant".into());
             }
             OwnerKind::Annotation => {
                 return Err("a cross-file annotation property".into());
@@ -126,7 +128,7 @@ fn plan(declaration: &PropertyDeclaration) -> Result<PropertyAbi, Unsupported> {
             OwnerKind::Concrete if flags.has(DeclarationFlags::CONST) => {
                 return Err("a cross-file classifier constant".into());
             }
-            OwnerKind::Concrete => PropertyPlacement::Member {
+            OwnerKind::Concrete | OwnerKind::Interface => PropertyPlacement::Member {
                 owner: owner.classifier,
             },
         },

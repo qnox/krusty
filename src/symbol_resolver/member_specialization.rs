@@ -25,6 +25,14 @@ pub(crate) enum UnboundSpecialization {
     UseUpperBound,
 }
 
+/// A capture that closes the value input itself. Nested function/classifier slots retain their
+/// own type-mismatch diagnostics rather than prohibiting the whole source argument.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum InputProjection {
+    Out,
+    Star,
+}
+
 pub(super) fn bind_member_return(
     source: &dyn SymbolSource,
     gsig: &GenericSig,
@@ -186,10 +194,15 @@ fn specialize_member_type_with_unbound(
     bindings: &GSigBinds,
     position: TypePosition,
     unbound: UnboundSpecialization,
+    input_projection: &mut Option<InputProjection>,
 ) -> Ty {
     match ty.kind() {
         TyKind::TyParam(name, bound) => {
-            let Some(binding) = bindings.get(name.as_str()).copied() else {
+            let Some(binding) = bindings
+                .get(name.as_str())
+                .copied()
+                .map(Ty::raw_binding_read)
+            else {
                 return match unbound {
                     UnboundSpecialization::Preserve => ty,
                     UnboundSpecialization::UseUpperBound => bound.non_null(),
@@ -210,7 +223,12 @@ fn specialize_member_type_with_unbound(
                     TypePosition::Out,
                     TyKind::OutProjection(inner) | TyKind::StarProjection(inner),
                 ) => inner,
-                (TypePosition::In, TyKind::OutProjection(_) | TyKind::StarProjection(_)) => {
+                (TypePosition::In, TyKind::OutProjection(_)) => {
+                    *input_projection = Some(InputProjection::Out);
+                    Ty::Nothing
+                }
+                (TypePosition::In, TyKind::StarProjection(_)) => {
+                    *input_projection = Some(InputProjection::Star);
                     Ty::Nothing
                 }
                 (TypePosition::Out, TyKind::InProjection(_)) => bound,
@@ -233,21 +251,40 @@ fn specialize_member_type_with_unbound(
                         bindings,
                         compose_position(position, crate::types::TypeVariance::In),
                         unbound,
+                        &mut None,
                     )
                 })
                 .collect(),
-            specialize_member_type_with_unbound(source, signature.ret, bindings, position, unbound),
+            specialize_member_type_with_unbound(
+                source,
+                signature.ret,
+                bindings,
+                position,
+                unbound,
+                &mut None,
+            ),
             signature.context_count,
             signature.has_receiver,
             signature.suspend,
         ),
         TyKind::Nullable(inner) => Ty::nullable(specialize_member_type_with_unbound(
-            source, inner, bindings, position, unbound,
+            source,
+            inner,
+            bindings,
+            position,
+            unbound,
+            input_projection,
         )),
         TyKind::PlatformNullable(inner) => {
             let declared = inner;
-            let specialized =
-                specialize_member_type_with_unbound(source, declared, bindings, position, unbound);
+            let specialized = specialize_member_type_with_unbound(
+                source,
+                declared,
+                bindings,
+                position,
+                unbound,
+                input_projection,
+            );
             // A flexible variable is the interval `T..T?`. A nullable binding makes both faces
             // identical and therefore produces that rigid nullable type; every other binding
             // retains the flexible wrapper. This belongs to selected-slot instantiation, not the
@@ -264,6 +301,7 @@ fn specialize_member_type_with_unbound(
             bindings,
             compose_position(position, crate::types::TypeVariance::In),
             unbound,
+            &mut None,
         )),
         TyKind::OutProjection(inner) => Ty::out_projection(specialize_member_type_with_unbound(
             source,
@@ -271,6 +309,7 @@ fn specialize_member_type_with_unbound(
             bindings,
             compose_position(position, crate::types::TypeVariance::Out),
             unbound,
+            &mut None,
         )),
         TyKind::StarProjection(inner) => Ty::star_projection(specialize_member_type_with_unbound(
             source,
@@ -278,6 +317,7 @@ fn specialize_member_type_with_unbound(
             bindings,
             compose_position(position, crate::types::TypeVariance::Out),
             unbound,
+            &mut None,
         )),
         TyKind::Obj(internal, arguments) if !arguments.is_empty() => {
             let variances = source
@@ -308,6 +348,7 @@ fn specialize_member_type_with_unbound(
                             bindings,
                             argument_position,
                             unbound,
+                            &mut None,
                         )
                     })
                     .collect::<Vec<_>>(),
@@ -329,6 +370,7 @@ pub(super) fn specialize_member_type(
         bindings,
         position,
         UnboundSpecialization::Preserve,
+        &mut None,
     )
 }
 
@@ -348,6 +390,42 @@ pub(crate) fn instantiate_slot(
     bindings: &GSigBinds,
     position: TypePosition,
     unbound: UnboundSpecialization,
+) -> Ty {
+    instantiate_slot_with_input_projection(
+        source, signature, ty, bindings, position, unbound, &mut None,
+    )
+}
+
+/// Instantiate a mapped source input and retain the capture that closes that input. The same
+/// position-aware walk owns both the resulting type and the reason it admits no values.
+pub(crate) fn instantiate_input_slot(
+    source: &dyn SymbolSource,
+    signature: Option<&GenericSig>,
+    ty: Ty,
+    bindings: &GSigBinds,
+    unbound: UnboundSpecialization,
+) -> (Ty, Option<InputProjection>) {
+    let mut projection = None;
+    let ty = instantiate_slot_with_input_projection(
+        source,
+        signature,
+        ty,
+        bindings,
+        TypePosition::In,
+        unbound,
+        &mut projection,
+    );
+    (ty, projection)
+}
+
+fn instantiate_slot_with_input_projection(
+    source: &dyn SymbolSource,
+    signature: Option<&GenericSig>,
+    ty: Ty,
+    bindings: &GSigBinds,
+    position: TypePosition,
+    unbound: UnboundSpecialization,
+    input_projection: &mut Option<InputProjection>,
 ) -> Ty {
     if !bindings
         .values()
@@ -372,7 +450,7 @@ pub(crate) fn instantiate_slot(
             crate::types::ty_with_param_bounds(ty, &bounds)
         }
     });
-    specialize_member_type_with_unbound(source, ty, bindings, position, unbound)
+    specialize_member_type_with_unbound(source, ty, bindings, position, unbound, input_projection)
 }
 
 /// Instantiate every value-parameter slot from one semantic declaration signature. Keeping the
@@ -487,6 +565,7 @@ pub(crate) fn specialize_signature_input_type(
         bindings,
         TypePosition::In,
         UnboundSpecialization::Preserve,
+        &mut None,
     )
 }
 
@@ -501,6 +580,7 @@ pub(crate) fn specialize_signature_output_type(
         bindings,
         TypePosition::Out,
         UnboundSpecialization::Preserve,
+        &mut None,
     )
 }
 
@@ -515,6 +595,7 @@ pub(super) fn specialize_final_signature_output_type(
         bindings,
         TypePosition::Out,
         UnboundSpecialization::UseUpperBound,
+        &mut None,
     )
 }
 
@@ -529,6 +610,7 @@ pub(crate) fn specialize_signature_receiver_type(
         bindings,
         TypePosition::Invariant,
         UnboundSpecialization::Preserve,
+        &mut None,
     )
 }
 
@@ -770,8 +852,9 @@ pub(super) fn specialize_call_sig(
 #[cfg(test)]
 mod projected_member_view_tests {
     use super::{
-        instantiate_slot, instantiate_vararg_element, member_slots_are_applied,
-        specialize_member_type, CallArgKind, GSigBinds, TypePosition, UnboundSpecialization,
+        instantiate_input_slot, instantiate_slot, instantiate_vararg_element,
+        member_slots_are_applied, specialize_member_type, CallArgKind, GSigBinds, InputProjection,
+        TypePosition, UnboundSpecialization,
     };
     use crate::libraries::{GenericReturnPolicy, GenericSig, LibraryType};
     use crate::symbol_source::SymbolSource;
@@ -787,6 +870,66 @@ mod projected_member_view_tests {
 
     fn bindings(projected: Ty) -> GSigBinds {
         GSigBinds::from_iter([("T".to_string(), projected)])
+    }
+
+    #[test]
+    fn a_direct_projected_input_retains_its_restriction_through_nullability() {
+        let parameter = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        for (binding, projection) in [
+            (Ty::out_projection(Ty::String), InputProjection::Out),
+            (Ty::star_projection(Ty::String), InputProjection::Star),
+        ] {
+            assert_eq!(
+                instantiate_input_slot(
+                    &Source,
+                    None,
+                    parameter,
+                    &bindings(binding),
+                    UnboundSpecialization::Preserve
+                ),
+                (Ty::Nothing, Some(projection))
+            );
+            assert_eq!(
+                instantiate_input_slot(
+                    &Source,
+                    None,
+                    Ty::nullable(parameter),
+                    &bindings(binding),
+                    UnboundSpecialization::Preserve
+                ),
+                (Ty::nullable(Ty::Nothing), Some(projection))
+            );
+        }
+    }
+
+    #[test]
+    fn nested_and_literal_bottom_inputs_do_not_prohibit_the_whole_argument() {
+        let parameter = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let projected = bindings(Ty::out_projection(Ty::String));
+        for input in [
+            Ty::Nothing,
+            Ty::fun(Vec::new(), parameter),
+            Ty::fun(vec![parameter], Ty::Unit),
+        ] {
+            let (_, projection) = instantiate_input_slot(
+                &Source,
+                None,
+                input,
+                &projected,
+                UnboundSpecialization::Preserve,
+            );
+            assert_eq!(projection, None);
+        }
+        assert_eq!(
+            instantiate_input_slot(
+                &Source,
+                None,
+                parameter,
+                &bindings(Ty::in_projection(Ty::String)),
+                UnboundSpecialization::Preserve
+            ),
+            (Ty::String, None)
+        );
     }
 
     #[test]

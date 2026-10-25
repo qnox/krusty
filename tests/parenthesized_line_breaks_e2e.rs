@@ -93,3 +93,49 @@ fn a_when_subject_and_an_object_header_inside_parentheses_may_start_on_the_next_
     common::expect_box_ok_with_stdlib(source, "BodyBoundaryInParentheses");
     assert_module_matches_kotlinc(&[("BodyBoundaryInParentheses.kt", source)]);
 }
+
+#[test]
+fn every_value_argument_list_continues_across_a_line_break() {
+    let source = "annotation class Tag(val value: Int)\n\
+         \n\
+         open class Base(val n: Int)\n\
+         \n\
+         enum class Level(val weight: Int) {\n\
+         \x20   LOW(1\n\
+         \x20       + 1),\n\
+         \x20   HIGH(10\n\
+         \x20       * 2),\n\
+         }\n\
+         \n\
+         class Derived : Base(3\n\
+         \x20   + 4)\n\
+         \n\
+         class Point(val x: Int) {\n\
+         \x20   constructor(a: Int, b: Int) : this(a\n\
+         \x20       - b)\n\
+         }\n\
+         \n\
+         class Box(val size: Int) {\n\
+         \x20   fun grow(by: Int) = size + by\n\
+         }\n\
+         \n\
+         @Tag(1\n\
+         \x20   + 2)\n\
+         fun tagged() = 1\n\
+         \n\
+         fun boxed(box: Box?): Int? {\n\
+         \x20   return box?.grow(1\n\
+         \x20       + 2)\n\
+         }\n\
+         \n\
+         fun box(): String {\n\
+         \x20   val levels = Level.LOW.weight + Level.HIGH.weight\n\
+         \x20   val derived = Derived().n\n\
+         \x20   val point = Point(9, 2).x\n\
+         \x20   val grown = boxed(Box(5))!!\n\
+         \x20   val sum = levels + derived + point + grown + tagged()\n\
+         \x20   return if (sum == 22 + 7 + 7 + 8 + 1) \"OK\" else \"sum $sum\"\n\
+         }\n";
+    common::expect_box_ok_with_stdlib(source, "ArgumentListLineBreaks");
+    assert_module_matches_kotlinc(&[("ArgumentListLineBreaks.kt", source)]);
+}

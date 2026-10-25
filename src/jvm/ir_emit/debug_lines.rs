@@ -42,6 +42,16 @@ pub(super) fn mark_statement_retained(ir: &IrFile, expression: ExprId, code: &mu
     }
 }
 
+/// An initializer store returns to its own source line after an inlined value reset the caller's
+/// line. This distinct consumer debug point also bounds the existing inline closing anchor.
+pub(super) fn restore_initializer_store_line(line: Option<u32>, code: &mut CodeBuilder) {
+    if code.line_forgotten() {
+        if let Some(line) = line.filter(|&line| line != 0) {
+            code.inlined_line(line.min(u32::from(u16::MAX)) as u16);
+        }
+    }
+}
+
 /// Withdraw a line marked where a positionless expression begins; see
 /// [`CodeBuilder::withdraw_line`].
 pub(super) fn begin_expression(ir: &IrFile, expression: ExprId, code: &mut CodeBuilder) {
@@ -135,6 +145,10 @@ impl Emitter<'_> {
         if self.ir.callable_scopes.contains(&expression)
             || self.ir.dispatch_line(expression).is_some()
         {
+            return;
+        }
+        if self.ir.kept_start_lines.contains(&expression) {
+            self.mark_kept_start_line(expression, code);
             return;
         }
         let Some(&line) = self.ir.expr_source_lines.get(&expression) else {

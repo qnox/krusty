@@ -16,6 +16,9 @@ mod dynamic;
 mod elf;
 #[cfg(test)]
 mod fixture;
+mod interface_records;
+mod interface_stubs;
+mod interface_tables;
 mod libraries;
 mod reachability;
 mod relocate;

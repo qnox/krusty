@@ -37,6 +37,7 @@ mod metadata_indexes;
 mod method_bodies;
 mod method_body_cache;
 mod module_optional_annotations;
+mod multifile_part_bodies;
 mod package_facades;
 mod property_access;
 mod property_identity;
@@ -995,6 +996,16 @@ pub struct MetaFns(std::sync::Arc<ClassMeta>);
 impl MetaFns {
     pub fn iter(&self) -> impl Iterator<Item = &super::metadata::MetaFn> {
         self.0.iter_fns()
+    }
+
+    /// The functions a method named `jvm_name` of this class can realize, in declaration order.
+    pub fn named<'a>(
+        &'a self,
+        jvm_name: &'a str,
+    ) -> impl Iterator<Item = &'a super::metadata::MetaFn> + 'a {
+        self.0
+            .fns_named(jvm_name)
+            .map(|index| self.0.fn_at(index as usize))
     }
 }
 
@@ -2062,6 +2073,7 @@ impl Classpath {
         // copy here duplicated every part `MetaFn` (deep Strings included) — ~a third of peak heap.
         let mut fn_segments: Vec<std::sync::Arc<[super::metadata::MetaFn]>> = Vec::new();
         let mut prop_segments: Vec<std::sync::Arc<[super::metadata::MetaProp]>> = Vec::new();
+        let mut merged_parts = false;
         if let Some(ci) = &ci {
             if !ci.meta.package_functions.is_empty() {
                 fn_segments.push(ci.meta.package_functions.clone());
@@ -2077,6 +2089,7 @@ impl Classpath {
             if merge_fns || merge_props {
                 for part in &ci.meta.multifile_parts {
                     let Some(pci) = self.find(part) else { continue };
+                    merged_parts |= merge_fns;
                     if merge_fns && !pci.meta.package_functions.is_empty() {
                         fn_segments.push(pci.meta.package_functions.clone());
                     }
@@ -2088,11 +2101,13 @@ impl Classpath {
         }
         // Hash-sorted by-JVM-name lookup over the flat segment concatenation: no name copies, and
         // same-name overloads stay in declaration order (sort by `(hash, index)`), matching the old
-        // map's insertion-ordered index vecs.
+        // map's insertion-ordered index vecs. A part's private function has no facade method, so a
+        // facade's JVM name never selects it (another part may reuse its name and descriptor).
         let mut by_jvm_name: Vec<(u64, u32)> = fn_segments
             .iter()
             .flat_map(|s| s.iter())
             .enumerate()
+            .filter(|(_, f)| !(merged_parts && f.visibility == crate::types::Visibility::Private))
             .map(|(i, f)| (jvm_name_hash(&f.jvm_name), i as u32))
             .collect();
         by_jvm_name.sort_unstable();
@@ -3211,6 +3226,19 @@ impl Classpath {
         None
     }
 
+    /// The annotations, with their arguments, applied to method `name` `descriptor` of
+    /// `internal`, read from its class file ([`super::classreader::read_method_annotations`]).
+    pub fn method_annotations(
+        &self,
+        internal: TypeName,
+        name: &str,
+        descriptor: &str,
+    ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
+        let internal = super::jvm_class_map::to_jvm_type_name(internal);
+        let bytes = self.class_bytes(crate::jvm::names::classfile_internal_name_of(internal))?;
+        super::classreader::read_method_annotations(&bytes, name, descriptor)
+    }
+
     /// Lazily read (and cache) one method's bytecode body — the inline expander's entry point. Each
     /// `(class, method, descriptor)` body is read and parsed at most once, even across many call sites.
     pub fn method_code(&self, internal: &str, name: &str, descriptor: &str) -> Option<MethodCode> {
@@ -3235,27 +3263,7 @@ impl Classpath {
             }
         }
         cache_stat!(bodies, false);
-        let mut code = self.own_method_code(internal, name, descriptor, catalog_complete);
-        if code.is_none() {
-            // A multifile facade (`StandardKt`) has no method bodies — they live in its part classes,
-            // which the facade *extends* (a superclass chain: `StandardKt` → `StandardKt__StandardKt`).
-            let jvm = super::jvm_class_map::to_jvm_type_name(internal);
-            let mut cur = self.find_name(jvm).and_then(|class| class.super_class);
-            while let Some(superclass) = cur {
-                if superclass == crate::types::wk::java_object() {
-                    break;
-                }
-                if let Some(body) =
-                    self.own_method_code(superclass, name, descriptor, catalog_complete)
-                {
-                    code = Some(body);
-                    break;
-                }
-                cur = self
-                    .find_name(superclass)
-                    .and_then(|class| class.super_class);
-            }
-        }
+        let code = self.method_code_through_parts(internal, name, descriptor, catalog_complete);
         if catalog_complete {
             self.bodies.borrow_mut().insert(key, code.clone());
         }
@@ -3571,7 +3579,6 @@ impl Classpath {
             }
             for facade in &roots {
                 let facade = facade.as_str();
-                let metas = self.meta_functions(facade);
                 for cand in self.facade_statics(type_name(facade)).iter() {
                     // `facade_statics` walks a multifile superclass chain. Several roots can
                     // therefore reach the SAME physical method (`StandardKt`, its declaring
@@ -3592,10 +3599,13 @@ impl Classpath {
                     // `@JvmName`-mangled extension (`sum` → `sumOfInt`) or value-class member resolves by
                     // the source name; the JVM name is emit-only, kept on the candidate. A static with no
                     // metadata (a Java method / synthetic) keeps its JVM name as the source key.
+                    // The declaring class's metadata names it: a facade's merged parts never offer
+                    // a part's private function for the facade's forwarder of the same JVM name.
+                    let metas = self.meta_functions_name(cand.owner);
                     let source = indexed_source_name(&cand.name, |jvm_name| {
                         metas
-                            .iter()
-                            .find(|metadata| metadata.jvm_name == jvm_name)
+                            .named(jvm_name)
+                            .next()
                             .map(|metadata| metadata.kotlin_name.clone())
                     });
                     // The receiver (first-parameter) descriptor marks `facade` as an extension owner for it

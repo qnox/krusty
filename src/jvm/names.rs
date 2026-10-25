@@ -496,7 +496,8 @@ fn descriptor_shape(ty: Ty) -> DescriptorShape {
         TyKind::TyParam(_, bound)
         | TyKind::PlatformNullable(bound)
         | TyKind::OutProjection(bound)
-        | TyKind::StarProjection(bound) => descriptor_shape(bound),
+        | TyKind::StarProjection(bound)
+        | TyKind::RawProjection(bound) => descriptor_shape(bound),
         TyKind::InProjection(_) => {
             DescriptorShape::Class(classfile_internal_name_of(crate::types::wk::java_object()))
         }

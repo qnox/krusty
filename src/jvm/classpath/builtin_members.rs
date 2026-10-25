@@ -162,6 +162,7 @@ impl Classpath {
                         // A builtin member has no JVM `Signature`: its DECODED signature alone keeps a
                         // generic member from resolving with an `Any`-erased return.
                         generic_sig: Some(m.generic_sig.clone()),
+                        declared_params: None,
                         projected_return_hazard: false,
                         // `ret_nullable` — the declared return nullability from the `.kotlin_builtins`
                         // `Type.nullable` flag (`Map.get(K): V?`); the JVM descriptor erases it.

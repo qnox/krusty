@@ -4,7 +4,7 @@
 use super::*;
 use crate::metadata::class_builder::{
     FnMeta, JvmClassSignatures, JvmConstructorSignature, JvmFieldSignature, JvmFunctionSignature,
-    JvmPropertySignature,
+    JvmPropertySignature, PropMeta,
 };
 use crate::metadata::class_declarations::{
     ClassDeclarationRecord, ClassTailOptions, FunctionOrigin, PropertyOrigin,
@@ -267,7 +267,7 @@ impl<'a> JvmClassRealization<'a> {
                 .prop_origins
                 .iter()
                 .zip(&record.props)
-                .map(|(&origin, _)| self.property(origin))
+                .map(|(&origin, record)| self.property(origin, record))
                 .collect(),
             functions: record
                 .method_origins
@@ -339,7 +339,7 @@ impl<'a> JvmClassRealization<'a> {
             &f.params,
             self.override_results.physical_result(self.ir, fid),
         );
-        let desc = super::super::metadata_method_signatures::requires_function_signature(
+        let desc = (super::super::metadata_method_signatures::requires_function_signature(
             record.receiver,
             record
                 .params
@@ -355,7 +355,7 @@ impl<'a> JvmClassRealization<'a> {
             record.ret,
             &physical,
             &self.local_classifiers,
-        )
+        ) || record.spellings.names_actualized_expect())
         .then_some(physical);
         JvmFunctionSignature {
             name: (record.name != f.name).then(|| f.name.clone()),
@@ -363,10 +363,10 @@ impl<'a> JvmClassRealization<'a> {
         }
     }
 
-    fn property(&self, origin: PropertyOrigin) -> JvmPropertySignature {
+    fn property(&self, origin: PropertyOrigin, record: &PropMeta) -> JvmPropertySignature {
         let (ir, c) = (self.ir, self.c);
         match origin {
-            PropertyOrigin::Declared(index) => self.declared_property(index),
+            PropertyOrigin::Declared(index) => self.declared_property(index, record),
             // A class `const val` is its static field, read inline through its `ConstantValue`.
             PropertyOrigin::Constant(static_id) => JvmPropertySignature {
                 field: Some(JvmFieldSignature::default()),
@@ -391,7 +391,7 @@ impl<'a> JvmClassRealization<'a> {
         }
     }
 
-    fn declared_property(&self, property_index: usize) -> JvmPropertySignature {
+    fn declared_property(&self, property_index: usize, record: &PropMeta) -> JvmPropertySignature {
         let (ir, c) = (self.ir, self.c);
         let property = &c.properties[property_index];
         let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
@@ -486,7 +486,10 @@ impl<'a> JvmClassRealization<'a> {
                 .or(delegate.map(|field| jvm_value_ty(&field.ty)))
                 .or_else(|| hoisted.map(|(_, storage)| jvm_value_ty(&storage.ty)))
                 .map(desc)
-                .filter(|physical| self.requires_field_signature(property.ty, physical)),
+                .filter(|physical| {
+                    record.spellings.ret.actualized_expect
+                        || self.requires_field_signature(property.ty, physical)
+                }),
         });
         JvmPropertySignature {
             getter,

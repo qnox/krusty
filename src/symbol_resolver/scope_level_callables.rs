@@ -160,7 +160,7 @@ pub(super) fn symbol_levels_in_function_scope(
         .collect()
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum FunctionScopeLevelKind {
     Flat,
     Explicit,
@@ -185,10 +185,32 @@ impl FunctionScopeLevelKind {
 
 pub(super) struct FunctionScopeLevel {
     pub(super) kind: FunctionScopeLevelKind,
+    pub(super) rank: u32,
     pub(super) symbols: Vec<Rc<ResolvedSymbols>>,
 }
 
 pub(super) fn tagged_symbol_levels_in_function_scope(
+    src: &dyn SymbolSource,
+    name: &str,
+    scope: FunctionScopeRef<'_>,
+) -> Vec<FunctionScopeLevel> {
+    declaration_levels_in_function_scope(src, name, scope)
+        .into_iter()
+        .filter_map(|mut level| {
+            if matches!(
+                level.kind,
+                FunctionScopeLevelKind::CurrentPackage | FunctionScopeLevelKind::Import
+            ) {
+                level.symbols.retain(|record| has_callables(record));
+            }
+            (!level.symbols.is_empty()).then_some(level)
+        })
+        .collect()
+}
+
+/// One name inventory retains every declaration facet. Callable-only consumers keep their
+/// established filtered view through `tagged_symbol_levels_in_function_scope`.
+pub(super) fn declaration_levels_in_function_scope(
     src: &dyn SymbolSource,
     name: &str,
     scope: FunctionScopeRef<'_>,
@@ -199,6 +221,7 @@ pub(super) fn tagged_symbol_levels_in_function_scope(
             (!records.is_empty())
                 .then_some(FunctionScopeLevel {
                     kind: FunctionScopeLevelKind::Flat,
+                    rank: 0,
                     symbols: records,
                 })
                 .into_iter()
@@ -229,14 +252,12 @@ pub(super) fn tagged_symbol_levels_in_function_scope(
             if !explicit.is_empty() {
                 result.push(FunctionScopeLevel {
                     kind: FunctionScopeLevelKind::Explicit,
+                    rank: 0,
                     symbols: explicit,
                 });
             }
             for (index, level) in imports.levels().iter().enumerate() {
-                let records = symbols_at_scope_level(src, name, level)
-                    .into_iter()
-                    .filter(|record| has_callables(record))
-                    .collect::<Vec<_>>();
+                let records = symbols_at_scope_level(src, name, level);
                 if !records.is_empty() {
                     crate::trace_compiler!(
                         "resolve",
@@ -245,6 +266,7 @@ pub(super) fn tagged_symbol_levels_in_function_scope(
                         records.len()
                     );
                     result.push(FunctionScopeLevel {
+                        rank: u32::try_from(index).expect("import scope depth exceeds u32"),
                         kind: if index == 0 {
                             FunctionScopeLevelKind::CurrentPackage
                         } else {
@@ -378,6 +400,70 @@ mod tests {
     use super::*;
     use crate::libraries::{Callables, FnKind, FunctionSet, LibraryCallable, PropertySet};
     use crate::types::Ty;
+
+    #[test]
+    fn classifier_facets_do_not_stop_callable_scope_selection() {
+        struct SplitScope;
+        impl SymbolSource for SplitScope {
+            fn symbols(&self, namespace: SymbolNamespace, name: &str) -> Rc<ResolvedSymbols> {
+                let mut record = ResolvedSymbols::default();
+                if namespace == SymbolNamespace::Package(crate::types::type_name("near")) {
+                    let classifier = crate::types::type_name("near/Selected");
+                    record.classifier_name = Some(classifier);
+                    record.classifier_declaration = Some(
+                        crate::libraries::ClassifierDeclaration::Ordinary(classifier),
+                    );
+                } else if namespace == SymbolNamespace::Package(crate::types::type_name("far")) {
+                    record.callables = Callables::Functions(FunctionSet {
+                        overloads: vec![FunctionInfo::plain(
+                            FnKind::Extension,
+                            Some(Ty::String),
+                            LibraryCallable::library(
+                                "far/CallsKt",
+                                name,
+                                vec![Ty::String],
+                                Ty::Unit,
+                                Ty::Unit,
+                                "(Ljava/lang/String;)V",
+                            ),
+                        )],
+                    });
+                }
+                Rc::new(record)
+            }
+        }
+        let imports = FunctionImportScope::new(
+            [],
+            [
+                vec![crate::types::type_name("near")],
+                vec![crate::types::type_name("far")],
+                Vec::new(),
+                Vec::new(),
+            ],
+        );
+        for name in ["pick", "pick$default"] {
+            let inventory = declaration_levels_in_function_scope(
+                &SplitScope,
+                name,
+                FunctionScopeRef::Imports(&imports),
+            );
+            assert_eq!(inventory.len(), 2);
+            assert_eq!(
+                inventory[0].symbols[0].classifier_name,
+                Some(crate::types::type_name("near/Selected"))
+            );
+            let callable =
+                symbols_in_function_scope(&SplitScope, name, FunctionScopeRef::Imports(&imports));
+            assert_eq!(callable.len(), 1);
+            assert_eq!(callable[0].classifier_name, None);
+            let functions = level_functions(&callable).collect::<Vec<_>>();
+            assert_eq!(functions.len(), 1);
+            assert_eq!(
+                functions[0].callable.owner,
+                crate::types::type_name("far/CallsKt")
+            );
+        }
+    }
 
     #[test]
     fn overloads_are_borrowed_in_record_order() {

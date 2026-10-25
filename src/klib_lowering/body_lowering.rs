@@ -16,7 +16,9 @@ use crate::fx_hash::{HashMap, HashSet};
 mod arrays;
 mod blocks;
 mod calls;
+mod class_initializers;
 mod class_literals;
+mod closures;
 mod compiler_blocks;
 mod conditionals;
 mod constructions;
@@ -83,7 +85,11 @@ pub(super) trait CallLinker {
     fn link(&mut self, ir: &mut IrFile, callee: &KlibPublicIdSignature) -> Lowered<LinkedCallee>;
 
     /// The dependency constructor a constructor call of the public declaration `callee` invokes.
-    fn link_constructor(&mut self, callee: &KlibPublicIdSignature) -> Lowered<LinkedConstructor>;
+    fn link_constructor(
+        &mut self,
+        ir: &mut IrFile,
+        callee: &KlibPublicIdSignature,
+    ) -> Lowered<LinkedConstructor>;
 
     /// The dependency property a call of its accessor `callee` reads or writes.
     fn link_accessor(&mut self, callee: &KlibAccessorIdSignature) -> Lowered<LinkedAccessor>;
@@ -158,6 +164,7 @@ pub(super) struct BodyLowering<'a> {
     /// The coercions of an erased body's values to their erasure, which a conversion back to the
     /// declared type cancels.
     erasure_coercions: HashSet<ExprId>,
+    initialization: Option<class_initializers::InitializationFrame<'a>>,
 }
 
 impl<'a> BodyLowering<'a> {
@@ -183,6 +190,7 @@ impl<'a> BodyLowering<'a> {
             loops: Vec::new(),
             breakable_loops: HashSet::default(),
             erasure_coercions: HashSet::default(),
+            initialization: None,
         }
     }
 
@@ -273,9 +281,35 @@ impl<'a> BodyLowering<'a> {
             KlibIrExprKind::EnumConstructorCall(_) => {
                 return unsupported("an enum constructor call")
             }
-            KlibIrExprKind::FunctionReference { .. }
-            | KlibIrExprKind::RichFunctionReference { .. } => {
-                return unsupported("a function reference")
+            KlibIrExprKind::FunctionReference { .. } => return unsupported("a function reference"),
+            KlibIrExprKind::RichFunctionReference {
+                invoke,
+                overridden,
+                origin,
+                ..
+            } => {
+                if !super::closure_forms::unbound_rich_reference(&expression.kind) {
+                    return unsupported("a bound or reflective rich function reference");
+                }
+                let ty = self.ty(expression, "closure")?;
+                let crate::types::TyKind::Fun(signature) = ty.kind() else {
+                    return unsupported("a closure of a non-function type");
+                };
+                let invocation = match &overridden.signature {
+                    crate::metadata::klib_ir::KlibIrSignature::Public(signature)
+                        if overridden.kind
+                            == crate::metadata::klib_ir::KlibIrSymbolKind::Function =>
+                    {
+                        super::klib_types::function_invocation_arity(signature)
+                    }
+                    _ => None,
+                };
+                if invocation != Some(signature.params.len()) {
+                    return Err(mismatch(
+                        "a rich closure does not override its function invocation",
+                    ));
+                }
+                (self.closure(*invoke, ty, origin.as_deref())?, ty)
             }
             KlibIrExprKind::PropertyReference { .. }
             | KlibIrExprKind::RichPropertyReference { .. } => {
@@ -340,8 +374,31 @@ impl<'a> BodyLowering<'a> {
                 let ty = self.ty(expression, "type operator")?;
                 return self.type_operator(*operator, *operand, *argument, ty);
             }
-            KlibIrExprKind::GetField { .. } => return unsupported("a field read"),
-            KlibIrExprKind::SetField { .. } => return unsupported("a field write"),
+            KlibIrExprKind::GetField {
+                symbol,
+                receiver,
+                super_qualifier,
+                ..
+            } => {
+                if super_qualifier.is_some() {
+                    return unsupported("a superclass field read");
+                }
+                let ty = self.ty(expression, "field read")?;
+                return self.initialized_field(symbol, *receiver, None, ty);
+            }
+            KlibIrExprKind::SetField {
+                symbol,
+                receiver,
+                value,
+                super_qualifier,
+                ..
+            } => {
+                if super_qualifier.is_some() {
+                    return unsupported("a superclass field write");
+                }
+                let ty = self.ty(expression, "field write")?;
+                return self.initialized_field(symbol, *receiver, Some(*value), ty);
+            }
             KlibIrExprKind::GetObject(symbol) => {
                 let ty = self.ty(expression, "object value")?;
                 return self.object_value(symbol, ty);
@@ -398,7 +455,10 @@ impl<'a> BodyLowering<'a> {
                 let ty = self.ty(expression, "a vararg array")?;
                 (self.vararg_array(*element_type, elements, ty)?, ty)
             }
-            KlibIrExprKind::FunctionExpression { .. } => return unsupported("a lambda"),
+            KlibIrExprKind::FunctionExpression { function, origin } => {
+                let ty = self.ty(expression, "closure")?;
+                (self.closure(*function, ty, origin.as_deref())?, ty)
+            }
             KlibIrExprKind::DynamicMember { .. } => return unsupported("a dynamic member access"),
             KlibIrExprKind::DynamicOperator { .. } => return unsupported("a dynamic operator"),
             KlibIrExprKind::Error { .. } => return unsupported("an error expression"),
@@ -624,6 +684,8 @@ impl<'a> BodyLowering<'a> {
         // after those locals, as checked FIR does, and keep its symbol invisible until then.
         let local = self.locals.slot(variable, ty)?;
         self.locals.declare(&variable.base.symbol, local)?;
+        self.locals
+            .record_name(&variable.base.symbol, &variable.name);
         Ok(self.ir.add_expr(IrExpr::Variable {
             index: local.index,
             ty,
