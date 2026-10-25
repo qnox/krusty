@@ -5,11 +5,209 @@
   "kotlin": 126665,
   "java": 3816
  },
- "compilations": 2,
- "built": 2,
- "classes": 14,
- "identical": 7,
+ "compilations": 37,
+ "built": 9,
+ "classes": 1481,
+ "identical": 37,
  "rows": [
+  {
+   "task": ":logging-interceptor:compileKotlin",
+   "dir": "okhttp-logging-interceptor/build/classes/kotlin/main",
+   "built": true,
+   "fallback": null,
+   "error": null,
+   "classes": 9,
+   "identical": 7,
+   "only_kotlinc": 0,
+   "only_krusty": 0
+  },
+  {
+   "task": ":logging-interceptor:compileTestKotlin",
+   "dir": "okhttp-logging-interceptor/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "not run: a task it depends on failed",
+   "classes": 9,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mockwebserver3-junit4:compileKotlin",
+   "dir": "mockwebserver-junit4/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "not run: a task it depends on failed",
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mockwebserver3-junit4:compileTestKotlin",
+   "dir": "mockwebserver-junit4/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "not run: a task it depends on failed",
+   "classes": 2,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mockwebserver3-junit5:compileKotlin",
+   "dir": "mockwebserver-junit5/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "not run: a task it depends on failed",
+   "classes": 2,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mockwebserver3-junit5:compileTestKotlin",
+   "dir": "mockwebserver-junit5/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "not run: a task it depends on failed",
+   "classes": 5,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mockwebserver3:compileKotlin",
+   "dir": "mockwebserver/build/classes/kotlin/main",
+   "built": true,
+   "fallback": null,
+   "error": null,
+   "classes": 29,
+   "identical": 16,
+   "only_kotlinc": 0,
+   "only_krusty": 0
+  },
+  {
+   "task": ":mockwebserver3:compileTestKotlin",
+   "dir": "mockwebserver/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "not run: a task it depends on failed",
+   "classes": 9,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mockwebserver:compileKotlin",
+   "dir": "mockwebserver-deprecated/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "not run: a task it depends on failed",
+   "classes": 12,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":mockwebserver:compileTestKotlin",
+   "dir": "mockwebserver-deprecated/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "not run: a task it depends on failed",
+   "classes": 5,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":okcurl:compileKotlin",
+   "dir": "okcurl/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "not run: a task it depends on failed",
+   "classes": 11,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":okhttp-brotli:compileKotlin",
+   "dir": "okhttp-brotli/build/classes/kotlin/main",
+   "built": true,
+   "fallback": null,
+   "error": null,
+   "classes": 2,
+   "identical": 2,
+   "only_kotlinc": 0,
+   "only_krusty": 0
+  },
+  {
+   "task": ":okhttp-brotli:compileTestKotlin",
+   "dir": "okhttp-brotli/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "not run: a task it depends on failed",
+   "classes": 2,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":okhttp-coroutines:compileKotlin",
+   "dir": "okhttp-coroutines/build/classes/kotlin/main",
+   "built": true,
+   "fallback": null,
+   "error": null,
+   "classes": 4,
+   "identical": 0,
+   "only_kotlinc": 2,
+   "only_krusty": 0
+  },
+  {
+   "task": ":okhttp-coroutines:compileTestKotlin",
+   "dir": "okhttp-coroutines/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "not run: a task it depends on failed",
+   "classes": 16,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":okhttp-dnsoverhttps:compileKotlin",
+   "dir": "okhttp-dnsoverhttps/build/classes/kotlin/main",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/app.cash.burst/burst-kotlin-plugin/2.14.0/18ea5fbb5fc62dbafd0552da69c94e5d1059e59e/burst-kotlin-plugin-2.14.0.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "error": null,
+   "classes": 9,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":okhttp-dnsoverhttps:compileTestKotlin",
+   "dir": "okhttp-dnsoverhttps/build/classes/kotlin/test",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/app.cash.burst/burst-kotlin-plugin/2.14.0/18ea5fbb5fc62dbafd0552da69c94e5d1059e59e/burst-kotlin-plugin-2.14.0.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "error": null,
+   "classes": 9,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":okhttp-hpacktests:compileTestKotlin",
+   "dir": "okhttp-hpacktests/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "not run: a task it depends on failed",
+   "classes": 12,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
   {
    "task": ":okhttp-idna-mapping-table:compileKotlin",
    "dir": "okhttp-idna-mapping-table/build/classes/kotlin/main",
@@ -31,6 +229,193 @@
    "identical": 0,
    "only_kotlinc": 0,
    "only_krusty": 0
+  },
+  {
+   "task": ":okhttp-java-net-cookiejar:compileKotlin",
+   "dir": "okhttp-java-net-cookiejar/build/classes/kotlin/main",
+   "built": true,
+   "fallback": null,
+   "error": null,
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": 0,
+   "only_krusty": 0
+  },
+  {
+   "task": ":okhttp-osgi-tests:compileTestKotlin",
+   "dir": "okhttp-osgi-tests/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "not run: a task it depends on failed",
+   "classes": 2,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":okhttp-sse:compileKotlin",
+   "dir": "okhttp-sse/build/classes/kotlin/main",
+   "built": true,
+   "fallback": null,
+   "error": null,
+   "classes": 8,
+   "identical": 4,
+   "only_kotlinc": 0,
+   "only_krusty": 0
+  },
+  {
+   "task": ":okhttp-sse:compileTestKotlin",
+   "dir": "okhttp-sse/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "not run: a task it depends on failed",
+   "classes": 9,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":okhttp-testing-support:compileKotlin",
+   "dir": "okhttp-testing-support/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "not run: a task it depends on failed",
+   "classes": 177,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":okhttp-testing-support:compileTestKotlin",
+   "dir": "okhttp-testing-support/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "not run: a task it depends on failed",
+   "classes": 7,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":okhttp-tls:compileKotlin",
+   "dir": "okhttp-tls/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "okhttp-tls/src/main/kotlin/okhttp3/tls/internal/der/Adapters.kt:38:68: error: unresolved reference 'readBoolean'.",
+   "classes": 53,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":okhttp-tls:compileTestKotlin",
+   "dir": "okhttp-tls/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "not run: a task it depends on failed",
+   "classes": 7,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":okhttp-urlconnection:compileKotlin",
+   "dir": "okhttp-urlconnection/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "not run: a task it depends on failed",
+   "classes": 2,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":okhttp-zstd:compileKotlin",
+   "dir": "okhttp-zstd/build/classes/kotlin/main",
+   "built": true,
+   "fallback": null,
+   "error": null,
+   "classes": 1,
+   "identical": 1,
+   "only_kotlinc": 0,
+   "only_krusty": 0
+  },
+  {
+   "task": ":okhttp-zstd:compileTestKotlin",
+   "dir": "okhttp-zstd/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "not run: a task it depends on failed",
+   "classes": 2,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":okhttp:compileKotlinJvm",
+   "dir": "okhttp/build/classes/kotlin/jvm/main",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-module-name=okhttp' conflicts with compilerOptions.moduleName; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 384,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":okhttp:compileTestKotlinJvm",
+   "dir": "okhttp/build/classes/kotlin/jvm/test",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-module-name=okhttp' conflicts with compilerOptions.moduleName; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 573,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":samples:compare:compileTestKotlin",
+   "dir": "samples/compare/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "not run: a task it depends on failed",
+   "classes": 4,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":samples:guide:compileKotlin",
+   "dir": "samples/guide/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "not run: a task it depends on failed",
+   "classes": 66,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":samples:guide:compileTestKotlin",
+   "dir": "samples/guide/build/classes/kotlin/test",
+   "built": false,
+   "fallback": null,
+   "error": "not run: a task it depends on failed",
+   "classes": 3,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":samples:tlssurvey:compileKotlin",
+   "dir": "samples/tlssurvey/build/classes/kotlin/main",
+   "built": false,
+   "fallback": null,
+   "error": "not run: a task it depends on failed",
+   "classes": 20,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
   }
  ],
  "no_reference_classes": [
@@ -45,18 +430,8 @@
    "krusty_classes": 0
   },
   {
-   "task": ":logging-interceptor:compileKotlin",
-   "dir": "okhttp-logging-interceptor/build/classes/kotlin/main",
-   "krusty_classes": 0
-  },
-  {
    "task": ":logging-interceptor:compileOsgiKotlin",
    "dir": "okhttp-logging-interceptor/build/classes/kotlin/osgi",
-   "krusty_classes": 0
-  },
-  {
-   "task": ":logging-interceptor:compileTestKotlin",
-   "dir": "okhttp-logging-interceptor/build/classes/kotlin/test",
    "krusty_classes": 0
   },
   {
@@ -70,16 +445,6 @@
    "krusty_classes": 0
   },
   {
-   "task": ":mockwebserver3-junit4:compileKotlin",
-   "dir": "mockwebserver-junit4/build/classes/kotlin/main",
-   "krusty_classes": 0
-  },
-  {
-   "task": ":mockwebserver3-junit4:compileTestKotlin",
-   "dir": "mockwebserver-junit4/build/classes/kotlin/test",
-   "krusty_classes": 0
-  },
-  {
    "task": ":mockwebserver3-junit5:compileJava9Kotlin",
    "dir": "mockwebserver-junit5/build/classes/kotlin/java9",
    "krusty_classes": 0
@@ -87,16 +452,6 @@
   {
    "task": ":mockwebserver3-junit5:compileJava9TestKotlin",
    "dir": "mockwebserver-junit5/build/classes/kotlin/java9Test",
-   "krusty_classes": 0
-  },
-  {
-   "task": ":mockwebserver3-junit5:compileKotlin",
-   "dir": "mockwebserver-junit5/build/classes/kotlin/main",
-   "krusty_classes": 0
-  },
-  {
-   "task": ":mockwebserver3-junit5:compileTestKotlin",
-   "dir": "mockwebserver-junit5/build/classes/kotlin/test",
    "krusty_classes": 0
   },
   {
@@ -110,16 +465,6 @@
    "krusty_classes": 0
   },
   {
-   "task": ":mockwebserver3:compileKotlin",
-   "dir": "mockwebserver/build/classes/kotlin/main",
-   "krusty_classes": 0
-  },
-  {
-   "task": ":mockwebserver3:compileTestKotlin",
-   "dir": "mockwebserver/build/classes/kotlin/test",
-   "krusty_classes": 0
-  },
-  {
    "task": ":mockwebserver:compileJava9Kotlin",
    "dir": "mockwebserver-deprecated/build/classes/kotlin/java9",
    "krusty_classes": 0
@@ -127,21 +472,6 @@
   {
    "task": ":mockwebserver:compileJava9TestKotlin",
    "dir": "mockwebserver-deprecated/build/classes/kotlin/java9Test",
-   "krusty_classes": 0
-  },
-  {
-   "task": ":mockwebserver:compileKotlin",
-   "dir": "mockwebserver-deprecated/build/classes/kotlin/main",
-   "krusty_classes": 0
-  },
-  {
-   "task": ":mockwebserver:compileTestKotlin",
-   "dir": "mockwebserver-deprecated/build/classes/kotlin/test",
-   "krusty_classes": 0
-  },
-  {
-   "task": ":okcurl:compileKotlin",
-   "dir": "okcurl/build/classes/kotlin/main",
    "krusty_classes": 0
   },
   {
@@ -160,18 +490,8 @@
    "krusty_classes": 0
   },
   {
-   "task": ":okhttp-brotli:compileKotlin",
-   "dir": "okhttp-brotli/build/classes/kotlin/main",
-   "krusty_classes": 0
-  },
-  {
    "task": ":okhttp-brotli:compileOsgiKotlin",
    "dir": "okhttp-brotli/build/classes/kotlin/osgi",
-   "krusty_classes": 0
-  },
-  {
-   "task": ":okhttp-brotli:compileTestKotlin",
-   "dir": "okhttp-brotli/build/classes/kotlin/test",
    "krusty_classes": 0
   },
   {
@@ -185,18 +505,8 @@
    "krusty_classes": 0
   },
   {
-   "task": ":okhttp-coroutines:compileKotlin",
-   "dir": "okhttp-coroutines/build/classes/kotlin/main",
-   "krusty_classes": 0
-  },
-  {
    "task": ":okhttp-coroutines:compileOsgiKotlin",
    "dir": "okhttp-coroutines/build/classes/kotlin/osgi",
-   "krusty_classes": 0
-  },
-  {
-   "task": ":okhttp-coroutines:compileTestKotlin",
-   "dir": "okhttp-coroutines/build/classes/kotlin/test",
    "krusty_classes": 0
   },
   {
@@ -210,28 +520,13 @@
    "krusty_classes": 0
   },
   {
-   "task": ":okhttp-dnsoverhttps:compileKotlin",
-   "dir": "okhttp-dnsoverhttps/build/classes/kotlin/main",
-   "krusty_classes": 0
-  },
-  {
    "task": ":okhttp-dnsoverhttps:compileOsgiKotlin",
    "dir": "okhttp-dnsoverhttps/build/classes/kotlin/osgi",
    "krusty_classes": 0
   },
   {
-   "task": ":okhttp-dnsoverhttps:compileTestKotlin",
-   "dir": "okhttp-dnsoverhttps/build/classes/kotlin/test",
-   "krusty_classes": 0
-  },
-  {
    "task": ":okhttp-hpacktests:compileKotlin",
    "dir": "okhttp-hpacktests/build/classes/kotlin/main",
-   "krusty_classes": 0
-  },
-  {
-   "task": ":okhttp-hpacktests:compileTestKotlin",
-   "dir": "okhttp-hpacktests/build/classes/kotlin/test",
    "krusty_classes": 0
   },
   {
@@ -242,11 +537,6 @@
   {
    "task": ":okhttp-java-net-cookiejar:compileJava9TestKotlin",
    "dir": "okhttp-java-net-cookiejar/build/classes/kotlin/java9Test",
-   "krusty_classes": 0
-  },
-  {
-   "task": ":okhttp-java-net-cookiejar:compileKotlin",
-   "dir": "okhttp-java-net-cookiejar/build/classes/kotlin/main",
    "krusty_classes": 0
   },
   {
@@ -265,11 +555,6 @@
    "krusty_classes": 0
   },
   {
-   "task": ":okhttp-osgi-tests:compileTestKotlin",
-   "dir": "okhttp-osgi-tests/build/classes/kotlin/test",
-   "krusty_classes": 0
-  },
-  {
    "task": ":okhttp-sse:compileJava9Kotlin",
    "dir": "okhttp-sse/build/classes/kotlin/java9",
    "krusty_classes": 0
@@ -280,28 +565,8 @@
    "krusty_classes": 0
   },
   {
-   "task": ":okhttp-sse:compileKotlin",
-   "dir": "okhttp-sse/build/classes/kotlin/main",
-   "krusty_classes": 0
-  },
-  {
    "task": ":okhttp-sse:compileOsgiKotlin",
    "dir": "okhttp-sse/build/classes/kotlin/osgi",
-   "krusty_classes": 0
-  },
-  {
-   "task": ":okhttp-sse:compileTestKotlin",
-   "dir": "okhttp-sse/build/classes/kotlin/test",
-   "krusty_classes": 0
-  },
-  {
-   "task": ":okhttp-testing-support:compileKotlin",
-   "dir": "okhttp-testing-support/build/classes/kotlin/main",
-   "krusty_classes": 0
-  },
-  {
-   "task": ":okhttp-testing-support:compileTestKotlin",
-   "dir": "okhttp-testing-support/build/classes/kotlin/test",
    "krusty_classes": 0
   },
   {
@@ -315,18 +580,8 @@
    "krusty_classes": 0
   },
   {
-   "task": ":okhttp-tls:compileKotlin",
-   "dir": "okhttp-tls/build/classes/kotlin/main",
-   "krusty_classes": 0
-  },
-  {
    "task": ":okhttp-tls:compileOsgiKotlin",
    "dir": "okhttp-tls/build/classes/kotlin/osgi",
-   "krusty_classes": 0
-  },
-  {
-   "task": ":okhttp-tls:compileTestKotlin",
-   "dir": "okhttp-tls/build/classes/kotlin/test",
    "krusty_classes": 0
   },
   {
@@ -340,11 +595,6 @@
    "krusty_classes": 0
   },
   {
-   "task": ":okhttp-urlconnection:compileKotlin",
-   "dir": "okhttp-urlconnection/build/classes/kotlin/main",
-   "krusty_classes": 0
-  },
-  {
    "task": ":okhttp-urlconnection:compileOsgiKotlin",
    "dir": "okhttp-urlconnection/build/classes/kotlin/osgi",
    "krusty_classes": 0
@@ -355,38 +605,13 @@
    "krusty_classes": 0
   },
   {
-   "task": ":okhttp-zstd:compileKotlin",
-   "dir": "okhttp-zstd/build/classes/kotlin/main",
-   "krusty_classes": 0
-  },
-  {
    "task": ":okhttp-zstd:compileOsgiKotlin",
    "dir": "okhttp-zstd/build/classes/kotlin/osgi",
    "krusty_classes": 0
   },
   {
-   "task": ":okhttp-zstd:compileTestKotlin",
-   "dir": "okhttp-zstd/build/classes/kotlin/test",
-   "krusty_classes": 0
-  },
-  {
-   "task": ":okhttp:compileKotlinJvm",
-   "dir": "okhttp/build/classes/kotlin/jvm/main",
-   "krusty_classes": 0
-  },
-  {
-   "task": ":okhttp:compileTestKotlinJvm",
-   "dir": "okhttp/build/classes/kotlin/jvm/test",
-   "krusty_classes": 0
-  },
-  {
    "task": ":samples:compare:compileKotlin",
    "dir": "samples/compare/build/classes/kotlin/main",
-   "krusty_classes": 0
-  },
-  {
-   "task": ":samples:compare:compileTestKotlin",
-   "dir": "samples/compare/build/classes/kotlin/test",
    "krusty_classes": 0
   },
   {
@@ -397,16 +622,6 @@
   {
    "task": ":samples:crawler:compileTestKotlin",
    "dir": "samples/crawler/build/classes/kotlin/test",
-   "krusty_classes": 0
-  },
-  {
-   "task": ":samples:guide:compileKotlin",
-   "dir": "samples/guide/build/classes/kotlin/main",
-   "krusty_classes": 0
-  },
-  {
-   "task": ":samples:guide:compileTestKotlin",
-   "dir": "samples/guide/build/classes/kotlin/test",
    "krusty_classes": 0
   },
   {
@@ -440,11 +655,6 @@
    "krusty_classes": 0
   },
   {
-   "task": ":samples:tlssurvey:compileKotlin",
-   "dir": "samples/tlssurvey/build/classes/kotlin/main",
-   "krusty_classes": 0
-  },
-  {
    "task": ":samples:tlssurvey:compileTestKotlin",
    "dir": "samples/tlssurvey/build/classes/kotlin/test",
    "krusty_classes": 0
@@ -462,7 +672,7 @@
  ],
  "measured": {
   "date": "2026-10-25",
-  "commit": "cf34959a9fd4d1d8b424730bd8775da493e7ea90",
-  "run": "https://github.com/qnox/krusty/actions/runs/40199492852"
+  "commit": "b5979a1e2f54abd23bbf8a46d0a77f763acbd4fd",
+  "run": "https://github.com/qnox/krusty/actions/runs/40201721357"
  }
 }

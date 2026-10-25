@@ -1,19 +1,415 @@
 {
  "name": "kotlinx.coroutines",
- "reference_exit": 1,
+ "reference_exit": 0,
  "loc": {
   "kotlin": 102096,
   "java": 897
  },
- "compilations": 0,
+ "compilations": 34,
  "built": 0,
- "classes": 0,
+ "classes": 9482,
  "identical": 0,
- "rows": [],
- "no_reference_classes": [],
+ "rows": [
+  {
+   "task": ":android-unit-tests:compileKotlin",
+   "dir": "ui/kotlinx-coroutines-android/android-unit-tests/build/classes/kotlin/main",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 3,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":android-unit-tests:compileTestKotlin",
+   "dir": "ui/kotlinx-coroutines-android/android-unit-tests/build/classes/kotlin/test",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 12,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":benchmarks:compileJmhKotlin",
+   "dir": "benchmarks/build/classes/kotlin/jmh",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead; freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 311,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":benchmarks:compileKotlin",
+   "dir": "benchmarks/build/classes/kotlin/main",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 1,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-android:compileKotlin",
+   "dir": "ui/kotlinx-coroutines-android/build/classes/kotlin/main",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 6,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-android:compileTestKotlin",
+   "dir": "ui/kotlinx-coroutines-android/build/classes/kotlin/test",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 35,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-core:compileBenchmarkKotlinJvm",
+   "dir": "kotlinx-coroutines-core/build/classes/kotlin/jvm/benchmark",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead; freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 67,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-core:compileKotlinJvm",
+   "dir": "kotlinx-coroutines-core/build/classes/kotlin/jvm/main",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 850,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-core:compileTestKotlinJvm",
+   "dir": "kotlinx-coroutines-core/build/classes/kotlin/jvm/test",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead; freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 5815,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-debug:compileKotlin",
+   "dir": "kotlinx-coroutines-debug/build/classes/kotlin/main",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 19,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-debug:compileTestKotlin",
+   "dir": "kotlinx-coroutines-debug/build/classes/kotlin/test",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 258,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-guava:compileKotlin",
+   "dir": "integration/kotlinx-coroutines-guava/build/classes/kotlin/main",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 8,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-guava:compileTestKotlin",
+   "dir": "integration/kotlinx-coroutines-guava/build/classes/kotlin/test",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 110,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-javafx:compileKotlin",
+   "dir": "ui/kotlinx-coroutines-javafx/build/classes/kotlin/main",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 9,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-javafx:compileTestKotlin",
+   "dir": "ui/kotlinx-coroutines-javafx/build/classes/kotlin/test",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 73,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-jdk9:compileKotlin",
+   "dir": "reactive/kotlinx-coroutines-jdk9/build/classes/kotlin/main",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 4,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-jdk9:compileTestKotlin",
+   "dir": "reactive/kotlinx-coroutines-jdk9/build/classes/kotlin/test",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 108,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-play-services:compileKotlin",
+   "dir": "integration/kotlinx-coroutines-play-services/build/classes/kotlin/main",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 5,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-play-services:compileTestKotlin",
+   "dir": "integration/kotlinx-coroutines-play-services/build/classes/kotlin/test",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 47,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-reactive:compileKotlin",
+   "dir": "reactive/kotlinx-coroutines-reactive/build/classes/kotlin/main",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 37,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-reactive:compileTestKotlin",
+   "dir": "reactive/kotlinx-coroutines-reactive/build/classes/kotlin/test",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 192,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-reactor:compileKotlin",
+   "dir": "reactive/kotlinx-coroutines-reactor/build/classes/kotlin/main",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 22,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-reactor:compileTestKotlin",
+   "dir": "reactive/kotlinx-coroutines-reactor/build/classes/kotlin/test",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 156,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-rx2:compileKotlin",
+   "dir": "reactive/kotlinx-coroutines-rx2/build/classes/kotlin/main",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 49,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-rx2:compileTestKotlin",
+   "dir": "reactive/kotlinx-coroutines-rx2/build/classes/kotlin/test",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 380,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-rx3:compileKotlin",
+   "dir": "reactive/kotlinx-coroutines-rx3/build/classes/kotlin/main",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 48,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-rx3:compileTestKotlin",
+   "dir": "reactive/kotlinx-coroutines-rx3/build/classes/kotlin/test",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 458,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-slf4j:compileKotlin",
+   "dir": "integration/kotlinx-coroutines-slf4j/build/classes/kotlin/main",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 3,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-slf4j:compileTestKotlin",
+   "dir": "integration/kotlinx-coroutines-slf4j/build/classes/kotlin/test",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 21,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-swing:compileKotlin",
+   "dir": "ui/kotlinx-coroutines-swing/build/classes/kotlin/main",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 5,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-swing:compileTestKotlin",
+   "dir": "ui/kotlinx-coroutines-swing/build/classes/kotlin/test",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 3,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-test:compileKotlinJvm",
+   "dir": "kotlinx-coroutines-test/build/classes/kotlin/jvm/main",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 52,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":kotlinx-coroutines-test:compileTestKotlinJvm",
+   "dir": "kotlinx-coroutines-test/build/classes/kotlin/jvm/test",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead; freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 221,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  },
+  {
+   "task": ":test-utils:compileKotlinJvm",
+   "dir": "test-utils/build/classes/kotlin/jvm/main",
+   "built": false,
+   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+   "error": null,
+   "classes": 94,
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
+  }
+ ],
+ "no_reference_classes": [
+  {
+   "task": ":benchmarks:compileTestKotlin",
+   "dir": "benchmarks/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":kotlinx-coroutines-jdk8:compileKotlin",
+   "dir": "integration/kotlinx-coroutines-jdk8/build/classes/kotlin/main",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":kotlinx-coroutines-jdk8:compileTestKotlin",
+   "dir": "integration/kotlinx-coroutines-jdk8/build/classes/kotlin/test",
+   "krusty_classes": 0
+  },
+  {
+   "task": ":test-utils:compileTestKotlinJvm",
+   "dir": "test-utils/build/classes/kotlin/jvm/test",
+   "krusty_classes": 0
+  }
+ ],
  "measured": {
   "date": "2026-10-25",
-  "commit": "0e127f350d9a74cd4fb5fb36d85f789e65bf8841",
-  "run": "https://github.com/qnox/krusty/actions/runs/40196119897"
+  "commit": "b5979a1e2f54abd23bbf8a46d0a77f763acbd4fd",
+  "run": "https://github.com/qnox/krusty/actions/runs/40201721357"
  }
 }

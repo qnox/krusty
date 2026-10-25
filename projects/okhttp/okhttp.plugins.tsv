@@ -1,4 +1,4 @@
-compiler	:android-test	burst-kotlin-plugin-2.10.2.jar
+compiler	:android-test	burst-kotlin-plugin-2.14.0.jar
 compiler	:logging-interceptor	annotations-13.0.jar
 compiler	:logging-interceptor	kotlin-script-runtime-2.4.21.jar
 compiler	:logging-interceptor	kotlin-scripting-common-2.4.21.jar
@@ -42,7 +42,7 @@ compiler	:okcurl	kotlin-scripting-compiler-impl-embeddable-2.4.21.jar
 compiler	:okcurl	kotlin-scripting-jvm-2.4.21.jar
 compiler	:okcurl	kotlin-stdlib-2.4.21.jar
 compiler	:okhttp	annotations-13.0.jar
-compiler	:okhttp	burst-kotlin-plugin-2.10.2.jar
+compiler	:okhttp	burst-kotlin-plugin-2.14.0.jar
 compiler	:okhttp	kotlin-script-runtime-2.4.21.jar
 compiler	:okhttp	kotlin-scripting-common-2.4.21.jar
 compiler	:okhttp	kotlin-scripting-compiler-embeddable-2.4.21.jar
@@ -65,7 +65,7 @@ compiler	:okhttp-coroutines	kotlin-scripting-compiler-impl-embeddable-2.4.21.jar
 compiler	:okhttp-coroutines	kotlin-scripting-jvm-2.4.21.jar
 compiler	:okhttp-coroutines	kotlin-stdlib-2.4.21.jar
 compiler	:okhttp-dnsoverhttps	annotations-13.0.jar
-compiler	:okhttp-dnsoverhttps	burst-kotlin-plugin-2.10.2.jar
+compiler	:okhttp-dnsoverhttps	burst-kotlin-plugin-2.14.0.jar
 compiler	:okhttp-dnsoverhttps	kotlin-script-runtime-2.4.21.jar
 compiler	:okhttp-dnsoverhttps	kotlin-scripting-common-2.4.21.jar
 compiler	:okhttp-dnsoverhttps	kotlin-scripting-compiler-embeddable-2.4.21.jar

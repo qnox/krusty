@@ -547,13 +547,6 @@
    ],
    "plugins": {
     "compiler": {
-     "annotations": 26,
-     "kotlin-script-runtime": 26,
-     "kotlin-scripting-common": 26,
-     "kotlin-scripting-compiler-embeddable": 26,
-     "kotlin-scripting-compiler-impl-embeddable": 26,
-     "kotlin-scripting-jvm": 26,
-     "kotlin-stdlib": 26,
      "kotlin-serialization-compiler-plugin-embeddable": 9
     },
     "gradle": {
@@ -561,44 +554,14 @@
      "com.vanniktech.maven.publish": 24,
      "com.vanniktech.maven.publish.base": 24,
      "io.gitlab.arturbosch.detekt": 28,
-     "org.gradle.base": 28,
-     "org.gradle.build-init": 28,
-     "org.gradle.help-tasks": 28,
-     "org.gradle.java": 26,
-     "org.gradle.java-base": 26,
-     "org.gradle.jvm-ecosystem": 27,
-     "org.gradle.jvm-test-suite": 26,
-     "org.gradle.jvm-toolchains": 26,
-     "org.gradle.kotlin.kotlin-dsl-project": 28,
-     "org.gradle.kotlin.kotlin-dsl-root-project": 1,
-     "org.gradle.lifecycle-base": 28,
-     "org.gradle.maven-publish": 24,
-     "org.gradle.publishing": 24,
-     "org.gradle.reporting-base": 28,
-     "org.gradle.software-reporting-tasks": 28,
-     "org.gradle.test-suite-base": 26,
-     "org.gradle.wrapper": 28,
      "org.jetbrains.dokka": 22,
-     "org.jetbrains.dokka.gradle.DokkaBasePlugin": 22,
-     "org.jetbrains.dokka.gradle.adapters.JavaAdapter": 22,
-     "org.jetbrains.dokka.gradle.adapters.KotlinAdapter": 22,
-     "org.jetbrains.dokka.gradle.formats.DokkaHtmlPlugin": 22,
-     "org.jetbrains.kotlin.gradle.plugin.BuildMetricsPlugin": 26,
-     "org.jetbrains.kotlin.gradle.scripting.internal.ScriptingKotlinGradleSubplugin": 26,
      "org.jetbrains.kotlin.jvm": 26,
      "org.jetbrains.kotlin.plugin.scripting": 26,
      "org.jetbrains.kotlinx.binary-compatibility-validator": 1,
      "org.jetbrains.kotlinx.kover": 26,
-     "org.gradle.java-platform": 1,
-     "org.gradle.signing": 23,
      "org.jetbrains.kotlin.plugin.serialization": 9,
      "com.gradle.plugin-publish": 1,
-     "org.gradle.java-gradle-plugin": 1,
-     "org.gradle.java-library": 1,
-     "org.gradle.plugin-compatibility": 1,
-     "org.gradle.plugin.devel.plugins.MavenPluginPublishPlugin": 1,
-     "org.gradlex.maven-plugin-development": 1,
-     "org.gradle.version-catalog": 1
+     "org.gradlex.maven-plugin-development": 1
     }
    }
   },
@@ -882,13 +845,6 @@
    "plugins": {
     "compiler": {
      "kotlin-compose-compiler-plugin-embeddable": 6,
-     "annotations": 17,
-     "kotlin-script-runtime": 17,
-     "kotlin-scripting-common": 17,
-     "kotlin-scripting-compiler-embeddable": 17,
-     "kotlin-scripting-compiler-impl-embeddable": 17,
-     "kotlin-scripting-jvm": 17,
-     "kotlin-stdlib": 17,
      "kotlin-allopen-compiler-plugin-embeddable": 1
     },
     "compiler-arg": {
@@ -896,145 +852,479 @@
     },
     "gradle": {
      "com.gradleup.nmcp.aggregation": 1,
-     "org.gradle.base": 28,
-     "org.gradle.build-init": 34,
-     "org.gradle.help-tasks": 34,
-     "org.gradle.kotlin.kotlin-dsl-project": 28,
-     "org.gradle.kotlin.kotlin-dsl-root-project": 1,
-     "org.gradle.lifecycle-base": 34,
-     "org.gradle.software-reporting-tasks": 34,
-     "org.gradle.wrapper": 34,
      "org.jetbrains.dokka": 34,
-     "org.jetbrains.dokka.gradle.DokkaBasePlugin": 34,
-     "org.jetbrains.dokka.gradle.adapters.AndroidAdapter": 34,
-     "org.jetbrains.dokka.gradle.adapters.JavaAdapter": 34,
-     "org.jetbrains.dokka.gradle.adapters.KotlinAdapter": 34,
-     "org.jetbrains.dokka.gradle.formats.DokkaHtmlPlugin": 34,
-     "org.jetbrains.kotlin.gradle.targets.js.nodejs.NodeJsPlugin": 12,
-     "org.jetbrains.kotlin.gradle.targets.js.nodejs.NodeJsRootPlugin": 1,
-     "org.jetbrains.kotlin.gradle.targets.js.yarn.YarnPlugin": 1,
-     "org.jetbrains.kotlin.gradle.targets.wasm.nodejs.WasmNodeJsPlugin": 11,
-     "org.jetbrains.kotlin.gradle.targets.wasm.nodejs.WasmNodeJsRootPlugin": 1,
-     "org.jetbrains.kotlin.gradle.targets.wasm.yarn.WasmYarnPlugin": 1,
      "org.jetbrains.kotlinx.binary-compatibility-validator": 1,
-     "com.android.build.gradle.LibraryPlugin": 14,
-     "com.android.build.gradle.api.AndroidBasePlugin": 14,
      "com.android.internal.library": 14,
      "com.android.internal.version-check": 14,
      "com.gradleup.nmcp": 26,
-     "org.gradle.java-base": 26,
-     "org.gradle.jvm-ecosystem": 27,
-     "org.gradle.jvm-toolchains": 26,
-     "org.gradle.maven-publish": 26,
-     "org.gradle.publishing": 26,
-     "org.gradle.reporting-base": 26,
-     "org.gradle.signing": 26,
      "org.jetbrains.kotlin.android": 9,
-     "org.jetbrains.kotlin.gradle.plugin.BuildMetricsPlugin": 26,
-     "org.gradle.java-platform": 1,
      "org.jetbrains.kotlin.plugin.compose": 6,
      "org.jetbrains.compose": 4,
      "org.jetbrains.compose.hot-reload": 4,
-     "org.jetbrains.kotlin.gradle.scripting.internal.ScriptingKotlinGradleSubplugin": 17,
-     "org.jetbrains.kotlin.gradle.targets.js.npm.NpmResolverPlugin": 11,
-     "org.jetbrains.kotlin.gradle.targets.wasm.binaryen.BinaryenPlugin": 10,
-     "org.jetbrains.kotlin.gradle.targets.wasm.npm.WasmNpmResolverPlugin": 10,
      "org.jetbrains.kotlin.multiplatform": 13,
      "org.jetbrains.kotlin.plugin.scripting": 17,
      "org.jetbrains.kotlin.plugin.allopen": 1,
      "org.jetbrains.kotlinx.benchmark": 1,
-     "org.gradle.java": 4,
-     "org.gradle.jvm-test-suite": 4,
-     "org.gradle.test-suite-base": 4,
-     "org.jetbrains.kotlin.jvm": 4,
-     "org.gradle.groovy": 1,
-     "org.gradle.groovy-base": 1
+     "org.jetbrains.kotlin.jvm": 4
     }
    }
   },
   {
    "name": "kotlinx.coroutines",
-   "reference_exit": 1,
+   "reference_exit": 0,
    "loc": {
     "kotlin": 102096,
     "java": 897
    },
-   "compilations": 0,
+   "compilations": 34,
    "built": 0,
-   "classes": 0,
+   "classes": 9482,
    "identical": 0,
-   "rows": [],
-   "no_reference_classes": [],
+   "rows": [
+    {
+     "task": ":android-unit-tests:compileKotlin",
+     "dir": "ui/kotlinx-coroutines-android/android-unit-tests/build/classes/kotlin/main",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 3,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":android-unit-tests:compileTestKotlin",
+     "dir": "ui/kotlinx-coroutines-android/android-unit-tests/build/classes/kotlin/test",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 12,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":benchmarks:compileJmhKotlin",
+     "dir": "benchmarks/build/classes/kotlin/jmh",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead; freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 311,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":benchmarks:compileKotlin",
+     "dir": "benchmarks/build/classes/kotlin/main",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 1,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-android:compileKotlin",
+     "dir": "ui/kotlinx-coroutines-android/build/classes/kotlin/main",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 6,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-android:compileTestKotlin",
+     "dir": "ui/kotlinx-coroutines-android/build/classes/kotlin/test",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 35,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-core:compileBenchmarkKotlinJvm",
+     "dir": "kotlinx-coroutines-core/build/classes/kotlin/jvm/benchmark",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead; freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 67,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-core:compileKotlinJvm",
+     "dir": "kotlinx-coroutines-core/build/classes/kotlin/jvm/main",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 850,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-core:compileTestKotlinJvm",
+     "dir": "kotlinx-coroutines-core/build/classes/kotlin/jvm/test",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead; freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 5815,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-debug:compileKotlin",
+     "dir": "kotlinx-coroutines-debug/build/classes/kotlin/main",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 19,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-debug:compileTestKotlin",
+     "dir": "kotlinx-coroutines-debug/build/classes/kotlin/test",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 258,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-guava:compileKotlin",
+     "dir": "integration/kotlinx-coroutines-guava/build/classes/kotlin/main",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 8,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-guava:compileTestKotlin",
+     "dir": "integration/kotlinx-coroutines-guava/build/classes/kotlin/test",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 110,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-javafx:compileKotlin",
+     "dir": "ui/kotlinx-coroutines-javafx/build/classes/kotlin/main",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 9,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-javafx:compileTestKotlin",
+     "dir": "ui/kotlinx-coroutines-javafx/build/classes/kotlin/test",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 73,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-jdk9:compileKotlin",
+     "dir": "reactive/kotlinx-coroutines-jdk9/build/classes/kotlin/main",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 4,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-jdk9:compileTestKotlin",
+     "dir": "reactive/kotlinx-coroutines-jdk9/build/classes/kotlin/test",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 108,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-play-services:compileKotlin",
+     "dir": "integration/kotlinx-coroutines-play-services/build/classes/kotlin/main",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 5,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-play-services:compileTestKotlin",
+     "dir": "integration/kotlinx-coroutines-play-services/build/classes/kotlin/test",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 47,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-reactive:compileKotlin",
+     "dir": "reactive/kotlinx-coroutines-reactive/build/classes/kotlin/main",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 37,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-reactive:compileTestKotlin",
+     "dir": "reactive/kotlinx-coroutines-reactive/build/classes/kotlin/test",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 192,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-reactor:compileKotlin",
+     "dir": "reactive/kotlinx-coroutines-reactor/build/classes/kotlin/main",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 22,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-reactor:compileTestKotlin",
+     "dir": "reactive/kotlinx-coroutines-reactor/build/classes/kotlin/test",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 156,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-rx2:compileKotlin",
+     "dir": "reactive/kotlinx-coroutines-rx2/build/classes/kotlin/main",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 49,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-rx2:compileTestKotlin",
+     "dir": "reactive/kotlinx-coroutines-rx2/build/classes/kotlin/test",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 380,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-rx3:compileKotlin",
+     "dir": "reactive/kotlinx-coroutines-rx3/build/classes/kotlin/main",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 48,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-rx3:compileTestKotlin",
+     "dir": "reactive/kotlinx-coroutines-rx3/build/classes/kotlin/test",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 458,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-slf4j:compileKotlin",
+     "dir": "integration/kotlinx-coroutines-slf4j/build/classes/kotlin/main",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 3,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-slf4j:compileTestKotlin",
+     "dir": "integration/kotlinx-coroutines-slf4j/build/classes/kotlin/test",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 21,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-swing:compileKotlin",
+     "dir": "ui/kotlinx-coroutines-swing/build/classes/kotlin/main",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 5,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-swing:compileTestKotlin",
+     "dir": "ui/kotlinx-coroutines-swing/build/classes/kotlin/test",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 3,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-test:compileKotlinJvm",
+     "dir": "kotlinx-coroutines-test/build/classes/kotlin/jvm/main",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 52,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":kotlinx-coroutines-test:compileTestKotlinJvm",
+     "dir": "kotlinx-coroutines-test/build/classes/kotlin/jvm/test",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead; freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 221,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":test-utils:compileKotlinJvm",
+     "dir": "test-utils/build/classes/kotlin/jvm/main",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 94,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    }
+   ],
+   "no_reference_classes": [
+    {
+     "task": ":benchmarks:compileTestKotlin",
+     "dir": "benchmarks/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":kotlinx-coroutines-jdk8:compileKotlin",
+     "dir": "integration/kotlinx-coroutines-jdk8/build/classes/kotlin/main",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":kotlinx-coroutines-jdk8:compileTestKotlin",
+     "dir": "integration/kotlinx-coroutines-jdk8/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":test-utils:compileTestKotlinJvm",
+     "dir": "test-utils/build/classes/kotlin/jvm/test",
+     "krusty_classes": 0
+    }
+   ],
    "measured": {
     "date": "2026-10-25",
-    "commit": "0e127f350d9a74cd4fb5fb36d85f789e65bf8841",
-    "run": "https://github.com/qnox/krusty/actions/runs/40196119897"
+    "commit": "b5979a1e2f54abd23bbf8a46d0a77f763acbd4fd",
+    "run": "https://github.com/qnox/krusty/actions/runs/40201721357"
    },
    "stars": 13824,
-   "misses": [],
+   "misses": [
+    [
+     "left to kotlinc: krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     30
+    ],
+    [
+     "left to kotlinc: krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead; freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
+     4
+    ]
+   ],
    "plugins": {
     "compiler": {
-     "annotations": 1,
-     "gradle-api": 1,
-     "gradle-installation-beacon": 1,
-     "gradle-kotlin-dsl": 1,
-     "gradle-kotlin-dsl-shared-runtime": 1,
-     "gradle-kotlin-dsl-tooling-models": 1,
-     "groovy": 1,
-     "groovy-ant": 1,
-     "groovy-astbuilder": 1,
-     "groovy-console": 1,
-     "groovy-datetime": 1,
-     "groovy-dateutil": 1,
-     "groovy-groovydoc": 1,
-     "groovy-json": 1,
-     "groovy-nio": 1,
-     "groovy-sql": 1,
-     "groovy-templates": 1,
-     "groovy-test": 1,
-     "groovy-xml": 1,
-     "javaparser-core": 1,
-     "kotlin-assignment-compiler-plugin-embeddable": 1,
-     "kotlin-reflect": 1,
-     "kotlin-sam-with-receiver-compiler-plugin-embeddable": 1,
-     "kotlin-script-runtime": 1,
-     "kotlin-scripting-common": 1,
-     "kotlin-scripting-compiler-embeddable": 1,
-     "kotlin-scripting-compiler-impl-embeddable": 1,
-     "kotlin-scripting-jvm": 1,
-     "kotlin-stdlib": 1
+     "kotlin-atomicfu-compiler-plugin-embeddable": 18
     },
     "gradle": {
-     "org.gradle.base": 1,
-     "org.gradle.build-init": 1,
-     "org.gradle.groovy": 1,
-     "org.gradle.groovy-base": 1,
-     "org.gradle.help-tasks": 1,
-     "org.gradle.java": 1,
-     "org.gradle.java-base": 1,
-     "org.gradle.java-gradle-plugin": 1,
-     "org.gradle.java-library": 1,
-     "org.gradle.jvm-ecosystem": 1,
-     "org.gradle.jvm-test-suite": 1,
-     "org.gradle.jvm-toolchains": 1,
-     "org.gradle.kotlin.embedded-kotlin": 1,
-     "org.gradle.kotlin.kotlin-dsl": 1,
-     "org.gradle.kotlin.kotlin-dsl-project": 1,
-     "org.gradle.kotlin.kotlin-dsl-root-project": 1,
-     "org.gradle.kotlin.kotlin-dsl.base": 1,
-     "org.gradle.kotlin.kotlin-dsl.compiler-settings": 1,
-     "org.gradle.kotlin.kotlin-dsl.precompiled-script-plugins": 1,
-     "org.gradle.lifecycle-base": 1,
-     "org.gradle.reporting-base": 1,
-     "org.gradle.software-reporting-tasks": 1,
-     "org.gradle.test-suite-base": 1,
-     "org.gradle.wrapper": 1,
-     "org.jetbrains.kotlin.gradle.plugin.KotlinBaseApiPlugin": 1,
-     "org.jetbrains.kotlin.gradle.scripting.internal.ScriptingKotlinGradleSubplugin": 1,
-     "org.jetbrains.kotlin.jvm": 1,
-     "org.jetbrains.kotlin.plugin.assignment": 1,
-     "org.jetbrains.kotlin.plugin.sam.with.receiver": 1,
-     "org.jetbrains.kotlin.plugin.scripting": 1
+     "bom-conventions": 1,
+     "configure-compilation-conventions": 1,
+     "dokka-conventions": 1,
+     "java-modularity-conventions": 1,
+     "knit-conventions": 1,
+     "kover-conventions": 1,
+     "org.jetbrains.dokka": 15,
+     "org.jetbrains.kotlinx.knit": 1,
+     "org.jetbrains.kotlinx.kover": 16,
+     "source-set-conventions": 1,
+     "version-file-conventions": 1,
+     "kotlin-jvm-conventions": 15,
+     "org.jetbrains.kotlin.jvm": 15,
+     "org.jetbrains.kotlin.plugin.scripting": 18,
+     "org.jetbrains.kotlinx.atomicfu": 18,
+     "me.champeau.jmh": 1,
+     "animalsniffer-jvm-conventions": 7,
+     "pub-conventions": 16,
+     "ru.vyarus.animalsniffer": 8,
+     "animalsniffer-multiplatform-conventions": 1,
+     "kotlin-multiplatform-conventions": 3,
+     "org.jetbrains.kotlin.multiplatform": 3,
+     "org.jetbrains.kotlinx.benchmark": 1,
+     "com.google.osdetector": 1,
+     "org.javamodularity.moduleplugin": 1,
+     "org.openjfx.javafxplugin": 1
     }
    }
   },
@@ -1060,7 +1350,6 @@
    "misses": [],
    "plugins": {
     "compiler": {
-     "annotations": 1,
      "gradle-api": 1,
      "gradle-installation-beacon": 1,
      "gradle-kotlin-dsl": 1,
@@ -1078,41 +1367,10 @@
      "groovy-xml": 1,
      "javaparser-core": 1,
      "kotlin-assignment-compiler-plugin-embeddable": 1,
-     "kotlin-reflect": 1,
      "kotlin-sam-with-receiver-compiler-plugin-embeddable": 1,
-     "kotlin-script-runtime": 1,
-     "kotlin-scripting-common": 1,
-     "kotlin-scripting-compiler-embeddable": 1,
-     "kotlin-scripting-compiler-impl-embeddable": 1,
-     "kotlin-scripting-jvm": 1,
-     "kotlin-serialization-compiler-plugin-embeddable": 1,
-     "kotlin-stdlib": 1
+     "kotlin-serialization-compiler-plugin-embeddable": 1
     },
     "gradle": {
-     "org.gradle.base": 1,
-     "org.gradle.build-init": 1,
-     "org.gradle.help-tasks": 1,
-     "org.gradle.java": 1,
-     "org.gradle.java-base": 1,
-     "org.gradle.java-gradle-plugin": 1,
-     "org.gradle.java-library": 1,
-     "org.gradle.jvm-ecosystem": 1,
-     "org.gradle.jvm-test-suite": 1,
-     "org.gradle.jvm-toolchains": 1,
-     "org.gradle.kotlin.dsl.plugins.embedded.EmbeddedKotlinPlugin": 1,
-     "org.gradle.kotlin.kotlin-dsl": 1,
-     "org.gradle.kotlin.kotlin-dsl-project": 1,
-     "org.gradle.kotlin.kotlin-dsl.base": 1,
-     "org.gradle.kotlin.kotlin-dsl.compiler-settings": 1,
-     "org.gradle.kotlin.kotlin-dsl.precompiled-script-plugins": 1,
-     "org.gradle.lifecycle-base": 1,
-     "org.gradle.reporting-base": 1,
-     "org.gradle.software-reporting-tasks": 1,
-     "org.gradle.test-suite-base": 1,
-     "org.gradle.wrapper": 1,
-     "org.jetbrains.kotlin.gradle.plugin.BuildMetricsPlugin": 1,
-     "org.jetbrains.kotlin.gradle.plugin.KotlinBaseApiPlugin": 1,
-     "org.jetbrains.kotlin.gradle.scripting.internal.ScriptingKotlinGradleSubplugin": 1,
      "org.jetbrains.kotlin.jvm": 1,
      "org.jetbrains.kotlin.plugin.assignment": 1,
      "org.jetbrains.kotlin.plugin.sam.with.receiver": 1,
@@ -1561,73 +1819,32 @@
    ],
    "plugins": {
     "compiler": {
-     "annotations": 20,
      "kotlin-build-tools-api": 1,
      "kotlin-compiler-embeddable": 1,
      "kotlin-compose-compiler-plugin-embeddable": 2,
      "kotlin-daemon-embeddable": 1,
      "kotlin-parcelize-compiler": 1,
-     "kotlin-reflect": 1,
-     "kotlin-script-runtime": 20,
-     "kotlin-stdlib": 20,
      "kotlinx-coroutines-core-jvm": 1,
-     "symbol-processing-api": 1,
-     "kotlin-scripting-common": 19,
-     "kotlin-scripting-compiler-embeddable": 19,
-     "kotlin-scripting-compiler-impl-embeddable": 19,
-     "kotlin-scripting-jvm": 19
+     "symbol-processing-api": 1
     },
     "compiler-arg": {
      "-P": 1
     },
     "gradle": {
-     "Build_gradle$DokkaGfmPlugin": 28,
-     "org.gradle.build-init": 48,
-     "org.gradle.help-tasks": 48,
-     "org.gradle.kotlin.kotlin-dsl-project": 42,
-     "org.gradle.lifecycle-base": 42,
-     "org.gradle.software-reporting-tasks": 48,
-     "org.gradle.wrapper": 48,
-     "org.jetbrains.dokka.gradle.DokkaBasePlugin": 28,
      "io.gitlab.arturbosch.detekt": 47,
-     "org.gradle.reporting-base": 47,
-     "com.android.build.gradle.LibraryPlugin": 19,
-     "com.android.build.gradle.api.AndroidBasePlugin": 22,
      "com.android.internal.library": 19,
      "com.android.internal.version-check": 22,
      "com.vanniktech.maven.publish": 27,
      "com.vanniktech.maven.publish.base": 27,
-     "org.gradle.base": 41,
-     "org.gradle.java-base": 41,
-     "org.gradle.jvm-ecosystem": 41,
-     "org.gradle.jvm-toolchains": 41,
-     "org.gradle.maven-publish": 27,
-     "org.gradle.publishing": 27,
-     "org.gradle.signing": 27,
      "org.jetbrains.dokka-javadoc": 27,
-     "org.jetbrains.dokka.gradle.adapters.AndroidAdapter": 16,
-     "org.jetbrains.dokka.gradle.adapters.JavaAdapter": 27,
-     "org.jetbrains.dokka.gradle.adapters.KotlinAdapter": 27,
-     "org.jetbrains.kotlin.gradle.plugin.KotlinBaseApiPlugin": 22,
-     "com.android.build.gradle.AppPlugin": 3,
      "com.android.internal.application": 3,
      "com.google.dagger.hilt.android": 1,
      "com.google.devtools.ksp": 1,
      "org.jetbrains.kotlin.plugin.compose": 2,
      "org.jetbrains.kotlin.plugin.parcelize": 1,
      "app.cash.sqldelight": 1,
-     "org.gradle.java": 19,
-     "org.gradle.jvm-test-suite": 19,
-     "org.gradle.test-suite-base": 19,
-     "org.jetbrains.kotlin.gradle.scripting.internal.ScriptingKotlinGradleSubplugin": 19,
      "org.jetbrains.kotlin.jvm": 19,
      "org.jetbrains.kotlin.plugin.scripting": 19,
-     "org.gradle.java-gradle-plugin": 1,
-     "org.gradle.java-library": 1,
-     "org.gradle.plugin.devel.plugins.MavenPluginPublishPlugin": 1,
-     "org.gradle.application": 2,
-     "org.gradle.distribution": 2,
-     "org.gradle.distribution-base": 2,
      "org.jetbrains.compose": 1,
      "org.jetbrains.compose.hot-reload": 1
     }
@@ -1902,48 +2119,15 @@
    ],
    "plugins": {
     "compiler": {
-     "annotations": 11,
-     "kotlin-script-runtime": 11,
-     "kotlin-scripting-common": 11,
-     "kotlin-scripting-compiler-embeddable": 11,
-     "kotlin-scripting-compiler-impl-embeddable": 11,
-     "kotlin-scripting-jvm": 11,
-     "kotlin-stdlib": 11,
      "kotlin-serialization-compiler-plugin-embeddable": 4
     },
     "gradle": {
      "com.vanniktech.maven.publish": 11,
      "com.vanniktech.maven.publish.base": 11,
      "io.gitlab.arturbosch.detekt": 3,
-     "org.gradle.base": 12,
-     "org.gradle.build-init": 15,
-     "org.gradle.help-tasks": 15,
-     "org.gradle.java": 12,
-     "org.gradle.java-base": 12,
-     "org.gradle.jvm-ecosystem": 12,
-     "org.gradle.jvm-test-suite": 12,
-     "org.gradle.jvm-toolchains": 12,
-     "org.gradle.kotlin.kotlin-dsl-project": 12,
-     "org.gradle.kotlin.kotlin-dsl-root-project": 1,
-     "org.gradle.lifecycle-base": 12,
-     "org.gradle.maven-publish": 11,
-     "org.gradle.publishing": 11,
-     "org.gradle.reporting-base": 12,
-     "org.gradle.software-reporting-tasks": 15,
-     "org.gradle.test-suite-base": 12,
-     "org.gradle.wrapper": 15,
-     "org.jetbrains.kotlin.gradle.plugin.BuildMetricsPlugin": 11,
-     "org.jetbrains.kotlin.gradle.scripting.internal.ScriptingKotlinGradleSubplugin": 11,
      "org.jetbrains.kotlin.jvm": 11,
      "org.jetbrains.kotlin.plugin.scripting": 11,
-     "org.gradle.application": 2,
-     "org.gradle.distribution": 2,
-     "org.gradle.distribution-base": 2,
-     "org.gradle.signing": 10,
      "org.jetbrains.kotlin.plugin.serialization": 4,
-     "com.github.jengelman.gradle.plugins.shadow.ShadowApplicationPlugin": 1,
-     "com.github.jengelman.gradle.plugins.shadow.ShadowBasePlugin": 1,
-     "com.github.jengelman.gradle.plugins.shadow.ShadowJavaPlugin": 1,
      "com.github.johnrengelman.shadow": 1,
      "org.jreleaser": 1,
      "com.google.osdetector": 1,
@@ -1968,7 +2152,7 @@
      "dir": "ci-release-helper/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 19,
      "identical": 0,
      "only_kotlinc": null,
@@ -1979,7 +2163,7 @@
      "dir": "mirai-console/tools/compiler-common/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 8,
      "identical": 0,
      "only_kotlinc": null,
@@ -1990,7 +2174,7 @@
      "dir": "mirai-console/frontend/mirai-console-frontend-base/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 35,
      "identical": 0,
      "only_kotlinc": null,
@@ -2001,7 +2185,7 @@
      "dir": "mirai-console/frontend/mirai-console-frontend-base/build/classes/kotlin/test",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 2,
      "identical": 0,
      "only_kotlinc": null,
@@ -2012,7 +2196,7 @@
      "dir": "mirai-console/tools/gradle-plugin/build/classes/kotlin/integTest",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 4,
      "identical": 0,
      "only_kotlinc": null,
@@ -2023,7 +2207,7 @@
      "dir": "mirai-console/tools/gradle-plugin/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 38,
      "identical": 0,
      "only_kotlinc": null,
@@ -2034,7 +2218,7 @@
      "dir": "mirai-console/tools/intellij-plugin/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 210,
      "identical": 0,
      "only_kotlinc": null,
@@ -2045,7 +2229,7 @@
      "dir": "mirai-console/tools/intellij-plugin/build/classes/kotlin/test",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 5,
      "identical": 0,
      "only_kotlinc": null,
@@ -2056,7 +2240,7 @@
      "dir": "mirai-console/frontend/mirai-console-terminal/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 61,
      "identical": 0,
      "only_kotlinc": null,
@@ -2067,7 +2251,7 @@
      "dir": "mirai-console/frontend/mirai-console-terminal/build/classes/kotlin/test",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 6,
      "identical": 0,
      "only_kotlinc": null,
@@ -2078,7 +2262,7 @@
      "dir": "mirai-console/backend/codegen/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 56,
      "identical": 0,
      "only_kotlinc": null,
@@ -2089,7 +2273,7 @@
      "dir": "mirai-console/backend/integration-test/testers/MCITSelfTestPlugin/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -2100,7 +2284,7 @@
      "dir": "mirai-console/backend/integration-test/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 26,
      "identical": 0,
      "only_kotlinc": null,
@@ -2111,7 +2295,7 @@
      "dir": "mirai-console/backend/integration-test/build/classes/kotlin/test",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 19,
      "identical": 0,
      "only_kotlinc": null,
@@ -2122,7 +2306,7 @@
      "dir": "mirai-console/backend/integration-test/testers/mirai-plugin-compatibility/mirai-jar-after-2_11-without-new/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -2133,7 +2317,7 @@
      "dir": "mirai-console/backend/integration-test/testers/mirai-plugin-compatibility/mirai-jar-after-2_11/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -2144,7 +2328,7 @@
      "dir": "mirai-console/backend/integration-test/testers/mirai-plugin-compatibility/mirai-jar-before-2_11/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -2155,7 +2339,7 @@
      "dir": "mirai-console/backend/integration-test/testers/mirai-plugin-compatibility/same-pkg-1/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -2166,7 +2350,7 @@
      "dir": "mirai-console/backend/integration-test/testers/mirai-plugin-compatibility/same-pkg-2/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -2177,7 +2361,7 @@
      "dir": "mirai-console/backend/integration-test/testers/never-override-jdk-modules/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -2188,7 +2372,7 @@
      "dir": "mirai-console/backend/integration-test/testers/never-override-jdk-modules/module-jdk-module/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -2199,7 +2383,7 @@
      "dir": "mirai-console/backend/integration-test/testers/options-properties/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -2210,7 +2394,7 @@
      "dir": "mirai-console/backend/integration-test/testers/options-properties/independent-plugin/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -2221,7 +2405,7 @@
      "dir": "mirai-console/backend/integration-test/testers/plugin-can-depends-on-mirai-console/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -2232,7 +2416,7 @@
      "dir": "mirai-console/backend/integration-test/testers/plugin-dep-dependon-dep-issue-2054/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -2243,7 +2427,7 @@
      "dir": "mirai-console/backend/integration-test/testers/plugin-dep-dependon-dep-issue-2054/module-moda/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -2254,7 +2438,7 @@
      "dir": "mirai-console/backend/integration-test/testers/plugin-dep-dependon-dep-issue-2054/module-modb/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -2265,7 +2449,7 @@
      "dir": "mirai-console/backend/integration-test/testers/plugin-dep-dependon-dep-issue-2054/module-private-issue2108/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -2276,7 +2460,7 @@
      "dir": "mirai-console/backend/integration-test/testers/plugin-dep-dependon-dep-issue-2054/second-plugin/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 3,
      "identical": 0,
      "only_kotlinc": null,
@@ -2287,7 +2471,7 @@
      "dir": "mirai-console/backend/integration-test/testers/plugin-depend-on-other/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 5,
      "identical": 0,
      "only_kotlinc": null,
@@ -2298,7 +2482,7 @@
      "dir": "mirai-console/backend/integration-test/testers/plugin-dynamic-dependencies-download/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -2309,7 +2493,7 @@
      "dir": "mirai-console/backend/integration-test/testers/plugin-resolve-self-dependencies-over-console-ones/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 2,
      "identical": 0,
      "only_kotlinc": null,
@@ -2320,7 +2504,7 @@
      "dir": "mirai-console/backend/integration-test/testers/plugin-use-console-deps-fallback/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -2331,7 +2515,7 @@
      "dir": "mirai-console/backend/integration-test/testers/plugin-with-pluginyml-can-use-libraries-while-clinit/clinit-library/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -2342,7 +2526,7 @@
      "dir": "mirai-console/backend/integration-test/testers/plugin-with-pluginyml-can-use-libraries-while-clinit/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 2,
      "identical": 0,
      "only_kotlinc": null,
@@ -2353,7 +2537,7 @@
      "dir": "mirai-console/backend/integration-test/testers/plugin-with-pluginyml/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -2364,7 +2548,7 @@
      "dir": "mirai-console/backend/integration-test/testers/service-loader/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 3,
      "identical": 0,
      "only_kotlinc": null,
@@ -2375,7 +2559,7 @@
      "dir": "mirai-console/backend/integration-test/testers/service-loader/module-service-loader-impl/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -2386,7 +2570,7 @@
      "dir": "mirai-console/backend/integration-test/testers/service-loader/module-service-loader-typedef/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -2397,7 +2581,7 @@
      "dir": "mirai-console/backend/integration-test/testers/service-loader/service-loader-2dep-plugin/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 4,
      "identical": 0,
      "only_kotlinc": null,
@@ -2408,7 +2592,7 @@
      "dir": "mirai-console/backend/mirai-console/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 1077,
      "identical": 0,
      "only_kotlinc": null,
@@ -2419,7 +2603,7 @@
      "dir": "mirai-console/backend/mirai-console/build/classes/kotlin/test",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 257,
      "identical": 0,
      "only_kotlinc": null,
@@ -2430,7 +2614,7 @@
      "dir": "mirai-core-mock/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 359,
      "identical": 0,
      "only_kotlinc": null,
@@ -2441,7 +2625,7 @@
      "dir": "mirai-core-mock/build/classes/kotlin/test",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 289,
      "identical": 0,
      "only_kotlinc": null,
@@ -2452,7 +2636,7 @@
      "dir": "mirai-deps-test/build/classes/kotlin/test",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 15,
      "identical": 0,
      "only_kotlinc": null,
@@ -2463,7 +2647,7 @@
      "dir": "mirai-dokka/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 5,
      "identical": 0,
      "only_kotlinc": null,
@@ -2474,7 +2658,7 @@
      "dir": "logging/mirai-logging-log4j2/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -2485,7 +2669,7 @@
      "dir": "logging/mirai-logging-log4j2/build/classes/kotlin/test",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -2496,7 +2680,7 @@
      "dir": "logging/mirai-logging-slf4j-logback/build/classes/kotlin/test",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -2507,7 +2691,7 @@
      "dir": "logging/mirai-logging-slf4j-simple/build/classes/kotlin/test",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -2518,7 +2702,7 @@
      "dir": "logging/mirai-logging-slf4j/build/classes/kotlin/test",
      "built": false,
      "fallback": null,
-     "error": "krusty wrote no class",
+     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -2729,29 +2913,22 @@
    ],
    "measured": {
     "date": "2026-10-25",
-    "commit": "cf34959a9fd4d1d8b424730bd8775da493e7ea90",
-    "run": "https://github.com/qnox/krusty/actions/runs/40199492852"
+    "commit": "b5979a1e2f54abd23bbf8a46d0a77f763acbd4fd",
+    "run": "https://github.com/qnox/krusty/actions/runs/40201721357"
    },
    "stars": 14792,
    "misses": [
     [
-     "krusty wrote no class",
+     "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
      51
     ]
    ],
    "plugins": {
     "compiler": {
-     "annotations": 49,
      "kotlin-gradle-plugin-api": 40,
      "kotlin-native-utils": 40,
      "kotlin-project-model": 40,
-     "kotlin-script-runtime": 49,
-     "kotlin-scripting-common": 49,
-     "kotlin-scripting-compiler-embeddable": 49,
-     "kotlin-scripting-compiler-impl-embeddable": 49,
-     "kotlin-scripting-jvm": 49,
      "kotlin-serialization": 40,
-     "kotlin-stdlib": 49,
      "kotlin-stdlib-common": 49,
      "kotlin-tooling-core": 40,
      "kotlin-util-io": 40,
@@ -2761,31 +2938,12 @@
     "gradle": {
      "com.google.osdetector": 1,
      "me.him188.kotlin-jvm-blocking-bridge": 7,
-     "org.gradle.api.plugins.HelpTasksPlugin$Inject": 51,
-     "org.gradle.buildinit.plugins.BuildInitPlugin$Inject": 51,
-     "org.gradle.buildinit.plugins.WrapperPlugin$Inject": 51,
-     "org.gradle.kotlin.dsl.provider.plugins.KotlinScriptBasePlugin$Inject": 51,
-     "org.gradle.kotlin.dsl.provider.plugins.KotlinScriptRootPlugin$Inject": 1,
      "org.jetbrains.dokka": 3,
      "io.codearte.nexus-staging": 1,
-     "org.gradle.api.plugins.BasePlugin$Inject": 50,
-     "org.gradle.api.plugins.JavaBasePlugin$Inject": 49,
-     "org.gradle.api.plugins.JavaPlugin$Inject": 45,
-     "org.gradle.api.plugins.JvmEcosystemPlugin$Inject": 50,
-     "org.gradle.api.plugins.JvmTestSuitePlugin$Inject": 45,
-     "org.gradle.api.plugins.JvmToolchainsPlugin$Inject": 49,
-     "org.gradle.api.plugins.ReportingBasePlugin$Inject": 49,
-     "org.gradle.language.base.plugins.LifecycleBasePlugin$Inject": 50,
-     "org.gradle.testing.base.plugins.TestSuiteBasePlugin$Inject": 45,
-     "org.jetbrains.kotlin.gradle.scripting.internal.ScriptingKotlinGradleSubplugin": 49,
      "org.jetbrains.kotlin.jvm": 45,
      "org.jetbrains.kotlin.plugin.scripting": 49,
      "org.jetbrains.kotlin.plugin.serialization": 40,
-     "org.gradle.api.plugins.JavaPlatformPlugin$Inject": 1,
-     "org.gradle.api.publish.maven.plugins.MavenPublishPlugin$Inject": 18,
-     "org.gradle.api.publish.plugins.PublishingPlugin$Inject": 18,
      "me.him188.kotlin-dynamic-delegation": 3,
-     "com.android.build.gradle.api.AndroidBasePlugin": 4,
      "com.android.internal.library": 4,
      "com.android.internal.version-check": 4,
      "com.android.library": 4,
@@ -2793,17 +2951,9 @@
      "explicit-api": 4,
      "org.jetbrains.kotlin.multiplatform": 4,
      "com.gradle.plugin-publish": 1,
-     "org.gradle.api.plugins.GroovyBasePlugin$Inject": 1,
-     "org.gradle.api.plugins.GroovyPlugin$Inject": 1,
-     "org.gradle.api.plugins.JavaLibraryPlugin$Inject": 2,
-     "org.gradle.plugin.devel.plugins.JavaGradlePluginPlugin$Inject": 2,
-     "org.gradle.plugin.devel.plugins.MavenPluginPublishPlugin$Inject": 1,
-     "org.gradle.plugins.ide.idea.IdeaPlugin$Inject": 1,
      "org.jetbrains.gradle.plugin.idea-ext": 1,
-     "org.jetbrains.intellij.IntelliJPlugin$Inject": 1,
      "kotlinx-atomicfu": 3,
-     "org.jetbrains.kotlin.plugin.atomicfu": 3,
-     "org.gradle.plugins.signing.SigningPlugin$Inject": 1
+     "org.jetbrains.kotlin.plugin.atomicfu": 3
     }
    }
   },
@@ -2997,48 +3147,17 @@
    ],
    "plugins": {
     "compiler": {
-     "annotations": 8,
-     "kotlin-script-runtime": 8,
-     "kotlin-scripting-common": 8,
-     "kotlin-scripting-compiler-embeddable": 8,
-     "kotlin-scripting-compiler-impl-embeddable": 8,
-     "kotlin-scripting-jvm": 8,
-     "kotlin-stdlib": 8,
      "symbol-processing-api": 3
     },
     "gradle": {
      "com.diffplug.spotless": 1,
-     "org.gradle.base": 12,
-     "org.gradle.build-init": 12,
-     "org.gradle.help-tasks": 12,
-     "org.gradle.kotlin.kotlin-dsl-project": 12,
-     "org.gradle.lifecycle-base": 12,
-     "org.gradle.software-reporting-tasks": 12,
-     "org.gradle.wrapper": 12,
      "org.jetbrains.dokka": 4,
-     "org.jetbrains.dokka.gradle.DokkaBasePlugin": 4,
-     "org.jetbrains.dokka.gradle.formats.DokkaHtmlPlugin": 4,
      "com.google.devtools.ksp": 3,
-     "org.gradle.java": 11,
-     "org.gradle.java-base": 11,
-     "org.gradle.jvm-ecosystem": 11,
-     "org.gradle.jvm-test-suite": 11,
-     "org.gradle.jvm-toolchains": 11,
-     "org.gradle.reporting-base": 11,
-     "org.gradle.test-suite-base": 11,
-     "org.jetbrains.kotlin.gradle.plugin.BuildMetricsPlugin": 8,
-     "org.jetbrains.kotlin.gradle.scripting.internal.ScriptingKotlinGradleSubplugin": 8,
      "org.jetbrains.kotlin.jvm": 8,
      "org.jetbrains.kotlin.plugin.scripting": 8,
      "com.vanniktech.maven.publish": 4,
      "com.vanniktech.maven.publish.base": 4,
-     "org.gradle.maven-publish": 4,
-     "org.gradle.publishing": 4,
-     "org.gradle.signing": 4,
-     "org.jetbrains.dokka.gradle.adapters.JavaAdapter": 3,
-     "org.jetbrains.dokka.gradle.adapters.KotlinAdapter": 3,
-     "me.champeau.gradle.japicmp": 2,
-     "org.gradle.java-library": 3
+     "me.champeau.gradle.japicmp": 2
     }
    }
   },
@@ -3820,30 +3939,14 @@
    "plugins": {
     "compiler": {
      "kotlin-compose-compiler-plugin-embeddable": 14,
-     "kotlin-serialization-compiler-plugin-embeddable": 9,
-     "annotations": 4,
-     "kotlin-script-runtime": 4,
-     "kotlin-scripting-common": 4,
-     "kotlin-scripting-compiler-embeddable": 4,
-     "kotlin-scripting-compiler-impl-embeddable": 4,
-     "kotlin-scripting-jvm": 4,
-     "kotlin-stdlib": 4
+     "kotlin-serialization-compiler-plugin-embeddable": 9
     },
     "gradle": {
      "com.diffplug.spotless": 34,
      "nowinandroid.root": 1,
-     "org.gradle.base": 36,
-     "org.gradle.build-init": 45,
-     "org.gradle.help-tasks": 45,
-     "org.gradle.kotlin.kotlin-dsl-project": 36,
-     "org.gradle.lifecycle-base": 36,
-     "org.gradle.software-reporting-tasks": 45,
-     "org.gradle.wrapper": 45,
      "androidx.baselineprofile": 2,
      "androidx.baselineprofile.apptarget": 1,
      "androidx.baselineprofile.consumer": 1,
-     "com.android.build.gradle.AppPlugin": 2,
-     "com.android.build.gradle.api.AndroidBasePlugin": 31,
      "com.android.internal.application": 2,
      "com.android.internal.version-check": 35,
      "com.dropbox.dependency-guard": 2,
@@ -3861,30 +3964,16 @@
      "nowinandroid.android.application.jacoco": 1,
      "nowinandroid.android.lint": 34,
      "nowinandroid.hilt": 23,
-     "org.gradle.jacoco": 13,
-     "org.gradle.java-base": 35,
-     "org.gradle.jvm-ecosystem": 35,
-     "org.gradle.jvm-toolchains": 35,
-     "org.gradle.reporting-base": 35,
-     "org.jetbrains.kotlin.gradle.plugin.BuildMetricsPlugin": 35,
-     "org.jetbrains.kotlin.gradle.plugin.KotlinBaseApiPlugin": 31,
      "org.jetbrains.kotlin.plugin.compose": 14,
      "org.jetbrains.kotlin.plugin.serialization": 9,
      "androidx.baselineprofile.producer": 1,
-     "com.android.build.gradle.TestPlugin": 1,
      "com.android.internal.test": 1,
      "nowinandroid.android.test": 1,
-     "com.android.build.gradle.LibraryPlugin": 28,
      "com.android.internal.library": 28,
      "nowinandroid.android.library": 28,
      "nowinandroid.android.library.compose": 11,
-     "com.android.build.gradle.LintPlugin": 4,
      "com.android.internal.lint": 4,
      "nowinandroid.jvm.library": 3,
-     "org.gradle.java": 4,
-     "org.gradle.jvm-test-suite": 4,
-     "org.gradle.test-suite-base": 4,
-     "org.jetbrains.kotlin.gradle.scripting.internal.ScriptingKotlinGradleSubplugin": 4,
      "org.jetbrains.kotlin.jvm": 4,
      "org.jetbrains.kotlin.plugin.scripting": 4,
      "nowinandroid.android.library.jacoco": 12,
@@ -3893,8 +3982,7 @@
      "com.google.osdetector": 1,
      "com.google.protobuf": 1,
      "nowinandroid.android.feature.api": 5,
-     "nowinandroid.android.feature.impl": 7,
-     "org.gradle.java-library": 1
+     "nowinandroid.android.feature.impl": 7
     }
    }
   },
@@ -3905,11 +3993,209 @@
     "kotlin": 126665,
     "java": 3816
    },
-   "compilations": 2,
-   "built": 2,
-   "classes": 14,
-   "identical": 7,
+   "compilations": 37,
+   "built": 9,
+   "classes": 1481,
+   "identical": 37,
    "rows": [
+    {
+     "task": ":logging-interceptor:compileKotlin",
+     "dir": "okhttp-logging-interceptor/build/classes/kotlin/main",
+     "built": true,
+     "fallback": null,
+     "error": null,
+     "classes": 9,
+     "identical": 7,
+     "only_kotlinc": 0,
+     "only_krusty": 0
+    },
+    {
+     "task": ":logging-interceptor:compileTestKotlin",
+     "dir": "okhttp-logging-interceptor/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
+     "classes": 9,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":mockwebserver3-junit4:compileKotlin",
+     "dir": "mockwebserver-junit4/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
+     "classes": 1,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":mockwebserver3-junit4:compileTestKotlin",
+     "dir": "mockwebserver-junit4/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
+     "classes": 2,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":mockwebserver3-junit5:compileKotlin",
+     "dir": "mockwebserver-junit5/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
+     "classes": 2,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":mockwebserver3-junit5:compileTestKotlin",
+     "dir": "mockwebserver-junit5/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
+     "classes": 5,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":mockwebserver3:compileKotlin",
+     "dir": "mockwebserver/build/classes/kotlin/main",
+     "built": true,
+     "fallback": null,
+     "error": null,
+     "classes": 29,
+     "identical": 16,
+     "only_kotlinc": 0,
+     "only_krusty": 0
+    },
+    {
+     "task": ":mockwebserver3:compileTestKotlin",
+     "dir": "mockwebserver/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
+     "classes": 9,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":mockwebserver:compileKotlin",
+     "dir": "mockwebserver-deprecated/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
+     "classes": 12,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":mockwebserver:compileTestKotlin",
+     "dir": "mockwebserver-deprecated/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
+     "classes": 5,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":okcurl:compileKotlin",
+     "dir": "okcurl/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
+     "classes": 11,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":okhttp-brotli:compileKotlin",
+     "dir": "okhttp-brotli/build/classes/kotlin/main",
+     "built": true,
+     "fallback": null,
+     "error": null,
+     "classes": 2,
+     "identical": 2,
+     "only_kotlinc": 0,
+     "only_krusty": 0
+    },
+    {
+     "task": ":okhttp-brotli:compileTestKotlin",
+     "dir": "okhttp-brotli/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
+     "classes": 2,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":okhttp-coroutines:compileKotlin",
+     "dir": "okhttp-coroutines/build/classes/kotlin/main",
+     "built": true,
+     "fallback": null,
+     "error": null,
+     "classes": 4,
+     "identical": 0,
+     "only_kotlinc": 2,
+     "only_krusty": 0
+    },
+    {
+     "task": ":okhttp-coroutines:compileTestKotlin",
+     "dir": "okhttp-coroutines/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
+     "classes": 16,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":okhttp-dnsoverhttps:compileKotlin",
+     "dir": "okhttp-dnsoverhttps/build/classes/kotlin/main",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/app.cash.burst/burst-kotlin-plugin/2.14.0/18ea5fbb5fc62dbafd0552da69c94e5d1059e59e/burst-kotlin-plugin-2.14.0.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "error": null,
+     "classes": 9,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":okhttp-dnsoverhttps:compileTestKotlin",
+     "dir": "okhttp-dnsoverhttps/build/classes/kotlin/test",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/app.cash.burst/burst-kotlin-plugin/2.14.0/18ea5fbb5fc62dbafd0552da69c94e5d1059e59e/burst-kotlin-plugin-2.14.0.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "error": null,
+     "classes": 9,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":okhttp-hpacktests:compileTestKotlin",
+     "dir": "okhttp-hpacktests/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
+     "classes": 12,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
     {
      "task": ":okhttp-idna-mapping-table:compileKotlin",
      "dir": "okhttp-idna-mapping-table/build/classes/kotlin/main",
@@ -3931,6 +4217,193 @@
      "identical": 0,
      "only_kotlinc": 0,
      "only_krusty": 0
+    },
+    {
+     "task": ":okhttp-java-net-cookiejar:compileKotlin",
+     "dir": "okhttp-java-net-cookiejar/build/classes/kotlin/main",
+     "built": true,
+     "fallback": null,
+     "error": null,
+     "classes": 1,
+     "identical": 0,
+     "only_kotlinc": 0,
+     "only_krusty": 0
+    },
+    {
+     "task": ":okhttp-osgi-tests:compileTestKotlin",
+     "dir": "okhttp-osgi-tests/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
+     "classes": 2,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":okhttp-sse:compileKotlin",
+     "dir": "okhttp-sse/build/classes/kotlin/main",
+     "built": true,
+     "fallback": null,
+     "error": null,
+     "classes": 8,
+     "identical": 4,
+     "only_kotlinc": 0,
+     "only_krusty": 0
+    },
+    {
+     "task": ":okhttp-sse:compileTestKotlin",
+     "dir": "okhttp-sse/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
+     "classes": 9,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":okhttp-testing-support:compileKotlin",
+     "dir": "okhttp-testing-support/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
+     "classes": 177,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":okhttp-testing-support:compileTestKotlin",
+     "dir": "okhttp-testing-support/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
+     "classes": 7,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":okhttp-tls:compileKotlin",
+     "dir": "okhttp-tls/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "okhttp-tls/src/main/kotlin/okhttp3/tls/internal/der/Adapters.kt:38:68: error: unresolved reference 'readBoolean'.",
+     "classes": 53,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":okhttp-tls:compileTestKotlin",
+     "dir": "okhttp-tls/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
+     "classes": 7,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":okhttp-urlconnection:compileKotlin",
+     "dir": "okhttp-urlconnection/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
+     "classes": 2,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":okhttp-zstd:compileKotlin",
+     "dir": "okhttp-zstd/build/classes/kotlin/main",
+     "built": true,
+     "fallback": null,
+     "error": null,
+     "classes": 1,
+     "identical": 1,
+     "only_kotlinc": 0,
+     "only_krusty": 0
+    },
+    {
+     "task": ":okhttp-zstd:compileTestKotlin",
+     "dir": "okhttp-zstd/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
+     "classes": 2,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":okhttp:compileKotlinJvm",
+     "dir": "okhttp/build/classes/kotlin/jvm/main",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-module-name=okhttp' conflicts with compilerOptions.moduleName; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 384,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":okhttp:compileTestKotlinJvm",
+     "dir": "okhttp/build/classes/kotlin/jvm/test",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (freeCompilerArg '-module-name=okhttp' conflicts with compilerOptions.moduleName; configure the structured Gradle input instead)",
+     "error": null,
+     "classes": 573,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":samples:compare:compileTestKotlin",
+     "dir": "samples/compare/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
+     "classes": 4,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":samples:guide:compileKotlin",
+     "dir": "samples/guide/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
+     "classes": 66,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":samples:guide:compileTestKotlin",
+     "dir": "samples/guide/build/classes/kotlin/test",
+     "built": false,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
+     "classes": 3,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":samples:tlssurvey:compileKotlin",
+     "dir": "samples/tlssurvey/build/classes/kotlin/main",
+     "built": false,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
+     "classes": 20,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
     }
    ],
    "no_reference_classes": [
@@ -3945,18 +4418,8 @@
      "krusty_classes": 0
     },
     {
-     "task": ":logging-interceptor:compileKotlin",
-     "dir": "okhttp-logging-interceptor/build/classes/kotlin/main",
-     "krusty_classes": 0
-    },
-    {
      "task": ":logging-interceptor:compileOsgiKotlin",
      "dir": "okhttp-logging-interceptor/build/classes/kotlin/osgi",
-     "krusty_classes": 0
-    },
-    {
-     "task": ":logging-interceptor:compileTestKotlin",
-     "dir": "okhttp-logging-interceptor/build/classes/kotlin/test",
      "krusty_classes": 0
     },
     {
@@ -3970,16 +4433,6 @@
      "krusty_classes": 0
     },
     {
-     "task": ":mockwebserver3-junit4:compileKotlin",
-     "dir": "mockwebserver-junit4/build/classes/kotlin/main",
-     "krusty_classes": 0
-    },
-    {
-     "task": ":mockwebserver3-junit4:compileTestKotlin",
-     "dir": "mockwebserver-junit4/build/classes/kotlin/test",
-     "krusty_classes": 0
-    },
-    {
      "task": ":mockwebserver3-junit5:compileJava9Kotlin",
      "dir": "mockwebserver-junit5/build/classes/kotlin/java9",
      "krusty_classes": 0
@@ -3987,16 +4440,6 @@
     {
      "task": ":mockwebserver3-junit5:compileJava9TestKotlin",
      "dir": "mockwebserver-junit5/build/classes/kotlin/java9Test",
-     "krusty_classes": 0
-    },
-    {
-     "task": ":mockwebserver3-junit5:compileKotlin",
-     "dir": "mockwebserver-junit5/build/classes/kotlin/main",
-     "krusty_classes": 0
-    },
-    {
-     "task": ":mockwebserver3-junit5:compileTestKotlin",
-     "dir": "mockwebserver-junit5/build/classes/kotlin/test",
      "krusty_classes": 0
     },
     {
@@ -4010,16 +4453,6 @@
      "krusty_classes": 0
     },
     {
-     "task": ":mockwebserver3:compileKotlin",
-     "dir": "mockwebserver/build/classes/kotlin/main",
-     "krusty_classes": 0
-    },
-    {
-     "task": ":mockwebserver3:compileTestKotlin",
-     "dir": "mockwebserver/build/classes/kotlin/test",
-     "krusty_classes": 0
-    },
-    {
      "task": ":mockwebserver:compileJava9Kotlin",
      "dir": "mockwebserver-deprecated/build/classes/kotlin/java9",
      "krusty_classes": 0
@@ -4027,21 +4460,6 @@
     {
      "task": ":mockwebserver:compileJava9TestKotlin",
      "dir": "mockwebserver-deprecated/build/classes/kotlin/java9Test",
-     "krusty_classes": 0
-    },
-    {
-     "task": ":mockwebserver:compileKotlin",
-     "dir": "mockwebserver-deprecated/build/classes/kotlin/main",
-     "krusty_classes": 0
-    },
-    {
-     "task": ":mockwebserver:compileTestKotlin",
-     "dir": "mockwebserver-deprecated/build/classes/kotlin/test",
-     "krusty_classes": 0
-    },
-    {
-     "task": ":okcurl:compileKotlin",
-     "dir": "okcurl/build/classes/kotlin/main",
      "krusty_classes": 0
     },
     {
@@ -4060,18 +4478,8 @@
      "krusty_classes": 0
     },
     {
-     "task": ":okhttp-brotli:compileKotlin",
-     "dir": "okhttp-brotli/build/classes/kotlin/main",
-     "krusty_classes": 0
-    },
-    {
      "task": ":okhttp-brotli:compileOsgiKotlin",
      "dir": "okhttp-brotli/build/classes/kotlin/osgi",
-     "krusty_classes": 0
-    },
-    {
-     "task": ":okhttp-brotli:compileTestKotlin",
-     "dir": "okhttp-brotli/build/classes/kotlin/test",
      "krusty_classes": 0
     },
     {
@@ -4085,18 +4493,8 @@
      "krusty_classes": 0
     },
     {
-     "task": ":okhttp-coroutines:compileKotlin",
-     "dir": "okhttp-coroutines/build/classes/kotlin/main",
-     "krusty_classes": 0
-    },
-    {
      "task": ":okhttp-coroutines:compileOsgiKotlin",
      "dir": "okhttp-coroutines/build/classes/kotlin/osgi",
-     "krusty_classes": 0
-    },
-    {
-     "task": ":okhttp-coroutines:compileTestKotlin",
-     "dir": "okhttp-coroutines/build/classes/kotlin/test",
      "krusty_classes": 0
     },
     {
@@ -4110,28 +4508,13 @@
      "krusty_classes": 0
     },
     {
-     "task": ":okhttp-dnsoverhttps:compileKotlin",
-     "dir": "okhttp-dnsoverhttps/build/classes/kotlin/main",
-     "krusty_classes": 0
-    },
-    {
      "task": ":okhttp-dnsoverhttps:compileOsgiKotlin",
      "dir": "okhttp-dnsoverhttps/build/classes/kotlin/osgi",
      "krusty_classes": 0
     },
     {
-     "task": ":okhttp-dnsoverhttps:compileTestKotlin",
-     "dir": "okhttp-dnsoverhttps/build/classes/kotlin/test",
-     "krusty_classes": 0
-    },
-    {
      "task": ":okhttp-hpacktests:compileKotlin",
      "dir": "okhttp-hpacktests/build/classes/kotlin/main",
-     "krusty_classes": 0
-    },
-    {
-     "task": ":okhttp-hpacktests:compileTestKotlin",
-     "dir": "okhttp-hpacktests/build/classes/kotlin/test",
      "krusty_classes": 0
     },
     {
@@ -4142,11 +4525,6 @@
     {
      "task": ":okhttp-java-net-cookiejar:compileJava9TestKotlin",
      "dir": "okhttp-java-net-cookiejar/build/classes/kotlin/java9Test",
-     "krusty_classes": 0
-    },
-    {
-     "task": ":okhttp-java-net-cookiejar:compileKotlin",
-     "dir": "okhttp-java-net-cookiejar/build/classes/kotlin/main",
      "krusty_classes": 0
     },
     {
@@ -4165,11 +4543,6 @@
      "krusty_classes": 0
     },
     {
-     "task": ":okhttp-osgi-tests:compileTestKotlin",
-     "dir": "okhttp-osgi-tests/build/classes/kotlin/test",
-     "krusty_classes": 0
-    },
-    {
      "task": ":okhttp-sse:compileJava9Kotlin",
      "dir": "okhttp-sse/build/classes/kotlin/java9",
      "krusty_classes": 0
@@ -4180,28 +4553,8 @@
      "krusty_classes": 0
     },
     {
-     "task": ":okhttp-sse:compileKotlin",
-     "dir": "okhttp-sse/build/classes/kotlin/main",
-     "krusty_classes": 0
-    },
-    {
      "task": ":okhttp-sse:compileOsgiKotlin",
      "dir": "okhttp-sse/build/classes/kotlin/osgi",
-     "krusty_classes": 0
-    },
-    {
-     "task": ":okhttp-sse:compileTestKotlin",
-     "dir": "okhttp-sse/build/classes/kotlin/test",
-     "krusty_classes": 0
-    },
-    {
-     "task": ":okhttp-testing-support:compileKotlin",
-     "dir": "okhttp-testing-support/build/classes/kotlin/main",
-     "krusty_classes": 0
-    },
-    {
-     "task": ":okhttp-testing-support:compileTestKotlin",
-     "dir": "okhttp-testing-support/build/classes/kotlin/test",
      "krusty_classes": 0
     },
     {
@@ -4215,18 +4568,8 @@
      "krusty_classes": 0
     },
     {
-     "task": ":okhttp-tls:compileKotlin",
-     "dir": "okhttp-tls/build/classes/kotlin/main",
-     "krusty_classes": 0
-    },
-    {
      "task": ":okhttp-tls:compileOsgiKotlin",
      "dir": "okhttp-tls/build/classes/kotlin/osgi",
-     "krusty_classes": 0
-    },
-    {
-     "task": ":okhttp-tls:compileTestKotlin",
-     "dir": "okhttp-tls/build/classes/kotlin/test",
      "krusty_classes": 0
     },
     {
@@ -4240,11 +4583,6 @@
      "krusty_classes": 0
     },
     {
-     "task": ":okhttp-urlconnection:compileKotlin",
-     "dir": "okhttp-urlconnection/build/classes/kotlin/main",
-     "krusty_classes": 0
-    },
-    {
      "task": ":okhttp-urlconnection:compileOsgiKotlin",
      "dir": "okhttp-urlconnection/build/classes/kotlin/osgi",
      "krusty_classes": 0
@@ -4255,38 +4593,13 @@
      "krusty_classes": 0
     },
     {
-     "task": ":okhttp-zstd:compileKotlin",
-     "dir": "okhttp-zstd/build/classes/kotlin/main",
-     "krusty_classes": 0
-    },
-    {
      "task": ":okhttp-zstd:compileOsgiKotlin",
      "dir": "okhttp-zstd/build/classes/kotlin/osgi",
      "krusty_classes": 0
     },
     {
-     "task": ":okhttp-zstd:compileTestKotlin",
-     "dir": "okhttp-zstd/build/classes/kotlin/test",
-     "krusty_classes": 0
-    },
-    {
-     "task": ":okhttp:compileKotlinJvm",
-     "dir": "okhttp/build/classes/kotlin/jvm/main",
-     "krusty_classes": 0
-    },
-    {
-     "task": ":okhttp:compileTestKotlinJvm",
-     "dir": "okhttp/build/classes/kotlin/jvm/test",
-     "krusty_classes": 0
-    },
-    {
      "task": ":samples:compare:compileKotlin",
      "dir": "samples/compare/build/classes/kotlin/main",
-     "krusty_classes": 0
-    },
-    {
-     "task": ":samples:compare:compileTestKotlin",
-     "dir": "samples/compare/build/classes/kotlin/test",
      "krusty_classes": 0
     },
     {
@@ -4297,16 +4610,6 @@
     {
      "task": ":samples:crawler:compileTestKotlin",
      "dir": "samples/crawler/build/classes/kotlin/test",
-     "krusty_classes": 0
-    },
-    {
-     "task": ":samples:guide:compileKotlin",
-     "dir": "samples/guide/build/classes/kotlin/main",
-     "krusty_classes": 0
-    },
-    {
-     "task": ":samples:guide:compileTestKotlin",
-     "dir": "samples/guide/build/classes/kotlin/test",
      "krusty_classes": 0
     },
     {
@@ -4340,11 +4643,6 @@
      "krusty_classes": 0
     },
     {
-     "task": ":samples:tlssurvey:compileKotlin",
-     "dir": "samples/tlssurvey/build/classes/kotlin/main",
-     "krusty_classes": 0
-    },
-    {
      "task": ":samples:tlssurvey:compileTestKotlin",
      "dir": "samples/tlssurvey/build/classes/kotlin/test",
      "krusty_classes": 0
@@ -4362,85 +4660,60 @@
    ],
    "measured": {
     "date": "2026-10-25",
-    "commit": "cf34959a9fd4d1d8b424730bd8775da493e7ea90",
-    "run": "https://github.com/qnox/krusty/actions/runs/40199492852"
+    "commit": "b5979a1e2f54abd23bbf8a46d0a77f763acbd4fd",
+    "run": "https://github.com/qnox/krusty/actions/runs/40201721357"
    },
    "stars": 47095,
-   "misses": [],
+   "misses": [
+    [
+     "not run: a task it depends on failed",
+     23
+    ],
+    [
+     "left to kotlinc: krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/app.cash.burst/burst-kotlin-plugin/2.14.0/18ea5fbb5fc62dbafd0552da69c94e5d1059e59e/burst-kotlin-plugin-2.14.0.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     2
+    ],
+    [
+     "left to kotlinc: krusty does not implement everything it requests (freeCompilerArg '-module-name=okhttp' conflicts with compilerOptions.moduleName; configure the structured Gradle input instead)",
+     2
+    ],
+    [
+     "okhttp-tls/src/main/kotlin/okhttp3/tls/internal/der/Adapters.kt:38:68: error: unresolved reference 'readBoolean'.",
+     1
+    ]
+   ],
    "plugins": {
     "compiler": {
      "burst-kotlin-plugin": 3,
-     "annotations": 27,
-     "kotlin-script-runtime": 27,
-     "kotlin-scripting-common": 27,
-     "kotlin-scripting-compiler-embeddable": 27,
-     "kotlin-scripting-compiler-impl-embeddable": 27,
-     "kotlin-scripting-jvm": 27,
-     "kotlin-stdlib": 27,
      "kotlin-serialization-compiler-plugin-embeddable": 1,
      "symbol-processing-api": 2
     },
     "gradle": {
      "okhttp.dokka-multimodule-conventions": 1,
-     "org.gradle.build-init": 33,
-     "org.gradle.help-tasks": 33,
-     "org.gradle.kotlin.kotlin-dsl-project": 32,
-     "org.gradle.software-reporting-tasks": 33,
-     "org.gradle.wrapper": 33,
      "app.cash.burst": 3,
-     "app.cash.burst.gradle.BurstKotlinPlugin": 3,
-     "com.android.build.gradle.LibraryPlugin": 2,
-     "com.android.build.gradle.api.AndroidBasePlugin": 3,
      "com.android.internal.library": 2,
      "com.android.internal.version-check": 29,
      "de.mannodermaus.android-junit": 1,
      "okhttp.base-conventions": 31,
-     "org.gradle.base": 31,
-     "org.gradle.java-base": 30,
-     "org.gradle.jvm-ecosystem": 31,
-     "org.gradle.jvm-toolchains": 30,
-     "org.gradle.lifecycle-base": 31,
-     "org.gradle.reporting-base": 30,
-     "org.jetbrains.kotlin.gradle.plugin.BuildMetricsPlugin": 30,
-     "org.jetbrains.kotlin.gradle.plugin.KotlinBaseApiPlugin": 3,
-     "com.android.build.gradle.AppPlugin": 1,
      "com.android.internal.application": 1,
-     "com.android.build.gradle.LintPlugin": 26,
      "com.android.internal.lint": 26,
      "com.diffplug.spotless": 26,
      "com.gradleup.tapmoc": 27,
      "com.vanniktech.maven.publish.base": 16,
-     "me.champeau.mrjar.MultiReleaseJarPlugin$Inject_": 12,
      "okhttp.jvm-conventions": 27,
      "okhttp.publish-conventions": 16,
      "okhttp.quality-conventions": 26,
      "okhttp.testing-conventions": 27,
-     "org.gradle.checkstyle": 26,
-     "org.gradle.java": 26,
-     "org.gradle.jvm-test-suite": 26,
-     "org.gradle.maven-publish": 16,
-     "org.gradle.publishing": 16,
-     "org.gradle.signing": 16,
-     "org.gradle.test-suite-base": 26,
-     "org.jetbrains.kotlin.gradle.scripting.internal.ScriptingKotlinGradleSubplugin": 27,
      "org.jetbrains.kotlin.jvm": 26,
      "org.jetbrains.kotlin.plugin.scripting": 27,
      "org.jetbrains.kotlinx.binary-compatibility-validator": 16,
      "ru.vyarus.animalsniffer": 26,
-     "com.github.jengelman.gradle.plugins.shadow.ShadowBasePlugin": 2,
-     "com.github.jengelman.gradle.plugins.shadow.ShadowJavaPlugin": 2,
      "com.github.johnrengelman.shadow": 2,
      "com.gradleup.shadow": 2,
-     "org.graalvm.buildtools.gradle.NativeImagePlugin$Inject_": 1,
-     "com.android.build.gradle.api.KotlinMultiplatformAndroidPlugin": 1,
      "com.android.internal.kotlin.multiplatform.library": 1,
      "io.github.usefulness.maven-sympathy": 1,
      "org.jetbrains.kotlin.multiplatform": 1,
      "org.jetbrains.kotlin.plugin.serialization": 1,
-     "org.gradle.java-platform": 1,
-     "org.gradle.application": 2,
-     "org.gradle.distribution": 2,
-     "org.gradle.distribution-base": 2,
      "com.google.devtools.ksp": 2
     }
    }
@@ -4581,69 +4854,22 @@
    ],
    "plugins": {
     "compiler": {
-     "annotations": 5,
-     "burst-kotlin-plugin": 2,
-     "kotlin-script-runtime": 5,
-     "kotlin-scripting-common": 5,
-     "kotlin-scripting-compiler-embeddable": 5,
-     "kotlin-scripting-compiler-impl-embeddable": 5,
-     "kotlin-scripting-jvm": 5,
-     "kotlin-stdlib": 5
+     "burst-kotlin-plugin": 2
     },
     "gradle": {
      "com.vanniktech.maven.publish.base": 7,
-     "org.gradle.base": 12,
-     "org.gradle.build-init": 12,
-     "org.gradle.help-tasks": 12,
-     "org.gradle.kotlin.kotlin-dsl-project": 11,
-     "org.gradle.lifecycle-base": 12,
-     "org.gradle.maven-publish": 7,
-     "org.gradle.publishing": 7,
-     "org.gradle.signing": 7,
-     "org.gradle.software-reporting-tasks": 12,
-     "org.gradle.wrapper": 12,
-     "org.jetbrains.kotlin.gradle.targets.js.nodejs.NodeJsPlugin": 5,
-     "org.jetbrains.kotlin.gradle.targets.js.nodejs.NodeJsRootPlugin": 1,
-     "org.jetbrains.kotlin.gradle.targets.js.yarn.YarnPlugin": 1,
-     "org.jetbrains.kotlin.gradle.targets.wasm.nodejs.WasmNodeJsPlugin": 5,
-     "org.jetbrains.kotlin.gradle.targets.wasm.nodejs.WasmNodeJsRootPlugin": 1,
-     "org.jetbrains.kotlin.gradle.targets.wasm.yarn.WasmYarnPlugin": 1,
-     "com.android.build.gradle.LibraryPlugin": 2,
-     "com.android.build.gradle.api.AndroidBasePlugin": 2,
      "com.android.internal.library": 2,
      "com.android.internal.version-check": 2,
      "com.diffplug.spotless": 11,
-     "org.gradle.java-base": 9,
-     "org.gradle.jvm-ecosystem": 10,
-     "org.gradle.jvm-toolchains": 9,
-     "org.gradle.reporting-base": 9,
-     "org.jetbrains.kotlin.gradle.plugin.BuildMetricsPlugin": 9,
-     "org.jetbrains.kotlin.gradle.plugin.KotlinBaseApiPlugin": 2,
      "app.cash.burst": 4,
-     "app.cash.burst.gradle.BurstKotlinPlugin": 4,
      "build-support": 6,
      "org.jetbrains.dokka": 5,
-     "org.jetbrains.dokka.gradle.DokkaBasePlugin": 5,
-     "org.jetbrains.dokka.gradle.adapters.JavaAdapter": 5,
-     "org.jetbrains.dokka.gradle.adapters.KotlinAdapter": 5,
-     "org.jetbrains.dokka.gradle.formats.DokkaHtmlPlugin": 5,
-     "org.jetbrains.kotlin.gradle.scripting.internal.ScriptingKotlinGradleSubplugin": 7,
-     "org.jetbrains.kotlin.gradle.targets.js.npm.NpmResolverPlugin": 4,
-     "org.jetbrains.kotlin.gradle.targets.wasm.binaryen.BinaryenPlugin": 4,
-     "org.jetbrains.kotlin.gradle.targets.wasm.npm.WasmNpmResolverPlugin": 3,
      "org.jetbrains.kotlin.multiplatform": 6,
      "org.jetbrains.kotlin.plugin.scripting": 7,
      "org.jetbrains.kotlinx.binary-compatibility-validator": 5,
-     "org.jetbrains.dokka.gradle.adapters.AndroidAdapter": 1,
-     "org.gradle.java-platform": 1,
      "me.champeau.jmh": 1,
-     "org.gradle.java": 1,
-     "org.gradle.jvm-test-suite": 1,
-     "org.gradle.test-suite-base": 1,
      "org.jetbrains.kotlin.jvm": 1,
-     "com.gradleup.tapmoc": 1,
-     "org.gradle.distribution": 1,
-     "org.gradle.distribution-base": 1
+     "com.gradleup.tapmoc": 1
     }
    }
   },
@@ -5118,46 +5344,15 @@
    ],
    "plugins": {
     "compiler": {
-     "annotations": 22,
-     "kotlin-script-runtime": 22,
-     "kotlin-scripting-common": 22,
-     "kotlin-scripting-compiler-embeddable": 22,
-     "kotlin-scripting-compiler-impl-embeddable": 22,
-     "kotlin-scripting-jvm": 22,
-     "kotlin-stdlib": 22,
      "symbol-processing-api": 3,
      "kotlin-serialization-compiler-plugin-embeddable": 3
     },
     "gradle": {
      "io.github.ben-manes.versions": 22,
-     "org.gradle.application": 2,
-     "org.gradle.base": 22,
-     "org.gradle.build-init": 22,
-     "org.gradle.distribution": 2,
-     "org.gradle.distribution-base": 2,
-     "org.gradle.help-tasks": 22,
-     "org.gradle.java": 13,
-     "org.gradle.java-base": 22,
-     "org.gradle.jvm-ecosystem": 22,
-     "org.gradle.jvm-test-suite": 13,
-     "org.gradle.jvm-toolchains": 22,
-     "org.gradle.kotlin.kotlin-dsl-project": 22,
-     "org.gradle.lifecycle-base": 22,
-     "org.gradle.reporting-base": 22,
-     "org.gradle.software-reporting-tasks": 22,
-     "org.gradle.test-suite-base": 13,
-     "org.gradle.wrapper": 22,
      "org.jetbrains.dokka": 22,
-     "org.jetbrains.dokka.gradle.DokkaBasePlugin": 22,
-     "org.jetbrains.dokka.gradle.adapters.JavaAdapter": 22,
-     "org.jetbrains.dokka.gradle.adapters.KotlinAdapter": 22,
-     "org.jetbrains.dokka.gradle.formats.DokkaHtmlPlugin": 22,
-     "org.jetbrains.kotlin.gradle.plugin.BuildMetricsPlugin": 22,
-     "org.jetbrains.kotlin.gradle.scripting.internal.ScriptingKotlinGradleSubplugin": 22,
      "org.jetbrains.kotlin.jvm": 13,
      "org.jetbrains.kotlin.plugin.scripting": 22,
      "org.jlleitschuh.gradle.ktlint": 22,
-     "org.jlleitschuh.gradle.ktlint.KtlintBasePlugin": 22,
      "se.patrikerdes.use-latest-versions": 22,
      "quarkdown.jvm": 12,
      "com.google.devtools.ksp": 3,
@@ -5274,45 +5469,17 @@
    ],
    "plugins": {
     "compiler": {
-     "annotations": 6,
-     "kotlin-script-runtime": 5,
-     "kotlin-scripting-common": 5,
-     "kotlin-scripting-compiler-embeddable": 5,
-     "kotlin-scripting-compiler-impl-embeddable": 5,
-     "kotlin-scripting-jvm": 5,
      "kotlin-serialization-compiler-plugin-embeddable": 3,
-     "kotlin-stdlib": 6,
      "purity-compiler-plugin": 6
     },
     "gradle": {
      "io.github.yairm210.purity-plugin": 6,
      "io.gitlab.arturbosch.detekt": 1,
-     "org.gradle.base": 6,
-     "org.gradle.build-init": 6,
-     "org.gradle.eclipse": 6,
-     "org.gradle.help-tasks": 6,
-     "org.gradle.idea": 6,
-     "org.gradle.java-base": 6,
-     "org.gradle.jvm-ecosystem": 6,
-     "org.gradle.jvm-toolchains": 6,
-     "org.gradle.kotlin.kotlin-dsl-project": 6,
-     "org.gradle.lifecycle-base": 6,
-     "org.gradle.reporting-base": 6,
-     "org.gradle.software-reporting-tasks": 6,
-     "org.gradle.wrapper": 6,
-     "org.jetbrains.kotlin.gradle.plugin.BuildMetricsPlugin": 6,
-     "org.jetbrains.kotlin.gradle.scripting.internal.ScriptingKotlinGradleSubplugin": 5,
      "org.jetbrains.kotlin.multiplatform": 1,
      "org.jetbrains.kotlin.plugin.scripting": 5,
      "org.jetbrains.kotlin.plugin.serialization": 3,
-     "com.android.build.gradle.AppPlugin": 1,
-     "com.android.build.gradle.api.AndroidBasePlugin": 1,
      "com.android.internal.application": 1,
      "com.android.internal.version-check": 1,
-     "org.jetbrains.kotlin.gradle.plugin.KotlinBaseApiPlugin": 1,
-     "org.gradle.java": 4,
-     "org.gradle.jvm-test-suite": 4,
-     "org.gradle.test-suite-base": 4,
      "org.jetbrains.kotlin.jvm": 4
     }
    }

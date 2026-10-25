@@ -14,3 +14,6 @@ date	krusty commit	project	reference exit	built	compilations	identical	classes	r
 2026-10-25	cf34959a9fd4d1d8b424730bd8775da493e7ea90	nowinandroid	0	24	58	221	1110	https://github.com/qnox/krusty/actions/runs/40199492852
 2026-10-25	cf34959a9fd4d1d8b424730bd8775da493e7ea90	okhttp	1	2	2	7	14	https://github.com/qnox/krusty/actions/runs/40199492852
 2026-10-25	cf34959a9fd4d1d8b424730bd8775da493e7ea90	okio	1	0	6	0	343	https://github.com/qnox/krusty/actions/runs/40199492852
+2026-10-25	b5979a1e2f54abd23bbf8a46d0a77f763acbd4fd	kotlinx.coroutines	0	0	34	0	9482	https://github.com/qnox/krusty/actions/runs/40201721357
+2026-10-25	b5979a1e2f54abd23bbf8a46d0a77f763acbd4fd	mirai	0	0	51	0	2536	https://github.com/qnox/krusty/actions/runs/40201721357
+2026-10-25	b5979a1e2f54abd23bbf8a46d0a77f763acbd4fd	okhttp	1	9	37	37	1481	https://github.com/qnox/krusty/actions/runs/40201721357
