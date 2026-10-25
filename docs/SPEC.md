@@ -21106,6 +21106,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   earlier parameter. A local function, lambda, or object in an initializer reads the property
   through the instance. The constructor parameter of the same spelling is hidden and is not a
   capture.
+  Anonymous-object super-constructor arguments are checked on the enclosing construction scope,
+  before inherited or declared instance properties enter the tower. In
+  `object : Carrier<List<T>>(listOf(value)) {}`, an enclosing `value: T` therefore remains that
+  lexical value even when `Carrier` declares a property named `value`. An applied typealias for
+  the same parent follows the identical rule. Named classes retain their own constructor-parameter
+  rung, and a missing enclosing value cannot fall back to the uninitialized inherited property.
+  An unavailable dispatch rung reserves the constructor-prefix receiver coordinate without adding
+  instance-property bindings, so enclosing receiver captures retain their checked identities.
+  Tests: `tests/typealias_constructor_inference_e2e.rs` compares complete JVM ABI and runtime
+  behavior with kotlinc. Separate existing gaps in deferred-lambda capture transport and the exact
+  unavailable-member diagnostic retain their full controls in #2657 and #2658.
   An anonymous object moves every super-constructor argument that is not a compile-time constant
   and not a lexical capture out to the construction site, stores it in a temporary, and forwards
   it as a constructor parameter that is not a field (`object : Base(n + 1)`, `object :
