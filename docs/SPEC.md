@@ -730,6 +730,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the transformer saves the builder. Tests: `tests/suspend_argument_operands_e2e.rs`,
   `tests/suspending_concat_operands_e2e.rs`, `tests/suspend_arg_order_e2e.rs`,
   `fir_lower/tests.rs::suspending_call_operand_stays_a_direct_constructor_argument`.
+- **Anonymous-class fields preserve enclosing method formals in JVM signatures.** A property or
+  capture whose retained type is an enclosing function's `T` carries `TT;`, including nullable
+  `T?` and a bounded `T : Number`. Its descriptor keeps the declared erasure (`Object` or `Number`);
+  default getters and setters carry `()TT;` and `(TT;)V`. Declaration-owned classifier formals use
+  the same formatter. Complete class headers/member tables and runtime are compared with Kotlin
+  in `tests/enclosing_formal_signatures_e2e.rs`.
 - **A suspend lambda that writes a captured `var`.** The cell is a `Ref$ObjectRef<T>`, and the
   lambda's field carries that generic `Signature`, as its constructor does. A suspension result
   stored into the cell's `element` (an `Object`) goes in erased, with no `checkcast` to the

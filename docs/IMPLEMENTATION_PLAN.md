@@ -6,6 +6,10 @@ resolver facade; selected receiver provenance and declaration ABI survive that b
 source signatures now retain receiver captures before contextual result constraints and reuse the
 ordinary call solver and output-slot specialization. Shared conformance expectations stay unchanged.
 
+JVM field and property-accessor signature formatting consumes retained enclosing-method formals
+through the declaration type-use formatter. Own classifier formals, nullable/bounded captures and
+concrete declarations share that boundary; physical field descriptors retain their existing erasure.
+
 Phased, each phase ends in a **green `cargo test`** and a runnable artifact. The pipeline is built
 front-to-back so the streaming/arena shape is real from the start, then widened.
 

@@ -18,6 +18,11 @@ its members. Physical mapped Java requests keep invariant formals independently 
 declared variance. This changes no metadata wire fields or physical descriptors. Missing lexical
 formal scopes, including unavailable enclosing-method evidence, do not license placeholder bounds.
 
+Field and property-accessor JVM `Signature` attributes consume the retained semantic formal identity
+even when its declaration belongs to an enclosing method. Nullable and bounded formals keep that
+identity through the common formatter; class-owned formals and concrete declarations use the same
+type-use boundary. Class formal declarations and Kotlin metadata applications retain their own layout.
+
 Wasm's erased-reference binary equality realization uses the already checked operator and the
 runtime GC representation. It changes no metadata, callable identity, or provider authorization;
 explicit dependency `Any.equals` realization remains a separate authenticated-callable contract.
