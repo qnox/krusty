@@ -395,6 +395,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     if let Some(line) = ir.whens.source_lines.get(&source).copied() {
         ir.whens.source_lines.insert(target, line);
     }
+    if ir.whens.elvises.contains(&source) {
+        ir.whens.elvises.insert(target);
+    }
     copy_map!(binding_read_stability);
     copy_map!(short_circuits);
     copy_map!(physical_types);

@@ -822,6 +822,8 @@ mod duplicate_param_check_e2e;
 mod eager_lambda_analysis_e2e;
 #[path = "editor_failed_signature_recovery_e2e.rs"]
 mod editor_failed_signature_recovery_e2e;
+#[path = "elvis_branch_order_e2e.rs"]
+mod elvis_branch_order_e2e;
 #[path = "elvis_newline_continuation_e2e.rs"]
 mod elvis_newline_continuation_e2e;
 #[path = "elvis_nullability_join_e2e.rs"]

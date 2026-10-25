@@ -2,7 +2,7 @@
 //! identity, for a backend to emit it without re-deciding.
 
 use super::ExprId;
-use crate::fx_hash::HashMap;
+use crate::fx_hash::{HashMap, HashSet};
 use crate::types::Ty;
 
 #[derive(Clone, Debug, Default)]
@@ -15,4 +15,9 @@ pub(crate) struct IrWhenFacts {
     /// their `when` keyword. An `if`, and a `when` lowering builds, is not one. kotlinc's JVM codegen
     /// marks that line and a `nop` before the branches of such a `when` unless it becomes a switch.
     pub(crate) source_lines: HashMap<ExprId, u32>,
+    /// The `when` each elvis (`a ?: b`) lowers to, as fir2ir builds it: the first branch tests the
+    /// left value's temporary against `null` and yields the right side, the `else` yields the left
+    /// value. A backend whose platform compiler reorders an elvis's branches uses this provenance
+    /// rather than recognizing the shape.
+    pub(crate) elvises: HashSet<ExprId>,
 }
