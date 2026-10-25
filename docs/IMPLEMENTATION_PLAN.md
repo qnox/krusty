@@ -6035,6 +6035,11 @@ priority, reordered and unused alias formals, named arguments, and independent c
 Alias/value-class runtime controls also retain the target declaration's generic versus concrete
 constructor carriers for source, own-produced and reference-produced dependencies.
 
+Late extension admission now uses strict receiver assignability or the existing satisfiable
+postponed-frame trial. The common operation also serves unbound constructor-reference receivers;
+selection cannot commit its trial bindings. This repairs the two existing builder-inference
+regressions introduced by the alias receiver guard while retaining concrete receiver refusal.
+
 Original parameter declarations now survive selected callable/member conversion independently of
 the specialized applicability signature. Constructor publication reads that same declaration shape;
 the JVM retains generic value-class boxes while concrete value-class slots keep their carriers.
@@ -6043,7 +6048,9 @@ dependency runtime tests read both generic and concrete stored values. The selec
 and conversion move out of the resolver facade, and plugin plans keep their declaration payload
 indirect, retiring two large-enum lint findings without changing the indexed FIR/IR representation.
 
-Late extension admission now uses strict receiver assignability or the existing satisfiable
-postponed-frame trial. The common operation also serves unbound constructor-reference receivers;
-selection cannot commit its trial bindings. This repairs the two existing builder-inference
-regressions introduced by the alias receiver guard while retaining concrete receiver refusal.
+JVM class-initializer entry establishes its implicit callable frame before emitting expressions.
+Their nested lexical ranges close before each static field store, which restores its source line
+after an inline value resets the caller line. Ordinary method local-table ordering is preserved.
+Full-class/runtime controls cover consecutive initializers, object and companion storage with an
+`init` block, and ordinary callable bodies. The batched bytecode oracle now isolates fixture packages
+and fails compilation errors (#2639).
