@@ -22,3 +22,16 @@ index 877177f..b23da5d 100644
  checkstyle = "14.3.0"
  clikt = "5.1.0"
  extra-java-module-info = "1.14.2"
+diff --git a/okcurl/build.gradle.kts b/okcurl/build.gradle.kts
+index 440ba43..0cda275 100644
+--- a/okcurl/build.gradle.kts
++++ b/okcurl/build.gradle.kts
+@@ -50,7 +50,7 @@ dependencies {
+   testImplementation(projects.mockwebserver3Junit5)
+   testImplementation(libs.junit)
+   testImplementation(libs.assertk)
+-  testImplementation(kotlin("test"))
++  testImplementation(kotlin("test-junit5"))
+ }
+ 
+ val jvmSignature = configurations.getByName("jvmSignature")
