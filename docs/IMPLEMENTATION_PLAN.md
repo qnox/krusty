@@ -1,5 +1,11 @@
 # krusty — implementation plan
 
+JVM return consumers now use authenticated declaration-result slots across reference-preserving
+null assertions. Value-class refinement shares that producer boundary, while inline and suspension
+owners keep their existing result materialization. Full classfile/runtime controls cover ordinary
+generic returns and explicit/local materialization; existing inline, suspension and value-class
+guards constrain the adjacent representation boundaries.
+
 Serialization handoff validation now provisions the pinned runtime and checks nullable value-class
 deserialization parameters against the established plugin contract. Exact common-IR assertions,
 complete generated-owner class bytes and reference JSON behavior guard the same constructor.
@@ -6033,3 +6039,9 @@ Owner tests constrain the constructor and context/extension/value round trips, a
 dependency runtime tests read both generic and concrete stored values. The selected-member record
 and conversion move out of the resolver facade, and plugin plans keep their declaration payload
 indirect, retiring two large-enum lint findings without changing the indexed FIR/IR representation.
+
+JVM class-initializer entry establishes its implicit callable frame before emitting expressions.
+Their nested lexical ranges close before each static field store, which restores its source line
+after an inline value resets the caller line. Ordinary method local-table ordering is preserved.
+Full-class/runtime controls cover consecutive initializers, object and companion storage with an
+`init` block, and ordinary callable bodies. Restoring the batched bytecode oracle remains #2637.

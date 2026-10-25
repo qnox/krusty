@@ -1,5 +1,20 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## JVM generic result consumption
+
+A checked generic call's declaration-result coercion can retain its recorded reference slot until
+the return consumer materializes that value. The exact coercion marker and physical producer own
+that decision. A source null assertion checks and preserves the same value; its call slot is
+realized after generic erasure and refined with value-class declaration evidence. Inline regions,
+compiled inline calls and transformed suspension results retain their own materialization boundary.
+
+Named local storage and explicit source casts still materialize their declared types. Value-class
+returns distinguish declaration carriers from values boxed through a bare type parameter. A source
+assertion's extra nullability coercion retains the same authenticated declaration boundary rather
+than materializing an intermediate substituted type. Complete classfile and reference runtime
+controls, including single evaluation, live in
+`tests/consumer_materialized_result_e2e.rs`.
+
 ## Serialization constructor contract checks
 
 The deserialization-constructor handoff test retains nullable value-class element parameters and
@@ -1028,6 +1043,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   local-variable table lists the marker, then those locals, then the parameters. A block nested
   inside those statements still closes where that block ends. Test:
   `tests/inline_repeat_local_e2e.rs`.
+- **An initializer's lexical inline ranges close before the value is stored.** Callable-scope
+  entry gives `<clinit>` its implicit method body, so initializer expressions own nested lexical
+  scopes. Their marker and operand ranges close at the expression boundary, allowing the next
+  initializer to reuse its slots. A store restores its source line after an inlined value resets
+  the caller line; that debug boundary preserves the existing closing `nop`. Class-initializer
+  line tables retain these intentional returns to the same line at distinct bytecode offsets.
+  Tests: `tests/initializer_inline_local_scopes_e2e.rs`.
 - **An inlined lambda's implicit-result end stays on the path that evaluated it.** Common IR
   records the exact result expression and its end line; the backend marks that line after the
   expression succeeds, before local-return paths rejoin it. For a returned `try`, the `nop`
@@ -16413,8 +16435,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   public`); `kotlin.Annotation` declares nothing and inherits `kotlin.Any`'s functions. A library
   modifier set is the visibility (none for Java package-private), the modality, `infix`, and
   `operator` together with `override`; an accessor lists its modality only when it is not `open`.
-  The members of other classifiers, and of an annotation class whose members carry annotations,
-  are refused for those queries. (`crates/krusty-plugin-host/tests/ksp.rs`,
+  A constant a Java annotation declares is a `JAVA_LIB` `final public` property with the
+  `JAVA_STATIC` modifier and neither getter nor setter, listed after the constructor and before
+  the nested classifiers and left out of `getAllProperties`; a reference array is
+  `Array<out E>`, a mapped class its Kotlin classifier. The members of other classifiers, of an
+  annotation class whose members carry annotations, and of one declaring a generic, raw generic
+  or collection-typed constant are refused for those queries. (`crates/krusty-plugin-host/tests/ksp.rs`,
   `library_annotation_members_are_what_ksp2_reports`.)
 - **KSP maps names between Kotlin and the JVM by kotlinc's class map.** `mapKotlinNameToJava` and
   `mapJavaNameToKotlin` answer what kotlinc's `JavaToKotlinClassMap` does for the classifier the

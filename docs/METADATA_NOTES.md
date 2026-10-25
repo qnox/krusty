@@ -1,5 +1,13 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+JVM generic result consumption joins the retained declaration-result coercion with its physical
+producer after erasure. Null assertions preserve that producer's slot, and value-class lowering
+uses the same marked edge to distinguish declaration carriers from generic boxes. The extra
+nullable-to-nonnull coercion retains that declaration boundary. Source metadata types continue
+to describe the selected declaration independently of this JVM representation decision.
+
+## Serialization constructor handoff
+
 The serialization constructor's `named_params` retain nullable reference elements and the nullable
 serialization marker independently of the erased constructor parameter vector. The handoff test
 checks both exact vectors; the generated owner is also compared byte-for-byte with the matching
@@ -1111,3 +1119,11 @@ physical inputs. This is an in-memory declaration fact, with no Kotlin metadata 
 JVM annotation interfaces use the same retained `InnerClasses` inventory as other declared
 classifiers. Declared children and enclosing rows remain discoverable without a method or element
 referencing them. This changes the JVM class table, not Kotlin metadata or annotation values.
+
+## Initializer inline debug ranges
+
+Class-initializer entry establishes the implicit callable frame. Initializer expressions record
+their local-variable ranges at nested lexical boundaries, and each store restores its source line
+after an inlined value. Class-initializer table curation preserves intentional marks at distinct
+offsets, including returns to the same source line. The JVM uses these debug points to preserve
+inline markers and closing anchors; Kotlin metadata and constructor descriptors are unchanged.

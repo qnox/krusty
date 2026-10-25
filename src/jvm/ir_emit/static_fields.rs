@@ -178,10 +178,7 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
             .iter()
             .filter_map(|(_, property)| property.init),
     );
-    e.regeneration_site = Some(bytecode_inline_call::RegenerationSite::class_initializer(
-        env.signature_symbols,
-    ));
-    e.record_locals = true;
+    e.enter_class_initializer(env.signature_symbols);
     let mut code = CodeBuilder::new(0);
     e.emit_delegated_property_array(env, env.facade_class, facade, &mut code);
     if delegated_property_array::exists(env, env.facade_class) {
@@ -855,10 +852,7 @@ pub(super) fn emit_class_static_initializer(
                 .map(|&(_, _, init)| init)
                 .chain(companion_initializer),
         );
-        e.regeneration_site = Some(bytecode_inline_call::RegenerationSite::class_initializer(
-            env.signature_symbols,
-        ));
-        e.record_locals = true;
+        e.enter_class_initializer(env.signature_symbols);
         let has_delegated_array = delegated_property_array::exists(env, c.fq_name);
         let canonical_delegated_array = has_delegated_array
             && env
@@ -934,7 +928,17 @@ pub(super) fn emit_class_static_initializer(
     }
 }
 
-impl Emitter<'_> {
+impl<'a> Emitter<'a> {
+    /// Enter the implicit callable body of a synthetic class initializer. Its expressions then
+    /// own nested lexical scopes, as expressions inside a declared method body do.
+    pub(super) fn enter_class_initializer(&mut self, symbols: &'a dyn BackendClassifierSource) {
+        self.regeneration_site = Some(bytecode_inline_call::RegenerationSite::class_initializer(
+            symbols,
+        ));
+        self.record_locals = true;
+        self.block_depth = 1;
+    }
+
     /// Emit a class companion's initializer body in the outer `<clinit>`, after the `Companion`
     /// instance store, recording its line marks in `clinit_lines`.
     pub(super) fn emit_companion_clinit_body(
@@ -979,7 +983,7 @@ impl Emitter<'_> {
             .iter()
             .map(|&(pc, line)| (pc, u32::from(line)));
         clinit_lines.extend(marks);
-        clinit_lines.dedup_by_key(|(_, line)| *line);
+        clinit_lines.dedup();
     }
 }
 
@@ -1189,11 +1193,18 @@ impl Emitter<'_> {
     /// Store `value` into static `index`, through the storage boundary visible from this class.
     pub(super) fn emit_set_static(
         &mut self,
+        statement: crate::ir::ExprId,
         index: u32,
         value: crate::ir::ExprId,
         code: &mut CodeBuilder,
     ) {
         let s = &self.ir.statics[index as usize];
+        let initializer_line = self
+            .ir
+            .property_initializer_stores
+            .contains(&statement)
+            .then(|| self.ir.expr_lines.get(&statement).copied())
+            .flatten();
         let jt = jvm_declared_ty(&s.ty);
         let name = s.name.clone();
         let is_const = s.is_const;
@@ -1239,6 +1250,7 @@ impl Emitter<'_> {
             if self.diverges(value) {
                 return;
             }
+            super::debug_lines::restore_initializer_store_line(initializer_line, code);
             let method = self.cw.methodref(
                 &companion_name,
                 &setter_name,
@@ -1251,6 +1263,7 @@ impl Emitter<'_> {
         if self.diverges(value) {
             return;
         }
+        super::debug_lines::restore_initializer_store_line(initializer_line, code);
         // A PRIVATE property's field, or the backing field of a source-declared setter, written
         // from another class, goes through its owner's accessor.
         if let Some(storage) = crate::jvm::private_static_access::bridged_setter(self.ir, index)
@@ -1344,6 +1357,12 @@ impl Emitter<'_> {
             owner,
             self.ir.static_field_jvm_name(static_index),
             &type_descriptor(physical),
+        );
+        // An inlined initializer resets the caller's line. The store owns its source boundary,
+        // just as an instance initializer's putfield does after evaluating its value.
+        super::debug_lines::restore_initializer_store_line(
+            Some(initializer_line(self.ir, field, init)),
+            code,
         );
         code.putstatic(reference, slot_words(physical) as i32);
     }

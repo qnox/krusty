@@ -419,9 +419,15 @@ and Java drivers use persistent `BoxRunner` and `JavaRunner` JVMs; `javac` runs 
 source to compile that helper, then in-process. The conformance box runner is a separate persistent
 JVM per test thread, also compiled once.
 
-`javap` is not a process on that path. Disassembly goes through `JavaRunner`'s in-process tool, and
-only to explain a failure. The oracle for a class is byte-for-byte equality with kotlinc's class
-file. A well-formedness check reads the class file and disassembles when that read fails. A
+The `bytecode_parity_e2e` batch compares normalized disassembly for its named fixtures. Each
+fixture receives its own package on both compiler inputs, so independent declarations such as
+`box()` can share one pooled reference compilation and one in-process krusty compilation. The
+batch caches comparisons and compilation errors for the test process. An unavailable
+reference compiler, a rejected batch, or a missing output class fails the comparison.
+
+Disassembly goes through `JavaRunner`'s in-process `javap` tool. Class-equality helpers compare
+byte-for-byte with kotlinc's class file and use disassembly to explain a failure. A well-formedness
+check reads the class file and disassembles when that read fails. A
 method-code comparison passes when the class files are identical and disassembles them only when
 they are not. The survey's reference acceptance oracle starts a kotlinc process per case; it is not
 part of `just ci`.
