@@ -2,7 +2,7 @@
 //! krusty compiles each beside it, and the report counts what krusty compiled, what it does not
 //! support and how its classes compare.
 
-use super::tests::{invocations, IntegrationFixture};
+use super::tests::{invocations, read_invocation_log, IntegrationFixture};
 use std::path::Path;
 
 #[test]
@@ -52,7 +52,7 @@ fn verify_task_reports_krusty_against_kotlinc() {
     assert!(root
         .join("build/krusty/verify/compileKotlin/classes/app/Point.class")
         .is_file());
-    let runs = invocations(&std::fs::read_to_string(&fixture.log).expect("invocation log"));
+    let runs = invocations(&read_invocation_log(&fixture.log).expect("invocation log"));
     let commands = runs
         .iter()
         .map(|run| run.first().map(String::as_str).unwrap_or(""))

@@ -55,40 +55,7 @@ pub const OUTPUTS: &str = "==== outputs";
 
 /// Shared by the compiler, plugin compiler and Java/KSP recorders. A claimed slot is never
 /// released while children run; only the completed-run consumer may reset the record directory.
-const WRITE_INVOCATION: &str = r#"record_invocation() {
-  if [ ! -d "$KRUSTY_RECORD" ]; then
-    echo "recorder: missing invocation directory $KRUSTY_RECORD" >&2
-    exit 7
-  fi
-  record_index=0
-  while :; do
-    record_slot="$KRUSTY_RECORD/$record_index"
-    if ! mkdir "$record_slot" 2>/dev/null && [ ! -d "$record_slot" ]; then
-      echo "recorder: cannot claim invocation slot $record_slot" >&2
-      exit 7
-    fi
-    # Directory creation is structural: some mkdir implementations also report a
-    # racing creator's directory as success. Only exclusive file creation owns it.
-    if (set -C; : > "$record_slot/owner") 2>/dev/null; then break; fi
-    if [ ! -f "$record_slot/owner" ]; then
-      printf '%s\n' "cannot claim invocation slot: $record_slot" >&2
-      exit 7
-    fi
-    record_index=$((record_index + 1))
-  done
-  if ! {
-    for recorded_argument in "$@"; do printf '%s\n' "$recorded_argument" || exit 7; done
-    printf '%s\n' '----'
-  } > "$record_slot/pending"; then
-    echo "recorder: cannot write invocation slot $record_slot" >&2
-    exit 7
-  fi
-  if ! mv "$record_slot/pending" "$record_slot/arguments"; then
-    echo "recorder: cannot publish invocation slot $record_slot" >&2
-    exit 7
-  fi
-}
-"#;
+use krusty_test_support::WRITE_INVOCATION;
 
 fn recording_script(body: &str) -> String {
     format!("#!/bin/sh\n{WRITE_INVOCATION}{body}")
