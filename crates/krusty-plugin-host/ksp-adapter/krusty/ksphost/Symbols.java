@@ -235,11 +235,14 @@ final class Symbols {
         property.extensionReceiver = receiver == 1 ? readReference(in, property) : null;
         property.receiverUndescribed = receiver == 2;
         property.type = Wire.readBoolean(in) ? readReference(in, property) : null;
-        property.getter = new SourceAccessor.Getter(property);
-        if (readAccessor(in, property.getter)) {
-            throw new IOException("a getter has no parameter");
+        if (Wire.readBoolean(in)) {
+            SourceAccessor.Getter getter = new SourceAccessor.Getter(property);
+            if (readAccessor(in, getter)) {
+                throw new IOException("a getter has no parameter");
+            }
+            getter.jvmName = readOptionalString(in);
+            property.getter = getter;
         }
-        property.getter.jvmName = readOptionalString(in);
         if (Wire.readBoolean(in)) {
             SourceAccessor.Setter setter = new SourceAccessor.Setter(property);
             if (!readAccessor(in, setter)) {

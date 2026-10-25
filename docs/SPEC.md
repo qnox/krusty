@@ -1020,6 +1020,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   local-variable table lists the marker, then those locals, then the parameters. A block nested
   inside those statements still closes where that block ends. Test:
   `tests/inline_repeat_local_e2e.rs`.
+- **An initializer's lexical inline ranges close before the value is stored.** Callable-scope
+  entry gives `<clinit>` its implicit method body, so initializer expressions own nested lexical
+  scopes. Their marker and operand ranges close at the expression boundary, allowing the next
+  initializer to reuse its slots. A store restores its source line after an inlined value resets
+  the caller line; that debug boundary preserves the existing closing `nop`. Class-initializer
+  line tables retain these intentional returns to the same line at distinct bytecode offsets.
+  Tests: `tests/initializer_inline_local_scopes_e2e.rs`.
 - **An inlined lambda's implicit-result end stays on the path that evaluated it.** Common IR
   records the exact result expression and its end line; the backend marks that line after the
   expression succeeds, before local-return paths rejoin it. For a returned `try`, the `nop`
@@ -16405,8 +16412,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   public`); `kotlin.Annotation` declares nothing and inherits `kotlin.Any`'s functions. A library
   modifier set is the visibility (none for Java package-private), the modality, `infix`, and
   `operator` together with `override`; an accessor lists its modality only when it is not `open`.
-  The members of other classifiers, and of an annotation class whose members carry annotations,
-  are refused for those queries. (`crates/krusty-plugin-host/tests/ksp.rs`,
+  A constant a Java annotation declares is a `JAVA_LIB` `final public` property with the
+  `JAVA_STATIC` modifier and neither getter nor setter, listed after the constructor and before
+  the nested classifiers and left out of `getAllProperties`; a reference array is
+  `Array<out E>`, a mapped class its Kotlin classifier. The members of other classifiers, of an
+  annotation class whose members carry annotations, and of one declaring a generic, raw generic
+  or collection-typed constant are refused for those queries. (`crates/krusty-plugin-host/tests/ksp.rs`,
   `library_annotation_members_are_what_ksp2_reports`.)
 - **KSP maps names between Kotlin and the JVM by kotlinc's class map.** `mapKotlinNameToJava` and
   `mapJavaNameToKotlin` answer what kotlinc's `JavaToKotlinClassMap` does for the classifier the
@@ -21091,6 +21102,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   earlier parameter. A local function, lambda, or object in an initializer reads the property
   through the instance. The constructor parameter of the same spelling is hidden and is not a
   capture.
+  Anonymous-object super-constructor arguments are checked on the enclosing construction scope,
+  before inherited or declared instance properties enter the tower. In
+  `object : Carrier<List<T>>(listOf(value)) {}`, an enclosing `value: T` therefore remains that
+  lexical value even when `Carrier` declares a property named `value`. An applied typealias for
+  the same parent follows the identical rule. Named classes retain their own constructor-parameter
+  rung, and a missing enclosing value cannot fall back to the uninitialized inherited property.
+  An unavailable dispatch rung reserves the constructor-prefix receiver coordinate without adding
+  instance-property bindings, so enclosing receiver captures retain their checked identities.
+  Tests: `tests/typealias_constructor_inference_e2e.rs` compares complete JVM ABI and runtime
+  behavior with kotlinc. Separate existing gaps in deferred-lambda capture transport and the exact
+  unavailable-member diagnostic retain their full controls in #2657 and #2658.
   An anonymous object moves every super-constructor argument that is not a compile-time constant
   and not a lexical capture out to the construction site, stores it in a temporary, and forwards
   it as a constructor parameter that is not a field (`object : Base(n + 1)`, `object :

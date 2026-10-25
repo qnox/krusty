@@ -15,7 +15,7 @@ use crate::protocol::{malformed, put_list, put_str, read_frame, utf8, write_fram
 
 use super::{GeneratedKind, KspGenerated, KspLoad, KspOutcome};
 
-pub(crate) const PROTOCOL: u32 = 8;
+pub(crate) const PROTOCOL: u32 = 9;
 
 const HELLO: u8 = 0;
 const LOAD: u8 = 1;
@@ -269,7 +269,7 @@ fn put_property(payload: &mut Vec<u8>, property: &KspProperty) {
     put_type_parameters(payload, &property.type_parameters);
     put_type_slot(payload, &property.extension_receiver);
     put_option(payload, &property.ty, put_type);
-    put_accessor(payload, &property.getter);
+    put_option(payload, &property.getter, put_accessor);
     put_option(payload, &property.setter, put_accessor);
     put_option(payload, &property.jvm_signature, |payload, text| {
         put_str(payload, text)

@@ -5,6 +5,13 @@ front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
 
+## Anonymous construction argument scope
+
+Primary constructor argument checking has a dedicated owner. Anonymous base arguments use the
+construction site's lexical scope; named classes retain their constructor-parameter rung. The
+shared constructor selector, argument mapping, contextual lambda checks and forwarding ledger remain
+the same. Direct and aliased parents with colliding inherited property names exercise this boundary.
+
 ## Class application headers
 
 JVM classifier assembly reads complete own/captured formal layouts without recursively publishing
@@ -6022,3 +6029,9 @@ Owner tests constrain the constructor and context/extension/value round trips, a
 dependency runtime tests read both generic and concrete stored values. The selected-member record
 and conversion move out of the resolver facade, and plugin plans keep their declaration payload
 indirect, retiring two large-enum lint findings without changing the indexed FIR/IR representation.
+
+JVM class-initializer entry establishes its implicit callable frame before emitting expressions.
+Their nested lexical ranges close before each static field store, which restores its source line
+after an inline value resets the caller line. Ordinary method local-table ordering is preserved.
+Full-class/runtime controls cover consecutive initializers, object and companion storage with an
+`init` block, and ordinary callable bodies. Restoring the batched bytecode oracle remains #2637.

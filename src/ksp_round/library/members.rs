@@ -3,10 +3,11 @@
 //! described yet: an annotation class's, `kotlin.Any`'s, and an empty interface's; another
 //! classifier's follow ordering and override rules not pinned yet.
 //!
-//! KSP2 lists a library classifier's functions, properties, constructors, then nested classifiers,
-//! each in declaration order, and the inherited members after the classifier's own, constructors
-//! last. It derives a library declaration's modifiers from its facts: the visibility, the modality
-//! (an accessor's only when it is not `open`), `infix`, and `operator` together with `override`.
+//! KSP2 lists a library classifier's functions, properties, constructors, static properties, then
+//! nested classifiers, each in declaration order, and the inherited members after the classifier's
+//! own, constructors last and static properties left out. It derives a library declaration's
+//! modifiers from its facts: the visibility, the modality (an accessor's only when it is not
+//! `open`), `infix`, and `operator` together with `override`.
 
 use krusty_plugin_ir::{
     KspAccessor, KspDeclaration, KspDeclarationOrigin, KspFunction, KspFunctionKind, KspMember,
@@ -71,6 +72,12 @@ impl KspLibraries<'_> {
         }
         declarations.extend(
             declared
+                .static_properties
+                .iter()
+                .map(|property| KspDeclaration::Property(Box::new(view.static_property(property)))),
+        );
+        declarations.extend(
+            declared
                 .nested
                 .iter()
                 .map(|nested| KspDeclaration::LibraryClass(qualified_name(*nested))),
@@ -102,6 +109,7 @@ impl KspLibraries<'_> {
             || declared
                 .properties
                 .iter()
+                .chain(&declared.static_properties)
                 .any(|property| property.annotated);
         (!annotated).then_some(declared)
     }
@@ -188,6 +196,7 @@ fn ordering_is_pinned(
     let declares_nothing = declared.functions.is_empty()
         && declared.properties.is_empty()
         && declared.constructors.is_empty()
+        && declared.static_properties.is_empty()
         && declared.nested.is_empty();
     match header.kind {
         TypeKind::Annotation => true,
@@ -289,10 +298,30 @@ impl MemberView<'_> {
             type_parameters: Some(Vec::new()),
             extension_receiver: KspTypeSlot::Absent,
             ty: self.scope.ty(property.ty),
-            getter: accessor(getter_modality, None),
+            getter: Some(accessor(getter_modality, None)),
             setter: property
                 .is_var
                 .then(|| accessor(property.modality, Some(("value".to_string(), Vec::new())))),
+            jvm_signature: None,
+        }
+    }
+
+    /// A static property, a Java field, which has no accessors.
+    fn static_property(&self, property: &DeclaredProperty) -> KspProperty {
+        let mut modifiers = declaration_modifiers(property.visibility, property.modality);
+        modifiers.push(KspModifier::JavaStatic);
+        KspProperty {
+            name: property.name.clone(),
+            is_mutable: property.is_var,
+            origin: KspDeclarationOrigin::Library(self.origin),
+            line: None,
+            annotations: Vec::new(),
+            modifiers: Some(modifiers),
+            type_parameters: Some(Vec::new()),
+            extension_receiver: KspTypeSlot::Absent,
+            ty: self.scope.ty(property.ty),
+            getter: None,
+            setter: None,
             jvm_signature: None,
         }
     }
