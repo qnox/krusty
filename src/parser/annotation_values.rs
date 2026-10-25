@@ -7,10 +7,17 @@ impl Parser<'_> {
     /// the checker cannot model retain an explicit [`UnsupportedAnnotationArgument`] node so the
     /// annotation-consumption site can reject them without fabricating a resolvable name.
     pub(super) fn parse_annotation_args(&mut self) -> Vec<ExprId> {
-        let mut out = Vec::new();
         if !self.eat(TokenKind::LParen) {
-            return out;
+            return Vec::new();
         }
+        let out = self.with_newlines_insignificant(Self::parse_annotation_arg_items);
+        self.expect(TokenKind::RParen, "')'");
+        out
+    }
+
+    /// The arguments of an annotation argument list after its `(`, up to its `)`.
+    fn parse_annotation_arg_items(&mut self) -> Vec<ExprId> {
+        let mut out = Vec::new();
         self.skip_newlines();
         while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
             // optional named argument `name = value` — the label binds the value to an element by
@@ -34,7 +41,6 @@ impl Parser<'_> {
             }
             self.skip_newlines();
         }
-        self.expect(TokenKind::RParen, "')'");
         out
     }
 
