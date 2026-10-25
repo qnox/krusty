@@ -82,6 +82,7 @@ pub(crate) struct ModuleSlotPlan {
 
 impl ModuleSlotPlan {
     /// A plan that numbers nothing: every class is numbered by its declaring file alone.
+    #[cfg(test)]
     pub(crate) fn empty() -> Self {
         Self::default()
     }
@@ -113,6 +114,19 @@ impl ModuleSlotPlan {
         }
         Self {
             tables: planner.tables,
+            interfaces: ModuleInterfaces::build(classes, representation),
+        }
+    }
+
+    /// A plan numbering the module's interface members and no class's slots: for a target that
+    /// lays every class out in its declaring file alone, and reaches a class of another file only
+    /// through an interface.
+    pub(crate) fn interfaces_only(
+        classes: &ModuleClasses,
+        representation: &dyn Representation,
+    ) -> Self {
+        Self {
+            tables: HashMap::default(),
             interfaces: ModuleInterfaces::build(classes, representation),
         }
     }

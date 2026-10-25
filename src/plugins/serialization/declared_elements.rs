@@ -51,6 +51,9 @@ pub(super) fn declared_serializable_elements(
             name: property.name.clone(),
             ty: property.ty,
             optional: property.has_default,
+            serial_name: None,
+            serializer: None,
+            contextual: false,
         });
     }
     // The module's checked declarations do not name the type parameters the element types use, so

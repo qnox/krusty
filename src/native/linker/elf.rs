@@ -24,10 +24,12 @@ use object::{
     SymbolKind, SymbolSection,
 };
 
+use super::super::interface_calls::is_implementations_section;
 use super::super::prebuilt;
 use super::super::target::{Arch, NativeTarget};
 use super::abi;
 use super::dynamic::{self, Imports, Tables};
+use super::interface_stubs::{InterfaceStubs, Target};
 use super::libraries::ImportLibrary;
 use super::relocate::{relocate, Reloc};
 use super::{ProgramLinkError, RelocationTable};
@@ -234,6 +236,10 @@ struct Layout {
     data_mem_size: u64,
     /// Where the import stubs start, as an offset from `BASE` (which is also their file offset).
     stubs_at: u64,
+    /// Where the interface stubs start, likewise.
+    interface_stubs_at: u64,
+    /// Where the interface tables start, likewise.
+    interface_tables_at: u64,
 }
 
 /// Room the layout keeps for what the linker writes itself rather than copies from an input.
@@ -244,11 +250,29 @@ struct Reserve {
     headers: u64,
     /// Import stubs, placed after the program's code.
     stubs: u64,
+    /// Interface stubs, placed after the import stubs.
+    interface_stubs: u64,
+    /// Interface tables, placed after the interface stubs.
+    interface_tables: u64,
     /// The start of the writable segment: `.dynamic` and the offset table.
     writable: u64,
 }
 
 impl Layout {
+    /// Where the bytes of the address `address` sit in the image, for an address the layout gave
+    /// file bytes.
+    fn file_offset(&self, address: u64) -> Option<u64> {
+        if (BASE..BASE + self.text_end).contains(&address) {
+            Some(address - BASE)
+        } else if (self.data_vaddr_start..self.data_vaddr_start + self.data_file_size)
+            .contains(&address)
+        {
+            Some(self.data_file_start + address - self.data_vaddr_start)
+        } else {
+            None
+        }
+    }
+
     fn new(files: &[Elf], page: u64, reserve: Reserve) -> Result<Self, ProgramLinkError> {
         for (file_index, file) in files.iter().enumerate() {
             for section in file.sections() {
@@ -267,7 +291,10 @@ impl Layout {
                 };
                 // Notes and unwind tables are loadable but nothing in a krusty program reads them;
                 // any other loadable section left out would be code or data silently missing.
-                let unread = section.kind() == SectionKind::Note || name == ".eh_frame";
+                // Interface implementation records are read by the link itself.
+                let unread = section.kind() == SectionKind::Note
+                    || name == ".eh_frame"
+                    || is_implementations_section(name);
                 if sh_flags.contains(object::elf::SHF_ALLOC)
                     && placement(section.kind()).is_none()
                     && !unread
@@ -289,6 +316,8 @@ impl Layout {
             data_file_size: 0,
             data_mem_size: 0,
             stubs_at: 0,
+            interface_stubs_at: 0,
+            interface_tables_at: 0,
         };
         // Executable segment: headers, then text and the import stubs, then read-only data.
         // Offsets equal virtual addresses minus BASE, since the segment is mapped from file
@@ -299,6 +328,14 @@ impl Layout {
         if reserve.stubs > 0 {
             layout.stubs_at = align_up(end, 16);
             end = layout.stubs_at + reserve.stubs;
+        }
+        if reserve.interface_stubs > 0 {
+            layout.interface_stubs_at = align_up(end, 16);
+            end = layout.interface_stubs_at + reserve.interface_stubs;
+        }
+        if reserve.interface_tables > 0 {
+            layout.interface_tables_at = align_up(end, 8);
+            end = layout.interface_tables_at + reserve.interface_tables;
         }
         end = layout.place(files, Placement::ReadOnly, end, |at| (BASE + at, Some(at)))?;
         layout.text_end = end;
@@ -340,12 +377,13 @@ impl Layout {
     ) -> Result<u64, ProgramLinkError> {
         for (file_index, file) in files.iter().enumerate() {
             for section in file.sections() {
+                let name = section.name().unwrap_or("?");
                 if placement(section.kind()) != Some(wanted)
+                    || is_implementations_section(name)
                     || self.discarded.contains(&(file_index, section.index()))
                 {
                     continue;
                 }
-                let name = section.name().unwrap_or("?");
                 let align = section.align().max(1);
                 if !align.is_power_of_two() {
                     return Err(ProgramLinkError::Parse(format!(
@@ -564,6 +602,7 @@ pub(super) fn link(
         .collect::<Result<Vec<_>, _>>()?;
     let e_flags = abi::output_flags(target.arch, &files)?;
     let imports = Imports::collect(&files, libraries)?;
+    let mut interface_stubs = InterfaceStubs::collect(&files, target.arch)?;
     dynamic::refuse_clone_threads(&files, &imports, "_start")?;
     let tables = (!imports.is_empty()).then(|| Tables::new(&imports, target));
     let phdr_count = match tables {
@@ -576,11 +615,15 @@ pub(super) fn link(
         None => Reserve {
             headers,
             stubs: 0,
+            interface_stubs: interface_stubs.size(),
+            interface_tables: interface_stubs.tables().size(),
             writable: 0,
         },
         Some(tables) => Reserve {
             headers: tables_at + tables.read_only_size(),
             stubs: tables.stubs_size(),
+            interface_stubs: interface_stubs.size(),
+            interface_tables: interface_stubs.tables().size(),
             writable: tables.writable_size(),
         },
     };
@@ -601,6 +644,24 @@ pub(super) fn link(
                 .insert(import.name.clone(), tables.stub(placement, index));
         }
     }
+    let recorded = |symbols: &Symbols, target: &Target| match target {
+        Target::Global(name) => symbols
+            .global(name)
+            .ok_or_else(|| ProgramLinkError::UndefinedSymbol(name.clone())),
+        Target::Local(file_index, index) => symbols
+            .locals
+            .get(&(*file_index, *index))
+            .copied()
+            .ok_or_else(|| {
+                ProgramLinkError::Unsupported(format!(
+                    "an interface implementation of input {file_index} is not loaded"
+                ))
+            }),
+    };
+    let bound = interface_stubs.decide(BASE + layout.interface_stubs_at, |target| {
+        recorded(&symbols, target)
+    })?;
+    symbols.strong.extend(bound);
     let entry = symbols
         .global("_start")
         .ok_or_else(|| ProgramLinkError::UndefinedSymbol("_start".into()))?;
@@ -621,6 +682,19 @@ pub(super) fn link(
             image[start..start + data.len()].copy_from_slice(data);
         }
     }
+
+    let stubs_at = layout.interface_stubs_at as usize;
+    let filler = match target.arch {
+        Arch::X86_64 => 0xcc, // int3
+        Arch::Aarch64 | Arch::Riscv64 => 0,
+    };
+    image[stubs_at..stubs_at + interface_stubs.size() as usize].fill(filler);
+    interface_stubs.write(
+        &mut image,
+        layout.interface_stubs_at,
+        BASE + layout.interface_stubs_at,
+        target.arch,
+    )?;
 
     // ---- apply relocations -------------------------------------------------------------------
     // Gathered first, then applied per architecture: RISC-V's `PCREL_LO12` needs the result of the
@@ -679,6 +753,13 @@ pub(super) fn link(
         }
         relocate(target.arch, &mut image, &relocations)?;
     }
+    interface_stubs.tables().write(
+        &mut image,
+        layout.interface_tables_at,
+        BASE + layout.interface_tables_at,
+        |target| recorded(&symbols, target),
+        |address| layout.file_offset(address),
+    )?;
 
     let mut program_headers = Vec::with_capacity(phdr_count as usize);
     let text = ProgramHeader::load(0x5, 0, BASE, layout.text_end, layout.text_end, layout.page);

@@ -57,18 +57,25 @@ fn checked_default_in_scope(ir: &IrFile, class_id: ClassId, field: usize) -> Opt
             _ => None,
         }
     })?;
-    // A body property's initializer is composed into the primary constructor, in its frame. A class
+    Some((initializer, class_body_parameters(ir, class_id)?))
+}
+
+/// The constructor values a class-body initializer (a property's or an `init` block's) sees.
+fn class_body_parameters(ir: &IrFile, class_id: ClassId) -> Option<u32> {
+    let class = &ir.classes[class_id as usize];
+    // A class-body initializer is composed into the primary constructor, in its frame. A class
     // without one runs it in each secondary constructor that delegates to `super`, its locals
     // numbered above every constructor's values; it can read no constructor parameter there, only
     // the receiver and the captures the constructor prefix holds.
-    let parameters = if class.has_primary_ctor {
-        u32::try_from(class.ctor_args.len()).ok()?
+    if class.has_primary_ctor {
+        u32::try_from(class.ctor_args.len()).ok()
     } else {
-        *ir.secondary_initializer_value_bases
-            .get(&class_id)
-            .expect("a composed initializer records the values its locals are numbered above")
-    };
-    Some((initializer, parameters))
+        Some(
+            *ir.secondary_initializer_value_bases
+                .get(&class_id)
+                .expect("a composed initializer records the values its locals are numbered above"),
+        )
+    }
 }
 
 /// How the method a default is copied into reaches what the constructor saw.
@@ -103,6 +110,53 @@ pub(super) fn default_in_frame(
     frame: DefaultFrame<'_>,
 ) -> Option<ExprId> {
     let (initializer, parameter_count) = checked_default_in_scope(ir, class_id, field)?;
+    copy_in_frame(ir, class_id, initializer, parameter_count, frame)
+}
+
+/// A private copy of `class_id`'s `init` block `body`, evaluated in `frame`.
+///
+/// `None` when the block refers to a value the method cannot reach.
+pub(super) fn initializer_block_in_frame(
+    ir: &mut IrFile,
+    class_id: ClassId,
+    body: ExprId,
+    frame: DefaultFrame<'_>,
+) -> Option<ExprId> {
+    let parameter_count = class_body_parameters(ir, class_id)?;
+    copy_in_frame(ir, class_id, body, parameter_count, frame)
+}
+
+/// The position among `class_id`'s property initializers and `init` blocks of the class-body
+/// property whose backing field is `field`. `None` for a constructor property, which the
+/// constructor stores before any of them.
+pub(super) fn field_initialization_order(
+    ir: &IrFile,
+    class_id: ClassId,
+    field: usize,
+) -> Option<u32> {
+    let field_index = u32::try_from(field).ok()?;
+    ir.checked_properties.iter().find_map(|(id, property)| {
+        match ir.local_property_layouts.get(id) {
+            Some(IrLocalPropertyLayout::Member {
+                class,
+                backing_field: Some(backing),
+                ..
+            }) if *class == class_id && *backing == field_index => property.initialization_order,
+            _ => None,
+        }
+    })
+}
+
+/// A private copy of `expression`, checked in a constructor frame with `parameter_count`
+/// parameters, evaluated in `frame`.
+fn copy_in_frame(
+    ir: &mut IrFile,
+    class_id: ClassId,
+    expression: ExprId,
+    parameter_count: u32,
+    frame: DefaultFrame<'_>,
+) -> Option<ExprId> {
+    let initializer = expression;
     // Constructor parameter `k` is value `k + 1`; each one a default can read is a property.
     let parameter_fields = ir.classes[class_id as usize]
         .ctor_args
