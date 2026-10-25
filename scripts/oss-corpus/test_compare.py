@@ -87,5 +87,27 @@ class FailedCompile(unittest.TestCase):
         ])
 
 
+class FailedBuild(unittest.TestCase):
+    def test_a_build_that_fails_before_any_compile_names_the_failure(self):
+        with tempfile.TemporaryDirectory() as work:
+            out = os.path.join(work, 'out', 'p')
+            write(f'{out}/kotlinc/a/build/classes/kotlin/main/A.class', b'A')
+            write(f'{work}/logs/p.kotlinc.compilations.tsv', b':a:compileKotlin\ta/build/classes/kotlin/main\n')
+            write(f'{work}/logs/p.krusty.log', (
+                '* What went wrong:\n'
+                "A problem occurred configuring project ':a'.\n"
+                '> Failed to notify project evaluation listener.\n'
+                '   > Found class K, but interface was expected\n'
+                '\n'
+                '* Try:\n').encode())
+            subprocess.run([sys.executable, os.path.join(HERE, 'compare.py'), work, 'p', '0'],
+                           check=True, stdout=subprocess.DEVNULL)
+            with open(f'{out}/compare.json') as f:
+                summary = json.load(f)
+        self.assertEqual([r['error'] for r in summary['rows']], [
+            'not run: the krusty build failed: Found class K, but interface was expected',
+        ])
+
+
 if __name__ == '__main__':
     unittest.main()

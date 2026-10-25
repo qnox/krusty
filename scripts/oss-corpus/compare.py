@@ -68,6 +68,23 @@ def failures(log_path, checkout):
     return ran, found
 
 
+def build_failure(log_path):
+    """The innermost message of the first `* What went wrong:` block of a Gradle log, or None."""
+    try:
+        lines = open(log_path, errors='replace').read().splitlines()
+    except OSError:
+        return None
+    for i, line in enumerate(lines):
+        if line.startswith('* What went wrong:'):
+            block = []
+            for detail in lines[i + 1:]:
+                if not detail.strip() or detail.startswith('* '):
+                    break
+                block.append(detail.strip().lstrip('> ').strip())
+            return block[-1][:300] if block else None
+    return None
+
+
 def compilations(manifest):
     """The compile tasks the reference build ran, as (task path, output directory relative to the
     Gradle root), from the manifest `corpus.init.gradle` writes. Each task is one compilation: a
@@ -109,6 +126,13 @@ def compare(work, name):
     log = os.path.join(work, 'logs', name + '.krusty.log')
     found = fallbacks(log)
     ran, errors = failures(log, os.path.join(work, 'src', name))
+    # A krusty build that fails before running any compile (configuration, plugin resolution)
+    # says why once, for every compile it never reached.
+    not_run = 'not run: a task it depends on failed'
+    if not any(task in ran for task, _ in compilations(os.path.join(work, 'logs', name + '.kotlinc.compilations.tsv'))):
+        failure = build_failure(log)
+        if failure:
+            not_run = 'not run: the krusty build failed: ' + failure
     rows, empty = [], []
     for task, rel in compilations(os.path.join(work, 'logs', name + '.kotlinc.compilations.tsv')):
         reference = files(os.path.join(kotlinc, rel))
@@ -126,8 +150,7 @@ def compare(work, name):
         error = None
         if not built and fallback is None:
             # With --continue, Gradle skips a compile whose dependency failed.
-            error = errors.get(task, 'krusty wrote no class' if task in ran
-                               else 'not run: a task it depends on failed')
+            error = errors.get(task, 'krusty wrote no class' if task in ran else not_run)
         rows.append(dict(task=task, dir=rel, built=built, fallback=fallback, error=error, classes=classes,
                          identical=identical if built else 0,
                          only_kotlinc=len(set(reference) - set(candidate)) if built else None,

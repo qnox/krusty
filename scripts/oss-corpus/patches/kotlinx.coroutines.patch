@@ -1,3 +1,16 @@
+diff --git a/buildSrc/build.gradle.kts b/buildSrc/build.gradle.kts
+index ef767ac..d46b31a 100644
+--- a/buildSrc/build.gradle.kts
++++ b/buildSrc/build.gradle.kts
+@@ -40,7 +40,7 @@ fun version(target: String): String {
+ 
+ kotlin {
+     compilerOptions {
+-        allWarningsAsErrors = true
++        allWarningsAsErrors = false // Kotlin 2.4 deprecations would fail the build
+     }
+ }
+ 
 diff --git a/buildSrc/src/main/kotlin/kotlin-jvm-conventions.gradle.kts b/buildSrc/src/main/kotlin/kotlin-jvm-conventions.gradle.kts
 index c493e2e..7ff4a63 100644
 --- a/buildSrc/src/main/kotlin/kotlin-jvm-conventions.gradle.kts
@@ -52,3 +65,14 @@ index c459ba8..ce4ee35 100644
  kotlin.targets.withType<KotlinJvmTarget>().configureEach {
      // Fill attributes for the JVM implementation Jar only
      tasks.named<Jar>(artifactsTaskName) {
+diff --git a/gradle.properties b/gradle.properties
+index 1948eb7..f0161d1 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -55,3 +55,6 @@ org.gradle.caching=true
+ 
+ # see KT-78660
+ kotlin.internal.suppressGradlePluginErrors=DeprecatedKotlinNativeTargetsDiagnostic
++
++# Kotlin 2.4 deprecations are warnings, not errors, for the corpus build.
++kotlin_Werror_override=disable
