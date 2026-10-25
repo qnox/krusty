@@ -75,7 +75,8 @@ fn a_package_private_java_member_in_another_package_does_not_suppress_the_stub_l
     assert_walk_matches_kotlinc(&source, "app/Walk", &java);
 
     let program = format!("{JAVA_SUBCLASS}{REJECTED}");
-    let reference = common::kotlinc_box_result_with_classpath(&program, &[java.clone()]);
+    let reference =
+        common::kotlinc_box_result_with_classpath(&program, std::slice::from_ref(&java));
     assert_eq!(reference, "OK", "kotlinc fixture must succeed");
     let jdk = common::jdk_modules();
     assert_eq!(
