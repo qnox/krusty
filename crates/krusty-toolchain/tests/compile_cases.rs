@@ -171,6 +171,50 @@ fn same_label_temporary_directories_preserve_each_live_owners_state() {
     assert!(!first_path.exists());
 }
 
+#[test]
+fn a_malformed_record_reports_the_slot_bytes_and_completed_child_output() {
+    let temp = support::TempDir::new("compile-malformed-record");
+    let directory = temp.0.clone();
+    let recorder = directory.join("malformed-recorder");
+    std::fs::write(
+        &recorder,
+        r#"#!/bin/sh
+if [ "${1:-}" = compilation-fingerprint ]; then exit 1; fi
+mkdir "$KRUSTY_RECORD/0" || exit 9
+printf 'broken\000' > "$KRUSTY_RECORD/0/arguments"
+printf 'producer stdout\n'
+printf 'producer stderr\n' >&2
+exit 7
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&recorder, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let failure = std::panic::catch_unwind(|| {
+        krusty_toolchain_in(
+            temp,
+            &case("lib-and-app"),
+            &[":app:compileJvm"],
+            |command| {
+                command.env("KRUSTY_BIN", &recorder);
+            },
+        )
+    });
+    let failure = match failure {
+        Err(failure) => failure,
+        Ok(_) => panic!("a malformed invocation record must fail the fixture"),
+    };
+    let message = failure.downcast_ref::<String>().expect("formatted panic");
+    assert_eq!(
+        placed(&directory.display().to_string(), message.as_bytes()),
+        "cannot collect recorded invocations: <directory>/record: unterminated invocation record at <directory>/record/0/arguments (7 bytes): [98, 114, 111, 107, 101, 110, 0]\ntask status: 7\nstdout: \"producer stdout\\n\"\nstderr: \"producer stderr\\n\\nERROR: Task ':lib:compileJvm' failed: krusty exited with status 7\\n\""
+    );
+    assert!(!directory.exists(), "the report survives fixture cleanup");
+}
+
 fn krusty_toolchain(
     run: &str,
     case: &CompileCase,
@@ -194,7 +238,14 @@ fn krusty_toolchain_in(
     let output = run_task(&directory, &root, tasks, configure);
     let record = compiling::InvocationRecords::new(&directory)
         .read_snapshot()
-        .unwrap();
+        .unwrap_or_else(|error| {
+            panic!(
+                "cannot collect recorded invocations: {error}\ntask status: {}\nstdout: {:?}\nstderr: {:?}",
+                output.code,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
     Ran {
         output,
         record: placed(&directory.display().to_string(), &record),

@@ -56,9 +56,14 @@ impl InvocationRecords {
             {
                 return Err(self.invalid("incomplete invocation slot"));
             }
-            let arguments = std::fs::read(slot.join("arguments"))?;
+            let path = slot.join("arguments");
+            let arguments = std::fs::read(&path)?;
             if !arguments.ends_with(b"----\n") {
-                return Err(self.invalid("unterminated invocation record"));
+                return Err(self.invalid(&format!(
+                    "unterminated invocation record at {} ({} bytes): {arguments:?}",
+                    path.display(),
+                    arguments.len()
+                )));
             }
             record.extend(arguments);
         }
