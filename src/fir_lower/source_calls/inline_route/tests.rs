@@ -67,25 +67,27 @@ fn routed_bodies(ir: &IrFile) -> (Vec<&str>, Vec<&str>) {
     (compiled, expanded)
 }
 
-// A suspend lambda's body, and a lambda written in a suspend local function, may run in a state
-// machine, so their call to `applied` stays expanded (`SuspendCaller`); the same call in an
-// ordinary function's lambda is kept for the compiled-body inliner.
+// A suspend lambda's body, a suspend local function and a lambda written in one keep their call
+// to `applied` for the compiled-body inliner, as an ordinary function's lambda does: the coroutine
+// transformer builds their machines over the inlined bytecode, as kotlinc's does.
 #[test]
-fn calls_in_suspend_lambdas_and_lambdas_of_suspend_local_functions_stay_expanded() {
+fn calls_in_suspend_callers_are_kept_for_the_compiled_body_inliner() {
     let ir = lowered_for_compiled_bodies(SUSPEND_CONTEXT_CALLERS);
     let (compiled, expanded) = routed_bodies(&ir);
-    assert_eq!(compiled, ["plain", "plain$fir_4_0_11"]);
+    assert!(expanded.is_empty(), "{expanded:?}");
     let lambda_of = |owner: &str| {
-        expanded
+        compiled
             .iter()
             .filter(|name| name.starts_with(&format!("{owner}$")))
             .count()
     };
-    // The `builder { result = applied { … } }` lambda and the `run { applied { … } }` lambda.
+    // `plain`, its lambda, the `builder { result = applied { … } }` lambda and the
+    // `run { applied { … } }` lambda of `local`.
+    assert!(compiled.contains(&"plain"), "{compiled:?}");
     assert_eq!(
-        (lambda_of("box"), lambda_of("local")),
-        (1, 1),
-        "{expanded:?}"
+        (lambda_of("plain"), lambda_of("box"), lambda_of("local")),
+        (1, 1, 1),
+        "{compiled:?}"
     );
 }
 
