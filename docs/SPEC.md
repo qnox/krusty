@@ -13403,6 +13403,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   order, interleaved with the throwing ones. An abstract superclass that has the face writes the
   bridge, and its subclass does not repeat it. Tests: `tests/read_only_stub_override_bridges_e2e.rs`
   (class bytes and box runs against kotlinc).
+- **A generic superclass member implements a read-only stub's member after substitution.** A
+  superclass member is compared with the mutable member in the class's substitution context:
+  `Base<T>.set(e: T)` under `Walk : Base<String>(), ListIterator<String>` implements
+  `set(String)`, through any chain of generic superclasses. For a source superclass the
+  declaration's recorded semantic signature is substituted with the class's checked application.
+  For a Kotlin dependency it is the metadata signature. Such a member writes no throwing stub. Its
+  bridge targets the member's own physical descriptor, and it is written only when that differs
+  from the erased one. So `Base<T>` (physically `set(Object)`) needs none, and
+  `Base<T : CharSequence>` gets `set(Object)` that checkcasts to `CharSequence` and calls
+  `set(CharSequence)`. The nearest implementation is the bridge's target. Tests:
+  `tests/read_only_stub_generic_override_e2e.rs` (class bytes and box runs against kotlinc).
 - **A nested value class over a reference carrier is read as its carrier.** In `ZN(val z: Z1?)`
   with `Z1(val x: En)`, `Z1?` is carried as `En?`, so `zn.z` and `zn.z!!` already are `Z1`'s
   carrier and `.x` of them is that carrier itself, with no cast. krusty took the unboxed property
