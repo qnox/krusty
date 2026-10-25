@@ -1,5 +1,10 @@
 # krusty — implementation plan
 
+Syntax-aware callable applicability lives in `resolve/call_applicability`: source argument slots,
+candidate ranks and selected SAM adaptations share one operation across the existing call paths.
+The resolver facade delegates to that owner, preserving parameter mapping and scoring policy.
+Captured input constraints remain tracked separately in #2648 and #2649.
+
 Inner-alias conformance recovery shares constructor-reference publication across direct and
 already-selected alias declarations. The constructor selection responsibility moves out of the
 resolver facade; selected receiver provenance and declaration ABI survive that boundary. Demanded
