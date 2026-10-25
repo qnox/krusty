@@ -6,6 +6,13 @@ uses the same marked edge to distinguish declaration carriers from generic boxes
 nullable-to-nonnull coercion retains that declaration boundary. Source metadata types continue
 to describe the selected declaration independently of this JVM representation decision.
 
+## Serialization constructor handoff
+
+The serialization constructor's `named_params` retain nullable reference elements and the nullable
+serialization marker independently of the erased constructor parameter vector. The handoff test
+checks both exact vectors; the generated owner is also compared byte-for-byte with the matching
+official serialization plugin. This updates test coverage without changing metadata encoding.
+
 ## Anonymous superclass argument bindings
 
 Base expressions of an anonymous object are checked before its dispatch-property scope exists.

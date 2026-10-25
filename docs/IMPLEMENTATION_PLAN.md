@@ -6,6 +6,10 @@ owners keep their existing result materialization. Full classfile/runtime contro
 generic returns and explicit/local materialization; existing inline, suspension and value-class
 guards constrain the adjacent representation boundaries.
 
+Serialization handoff validation now provisions the pinned runtime and checks nullable value-class
+deserialization parameters against the established plugin contract. Exact common-IR assertions,
+complete generated-owner class bytes and reference JSON behavior guard the same constructor.
+
 Phased, each phase ends in a **green `cargo test`** and a runnable artifact. The pipeline is built
 front-to-back so the streaming/arena shape is real from the start, then widened.
 
