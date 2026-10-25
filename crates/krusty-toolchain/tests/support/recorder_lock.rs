@@ -21,8 +21,9 @@ fn assert_exclusive(recorder: &Path) {
     let barrier = temp.0.join("barrier");
     std::fs::create_dir(&tools).unwrap();
     std::fs::create_dir(&barrier).unwrap();
-    let record = temp.0.join("record");
-    std::fs::write(&record, b"").unwrap();
+    let records = super::InvocationRecords::new(&temp.0);
+    records.create().unwrap();
+    let record = records.path();
     let resolved = Command::new("sh")
         .args(["-c", "command -v mkdir"])
         .output()
@@ -69,7 +70,7 @@ exit 0
                 payload.clone(),
             ])
             .env("PATH", &path)
-            .env("KRUSTY_RECORD", &record)
+            .env("KRUSTY_RECORD", record)
             .env("KRUSTY_CLAIM_RACE", &barrier)
             .env("KRUSTY_CLAIM_ACTOR", actor)
             .env("KRUSTY_REAL_MKDIR", real_mkdir.trim_end())
@@ -91,7 +92,7 @@ exit 0
         assert_eq!(output.stdout, b"");
         assert_eq!(output.stderr, b"");
     }
-    let record = std::fs::read_to_string(record).unwrap();
+    let record = String::from_utf8(records.read_snapshot().unwrap()).unwrap();
     let mut actual = record
         .split_inclusive("----\n")
         .map(str::to_owned)
