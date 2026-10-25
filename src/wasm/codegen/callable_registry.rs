@@ -5,7 +5,7 @@
 //! signature, which survives independent analysis and is the only key an external call may use.
 //! Wasm indices never come from a declaration spelling.
 
-use crate::fx_hash::HashMap;
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::backend::{
     CheckedBackendCallables, DependencyExportSignatures, DependencyFunctionSignature,
@@ -83,6 +83,7 @@ impl CallableRegistry {
             targets.push(callable);
         }
 
+        let mut declared = HashSet::default();
         identities
             .into_iter()
             .enumerate()
@@ -108,6 +109,11 @@ impl CallableRegistry {
                         "two source callable identities reserved different Wasm functions"
                             .to_string(),
                     );
+                }
+                // An inline template's local class is cloned into each file it is spliced into,
+                // and every clone realizes the template's callables again.
+                if wasm.function_is_defined(index) || !declared.insert(index) {
+                    return Err("a callable realized by two functions".to_string());
                 }
                 for target in targets {
                     self.module.insert(target, index);
@@ -399,8 +405,15 @@ impl CallableRegistry {
         Ok(())
     }
 
-    fn module_index(&mut self, target: CallableId, wasm: &mut Module) -> u32 {
+    /// The function `target` of this source module is, reserving its index when the file that
+    /// declares it has not been lowered yet.
+    pub(super) fn module_index(&mut self, target: CallableId, wasm: &mut Module) -> u32 {
         *self.module.entry(target).or_insert_with(|| wasm.declare())
+    }
+
+    /// The function an earlier source module published under `identity`.
+    pub(super) fn dependency(&self, identity: &KlibDependencyCallable) -> Option<u32> {
+        self.dependencies.get(identity).copied()
     }
 
     fn module_default_index(&mut self, target: CallableId, wasm: &mut Module) -> u32 {

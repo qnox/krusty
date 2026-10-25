@@ -108,7 +108,6 @@ impl Body<'_> {
 
 #[cfg(test)]
 mod tests {
-    use crate::backend::{CheckedBackendCallables, DependencyExportSignatures};
     use crate::ir::{IrConst, IrExpr, IrFile, IrFunction};
     use crate::types::Ty;
     use crate::wasm::target::WasmTarget;
@@ -157,17 +156,7 @@ mod tests {
         let mut started = super::super::super::Started::new(WasmTarget::Wasi);
         let properties = crate::backend::local_properties::realize(&mut ir)
             .expect("the body declares no local delegated property");
-        super::super::lower_file(
-            &ir,
-            &properties,
-            &CheckedBackendCallables::default(),
-            &DependencyExportSignatures::default(),
-            &mut started.module,
-            &mut started.runtime,
-            &mut started.callables,
-            &mut started.properties,
-        )
-        .expect("the cell body lowers");
+        super::super::lower_alone(&ir, &properties, &mut started).expect("the cell body lowers");
         started.module.encode()
     }
 

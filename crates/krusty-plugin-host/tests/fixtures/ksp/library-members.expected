@@ -1,7 +1,7 @@
 # What KSP2 2.3.12 (KSPJvmMain) logs with LibraryMembers.kt over library-members-source/, with
-# library-members/ (built by kotlinc for this record) on the classpath: for each classpath classifier
-# the processor names, the declarations it lists, then its properties and functions with the
-# inherited ones.
+# library-members/ (built by kotlinc and javac for this record) on the classpath: for each
+# classpath classifier the processor names, the declarations it lists, then its properties and
+# functions with the inherited ones.
 w: [ksp] kotlin.Any CLASS KOTLIN_LIB
 w: [ksp]   declares fun equals(other: kotlin.Any?): kotlin.Boolean kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,OPERATOR,OVERRIDE,PUBLIC
 w: [ksp]   declares fun hashCode(): kotlin.Int kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,PUBLIC
@@ -117,3 +117,28 @@ w: [ksp]   function fun equals(other: kotlin.Any?): kotlin.Boolean kind=MEMBER a
 w: [ksp]   function fun hashCode(): kotlin.Int kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,PUBLIC
 w: [ksp]   function fun toString(): kotlin.String kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,PUBLIC
 w: [ksp]   function fun <init>(vararg names: kotlin.String, types: kotlin.Array<kotlin.reflect.KClass<*>> = default, tag: dependency.Tag = default, flag: kotlin.Boolean): dependency.Choices kind=MEMBER abstract=false owner=dependency.Choices origin=KOTLIN_LIB modifiers=FINAL,PUBLIC
+w: [ksp] dependency.Constants ANNOTATION_CLASS JAVA_LIB
+w: [ksp]   declares val modes: kotlin.Array<dependency.Constants.Mode> mutable=false owner=dependency.Constants origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   declares val prefix: kotlin.String mutable=false owner=dependency.Constants origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   declares val entries: kotlin.Array<dependency.Constants.Entry> mutable=false owner=dependency.Constants origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   declares fun <init>(modes: kotlin.Array<dependency.Constants.Mode> = default, prefix: kotlin.String = default, entries: kotlin.Array<dependency.Constants.Entry> = default): dependency.Constants kind=MEMBER abstract=false owner=dependency.Constants origin=JAVA_LIB modifiers=FINAL,PUBLIC
+w: [ksp]   declares val DEFAULT_MODES: kotlin.Array<out dependency.Constants.Mode> mutable=false owner=dependency.Constants origin=JAVA_LIB modifiers=FINAL,JAVA_STATIC,PUBLIC getter=none setter=none
+w: [ksp]   declares val PREFIX: kotlin.String mutable=false owner=dependency.Constants origin=JAVA_LIB modifiers=FINAL,JAVA_STATIC,PUBLIC getter=none setter=none
+w: [ksp]   declares val LIMIT: kotlin.Int mutable=false owner=dependency.Constants origin=JAVA_LIB modifiers=FINAL,JAVA_STATIC,PUBLIC getter=none setter=none
+w: [ksp]   declares class dependency.Constants.Mode ENUM_CLASS
+w: [ksp]   declares class dependency.Constants.Entry ANNOTATION_CLASS
+w: [ksp]   property val modes: kotlin.Array<dependency.Constants.Mode> mutable=false owner=dependency.Constants origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   property val prefix: kotlin.String mutable=false owner=dependency.Constants origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   property val entries: kotlin.Array<dependency.Constants.Entry> mutable=false owner=dependency.Constants origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   function fun equals(other: kotlin.Any?): kotlin.Boolean kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,OPERATOR,OVERRIDE,PUBLIC
+w: [ksp]   function fun hashCode(): kotlin.Int kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,PUBLIC
+w: [ksp]   function fun toString(): kotlin.String kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,PUBLIC
+w: [ksp]   function fun <init>(modes: kotlin.Array<dependency.Constants.Mode> = default, prefix: kotlin.String = default, entries: kotlin.Array<dependency.Constants.Entry> = default): dependency.Constants kind=MEMBER abstract=false owner=dependency.Constants origin=JAVA_LIB modifiers=FINAL,PUBLIC
+w: [ksp] dependency.Constants.Entry ANNOTATION_CLASS JAVA_LIB
+w: [ksp]   declares val name: kotlin.String mutable=false owner=dependency.Constants.Entry origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   declares fun <init>(name: kotlin.String): dependency.Constants.Entry kind=MEMBER abstract=false owner=dependency.Constants.Entry origin=JAVA_LIB modifiers=FINAL,PUBLIC
+w: [ksp]   property val name: kotlin.String mutable=false owner=dependency.Constants.Entry origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   function fun equals(other: kotlin.Any?): kotlin.Boolean kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,OPERATOR,OVERRIDE,PUBLIC
+w: [ksp]   function fun hashCode(): kotlin.Int kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,PUBLIC
+w: [ksp]   function fun toString(): kotlin.String kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,PUBLIC
+w: [ksp]   function fun <init>(name: kotlin.String): dependency.Constants.Entry kind=MEMBER abstract=false owner=dependency.Constants.Entry origin=JAVA_LIB modifiers=FINAL,PUBLIC

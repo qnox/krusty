@@ -1,10 +1,25 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
-Selected alias constructor references keep the constructor's original declaration parameters apart
-from the synthetic extension lookup receiver. Projection of that facet removes only its known
-receiver slot; physical descriptor/carrier evidence and stable constructor identity remain intact.
-Inferred source-call results retain receiver projections through declaration-signature publication
-using the common output-position specialization. This changes no Kotlin metadata wire schema.
+JVM generic result consumption joins the retained declaration-result coercion with its physical
+producer after erasure. Null assertions preserve that producer's slot, and value-class lowering
+uses the same marked edge to distinguish declaration carriers from generic boxes. The extra
+nullable-to-nonnull coercion retains that declaration boundary. Source metadata types continue
+to describe the selected declaration independently of this JVM representation decision.
+
+## Serialization constructor handoff
+
+The serialization constructor's `named_params` retain nullable reference elements and the nullable
+serialization marker independently of the erased constructor parameter vector. The handoff test
+checks both exact vectors; the generated owner is also compared byte-for-byte with the matching
+official serialization plugin. This updates test coverage without changing metadata encoding.
+
+## Anonymous superclass argument bindings
+
+Base expressions of an anonymous object are checked before its dispatch-property scope exists.
+The selected lexical value and complete applied parent flow through ordinary constructor checking;
+an inherited property of the same spelling does not change generic inference. Complete JVM class
+headers and member tables are compared with kotlinc in the constructor-alias regression. No metadata
+wire fields, declaration identities or backend-specific substitutions change at this boundary.
 
 ## Class formal layouts before member publication
 
@@ -1104,6 +1119,12 @@ object-import singleton projection preserves those classifier and alias facts as
 Alias applicability substitutions do not replace the target constructor's original declaration
 parameters: generic value-class slots remain boxed, while concrete slots retain their carriers.
 
+Selected alias constructor references keep the constructor's original declaration parameters apart
+from the synthetic extension lookup receiver. Projection of that facet removes only its known
+receiver slot; physical descriptor/carrier evidence and stable constructor identity remain intact.
+Inferred source-call results retain receiver projections through declaration-signature publication
+using the common output-position specialization. This changes no Kotlin metadata wire schema.
+
 Selected member records also retain pre-substitution declaration parameters in full source order
 (contexts, extension receiver, values). Metadata function normalization publishes this fact before
 specialization; callable/member projection and constructor publication carry it without recovering
@@ -1120,3 +1141,11 @@ declaration parameters remain unchanged; no metadata wire or physical ABI change
 JVM annotation interfaces use the same retained `InnerClasses` inventory as other declared
 classifiers. Declared children and enclosing rows remain discoverable without a method or element
 referencing them. This changes the JVM class table, not Kotlin metadata or annotation values.
+
+## Initializer inline debug ranges
+
+Class-initializer entry establishes the implicit callable frame. Initializer expressions record
+their local-variable ranges at nested lexical boundaries, and each store restores its source line
+after an inlined value. Class-initializer table curation preserves intentional marks at distinct
+offsets, including returns to the same source line. The JVM uses these debug points to preserve
+inline markers and closing anchors; Kotlin metadata and constructor descriptors are unchanged.

@@ -1195,6 +1195,8 @@ mod inherited_property_reference_e2e;
 mod inherited_reference_owner_e2e;
 #[path = "init_block_lines_e2e.rs"]
 mod init_block_lines_e2e;
+#[path = "initializer_inline_local_scopes_e2e.rs"]
+mod initializer_inline_local_scopes_e2e;
 #[path = "e2e/inline.rs"]
 mod inline;
 #[path = "inline_member_super_arguments_e2e.rs"]
@@ -1957,6 +1959,8 @@ mod native_gc_stress_e2e;
 mod native_implemented_dependency_dispatch_e2e;
 #[path = "native_interface_bridges_e2e.rs"]
 mod native_interface_bridges_e2e;
+#[path = "native_interface_call_stubs_e2e.rs"]
+mod native_interface_call_stubs_e2e;
 #[path = "native_interface_implementations_e2e.rs"]
 mod native_interface_implementations_e2e;
 #[path = "native_lateinit_initialized_e2e.rs"]
