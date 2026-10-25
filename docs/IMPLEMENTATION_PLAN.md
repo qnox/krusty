@@ -1,19 +1,26 @@
 # krusty — implementation plan
 
-Inner-alias conformance recovery shares constructor-reference publication across direct and
-already-selected alias declarations. The constructor selection responsibility moves out of the
-resolver facade; selected receiver provenance and declaration ABI survive that boundary. Demanded
-source signatures now retain receiver captures before contextual result constraints and reuse the
-ordinary call solver and output-slot specialization. Shared conformance expectations stay unchanged.
+JVM return consumers now use authenticated declaration-result slots across reference-preserving
+null assertions. Value-class refinement shares that producer boundary, while inline and suspension
+owners keep their existing result materialization. Full classfile/runtime controls cover ordinary
+generic returns and explicit/local materialization; existing inline, suspension and value-class
+guards constrain the adjacent representation boundaries.
 
-JVM field and property-accessor signature formatting consumes retained enclosing-method formals
-through the declaration type-use formatter. Own classifier formals, nullable/bounded captures and
-concrete declarations share that boundary; physical field descriptors retain their existing erasure.
+Serialization handoff validation now provisions the pinned runtime and checks nullable value-class
+deserialization parameters against the established plugin contract. Exact common-IR assertions,
+complete generated-owner class bytes and reference JSON behavior guard the same constructor.
 
 Phased, each phase ends in a **green `cargo test`** and a runnable artifact. The pipeline is built
 front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
+
+## Anonymous construction argument scope
+
+Primary constructor argument checking has a dedicated owner. Anonymous base arguments use the
+construction site's lexical scope; named classes retain their constructor-parameter rung. The
+shared constructor selector, argument mapping, contextual lambda checks and forwarding ledger remain
+the same. Direct and aliased parents with colliding inherited property names exercise this boundary.
 
 ## Class application headers
 
@@ -5986,6 +5993,12 @@ direct source construction, inheritance, secondary/default/vararg/generic constr
 accessor/member dispatch remain required follow-ups. The first slice explicitly declines identity
 collisions before backend emission. It does not close #2621 or change any outcome baseline.
 
+## Enclosing formal field signatures
+
+JVM field and property-accessor signature formatting consumes retained enclosing-method formals
+through the declaration type-use formatter. Own classifier formals, nullable/bounded captures and
+concrete declarations share that boundary; physical field descriptors retain their existing erasure.
+
 ## Lossless JVM signature syntax
 
 The signature reader has an application-construction boundary that retains all written class
@@ -6008,6 +6021,12 @@ with width, Object, exact-wrapper and runtime controls. The dependency inner-con
 prerequisite landed in #2593; its declaration normalization remains separate from this representation fix (#2590).
 
 ## Receiver-bound constructor constraints
+
+Inner-alias conformance recovery shares constructor-reference publication across direct and
+already-selected alias declarations. The constructor selection responsibility moves out of the
+resolver facade; selected receiver provenance and declaration ABI survive that boundary. Demanded
+source signatures now retain receiver captures before contextual result constraints and reuse the
+ordinary call solver and output-slot specialization. Shared conformance expectations stay unchanged.
 
 Normalize inner constructors with complete own-plus-captured instance results, preserving independent
 callable formals while removing captured formals from the inference variables. One receiver context
@@ -6032,6 +6051,11 @@ priority, reordered and unused alias formals, named arguments, and independent c
 Alias/value-class runtime controls also retain the target declaration's generic versus concrete
 constructor carriers for source, own-produced and reference-produced dependencies.
 
+Late extension admission now uses strict receiver assignability or the existing satisfiable
+postponed-frame trial. The common operation also serves unbound constructor-reference receivers;
+selection cannot commit its trial bindings. This repairs the two existing builder-inference
+regressions introduced by the alias receiver guard while retaining concrete receiver refusal.
+
 Original parameter declarations now survive selected callable/member conversion independently of
 the specialized applicability signature. Constructor publication reads that same declaration shape;
 the JVM retains generic value-class boxes while concrete value-class slots keep their carriers.
@@ -6040,7 +6064,9 @@ dependency runtime tests read both generic and concrete stored values. The selec
 and conversion move out of the resolver facade, and plugin plans keep their declaration payload
 indirect, retiring two large-enum lint findings without changing the indexed FIR/IR representation.
 
-Late extension admission now uses strict receiver assignability or the existing satisfiable
-postponed-frame trial. The common operation also serves unbound constructor-reference receivers;
-selection cannot commit its trial bindings. This repairs the two existing builder-inference
-regressions introduced by the alias receiver guard while retaining concrete receiver refusal.
+JVM class-initializer entry establishes its implicit callable frame before emitting expressions.
+Their nested lexical ranges close before each static field store, which restores its source line
+after an inline value resets the caller line. Ordinary method local-table ordering is preserved.
+Full-class/runtime controls cover consecutive initializers, object and companion storage with an
+`init` block, and ordinary callable bodies. The batched bytecode oracle now isolates fixture packages
+and fails compilation errors (#2639).

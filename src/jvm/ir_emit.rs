@@ -1010,10 +1010,7 @@ fn emit_jvm_interface_companion_surface(
             Ty::Unit,
             clinit_statics.iter().map(|&(_, _, init)| init),
         );
-        emitter.regeneration_site = Some(
-            bytecode_inline_call::RegenerationSite::class_initializer(env.signature_symbols),
-        );
-        emitter.record_locals = true;
+        emitter.enter_class_initializer(env.signature_symbols);
         let mut clinit = CodeBuilder::new(0);
         emitter.emit_delegated_property_array(env, c.fq_name, &fq_name, &mut clinit);
         if array {
@@ -4000,10 +3997,7 @@ fn emit_enum_class(
                 .flat_map(|entry| entry.argument_prelude.iter().chain(&entry.args).copied())
                 .chain(ir.companion_clinit_body(c.fq_name)),
         );
-        e.regeneration_site = Some(bytecode_inline_call::RegenerationSite::class_initializer(
-            env.signature_symbols,
-        ));
-        e.record_locals = true;
+        e.enter_class_initializer(env.signature_symbols);
         let mut clinit = CodeBuilder::new(0);
         e.emit_delegated_property_array(env, c.fq_name, &fq, &mut clinit);
         if delegated_property_array::exists(env, c.fq_name) {
@@ -5733,7 +5727,7 @@ impl<'a> Emitter<'a> {
                 index,
                 value,
             } => self.emit_set_field(e, receiver, class, index, value, code),
-            IrExpr::SetStatic { index, value } => self.emit_set_static(index, value, code),
+            IrExpr::SetStatic { index, value } => self.emit_set_static(e, index, value, code),
             IrExpr::Checked(_) => {
                 unreachable!("checked operation passed jvm_can_emit without a JVM realization")
             }

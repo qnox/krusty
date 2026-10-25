@@ -66,3 +66,90 @@ fn an_omitted_source_alias_argument_is_inferred_through_the_alias_expansion() {
         }\n";
     common::expect_box_same_as_kotlinc(SRC, "OmittedSourceAliasArguments");
 }
+
+const ALIAS_SUPERCLASS_CONSTRUCTOR: &str = r#"
+open class Carrier<T>(val value: T)
+typealias Nested<T> = Carrier<List<T>>
+private fun <T> copy(value: T) = object : Nested<T>(listOf(value)) {}
+fun box(): String {
+    copy("OK")
+    return "OK"
+}
+"#;
+
+fn assert_complete_class_abi(classes: &common::ClassSets) {
+    let inventory = |classes: &std::collections::BTreeMap<String, Vec<u8>>| {
+        classes
+            .iter()
+            .map(|(name, bytes)| {
+                let info = krusty::jvm::classreader::parse_class(bytes).expect("readable class");
+                let header = format!(
+                    "{:?}",
+                    (
+                        info.access,
+                        info.this_class,
+                        info.super_class,
+                        info.interfaces(),
+                        info.signature,
+                        info.inner_classes,
+                    )
+                );
+                (name.clone(), (header, common::member_table(bytes)))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let actual = inventory(&classes.krusty);
+    let expected = inventory(&classes.reference);
+    assert_eq!(actual, expected, "complete class ABI");
+}
+
+// PLATFORM: complete JVM class headers and member signatures for the expanded superclass.
+#[test]
+fn alias_superclass_constructor_complete_abi_matches_kotlinc() {
+    assert_complete_class_abi(&common::classes_against_kotlinc_module(&[(
+        "AliasSuperclassConstructor.kt",
+        ALIAS_SUPERCLASS_CONSTRUCTOR,
+    )]));
+}
+
+#[test]
+fn alias_superclass_constructor_runs_like_kotlinc() {
+    common::expect_box_same_as_kotlinc(
+        ALIAS_SUPERCLASS_CONSTRUCTOR,
+        "alias_superclass_constructor",
+    );
+}
+
+#[test]
+fn a_direct_superclass_argument_keeps_the_enclosing_value() {
+    let source = r#"
+open class Carrier<T>(val value: T)
+private fun <T> copy(value: T) = object : Carrier<List<T>>(listOf(value)) {}
+fun box(): String {
+    copy("OK")
+    return "OK"
+}
+"#;
+    common::expect_box_same_as_kotlinc(source, "direct_superclass_lexical_value");
+}
+
+#[test]
+fn an_aliased_superclass_argument_without_a_property_collision_runs_like_kotlinc() {
+    let source = r#"
+open class Carrier<T>(val stored: T)
+typealias Nested<T> = Carrier<List<T>>
+private fun <T> copy(value: T) = object : Nested<T>(listOf(value)) {}
+fun box(): String = copy("OK").stored.single()
+"#;
+    common::expect_box_same_as_kotlinc(source, "aliased_superclass_distinct_property");
+}
+
+#[test]
+fn a_named_class_superclass_argument_keeps_its_constructor_parameter() {
+    let source = r#"
+open class Carrier<T>(val value: T)
+class Named<T>(value: T) : Carrier<List<T>>(listOf(value))
+fun box(): String = Named("OK").value.single()
+"#;
+    common::expect_box_same_as_kotlinc(source, "named_superclass_constructor_parameter");
+}
