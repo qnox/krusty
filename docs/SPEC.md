@@ -14064,10 +14064,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Collection`, `String` to `CharSequence`). No `IntRange` is built. Under `reversed()` or `step`
   the bound reverts to the inclusive `size + -1` (`revertToLastInclusive` of the handler's
   `last.decrement()`), which they then count from. A user extension property named `indices` is
-  read and iterated as written. Not yet ported, so still building the range: membership
-  (`i in xs.indices`), `withIndex()` over `indices`, and an unsigned array's `indices`, which
-  kotlinc counts to the static `UIntArray.getSize-impl` (the role requires a signed array's
-  element). (`tests/indices_loop_e2e.rs`, `indices_roles_require_the_complete_extension_property`.)
+  read and iterated as written. Not yet ported, so still building the range: `withIndex()` over
+  `indices`, and an unsigned array's `indices`, which kotlinc counts to the static
+  `UIntArray.getSize-impl` (the role requires a signed array's element).
+  (`tests/indices_loop_e2e.rs`, `indices_roles_require_the_complete_extension_property`.)
+
+- **Membership in the stdlib's `indices` compares the value with 0 and the receiver's size, as
+  kotlinc's `RangeContainsLowering` does over an `IndicesHandler` header.** Resolution selects the
+  size member for every read of a declaration with the `Indices` role, the plan a loop over it
+  also reads (`record_extension_property_get`). The parser marks the `contains` call an `in` or
+  `!in` stands for, in an expression or a `when` branch, with its operator token (kotlinc's
+  `IN`/`NOT_IN` origin); a written `xs.indices.contains(i)` call is not marked and is called as
+  written. A marked call on an `indices` read whose selected `contains` is the range's own member
+  or a `kotlin.ranges` closed-range extension (`matchStdlibExtensionContainsCall`), with a
+  value of a primitive numeric type, is checked as `IndicesContainment` (`indices_membership`). It is the
+  membership in `0 until size` that the range-literal comparison realizes:
+  `0 <= i && i < size`, in the widest numeric type of `Int` and the value (`i in list.indices`
+  with a `Long` `i` compares `(long) size`), with the size read on the receiver cast to the
+  declaration's class as a loop reads it, and the operands ordered and stored as for a range
+  literal (`make().indices` is read before a value with side effects). `!in` keeps its negation of
+  the test, as kotlinc keeps its `not()` call. A nullable value (`IntRange.contains(Int?)`) and a
+  user `indices` property call `contains`. (`tests/indices_contains_e2e.rs`.)
 
 - **A `checkcast` right before an `aastore` is removed, as kotlinc's
   `RedundantCheckcastsBeforeAastoreMethodTransformer` does.** The pass runs after jump negation and

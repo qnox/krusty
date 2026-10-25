@@ -1673,8 +1673,8 @@ pub struct File {
     /// the terminal segment's source provenance without spelling recovery.
     pub exact_member_name_spans: crate::fx_hash::HashMap<u32, Span>,
     /// Exact operator tokens the expression span cannot locate: the `..`/`..<`/`until`/`downTo` of a
-    /// range value or membership test, and the `!in` a negated `contains` call stands for. Kept
-    /// sparse rather than widening those expression nodes.
+    /// range value or membership test, and the `in`/`!in` a `contains` call (and its negation)
+    /// stands for, which marks that call as kotlinc's `IN`/`NOT_IN` origin. Kept sparse.
     pub operator_token_spans: crate::fx_hash::HashMap<u32, Span>,
     /// The assignment tokens kotlinc's binary-expression diagnostic positioning searches.
     pub binary_reference_tokens: BinaryReferenceTokens,
