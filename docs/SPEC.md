@@ -64,8 +64,9 @@ constraints. The same receiver participates in call constraint solving and bindi
 specialization reads a root capture through its bound and preserves projections in invariant type
 arguments. Exact corpus regressions, outer-instance runtime and projection variants live in
 `bound_inner_alias_inference_e2e` and `projected_receiver_extension_e2e`; existing alias receiver and
-bound diagnostic ledgers remain intact. Anonymous public-result ABI approximation and complete
-closed-projection diagnostic parity remain separate follow-ups with preserved failing oracles.
+bound diagnostic ledgers remain intact. Anonymous public-result ABI follows the declaration-publication
+rules. Complete closed-projection diagnostic parity remains a separate follow-up with preserved
+failing oracles.
 
 **Status:** PoC / experiment. NOT a production Kotlin compiler.
 
@@ -7621,6 +7622,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   array of that supertype, and the copied class is not cast back to the declaration class.
   Tests: `tests/reified_anonymous_object_e2e.rs`, box
   `reified/kt39256_privateInlineWithAnonymousObject.kt`.
+- **Anonymous result exposure belongs to declaration publication.** A public inferred function
+  calling a private anonymous-object factory exposes the applied declared parent, just as a direct
+  anonymous result does. The expression and private non-inline factory retain the exact anonymous
+  application while their members are checked. Local-class members also retain exact results.
+  Publication preserves declaration-owned type arguments and bounds: a captured bounded star can
+  expose `Bounded<out Number>`, while an ordinary written `Token<*>` remains a star. Nested results
+  follow variance, so invariant `Box<Anonymous>` exposes `Box<out Parent>`, and a returned callback
+  exposes its result without changing the callback implementation's private result ABI. Function
+  parents retain their receiver/context/suspend shape. Negative nominal positions retain the exact
+  anonymous identity, preserving the accepted inputs. An object with no declared parent exposes
+  `Any`; multiple parents require an explicit result type, with the diagnostic at the declaration's
+  written name.
+  Parent templates include complete alias expansions and remain unbound until the anonymous
+  application's capture bindings are applied; classifier headers consume the same canonical facts.
+  Tests: `tests/projected_receiver_extension_e2e.rs::inferred_receiver_capture_signatures_match_kotlinc`
+  and the `anonymous_factory_` ABI, runtime and complete diagnostic controls in the same module.
 - **A hoisted anonymous object retains its construction site's lexical classifier scope.** The parser
   stores an anonymous object's class as a file-level synthetic declaration, but its member signatures,
   supertype arguments, superclass constructor arguments, and inferred member returns may still name a
@@ -9942,8 +9959,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   temporary. A classpath `inline` callee that needs an empty stack (a loop or a `try`) still takes
   the method inliner: the duplicated receiver is that call's own argument and is stored before the
   body. Only a value left underneath the argument keeps the call on the byte splice. After that
-  inline the caller's line is marked again on the null path's `pop`; the expression-body `return`
-  does not repeat it. The same holds when the safe call's receiver is folded out of its temporary
+  inline the caller's line is marked again on the null path's `pop`. The expression-body `return`
+  marks the body's end line as it does after any call, so it adds no entry on a one-line body and
+  marks the last line of a safe call spanning several (`tests/safe_call_return_line_e2e.rs`). The same holds when the safe call's receiver is folded out of its temporary
   (`simplifyKnownSafeCallPatterns`) after a same-module inline selector: kotlinc's label
   normalization merges the null result's line label into the jump's own, and the fold puts the
   `pop` right after that label, so the line describes the `pop`. A discarded null result leaves a
@@ -9959,6 +9977,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   removes the elvis's check, where it proves the value non-null (a `new`, a string constant).
   Common lowering therefore never fuses the two guards on the selector's type. Test:
   `tests/elvis_over_safe_call_e2e.rs`.
+- **An elvis lays out its left value first.** fir2ir builds `a ?: b` as
+  `{ val tmp = a; when { tmp == null -> b; else -> tmp } }`, and kotlinc's
+  `JvmSafeCallChainFoldingLowering.foldElvis` rebuilds it as `when { tmp != null -> tmp; else -> b }`.
+  The JVM layout is therefore `ifnull R; <tmp>; goto E; R: <b>; E:`. Where the left value needs no
+  conversion, the negated-jumps pass turns that into `ifnonnull E`. Where it is unboxed (`Int?` to
+  `Int`), the `intValue` stays in the fall-through branch. The fold's right-side branch is an
+  `irTrue` condition at the elvis's position, which marks the elvis's line on a `nop`, so the right
+  side's own line starts after the `pop` at the null target, never on it. Common lowering keeps
+  fir2ir's order and records the `when` as an elvis with its line, and the JVM emitter applies the
+  fold. Test:
+  `tests/elvis_branch_order_e2e.rs`.
 
 - **An integer-constant branch takes a sibling primitive.** An `if`, `when`, elvis, or `try` with no
   expected type still adapts an integer-constant branch to the non-null primitive of the other

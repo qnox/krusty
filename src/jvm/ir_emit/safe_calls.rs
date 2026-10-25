@@ -258,27 +258,6 @@ pub(super) fn safe_call_selector_boundary(ir: &crate::ir::IrFile, expression: u3
     }
 }
 
-/// Whether `expression` is the result block of a source safe call.
-///
-/// The generated null guard is the stable semantic marker. Its receiver may be statically non-null
-/// (an unnecessary safe call), in which case JVM cleanup removes the guard but kotlinc still does
-/// not add an implicit-return line after an inlined selector.
-pub(super) fn is_safe_call_result(ir: &crate::ir::IrFile, mut expression: u32) -> bool {
-    loop {
-        match ir.expr(expression) {
-            IrExpr::TypeOp {
-                op: crate::ir::IrTypeOp::ImplicitCoercion,
-                arg,
-                ..
-            } => expression = *arg,
-            IrExpr::Block {
-                value: Some(value), ..
-            } => return ir.null_guards.contains(value),
-            _ => return false,
-        }
-    }
-}
-
 /// The safe call's own source line, mapped the way every other caller expression is.
 ///
 /// The duplicated temporary and its null guard are generated and have no statement line. The
