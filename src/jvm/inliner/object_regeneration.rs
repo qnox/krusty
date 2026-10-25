@@ -69,6 +69,13 @@ pub(crate) trait AnonymousObjects {
             "an anonymous singleton",
         )))
     }
+
+    /// Whether the callee was compiled with the call site's module (kotlinc's `sameModule`). Its
+    /// objects are then reused as they are unless this call must specialize them; a dependency's
+    /// objects are always regenerated.
+    fn same_module(&self) -> bool {
+        false
+    }
 }
 
 /// A constructor call whose object takes lambdas: the call is completed once the lambdas' loads are
@@ -103,9 +110,22 @@ pub(super) fn regenerate_objects(
     let mut prior_classes = Vec::new();
     // `new` / `getstatic INSTANCE` sites whose copy still uses a reified parameter.
     let mut reemit_markers = Vec::new();
+    // The copies those markers ask the caller to specialize in turn.
+    let mut still_reified = Vec::new();
     let marker_sites = need_class_reification_sites(node);
+    // kotlinc's `awaitClassReification`: a `needClassReification` marker asks the next object
+    // to be specialized for this call.
+    let mut await_reification = false;
+    // The `new`s of objects a same-module body constructs that this call reuses unchanged.
+    let mut reused = BTreeSet::new();
     for at in 0..node.nodes.len() {
+        if marker_sites.contains(&at) {
+            await_reification = true;
+        }
         if let Some(owner) = anonymous_singleton_owner(node, at, classes) {
+            if objects.same_module() && !std::mem::take(&mut await_reification) {
+                continue;
+            }
             let copy = objects.regenerate_singleton(&owner, &prior_classes)?;
             crate::trace_compiler!(
                 "splice",
@@ -117,6 +137,7 @@ pub(super) fn regenerate_objects(
             prior_classes.push((owner, copy.name.clone()));
             if copy.reified_parameters_remain {
                 reemit_markers.push(at);
+                still_reified.push(copy.name.clone());
             }
             let Node::Insn(insn) = &mut node.nodes[at] else {
                 unreachable!("a singleton load is a field instruction")
@@ -132,6 +153,20 @@ pub(super) fn regenerate_objects(
                 unreachable!("a construction starts at a `new`")
             };
             let passed = &constructions.lambdas[&constructor];
+            let specialize = std::mem::take(&mut await_reification);
+            // kotlinc's `shouldRegenerate(sameModule)`: an object that takes none of the call's
+            // lambdas, needs no reification, and captures no object regenerated here is reused.
+            if objects.same_module()
+                && passed.is_empty()
+                && !specialize
+                && !captures_regenerated_object(
+                    &constructions.descriptors[&constructor],
+                    &prior_classes,
+                )
+            {
+                reused.insert(at);
+                continue;
+            }
             let object_lambdas: Vec<ObjectLambda<'_>> = passed
                 .iter()
                 .map(|&(argument, lambda)| ObjectLambda {
@@ -154,12 +189,17 @@ pub(super) fn regenerate_objects(
             }
             if copy.reified_parameters_remain {
                 reemit_markers.push(at);
+                still_reified.push(copy.name.clone());
             }
             remapper.add_mapping(class, &copy.name);
             prior_classes.push((class.clone(), copy.name.clone()));
             *class = copy.name.clone();
             copies.insert(at, (copy.name, copy.constructor_desc));
-        } else if let Some(new) = constructions.by_constructor.get(&at) {
+        } else if let Some(new) = constructions
+            .by_constructor
+            .get(&at)
+            .filter(|new| !reused.contains(*new))
+        {
             let Insn::Method { owner, desc, .. } = insn else {
                 unreachable!("a construction ends at an `<init>` call")
             };
@@ -180,12 +220,27 @@ pub(super) fn regenerate_objects(
     for local in &mut node.local_variables {
         local.desc = remapper.map_desc(&local.desc).map_err(malformed)?;
     }
-    if !marker_sites.is_empty() && names_unreified_class(node, classes) {
+    if !marker_sites.is_empty() && names_unreified_class(node, classes, &still_reified) {
         return Err(InlineError::UnreifiedClass);
     }
     remove_nodes(node, &marker_sites);
     insert_reification_markers(node, &marker_sites, &reemit_markers);
     Ok(pending)
+}
+
+/// Whether a constructor `descriptor` takes an object regenerated earlier in the same body
+/// (kotlinc's `capturesAnonymousObjectThatMustBeRegenerated`).
+fn captures_regenerated_object(descriptor: &str, prior_classes: &[(String, String)]) -> bool {
+    descriptors::argument_types(descriptor).is_some_and(|arguments| {
+        arguments.iter().any(|argument| {
+            prior_classes.iter().any(|(original, _)| {
+                argument
+                    .strip_prefix('L')
+                    .and_then(|rest| rest.strip_suffix(';'))
+                    == Some(original.as_str())
+            })
+        })
+    })
 }
 
 /// `getstatic owner.INSTANCE` of an anonymous object, the owner's internal name.
@@ -217,13 +272,18 @@ fn need_class_reification_sites(node: &MethodNode) -> Vec<usize> {
         .collect()
 }
 
-fn is_need_class_reification(insn: &Insn) -> bool {
+pub(super) fn is_need_class_reification(insn: &Insn) -> bool {
     matches!(insn, Insn::Method { op: INVOKESTATIC, owner, name, desc, interface }
         if !*interface && owner == INTRINSICS && name == "needClassReification" && desc == "()V")
 }
 
-/// Whether `node` still names a class whose methods call `reifiedOperationMarker`.
-fn names_unreified_class(node: &MethodNode, classes: &dyn ClassRoles) -> bool {
+/// Whether `node` still names a class whose methods call `reifiedOperationMarker`, other than the
+/// `still_reified` copies whose loads keep their marker for the caller.
+fn names_unreified_class(
+    node: &MethodNode,
+    classes: &dyn ClassRoles,
+    still_reified: &[String],
+) -> bool {
     let mut named = Vec::new();
     for insn in node.instructions() {
         note_classes(insn, &mut named);
@@ -237,7 +297,7 @@ fn names_unreified_class(node: &MethodNode, classes: &dyn ClassRoles) -> bool {
         internal_names(&local.desc, &mut named);
     }
     named.iter().any(|class| {
-        let marked = classes.contains_reified_marker(class);
+        let marked = !still_reified.contains(class) && classes.contains_reified_marker(class);
         if marked {
             crate::trace_compiler!("splice", "unreified class {class}");
         }

@@ -29,9 +29,9 @@ pub(crate) fn rename(
     ir.remap_classifier_identities(&names);
 }
 
-/// `Intrinsics.needClassReification` immediately before `new` of a declaration class whose members
-/// use a reified parameter. A specialized copy is absent from that set, so its construction stays
-/// unmarked.
+/// `Intrinsics.needClassReification` immediately before `new` of a declaration class, or the load
+/// of its instance, when its members or its own function type use a reified parameter. A
+/// specialized copy is in neither set, so its construction stays unmarked.
 pub(crate) fn guard_reified_construction(
     ir: &crate::ir::IrFile,
     writer: &mut ClassWriter,
@@ -50,6 +50,11 @@ pub(crate) fn guard_reified_construction(
 }
 
 fn needs_class_reification(ir: &crate::ir::IrFile, internal: TypeName) -> bool {
-    ir.class_id_by_name(internal)
-        .is_some_and(|class| ir.reified_anonymous_declarations.contains(&class))
+    ir.class_id_by_name(internal).is_some_and(|class| {
+        ir.reified_anonymous_declarations.contains(&class)
+            || ir.classes[class as usize]
+                .lambda
+                .as_ref()
+                .is_some_and(|lambda| lambda.requires_reification)
+    })
 }

@@ -5654,7 +5654,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   backend (`IrFile::compiled_inline_call`) only when the callee is a non-suspend function in this
   module (public, or declared in the caller's own file), top-level or a member of a class, object
   or companion, with no suspend function-typed parameter or receiver, no
-  `crossinline` parameter, and a template without lambdas, callable references, local classes,
+  `crossinline` parameter, and a template without local classes
   or a subject `when` that switches on an enum's keys (`IrFile::enum_switch_when`),
   called with every argument from any body outside a suspend state machine: a named function, an
   inline function (whose compiled body then holds the nested callee's code, as kotlinc's does), a
@@ -5833,6 +5833,64 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reified-array callee runs), `tests/reified_local_delegate_e2e.rs` (a reified callee with a local
   delegate, across files and in an object), and
   `source_map::tests::the_copier_reads_lines_the_optimizer_dropped`.
+
+- **A same-module inline body that declares a lambda is inlined from its compiled body.** kotlinc
+  compiles the callee through its file's class codegen, so the classes of the lambdas (and callable
+  references) its body declares exist when a call site's `AnonymousObjectTransformer` reads them.
+  The JVM compiles those classes with the callee, once per emission pass, and the inliner reads them
+  as it reads a dependency's (`ModuleClassBodies`). A class of the caller's own file is compiled
+  there once and the class loop writes those bytes; a class another file declares is realized in
+  full in the caller's IR, compiled under that file's facade, source name and line count, and never
+  written, since its own file writes it. A same-module callee's object is then reused as it is
+  (kotlinc's `shouldRegenerate(sameModule = true)`) unless the call passes it one of its lambdas,
+  it captures an object regenerated earlier in the body, or a `needClassReification` marker asks for
+  its specialization; then the call regenerates it as `<Caller>$<function>$$inlined$<callee>$N`.
+  A library callee's objects are always regenerated. An inline function regenerates the objects
+  of the inline calls in its own body, as any function does, under its own name
+  (`LibKt$median$$inlined$sortedBy$1`), public ABI when the function is not private; a callee
+  compiled for its callers regenerates them under the same names, and those copies are read from
+  there by the callers and written by the callee's file when it emits the function. A copy a call
+  of this file specialized from another file's class is this file's own class, written here. A
+  `-Xlambdas=class` lambda's `invoke` regenerates under its own name as any method does
+  (`Kt$outer$caller$1$invoke$$inlined$defineFunc$1`); a lifted local function under its lifted
+  name (`Kt$outer$localCall$$inlined$defineFunc$1`); a property accessor under `$special`, its
+  getter and setter numbering one group; and a lambda body a `-Xsam-conversions=class` class
+  implements under that class and its SAM method (`Kt$outer$caller$1$run$$inlined$defineFunc$1`).
+  A copy regenerates the objects its methods name in turn, as kotlinc's `MethodInliner`
+  transforms every method of a copy, so a reified lambda nested in a regenerated lambda is the
+  copy's next object (`Kt$box$$inlined$defineFunc$1$1`). A suspend lambda the call passes no
+  lambda is copied with its machine and `@DebugMetadata` as they are, its reified operations
+  specialized; a suspend lambda class, like any lambda class written in an inline function, is
+  public, and public ABI when the function is not private. A closure of a local delegated
+  property written in an inline function belongs to that function as its lambdas do, and a
+  conversion written in another file's inline function constructs that file's published SAM
+  wrapper. A copy's `<clinit>` drops its `needClassReification`: kotlinc's copy initializes its
+  singleton unguarded, and its load keeps the marker while a reified parameter remains. The
+  marker stands where kotlinc writes it: a lambda class whose methods use a reified parameter is
+  marked where its instance is loaded (`getstatic INSTANCE`) or constructed, and its own `<clinit>`
+  is marked only when its function type names the parameter, so a caller that reuses a class never
+  runs the marker. A `when` (and an `if`) branch whose class already is the
+  `when`'s, but whose type names a reified parameter, casts to that class again (kotlinc's
+  `castForReified` in `PromisedValue.materializeAt`; a branch coerced from a generic call's erased
+  result casts once, and an `Object` needs none). The redundant-cast pass keeps the cast only in a
+  method that still holds a reified-operation marker, so a join whose branch an inlining call
+  specializes still verifies. A callee is compiled after every same-module callee that its
+  body or a class it declares inlines. The objects a declared class's methods regenerate for their
+  own inline calls are read with the class, whichever file writes them, so a call site that
+  regenerates the class regenerates them in turn. A copy whose nested copy still names a reified
+  parameter of an enclosing inline function names it too (kotlinc merges the nested
+  transformation's `reifiedTypeParametersUsages`), so its load keeps the marker and a call site
+  specializes it again. A copy is public ABI when the code it is written in is: a non-private
+  inline function, a lambda class that function's ABI publishes, or, for a nested copy, its root
+  call's scope (`RegeneratedClassContext` keeps the root `callSiteInfo`). Tests:
+  `tests/inline_same_module_lambda_bodies_e2e.rs` (same-file and cross-file lambdas reused and
+  regenerated, a reified lambda marked at its load, a reified default lambda, a reified `when`
+  join, a lambda whose function type names a reified parameter, a reified lambda nested in a
+  regenerated one, a reified helper regenerated in a declared lambda, and a forwarded copy whose
+  nested copy stays reified, against kotlinc's bytes or class inventory and as runs),
+  `tests/escaping_reified_lambda_e2e.rs` (local-function, accessor, class-SAM, class-lambda and
+  suspend callers), `tests/nested_inline_delegate_e2e.rs`,
+  `tests/sam_wrapper_class_e2e.rs::a_cross_file_inline_copy_constructs_the_declarations_sam_wrapper` and `jvm::inliner::tests::a_same_module_body_reuses_an_object_only_its_reification_marker_regenerates`.
 
 - **`inline fun` (same-module, user-defined):** expanded at each call site by the IR lowerer
   (`Lower::lower_inline_fn_call`), matching kotlinc's effect — value parameters bind to once-evaluated
