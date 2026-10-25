@@ -371,6 +371,7 @@ impl Parser<'_> {
                                 },
                                 Span::new(lspan.lo, cspan.hi),
                             );
+                            self.file.operator_token_spans.insert(call.0, membership);
                             lhs = if negated {
                                 let negation = self.file.add_expr(
                                     Expr::Unary {
@@ -1807,6 +1808,7 @@ impl Parser<'_> {
                         },
                         Span::new(start.lo, cspan.hi),
                     );
+                    self.file.operator_token_spans.insert(call.0, membership);
                     if negated {
                         let negation = self.file.add_expr(
                             Expr::Unary {

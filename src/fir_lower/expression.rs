@@ -918,6 +918,11 @@ impl BodyLowering<'_> {
                 *negated,
                 origin,
             ))?,
+            FirExprKind::IndicesContainment {
+                value,
+                indices,
+                comparison,
+            } => self.indices_contains_expression(*value, indices, comparison.get())?,
             FirExprKind::StringTemplate(_) => {
                 unreachable!("a string template folds to a constant or is a concatenation")
             }
