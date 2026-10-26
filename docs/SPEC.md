@@ -2390,7 +2390,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   default expression runs on its own lines, and the call after the defaults returns to the
   signature line. A `$DefaultImpls` forward of an interface stub calls on the declaration's line and
   returns on its end line, which for an abstract member is the last line of its declaration (the
-  `): String` of a multi-line parameter list). Test: `tests/default_stub_lines_e2e.rs`. A call with
+  `): String` of a multi-line parameter list). Test: `tests/default_stub_lines_e2e.rs`. kotlinc
+  stores each masked default as a statement at its expression's position, so the fill opens on
+  the expression's first line even when its first operand marks another line at that same offset
+  (`k(` above an argument on the next line): the table keeps both entries. Test:
+  `tests/default_argument_fill_lines_e2e.rs`. A constructor's synthetic `$default` `<init>` is
+  generated the same way: it enters on the constructor's line (the class declaration's for a
+  primary, the `constructor` keyword's for a secondary), and so do each mask test and the
+  delegation; each fill runs on the lines its default expression marks, nested calls included;
+  the `return` is on the declaration's closing line. krusty set a primary's table by hand from the
+  class field at the parameter's index (another parameter's line once one is no property) and a
+  secondary's from each default's first line only. Test:
+  `tests/constructor_default_expression_lines_e2e.rs`. A call with
   holes passes the computed mask + null marker. Byte-identical to kotlinc
   for data-class `copy` and instance methods. **Mask bits are LOGICAL**: kotlinc numbers them over
   the DECLARED value parameters, so an EXTENSION's receiver — physically the leading parameter of
@@ -13584,6 +13595,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`m_impl$lambda$0`) are lifted by later lowerings, so they come after all of those, in their
   lifted order. krusty placed them after the last declared member. Tests:
   `tests/value_class_lifted_member_order_e2e.rs`.
+- **A value class's boxed `Any` override is the source override on the box.** A source
+  `override fun toString()` (likewise `hashCode`/`equals`) becomes the static `toString-impl` over
+  the carrier, and the box's `toString()` calls it. kotlinc places that box method right after
+  `toString-impl`, at the override's place among the declared members, entering on the override's
+  signature line and returning on its last line; only the generated `Any` members follow every
+  declared member with no line. krusty appended the box method of a source override after every
+  declared member with no line. Tests:
+  `tests/value_class_any_override_e2e.rs`.
+- **What a value class's `Any` override lifts is named after its static `-impl`.** kotlinc renames
+  the override to `toString-impl` before lifting, so its lambda is `toString_impl$lambda$0`, as an
+  interface override's is `describe_impl$lambda$0`. The value-class pass records the `Any`
+  override's realization among the functions whose JVM name it chose. Tests:
+  `tests/value_class_any_override_e2e.rs`.
+- **A companion initializer run by the outer `<clinit>` is value-class lowered.** With an `init`
+  block the whole companion initializer moves to the outer class's `<clinit>`; it remains the
+  companion's constructor code (over no parameters) for the value-class rewrite, so `Id(0)` there
+  is `Id.constructor-impl(0)` stored as the carrier. krusty left `new Id(0)`, a `VerifyError`.
+  Tests: `tests/companion_initializer_value_class_e2e.rs`.
+- **A value class's companion properties are statics of the value class.** kotlinc stores them as
+  for any class: private statics of the value class (a `@JvmField`/`lateinit` one public),
+  initialized in its `<clinit>` after `Companion`, reached from the companion's accessors through
+  `access$getX$cp`/`access$setX$cp`; a companion `init` block runs there in source order. krusty
+  kept them as `Companion` instance fields. Tests: `tests/value_class_companion_property_storage_e2e.rs`.
 - **An owner reads its explicit backing field, typed as the field.** Inside the class that
   declares `val a: Any field = V(1)`, a read whose receiver's static type is exactly that class is
   kotlinc's `IrGetField` of the field, not a call of `getA()`: `a.x` over a value class
