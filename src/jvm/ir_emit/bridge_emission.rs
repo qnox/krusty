@@ -66,6 +66,50 @@ fn barrier_instanceof_name(semantic: Ty, jvm: Ty) -> String {
     )
 }
 
+/// kotlinc's test of one erased argument against the override's type (`p is T`), returning the
+/// neutral result when it fails: `instanceof` for a narrower class, through a `null` shortcut when
+/// the type admits `null`, or a presence test for a type that erases to `Object`, which a type
+/// admitting `null` reduces to a branch to the next instruction.
+pub(super) fn emit_barrier_check(
+    cw: &mut ClassWriter,
+    code: &mut CodeBuilder,
+    slot: u16,
+    check: crate::ir::CollectionBarrierCheck,
+    class: &str,
+    outcome: crate::jvm::collection_barriers::BarrierOutcome,
+) {
+    let next = code.new_label();
+    code.aload(slot);
+    match check {
+        crate::ir::CollectionBarrierCheck::Instance { admits_null } => {
+            let class = cw.class_ref(class);
+            if admits_null {
+                let present = code.new_label();
+                let tested = code.new_label();
+                code.dup();
+                code.ifnonnull(present);
+                code.pop();
+                code.push_int(1, cw);
+                code.goto(tested);
+                code.bind(present);
+                code.instance_of(class);
+                code.bind(tested);
+            } else {
+                code.instance_of(class);
+            }
+            code.ifne(next);
+            emit_barrier_outcome(outcome, cw, code);
+        }
+        crate::ir::CollectionBarrierCheck::Presence { admits_null } => {
+            code.ifnonnull(next);
+            if !admits_null {
+                emit_barrier_outcome(outcome, cw, code);
+            }
+        }
+    }
+    code.bind(next);
+}
+
 pub(super) fn emit_barrier_outcome(
     outcome: crate::jvm::collection_barriers::BarrierOutcome,
     cw: &mut ClassWriter,
@@ -433,34 +477,29 @@ fn emit_bridge(
         emit_interface_entry_checks(ir, b, &ep, cw, &mut code);
     }
     let body_pc = u16::try_from(code.bytes.len()).expect("parameter checks fit a method");
-    if let Some(barrier) = b.barrier_plan {
-        let dispatch = code.new_label();
-        let parameter_slot = 1 + ep[..barrier.parameter]
-            .iter()
-            .map(|ty| slot_words(*ty))
-            .sum::<u16>();
-        if b.concrete_params[barrier.parameter].is_nullable() {
-            code.aload(parameter_slot);
-            code.ifnull(dispatch);
+    if let Some(barrier) = &b.barrier_plan {
+        for checked in &barrier.parameters {
+            let parameter = checked.parameter;
+            let slot = 1 + ep[..parameter]
+                .iter()
+                .map(|ty| slot_words(*ty))
+                .sum::<u16>();
+            // A primitive parameter's JVM type is the scalar. `instanceof` names its boxed wrapper
+            // (`Int` → `java/lang/Integer`); the unbox below still goes through `Number`. A
+            // value-class parameter arrives as that class's box. The unbox adapter names the box;
+            // the carrier's wrapper (`Integer`) is a different class and would reject a real key.
+            let class = adapter
+                .and_then(|plan| plan.parameter(parameter))
+                .map(|value_class| value_class.owner.render())
+                .unwrap_or_else(|| {
+                    barrier_instanceof_name(b.concrete_params[parameter], cp[parameter])
+                });
+            emit_barrier_check(cw, &mut code, slot, checked.check, &class, barrier.outcome);
         }
-        code.aload(parameter_slot);
-        // A primitive parameter's JVM type is the scalar. `instanceof` names its boxed wrapper
-        // (`Int` → `java/lang/Integer`); the unbox below still goes through `Number`. A value-class
-        // parameter arrives as that class's box. The unbox adapter names the box; the carrier's
-        // wrapper (`Integer`) is a different class and would reject a real key.
-        let concrete = adapter
-            .and_then(|plan| plan.parameter(barrier.parameter))
-            .map(|value_class| value_class.owner.render())
-            .unwrap_or_else(|| {
-                barrier_instanceof_name(b.concrete_params[barrier.parameter], cp[barrier.parameter])
-            });
-        let concrete_class = cw.class_ref(&concrete);
-        code.instance_of(concrete_class);
-        code.ifne(dispatch);
-        emit_barrier_outcome(barrier.outcome, cw, &mut code);
-        let mut locals = vec![VerifType::ObjectName(c.fq_name())];
-        locals.extend(ep.iter().map(|ty| verif_for_jvm_free(cw, *ty)));
-        code.bind(dispatch);
+        // The erased parameters' classes enter the pool here, as kotlinc's frames intern them.
+        for ty in &ep {
+            verif_for_jvm_free(cw, *ty);
+        }
     }
     if packs_arguments {
         super::function_reference_invoke::check_argument_count(cw, &mut code, cp.len());

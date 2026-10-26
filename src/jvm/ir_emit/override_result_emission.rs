@@ -12,7 +12,7 @@ use super::scalar_coercion::{box_prim_free, unbox_prim_from};
 use super::signature_formatter::JvmSignatureFormatter;
 use super::{
     discard, ir_method_desc, ir_ty_to_jvm, jvm_declared_ty, jvm_is_erased_top, method_descriptor,
-    method_signature, type_descriptor, CodeBuilder, Emitter,
+    method_signature, type_descriptor, CodeBuilder, EmitEnv, Emitter,
 };
 use crate::ir::{ExprId, IrExpr, IrFile, IrTypeOp};
 use crate::jvm::collection_override_signatures::OverrideSignature;
@@ -22,20 +22,31 @@ use crate::jvm::read_only_collection_stubs::star_projected;
 use crate::types::Ty;
 
 const NOT_NULL: &str = "Lorg/jetbrains/annotations/NotNull;";
+const NULLABLE: &str = "Lorg/jetbrains/annotations/Nullable;";
 
 /// The declaration annotation for a result after the boxed-override representation is selected.
 ///
 /// Common IR keeps the non-null primitive Kotlin result, which ordinarily has no JVM nullability
 /// annotation. When [`OverrideResults`] gives that declaration a wrapper result, the wrapper is a
 /// non-null reference at the class-file boundary and kotlinc publishes `@NotNull` on it.
+///
+/// A parameter that a collection method-entry guard covers accepts `null` at the class-file
+/// boundary (the guard answers it with the neutral result), so kotlinc publishes `@Nullable` on it.
 pub(super) fn declared_nullability(
     ir: &IrFile,
-    override_results: &OverrideResults,
+    env: &EmitEnv<'_>,
     function: u32,
 ) -> super::declared_nullability::DeclaredNullability {
     let mut declared = super::declared_nullability::declared_nullability(ir, function);
-    if override_results.boxes(function) {
+    if env.override_results.boxes(function) {
         declared.result = Some(NOT_NULL);
+    }
+    if let Some(plan) = env.collection_method_entry_barriers.plan(function) {
+        for checked in &plan.parameters {
+            if let Some(annotation) = declared.parameters.get_mut(checked.parameter) {
+                *annotation = Some(NULLABLE);
+            }
+        }
     }
     declared
 }

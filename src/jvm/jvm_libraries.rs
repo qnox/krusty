@@ -4575,28 +4575,25 @@ fn collection_barrier_role(
     owner: TypeName,
     source_name: &str,
     descriptor: &str,
-) -> Option<crate::libraries::CollectionBarrierOutcome> {
+) -> Option<crate::libraries::CollectionBarrier> {
+    use super::mapped_builtin_declarations::CollectionBridgeFailure as Failure;
+    use crate::libraries::CollectionBarrierOutcome as Outcome;
     let policy = classpath.collection_bridge_policy_name(
         owner,
         source_name,
         descriptor,
         super::mapped_builtin_declarations::MappedBuiltinMemberKind::Function,
     )?;
-    if policy.checked_parameters != [0] {
-        return None;
-    }
-    match policy.failure {
-        super::mapped_builtin_declarations::CollectionBridgeFailure::False => {
-            Some(crate::libraries::CollectionBarrierOutcome::False)
-        }
-        super::mapped_builtin_declarations::CollectionBridgeFailure::Null => {
-            Some(crate::libraries::CollectionBarrierOutcome::Null)
-        }
-        super::mapped_builtin_declarations::CollectionBridgeFailure::NotFound => {
-            Some(crate::libraries::CollectionBarrierOutcome::NotFound)
-        }
-        super::mapped_builtin_declarations::CollectionBridgeFailure::Argument(_) => None,
-    }
+    let outcome = match policy.failure {
+        Failure::False => Outcome::False,
+        Failure::Null => Outcome::Null,
+        Failure::NotFound => Outcome::NotFound,
+        Failure::Argument(_) => return None,
+    };
+    Some(crate::libraries::CollectionBarrier {
+        checked_parameters: policy.checked_parameters,
+        outcome,
+    })
 }
 
 impl crate::libraries::SemanticPlatform for JvmLibraries {
@@ -5105,12 +5102,11 @@ impl JvmLibraries {
 #[cfg(test)]
 mod tests {
     use super::{
-        collection_barrier_role, desc_to_ty, java_method_has_operator_convention,
-        java_type_nullability, overlay_metadata_collection_names, parse_class_gsig,
-        parse_concrete_field_gsig, parse_field_gsig, parse_formals, parse_method_desc,
-        parse_method_gsig, suspend_return_from_gsig,
+        desc_to_ty, java_method_has_operator_convention, java_type_nullability,
+        overlay_metadata_collection_names, parse_class_gsig, parse_concrete_field_gsig,
+        parse_field_gsig, parse_formals, parse_method_desc, parse_method_gsig,
+        suspend_return_from_gsig,
     };
-    use crate::libraries::CollectionBarrierOutcome;
     use crate::libraries::{GenericReturnPolicy, SemanticPlatform};
     use crate::symbol_source::SymbolNamespace;
     use crate::types::type_name;
@@ -5159,42 +5155,6 @@ mod tests {
                     && function.callable.params.len() == 1
             });
         assert!(operator_get, "realized charAt must be operator get");
-    }
-
-    #[test]
-    fn decoded_collection_barrier_role_is_declaration_exact() {
-        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
-            return;
-        };
-        let classpath = crate::jvm::classpath::Classpath::new(vec![stdlib]);
-        assert_eq!(
-            collection_barrier_role(
-                &classpath,
-                type_name("kotlin/collections/MutableCollection"),
-                "remove",
-                "(Ljava/lang/Object;)Z",
-            ),
-            Some(CollectionBarrierOutcome::False)
-        );
-        assert_eq!(
-            collection_barrier_role(
-                &classpath,
-                type_name("kotlin/collections/MutableCollection"),
-                "add",
-                "(Ljava/lang/Object;)Z",
-            ),
-            None,
-            "a same-signature ordinary collection member must keep its parameter assertion"
-        );
-        assert_eq!(
-            collection_barrier_role(
-                &classpath,
-                type_name("example/MutableCollection"),
-                "remove",
-                "(Ljava/lang/Object;)Z",
-            ),
-            None
-        );
     }
 
     #[test]

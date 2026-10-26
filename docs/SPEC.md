@@ -13653,10 +13653,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   keeps its own generic signature, and its final special bridge does the type check, as before.
   The checked parameters come from the overridden declaration's type-safe policy in
   `mapped_builtin_declarations`, found through the override edges like the signature policies
-  above. kotlinc's special bridge for a narrower `MutableMap.remove(key, value)` checks both
-  parameters; krusty's barrier checks one, so that override still gets a plain bridge, which
-  follows later. Tests: `tests/collection_type_safe_members_e2e.rs` (member bytes and a
-  reflective box run against kotlinc).
+  above. Tests: `tests/collection_type_safe_members_e2e.rs` (member bytes and a reflective box run
+  against kotlinc).
+- **A type-safe collection guard checks every checked parameter.** The provider's barrier role
+  (`CollectionBarrier`) carries every parameter the declaration's type-safe policy checks, with
+  the neutral result, so `MutableMap.remove(key, value)` checks both. A special bridge, which
+  exists once any checked parameter is narrower than `Object`, tests each of them in order
+  against the override's type (`p is T`), returning the neutral result on the first failure:
+  `instanceof` for a narrower class (`String`, `Integer` for `Int`), behind kotlinc's
+  `dup; ifnonnull; pop; iconst_1; goto` shortcut when the type admits `null` (`String?`,
+  `V : CharSequence?`); for a type that erases to `Object`, `ifnonnull` that skips the neutral
+  return when the type excludes `null` (`Any`, `V : Any`), and kotlinc's `ifnonnull` to the next
+  instruction when it admits `null` (`V`). An override that keeps the erased descriptor gets no
+  bridge; its entry instead returns the neutral result for a `null` in each checked parameter
+  whose type excludes `null` (`remove(key: Any, value: Any)`, `contains(element: T)` with
+  `T : Any`), skips those parameters' `checkNotNullParameter`, and annotates them `@Nullable`, as
+  they accept `null` at the class-file boundary. Single-parameter guards follow
+  the same rules, so a nullable narrower parameter now takes kotlinc's shortcut form. Tests:
+  `tests/collection_type_safe_members_e2e.rs` (member bytes and a box run through `Map.remove`
+  against kotlinc), `collection_barriers` unit tests.
 - **A nested value class over a reference carrier is read as its carrier.** In `ZN(val z: Z1?)`
   with `Z1(val x: En)`, `Z1?` is carried as `En?`, so `zn.z` and `zn.z!!` already are `Z1`'s
   carrier and `.x` of them is that carrier itself, with no cast. krusty took the unboxed property

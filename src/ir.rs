@@ -116,7 +116,7 @@ pub(crate) use bottom_values::complete_bottom_value;
 pub use bottom_values::IrBottomValueCompletion;
 pub use bridges::{
     Bridge, BridgeAccessorRole, BridgeKind, BridgeParameter, BridgePropertyImplementation,
-    CollectionBarrierPlan,
+    CollectionBarrierCheck, CollectionBarrierParameter, CollectionBarrierPlan,
 };
 pub use callee::{Callee, IrSuperCallKind, IrVirtualTarget};
 pub use catches::IrCatch;

@@ -1,4 +1,6 @@
 use super::*;
+use crate::jvm::jvm_libraries::collection_barrier_role;
+use crate::libraries::{CollectionBarrier, CollectionBarrierOutcome};
 
 #[test]
 fn mapped_number_members_publish_only_their_kotlin_names() {
@@ -119,4 +121,55 @@ fn mapped_mutable_list_publishes_its_applied_read_only_supertype() {
         actual,
         Ty::obj_args("kotlin/collections/List", &[Ty::String]),
     ));
+}
+
+#[test]
+fn decoded_collection_barrier_role_is_declaration_exact() {
+    let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+        return;
+    };
+    let classpath = crate::jvm::classpath::Classpath::new(vec![stdlib]);
+    assert_eq!(
+        collection_barrier_role(
+            &classpath,
+            type_name("kotlin/collections/MutableCollection"),
+            "remove",
+            "(Ljava/lang/Object;)Z",
+        ),
+        Some(CollectionBarrier {
+            checked_parameters: &[0],
+            outcome: CollectionBarrierOutcome::False
+        })
+    );
+    assert_eq!(
+        collection_barrier_role(
+            &classpath,
+            type_name("kotlin/collections/MutableMap"),
+            "remove",
+            "(Ljava/lang/Object;Ljava/lang/Object;)Z",
+        ),
+        Some(CollectionBarrier {
+            checked_parameters: &[0, 1],
+            outcome: CollectionBarrierOutcome::False
+        })
+    );
+    assert_eq!(
+        collection_barrier_role(
+            &classpath,
+            type_name("kotlin/collections/MutableCollection"),
+            "add",
+            "(Ljava/lang/Object;)Z",
+        ),
+        None,
+        "a same-signature ordinary collection member must keep its parameter assertion"
+    );
+    assert_eq!(
+        collection_barrier_role(
+            &classpath,
+            type_name("example/MutableCollection"),
+            "remove",
+            "(Ljava/lang/Object;)Z",
+        ),
+        None
+    );
 }
