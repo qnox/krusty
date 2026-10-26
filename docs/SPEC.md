@@ -13630,6 +13630,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   krusty described it under the property's unmangled spelling, which names no method, so the
   mangled getter had no tables, in a value class's companion and an ordinary one's. Tests:
   `tests/value_class_companion_property_storage_e2e.rs`.
+- **A reference to a value class's underlying property reads it with `unbox-impl`.** The
+  underlying property is the carrier, so kotlinc's `get` reads it from the box with `unbox-impl`
+  whatever its visibility, and reports the property's own getter (`getX()I`) to reflection. A
+  private one therefore needs no `access$getX$p` bridge. krusty called `getX()` for a public one
+  and gave a private one a bridge. Tests: `tests/value_class_property_reference_e2e.rs`.
 - **An owner reads its explicit backing field, typed as the field.** Inside the class that
   declares `val a: Any field = V(1)`, a read whose receiver's static type is exactly that class is
   kotlinc's `IrGetField` of the field, not a call of `getA()`: `a.x` over a value class
