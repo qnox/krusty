@@ -8,7 +8,7 @@
  "compilations": 58,
  "built": 24,
  "classes": 1110,
- "identical": 221,
+ "identical": 225,
  "rows": [
   {
    "task": ":app:compileDemoDebugAndroidTestKotlin",
@@ -160,7 +160,7 @@
    "fallback": null,
    "error": null,
    "classes": 37,
-   "identical": 27,
+   "identical": 28,
    "only_kotlinc": 1,
    "only_krusty": 0
   },
@@ -589,7 +589,7 @@
    "fallback": null,
    "error": null,
    "classes": 6,
-   "identical": 1,
+   "identical": 2,
    "only_kotlinc": 0,
    "only_krusty": 0
   },
@@ -619,7 +619,7 @@
    "task": ":sync:work:compileDemoDebugAndroidTestKotlin",
    "dir": "sync/work/build/intermediates/built_in_kotlinc/demoDebugAndroidTest/compileDemoDebugAndroidTestKotlin/classes",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'; krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies')",
+   "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers')",
    "error": null,
    "classes": 1,
    "identical": 0,
@@ -633,8 +633,8 @@
    "fallback": null,
    "error": null,
    "classes": 23,
-   "identical": 9,
-   "only_kotlinc": 6,
+   "identical": 11,
+   "only_kotlinc": 2,
    "only_krusty": 1
   },
   {
@@ -742,8 +742,8 @@
   }
  ],
  "measured": {
-  "date": "2026-10-25",
-  "commit": "cf34959a9fd4d1d8b424730bd8775da493e7ea90",
-  "run": "https://github.com/qnox/krusty/actions/runs/40199492852"
+  "date": "2026-10-26",
+  "commit": "ee5b59db59361e88a921a427646286affa142079",
+  "run": "https://github.com/qnox/krusty/actions/runs/40281561250"
  }
 }

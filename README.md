@@ -7,25 +7,26 @@ on master); `projects/` holds each project's latest result and `history.tsv` eve
 
 | Project | Stars | Kotlin LOC | Java LOC | Reference build | Compilations built by krusty | Identical classes | Measured |
 | --- | ---: | ---: | ---: | --- | ---: | ---: | --- |
-| Exposed | 9,301 | 138,105 | 0 | ok | 0 / 43 | 0 / 8,100 (0.0%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
-| koin | 10,022 | 33,677 | 123 | ok | 4 / 19 | 76 / 3,705 (2.1%) | [2026-10-25, krusty e911a36](https://github.com/qnox/krusty/actions/runs/40212685036) |
-| kotlinx.coroutines | 13,824 | 102,096 | 897 | ok | 0 / 34 | 0 / 9,482 (0.0%) | [2026-10-25, krusty b5979a1](https://github.com/qnox/krusty/actions/runs/40201721357) |
-| ktor | 14,554 | 259,026 | 85 | ok | 0 / 220 | 0 / 15,418 (0.0%) | [2026-10-25, krusty e911a36](https://github.com/qnox/krusty/actions/runs/40212685036) |
-| leakcanary | 30,004 | 100,627 | 172 | ok | 6 / 34 | 22 / 1,798 (1.2%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
-| Maestro | 16,208 | 65,644 | 0 | ok | 1 / 19 | 26 / 2,156 (1.2%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
-| mirai | 14,793 | 156,072 | 559 | ok | 0 / 51 | 0 / 2,536 (0.0%) | [2026-10-25, krusty b5979a1](https://github.com/qnox/krusty/actions/runs/40201721357) |
-| moshi | 10,166 | 16,749 | 13,212 | ok | 0 / 12 | 0 / 512 (0.0%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
-| nowinandroid | 21,967 | 26,596 | 0 | ok | 24 / 58 | 221 / 1,110 (19.9%) | [2026-10-25, krusty cf34959](https://github.com/qnox/krusty/actions/runs/40199492852) |
-| okhttp | 47,095 | 126,665 | 3,816 | ok | 9 / 38 | 37 / 1,483 (2.5%) | [2026-10-25, krusty 323386f](https://github.com/qnox/krusty/actions/runs/40208384415) |
-| okio | 9,052 | 46,812 | 2,398 | failed (exit 1) | 0 / 6 | 0 / 343 (0.0%) | [2026-10-25, krusty e911a36](https://github.com/qnox/krusty/actions/runs/40212685036) |
-| quarkdown | 16,323 | 87,771 | 23 | ok | 0 / 37 | 0 / 2,345 (0.0%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
-| Unciv | 11,486 | 139,231 | 1,184 | ok | 0 / 4 | 0 / 3,341 (0.0%) | [2026-10-25, krusty 0e127f3](https://github.com/qnox/krusty/actions/runs/40196119897) |
-| **Measured total** | | | | | **44 / 569** | **382 / 51,986 (0.7%)** | |
+| Exposed | 9,301 | 138,105 | 0 | ok | 0 / 43 | 0 / 8,100 (0.0%) | [2026-10-26, krusty ee5b59d](https://github.com/qnox/krusty/actions/runs/40281561250) |
+| koin | 10,023 | 33,677 | 123 | ok | 4 / 19 | 76 / 3,705 (2.1%) | [2026-10-26, krusty ee5b59d](https://github.com/qnox/krusty/actions/runs/40281561250) |
+| kotlinx.coroutines | 13,823 | 102,096 | 897 | ok | 0 / 34 | 0 / 9,482 (0.0%) | [2026-10-26, krusty ee5b59d](https://github.com/qnox/krusty/actions/runs/40281561250) |
+| ktor | 14,555 | 259,026 | 85 | ok | 0 / 220 | 0 / 15,418 (0.0%) | [2026-10-26, krusty ee5b59d](https://github.com/qnox/krusty/actions/runs/40281561250) |
+| leakcanary | 30,005 | 100,627 | 172 | ok | 6 / 34 | 23 / 1,798 (1.3%) | [2026-10-26, krusty ee5b59d](https://github.com/qnox/krusty/actions/runs/40281561250) |
+| Maestro | 16,217 | 65,644 | 0 | ok | 1 / 19 | 26 / 2,156 (1.2%) | [2026-10-26, krusty ee5b59d](https://github.com/qnox/krusty/actions/runs/40281561250) |
+| mirai | 14,795 | 156,072 | 559 | ok | 0 / 51 | 0 / 2,536 (0.0%) | [2026-10-26, krusty ee5b59d](https://github.com/qnox/krusty/actions/runs/40281561250) |
+| moshi | 10,166 | 16,749 | 13,212 | ok | 0 / 12 | 0 / 512 (0.0%) | [2026-10-26, krusty ee5b59d](https://github.com/qnox/krusty/actions/runs/40281561250) |
+| nowinandroid | 21,969 | 26,596 | 0 | ok | 24 / 58 | 225 / 1,110 (20.3%) | [2026-10-26, krusty ee5b59d](https://github.com/qnox/krusty/actions/runs/40281561250) |
+| okhttp | 47,097 | 126,665 | 3,816 | ok | 9 / 38 | 40 / 1,483 (2.7%) | [2026-10-26, krusty ee5b59d](https://github.com/qnox/krusty/actions/runs/40281561250) |
+| okio | 9,053 | 46,812 | 2,398 | failed (exit 1) | 0 / 6 | 0 / 343 (0.0%) | [2026-10-26, krusty ee5b59d](https://github.com/qnox/krusty/actions/runs/40281561250) |
+| quarkdown | 16,326 | 87,771 | 23 | ok | 5 / 37 | 28 / 2,345 (1.2%) | [2026-10-26, krusty ee5b59d](https://github.com/qnox/krusty/actions/runs/40281561250) |
+| Unciv | 11,488 | 139,231 | 1,184 | ok | 0 / 4 | 0 / 3,341 (0.0%) | [2026-10-26, krusty ee5b59d](https://github.com/qnox/krusty/actions/runs/40281561250) |
+| **Measured total** | | | | | **49 / 569** | **418 / 51,986 (0.8%)** | |
 
 ## Missed compilations
 
 - **Exposed**
-  - 43 × krusty wrote no class
+  - 42 × not run: a task it depends on failed
+  - 1 × exposed-core/src/main/kotlin/org/jetbrains/exposed/v1/core/AbstractQuery.kt:231:43: error: operator cannot be applied to 'Any'
 - **koin**
   - 11 × not run: a task it depends on failed
   - 1 × projects/core/koin-core-coroutines/src/commonMain/kotlin/org/koin/core/KoinWaitExt.kt:17:7: error: @file:JvmMultifileClass is not supported for JVM compilation yet; its part classes and delegating facade require distinct physical owners
@@ -38,12 +39,12 @@ on master); `projects/` holds each project's latest result and `history.tsv` eve
 - **ktor**
   - 220 × left to kotlinc: argument -Xreport-all-warnings, argument -Xrender-internal-diagnostic-names
 - **leakcanary**
-  - 24 × krusty wrote no class
+  - 24 × not run: a task it depends on failed
   - 2 × left to kotlinc: krusty does not implement everything it requests (freeCompilerArg '-P' conflicts with compiler plugin configuration; configure the structured Gradle input instead)
   - 1 × leakcanary/leakcanary-deobfuscation-gradle-plugin/src/main/java/com/squareup/leakcanary/deobfuscation/LeakCanaryLeakDeobfuscationPlugin.kt:50:57: error: argument type mismatch: actual type is 'Any', but 'Variant' was expected.
   - 1 × shark/shark-hprof/src/main/java/shark/HprofDeobfuscator.kt:1:1: error: internal error: checked FIR construction failed: Check(BodyCheckFailure { span: Some(Span { lo: 4167, hi: 4254 }), kind: UnpublishableType(Error) })
 - **Maestro**
-  - 14 × krusty wrote no class
+  - 14 × not run: a task it depends on failed
   - 1 × maestro-ai/src/main/java/maestro/ai/cloud/ApiClient.kt:1:1: error: krusty: this construct is not yet supported by the IR backend
   - 1 × maestro-ios-driver/src/main/kotlin/util/LocalSimulatorUtils.kt:239:50: error: unresolved reference 'Path'.
   - 1 × maestro-utils/src/test/kotlin/MaestroTimerTest.kt:19:9: error: unresolved reference 'assertEquals'.
@@ -51,15 +52,14 @@ on master); `projects/` holds each project's latest result and `history.tsv` eve
 - **mirai**
   - 51 × not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected
 - **moshi**
-  - 11 × krusty wrote no class
+  - 11 × not run: a task it depends on failed
   - 1 × moshi/src/main/java/com/squareup/moshi/-JsonValueReader.kt:348:31: error: return type mismatch: expected 'Void?', actual 'Nothing?'.
 - **nowinandroid**
   - 21 × left to kotlinc: compiler plugin androidx.compose.compiler.plugins.kotlin, argument -Xallow-unstable-dependencies
   - 9 × left to kotlinc: compiler plugin androidx.compose.compiler.plugins.kotlin, argument -Xuse-inline-scopes-numbers, argument -Xallow-unstable-dependencies
+  - 2 × left to kotlinc: argument -Xuse-inline-scopes-numbers
   - 1 × core/data/src/test/kotlin/com/google/samples/apps/nowinandroid/core/data/repository/OfflineFirstNewsRepositoryTest.kt:323:18: error: overload resolution ambiguity
-  - 1 × left to kotlinc: argument -Xuse-inline-scopes-numbers
   - 1 × core/datastore/src/test/kotlin/com/google/samples/apps/nowinandroid/core/datastore/IntToStringIdsMigrationTest.kt:1:1: error: internal error: module signatures were not finalized and no source diagnostic explains it
-  - 1 × left to kotlinc: argument -Xuse-inline-scopes-numbers, argument -Xallow-unstable-dependencies
 - **okhttp**
   - 24 × not run: a task it depends on failed
   - 2 × left to kotlinc: compiler plugin burst-kotlin-plugin
@@ -72,9 +72,12 @@ on master); `projects/` holds each project's latest result and `history.tsv` eve
   - 1 × krusty: error: -Xjdk-release=8 compiles against the JDK 8 API from ct.sym, which krusty does not implement; the selected JDK is 21
   - 1 × not run: a task it depends on failed
 - **quarkdown**
-  - 37 × krusty wrote no class
+  - 29 × not run: a task it depends on failed
+  - 1 × quarkdown-core/src/commonMain/kotlin/com/quarkdown/core/ast/base/inline/ReferenceFootnote.kt:46:68: error: argument type mismatch: actual type is 'List<Any>', but 'List<Node>' was expected.
+  - 1 × quarkdown-native-library-processor/src/main/kotlin/com/quarkdown/processor/discovery/AnnotationExtractor.kt:38:16: error: argument type mismatch: actual type is 'String?', but 'String' was expected.
+  - 1 × quarkdown-template/src/main/kotlin/com/quarkdown/template/TemplateProcessor.kt:1:1: error: internal error: module signatures were not finalized and no source diagnostic explains it
 - **Unciv**
-  - 4 × krusty wrote no class
+  - 4 × left to kotlinc: compiler plugin purityPlugin
 
 ## Gradle plugins
 
@@ -141,5 +144,4 @@ on master); `projects/` holds each project's latest result and `history.tsv` eve
 
 | Plugin | Projects | Modules |
 | --- | ---: | ---: |
-| `-P plugin:androidx.compose.compiler.plugins.kotlin` | 1 | 4 |
-| `-P` | 1 | 1 |
+| `-P plugin:androidx.compose.compiler.plugins.kotlin` | 2 | 5 |

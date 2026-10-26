@@ -14,8 +14,8 @@
    "task": ":core:compileKotlin",
    "dir": "core/build/classes/kotlin/main",
    "built": false,
-   "fallback": null,
-   "error": "krusty wrote no class",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/io.github.yairm210/purity-compiler-plugin/1.10.4/ec26e163200d3dc43c6e6ec5089cc060638098a2/purity-compiler-plugin-1.10.4.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'purityPlugin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "error": null,
    "classes": 3060,
    "identical": 0,
    "only_kotlinc": null,
@@ -25,8 +25,8 @@
    "task": ":desktop:compileKotlin",
    "dir": "desktop/build/classes/kotlin/main",
    "built": false,
-   "fallback": null,
-   "error": "krusty wrote no class",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/io.github.yairm210/purity-compiler-plugin/1.10.4/ec26e163200d3dc43c6e6ec5089cc060638098a2/purity-compiler-plugin-1.10.4.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'purityPlugin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "error": null,
    "classes": 44,
    "identical": 0,
    "only_kotlinc": null,
@@ -36,8 +36,8 @@
    "task": ":server:compileKotlin",
    "dir": "server/build/classes/kotlin/main",
    "built": false,
-   "fallback": null,
-   "error": "krusty wrote no class",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/io.github.yairm210/purity-compiler-plugin/1.10.4/ec26e163200d3dc43c6e6ec5089cc060638098a2/purity-compiler-plugin-1.10.4.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'purityPlugin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "error": null,
    "classes": 42,
    "identical": 0,
    "only_kotlinc": null,
@@ -47,8 +47,8 @@
    "task": ":tests:compileTestKotlin",
    "dir": "tests/build/classes/kotlin/test",
    "built": false,
-   "fallback": null,
-   "error": "krusty wrote no class",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/io.github.yairm210/purity-compiler-plugin/1.10.4/ec26e163200d3dc43c6e6ec5089cc060638098a2/purity-compiler-plugin-1.10.4.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'purityPlugin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+   "error": null,
    "classes": 195,
    "identical": 0,
    "only_kotlinc": null,
@@ -88,8 +88,8 @@
   }
  ],
  "measured": {
-  "date": "2026-10-25",
-  "commit": "0e127f350d9a74cd4fb5fb36d85f789e65bf8841",
-  "run": "https://github.com/qnox/krusty/actions/runs/40196119897"
+  "date": "2026-10-26",
+  "commit": "ee5b59db59361e88a921a427646286affa142079",
+  "run": "https://github.com/qnox/krusty/actions/runs/40281561250"
  }
 }

@@ -143,7 +143,7 @@ compiler	:shark:shark-test	kotlin-scripting-compiler-embeddable-2.4.10.jar
 compiler	:shark:shark-test	kotlin-scripting-compiler-impl-embeddable-2.4.10.jar
 compiler	:shark:shark-test	kotlin-scripting-jvm-2.4.10.jar
 compiler	:shark:shark-test	kotlin-stdlib-2.4.10.jar
-compiler-arg	:shark:shark-dive:shark-dive-app	-P
+compiler-arg	:shark:shark-dive:shark-dive-app	-P plugin:androidx.compose.compiler.plugins.kotlin
 gradle	:	Build_gradle$DokkaGfmPlugin
 gradle	:	org.gradle.build-init
 gradle	:	org.gradle.help-tasks
