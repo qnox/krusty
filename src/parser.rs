@@ -1747,18 +1747,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Whether the expression tree at `e` reads the property backing field — a bare `field`
-    /// identifier. Used to detect that a custom getter (`get() = field + …`) has a backing field.
-    fn expr_reads_field(&self, e: ExprId) -> bool {
-        if let Expr::Name(n) = self.file.expr(e) {
-            if n == "field" {
-                return true;
-            }
-        }
-        self.file
-            .any_child_expr(e, &mut |c| self.expr_reads_field(c), &mut |_| false)
-    }
-
     /// Consume an accessor's `()`. Returns `Some(())` on success. `require` controls whether a
     /// missing `(` is an error (getter) — setters route through `parse_setter_param` instead.
     fn eat_accessor_parens(&mut self, require: bool) -> Option<()> {
@@ -1970,6 +1958,9 @@ impl<'a> Parser<'a> {
         };
         let id = self.file.add_decl(Decl::Class(declaration));
         self.file.decls.insert(nested_start, id);
+        self.file
+            .hoisted_classifier_source_names
+            .insert(id, simple_name);
         self.file.adopt_hoisted_classifiers(id, nested_start + 1);
         declaration_modifiers::record_nested_actual(&mut self.file, modifiers, id);
         debug_assert!(self.lexical_type_parameters.names().is_empty());
@@ -2102,31 +2093,13 @@ impl<'a> Parser<'a> {
                     let entry_name = self.text().to_string();
                     self.bump();
                     // Optional constructor arguments: `RED(0xFF0000)`, incl. named `RED(rgb = 0xFF0000)`.
-                    let mut args = Vec::new();
-                    let mut arg_names: Vec<Option<String>> = Vec::new();
-                    if self.eat(TokenKind::LParen) {
-                        self.skip_newlines();
-                        while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
-                            // A named argument `name = value` — the identifier is followed by `=` (but not
-                            // `==`). Capture the name so the lowering can reorder to constructor order.
-                            let named = self.at_named_arg();
-                            if named {
-                                arg_names.push(Some(self.text().to_string()));
-                                self.bump(); // name
-                                self.bump(); // '='
-                                self.skip_newlines();
-                            } else {
-                                arg_names.push(None);
-                            }
-                            args.push(self.parse_expr());
-                            self.skip_newlines();
-                            if !self.eat(TokenKind::Comma) {
-                                break;
-                            }
-                            self.skip_newlines();
-                        }
+                    let (args, arg_names) = if self.eat(TokenKind::LParen) {
+                        let (args, names, _) = self.parse_call_argument_list();
                         self.expect(TokenKind::RParen, "')'");
-                    }
+                        (args, names)
+                    } else {
+                        (Vec::new(), Vec::new())
+                    };
                     // A per-entry class body (`RED { override fun m() = … }`) is an anonymous subclass.
                     // Capture its method overrides and `val`/`var` properties; anything else bails cleanly.
                     let mut body = Vec::new();
@@ -2551,8 +2524,15 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse a value-argument list after its opening parenthesis.
+    /// Parse a value-argument list after its opening parenthesis, up to its closing one. Line breaks
+    /// inside it are whitespace, as in every parenthesized construct.
     fn parse_call_argument_list(
+        &mut self,
+    ) -> (Vec<ExprId>, Vec<Option<String>>, Vec<Option<Span>>) {
+        self.with_newlines_insignificant(Self::parse_call_argument_items)
+    }
+
+    fn parse_call_argument_items(
         &mut self,
     ) -> (Vec<ExprId>, Vec<Option<String>>, Vec<Option<Span>>) {
         // A delegation guard applies to the delegate expression's OUTER postfix chain only. Calls
@@ -3247,32 +3227,7 @@ impl<'a> Parser<'a> {
                 if self.eat(TokenKind::LParen) {
                     // constructor call → base class. Arguments may be NAMED (`Base(name = …, addr = …)`);
                     // the per-arg name is recorded so the checker/lowerer reorder to the base ctor order.
-                    self.skip_newlines();
-                    let mut args = Vec::new();
-                    let mut arg_names: Vec<Option<String>> = Vec::new();
-                    while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
-                        let named = self.at_named_arg();
-                        if named {
-                            arg_names.push(Some(self.text().to_string()));
-                            self.bump(); // name
-                            self.bump(); // '='
-                            self.skip_newlines();
-                        } else {
-                            arg_names.push(None);
-                        }
-                        // Spread `*expr` — an array spread into the base ctor's `vararg` parameter.
-                        let spread = self.eat(TokenKind::Star);
-                        let arg = self.parse_expr();
-                        if spread {
-                            self.file.spread_arg_ids.insert(arg.0);
-                        }
-                        args.push(arg);
-                        self.skip_newlines();
-                        if !self.eat(TokenKind::Comma) {
-                            break;
-                        }
-                        self.skip_newlines();
-                    }
+                    let (args, arg_names, _) = self.parse_call_argument_list();
                     self.expect(TokenKind::RParen, "')'");
                     let mut reference = simple_type_ref(&name, sup_span);
                     reference.targs = targs.clone();
@@ -6321,6 +6276,12 @@ typealias Box<@Marker T> = List<T>
             _ => unreachable!("companion edge must target a class"),
         };
         assert_eq!(companion.name, "Game.Companion");
+        assert_eq!(
+            file.hoisted_classifier_source_names
+                .get(&g.companion.unwrap())
+                .map(String::as_str),
+            Some("Companion")
+        );
         assert!(companion.is_singleton());
         assert!(companion.methods.iter().any(|method| method.name == "foo"));
         assert!(companion

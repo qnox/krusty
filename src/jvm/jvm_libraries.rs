@@ -2405,6 +2405,9 @@ impl JvmLibraries {
             let own_type_parameter_count = application_header.own_count;
             let type_parameters = application_header.parameters;
             Some(LibraryType {
+                declaration_name: (ci.this_class == internal_name)
+                    .then(|| classifier_facts::classifier_declaration_name(&ci))
+                    .flatten(),
                 is_kotlin: has_kotlin_metadata,
                 is_data: ci.meta.is_data,
                 access: if let Some(visibility) = ci.meta.class_visibility {

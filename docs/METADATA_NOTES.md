@@ -1,10 +1,41 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## JVM member-class rows
+
+The JVM attribute writer now consumes retained non-local ownership and exact declaration segments
+for member rows, including names with literal dollars. The cross-file module resolver preserves
+the current declaration's precedence over classpath rows. Local and anonymous implementation rows
+retain their existing provenance. This changes no Kotlin metadata class-ID encoding; aliases and
+builtin ownership evidence belong to the remaining metadata handoff.
+
+## Declaration-name evidence
+
+Kotlin metadata class IDs delimit the package with `/` and lexical classifier ownership with `.`;
+`$` within either segment is literal content. Normalization retains that exact declaration segment
+and package or classifier parent in the common classifier shape. Source headers and structural
+classfile self entries publish the equivalent fact, independently of outer-instance capture.
+Resolved source headers, common IR and backend snapshots retain it without consulting global
+interned-name nesting. Missing evidence remains unknown. This phase changes no metadata encoding;
+the emission consumers will adopt the fact in a separate follow-up.
+
+For JVM dependencies, retain ownership from raw `Class.fq_name`, before flattening package and
+classifier delimiters for rendering. `StringTableTypes.local_name` indices exclude local class IDs
+independently of visibility, including public members of local classes. Actual resolved metadata
+annotation presence chooses Kotlin authority even when the decoded declaration inventory is empty;
+the inventory's inferred `is_present()` query cannot establish annotation absence.
+
 JVM generic result consumption joins the retained declaration-result coercion with its physical
 producer after erasure. Null assertions preserve that producer's slot, and value-class lowering
 uses the same marked edge to distinguish declaration carriers from generic boxes. The extra
 nullable-to-nonnull coercion retains that declaration boundary. Source metadata types continue
 to describe the selected declaration independently of this JVM representation decision.
+
+## Serialization constructor handoff
+
+The serialization constructor's `named_params` retain nullable reference elements and the nullable
+serialization marker independently of the erased constructor parameter vector. The handoff test
+checks both exact vectors; the generated owner is also compared byte-for-byte with the matching
+official serialization plugin. This updates test coverage without changing metadata encoding.
 
 ## Anonymous superclass argument bindings
 
@@ -21,10 +52,30 @@ semantic layout when applicable; Java class signatures supply the remaining decl
 class formals come from non-static `InnerClasses` outer edges, with bound hydration before own-first
 capture/shadow renaming. Local or anonymous entries without an outer are not member capture edges.
 
+Inferred exposed anonymous results are approximated before their declaration signatures enter
+metadata. Their authenticated own/captured application supplies the declared parent and bounds;
+ordinary written stars retain their declaration meaning. Function parents keep the complete
+semantic function shape. Private factory and lambda implementation signatures remain exact rather
+than being rewritten to match the exposed declaration's denotable result.
+The retained body view removes solver-local callee parameters through the same lexical formal set;
+ordinary result denotability does not introduce a separate checking context.
+Parent templates are the same alias-expanded compact facts later published in classifier headers;
+metadata and anonymous exposure do not reconstruct arguments from transitional collector shapes.
+
+Complete anonymous-class metadata parity remains tracked by #2653 (own versus lexical-capture
+applications) and #2654 (package-local classifier facts and raw payloads). Their unchanged complete
+fixture oracles remain attached to those issues; ABI publication checks do not establish metadata
+payload parity.
+
 Layout reads use class headers and builtin declaration tables, not the enclosing `LibraryType` or
 its members. Physical mapped Java requests keep invariant formals independently of a Kotlin view's
 declared variance. This changes no metadata wire fields or physical descriptors. Missing lexical
 formal scopes, including unavailable enclosing-method evidence, do not license placeholder bounds.
+
+Field and property-accessor JVM `Signature` attributes consume the retained semantic formal identity
+even when its declaration belongs to an enclosing method. Nullable and bounded formals keep that
+identity through the common formatter; class-owned formals and concrete declarations use the same
+type-use boundary. Class formal declarations and Kotlin metadata applications retain their own layout.
 
 Wasm's erased-reference binary equality realization uses the already checked operator and the
 runtime GC representation. It changes no metadata, callable identity, or provider authorization;
@@ -254,10 +305,11 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   (f100) interns its `d2` strings BEFORE the annotations, while the annotation field serializes first
   (ascending field number). An annotated `suspend fun f(a: Int)` therefore lands
   `…, "a", "(ILkotlin/coroutines/Continuation;)Ljava/lang/Object;", "Lp/Mark;"` in `d2`.
-- The PRIMARY constructor's flags word is the one case where `| HAS_ANNOTATIONS` is not enough.
-  `Constructor.flags` has proto default 6 (visibility PUBLIC) and is omitted at that value, so krusty
-  carries a public primary ctor as 0; the bit forces the field out, and the default has to be
-  materialized on the way (0 → 6 → 7). `class C @Mark constructor(val x: Int)` in kotlinc 2.4.10:
+- The PRIMARY constructor's flags word is written whenever it differs from the proto default 6
+  (visibility PUBLIC). krusty carries the real word (6 for a public primary ctor) and omits it only
+  at 6, so the bit takes a public ctor to an explicit 7, and an `internal constructor`, whose
+  visibility bits are 0, is written as an explicit 0 (1 with annotations), as kotlinc writes it.
+  `class C @Mark constructor(val x: Int)` in kotlinc 2.4.10:
   `08 07 | 12 06 …value parameter… | 1a 02 08 06 (Constructor.annotation, d2[6] = "Lp/Mark;") |
   a2 06 04 …constructorSignature…`, with `Lp/Mark;` interned between `"(I)V"` and `"getX"`. A
   secondary ctor never hits this — its 22 is already explicit, so 22 → 23 is a plain OR.
@@ -1101,11 +1153,48 @@ unapplied outer does not acquire invented type arguments.
 The same complete result reaches inferred function signatures and rejected-call recovery. This
 changes no metadata schema, physical constructor descriptor or enclosing-instance ABI.
 
+Receiver-bound aliases carry the already-selected alias expansion and its declaration signature on
+the constructor candidate. Alias formal order governs written type arguments independently of the
+target classifier's own-plus-captured layout. Inferred return publication uses the selected named
+argument mapping and preserves the alias abbreviation. Independent underlying constructor formals
+retain their semantic identities and declaration-specialized owner signature for diagnostics; they
+are not added to the alias's inference variables. No metadata schema or physical descriptor changes.
+Receiver-call inventories retain classifier and callable facets from the same declaration read;
+object-import singleton projection preserves those classifier and alias facts as well.
+Alias applicability substitutions do not replace the target constructor's original declaration
+parameters: generic value-class slots remain boxed, while concrete slots retain their carriers.
+
+Selected alias constructor references keep the constructor's original declaration parameters apart
+from the synthetic extension lookup receiver. Projection of that facet removes only its known
+receiver slot; physical descriptor/carrier evidence and stable constructor identity remain intact.
+Inferred source-call results retain receiver projections through declaration-signature publication
+using the common output-position specialization. This changes no Kotlin metadata wire schema.
+
 Selected member records also retain pre-substitution declaration parameters in full source order
 (contexts, extension receiver, values). Metadata function normalization publishes this fact before
 specialization; callable/member projection and constructor publication carry it without recovering
 it from the specialized signature. Constructor outer-instance and default-marker slots remain
 physical inputs. This is an in-memory declaration fact, with no Kotlin metadata wire change.
+
+Failed constructor argument recovery consumes those same normalized declaration signatures and
+receiver bindings. It does not infer function shape from classifier spelling or recover declarations
+from rendered diagnostic text. Nominal function classifiers normalize through provider evidence;
+vararg elements and anonymous receiver parameters retain their declared semantic slots. Alias
+candidate diagnostics keep the unspecialized declaration signature while input recovery retains
+independent substitutions. No wire model or constructor ABI changes are required by #2587.
+
+Receiver admission distinguishes active call-owned inference variables from rigid declaration
+parameters. A satisfiable trial specializes both receiver sides before strict comparison without
+publishing new declaration facts. Alias expansion, selected constructor identity and retained
+declaration parameters remain unchanged; no metadata wire or physical ABI change is involved.
+
+## Projected receiver input diagnostics
+
+Projected receiver input restrictions are compiler-internal facts from the shared position-aware
+specialization walk. They change no metadata type, physical descriptor or provider identity.
+Receiver constraints remain distinct from expected-result constraints, and nested projections
+retain their original declaration shape; the direct-input diagnostic does not invent a captured
+classifier or globally rewrite stars.
 
 ## Annotation classifier nesting
 

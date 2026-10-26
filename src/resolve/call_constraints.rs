@@ -12,6 +12,20 @@ pub(super) struct CallConstraints<'a> {
 }
 
 impl CallConstraints<'_> {
+    /// Receiver evidence is independent of contextual result constraints. Only this evidence can
+    /// establish that a projection on the receiver closes a source input.
+    pub(super) fn receiver_bindings(
+        self,
+        source: &dyn crate::symbol_source::SymbolSource,
+        signature: &crate::libraries::GenericSig,
+    ) -> crate::symbol_resolver::GSigBinds {
+        Self {
+            expected: None,
+            ..self
+        }
+        .bindings(source, signature)
+    }
+
     pub(super) fn bindings(
         self,
         source: &dyn crate::symbol_source::SymbolSource,
@@ -42,5 +56,47 @@ impl CallConstraints<'_> {
             }
         }
         bindings
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Source;
+
+    impl crate::symbol_source::SymbolSource for Source {
+        fn classifier(&self, _: TypeName) -> Option<std::sync::Arc<crate::libraries::LibraryType>> {
+            None
+        }
+    }
+
+    #[test]
+    fn expected_result_projections_do_not_become_receiver_capture_evidence() {
+        let parameter = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let receiver = Ty::obj("example/Bucket");
+        let signature = crate::libraries::GenericSig {
+            formals: vec!["T".to_string()],
+            formal_bounds: vec![vec![Ty::nullable(Ty::obj("kotlin/Any"))]],
+            receiver: Some(receiver),
+            params: vec![parameter],
+            ret: Ty::obj_args("example/Result", &[parameter]),
+            return_policy: crate::libraries::GenericReturnPolicy::Exact,
+        };
+        let constraints = CallConstraints {
+            type_args: &[],
+            receiver,
+            expected: Some(Ty::obj_args(
+                "example/Result",
+                &[Ty::out_projection(Ty::Int)],
+            )),
+        };
+        assert_eq!(
+            constraints.bindings(&Source, &signature).get("T"),
+            Some(&Ty::out_projection(Ty::Int))
+        );
+        assert!(constraints
+            .receiver_bindings(&Source, &signature)
+            .is_empty());
     }
 }

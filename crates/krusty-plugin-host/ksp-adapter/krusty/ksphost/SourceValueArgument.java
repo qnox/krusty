@@ -46,7 +46,15 @@ final class SourceValueArgument implements KSValueArgument {
 
     @Override
     public Origin getOrigin() {
-        return written ? Origin.KOTLIN : Origin.SYNTHETIC;
+        // A written argument shares a library annotation's origin.
+        if (!written) {
+            return Origin.SYNTHETIC;
+        }
+        Origin origin = annotation.getOrigin();
+        if (origin == Origin.JAVA || origin == Origin.JAVA_LIB || origin == Origin.KOTLIN_LIB) {
+            return origin;
+        }
+        return Origin.KOTLIN;
     }
 
     @Override

@@ -70,6 +70,7 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::ProgressionStep
         | CompilerIntrinsic::ProgressionReversed
         | CompilerIntrinsic::WithIndex
+        | CompilerIntrinsic::Indices(_)
         | CompilerIntrinsic::UnsignedCompare { .. }
         | CompilerIntrinsic::UnsignedDivide { .. }
         | CompilerIntrinsic::UnsignedRemainder { .. }

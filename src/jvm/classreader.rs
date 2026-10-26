@@ -13,6 +13,9 @@ use crate::libraries::AnnotationElementDefault;
 use crate::types::{TypeName, TypeNameList};
 
 mod member_nullability_attributes;
+mod method_annotations;
+
+pub use method_annotations::{method_annotations, MethodAnnotations};
 
 pub use super::JavaNullability;
 use member_nullability_attributes::{
@@ -60,7 +63,25 @@ pub struct MethodSig {
     pub annotations: Box<[crate::types::TypeName]>,
 }
 
+/// The declaration visibility JVM access flags state. No access flag is Java's package-private.
+pub(crate) fn visibility_of_access(access: u16) -> crate::types::Visibility {
+    use crate::types::Visibility;
+    if access & ACC_PUBLIC != 0 {
+        Visibility::Public
+    } else if access & ACC_PROTECTED != 0 {
+        Visibility::Protected
+    } else if access & ACC_PRIVATE != 0 {
+        Visibility::Private
+    } else {
+        Visibility::PackagePrivate
+    }
+}
+
 impl MethodSig {
+    /// The method's declaration visibility, from its access flags.
+    pub(crate) fn visibility(&self) -> crate::types::Visibility {
+        visibility_of_access(self.access)
+    }
     pub fn is_public(&self) -> bool {
         self.access & ACC_PUBLIC != 0
     }

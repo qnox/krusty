@@ -10,10 +10,12 @@
 //! `open`), `infix`, and `operator` together with `override`.
 
 use krusty_plugin_ir::{
-    KspAccessor, KspDeclaration, KspDeclarationOrigin, KspFunction, KspFunctionKind, KspMember,
-    KspModifier, KspOrigin, KspParameter, KspProperty, KspType, KspTypeArgument, KspTypeSlot,
+    KspAccessor, KspAnnotation, KspDeclaration, KspDeclarationOrigin, KspFunction, KspFunctionKind,
+    KspMember, KspModifier, KspOrigin, KspParameter, KspProperty, KspType, KspTypeArgument,
+    KspTypeSlot,
 };
 
+use super::super::annotations::Annotations;
 use super::super::type_model::{class_type, qualified_name, TypeParameterIds, TypeParameterScope};
 use super::KspLibraries;
 use crate::fx_hash::HashSet;
@@ -47,10 +49,12 @@ impl KspLibraries<'_> {
         if !ordering_is_pinned(class, header, &declared) {
             return LibraryMembers::default();
         }
+        let annotations = Annotations::new(self.analysis);
         let view = MemberView {
             class,
             origin: origin(header),
             scope,
+            annotations: &annotations,
         };
         let mut declarations = Vec::new();
         let mut own_functions = Vec::new();
@@ -135,6 +139,7 @@ impl KspLibraries<'_> {
             property_names.insert(&property.name);
         }
         let ids = TypeParameterIds::default();
+        let annotations = Annotations::new(self.analysis);
         let mut supertypes = Vec::new();
         let mut current = single_supertype(class, header)?;
         while let Some(supertype) = current {
@@ -154,6 +159,7 @@ impl KspLibraries<'_> {
                 class: *supertype,
                 origin: origin(header),
                 scope: &scope,
+                annotations: &annotations,
             };
             for function in &members.functions {
                 if function.visibility == Visibility::Private {
@@ -230,6 +236,7 @@ struct MemberView<'a> {
     class: TypeName,
     origin: KspOrigin,
     scope: &'a TypeParameterScope,
+    annotations: &'a Annotations<'a>,
 }
 
 impl MemberView<'_> {
@@ -270,7 +277,9 @@ impl MemberView<'_> {
             true => KotlinModality::Abstract,
             false => property.modality,
         };
-        let accessor = |modality: KotlinModality, parameter: Option<(String, Vec<_>)>| {
+        let accessor = |modality: KotlinModality,
+                        annotations: Vec<KspAnnotation>,
+                        parameter: Option<(String, Vec<_>)>| {
             let mut modifiers = visibility_modifier(property.visibility)
                 .into_iter()
                 .collect::<Vec<_>>();
@@ -280,7 +289,7 @@ impl MemberView<'_> {
             KspAccessor {
                 origin,
                 modifiers: Some(modifiers),
-                annotations: Vec::new(),
+                annotations,
                 parameter,
                 jvm_name: None,
             }
@@ -298,10 +307,28 @@ impl MemberView<'_> {
             type_parameters: Some(Vec::new()),
             extension_receiver: KspTypeSlot::Absent,
             ty: self.scope.ty(property.ty),
-            getter: Some(accessor(getter_modality, None)),
-            setter: property
-                .is_var
-                .then(|| accessor(property.modality, Some(("value".to_string(), Vec::new())))),
+            getter: Some(accessor(
+                getter_modality,
+                property
+                    .getter_annotations
+                    .iter()
+                    .map(|annotation| {
+                        self.annotations
+                            .ksp_annotation(annotation, false, true, false)
+                    })
+                    .collect(),
+                None,
+            )),
+            setter: property.is_var.then(|| {
+                accessor(
+                    property.modality,
+                    Vec::new(),
+                    Some(("value".to_string(), Vec::new())),
+                )
+            }),
+            // KSP2 reads a Java annotation element as a property with a field; a Kotlin library
+            // property's answer depends on what its metadata records, which is not read yet.
+            has_backing_field: property.from_java_method.then_some(true),
             jvm_signature: None,
         }
     }
@@ -322,6 +349,7 @@ impl MemberView<'_> {
             ty: self.scope.ty(property.ty),
             getter: None,
             setter: None,
+            has_backing_field: Some(true),
             jvm_signature: None,
         }
     }
