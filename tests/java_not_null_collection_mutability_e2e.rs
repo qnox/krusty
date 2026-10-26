@@ -1,7 +1,8 @@
 //! A Java collection annotated `@NotNull` is `(Mutable)List<T!>`, not `MutableList<T!>`: the
 //! annotation fixes nullability alone, so a read-only `List` still reaches a Java parameter, a Kotlin
 //! override may narrow it to either face, and a result is usable as both. A declaration inferred from
-//! one publishes the same flexible type kotlinc writes into its metadata and generic signature.
+//! one publishes the same flexible type kotlinc writes into its metadata and generic signature,
+//! raw (`@NotNull List`) or parameterized.
 
 use std::path::PathBuf;
 
@@ -23,6 +24,7 @@ const API: &str = "package jn;\n\
         public static int keys(@NotNull Set<String> keys) { return keys.size(); }\n\
         public static <T> @NotNull List<T> same(@NotNull List<T> xs) { return xs; }\n\
         public static int count(@NotNull Iterable<String> xs) { int n = 0; for (String x : xs) n++; return n; }\n\
+        @SuppressWarnings(\"rawtypes\") public static @NotNull List raw() { return new ArrayList(); }\n\
     }\n";
 
 const BASE: &str = "package jn;\n\
@@ -64,6 +66,7 @@ fun explicit(ro: List<String>) = Api.same<String>(ro)\n\
 fun declared(ro: List<String>): List<String> = Api.same(ro)\n\
 fun <T> generic(x: List<T>) = Api.same(x)\n\
 val given = Api.give()\n\
+fun raw() = Api.raw()\n\
 fun box(): String {\n\
     val ro: List<String> = listOf(\"x\")\n\
     val m: MutableList<String> = mutableListOf(\"y\")\n\

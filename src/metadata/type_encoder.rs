@@ -816,14 +816,15 @@ pub(crate) enum Expansion {
 
 /// A Java raw occurrence, as kotlinc's JVM serializer writes a raw type: the flexible interval
 /// from each formal's erasure (`Box<CharSequence!>`) up to the all-star application of the
-/// provider's upper face (`Box<*>?`), both faces marked with `JvmProtoBuf.is_raw` (field 101).
+/// provider's upper face `upper_bound` (`Box<*>?`), both faces marked with `JvmProtoBuf.is_raw`
+/// (field 101).
 /// `faces` is the nullability of the lower and upper face: an unannotated occurrence's upper face
 /// only, both for `@Nullable`, neither for `@NotNull`.
 fn encode_raw_type(
     strings: &mut StringTable<'_>,
     (owner, arguments): (TypeName, &[Ty]),
     (lower_nullable, upper_nullable): (bool, bool),
-    spelled: &Spelled,
+    upper_bound: Option<Ty>,
     type_parameters: &TypeParameters,
     expansion: Expansion,
 ) -> Result<Pb, TypeEncodeError> {
@@ -840,10 +841,7 @@ fn encode_raw_type(
         None,
         expansion,
     )?;
-    let upper_owner = spelled
-        .flexible_upper_bound
-        .and_then(Ty::obj_internal)
-        .unwrap_or(owner);
+    let upper_owner = upper_bound.and_then(Ty::obj_internal).unwrap_or(owner);
     let stars = vec![Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any"))); arguments.len()];
     let mut upper = encode_type_with_parameter(
         strings,
@@ -909,11 +907,16 @@ fn encode_type_with_parameter(
     // its mutability alone.
     let mutability_only = matches!(ty.kind(), TyKind::MutabilityFlexible(_));
     if let (TyKind::Obj(owner, arguments), true) = (base.kind(), base.is_raw_application()) {
+        let upper_bound = if mutability_only {
+            spelled.mutability_upper_bound
+        } else {
+            spelled.flexible_upper_bound
+        };
         return encode_raw_type(
             strings,
             (owner, &arguments),
-            (nullable, nullable || flexible),
-            spelled,
+            (nullable, nullable || (flexible && !mutability_only)),
+            upper_bound,
             type_parameters,
             expansion,
         );

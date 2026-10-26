@@ -126,6 +126,7 @@ impl Spelled {
             && !self.unsafe_variance
             && self.parameter_name.is_none()
             && self.flexible_upper_bound.is_none()
+            && self.mutability_upper_bound.is_none()
             && !self.enhanced_nullability
             && self.args.iter().all(Spelled::is_none)
     }
