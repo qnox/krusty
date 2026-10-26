@@ -7,7 +7,7 @@
 //! each would pass by accident if the value were simply carried as the signed number — and each was
 //! why the whole family was declined until it could be answered.
 
-use super::common::{expect_native_box, expect_native_decline};
+use super::common::{expect_box_ok_with_stdlib, expect_native_box, expect_native_decline};
 
 #[test]
 fn an_unsigned_value_renders_as_the_value_and_not_as_its_bits() {
@@ -227,6 +227,47 @@ fn every_unsigned_array_width_reads_back_what_it_stored() {
          }\n",
         "UnsignedArrays",
         "OK",
+    );
+}
+
+/// An unsigned array is allocated through the constructor its class declares.
+///
+/// `UIntArray(n)` is the class's `constructor(size: Int)`, not a compiler-provided array, and
+/// this target allocates it as the unsigned array's own type over the signed carrier's layout.
+/// Each element is then the top of its width, which a signed read of the same bits answers as
+/// `-1`.
+#[test]
+fn an_unsigned_array_is_allocated_through_its_declared_constructor() {
+    let source = "@file:OptIn(ExperimentalUnsignedTypes::class)\n\
+         fun box(): String {\n\
+         \x20   val sized = UIntArray(3)\n\
+         \x20   if (sized.size != 3 || sized[2] != 0u) return \"fail sized\"\n\
+         \x20   val any: Any = ULongArray(1)\n\
+         \x20   if (any is LongArray || any !is ULongArray) return \"fail identity\"\n\
+         \x20   val b = UByteArray(1); b[0] = 255u\n\
+         \x20   val s = UShortArray(1); s[0] = 65535u\n\
+         \x20   val text = \"${b[0]} ${s[0]} ${UIntArray(4).size} ${ULongArray(2).size}\"\n\
+         \x20   return if (text == \"255 65535 4 2\") \"OK\" else text\n\
+         }\n";
+    expect_box_ok_with_stdlib(source, "UnsignedArrayAllocation");
+    expect_native_box(source, "UnsignedArrayAllocation", "OK");
+}
+
+/// `UIntArray(n) { init }` is the library's inline function, not a compiler-provided array. This
+/// target has no splice of that body yet, so it declines the call by its declaration rather than
+/// allocating an array the library never asked for.
+#[test]
+fn an_unsigned_array_initializer_is_declined_by_its_library_declaration() {
+    let source = "@file:OptIn(ExperimentalUnsignedTypes::class)\n\
+         fun box(): String {\n\
+         \x20   val i = UIntArray(2) { (it + 4294967294L).toUInt() }\n\
+         \x20   return if (\"${i[0]} ${i[1]}\" == \"4294967294 4294967295\") \"OK\" else \"fail\"\n\
+         }\n";
+    expect_box_ok_with_stdlib(source, "UnsignedArrayInitializer");
+    expect_native_decline(
+        source,
+        "UnsignedArrayInitializer",
+        "the declaration `kotlin.UIntArrayKt.UIntArray`",
     );
 }
 

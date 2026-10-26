@@ -72,8 +72,8 @@ pub(crate) use module_members::*;
 use operand_nullness::{operand_nonnull, operand_null_only};
 use representation::erase;
 pub(crate) use representation::{
-    boxed_value_class_carrier, boxed_value_class_names, boxed_value_class_underlying,
-    instance_representation, is_boxed_value_class, type_operation_internal_name,
+    boxed_value_class_carrier, boxed_value_class_underlying, instance_representation,
+    is_boxed_value_class, type_operation_internal_name,
 };
 use result_tail_boxing::box_vc_tail;
 use suspend_results::{record_suspend_results, suspend_result_representation};

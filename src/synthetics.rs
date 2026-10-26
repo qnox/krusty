@@ -160,27 +160,6 @@ static TABLE: &[Synthetic] = &[
         "ShortArray",
         SyntheticKind::PrimitiveSize(Ty::Short),
     ),
-    // Unsigned size constructors use the same semantic elements as their vararg factories.
-    syn(
-        "kotlin/UByteArray",
-        "UByteArray",
-        SyntheticKind::PrimitiveSize(Ty::UByte),
-    ),
-    syn(
-        "kotlin/UShortArray",
-        "UShortArray",
-        SyntheticKind::PrimitiveSize(Ty::UShort),
-    ),
-    syn(
-        "kotlin/UIntArray",
-        "UIntArray",
-        SyntheticKind::PrimitiveSize(Ty::UInt),
-    ),
-    syn(
-        "kotlin/ULongArray",
-        "ULongArray",
-        SyntheticKind::PrimitiveSize(Ty::ULong),
-    ),
     // Reference creators.
     syn("kotlin/arrayOf", "arrayOf", SyntheticKind::ReferenceVararg),
     syn("kotlin/Array", "Array", SyntheticKind::ReferenceSize),
@@ -218,6 +197,9 @@ mod tests {
         // A real classpath function that is deliberately NOT synthetic must not match.
         assert!(lookup("listOf").is_none());
         assert!(lookup("println").is_none());
+        // An unsigned array is a value class whose size constructor is declared in metadata.
+        assert!(lookup("UIntArray").is_none());
+        assert!(lookup("ULongArray").is_none());
     }
 
     #[test]
@@ -230,8 +212,6 @@ mod tests {
             "LongArray",
             "uintArrayOf",
             "ulongArrayOf",
-            "UIntArray",
-            "ULongArray",
             "arrayOf",
             "Array",
             "emptyArray",

@@ -132,34 +132,36 @@ fn an_unsigned_array_walks_its_elements_unsigned() {
 fn each_width_allocates_its_carrier_and_indexes_through_its_own_members() {
     // The claim this change makes is about BYTECODE, and a program that prints the right number
     // cannot prove which opcodes produced it — `int[]` holds a 255 perfectly well. So the four
-    // shapes are read off the disassembly: the `newarray` operand, the store, the load, and the
-    // local's descriptor. The subscript is the value class's own `get`/`set` operator, which
-    // kotlinc calls as the class's static on the carrier, never the carrier's own opcode.
-    for (kind, atype, store, load, returned) in [
+    // shapes are read off the disassembly: the allocation, the store, the load, and the local's
+    // descriptor. `UIntArray(n)` is the class's declared size constructor, which kotlinc calls as
+    // `constructor-impl` returning the carrier, and the subscript is the class's own `get`/`set`
+    // operator, which kotlinc calls as the class's static on the carrier, never the carrier's own
+    // opcode.
+    for (kind, allocation, store, load, returned) in [
         (
             "UByteArray",
-            "byte",
+            "kotlin/UByteArray.\"constructor-impl\":(I)[B",
             "kotlin/UByteArray.\"set-VurrAj0\":([BIB)V",
             "kotlin/UByteArray.\"get-w2LRezQ\":([BI)B",
             "byte[] box()",
         ),
         (
             "UShortArray",
-            "short",
+            "kotlin/UShortArray.\"constructor-impl\":(I)[S",
             "kotlin/UShortArray.\"set-01HTLdE\":([SIS)V",
             "kotlin/UShortArray.\"get-Mh2AYeg\":([SI)S",
             "short[] box()",
         ),
         (
             "UIntArray",
-            "int",
+            "kotlin/UIntArray.\"constructor-impl\":(I)[I",
             "kotlin/UIntArray.\"set-VXSXFK8\":([III)V",
             "kotlin/UIntArray.\"get-pVg5ArA\":([II)I",
             "int[] box()",
         ),
         (
             "ULongArray",
-            "long",
+            "kotlin/ULongArray.\"constructor-impl\":(I)[J",
             "kotlin/ULongArray.\"set-k8EXiF4\":([JIJ)V",
             "kotlin/ULongArray.\"get-s-VKNKU\":([JI)J",
             "long[] box()",
@@ -176,14 +178,9 @@ fn each_width_allocates_its_carrier_and_indexes_through_its_own_members() {
                  }}\n"
             ),
         );
-        for expected in [
-            format!("newarray       {atype}"),
-            store.into(),
-            load.into(),
-            returned.into(),
-        ] {
+        for expected in [allocation, store, load, returned] {
             assert!(
-                dumped.contains(&expected),
+                dumped.contains(expected),
                 "{kind}: {expected:?} missing from\n{dumped}"
             );
         }
