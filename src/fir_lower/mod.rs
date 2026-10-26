@@ -1064,6 +1064,33 @@ pub(super) enum UnitReturnLine {
     ExpressionEnd,
 }
 
+/// The line an expression body's implicit return carries: fir2ir's `ExpressionBodyTransformer`
+/// builds that return at the expression's end offset, for a function and an accessor alike.
+///
+/// A block's value is what returns: a lambda body's block ends at its closing `}`, which kotlinc
+/// does not mark for the value it returns. The innermost value that records an end line gives it.
+/// A same-module inline expansion is different: its outer region carries the call expression's
+/// end, while its nested values retain declaration/lambda ends for SMAP. The caller's generated
+/// return belongs to that call expression, so keep the region's end.
+pub(super) fn implicit_return_end(ir: &IrFile, value: ExprId) -> Option<u32> {
+    let mut end = ir.expr_end_lines.get(&value).copied();
+    let inline_call_end = ir.inline_regions.contains(&value);
+    let mut returned = value;
+    while let crate::ir::IrExpr::Block {
+        value: Some(inner), ..
+    } = ir.expr(returned)
+    {
+        returned = *inner;
+        let inner_end = ir.expr_end_lines.get(&returned).copied();
+        end = if inline_call_end {
+            end.or(inner_end)
+        } else {
+            inner_end.or(end)
+        };
+    }
+    end
+}
+
 fn finish_callable_body(
     ir: &mut IrFile,
     mut roots: Vec<ExprId>,
@@ -1115,27 +1142,7 @@ fn finish_callable_body(
             .pop()
             .ok_or(FirLoweringFailure::MissingBodyResult { origin })?;
         let return_value = ir.add_expr(crate::ir::IrExpr::Return(Some(value)));
-        // A block's value is what returns: a lambda body's block ends at its closing `}`, which
-        // kotlinc does not mark for the value it returns. The innermost value that records an end
-        // line gives it. A same-module inline expansion is different: its outer region carries the
-        // call expression's end, while its nested values retain declaration/lambda ends for SMAP.
-        // The caller's generated return belongs to that call expression, so keep the region's end.
-        let mut end = ir.expr_end_lines.get(&value).copied();
-        let inline_call_end = ir.inline_regions.contains(&value);
-        let mut returned = value;
-        while let crate::ir::IrExpr::Block {
-            value: Some(inner), ..
-        } = ir.expr(returned)
-        {
-            returned = *inner;
-            let inner_end = ir.expr_end_lines.get(&returned).copied();
-            end = if inline_call_end {
-                end.or(inner_end)
-            } else {
-                inner_end.or(end)
-            };
-        }
-        if let Some(end) = end {
+        if let Some(end) = implicit_return_end(ir, value) {
             ir.mark_implicit_return_end_line(return_value, end);
         }
         roots.push(return_value);

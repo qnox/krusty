@@ -109,7 +109,7 @@ final class SourceClass implements KSClassDeclaration {
 
     @Override
     public KSType asStarProjectedType() {
-        throw Nodes.notImplemented("KSClassDeclaration.asStarProjectedType");
+        return ClassType.starProjected(this);
     }
 
     @Override

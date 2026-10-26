@@ -66,6 +66,34 @@ fn a_lambda_that_leaves_non_locally_runs() {
     );
 }
 
+/// A value class's inline member is its static `-impl`, whose first operand is the receiver: the
+/// lambda's `crossinline`/`noinline` fact moves with it to the next position.
+const VALUE_CLASS_MEMBER: &str = r#"@JvmInline
+value class Token(val value: String) {
+    inline fun inspect(block: (String) -> String): String = block(value)
+}
+
+fun choose(): String {
+    Token("OK").inspect { return it }
+    return "FAIL"
+}
+
+fun box(): String = Token(choose()).inspect { it }
+"#;
+
+#[test]
+fn a_value_class_members_lambda_is_inlined_from_the_compiled_body_like_kotlinc() {
+    assert_like_kotlinc(&[("ValueClassMember.kt", VALUE_CLASS_MEMBER)]);
+}
+
+#[test]
+fn a_value_class_members_lambda_inlined_from_the_compiled_body_runs() {
+    assert_eq!(
+        common::expect_box_run_with_stdlib(VALUE_CLASS_MEMBER, "ValueClassMember"),
+        "OK"
+    );
+}
+
 /// A `continue` the loop body runs on after. The bytes are not compared: the MethodInliner port
 /// threads the lambda's conditional exit straight to the loop where kotlinc keeps a `goto` behind
 /// it, the same against a library's compiled body.

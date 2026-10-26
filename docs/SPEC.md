@@ -1222,7 +1222,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   for top-level fns (`FnMeta::visibility` from the signature) and members
   (`IrFile::internal_methods`, alongside the dispatch-relevant `private_methods`),
   `Constructor.flags` for a DECLARED primary-ctor visibility (`class C protected constructor(…)` →
-  4, private → 2 — `IrFile::ctor_visibilities`), and `TypeAlias.flags` (`internal typealias`,
+  4, private → 2, internal → an explicit 0 — `IrFile::ctor_visibilities`), and `TypeAlias.flags` (`internal typealias`,
   parser now keeps the modifier in `File::type_alias_visibility`). A declared ctor visibility also
   reaches the JVM `<init>` access flags (protected/private; `internal` stays JVM-public, the
   boundary lives in metadata alone), including the all-defaults convenience `<init>()`, which
@@ -5789,7 +5789,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   references, an unread literal against kotlinc's bytes; a callee with a `try` beside stacked
   operands, non-local jumps and a bound value-class reference run);
   `tests/inline_same_module_non_local_jumps_e2e.rs` (a `break` with and without a value, a non-local
-  return from a function and from a secondary constructor against kotlinc's bytes and run; a
+  return from a function and from a secondary constructor, and a value class's inline member, whose
+  `-impl` static takes the receiver first so the lambda's modifier fact moves one position with the
+  operands (`value_classes::impl_call_parameters::align`), against kotlinc's bytes and run; a
   `continue` the loop body runs on after runs, its bytes differing from kotlinc's by the threaded
   conditional exit the MethodInliner port writes against a library's body too).
 
@@ -6851,6 +6853,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Only the `{…}` body re-enables them: the `when` keyword and subject, and an object literal's
   `object : Base(…)` header, keep the enclosing mode, so `f(when\n(x) { … })` and `f(object :
   Base\n(1) { … })` parse as one expression. Tests: `parenthesized_line_breaks_e2e`.
+
+- **A `when` condition is newline-insensitive, and a line break may follow a range or type-test
+  operator.** kotlinc's `parseWhenCondition` disables newlines for each condition, so `x` then
+  `!in 1..3 ->` on the next line is one condition, as is `!is` then `String ->`. Outside a `when`
+  condition a line break still may not precede a binary operator, but it may follow one:
+  `rangeExpression` and `infixFunctionCall` allow `NL*` after `..`, `..<`, `until` and `downTo`
+  (`x in 1..` then `3`, `for (i in 1..` then `3)`), and `isOperator NL* type` lets `x !is` leave its
+  type on the next line. Plain line breaks only; an explicit `;` still ends the operand. Test:
+  `split_line_conditions_parse_e2e`.
 
 - **`$` before a backtick interpolates only a complete escaped identifier.** A backtick, one or more
   characters that are neither a backtick nor a line break, then a closing backtick; any other `$`
@@ -11300,7 +11311,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Constructor code is the primary constructor's defaults and super-constructor arguments, the
   property initializers and delegate values, the `init` blocks, and each secondary constructor's
   defaults, delegation arguments and body; a value only a delegate expression reads
-  (`val x by boxOf(a)`) is captured for that constructor read. In `class L { val x = a + 1; fun m() = b }` the
+  (`val x by boxOf(a)`) is captured for that constructor read. An interface delegate expression
+  (`class D : I by valueOf(a)`) is constructor code too, and runs before the body's initializers,
+  so the walk orders its captures first: `class E : I by valueOf(b) { val x = a; fun y() = c + b }`
+  is constructed as `E(b, a, c)`, and a capture only a delegate expression reads gets no field. In `class L { val x = a + 1; fun m() = b }` the
   constructor is `(a, b)`, the initializer reads the parameter `a`, and only `$b` is a field; in
   `class B { val x = a; fun m() = a }` the initializer still reads the parameter and `m` reads the
   field. The walk that orders the captures decides this: a direct read in the local class's own
@@ -13509,6 +13523,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   enclosed by the `constructor-impl` realizing it, whose owner is the value class. Tests:
   `tests/value_class_constructor_bodies_e2e.rs`. Corpus: `inlineClasses/secondaryConstructorsWithBody`,
   `inlineClasses/defaultParameterValues/inlineClassPrimaryConstructorWithInlineClassValueGeneric`.
+- **A value class's `constructor-impl$default` maps the constructor's lines.** The stub that fills
+  a value-class constructor's omitted arguments is built like a function's `$default`: its entry and
+  the closing `constructor-impl` call stand on the constructor's own line (the primary's
+  `constructor` keyword or parameter-list `(`, the line its rebuilt `<init>` uses; a secondary's
+  `constructor` keyword), and each masked fill on its default expression's line. `constructor-impl`
+  itself has no `LineNumberTable`. krusty gave the primary's stub no table, and a secondary's lost
+  its defaults' lines because a constructor's default expressions were checked without attaching
+  their source lines. Tests: `tests/value_class_constructor_default_lines_e2e.rs`.
+- **A value class's lifted functions follow its representation members.** kotlinc's inline-class
+  lowering appends `<init>`, `constructor-impl`, `box-impl`, `unbox-impl` and `equals-impl0` after
+  the declared members and `Any` overrides; local functions (`m_impl$local`) and indy lambdas
+  (`m_impl$lambda$0`) are lifted by later lowerings, so they come after all of those, in their
+  lifted order. krusty placed them after the last declared member. Tests:
+  `tests/value_class_lifted_member_order_e2e.rs`.
 - **An owner reads its explicit backing field, typed as the field.** Inside the class that
   declares `val a: Any field = V(1)`, a read whose receiver's static type is exactly that class is
   kotlinc's `IrGetField` of the field, not a call of `getA()`: `a.x` over a value class
@@ -14127,10 +14155,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Collection`, `String` to `CharSequence`). No `IntRange` is built. Under `reversed()` or `step`
   the bound reverts to the inclusive `size + -1` (`revertToLastInclusive` of the handler's
   `last.decrement()`), which they then count from. A user extension property named `indices` is
-  read and iterated as written. Not yet ported, so still building the range: membership
-  (`i in xs.indices`), `withIndex()` over `indices`, and an unsigned array's `indices`, which
-  kotlinc counts to the static `UIntArray.getSize-impl` (the role requires a signed array's
-  element). (`tests/indices_loop_e2e.rs`, `indices_roles_require_the_complete_extension_property`.)
+  read and iterated as written. Not yet ported, so still building the range: `withIndex()` over
+  `indices`, and an unsigned array's `indices`, which kotlinc counts to the static
+  `UIntArray.getSize-impl` (the role requires a signed array's element).
+  (`tests/indices_loop_e2e.rs`, `indices_roles_require_the_complete_extension_property`.)
+
+- **Membership in the stdlib's `indices` compares the value with 0 and the receiver's size, as
+  kotlinc's `RangeContainsLowering` does over an `IndicesHandler` header.** Resolution selects the
+  size member for every read of a declaration with the `Indices` role, the plan a loop over it
+  also reads (`record_extension_property_get`). The parser marks the `contains` call an `in` or
+  `!in` stands for, in an expression or a `when` branch, with its operator token (kotlinc's
+  `IN`/`NOT_IN` origin); a written `xs.indices.contains(i)` call is not marked and is called as
+  written. A marked call on an `indices` read whose selected `contains` is the range's own member
+  or a `kotlin.ranges` closed-range extension (`matchStdlibExtensionContainsCall`), with a
+  value of a primitive numeric type, is checked as `IndicesContainment` (`indices_membership`). It is the
+  membership in `0 until size` that the range-literal comparison realizes:
+  `0 <= i && i < size`, in the widest numeric type of `Int` and the value (`i in list.indices`
+  with a `Long` `i` compares `(long) size`), with the size read on the receiver cast to the
+  declaration's class as a loop reads it, and the operands ordered and stored as for a range
+  literal (`make().indices` is read before a value with side effects). `!in` keeps its negation of
+  the test, as kotlinc keeps its `not()` call. A nullable value (`IntRange.contains(Int?)`) and a
+  user `indices` property call `contains`. (`tests/indices_contains_e2e.rs`.)
 
 - **A `checkcast` right before an `aastore` is removed, as kotlinc's
   `RedundantCheckcastsBeforeAastoreMethodTransformer` does.** The pass runs after jump negation and
@@ -16516,6 +16561,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   query only, and the build falls back to KSP2.
   (`crates/krusty-plugin-host/tests/ksp.rs`, `class_headers_are_what_ksp2_reports`;
   `ksp_round` unit test `a_header_has_its_written_modifiers_type_parameters_and_supertypes`.)
+- **A KSP classifier's star-projected type has a star per type parameter.**
+  `asStarProjectedType()` on a source or library classifier applies it to `*` for each of its type
+  parameters (`Map<*, *>`, `headers.Base<*, *>`), then, while the classifier is `inner`, for each
+  of its enclosing class's (`Holder<A>.Inner<B>` is `Inner<*, *>`, an inner `Bare` of it `Bare<*>`),
+  and to nothing when there are none. Each star is `SYNTHETIC`, with no type and no parent, and
+  renders as `STAR null`. The type is not nullable, its text is the simple name with the stars
+  (`Entry<*, *>`), and it equals
+  the same type a source declaration names (`Middle<*>` written in a supertype), with the same
+  hash, as KSP2 2.3.12 reports.
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `class_headers_are_what_ksp2_reports` and
+  `library_classes_are_what_ksp2_reports`.)
 - **KSP members are listed as KSP2 lists them.** A file lists its functions and properties in
   source order, then its classifiers and type aliases in source order. A class lists its
   constructor properties, then its properties and functions interleaved in source order, then a
@@ -16612,9 +16668,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   resolves to that type alias. An annotation argument naming an entry of a library enum is that
   entry: an `ENUM_ENTRY` declaration of the enum class with its name, qualified name, parent and
   origin. A Java class whose generic signature cannot be read has its other facts but answers
-  neither its type parameters nor its supertypes, rather than claiming it has none. An inner
-  class, a Java package-private class, and a supertype written as a typealias with arguments are refused
-  for that query only.
+  neither its type parameters nor its supertypes, rather than claiming it has none. A Kotlin inner
+  class adds `inner` to its modifiers (`final inner public`). A Java inner class, a Java
+  package-private class, and a supertype written as a typealias with arguments are refused for
+  that query only.
   The fixture's dependency (`dependency/Dependency.kt`) is built by krusty for the tests and by
   kotlinc only to record KSP2's transcript.
   (`crates/krusty-plugin-host/tests/ksp.rs`, `library_classes_are_what_ksp2_reports`;
@@ -17983,6 +18040,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   implicit return, as it already did for an expression getter; property lowering records the
   resulting exit on the setter body (`IrFile::record_accessor_body_exit`), and the accessor that
   appends the `return` marks it (`UnitBodyExit`). Test: `tests/setter_return_line_e2e.rs`.
+
+- **A getter's expression body returns at the expression's END line.** fir2ir builds the return of
+  `get() = expression` as it builds a function's, at the expression's end offset, so a getter whose
+  expression spans lines (`get() = grow(⏎ 2)`, `get() = "b" +⏎ v`) returns on its last line. Property
+  lowering records the getter's expression end as its accessor body exit, from the same rule a
+  function body uses (`implicit_return_end`), and the accessor that appends the `return` marks it.
+  A delegated getter keeps its value's start line. Test: `tests/getter_return_line_e2e.rs`.
 
 - **A bridge casts its delegated result to any different reference return type but `Object` or an
   array.** kotlinc's bridge materializes the result of the call it delegates to at the bridge's own
@@ -20876,11 +20940,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   ARGUMENT expressions were discarded at the parse site, so both had to be carried through lowering
   (the same retention split a function's and a secondary constructor's get). Three placement facts,
   each verified byte-for-byte against kotlinc 2.4.10:
-  - The flags word is not a plain OR. `Constructor.flags` is OMITTED at its proto default 6
-    (visibility PUBLIC), which krusty represents as 0; setting `HAS_ANNOTATIONS` forces the field to be
-    written, so the omitted default must be MATERIALIZED first — an annotated public primary ctor
-    writes 7, not 1 (which would read back as visibility INTERNAL). A declared `private`/`protected`
-    primary already carries a non-zero word (2 / 4) and just gains the bit.
+  - The flags word is the declaration's real `Constructor.flags`, OMITTED only at its proto default 6
+    (visibility PUBLIC); setting `HAS_ANNOTATIONS` forces the field to be written, so an annotated
+    public primary ctor writes 7, not 1 (which would read back as visibility INTERNAL). A declared
+    `private`/`protected`/`internal` primary carries 2 / 4 / 0 and just gains the bit; the internal
+    0 is written explicitly, as kotlinc writes it. krusty used 0 to mean the omitted default, so an
+    `internal constructor` read back as public. Tests:
+    `tests/internal_primary_constructor_metadata_e2e.rs` (an ordinary, annotated, data and value
+    class).
   - The annotation type INTERNS at the constructor's own annotation visit, which ASM runs after
     `visitMethod` and before `visitParameterAnnotation`: `Lp/Mark;` lands between the ctor descriptor
     and the body's first entry, ahead of any `@NotNull` parameter annotation.

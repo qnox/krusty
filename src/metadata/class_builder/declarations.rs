@@ -162,14 +162,8 @@ pub const DEFAULT_CLASS_FLAGS: u64 = 6;
 /// `Constructor.flags` (f1) for a DECLARED (public) secondary constructor — visibility PUBLIC (6) plus
 /// the `IS_SECONDARY` bit (16). From kotlinc 2.4.0 (`class Dual { constructor(a: Int, …) }` → 22).
 pub const SECONDARY_CTOR_FLAGS: u64 = 22;
-/// `Constructor.flags` (f1) for a sealed class's primary constructor — kotlinc marks it PROTECTED.
-pub const SEALED_CTOR_FLAGS: u64 = 4;
-/// `Constructor.flags` (f1) for an `object`'s primary constructor — kotlinc marks it PRIVATE
-/// (visibility bits 1-3 = 1). Instances come only from the static `INSTANCE` field.
-pub const OBJECT_CTOR_FLAGS: u64 = 2;
 /// `Constructor.flags` (f1) for a plain PUBLIC constructor — the proto's DEFAULT, so the field is
-/// omitted at this value and callers pass 0 to mean it. Written explicitly once another bit forces
-/// the field out.
+/// omitted at exactly this value.
 pub(super) const PUBLIC_CTOR_FLAGS: u64 = 6;
 /// Bit 0 of both `Constructor.flags` and `ValueParameter.flags` — the declaration (or the parameter)
 /// carries annotations. kotlinc keeps it set when the record-emission source feature is disabled;
@@ -276,8 +270,8 @@ pub struct ClassTail<'a> {
     /// Whether the class HAS a primary constructor at all — an `interface` has none, so `Class` carries
     /// no `constructor` (f8) entry. Defaults to true (every other kind).
     pub emit_primary_ctor: bool,
-    /// `Constructor.flags` (f1) for the PRIMARY constructor — 0 (omitted) for an ordinary class; a
-    /// sealed class's primary ctor is PROTECTED, which kotlinc records.
+    /// `Constructor.flags` (f1) for the PRIMARY constructor: its visibility bits, 6 (public)
+    /// for an ordinary class. A sealed class's primary ctor is PROTECTED and an object's PRIVATE.
     pub primary_ctor_flags: u64,
     /// Declared type-parameter names in order (`class C<T>` → `["T"]`), recorded as
     /// `Class.typeParameter` so the metadata describes the class as generic.
@@ -339,7 +333,7 @@ impl Default for ClassTail<'_> {
             param_assertions: true,
             ctor_vararg_index: None,
             emit_primary_ctor: true,
-            primary_ctor_flags: 0,
+            primary_ctor_flags: PUBLIC_CTOR_FLAGS,
             type_params: &[],
             type_param_bounds: &[],
             captured_type_params: CapturedTypeParameters::default(),
