@@ -1775,6 +1775,11 @@ pub struct IrFile {
     /// adaptation boundary records this edge when it creates the call; later representation
     /// analysis consumes the identity and never recognizes an unbox operation by its spelling.
     pub(crate) value_class_unbox_type_operation_edges: crate::fx_hash::HashMap<ExprId, ExprId>,
+    /// JVM null-safe value-class unbox call -> the type operation whose value it unboxes through
+    /// its temporary (`a as X?`: `checkcast X`, then `unbox-impl` unless null). The call reads the
+    /// temporary, so it is not the call's receiver, but it is the same checked box.
+    pub(crate) value_class_null_safe_unbox_type_operation_edges:
+        crate::fx_hash::HashMap<ExprId, ExprId>,
     /// `FunId` → source parameter names and, when present, default-value expressions.
     pub fn_params: crate::fx_hash::HashMap<u32, FnParamInfo>,
     /// Per declared method/function, whether each SOURCE parameter was declared nullable (`a: String?`).
