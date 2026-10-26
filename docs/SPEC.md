@@ -20943,6 +20943,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/annotation_class_element_e2e.rs::a_java_class_element_accepts_a_class_literal`,
   `…::the_emitted_class_constants_match_kotlinc`.
 
+- **A Java `@interface` element is a read-only property, never a function.** kotlinc reads
+  `String value()` as `val value: String`: `annotation.value` compiles to `invokeinterface
+  value()`, and `annotation.value()` is rejected with "expression 'value' of type 'String' cannot
+  be invoked as a function". The classpath provider moves each element's method out of the
+  function namespace into a property whose getter is that method and whose type is the element's
+  Kotlin type (`KClass` for `Class`, read through `Reflection.getOrCreateKotlinClass` like a Kotlin
+  annotation member). An element spelled like a bean getter (`getLabel()`) is the property
+  `getLabel` only: a Java annotation declares no synthetic accessor property, so `annotation.label`
+  is unresolved. Tests:
+  `tests/java_annotation_element_property_e2e.rs::a_java_annotation_element_reads_as_a_property_like_kotlinc`,
+  `…::a_java_annotation_element_is_neither_a_function_nor_a_bean_getter_like_kotlinc`.
+
 - **A Kotlin annotation member declared `KClass` is stored and returned as `java.lang.Class`.**
   The interface method's descriptor is `()Ljava/lang/Class;` (or `()[Ljava/lang/Class;` for
   `Array<KClass<*>>`); its generic signature keeps the type argument
