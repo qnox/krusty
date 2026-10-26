@@ -1,5 +1,24 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Classifier declaration-name ownership
+
+A non-local classifier retains its exact declaration segment and either its package or its
+declaring classifier. A literal `$` belongs to that segment. This declaration evidence is
+independent of an enclosing-instance capture, and belongs to the compilation snapshot rather than
+the global interned-name tree. A missing fact remains unknown; a known top-level declaration is
+positive evidence that there is no declaring classifier.
+
+Source headers, Kotlin metadata class IDs and structural classfile self entries normalize this
+fact at their declaration boundary. It survives signature publication, module symbols, common IR
+construction and frozen backend facts. Tests in `src/backend/module_facts.rs` cover repeated
+snapshots and capture independence; provider tests cover literal-dollar and actual nested names.
+This handoff does not yet change JVM name or metadata emission.
+
+Kotlin metadata remains authoritative when its annotation is present, including an empty or
+synthetic payload. Missing declaration ownership does not authorize a classfile-name guess. Local
+visibility and metadata local-name indices both exclude non-local ownership; a public member of a
+local class still carries a local class ID.
+
 ## JVM generic result consumption
 
 A checked generic call's declaration-result coercion can retain its recorded reference slot until
@@ -5654,7 +5673,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   backend (`IrFile::compiled_inline_call`) only when the callee is a non-suspend function in this
   module (public, or declared in the caller's own file), top-level or a member of a class, object
   or companion, with no suspend function-typed parameter or receiver, no
-  `crossinline` parameter, and a template without lambdas, callable references, local classes,
+  `crossinline` parameter, and a template without local classes
   or a subject `when` that switches on an enum's keys (`IrFile::enum_switch_when`),
   called with every argument from any body outside a suspend state machine: a named function, an
   inline function (whose compiled body then holds the nested callee's code, as kotlinc's does), a
@@ -5833,6 +5852,64 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reified-array callee runs), `tests/reified_local_delegate_e2e.rs` (a reified callee with a local
   delegate, across files and in an object), and
   `source_map::tests::the_copier_reads_lines_the_optimizer_dropped`.
+
+- **A same-module inline body that declares a lambda is inlined from its compiled body.** kotlinc
+  compiles the callee through its file's class codegen, so the classes of the lambdas (and callable
+  references) its body declares exist when a call site's `AnonymousObjectTransformer` reads them.
+  The JVM compiles those classes with the callee, once per emission pass, and the inliner reads them
+  as it reads a dependency's (`ModuleClassBodies`). A class of the caller's own file is compiled
+  there once and the class loop writes those bytes; a class another file declares is realized in
+  full in the caller's IR, compiled under that file's facade, source name and line count, and never
+  written, since its own file writes it. A same-module callee's object is then reused as it is
+  (kotlinc's `shouldRegenerate(sameModule = true)`) unless the call passes it one of its lambdas,
+  it captures an object regenerated earlier in the body, or a `needClassReification` marker asks for
+  its specialization; then the call regenerates it as `<Caller>$<function>$$inlined$<callee>$N`.
+  A library callee's objects are always regenerated. An inline function regenerates the objects
+  of the inline calls in its own body, as any function does, under its own name
+  (`LibKt$median$$inlined$sortedBy$1`), public ABI when the function is not private; a callee
+  compiled for its callers regenerates them under the same names, and those copies are read from
+  there by the callers and written by the callee's file when it emits the function. A copy a call
+  of this file specialized from another file's class is this file's own class, written here. A
+  `-Xlambdas=class` lambda's `invoke` regenerates under its own name as any method does
+  (`Kt$outer$caller$1$invoke$$inlined$defineFunc$1`); a lifted local function under its lifted
+  name (`Kt$outer$localCall$$inlined$defineFunc$1`); a property accessor under `$special`, its
+  getter and setter numbering one group; and a lambda body a `-Xsam-conversions=class` class
+  implements under that class and its SAM method (`Kt$outer$caller$1$run$$inlined$defineFunc$1`).
+  A copy regenerates the objects its methods name in turn, as kotlinc's `MethodInliner`
+  transforms every method of a copy, so a reified lambda nested in a regenerated lambda is the
+  copy's next object (`Kt$box$$inlined$defineFunc$1$1`). A suspend lambda the call passes no
+  lambda is copied with its machine and `@DebugMetadata` as they are, its reified operations
+  specialized; a suspend lambda class, like any lambda class written in an inline function, is
+  public, and public ABI when the function is not private. A closure of a local delegated
+  property written in an inline function belongs to that function as its lambdas do, and a
+  conversion written in another file's inline function constructs that file's published SAM
+  wrapper. A copy's `<clinit>` drops its `needClassReification`: kotlinc's copy initializes its
+  singleton unguarded, and its load keeps the marker while a reified parameter remains. The
+  marker stands where kotlinc writes it: a lambda class whose methods use a reified parameter is
+  marked where its instance is loaded (`getstatic INSTANCE`) or constructed, and its own `<clinit>`
+  is marked only when its function type names the parameter, so a caller that reuses a class never
+  runs the marker. A `when` (and an `if`) branch whose class already is the
+  `when`'s, but whose type names a reified parameter, casts to that class again (kotlinc's
+  `castForReified` in `PromisedValue.materializeAt`; a branch coerced from a generic call's erased
+  result casts once, and an `Object` needs none). The redundant-cast pass keeps the cast only in a
+  method that still holds a reified-operation marker, so a join whose branch an inlining call
+  specializes still verifies. A callee is compiled after every same-module callee that its
+  body or a class it declares inlines. The objects a declared class's methods regenerate for their
+  own inline calls are read with the class, whichever file writes them, so a call site that
+  regenerates the class regenerates them in turn. A copy whose nested copy still names a reified
+  parameter of an enclosing inline function names it too (kotlinc merges the nested
+  transformation's `reifiedTypeParametersUsages`), so its load keeps the marker and a call site
+  specializes it again. A copy is public ABI when the code it is written in is: a non-private
+  inline function, a lambda class that function's ABI publishes, or, for a nested copy, its root
+  call's scope (`RegeneratedClassContext` keeps the root `callSiteInfo`). Tests:
+  `tests/inline_same_module_lambda_bodies_e2e.rs` (same-file and cross-file lambdas reused and
+  regenerated, a reified lambda marked at its load, a reified default lambda, a reified `when`
+  join, a lambda whose function type names a reified parameter, a reified lambda nested in a
+  regenerated one, a reified helper regenerated in a declared lambda, and a forwarded copy whose
+  nested copy stays reified, against kotlinc's bytes or class inventory and as runs),
+  `tests/escaping_reified_lambda_e2e.rs` (local-function, accessor, class-SAM, class-lambda and
+  suspend callers), `tests/nested_inline_delegate_e2e.rs`,
+  `tests/sam_wrapper_class_e2e.rs::a_cross_file_inline_copy_constructs_the_declarations_sam_wrapper` and `jvm::inliner::tests::a_same_module_body_reuses_an_object_only_its_reification_marker_regenerates`.
 
 - **`inline fun` (same-module, user-defined):** expanded at each call site by the IR lowerer
   (`Lower::lower_inline_fn_call`), matching kotlinc's effect — value parameters bind to once-evaluated
@@ -9998,6 +10075,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   fold. Test:
   `tests/elvis_branch_order_e2e.rs`.
 
+- **A line mark replaced by the line in effect leaves no entry.** When two marks land on one
+  offset, the later one wins. If it names the line the previous entry already put in effect, the
+  offset keeps no entry, because kotlinc's last-line state never left that line. On the null path
+  of `s ?: boxed(\n).toString()` the call's line and then its receiver's line are marked where
+  `boxed()` begins, and kotlinc writes no entry there. A forgotten line's restatement after an
+  inlined call, a control-flow entry, and an inlined body's copied line keep their entry. Test:
+  `tests/elvis_branch_order_e2e.rs`
+  (`a_multi_line_call_on_the_null_path_writes_no_entry_for_the_line_in_effect`).
+
 - **An integer-constant branch takes a sibling primitive.** An `if`, `when`, elvis, or `try` with no
   expected type still adapts an integer-constant branch to the non-null primitive of the other
   branches when every such constant fits: `if (flag) current() - start else 0` is `Long`,
@@ -13412,6 +13498,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `iterator` result types, the JDK members and `toArray`, follow in later slices. Tests:
   `tests/read_only_iterator_stubs_e2e.rs`. Corpus: `objects/useAnonymousObjectAsIterator.kt`,
   `builtinStubMethods/customReadOnlyIterator.kt`.
+- **Only an inherited superclass member implements a read-only stub's member.** The superclass
+  members that suppress a stub are those the class actually inherits, decided from each member's
+  declaration visibility at every edge of the superclass walk: a private member is never inherited,
+  and a Java package-private member only when every class from the class up to its declaring class
+  is in that member's package. So `open class Base { private fun remove() }` and a Java
+  `lib.JBase` with a package-private `void remove()` leave `Walk : Base(), Iterator<String>` (or
+  `app.Walk : lib.JBase()`) its public throwing `remove()` stub, as kotlinc emits it. Tests:
+  `tests/read_only_stub_inheritability_e2e.rs` (class bytes and box run against kotlinc).
 - **A nested value class over a reference carrier is read as its carrier.** In `ZN(val z: Z1?)`
   with `Z1(val x: En)`, `Z1?` is carried as `En?`, so `zn.z` and `zn.z!!` already are `Z1`'s
   carrier and `.x` of them is that carrier itself, with no cast. krusty took the unboxed property
@@ -16546,6 +16640,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   hash, as KSP2 2.3.12 reports.
   (`crates/krusty-plugin-host/tests/ksp.rs`, `class_headers_are_what_ksp2_reports` and
   `library_classes_are_what_ksp2_reports`.)
+- **KSP builtins are the builtin classifiers' star-projected types.** `Resolver.builtIns` answers
+  `kotlin.Any`, `Nothing`, `Unit`, `Number`, the primitives, `String`, `Annotation`,
+  `kotlin.collections.Iterable<*>` and `kotlin.Array<*>`, each a `KOTLIN_LIB` classifier read from
+  the classpath and applied to a star per type parameter. `makeNullable()` adds `?` to the type
+  and its text (`Iterable<*>?`), and `makeNotNullable()` gives back an equal type. A builtin
+  equals a resolved source type of the same classifier, arguments and nullability in both
+  directions (`val name: String` against `stringType`, `String?` against its nullable form), and
+  hashes like it; a nullable type hashes apart from its non-null form, as KSP2 2.3.12 reports.
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `library_classes_are_what_ksp2_reports`.)
+- **A star-projected KSP classifier type is assignable from its subclassifiers.** On a type a
+  classifier answers (`asStarProjectedType()`, a builtin), `isAssignableFrom` holds for a type whose
+  classifier is that classifier or inherits it through its direct supertypes, transitively and
+  whatever its arguments, and for `kotlin.Nothing`; a nullable type is assignable only to a nullable
+  one. Every classifier reaches `kotlin.Any`. A type parameter or typealias on the right is refused
+  for that query, as is `isAssignableFrom` on a type a source declaration names.
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `class_headers_are_what_ksp2_reports`.)
 - **KSP members are listed as KSP2 lists them.** A file lists its functions and properties in
   source order, then its classifiers and type aliases in source order. A class lists its
   constructor properties, then its properties and functions interleaved in source order, then a
@@ -19632,6 +19742,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/unsigned_range_contains_e2e.rs` (full-byte against kotlinc). The common backend realizes the checked membership for every target, as
   it realizes counted loops. Tests: `range_literal_membership_e2e` (class bytes and run against
   kotlinc), box `ranges/contains/comparisonWithRangeBoundEliminated.kt`.
+
+- **A constant range bound kotlinc derives keeps the written constant's line.** `convertIrConst`
+  (the exclusive bound of `RangeToHandler`/`DownToHandler`, used by membership and counted loops)
+  and `castIfNecessary` (a constant converted to the comparison type) build the new constant with
+  `IrConstImpl(startOffset, endOffset, …)` of the written one. Codegen marks a constant's line where
+  it is loaded, so `x !in` on one line and `1..3` on the next marks the bound's line before
+  `iconst_4`, then the `in` line again at the comparison's jump; `for (i in 1..` then `3)` marks the
+  bound's line before the loop test's `iconst_4`. Every other node the lowering generates keeps
+  the construct's line. Test: `split_membership_conditions_e2e` (class bytes and run against
+  kotlinc).
 
 - **Membership in a `Comparable` range literal is kotlinc's `ComparableRangeToHandler`.** When the
   range is built by the stdlib's `operator fun <T : Comparable<T>> T.rangeTo(that: T): ClosedRange<T>`
