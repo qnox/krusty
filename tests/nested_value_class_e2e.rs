@@ -106,3 +106,40 @@ fn interface_nested_value_class_runs() {
         }\n";
     assert_eq!(run(SRC).expect("interface-nested value class"), "OK");
 }
+
+/// A nested value class's generated `toString` names it by its own simple name, as a data class's
+/// does: `IC1(s=…)`, never the owner-qualified `C.IC1(s=…)` krusty wrote.
+const NESTED_TEXT: &str = r#"class C {
+    @JvmInline
+    value class IC1(val s: String)
+
+    companion object {
+        @JvmInline
+        value class IC2(val s: String)
+    }
+}
+
+object O {
+    @JvmInline
+    value class IC3(val s: String)
+}
+
+fun box(): String {
+    val text = "${C.IC1("a")}${C.Companion.IC2("b")}${O.IC3("c")}"
+    return if (text == "IC1(s=a)IC2(s=b)IC3(s=c)") "OK" else text
+}
+"#;
+
+#[test]
+fn a_nested_value_class_prints_its_simple_name() {
+    common::assert_classes_identical_to_kotlinc(
+        "NestedValueClassText",
+        NESTED_TEXT,
+        &["C$IC1", "C$Companion$IC2", "O$IC3"],
+    );
+}
+
+#[test]
+fn nested_value_class_text_runs() {
+    common::expect_box_ok_with_stdlib(NESTED_TEXT, "NestedValueClassText");
+}

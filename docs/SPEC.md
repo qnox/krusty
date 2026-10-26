@@ -13649,6 +13649,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   carrier and `.x` of them is that carrier itself, with no cast. krusty took the unboxed property
   read for a box and cast the enum to `Z1`. Tests: `tests/value_class_nested_carrier_e2e.rs`.
   Corpus: `inlineClasses/kt27096_enum`, `kt27096_functional`, `kt27096_reference`.
+- **A value class's generated `toString` names its simple name.** kotlinc's `toString-impl`
+  starts with the class's own name, as a data class's `toString` does, whatever classes it is
+  nested in: `C.IC1(val s: String)` renders `IC1(s=…)`. krusty spelled the nesting from the JVM
+  name (`C.IC1(s=…)`, `C.Companion.IC2(s=…)`) (`jvm/value_classes/synth_members.rs`), and the
+  Native backend from the qualified one (`native/codegen/lower/object_entries.rs`). Test:
+  `tests/nested_value_class_e2e.rs::a_nested_value_class_prints_its_simple_name`. Corpus:
+  `inlineClasses/nestedInlineClass`.
 - **A null-safe unbox yields the nullable carrier.** Where an erased result that is a value
   class's box becomes `X?` carried as its reference carrier (`Map.get` in a `Map<K, X>` delegation),
   the null-safe `unbox-impl` is the carrier: kotlinc unboxes once and returns it. krusty kept the
