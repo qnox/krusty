@@ -503,10 +503,10 @@ impl Checker<'_> {
                 // introduces another selected local provider must be walked now to recreate that
                 // lexical scope; its ordinary FIR is still deferred to Pass 2.
                 if default_owned_method || !selected_default_method {
-                    self.check_fun_body(scope, f);
+                    self.check_fun_body(scope, f, stable_declaration);
                 }
             } else {
-                self.check_fun_body(scope, f);
+                self.check_fun_body(scope, f, stable_declaration);
             }
         }
         if (!self.signature_defaults_only || default_owned_method) && f.ret.is_none() {
@@ -984,7 +984,7 @@ impl Checker<'_> {
                 // declaration rather than this enclosing function. Walk this bounded Pass-1 unit
                 // for that dependency; no ordinary FIR or AST survives the pass.
                 if !self.selected_signature_default_function(f) {
-                    self.check_fun_body(scope, f);
+                    self.check_fun_body(scope, f, stable_declaration);
                 }
             } else if infer_ret {
                 if let FunBody::Expr(e) = &f.body {
@@ -1004,7 +1004,7 @@ impl Checker<'_> {
                     }
                 }
             } else if check_ordinary_body {
-                self.check_fun_body(scope, f);
+                self.check_fun_body(scope, f, stable_declaration);
             }
         }
         if !self.signature_defaults_only && check_ordinary_body && f.ret.is_none() {

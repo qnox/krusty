@@ -1984,7 +1984,7 @@ impl BodyLowering<'_> {
         if route == Some(inline_route::InlineCallRoute::CompiledBody) {
             let function = function.expect("a compiled-body route names the callee's template");
             self.ir.record_compiled_inline_call(call, function);
-            self.record_compiled_reified_arguments(call, function, substitutions);
+            self.record_compiled_type_arguments(call, function, substitutions);
         }
         argument_boundaries::record(
             self.ir,

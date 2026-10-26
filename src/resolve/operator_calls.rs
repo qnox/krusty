@@ -1028,8 +1028,8 @@ fn selected_member_call(
     })
 }
 
-/// `computeComparisonClass`: the widest numeric type of a range literal's bounds and the value.
-fn range_comparison_type(start: Ty, end: Ty, value: Ty) -> Option<Ty> {
+/// `computeComparisonClass`: the widest numeric type of a range's bounds and the value.
+pub(crate) fn range_comparison_type(start: Ty, end: Ty, value: Ty) -> Option<Ty> {
     widest_numeric_type(widest_numeric_type(start, end)?, value)
 }
 

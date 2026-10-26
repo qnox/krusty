@@ -52,6 +52,24 @@ pub(super) fn class_xi(ir: &crate::ir::IrFile, class: &crate::ir::IrClass) -> i3
     }
 }
 
+/// `@Metadata.xi` of a lambda's `k=3` class declared at `enclosure`. One written in an `inline`
+/// function's body is public, since a caller in another package constructs it, and part of the
+/// public ABI when that function is ([`METADATA_PUBLIC_ABI_FLAG`]); any other is local.
+pub(super) fn lambda_class_xi(
+    ir: &crate::ir::IrFile,
+    enclosure: Option<crate::ir::IrEnclosure>,
+) -> i32 {
+    let in_inline_function = super::enclosure::enclosing_functions(ir, enclosure)
+        .any(|(function, _)| ir.inline_fns.contains(&function));
+    if !in_inline_function {
+        synthetic_class_xi(SYNTHETIC_LOCAL)
+    } else if in_public_inline_scope(ir, enclosure) {
+        synthetic_class_xi(SYNTHETIC_PUBLIC) | METADATA_PUBLIC_ABI_FLAG
+    } else {
+        synthetic_class_xi(SYNTHETIC_PUBLIC)
+    }
+}
+
 fn in_public_inline_scope(
     ir: &crate::ir::IrFile,
     enclosure: Option<crate::ir::IrEnclosure>,

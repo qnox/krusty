@@ -28,9 +28,41 @@ pub(super) struct NestedObjects<'r, 'a> {
     pub classes: Vec<(String, Vec<u8>)>,
     /// The SAM wrappers the method and the nested copies construct.
     pub sam_wrappers: Vec<SamWrapperCopy>,
+    /// Whether a nested copy still names a reified parameter of an enclosing inline function: the
+    /// copy that constructs it then does too (kotlinc merges the nested transformation's
+    /// `reifiedTypeParametersUsages` into the enclosing one's).
+    pub reified_parameters_remain: bool,
 }
 
 impl AnonymousObjects for NestedObjects<'_, '_> {
+    fn same_module(&self) -> bool {
+        self.regeneration.same_module
+    }
+
+    fn regenerate_singleton(
+        &mut self,
+        class: &str,
+        prior_classes: &[(String, String)],
+    ) -> Result<RegeneratedObject, InlineError> {
+        let unsupported =
+            |reason| InlineError::Regeneration(RegenerationError::Unsupported(reason));
+        let bytes = self
+            .regeneration
+            .classes
+            .class_file(class)
+            .ok_or(unsupported(
+                "a nested object whose class file is not on the classpath",
+            ))?;
+        let original = ClassNode::read(&bytes)
+            .map_err(|_| unsupported("a nested object class that does not read"))?;
+        let constructor = super::split_constructor(&original)
+            .map_err(InlineError::Regeneration)?
+            .0
+            .desc
+            .clone();
+        self.regenerate(class, &constructor, &[], prior_classes)
+    }
+
     fn regenerate(
         &mut self,
         class: &str,
@@ -79,7 +111,9 @@ impl AnonymousObjects for NestedObjects<'_, '_> {
                     owner: outer.new_class,
                     method: self.method,
                     descriptor: self.descriptor,
-                    public_inline_scope: false,
+                    // A nested copy shares its root call's scope (`RegeneratedClassContext` keeps
+                    // the root's `callSiteInfo`).
+                    public_inline_scope: outer.call_site.public_inline_scope,
                     source: outer.call_site.source,
                 },
                 prior_classes: &prior,
@@ -94,6 +128,7 @@ impl AnonymousObjects for NestedObjects<'_, '_> {
         self.classes.extend(regenerated.nested);
         self.sam_wrappers.extend(regenerated.sam_wrappers);
         self.classes.push((new_class.clone(), regenerated.bytes));
+        self.reified_parameters_remain |= regenerated.reified_parameters_remain;
         Ok(RegeneratedObject {
             name: new_class,
             constructor_desc: regenerated.constructor_desc,
