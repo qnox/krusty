@@ -93,12 +93,15 @@ impl Checker<'_> {
         call: &super::ResolvedCall,
     ) {
         let (declared, applied) = match call {
+            // A non-generic extension has no generic signature; its selected declaration still
+            // records the receiver it declares.
             super::ResolvedCall::Extension(extension) => (
                 extension
                     .callable
                     .generic_sig
                     .as_ref()
-                    .and_then(|signature| signature.receiver),
+                    .and_then(|signature| signature.receiver)
+                    .or(extension.callable.source_receiver),
                 extension.receiver,
             ),
             super::ResolvedCall::MemberExtension {
