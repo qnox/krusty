@@ -3,7 +3,9 @@
 //! collection parameter (`Collection<?>`), and `addAll` (both of `MutableList`'s) and `putAll`
 //! write every declaration-site variance (`Collection<? extends E>`, `Map<? extends K, ? extends
 //! V>`). The policy comes from the overridden declaration, so it applies through a mutable face, a
-//! read-only one, a generic class and a Java collection superclass alike.
+//! read-only one, a generic class and a Java collection superclass alike. A value class's static
+//! replacement of such an override (`addAll-impl`) overrides nothing: it keeps its ordinary
+//! signature, the moved receiver first (`(ILjava/util/Collection<+TT;>;)Z`).
 //!
 //! Each comparison checks the listed members' declarations and complete bytes against kotlinc.
 
@@ -144,5 +146,71 @@ class Names : java.util.ArrayList<String>() {
             "public boolean removeAll(java.util.Collection<?>);",
             "public boolean addAll(java.util.Collection<? extends java.lang.String>);",
         ],
+    );
+}
+
+const VALUE_CLASSES: &str = "@JvmInline value class Wrapped<T>(val x: Int) : MutableCollection<T> {
+    override val size: Int get() = 0
+    override fun clear() {}
+    override fun addAll(elements: Collection<T>) = true
+    override fun add(element: T) = false
+    override fun isEmpty() = true
+    override fun iterator(): MutableIterator<T> = mutableListOf<T>().iterator()
+    override fun retainAll(elements: Collection<T>) = false
+    override fun removeAll(elements: Collection<T>) = false
+    override fun remove(element: T) = false
+    override fun containsAll(elements: Collection<T>) = elements.isEmpty()
+    override fun contains(element: T) = false
+}
+
+@JvmInline value class Names(val x: Int) : MutableCollection<String> {
+    override val size: Int get() = 0
+    override fun clear() {}
+    override fun addAll(elements: Collection<String>) = true
+    override fun add(element: String) = false
+    override fun isEmpty() = true
+    override fun iterator(): MutableIterator<String> = mutableListOf<String>().iterator()
+    override fun retainAll(elements: Collection<String>) = false
+    override fun removeAll(elements: Collection<String>) = false
+    override fun remove(element: String) = false
+    override fun containsAll(elements: Collection<String>) = elements.isEmpty()
+    override fun contains(element: String) = false
+}
+";
+
+#[test]
+fn a_value_class_static_replacement_keeps_its_ordinary_signature_like_kotlinc() {
+    assert_members_like_kotlinc(
+        VALUE_CLASSES,
+        "Wrapped",
+        &[
+            "public static boolean addAll-impl(int, java.util.Collection<? extends T>);",
+            "public static boolean retainAll-impl(int, java.util.Collection<? extends T>);",
+            "public static boolean removeAll-impl(int, java.util.Collection<? extends T>);",
+            "public static boolean containsAll-impl(int, java.util.Collection<? extends T>);",
+        ],
+    );
+    assert_members_like_kotlinc(
+        VALUE_CLASSES,
+        "Names",
+        &[
+            "public static boolean addAll-impl(int, java.util.Collection<java.lang.String>);",
+            "public static boolean retainAll-impl(int, java.util.Collection<java.lang.String>);",
+            "public static boolean removeAll-impl(int, java.util.Collection<java.lang.String>);",
+            "public static boolean containsAll-impl(int, java.util.Collection<java.lang.String>);",
+        ],
+    );
+    common::expect_box_same_as_kotlinc(
+        &format!(
+            "{VALUE_CLASSES}
+fun box(): String {{
+    val method = Wrapped::class.java.getMethod(\"addAll-impl\", Int::class.javaPrimitiveType, Collection::class.java)
+    val parameters = method.genericParameterTypes.joinToString()
+    if (parameters != \"int, java.util.Collection<? extends T>\") return parameters
+    return if (Wrapped<String>(1).addAll(setOf(\"b\"))) \"OK\" else \"addAll\"
+}}
+"
+        ),
+        "collection_override_signature_value_class",
     );
 }
