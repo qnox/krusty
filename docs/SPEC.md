@@ -13547,7 +13547,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   child's `set(String)` stub and erased bridge. A concrete generic intermediate's existing stub is
   still inherited rather than repeated. The stubs never enter Kotlin metadata. The collection faces
   (`Iterable`; `Collection`, `List`, `Set`, `Map` and `Map.Entry` are below), with `removeAt`, the lifted
-  `iterator` result types and the JDK members, follow in later slices. Tests:
+  `iterator` result types and the JDK members, are below. Tests:
   `tests/read_only_iterator_stubs_e2e.rs`. Corpus: `objects/useAnonymousObjectAsIterator.kt`,
   `builtinStubMethods/customReadOnlyIterator.kt`.
 - **Only an inherited superclass member implements a read-only stub's member.** The superclass
@@ -13613,9 +13613,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   String)` implements `remove(Object)`, which becomes kotlinc's `ACC_PUBLIC|ACC_FINAL|ACC_BRIDGE`
   special bridge returning `false` unless the argument is `instanceof String` (or `null`, for a
   `String?`), and an inherited `Base<T>.remove(e: T)` under `Base<String>` already has the erased
-  descriptor, so nothing is written for it. The JDK members (`removeIf`) and an abstract class's
-  fake-override bridges follow in later slices; `toArray` and a declared `containsAll`'s signature
-  are below. Tests:
+  descriptor, so nothing is written for it. The JDK members (`removeIf`) are below; an abstract
+  class's fake-override bridges follow in a later slice; `toArray` and a declared `containsAll`'s
+  signature are below. Tests:
   `tests/read_only_collection_face_stubs_e2e.rs` (member bytes and box runs against kotlinc).
 - **A read-only `List` gets `MutableList`'s members as stubs.** A class that implements
   `kotlin.collections.List` without `MutableList` gets throwing stubs for the members
@@ -13640,8 +13640,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   through applied supertypes: a builtin's generic supertypes from `.kotlin_builtins` and a source
   classifier's checked applied hierarchy, so `listIterator(): MutableListIterator<String>` and
   `listIterator(): Walk` with `Walk : ListIterator<String>` implement `listIterator`. The JDK
-  defaults (`replaceAll`, `sort`, the `SequencedCollection` members) and an abstract class's
-  fake-override bridges follow later. Tests:
+  defaults (`replaceAll`, `sort`, the `SequencedCollection` members) are below; an abstract
+  class's fake-override bridges follow later. Tests:
   `tests/read_only_list_face_stubs_e2e.rs` (member bytes and box runs against kotlinc),
   `tests/metadata_return_types.rs::list_impls_realize_remove_at_as_remove_int`.
 - **A read-only `Set` gets `MutableSet`'s members as stubs.** A class that implements
@@ -13668,9 +13668,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   bridge that calls it and casts. A declared `fun remove(key: String): Int?` implements the
   type-safe `remove(Object)` the same way: a final synthetic `Object remove(Object)` and the final
   `Integer remove(Object)`, each returning `null` unless the key is `instanceof String`. The JDK
-  defaults (`replaceAll`, `putIfAbsent`, `replace`, `compute*`, `merge`) and an abstract class's
-  fake-override bridges follow later. Tests:
+  defaults (`replaceAll`, `putIfAbsent`, `replace`, `compute*`, `merge`) are below; an abstract
+  class's fake-override bridges follow later. Tests:
   `tests/read_only_map_face_stubs_e2e.rs` (member bytes and box runs against kotlinc).
+- **A read-only face gets its JDK interface's mutable-only methods as stubs.** kotlinc joins a
+  mapped collection's JDK interface methods into its builtin scopes and keeps those of
+  `JvmBuiltInsSignatures.MUTABLE_METHOD_SIGNATURES` out of the read-only face. So a class that
+  implements a read-only face without its mutable counterpart also gets a throwing stub for each
+  such method the face's own JDK interface declares, in that interface's classfile order after
+  the builtin members: `removeIf` for `Collection` (`java.util.Collection` declares it; `List` and
+  `Set` do not), `replaceAll`, `sort`, `addFirst`, `addLast`, `removeFirst` and `removeLast` for
+  `List`, and `replaceAll`, `putIfAbsent`, both `replace`, `computeIfAbsent`, `computeIfPresent`,
+  `compute` and `merge` for `Map` (`remove(key, value)` is already the `MutableMap` builtin). The
+  JDK method's generic signature is applied with the face's arguments, whose uses are platform
+  types, so they stay references: `putIfAbsent(String, Integer)` and
+  `replaceAll(BiFunction<? super String, ? super Integer, ? extends Integer>)` for
+  `Map<String, Int>`. The parameters are named `p0`, `p1`, ... as the JDK classfile has no names.
+  Where the JDK descriptor differs, it gets a throwing `ACC_BRIDGE|ACC_SYNTHETIC` bridge after the
+  other bridges (`Object putIfAbsent(Object, Object)`, `addFirst(Object)`). The method set is a
+  checked-in mirror of kotlinc's table keyed by exact JVM owner, name and descriptor; the
+  candidates come from the classfile. Tests: `tests/read_only_map_face_stubs_e2e.rs`,
+  `tests/read_only_list_face_stubs_e2e.rs`, `tests/read_only_collection_face_stubs_e2e.rs`
+  (member bytes against kotlinc, and a box run through `MutableMap.replaceAll`/`computeIfPresent`).
+  Corpus: `specialBuiltins/maps.kt`, `bridges/strListContains.kt`,
+  `builtinStubMethods/customReadOnlyIterator.kt`.
 - **A collection class gets the JDK's `toArray` pair.** As kotlinc's `ToArrayLowering`, every
   non-interface class that implements `Collection` (any face, read-only or mutable, abstract or
   not, enum and anonymous classes included) gets `public <T> T[] toArray(T[])`, which checks its

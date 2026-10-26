@@ -10,9 +10,9 @@
 //! synthetic `Object get(Object)` copy of it, and `final HashSet<String> keySet()` before an
 //! ordinary `Set keySet()` bridge to it.
 //!
-//! The JDK defaults (`replaceAll`, `putIfAbsent`, `replace`, `compute*`, `merge`) and an abstract
-//! class's fake-override bridges are later realizations; these comparisons leave them out by
-//! their exact spelling and compare every other member byte for byte.
+//! The JDK defaults `java.util.Map` declares for the mutable face only (`replaceAll`,
+//! `putIfAbsent`, `replace`, `compute*`, `merge`) are stubs too, each with its erased bridge
+//! (`Object putIfAbsent(Object, Object)`). These comparisons compare every member byte for byte.
 
 use super::common;
 
@@ -66,25 +66,6 @@ const GENERIC_ENTRY: &str = "class Dict<V>(override val value: V) : Map.Entry<St
 
 const ABSTRACT_ENTRY: &str = "abstract class Dict : Map.Entry<String, Int>\n";
 
-/// The members a later realization writes, as `javap -p` spells them in either compiler's class.
-const LATER_REALIZATIONS: &[&str] = &[
-    "public void replaceAll(java.util.function.BiFunction<? super java.lang.String, ? super java.lang.Integer, ? extends java.lang.Integer>);",
-    "public java.lang.Integer putIfAbsent(java.lang.String, java.lang.Integer);",
-    "public boolean replace(java.lang.String, java.lang.Integer, java.lang.Integer);",
-    "public java.lang.Integer replace(java.lang.String, java.lang.Integer);",
-    "public java.lang.Integer computeIfAbsent(java.lang.String, java.util.function.Function<? super java.lang.String, ? extends java.lang.Integer>);",
-    "public java.lang.Integer computeIfPresent(java.lang.String, java.util.function.BiFunction<? super java.lang.String, ? super java.lang.Integer, ? extends java.lang.Integer>);",
-    "public java.lang.Integer compute(java.lang.String, java.util.function.BiFunction<? super java.lang.String, ? super java.lang.Integer, ? extends java.lang.Integer>);",
-    "public java.lang.Integer merge(java.lang.String, java.lang.Integer, java.util.function.BiFunction<? super java.lang.Integer, ? super java.lang.Integer, ? extends java.lang.Integer>);",
-    "public java.lang.Object putIfAbsent(java.lang.Object, java.lang.Object);",
-    "public boolean replace(java.lang.Object, java.lang.Object, java.lang.Object);",
-    "public java.lang.Object replace(java.lang.Object, java.lang.Object);",
-    "public java.lang.Object computeIfAbsent(java.lang.Object, java.util.function.Function);",
-    "public java.lang.Object computeIfPresent(java.lang.Object, java.util.function.BiFunction);",
-    "public java.lang.Object compute(java.lang.Object, java.util.function.BiFunction);",
-    "public java.lang.Object merge(java.lang.Object, java.lang.Object, java.util.function.BiFunction);",
-];
-
 fn assert_members_match_kotlinc(source: &str, members: &[&str]) {
     let classes = common::classes_against_kotlinc_module(&[(
         "Dict.kt",
@@ -93,13 +74,7 @@ fn assert_members_match_kotlinc(source: &str, members: &[&str]) {
     let (reference, krusty) = classes
         .method_declarations("maps/Dict")
         .expect("both compilers write maps/Dict");
-    let realized_here = |declarations: Vec<String>| {
-        declarations
-            .into_iter()
-            .filter(|declaration| !LATER_REALIZATIONS.contains(&declaration.as_str()))
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(realized_here(krusty), realized_here(reference));
+    assert_eq!(krusty, reference);
     let (reference, krusty) = classes.method_blocks("maps/Dict");
     for member in members {
         let block = |blocks: &[(String, String)]| {
@@ -153,6 +128,10 @@ fn a_map_gets_kotlincs_mutable_map_stubs_and_special_bridges() {
             "public boolean remove(java.lang.Object, java.lang.Object);",
             "public void putAll(java.util.Map<? extends java.lang.String, ? extends java.lang.Integer>);",
             "public void clear();",
+            "public void replaceAll(java.util.function.BiFunction<? super java.lang.String, ? super java.lang.Integer, ? extends java.lang.Integer>);",
+            "public java.lang.Integer putIfAbsent(java.lang.String, java.lang.Integer);",
+            "public boolean replace(java.lang.String, java.lang.Integer, java.lang.Integer);",
+            "public java.lang.Integer merge(java.lang.String, java.lang.Integer, java.util.function.BiFunction<? super java.lang.Integer, ? super java.lang.Integer, ? extends java.lang.Integer>);",
             "public final java.lang.Object get(java.lang.Object);",
             "public final java.lang.Integer get(java.lang.Object);",
             "public final java.util.Set<java.lang.String> keySet();",
@@ -160,6 +139,9 @@ fn a_map_gets_kotlincs_mutable_map_stubs_and_special_bridges() {
             "public final java.util.Set<java.util.Map$Entry<java.lang.String, java.lang.Integer>> entrySet();",
             "public java.lang.Object put(java.lang.Object, java.lang.Object);",
             "public java.lang.Object remove(java.lang.Object);",
+            "public java.lang.Object putIfAbsent(java.lang.Object, java.lang.Object);",
+            "public boolean replace(java.lang.Object, java.lang.Object, java.lang.Object);",
+            "public java.lang.Object merge(java.lang.Object, java.lang.Object, java.util.function.BiFunction);",
         ],
     );
     let expected = "put: UnsupportedOperationException; remove: UnsupportedOperationException; \
@@ -245,4 +227,38 @@ fn an_own_remove_gets_kotlincs_two_type_safe_remove_bridges_like_kotlinc() {
         &box_program(&own_remove_map(), expected),
         "read_only_map_face_own_remove",
     );
+}
+
+/// The JDK defaults reached through `java.util.Map`: the stubs throw where the JDK's default
+/// implementations, over this empty map, would answer.
+#[test]
+fn the_jdk_defaults_of_a_read_only_map_throw_like_kotlinc() {
+    let program = format!(
+        "{}
+fun outcome(map: Any, name: String, parameters: List<Class<*>>, arguments: List<Any?>): String = try {{
+    val result = map.javaClass.getMethod(name, *parameters.toTypedArray())
+        .invoke(map, *arguments.toTypedArray())
+    \"$name=$result\"
+}} catch (e: java.lang.reflect.InvocationTargetException) {{
+    \"$name: ${{e.cause!!.message}}\"
+}}
+
+fun box(): String {{
+    val map: Any = Dict()
+    val any = Any::class.java
+    val function = java.util.function.BiFunction::class.java
+    val keep = java.util.function.BiFunction<Any?, Any?, Any?> {{ _, value -> value }}
+    val outcomes = listOf(
+        outcome(map, \"replaceAll\", listOf(function), listOf(keep)),
+        outcome(map, \"computeIfPresent\", listOf(any, function), listOf(\"k\", keep)),
+        outcome(map, \"getOrDefault\", listOf(any, any), listOf(\"k\", 7)),
+    ).joinToString(\"; \")
+    val expected = \"replaceAll: Operation is not supported for read-only collection; \" +
+        \"computeIfPresent: Operation is not supported for read-only collection; getOrDefault=7\"
+    return if (outcomes == expected) \"OK\" else outcomes
+}}
+",
+        string_map()
+    );
+    common::expect_box_same_as_kotlinc(&program, "read_only_map_face_jdk_defaults");
 }

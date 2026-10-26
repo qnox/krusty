@@ -824,6 +824,12 @@ pub(super) fn inherited_collection_specialized_local(ordinal: usize) -> String {
     format!("p{ordinal}")
 }
 
+/// Kotlin's name for the parameter at `ordinal` of a Java method whose classfile records no names
+/// (a JDK interface method a read-only collection stub realizes).
+pub(super) fn unnamed_java_parameter(ordinal: usize) -> String {
+    format!("p{ordinal}")
+}
+
 fn resolved_anonymous_context_labels(
     identities: &[crate::fir::ResolvedParameterIdentity],
     semantic_types: &[crate::types::Ty],
