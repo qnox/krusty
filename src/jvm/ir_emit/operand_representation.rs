@@ -171,7 +171,7 @@ impl Emitter<'_> {
         }
         match self.erased_reference_result(expression) {
             Some(ErasedResult::Coerced { call, slot }) => {
-                self.emit_value(call, code);
+                self.emit_deferred_coercion(expression, call, code);
                 slot
             }
             Some(ErasedResult::Invocation) => {
@@ -185,6 +185,26 @@ impl Emitter<'_> {
             None => {
                 self.emit_value(expression, code);
                 self.value_ty(expression)
+            }
+        }
+    }
+
+    /// Emit a deferred coercion's producer in the coercion's place. The coercion still owns its
+    /// debug lines: the line it starts on, and the end line its evaluated result marks, exactly
+    /// as emitting the coercion itself would record them.
+    fn emit_deferred_coercion(
+        &mut self,
+        coercion: crate::ir::ExprId,
+        producer: crate::ir::ExprId,
+        code: &mut CodeBuilder,
+    ) {
+        super::debug_lines::begin_expression(self.ir, coercion, code);
+        self.mark_value_expression_start(coercion, code);
+        self.emit_value(producer, code);
+        if !code.is_dead() {
+            if let Some(line) = self.ir.evaluated_result_end_line(coercion) {
+                self.mark_expression_line(coercion, line, code);
+                code.nop();
             }
         }
     }
