@@ -5609,6 +5609,10 @@ regress.
     (`reified/kt39256_privateInlineWithAnonymousObject`, `reified/catchParameter/nestedReifiedCatch`,
     `inline/localDeclarationsClash`, `topLevelPrivate/privateInInlineNested`), none regresses, and
     all 7,184 applicable files run.
+    Inside a regenerated copy every object its methods and constructor create is regenerated with
+    it (`capturedOuterRegenerated`), a suspend method's continuation included, so a constructor
+    that creates an object and a suspend method of a reified object compile again (the IR route
+    had taken them): the corpus is unchanged (4,137 byte-identical, none lost, all 7,184 run).
     ☐ `$default` calls, suspend callees (and the calls a suspend inline function holds),
     `crossinline` parameters, calls in default arguments, and callee bodies with enum switches.
 - ☐ 7. Delete `InlineBodyPlan` and its resolver/FIR threading once the coroutine state machine runs

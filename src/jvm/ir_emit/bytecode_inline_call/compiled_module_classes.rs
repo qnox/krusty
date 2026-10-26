@@ -60,7 +60,13 @@ pub(super) fn compile_declared_classes(
     let classes = &env.run.compiled_inline_callees.classes;
     for (class_id, class) in ir.classes.iter().enumerate() {
         let class_id = class_id as ClassId;
-        let declared = class.enclosure.is_some_and(|scope| {
+        // A continuation class is code of the suspend function whose machine it carries.
+        let scope = class.enclosure.or_else(|| {
+            ir.continuation_owners
+                .get(&class_id)
+                .map(|&owner| crate::ir::IrEnclosure::Function(owner))
+        });
+        let declared = scope.is_some_and(|scope| {
             crate::jvm::inner_classes::scope_within(ir, scope, &|owner| owner == function)
         });
         if !declared || classes.written.borrow().contains_key(&class_id) {
