@@ -1,5 +1,6 @@
 package library
 
+import com.google.devtools.ksp.getDeclaredProperties
 import com.google.devtools.ksp.processing.*
 import com.google.devtools.ksp.symbol.*
 
@@ -72,6 +73,37 @@ class LibraryProcessor(private val env: SymbolProcessorEnvironment) : SymbolProc
         for (name in names) {
             val declaration = resolver.getClassDeclarationByName(resolver.getKSNameFromString(name))
             if (declaration == null) env.logger.warn("$name null") else log("$name ->", declaration)
+        }
+        val builtIns = resolver.builtIns
+        val types = listOf(
+            "any" to builtIns.anyType, "nothing" to builtIns.nothingType, "unit" to builtIns.unitType,
+            "number" to builtIns.numberType, "byte" to builtIns.byteType, "short" to builtIns.shortType,
+            "int" to builtIns.intType, "long" to builtIns.longType, "float" to builtIns.floatType,
+            "double" to builtIns.doubleType, "char" to builtIns.charType, "boolean" to builtIns.booleanType,
+            "string" to builtIns.stringType, "iterable" to builtIns.iterableType,
+            "annotation" to builtIns.annotationType, "array" to builtIns.arrayType,
+        )
+        for ((name, builtIn) in types) {
+            val nullable = builtIn.makeNullable()
+            env.logger.warn(
+                "builtIn $name=${type(builtIn)} text=$builtIn origin=${builtIn.declaration.origin}" +
+                    " nullable=${type(nullable)} text=$nullable" +
+                    " notNullable=${type(nullable.makeNotNullable())} same=${nullable.makeNotNullable() == builtIn}",
+            )
+        }
+        // Resolved source property types against the builtin of the same classifier.
+        val typed = resolver.getClassDeclarationByName(resolver.getKSNameFromString("library.Typed"))!!
+        for (property in typed.getDeclaredProperties()) {
+            val resolved = property.type.resolve()
+            val builtIn = types.first { it.second.declaration == resolved.declaration }
+            val plain = builtIn.second
+            env.logger.warn(
+                "resolved ${property.simpleName.asString()}=${type(resolved)} ${builtIn.first} equals=${resolved == plain}" +
+                    " reverse=${plain == resolved} nullable equals=${resolved == plain.makeNullable()}" +
+                    " reverse=${plain.makeNullable() == resolved}" +
+                    " same hash=${resolved.hashCode() == plain.hashCode()}" +
+                    " not null equals=${resolved.makeNotNullable() == plain}",
+            )
         }
         for (file in resolver.getAllFiles()) {
             for (declaration in file.declarations) {

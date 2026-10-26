@@ -106,6 +106,8 @@ mod inline_return_bound_context_e2e;
 mod inline_sam_wrapper_copy_e2e;
 #[path = "../inline_same_module_bytes_e2e.rs"]
 mod inline_same_module_bytes_e2e;
+#[path = "../inline_same_module_internal_bodies_e2e.rs"]
+mod inline_same_module_internal_bodies_e2e;
 #[path = "../inline_same_module_lambda_bodies_e2e.rs"]
 mod inline_same_module_lambda_bodies_e2e;
 #[path = "../inline_same_module_local_classes_e2e.rs"]

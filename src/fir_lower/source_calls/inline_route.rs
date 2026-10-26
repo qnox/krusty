@@ -11,7 +11,7 @@ use crate::fir::{
 };
 use crate::fx_hash::HashSet;
 use crate::ir::{ExprId, FunId, IrExpr, SameModuleInlining};
-use crate::types::{InlineParameterModifier, Ty, TyKind, Visibility};
+use crate::types::{InlineParameterModifier, Ty, TyKind};
 
 #[cfg(test)]
 mod tests;
@@ -48,9 +48,6 @@ pub(in super::super) enum ExpansionReason {
     /// A parameter of the callee is `crossinline`: its lambda is placed in an object or lambda the
     /// callee's body creates.
     CrossinlineParameter,
-    /// The callee is not public and declared in another file, so its body may reach declarations
-    /// only its own file's class can.
-    NonPublicCallee,
     /// The callee has no body of its own in this file's IR.
     NoTemplate,
     /// The callee's body holds a subject `when` that switches on an enum's keys. The keys are
@@ -72,7 +69,10 @@ impl BodyLowering<'_> {
         has_defaults: bool,
     ) -> InlineCallRoute {
         match self.compiled_body_exclusion(target, function, inline_lambdas, has_defaults) {
-            Some(reason) => InlineCallRoute::Expansion(reason),
+            Some(reason) => {
+                crate::trace_compiler!("lower", "inline route: expand {target:?} ({reason:?})");
+                InlineCallRoute::Expansion(reason)
+            }
             None => InlineCallRoute::CompiledBody,
         }
     }
@@ -142,13 +142,6 @@ impl BodyLowering<'_> {
         let Some(function) = function else {
             return Some(ExpansionReason::NoTemplate);
         };
-        // A body compiled into its own file's class reaches that file's private declarations as
-        // the class itself does; inlined into another file's class it would need accessors.
-        if header.visibility != Visibility::Public
-            && self.ir.foreign_inline_templates.contains(&function)
-        {
-            return Some(ExpansionReason::NonPublicCallee);
-        }
         if self
             .ir
             .declared_inline_modifiers(function)

@@ -147,12 +147,13 @@ final class SourceType implements KSType {
 
     @Override
     public int hashCode() {
-        return parameter < 0 ? classifierHash(name) : name.hashCode() * 31 + parameter;
+        return parameter < 0 ? classifierHash(name, nullable) : name.hashCode() * 31 + parameter;
     }
 
-    // The hash of a type naming the classifier `qualifiedName`, whichever kind of type names it.
-    static int classifierHash(String qualifiedName) {
-        return qualifiedName.hashCode() * 31 - 1;
+    // The hash of a type naming the classifier `qualifiedName`, whichever kind of type names it. As
+    // in KSP2, a nullable type hashes apart from its non-null form.
+    static int classifierHash(String qualifiedName, boolean nullable) {
+        return qualifiedName.hashCode() * 31 + (nullable ? 1 : -1);
     }
 
     // KSP's rendering: simple names, arguments in angle brackets, and `?` when nullable.

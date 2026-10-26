@@ -9,3 +9,5 @@ interface Store : Map<String, List<Int>>
 enum class Color { RED }
 
 annotation class Mark
+
+class Typed(val name: String, val label: String?, val count: Int, val tags: Iterable<*>)

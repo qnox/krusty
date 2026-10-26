@@ -15,6 +15,10 @@ pub(super) struct PendingLines {
     forgotten: bool,
     /// The pc of a line mark that must own an instruction (see [`CodeBuilder::mark_line_occupied`]).
     occupied_pc: Option<u16>,
+    /// The pc of an entry written although its line was already in effect: a forgotten line's
+    /// restatement, a control-flow entry, or an inlined body's copied line. A later mark that
+    /// replaces it keeps its own entry even when it names the line in effect before it.
+    restated_pc: Option<u16>,
 }
 
 impl ClassWriter {
@@ -223,6 +227,7 @@ impl CodeBuilder {
             Some((last_pc, last_line)) if *last_pc == pc => *last_line = line,
             _ => self.line_marks.push((pc, line)),
         }
+        self.pending_lines.restated_pc = Some(pc);
     }
 
     /// [`Self::mark_line`], reporting the index of the entry left in effect AT THE CURRENT pc —
@@ -289,7 +294,25 @@ impl CodeBuilder {
             }
             // Already exactly this entry.
             Some((lpc, ll)) if *lpc == pc && *ll == line => Some(self.line_marks.len() - 1),
+            // A replacement that names the line the previous entry already put in effect leaves
+            // no entry here at all, as if the replaced mark had never been made: the line in effect
+            // is still that line. `boxed(\n).toString()` on the null path of a one-line elvis
+            // marks the call's line 7 and then its receiver's line 6 where `boxed()` begins, and
+            // kotlinc writes no entry there.
             Some((lpc, _)) if *lpc == pc => {
+                let restated = forgotten || self.pending_lines.restated_pc == Some(pc);
+                let in_effect = self
+                    .line_marks
+                    .len()
+                    .checked_sub(2)
+                    .map(|index| self.line_marks[index].1);
+                if !restated && in_effect == Some(line) {
+                    self.line_marks.pop();
+                    return None;
+                }
+                if forgotten {
+                    self.pending_lines.restated_pc = Some(pc);
+                }
                 let last = self.line_marks.last_mut()?;
                 last.1 = line;
                 Some(self.line_marks.len() - 1)
@@ -298,6 +321,9 @@ impl CodeBuilder {
             // this offset holds none of this mark's to retain.
             Some((_, ll)) if *ll == line && !forgotten => None,
             _ => {
+                if forgotten {
+                    self.pending_lines.restated_pc = Some(pc);
+                }
                 self.line_marks.push((pc, line));
                 Some(self.line_marks.len() - 1)
             }
@@ -431,6 +457,7 @@ impl CodeBuilder {
         let pc = self.bytes.len() as u16;
         self.line_marks.push((pc, line));
         self.inlined_line_marks.push((pc, line));
+        self.pending_lines.restated_pc = Some(pc);
     }
 
     /// Line marks whose provenance is an inlined body or its caller-line restoration.
@@ -673,6 +700,22 @@ mod tests {
         code.mark_line(4);
         code.mark_line(5);
         assert_eq!(code.line_marks(), [(0, 5)]);
+    }
+
+    /// A mark replaced at its own offset by the line already in effect leaves no entry, and a
+    /// forgotten line's restatement survives the same replacement.
+    #[test]
+    fn a_replacement_by_the_line_in_effect_leaves_no_entry() {
+        let mut code = CodeBuilder::new(0);
+        code.mark_line(6);
+        advance(&mut code);
+        code.mark_line(7);
+        code.mark_line(6);
+        assert_eq!(code.line_marks(), [(0, 6)]);
+        code.forget_line();
+        code.mark_line(7);
+        code.mark_line(6);
+        assert_eq!(code.line_marks(), [(0, 6), (1, 6)]);
     }
 
     /// After an inlined call the line in effect is forgotten, so the next mark of the SAME line is

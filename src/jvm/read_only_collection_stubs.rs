@@ -22,7 +22,7 @@ use crate::jvm::jvm_class_map::{
 use crate::jvm::mapped_builtin_declarations::MappedBuiltinMemberKind;
 use crate::jvm::method_descriptors::{jvm_declared_ty, jvm_tys};
 use crate::jvm::names::method_descriptor;
-use crate::types::{ty_subst, wk, CollectionKind, Ty, TypeName};
+use crate::types::{ty_subst, wk, CollectionKind, Ty, TypeName, Visibility};
 
 /// kotlinc's `preComputedStubs` order: a class's applicable faces contribute their stubs in this
 /// order.
@@ -44,7 +44,6 @@ const REALIZED_FACES: [CollectionKind; 2] =
     [CollectionKind::Iterator, CollectionKind::ListIterator];
 
 const ACC_STATIC: u16 = 0x0008;
-const ACC_PRIVATE: u16 = 0x0002;
 const ACC_BRIDGE: u16 = 0x0040;
 const ACC_SYNTHETIC: u16 = 0x1000;
 const ACC_ABSTRACT: u16 = 0x0400;
@@ -68,10 +67,12 @@ impl ReadOnlyCollectionStubs {
     }
 }
 
-/// One throwing stub, in the substitution context of the class that declares it.
+/// One candidate member of a read-only face, in the substitution context of the class that declares
+/// it: a throwing stub, or a member the class already implements that still needs its bridge.
 #[derive(Clone, Debug)]
 pub(super) struct ReadOnlyStub {
     pub(super) name: String,
+    pub(super) body: StubBody,
     /// The declared parameter types, substituted with the face's type arguments.
     pub(super) parameters: Vec<Ty>,
     pub(super) parameter_names: Vec<String>,
@@ -79,6 +80,21 @@ pub(super) struct ReadOnlyStub {
     /// The erased JVM parameters and result of the mutable declaration, when they differ from the
     /// stub's own descriptor: kotlinc's bridge lowering gives the stub a throwing bridge there.
     pub(super) bridge: Option<(Vec<Ty>, Ty)>,
+}
+
+/// What realizes a candidate member at the stub's own descriptor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum StubBody {
+    /// Nothing implements it: the class gets the throwing stub, and its bridge throws too.
+    Throwing,
+    /// A member the class declares or inherits effectively overrides it (kotlinc's non-abstract
+    /// fake override). No stub is written, but the mutable declaration's erased descriptor still
+    /// needs a bridge, which forwards to that member.
+    Implemented {
+        /// The source order of the class's own implementing member, which places its bridge among
+        /// the ordinary ones; `u32::MAX` for an inherited member, whose bridge follows them.
+        order: u32,
+    },
 }
 
 impl ReadOnlyStub {
@@ -170,11 +186,43 @@ fn class_stubs(
         }
     }
 
+    // An effectively overridden member keeps only its bridge, and only when the mutable
+    // declaration's erased descriptor differs from the implementation's.
     let implemented = implemented_members(ir, class, &chain);
+    let own_order: HashMap<(String, String), u32> = class
+        .methods
+        .iter()
+        .filter(|&&function| !ir.functions[function as usize].is_static)
+        .map(|&function| {
+            let declaration = &ir.functions[function as usize];
+            (
+                (
+                    declaration.name.clone(),
+                    parameter_descriptor(&declaration.params),
+                ),
+                ir.fn_source_order
+                    .get(&function)
+                    .copied()
+                    .unwrap_or(u32::MAX),
+            )
+        })
+        .collect();
     Ok(candidates
         .into_iter()
         .filter(|stub| present.insert((stub.name.clone(), stub.descriptor())))
-        .filter(|stub| !implemented.contains(&stub.parameter_key()))
+        .filter_map(|stub| {
+            if !implemented.contains(&stub.parameter_key()) {
+                return Some(stub);
+            }
+            let order = own_order
+                .get(&stub.parameter_key())
+                .copied()
+                .unwrap_or(u32::MAX);
+            stub.bridge.is_some().then_some(ReadOnlyStub {
+                body: StubBody::Implemented { order },
+                ..stub
+            })
+        })
         .collect())
 }
 
@@ -283,6 +331,7 @@ fn face_stubs(classpath: &Classpath, face: Face, applied: Ty) -> Vec<ReadOnlyStu
                 .then_some((erased_parameters, erased_result));
             ReadOnlyStub {
                 name: member.source_name,
+                body: StubBody::Throwing,
                 parameters,
                 parameter_names: member.parameter_names,
                 result,
@@ -343,7 +392,10 @@ fn superclass_chain(
     let mut chain = Vec::new();
     let mut current = class.superclass;
     let mut seen = HashSet::default();
+    let package = class.fq_name_id().namespace();
+    let mut same_package_path = true;
     while current != wk::java_object() && current != wk::any() && seen.insert(current) {
+        same_package_path &= current.namespace() == package;
         if let Some(source) = ir.classes.iter().find(|c| c.fq_name_id() == current) {
             let mut superclass = Superclass {
                 supertypes: ir
@@ -362,7 +414,9 @@ fn superclass_chain(
             };
             for &function_id in &source.methods {
                 let function = &ir.functions[function_id as usize];
-                if function.is_static {
+                if function.is_static
+                    || !inherited_along(ir.method_visibility(function_id), same_package_path)
+                {
                     continue;
                 }
                 let key = (
@@ -427,8 +481,9 @@ fn superclass_chain(
             implemented_members: HashSet::default(),
         };
         for method in &info.methods {
-            if method.access & (ACC_STATIC | ACC_PRIVATE | ACC_BRIDGE | ACC_SYNTHETIC) != 0
+            if method.access & (ACC_STATIC | ACC_BRIDGE | ACC_SYNTHETIC) != 0
                 || method.name == "<init>"
+                || !inherited_along(method.visibility(), same_package_path)
             {
                 continue;
             }
@@ -502,6 +557,18 @@ fn superclass_chain(
         current = next;
     }
     Ok(chain)
+}
+
+/// Whether a member a superclass declares with `visibility` reaches the class, given whether every
+/// class from the class up to that superclass shares the class's package. A private member is
+/// never inherited, and a package-private one only along a path that stays in its package; only
+/// an inherited member can implement a stub's member.
+fn inherited_along(visibility: Visibility, same_package_path: bool) -> bool {
+    match visibility {
+        Visibility::Private => false,
+        Visibility::PackagePrivate => same_package_path,
+        Visibility::Public | Visibility::Internal | Visibility::Protected => true,
+    }
 }
 
 /// Every classifier a dependency classifier extends, through its published direct supertypes.
