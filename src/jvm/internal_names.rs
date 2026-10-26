@@ -311,9 +311,17 @@ fn declares_mangled_member(ir: &IrFile, function: FunId, facade: TypeName) -> bo
     if name == "<init>" || name == "<clinit>" {
         return false;
     }
-    ir.classes
-        .iter()
-        .any(|class| class.fq_name != facade && class.methods.contains(&function))
+    // Another file's member template is compiled on the class that declares it, under the name
+    // that class gives it.
+    let foreign_member = ir.foreign_inline_templates.contains(&function)
+        && ir.functions[function as usize]
+            .dispatch_receiver
+            .is_some_and(|class| class != facade);
+    foreign_member
+        || ir
+            .classes
+            .iter()
+            .any(|class| class.fq_name != facade && class.methods.contains(&function))
 }
 
 fn declares_jvm_name(annotations: Option<&crate::ir::DeclarationAnnotations>) -> bool {

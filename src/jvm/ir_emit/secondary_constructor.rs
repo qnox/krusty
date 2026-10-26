@@ -627,18 +627,10 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             // `(String, int, …declared, mask, marker)` as kotlinc writes it. Only the capture
             // prefix is LOGICAL: a default initializer can mention a capture, never `$enum$name`.
             // This stub belongs to the SECONDARY constructor, so its line table is the secondary's:
-            // each masked fill maps to the default expression it evaluates, and the entry to the
-            // first of them — the `constructor(…)` declaration itself. Borrowing the primary's
-            // class/field/closing-paren provenance put the whole stub on the class line.
-            // Every one of these is the DECLARATION's own recorded line, never a descendant
-            // expression's: the entry at the `constructor` keyword, each masked fill at that
-            // parameter's default, and the delegation at the declaration's closing line.
-            let default_lines = sc
-                .lines
-                .defaults
-                .iter()
-                .map(|line| (*line != 0).then_some(*line))
-                .collect::<Vec<_>>();
+            // the entry, each mask test and the delegation at the `constructor` keyword, the
+            // return at the declaration's closing line, and each masked fill on the lines its
+            // default expression marks. Borrowing the primary's class/closing-paren provenance put
+            // the whole stub on the class line.
             // An enum's constructors are private, and kotlinc marks the synthetic overload of a
             // private constructor ACC_SYNTHETIC alone: PUBLIC|SYNTHETIC would publish a way to build
             // the class that the declaration does not grant.
@@ -657,11 +649,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                     logical_prefix_count: sc_prefix_tys.len(),
                     real_params: &sc_source_tys,
                     defaults: &sc.defaults,
-                    secondary_lines: Some((
-                        sc.lines.decl_line,
-                        &default_lines,
-                        sc.lines.decl_end_line,
-                    )),
+                    secondary_lines: Some((sc.lines.decl_line, sc.lines.decl_end_line)),
                     target_uses_marker_accessor: sc.vc_params
                         || super::constructor_accessors::hides_secondary(ir, c, secondary_ordinal),
                     deprecated: sc.annotations.deprecated(),
