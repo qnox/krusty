@@ -1621,6 +1621,7 @@ fn type_mentions_anonymous_class(ir: &crate::ir::IrFile, ty: Ty) -> bool {
             .any(|part| type_mentions_anonymous_class(ir, part)),
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
         | TyKind::DefinitelyNotNull(inner)
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner)

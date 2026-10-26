@@ -566,6 +566,12 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
                 .unwrap_or(inner);
             unify_ty_impl(source, inner, actual, binds);
         }
+        TyKind::MutabilityFlexible(inner) => {
+            let inner = source
+                .map(|source| choose_platform_lower_face(source, inner, actual))
+                .unwrap_or(inner);
+            unify_ty_impl(source, inner, actual, binds);
+        }
         _ => {}
     }
 }
@@ -614,12 +620,16 @@ pub(crate) fn collect_generic_identity_bindings(
         (TyKind::InProjection(declared), TyKind::InProjection(actual))
         | (TyKind::OutProjection(declared), TyKind::OutProjection(actual))
         | (TyKind::Nullable(declared), TyKind::Nullable(actual))
-        | (TyKind::PlatformNullable(declared), TyKind::PlatformNullable(actual)) => {
+        | (TyKind::PlatformNullable(declared), TyKind::PlatformNullable(actual))
+        | (TyKind::MutabilityFlexible(declared), TyKind::MutabilityFlexible(actual)) => {
             collect_generic_identity_bindings(declared, actual, formals, bindings);
         }
-        (TyKind::Nullable(declared) | TyKind::PlatformNullable(declared), _)
-            if !null_only(actual) =>
-        {
+        (
+            TyKind::Nullable(declared)
+            | TyKind::PlatformNullable(declared)
+            | TyKind::MutabilityFlexible(declared),
+            _,
+        ) if !null_only(actual) => {
             collect_generic_identity_bindings(declared, actual.non_null(), formals, bindings);
         }
         (TyKind::Obj(declared_name, declared_args), TyKind::Obj(actual_name, actual_args))
@@ -783,7 +793,9 @@ fn formal_has_nested_flexible_expected_occurrence(
                 }
                 visit(inner, expected.non_null(), formal, nested)
             }
-            TyKind::Nullable(inner) | TyKind::DefinitelyNotNull(inner) => {
+            TyKind::Nullable(inner)
+            | TyKind::DefinitelyNotNull(inner)
+            | TyKind::MutabilityFlexible(inner) => {
                 visit(inner, expected.non_null(), formal, nested)
             }
             TyKind::InProjection(inner) | TyKind::OutProjection(inner) => visit(
@@ -892,7 +904,9 @@ fn formal_has_unprojected_expected_occurrence(declared: Ty, expected: Ty, formal
                 _ => false,
             }
         }
-        TyKind::Nullable(declared) | TyKind::PlatformNullable(declared) => {
+        TyKind::Nullable(declared)
+        | TyKind::PlatformNullable(declared)
+        | TyKind::MutabilityFlexible(declared) => {
             formal_has_unprojected_expected_occurrence(declared, expected.non_null(), formal)
         }
         TyKind::InProjection(declared) | TyKind::OutProjection(declared) => {
@@ -1238,6 +1252,12 @@ pub(super) fn unify_inferred_ty_impl(
         }
         TyKind::PlatformNullable(inner) => {
             let actual = nullable_generic_actual(actual);
+            let inner = source
+                .map(|source| choose_platform_lower_face(source, inner, actual))
+                .unwrap_or(inner);
+            unify_inferred_ty_impl(source, inner, actual, binds);
+        }
+        TyKind::MutabilityFlexible(inner) => {
             let inner = source
                 .map(|source| choose_platform_lower_face(source, inner, actual))
                 .unwrap_or(inner);
@@ -2098,6 +2118,9 @@ fn platform_argument_shape(source: &dyn SymbolSource, shape: Ty, actual: Ty) -> 
         TyKind::PlatformNullable(inner) => {
             Ty::platform_nullable(choose_platform_lower_face(source, inner, actual))
         }
+        TyKind::MutabilityFlexible(inner) => {
+            Ty::mutability_flexible(choose_platform_lower_face(source, inner, actual))
+        }
         _ => shape,
     }
 }
@@ -2208,7 +2231,9 @@ pub(crate) fn infer_generic_symbolic_return_constraints(
     fn symbolic_parameter(ty: Ty) -> bool {
         match ty.kind() {
             TyKind::TyParam(..) => true,
-            TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => symbolic_parameter(inner),
+            TyKind::Nullable(inner)
+            | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner) => symbolic_parameter(inner),
             _ => false,
         }
     }
@@ -2280,6 +2305,7 @@ pub(crate) fn infer_generic_symbolic_return_constraints(
             }
             (TyKind::Nullable(declared), TyKind::Nullable(expected))
             | (TyKind::PlatformNullable(declared), TyKind::PlatformNullable(expected))
+            | (TyKind::MutabilityFlexible(declared), TyKind::MutabilityFlexible(expected))
             | (TyKind::InProjection(declared), TyKind::InProjection(expected))
             | (TyKind::OutProjection(declared), TyKind::OutProjection(expected)) => {
                 collect(declared, expected, formals, candidates, constrained_formals);
@@ -2354,6 +2380,9 @@ pub(super) fn seed_undeclared_return_bindings(
                 seed_undeclared_return_bindings(inner, actual, declared_formals, binds);
             }
         }
+        TyKind::MutabilityFlexible(inner) => {
+            seed_undeclared_return_bindings(inner, actual.non_null(), declared_formals, binds);
+        }
         TyKind::Obj(_, args) => {
             if let TyKind::Obj(_, actual_args) = actual.kind() {
                 for (s, a) in args.iter().zip(actual_args.iter()) {
@@ -2391,6 +2420,12 @@ pub(super) fn merge_specialized_return(provider: Ty, inferred: Ty) -> Ty {
         }
         (_, TyKind::PlatformNullable(inferred)) => {
             Ty::platform_nullable(merge_specialized_return(provider.non_null(), inferred))
+        }
+        (TyKind::MutabilityFlexible(provider), _) => {
+            Ty::mutability_flexible(merge_specialized_return(provider, inferred.non_null()))
+        }
+        (_, TyKind::MutabilityFlexible(inferred)) => {
+            Ty::mutability_flexible(merge_specialized_return(provider.non_null(), inferred))
         }
         (TyKind::Nullable(provider), TyKind::Nullable(inferred)) => {
             Ty::nullable(merge_specialized_return(provider, inferred))

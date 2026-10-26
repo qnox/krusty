@@ -58,6 +58,8 @@ use std::fmt;
 use std::sync::OnceLock;
 pub use thin_handles::{TyList, TyParamName};
 pub use ty_kind::TyKind;
+mod type_name_list;
+pub use type_name_list::TypeNameList;
 pub(crate) use type_parameter_identity::{
     call_site_type_variable, constructor_type_parameter, declaration_type_parameter,
     generated_function_type_parameter, hidden_captured_type_parameter, metadata_type_parameter,
@@ -87,11 +89,6 @@ pub enum ArrayFactoryKind {
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeName(NameId);
-
-#[derive(Clone, Default)]
-pub struct TypeNameList {
-    names: Vec<TypeName>,
-}
 
 // The tree is concurrent (lock-free reads, internally-locked inserts), so the global interner is a
 // bare shared instance.
@@ -349,95 +346,6 @@ impl TypeName {
 
     pub fn render(self) -> String {
         type_names().render(self.0)
-    }
-}
-
-impl TypeNameList {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn push(&mut self, internal: &str) {
-        self.names.push(type_name(internal));
-    }
-
-    pub fn push_name(&mut self, internal: TypeName) {
-        self.names.push(internal);
-    }
-
-    pub fn iter_ids(&self) -> impl Iterator<Item = TypeName> + '_ {
-        self.names.iter().copied()
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = TypeName> + '_ {
-        self.iter_ids()
-    }
-
-    pub fn iter_rendered(&self) -> impl Iterator<Item = String> + '_ {
-        self.iter_ids().map(TypeName::render)
-    }
-
-    pub(crate) fn remap(&mut self, mut map: impl FnMut(TypeName) -> TypeName) {
-        for name in &mut self.names {
-            *name = map(*name);
-        }
-    }
-
-    pub fn contains(&self, internal: &str) -> bool {
-        self.names.iter().any(|name| name.matches(internal))
-    }
-
-    pub fn contains_name(&self, internal: TypeName) -> bool {
-        self.names.contains(&internal)
-    }
-
-    pub fn to_vec(&self) -> Vec<String> {
-        self.iter_rendered().collect()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.names.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.names.len()
-    }
-}
-
-impl fmt::Debug for TypeNameList {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_list().entries(self.iter_rendered()).finish()
-    }
-}
-
-impl From<Vec<String>> for TypeNameList {
-    fn from(names: Vec<String>) -> Self {
-        TypeNameList {
-            names: names.into_iter().map(|name| type_name(&name)).collect(),
-        }
-    }
-}
-
-impl From<Vec<&str>> for TypeNameList {
-    fn from(names: Vec<&str>) -> Self {
-        TypeNameList {
-            names: names.into_iter().map(type_name).collect(),
-        }
-    }
-}
-
-impl From<Vec<TypeName>> for TypeNameList {
-    fn from(names: Vec<TypeName>) -> Self {
-        TypeNameList { names }
-    }
-}
-
-impl IntoIterator for TypeNameList {
-    type Item = String;
-    type IntoIter = std::vec::IntoIter<String>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.to_vec().into_iter()
     }
 }
 
@@ -739,7 +647,9 @@ impl Ty {
     pub fn type_args(self) -> &'static [Ty] {
         match self.kind() {
             TyKind::Obj(_, args) => args.as_slice(),
-            TyKind::TyParam(_, b) | TyKind::PlatformNullable(b) => b.type_args(),
+            TyKind::TyParam(_, b) | TyKind::PlatformNullable(b) | TyKind::MutabilityFlexible(b) => {
+                b.type_args()
+            }
             _ => &[],
         }
     }
@@ -775,6 +685,9 @@ impl Ty {
             TyKind::Nullable(inner) => Ty::nullable(inner.substitute_erased(bindings)),
             TyKind::PlatformNullable(inner) => {
                 Ty::platform_nullable(inner.substitute_erased(bindings))
+            }
+            TyKind::MutabilityFlexible(inner) => {
+                Ty::mutability_flexible(inner.substitute_erased(bindings))
             }
             TyKind::InProjection(inner) => Ty::in_projection(inner.substitute_erased(bindings)),
             TyKind::OutProjection(inner) => Ty::out_projection(inner.substitute_erased(bindings)),
@@ -859,7 +772,9 @@ impl Ty {
             // a non-null bound; nullability restores the caller parameter and its recorded bound.
             TyKind::DefinitelyNotNull(original) => Ty::nullable(original),
             TyKind::Nullable(_) | TyKind::Null | TyKind::Error => inner,
-            TyKind::PlatformNullable(inner) => Ty::intern(TyKind::Nullable(inner)),
+            TyKind::PlatformNullable(inner) | TyKind::MutabilityFlexible(inner) => {
+                Ty::intern(TyKind::Nullable(inner))
+            }
             _ => Ty::intern(TyKind::Nullable(inner)),
         }
     }
@@ -867,11 +782,24 @@ impl Ty {
     /// Java's flexible platform-nullability form `T!`.
     pub fn platform_nullable(inner: Ty) -> Ty {
         match inner.kind() {
-            TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => {
-                Ty::intern(TyKind::PlatformNullable(inner))
-            }
+            TyKind::Nullable(inner)
+            | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner) => Ty::intern(TyKind::PlatformNullable(inner)),
             TyKind::Null | TyKind::Error => inner,
             _ => Ty::intern(TyKind::PlatformNullable(inner)),
+        }
+    }
+
+    /// The non-null Java collection type `(Mutable)X<..>` over its mutable face `inner`. The
+    /// provider builds it only for a face whose read-only counterpart differs; any nullability
+    /// already on `inner` is dropped, since this form is non-null.
+    pub fn mutability_flexible(inner: Ty) -> Ty {
+        match inner.kind() {
+            TyKind::Nullable(inner)
+            | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner) => Ty::intern(TyKind::MutabilityFlexible(inner)),
+            TyKind::Null | TyKind::Error => inner,
+            _ => Ty::intern(TyKind::MutabilityFlexible(inner)),
         }
     }
 
@@ -991,6 +919,9 @@ impl Ty {
         match self.kind() {
             TyKind::Nullable(inner) => inner,
             TyKind::PlatformNullable(inner) => inner,
+            // The mutable face: a commitment to non-null has nothing left to strip, and every
+            // structural reader of a non-null type sees the classifier it carries.
+            TyKind::MutabilityFlexible(inner) => inner,
             _ => self,
         }
     }
@@ -1005,7 +936,7 @@ impl Ty {
     pub fn definitely_non_null(self) -> Ty {
         match self.kind() {
             TyKind::Null => Ty::Nothing,
-            TyKind::DefinitelyNotNull(_) => self,
+            TyKind::DefinitelyNotNull(_) | TyKind::MutabilityFlexible(_) => self,
             TyKind::TyParam(name, bound) => {
                 Ty::ty_param(name.as_str(), bound.definitely_non_null())
             }
@@ -1032,7 +963,7 @@ impl Ty {
     /// Lower bound of a flexible Java platform type; fixed Kotlin types are unchanged.
     pub fn platform_lower_bound(self) -> Ty {
         match self.kind() {
-            TyKind::PlatformNullable(inner) => inner,
+            TyKind::PlatformNullable(inner) | TyKind::MutabilityFlexible(inner) => inner,
             _ => self,
         }
     }
@@ -1047,7 +978,8 @@ impl Ty {
             TyKind::Obj(i, _) => Some(i),
             TyKind::DefinitelyNotNull(inner)
             | TyKind::Nullable(inner)
-            | TyKind::PlatformNullable(inner) => inner.kotlin_class_internal(),
+            | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner) => inner.kotlin_class_internal(),
             TyKind::TyParam(_, bound) => bound.kotlin_class_internal(),
             _ => None,
         }
@@ -1086,7 +1018,9 @@ impl Ty {
                 Ty::nullable(inner.erased_recv())
             }
             TyKind::Nullable(inner) => inner.erased_recv(),
-            TyKind::PlatformNullable(inner) => inner.erased_recv(),
+            TyKind::PlatformNullable(inner) | TyKind::MutabilityFlexible(inner) => {
+                inner.erased_recv()
+            }
             TyKind::DefinitelyNotNull(inner) | TyKind::TyParam(_, inner) => inner.erased_recv(),
             // `Array<T>` keeps its array-ness but erases the ELEMENT's own generics (`Array<List<Int>>` →
             // `Array<List>`) — an array receiver keys per element class. Use the identity-form
@@ -1114,6 +1048,7 @@ impl Ty {
         match self.kind() {
             TyKind::Nullable(inner) => Ty::nullable(inner.extension_recv_key()),
             TyKind::PlatformNullable(inner) => Ty::platform_nullable(inner.extension_recv_key()),
+            TyKind::MutabilityFlexible(inner) => inner.extension_recv_key(),
             TyKind::DefinitelyNotNull(inner) => inner.extension_recv_key(),
             TyKind::TyParam(_, bound) => Ty::ty_param("\u{0}", bound.extension_recv_key()),
             TyKind::Obj(n, args) if n == wk::array() => {
@@ -1185,6 +1120,7 @@ impl Ty {
         match self.kind() {
             TyKind::Nullable(inner)
             | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner)
             | TyKind::DefinitelyNotNull(inner) => inner.mentions_marker(marker),
             TyKind::Intersection(parts) => parts.iter().any(|part| part.mentions_marker(marker)),
             TyKind::InProjection(inner)
@@ -1207,6 +1143,7 @@ impl Ty {
             TyKind::Intersection(parts) => parts.iter().any(|part| part.mentions_ty_param()),
             TyKind::Nullable(inner)
             | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner)
             | TyKind::InProjection(inner)
             | TyKind::OutProjection(inner)
             | TyKind::StarProjection(inner)
@@ -1246,6 +1183,7 @@ impl Ty {
                 .find_map(|part| part.type_parameter_occurrence_bound(name)),
             TyKind::Nullable(inner)
             | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner)
             | TyKind::InProjection(inner)
             | TyKind::OutProjection(inner)
             | TyKind::StarProjection(inner)
@@ -1377,6 +1315,9 @@ impl Ty {
             }
             TyKind::Nullable(inner) => Ty::nullable(inner.canonical_semantic()),
             TyKind::PlatformNullable(inner) => Ty::platform_nullable(inner.canonical_semantic()),
+            TyKind::MutabilityFlexible(inner) => {
+                Ty::mutability_flexible(inner.canonical_semantic())
+            }
             TyKind::InProjection(inner) => Ty::in_projection(inner.canonical_semantic()),
             TyKind::OutProjection(inner) => Ty::out_projection(inner.canonical_semantic()),
             TyKind::StarProjection(inner) => Ty::star_projection(inner.canonical_semantic()),
@@ -1595,6 +1536,15 @@ impl Ty {
             TyKind::Nullable(inner) => intersection::spell_nullable(inner, render, true),
             TyKind::PlatformNullable(inner) => diagnostic_rendering::platform_type(
                 inner,
+                true,
+                context,
+                type_parameter,
+                classifier,
+                platform_upper_bound,
+            ),
+            TyKind::MutabilityFlexible(inner) => diagnostic_rendering::platform_type(
+                inner,
+                false,
                 context,
                 type_parameter,
                 classifier,
@@ -1644,6 +1594,7 @@ impl Ty {
             }
             TyKind::Nullable(inner)
             | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner)
             | TyKind::InProjection(inner)
             | TyKind::OutProjection(inner)
             | TyKind::StarProjection(inner)
@@ -1678,6 +1629,7 @@ impl Ty {
             TyKind::Fun(_) => "Function".to_string(),
             TyKind::Nullable(inner) => intersection::spell_nullable(inner, Ty::name, false),
             TyKind::PlatformNullable(inner) => format!("{}!", inner.name()),
+            TyKind::MutabilityFlexible(inner) => inner.name(),
             TyKind::InProjection(inner) => format!("in {}", inner.name()),
             TyKind::OutProjection(inner) => format!("out {}", inner.name()),
             TyKind::StarProjection(_) => "*".to_string(),
@@ -1698,7 +1650,9 @@ impl Ty {
             TyKind::Obj(n, _) => Some(n),
             // A type parameter follows its bound for object identity queries.
             TyKind::DefinitelyNotNull(inner) => inner.obj_internal(),
-            TyKind::TyParam(_, b) | TyKind::PlatformNullable(b) => b.obj_internal(),
+            TyKind::TyParam(_, b) | TyKind::PlatformNullable(b) | TyKind::MutabilityFlexible(b) => {
+                b.obj_internal()
+            }
             _ => None,
         }
     }
@@ -1713,7 +1667,7 @@ impl Ty {
             // A flexible Java `T!` can be consumed as its non-null lower bound, but until that
             // commitment it also admits null and is represented by a reference — including a method
             // type variable specialized to a source primitive (`Boolean!`).
-            TyKind::PlatformNullable(_) => true,
+            TyKind::PlatformNullable(_) | TyKind::MutabilityFlexible(_) => true,
             _ => matches!(
                 self.kind(),
                 TyKind::Obj(..) | TyKind::Null | TyKind::Fun(_) | TyKind::Nullable(_)
@@ -1771,7 +1725,9 @@ impl Ty {
     pub fn range_operand_bound(self) -> Ty {
         match self.kind() {
             TyKind::TyParam(_, bound) => bound.range_operand_bound(),
-            TyKind::PlatformNullable(inner) => inner.range_operand_bound(),
+            TyKind::PlatformNullable(inner) | TyKind::MutabilityFlexible(inner) => {
+                inner.range_operand_bound()
+            }
             _ => self,
         }
     }
@@ -1997,6 +1953,7 @@ pub(crate) fn ty_mentions_param(ty: Ty, names: &[String]) -> bool {
         }
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner)
         | TyKind::StarProjection(inner)
@@ -2024,6 +1981,7 @@ pub(crate) fn ty_mentions_any_param(ty: Ty) -> bool {
         }
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner)
         | TyKind::StarProjection(inner)

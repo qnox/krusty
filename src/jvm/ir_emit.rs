@@ -4970,7 +4970,7 @@ fn method_parameterized_sig(
     // Runs for every emitted method — bail before building any string when no position can carry one.
     let is_parameterized = |t: &Ty| {
         let inner = match t.kind() {
-            TyKind::Nullable(t) | TyKind::PlatformNullable(t) => t,
+            TyKind::Nullable(t) | TyKind::PlatformNullable(t) | TyKind::MutabilityFlexible(t) => t,
             _ => *t,
         };
         matches!(inner.kind(), TyKind::Fun(_) | TyKind::Intersection(_))
@@ -6428,7 +6428,7 @@ impl<'a> Emitter<'a> {
             TyKind::Obj(n, _) => {
                 VerifType::ObjectName(crate::jvm::names::classfile_internal_name_of(n).to_string())
             }
-            TyKind::Nullable(_) | TyKind::PlatformNullable(_) => {
+            TyKind::Nullable(_) | TyKind::PlatformNullable(_) | TyKind::MutabilityFlexible(_) => {
                 VerifType::ObjectName(crate::jvm::names::instanceof_internal_name(ty))
             }
             TyKind::Null => VerifType::Null,

@@ -105,6 +105,7 @@ fn ty(value: Ty, names: &HashMap<TypeName, TypeName>) -> Ty {
         ),
         TyKind::Nullable(inner) => Ty::nullable(ty(inner, names)),
         TyKind::PlatformNullable(inner) => Ty::platform_nullable(ty(inner, names)),
+        TyKind::MutabilityFlexible(inner) => Ty::mutability_flexible(ty(inner, names)),
         TyKind::InProjection(inner) => Ty::in_projection(ty(inner, names)),
         TyKind::OutProjection(inner) => Ty::out_projection(ty(inner, names)),
         TyKind::StarProjection(inner) => Ty::star_projection(ty(inner, names)),

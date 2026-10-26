@@ -270,6 +270,14 @@ impl CompactSelectedResultPublication {
 /// turn an enhanced position back into a platform type.
 fn suppress_enhanced_flexibility(selected: Ty, published: Ty, enhancement: &TypeEnhancement) -> Ty {
     match (selected.kind(), published.kind()) {
+        // Mutability flexibility is not a nesting level: the enhancement applies to its classifier.
+        (TyKind::MutabilityFlexible(selected), TyKind::MutabilityFlexible(published)) => {
+            Ty::mutability_flexible(suppress_enhanced_flexibility(
+                selected,
+                published,
+                enhancement,
+            ))
+        }
         (TyKind::Obj(selected_owner, selected), TyKind::Obj(owner, published))
             if selected_owner == owner && selected.len() == published.len() =>
         {
@@ -380,6 +388,7 @@ fn collect_type_parameters(ty: Ty, output: &mut Vec<String>) {
         }
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
         | TyKind::DefinitelyNotNull(inner)
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner)
@@ -404,6 +413,9 @@ fn publish_selected(declared: Ty, selected: Ty, bindings: &HashMap<String, Ty>) 
         }
         (TyKind::PlatformNullable(declared), TyKind::Nullable(selected)) => {
             Ty::nullable(publish_selected(declared, selected, bindings).platform_lower_bound())
+        }
+        (TyKind::MutabilityFlexible(declared), TyKind::MutabilityFlexible(selected)) => {
+            Ty::mutability_flexible(publish_selected(declared, selected, bindings))
         }
         (TyKind::PlatformNullable(declared), TyKind::PlatformNullable(selected)) => {
             Ty::platform_nullable(
@@ -513,6 +525,9 @@ fn align_publication(publication: Ty, selected: Ty) -> Ty {
         }
         (TyKind::Nullable(publication), TyKind::Nullable(selected)) => {
             Ty::nullable(align_publication(publication, selected).platform_lower_bound())
+        }
+        (TyKind::MutabilityFlexible(publication), TyKind::MutabilityFlexible(selected)) => {
+            Ty::mutability_flexible(align_publication(publication, selected))
         }
         _ => selected,
     }
@@ -714,6 +729,7 @@ pub(super) fn constrain_parameters<F: Clone>(
         }
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
         | TyKind::DefinitelyNotNull(inner)
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner) => constrain_parameters(

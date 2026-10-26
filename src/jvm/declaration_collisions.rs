@@ -1546,6 +1546,7 @@ fn qualified_type_name(ty: crate::types::Ty) -> Result<String, UndeterminedDiagn
             }
         }
         TyKind::PlatformNullable(inner) => format!("{}!", qualified_type_name(inner)?),
+        TyKind::MutabilityFlexible(inner) => qualified_type_name(inner)?,
         TyKind::DefinitelyNotNull(inner) => {
             format!("{} & Any", qualified_type_name(inner)?)
         }

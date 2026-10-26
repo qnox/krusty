@@ -1336,6 +1336,8 @@ mod local_function_reference_inference_e2e;
 java_member_modules::declare!();
 #[path = "java_nested_static_e2e.rs"]
 mod java_nested_static_e2e;
+#[path = "java_not_null_collection_mutability_e2e.rs"]
+mod java_not_null_collection_mutability_e2e;
 #[path = "java_not_null_null_argument_e2e.rs"]
 mod java_not_null_null_argument_e2e;
 #[path = "java_parameters_attribute_e2e.rs"]

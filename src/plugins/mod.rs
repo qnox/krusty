@@ -984,7 +984,9 @@ fn record_external_value_classes(
                     collect(*argument, out);
                 }
             }
-            TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => collect(inner, out),
+            TyKind::Nullable(inner)
+            | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner) => collect(inner, out),
             TyKind::InProjection(inner)
             | TyKind::OutProjection(inner)
             | TyKind::StarProjection(inner) => collect(inner, out),

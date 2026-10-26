@@ -80,6 +80,9 @@ pub struct Spelled {
     /// retains the lower face; metadata needs both (`MutableList<T>..List<T>?`, or
     /// `Array<T>..Array<out T>?`) and must not rediscover the upper classifier in a backend.
     pub flexible_upper_bound: Option<Ty>,
+    /// Read-only face of an inferred non-null Java collection (`MutableList<T>..List<T>`). Unlike
+    /// [`Self::flexible_upper_bound`] it admits no `null`, so Java enhancement leaves it in place.
+    pub mutability_upper_bound: Option<Ty>,
     /// This occurrence carries kotlinc's `EnhancedNullability` type attribute. Inferred
     /// declarations retain argument-position marks from the checked Java value that produced them.
     pub enhanced_nullability: bool,
@@ -102,6 +105,7 @@ const EMPTY: Spelled = Spelled {
     unsafe_variance: false,
     parameter_name: None,
     flexible_upper_bound: None,
+    mutability_upper_bound: None,
     enhanced_nullability: false,
     actualized_expect: false,
 };
@@ -137,6 +141,7 @@ impl Spelled {
         let mut ty = ty;
         while let TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
         | TyKind::DefinitelyNotNull(inner)
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner)
@@ -195,6 +200,10 @@ impl Spelled {
         let ty = match ty.kind() {
             TyKind::PlatformNullable(lower) => {
                 self.flexible_upper_bound = Some(upper_bound(lower));
+                lower
+            }
+            TyKind::MutabilityFlexible(lower) => {
+                self.mutability_upper_bound = Some(upper_bound(lower));
                 lower
             }
             TyKind::Nullable(inner)
@@ -274,6 +283,9 @@ impl Spelled {
     pub(crate) fn merge_inferred_publication(&mut self, inferred: &Spelled) {
         if let Some(upper) = inferred.flexible_upper_bound {
             self.flexible_upper_bound = Some(upper);
+        }
+        if let Some(upper) = inferred.mutability_upper_bound {
+            self.mutability_upper_bound = Some(upper);
         }
         self.enhanced_nullability |= inferred.enhanced_nullability;
         if self.args.len() < inferred.args.len() {

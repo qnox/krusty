@@ -902,9 +902,12 @@ fn encode_type_with_parameter(
     }
     let (nullable, flexible, base) = match ty.kind() {
         TyKind::Nullable(inner) => (true, false, inner),
-        TyKind::PlatformNullable(inner) => (false, true, inner),
+        TyKind::PlatformNullable(inner) | TyKind::MutabilityFlexible(inner) => (false, true, inner),
         _ => (false, spelled.flexible_upper_bound.is_some(), ty),
     };
+    // Only a platform interval's upper face admits null; a non-null Java collection is flexible in
+    // its mutability alone.
+    let mutability_only = matches!(ty.kind(), TyKind::MutabilityFlexible(_));
     if let (TyKind::Obj(owner, arguments), true) = (base.kind(), base.is_raw_application()) {
         return encode_raw_type(
             strings,
@@ -923,6 +926,7 @@ fn encode_type_with_parameter(
         // while encoding each face so it describes this node once rather than recursing.
         let mut face = spelled.clone();
         face.flexible_upper_bound = None;
+        face.mutability_upper_bound = None;
         let mut message = encode_type_with_parameter(
             strings,
             base,
@@ -931,10 +935,14 @@ fn encode_type_with_parameter(
             forced_parameter,
             expansion,
         )?;
-        let upper = spelled.flexible_upper_bound.unwrap_or(base);
+        let upper = if mutability_only {
+            spelled.mutability_upper_bound.unwrap_or(base)
+        } else {
+            Ty::nullable(spelled.flexible_upper_bound.unwrap_or(base))
+        };
         let upper = encode_type_with_parameter(
             strings,
-            Ty::nullable(upper),
+            upper,
             &face,
             type_parameters,
             forced_parameter,
@@ -1131,6 +1139,7 @@ fn encode_type_with_parameter(
         | TyKind::Error
         | TyKind::Nullable(_)
         | TyKind::PlatformNullable(_)
+        | TyKind::MutabilityFlexible(_)
         | TyKind::InProjection(_)
         | TyKind::OutProjection(_)
         | TyKind::StarProjection(_)
