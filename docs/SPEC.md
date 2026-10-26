@@ -13479,6 +13479,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `iterator` result types, the JDK members and `toArray`, follow in later slices. Tests:
   `tests/read_only_iterator_stubs_e2e.rs`. Corpus: `objects/useAnonymousObjectAsIterator.kt`,
   `builtinStubMethods/customReadOnlyIterator.kt`.
+- **Only an inherited superclass member implements a read-only stub's member.** The superclass
+  members that suppress a stub are those the class actually inherits, decided from each member's
+  declaration visibility at every edge of the superclass walk: a private member is never inherited,
+  and a Java package-private member only when every class from the class up to its declaring class
+  is in that member's package. So `open class Base { private fun remove() }` and a Java
+  `lib.JBase` with a package-private `void remove()` leave `Walk : Base(), Iterator<String>` (or
+  `app.Walk : lib.JBase()`) its public throwing `remove()` stub, as kotlinc emits it. Tests:
+  `tests/read_only_stub_inheritability_e2e.rs` (class bytes and box run against kotlinc).
 - **A nested value class over a reference carrier is read as its carrier.** In `ZN(val z: Z1?)`
   with `Z1(val x: En)`, `Z1?` is carried as `En?`, so `zn.z` and `zn.z!!` already are `Z1`'s
   carrier and `.x` of them is that carrier itself, with no cast. krusty took the unboxed property

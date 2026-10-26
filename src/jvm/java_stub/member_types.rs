@@ -7,8 +7,7 @@
 //! accessibility: a private member type is never inherited, and a package-private one only into a
 //! class of the same package.
 
-use super::super::classfile::{ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC};
-use super::super::classreader::ClassInfo;
+use super::super::classreader::{visibility_of_access, ClassInfo};
 use crate::fx_hash::{HashMap, HashSet};
 use crate::types::{TypeName, Visibility};
 use std::cell::RefCell;
@@ -386,16 +385,4 @@ fn inheritable(member: &JavaMemberType, declaring: &str, package: &str) -> bool 
 /// when a class name contains `$`.
 fn package_of(internal: &str) -> &str {
     internal.rsplit_once('/').map_or("", |(package, _)| package)
-}
-
-pub(super) fn visibility_of_access(access: u16) -> Visibility {
-    if access & ACC_PUBLIC != 0 {
-        Visibility::Public
-    } else if access & ACC_PROTECTED != 0 {
-        Visibility::Protected
-    } else if access & ACC_PRIVATE != 0 {
-        Visibility::Private
-    } else {
-        Visibility::PackagePrivate
-    }
 }
