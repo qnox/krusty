@@ -9745,7 +9745,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   capture first (`tailrec::capture_parameters`), after its own, with its parameters and locals
   moved up past it in its method body and its template: kotlinc's `TailrecLowering` runs before
   its lambdas capture anything, so the step's write is what makes kotlinc's lambda capture the
-  parameter, and the inliner binds the capture to the function's own slot. In nested lambdas the
+  parameter, and the inliner binds the capture to the function's own slot. The added capture
+  joins the lambda's capture prefix (`IrFile::resize_lambda_capture_prefix`, the same operation
+  the escaping-lambda transfer uses), so the backend still tells a captured value-class parameter
+  from the lambda's own value-class parameter. In nested lambdas the
   outermost one captures first, then each lambda inside it captures from it. A self-call that
   leaves a parameter to its default (which reads the function's frame) stays a call. The bytes
   differ from kotlinc's, which keeps each parameter in a variable of its own across the loop and
@@ -9754,7 +9757,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`a_tailrec_self_call_returned_from_an_inline_lambda_loops`: a member, a two-parameter function
   and a call in nested lambdas, each a million deep;
   `a_tailrec_step_writes_a_parameter_its_inline_lambda_does_not_read`: the step writes a parameter
-  the lambda never reads, in a lambda, in nested lambdas and in a member); `src/fir_lower/tailrec/tests.rs`
+  the lambda never reads, in a lambda, in nested lambdas and in a member;
+  `a_tailrec_step_captures_a_value_class_beside_the_lambdas_own_value_class_parameter`: the
+  captured parameter and the lambda's own are value classes, compared with kotlinc and a million
+  deep); `src/fir_lower/tailrec/tests.rs`
   (`an_inline_body_that_does_not_capture_a_parameter_captures_it_for_the_step`).
 
   **An assertion or coercion wrapped around the call does not consume the tail position.** A

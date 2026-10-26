@@ -498,6 +498,7 @@ fn capture_parameters(ir: &mut IrFile, uncaptured: &UncapturedParameters) {
         for body in bodies.into_iter().flatten() {
             crate::ir::shift_value_indices(ir, body, position, 1);
         }
+        ir.resize_lambda_capture_prefix(impl_fn, index, 0, 1);
         let function = &mut ir.functions[impl_fn as usize];
         function.params.insert(index, ty);
         if function.param_checks.len() >= index && !function.param_checks.is_empty() {
