@@ -62,6 +62,7 @@ impl Emitter<'_> {
             super::vararg::NewArray {
                 ty: &array::array_type(),
                 reified_marker: None,
+                source: None,
             },
             elements,
             code,
