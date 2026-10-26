@@ -12,7 +12,7 @@ use crate::fir::{
 };
 use crate::fx_hash::HashSet;
 use crate::ir::{ExprId, FunId, IrExpr, SameModuleInlining};
-use crate::types::{InlineParameterModifier, Ty, TyKind, Visibility};
+use crate::types::{InlineParameterModifier, Ty, TyKind};
 
 #[cfg(test)]
 mod tests;
@@ -53,13 +53,8 @@ pub(in super::super) enum ExpansionReason {
     /// A parameter of the callee is `crossinline`: its lambda is placed in an object or lambda the
     /// callee's body creates.
     CrossinlineParameter,
-    /// The callee is not public and declared in another file, so its body may reach declarations
-    /// only its own file's class can.
-    NonPublicCallee,
     /// The callee has no body of its own in this file's IR.
     NoTemplate,
-    /// The callee's body creates a lambda or a callable reference.
-    LambdaInBody,
     /// The callee's body creates an object of a local or anonymous class.
     LocalClassInBody,
     /// The callee's body holds a subject `when` that switches on an enum's keys. The keys are
@@ -81,7 +76,10 @@ impl BodyLowering<'_> {
         has_defaults: bool,
     ) -> InlineCallRoute {
         match self.compiled_body_exclusion(target, function, inline_lambdas, has_defaults) {
-            Some(reason) => InlineCallRoute::Expansion(reason),
+            Some(reason) => {
+                crate::trace_compiler!("lower", "inline route: expand {target:?} ({reason:?})");
+                InlineCallRoute::Expansion(reason)
+            }
             None => InlineCallRoute::CompiledBody,
         }
     }
@@ -147,13 +145,6 @@ impl BodyLowering<'_> {
         let Some(function) = function else {
             return Some(ExpansionReason::NoTemplate);
         };
-        // A body compiled into its own file's class reaches that file's private declarations as
-        // the class itself does; inlined into another file's class it would need accessors.
-        if header.visibility != Visibility::Public
-            && self.ir.foreign_inline_templates.contains(&function)
-        {
-            return Some(ExpansionReason::NonPublicCallee);
-        }
         if self
             .ir
             .declared_inline_modifiers(function)
@@ -198,9 +189,6 @@ impl BodyLowering<'_> {
                 return Some(ExpansionReason::EnumSwitchInBody);
             }
             match self.ir.expr(expression) {
-                IrExpr::Lambda { .. } | IrExpr::CallableReference(_) => {
-                    return Some(ExpansionReason::LambdaInBody);
-                }
                 IrExpr::New { internal, .. }
                     if self
                         .ir
@@ -219,9 +207,11 @@ impl BodyLowering<'_> {
         None
     }
 
-    /// Record the call-site value of each reified type parameter of `function`, which `call`
-    /// inlines from its compiled body, by the parameter's source name the body's markers carry.
-    pub(in super::super) fn record_compiled_reified_arguments(
+    /// Record the call-site value of each type parameter of `function`, which `call` inlines from
+    /// its compiled body, by the parameter's source name the body's markers and signatures carry:
+    /// every one specializes the generic signatures of the objects the call regenerates, and the
+    /// reified ones the body's operations too.
+    pub(in super::super) fn record_compiled_type_arguments(
         &mut self,
         call: ExprId,
         function: FunId,
@@ -230,9 +220,8 @@ impl BodyLowering<'_> {
         let Some(signature) = self.ir.signatures.get(&function) else {
             return;
         };
-        let reified = substitutions
+        let arguments = substitutions
             .iter()
-            .filter(|substitution| substitution.reified)
             .filter_map(|substitution| {
                 let crate::fir::FirTypeParameterRef::Module(parameter) = substitution.parameter
                 else {
@@ -242,12 +231,26 @@ impl BodyLowering<'_> {
                 let formal = signature
                     .type_params
                     .iter()
-                    .find(|formal| formal.reified && formal.semantic_name == semantic)?;
-                Some((formal.name.clone(), substitution.reified_runtime.get()))
+                    .find(|formal| formal.semantic_name == semantic)?;
+                Some((formal, substitution))
             })
+            .collect::<Vec<_>>();
+        let reified = arguments
+            .iter()
+            .filter(|(formal, substitution)| formal.reified && substitution.reified)
+            .map(|(formal, substitution)| (formal.name.clone(), substitution.reified_runtime.get()))
+            .collect::<Vec<_>>();
+        let type_arguments = arguments
+            .iter()
+            .map(|(formal, substitution)| (formal.name.clone(), substitution.value.get()))
             .collect::<Vec<_>>();
         if !reified.is_empty() {
             self.ir.reified_call_subst.insert(call, reified);
+        }
+        if !type_arguments.is_empty() {
+            self.ir
+                .inline_call_type_arguments
+                .insert(call, type_arguments);
         }
     }
 

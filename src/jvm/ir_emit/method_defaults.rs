@@ -444,20 +444,7 @@ pub(super) fn emit_default_param_overwrites(
             code.iand();
             let skip = code.new_label();
             code.ifeq(skip);
-            if crate::jvm::lambda_classes::inline_default_value_requires_reification(
-                emitter.ir,
-                *expression,
-            ) {
-                // The marker is the default's first instruction, so it opens the default's line:
-                // an inliner reads it as the instruction just before the lambda's instance load.
-                emitter.mark_expression_start(*expression, code);
-                let marker = emitter.cw.methodref(
-                    "kotlin/jvm/internal/Intrinsics",
-                    "needClassReification",
-                    "()V",
-                );
-                code.invokestatic(marker, 0, 0);
-            }
+            mark_default_fill(emitter, *expression, code);
             emitter.emit_value(*expression, code);
             let produced = ir_ty_to_jvm(&emitter.value_ty(*expression));
             emit_primitive_box_if_needed(emitter.cw, produced, ty, code);
@@ -471,7 +458,19 @@ pub(super) fn emit_default_param_overwrites(
     }
 }
 
-pub(super) fn body_has_reified_markers(ir: &IrFile, expression: crate::ir::ExprId) -> bool {
+/// kotlinc stores a masked default into its parameter as a statement at the default expression's
+/// position, so the fill opens on that expression's first line before the value's own code marks
+/// any line. The value's first operand may mark another line at that same offset (a call whose
+/// argument starts on the next line); kotlinc's table keeps both entries.
+pub(super) fn mark_default_fill(
+    emitter: &mut Emitter<'_>,
+    default: ExprId,
+    code: &mut CodeBuilder,
+) {
+    emitter.mark_kept_start_line(default, code);
+}
+
+pub(in crate::jvm) fn body_has_reified_markers(ir: &IrFile, expression: crate::ir::ExprId) -> bool {
     if matches!(
         ir.expr(expression),
         IrExpr::ReifiedClassMarker { .. } | IrExpr::ReifiedTypeOp { .. }

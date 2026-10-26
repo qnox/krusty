@@ -1,21 +1,40 @@
 name: oss corpus
 
-# Conformance on the top-starred Kotlin projects listed in scripts/oss-corpus/projects.tsv. Each
-# project builds twice from a pinned commit with its own Gradle build: once with kotlinc, once with
-# the krusty Gradle plugin applied by an init script. The run reports, per project, how many
-# Kotlin/JVM compilations krusty built and how many classes match kotlinc's byte for byte. It needs
-# full network access for the projects' dependencies and toolchains. It is manual-only: ordinary
-# pushes and pull requests never schedule it, and it gates nothing.
+# Conformance on the top-starred Kotlin projects and the Android sample listed in
+# scripts/oss-corpus/projects.tsv. Each project builds twice from a pinned commit with its own
+# Gradle build: once with kotlinc, once with the krusty Gradle plugin applied by an init script. The
+# run reports, per project, how many Kotlin/JVM compilations krusty built, how many classes match
+# kotlinc's byte for byte, and why the rest missed. It needs full network access for the projects'
+# dependencies and toolchains. It runs nightly on master and on demand; ordinary pushes and pull
+# requests never schedule it, and it gates nothing.
+#
+# The nightly run, and a manual run that asks to publish, records its results on the
+# `corpus-results` branch: README.md is the current scoreboard, projects/<name>/ the latest result
+# of each project, and history.tsv one line per project per run.
 on:
+  schedule:
+    - cron: '30 1 * * *'
   workflow_dispatch:
     inputs:
       projects:
         description: Space-separated project names from scripts/oss-corpus/projects.tsv; empty runs every project.
         required: false
         default: ''
+      publish:
+        description: Record the results on the corpus-results branch.
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
+
+# One corpus run at a time. Neither a running nor a pending run is cancelled: `queue: max` keeps
+# every waiting run queued instead of the single pending slot a newer run would replace.
+concurrency:
+  group: oss-corpus
+  cancel-in-progress: false
+  queue: max
 
 jobs:
   prepare:
@@ -121,12 +140,26 @@ jobs:
     needs: [project]
     if: always()
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: corpus-*
           path: results
+      - name: look up stars
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # A pinned fork (a mirror that keeps the pinned commit) counts its upstream's stars.
+          awk -F'\t' '!/^#/ && NF { print $1 "\t" $2 }' scripts/oss-corpus/projects.tsv |
+            while IFS=$'\t' read -r name url; do
+              repo=${url#https://github.com/}
+              stars=$(gh api "repos/$repo" --jq 'if .fork then .source.stargazers_count else .stargazers_count end' || true)
+              printf '%s\t%s\n' "$name" "$stars"
+            done > stars.tsv
       - name: summarize
         run: |
           set -euo pipefail
@@ -135,8 +168,46 @@ jobs:
             echo "no project produced a comparison" >&2
             exit 1
           fi
-          python3 scripts/oss-corpus/summarize.py "${reports[@]}" | tee summary.md >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/oss-corpus/summarize.py --stars stars.tsv --plugins results "${reports[@]}" \
+            | tee summary.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: summary
           path: summary.md
+      - name: publish to corpus-results
+        if: github.event_name == 'schedule' || inputs.publish
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          tree=$RUNNER_TEMP/corpus-results
+          if git fetch -q --depth 1 origin corpus-results; then
+            git worktree add -q "$tree" FETCH_HEAD
+            git -C "$tree" checkout -q -B corpus-results
+          else
+            git worktree add -q --orphan -b corpus-results "$tree"
+          fi
+          python3 scripts/oss-corpus/publish.py results "$tree" scripts/oss-corpus/projects.tsv \
+            "$GITHUB_SHA" "$(date -u +%F)" "$RUN_URL"
+          mapfile -t published < <(find "$tree/projects" -name compare.json | sort)
+          {
+            echo '# krusty conformance corpus'
+            echo
+            echo 'Each project is built from a pinned commit with its own Gradle build, once with kotlinc and'
+            echo 'once with the krusty Gradle plugin, and the class files of every Kotlin/JVM compilation are'
+            echo 'compared byte for byte. Written by the `oss corpus` workflow (`.github/workflows/oss-corpus.yml`'
+            echo 'on master); `projects/` holds each project'"'"'s latest result and `history.tsv` every run.'
+            echo
+            python3 scripts/oss-corpus/summarize.py --stars stars.tsv --plugins "$tree/projects" \
+              --json "$tree/results.json" "${published[@]}"
+          } > "$tree/README.md"
+          git -C "$tree" add -A
+          if git -C "$tree" diff --cached --quiet; then
+            echo "corpus-results is unchanged"
+            exit 0
+          fi
+          # AGENTS.md: every commit, this data branch's included, is the maintainer's.
+          GIT_AUTHOR_NAME='Anton Efimchuk' GIT_AUTHOR_EMAIL='anton.efimchuk@gmail.com' \
+            GIT_COMMITTER_NAME='Anton Efimchuk' GIT_COMMITTER_EMAIL='anton.efimchuk@gmail.com' \
+            git -C "$tree" commit -q -m "Corpus results for ${GITHUB_SHA::7} ($(date -u +%F))"
+          git -C "$tree" push -q origin corpus-results

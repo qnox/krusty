@@ -115,6 +115,7 @@ impl Classpath {
                     visibility: member.visibility,
                     modality: member.modality,
                     from_java_method: false,
+                    getter_annotations: Vec::new(),
                     annotated: !member.annotations.is_empty(),
                 });
             } else {

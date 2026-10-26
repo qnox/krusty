@@ -2,6 +2,17 @@
 
 use super::{ReturnValueStatus, Ty, TypeName, Visibility};
 
+/// The declaring container and exact source segment of a non-local classifier.
+///
+/// A top-level declaration explicitly has no classifier owner, even when its name contains `$`.
+/// This is independent of the enclosing instance an `inner` class captures. Providers retain this
+/// declaration fact in their own snapshot; an absent record means unavailable ownership evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClassifierDeclarationName {
+    TopLevel { package: TypeName, name: Box<str> },
+    Nested { owner: TypeName, name: Box<str> },
+}
+
 /// Return-value statuses of the four overrides every serialization-plugin generated serializer
 /// declares. Pass 1 selects the overridden declarations from their complete semantic shapes; the
 /// closed result crosses common lowering without retaining a provider or reopening member lookup.

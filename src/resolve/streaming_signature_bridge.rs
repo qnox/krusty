@@ -17,6 +17,7 @@ mod callable_references;
 mod classifier_associated;
 mod classifier_identities;
 mod classifier_parents;
+mod constructor_results;
 mod convention_results;
 mod declaration_aliases;
 mod declaration_conflicts;
@@ -88,6 +89,7 @@ struct ProductionSignatureSemantics<'a> {
     headers: &'a crate::fir::StreamedHeaderModule,
     table: &'a SymbolTable,
     classifier_types: &'a HashMap<crate::fir::DeclarationId, crate::types::TypeName>,
+    classifier_parents: &'a classifier_parents::ParentInventory,
     parameters: HashMap<crate::fir::DeclarationId, Box<[crate::fir::ResolvedTy]>>,
     extension_receivers: &'a HashMap<crate::fir::DeclarationId, crate::fir::ResolvedTy>,
     source_orders: HashMap<crate::fir::DeclarationId, u32>,
@@ -132,6 +134,7 @@ struct DeclarationTypeParameters {
     bounds: Vec<Vec<Ty>>,
 }
 
+#[derive(Clone)]
 struct ProductionSignatureDiagnostic {
     declaration: crate::fir::DeclarationId,
     file: u32,
@@ -2025,177 +2028,6 @@ impl ProductionSignatureSemantics<'_> {
         .map_err(|_| Self::failure())
     }
 
-    fn constructor_result(
-        &self,
-        scope: crate::fir::SignatureScope,
-        selected: &crate::symbol_resolver::SelectedConstructorDeclaration,
-        arguments: &[Ty],
-        bound_outer: Option<Ty>,
-        explicit_type_arguments: &[Ty],
-        expected: Option<Ty>,
-    ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        use crate::symbol_resolver::selected_constructor::unlisted_constructor_type;
-        let member = &selected.declaration;
-        let owner = member.owner.ok_or_else(Self::failure)?;
-        let Some(class) = self.table.class_by_type_name(owner) else {
-            let result =
-                unlisted_constructor_type(selected, owner, explicit_type_arguments, expected);
-            return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
-        };
-        // Constructor selection has already applied explicit arguments, literal adaptation,
-        // generic bounds, and overload mapping to `member.ret`. Seed those selected classifier
-        // arguments before filling any still-unbound variable from the raw expression types; doing
-        // the latter first would incorrectly turn `C<T : Long>(0)` into `C<Int>`.
-        let selected_arguments = (member.ret.obj_internal() == Some(owner))
-            .then(|| member.ret.type_args())
-            .unwrap_or_default();
-        let mut bindings = class
-            .type_params
-            .iter()
-            .cloned()
-            .zip(selected_arguments.iter().copied())
-            .collect::<crate::symbol_resolver::GSigBinds>();
-        // A selected constructor result can contain an early partial solution (for example the
-        // first `T` occurrence in `PairBox("x", null)`). It is not a completed classifier result
-        // until every argument occurrence has contributed. Infer into a fresh map, then replace
-        // only classifier slots not fixed by a written type argument; this preserves
-        // `C<Number>(1)` while completing `PairBox("x", null)` to `PairBox<String?>`.
-        let declared_parameters: std::borrow::Cow<'_, [Ty]> = member
-            .generic_sig
-            .as_ref()
-            .filter(|signature| signature.params.len() == arguments.len())
-            .map(|signature| std::borrow::Cow::Borrowed(signature.params.as_slice()))
-            .unwrap_or_else(|| {
-                std::borrow::Cow::Owned(
-                    class
-                        .ctor_param_shapes
-                        .iter()
-                        .map(|parameter| parameter.0)
-                        .collect(),
-                )
-            });
-        let mut inferred = crate::symbol_resolver::GSigBinds::default();
-        for (parameter, argument) in declared_parameters.iter().zip(arguments) {
-            crate::symbol_resolver::unify_inferred_ty(*parameter, *argument, &mut inferred);
-        }
-        let mut completed_bindings = bindings.clone();
-        for (index, formal) in class.type_params.iter().enumerate() {
-            let explicitly_fixed = explicit_type_arguments
-                .get(index)
-                .is_some_and(|argument| *argument != Ty::Error);
-            if !explicitly_fixed {
-                if let Some(inferred) = inferred.get(formal).copied() {
-                    completed_bindings.insert(formal.clone(), inferred);
-                }
-            }
-        }
-        // The fresh completion above sees compact expression result types, but no longer carries
-        // literal provenance. It may therefore infer `Int` from the raw `0` after constructor
-        // selection correctly adapted that literal to a declared `T : Long` parameter. Accept the
-        // completed map only when it still satisfies the constructor's declaration bounds;
-        // otherwise the selected semantic result remains authoritative. This is generic
-        // constructor inference—value classes use the same path as ordinary classes.
-        let completed_is_valid = member.generic_sig.as_ref().is_none_or(|signature| {
-            let module =
-                crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-            let source = crate::symbol_source::CompositeSource::new(vec![
-                &module as &dyn crate::symbol_source::SymbolSource,
-                &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-            ]);
-            let oracle = crate::symbol_resolver::SourceOracle(&source);
-            crate::symbol_resolver::generic_bindings_satisfy_bounds(
-                signature,
-                &completed_bindings,
-                |actual, bound| {
-                    crate::assignable::is_assignable(
-                        &crate::assignable::TyCtx::new(),
-                        &oracle,
-                        actual,
-                        bound,
-                    )
-                },
-            )
-        });
-        if completed_is_valid {
-            bindings = completed_bindings;
-        }
-        let formal_bounds = class
-            .type_param_bounds
-            .iter()
-            .map(|bound| {
-                (*bound != Ty::Error)
-                    .then_some(*bound)
-                    .into_iter()
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
-        crate::symbol_resolver::seed_unbound_constructor_result_from_symbols(
-            &source,
-            owner,
-            &class.type_params,
-            &formal_bounds,
-            expected,
-            &mut bindings,
-        );
-        let mut result_arguments = class
-            .type_params
-            .iter()
-            .enumerate()
-            .map(|(index, formal)| {
-                bindings.get(formal).copied().unwrap_or_else(|| {
-                    class
-                        .type_param_bounds
-                        .get(index)
-                        .copied()
-                        .filter(|bound| *bound != Ty::Error)
-                        .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))
-                })
-            })
-            .collect::<Vec<_>>();
-        if !class.captured_type_parameters.type_params.is_empty() {
-            let receivers = bound_outer
-                .into_iter()
-                .chain(self.implicit_receivers(scope));
-            let receiver_bindings = receivers
-                .flat_map(|receiver| self.table.applied_type_hierarchy(receiver.non_null()))
-                .filter_map(|(receiver_owner, applied, _)| {
-                    self.table
-                        .class_by_type_name(receiver_owner)
-                        .map(|declaration| declaration.type_parameter_bindings(applied))
-                })
-                .collect::<Vec<_>>();
-            for (ordinal, captured) in class
-                .captured_type_parameters
-                .type_params
-                .iter()
-                .enumerate()
-            {
-                let argument = receiver_bindings
-                    .iter()
-                    .find_map(|bindings| bindings.get(captured).copied())
-                    .unwrap_or_else(|| {
-                        Ty::ty_param(
-                            captured,
-                            class
-                                .captured_type_parameters
-                                .type_param_bounds
-                                .get(ordinal)
-                                .copied()
-                                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any"))),
-                        )
-                    });
-                result_arguments.push(argument);
-            }
-        }
-        let result = Ty::obj_args_name(owner, &result_arguments);
-        crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure())
-    }
-
     fn direct_super_receivers(
         &self,
         scope: crate::fir::SignatureScope,
@@ -3588,12 +3420,14 @@ pub(crate) fn finalized_streamed_signature_index(
         }
     }
     let empty_extension_receivers = HashMap::default();
+    let empty_classifier_parents = classifier_parents::ParentInventory::default();
     let selected_types = selected_type_facts::SelectedTypeFacts::default();
     let bound_local_alias_templates = BoundLocalAliasTemplates::for_graph(&graph);
     let explicit_type_semantics = ProductionSignatureSemantics {
         headers,
         table,
         classifier_types: &classifier_types,
+        classifier_parents: &empty_classifier_parents,
         parameters: HashMap::default(),
         extension_receivers: &empty_extension_receivers,
         source_orders: HashMap::default(),
@@ -4311,46 +4145,34 @@ pub(crate) fn finalized_streamed_signature_index(
             Err(_) => failed.push(stub.id),
         }
     }
-    let mut resolved_classifier_parents = HashMap::default();
-    for (declaration, parents) in graph.explicit_classifier_parents() {
-        let superclass = match parents.superclass {
-            Some(expression) => {
-                let Some(parent) =
-                    explicit_type_semantics.resolve_compact_graph_type(&graph, expression)
-                else {
-                    failed.push(declaration);
-                    continue;
-                };
-                Some(parent)
-            }
-            None => None,
-        };
-        let resolved_supertypes = graph
-            .operands(parents.supertypes)
-            .iter()
-            .map(|expression| {
-                explicit_type_semantics.resolve_compact_graph_type(&graph, *expression)
-            })
-            .collect::<Option<Vec<_>>>();
-        let Some(resolved_supertypes) = resolved_supertypes else {
-            failed.push(declaration);
-            continue;
-        };
-        resolved_classifier_parents.insert(declaration, (superclass, resolved_supertypes));
-    }
+    let resolved_classifier_parents =
+        classifier_parents::resolve_graph_parents(&graph, &explicit_type_semantics, &mut failed);
     let compact_cycle_edges =
         compact_classifier_cycle_edges(table, &classifier_types, &resolved_classifier_parents);
+    let parent_diagnostic_start = explicit_type_semantics.diagnostics.borrow().len();
+    let classifier_parents = classifier_parents::inventory(
+        &explicit_type_semantics,
+        &resolved_classifier_parents,
+        &compact_cycle_edges,
+    );
     failed.sort_by_key(|declaration| declaration.raw());
     failed.dedup();
     let explicit_diagnostics = explicit_type_semantics.diagnostics.borrow();
-    diagnostics::emit_unconditional(diags, &explicit_diagnostics);
+    // Parent findings retain their original classifier-publication position. Their cached facts
+    // are needed by inference now, but the later header publication replays those findings once.
+    diagnostics::emit_unconditional(diags, &explicit_diagnostics[..parent_diagnostic_start]);
     if !failed.is_empty() {
         crate::trace_compiler!(
             "fir",
             "signature finalization rejected declarations before solver: {failed:?}",
         );
         let failed_declarations = failed.iter().copied().collect::<HashSet<_>>();
-        diagnostics::emit_failures(diags, &explicit_diagnostics, &failed_declarations, false);
+        diagnostics::emit_failures(
+            diags,
+            &explicit_diagnostics[..parent_diagnostic_start],
+            &failed_declarations,
+            false,
+        );
     }
     let explicit_publication_diagnostics = explicit_diagnostics.len();
     drop(explicit_diagnostics);
@@ -4376,6 +4198,7 @@ pub(crate) fn finalized_streamed_signature_index(
         headers,
         table,
         classifier_types: &classifier_types,
+        classifier_parents: &classifier_parents,
         parameters: inferred_parameters,
         extension_receivers: &resolved_receivers,
         source_orders,
@@ -4703,6 +4526,9 @@ pub(crate) fn finalized_streamed_signature_index(
             {
                 skip_classifier!(stub.id);
             }
+            if let Some(name) = &classifier.declaration_name {
+                index.publish_classifier_declaration_name(stub.id, name.clone());
+            }
             continue;
         }
         let declaration = headers
@@ -4717,17 +4543,11 @@ pub(crate) fn finalized_streamed_signature_index(
         else {
             unreachable!("a classifier stub must own a classifier header")
         };
-        let Some((superclass, interfaces, source_supertypes)) =
-            classifier_parents::compact_classifier_parents(
-                headers,
-                &semantics,
-                stub.id,
-                stub.source,
-                classifier,
-                resolved_classifier_parents.get(&stub.id),
-                &compact_cycle_edges,
-            )
-        else {
+        let parent_facts = classifier_parents
+            .get(&stub.id)
+            .expect("a source classifier retains its canonical parent normalization");
+        parent_facts.publish_diagnostics(&semantics);
+        let Some(parents) = &parent_facts.parents else {
             // Preserve an undemanded body-local classifier for Pass 2; one demanded by a non-local
             // inferred signature has compact parents and must finalize here.
             if stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
@@ -4751,6 +4571,9 @@ pub(crate) fn finalized_streamed_signature_index(
             );
             skip_classifier!(stub.id);
         };
+        let superclass = parents.superclass;
+        let interfaces = parents.interfaces.clone();
+        let source_supertypes = &parents.source_supertypes;
         let interface_delegations = headers
             .syntax
             .interface_delegations(delegations)
@@ -4843,6 +4666,9 @@ pub(crate) fn finalized_streamed_signature_index(
                 stub.id,
             );
             skip_classifier!(stub.id);
+        }
+        if let Some(name) = &classifier.declaration_name {
+            index.publish_classifier_declaration_name(stub.id, name.clone());
         }
     }
     type_parameter_publication::publish_source_declarations(

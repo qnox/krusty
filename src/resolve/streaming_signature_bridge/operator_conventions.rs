@@ -9,7 +9,7 @@ use crate::types::TyKind;
 
 enum ReceiverOperatorRung {
     Selected {
-        callable: crate::libraries::FunctionInfo,
+        callable: Box<crate::libraries::FunctionInfo>,
         parameters: Vec<Ty>,
         result: Ty,
         argument_types: Vec<Ty>,
@@ -132,7 +132,7 @@ impl ProductionSignatureSemantics<'_> {
                     parameters,
                     result,
                 )) => Some(ReceiverOperatorRung::Selected {
-                    callable: selected,
+                    callable: Box::new(selected),
                     parameters,
                     result,
                     argument_types,

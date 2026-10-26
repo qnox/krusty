@@ -160,10 +160,10 @@ fn kind(kind: TypeKind) -> KspClassKind {
 }
 
 /// The modifiers KSP reports for a library classifier, which it derives from the declaration's
-/// facts. `None` for a declaration whose facts the oracle has not pinned yet (an inner class, or a
-/// Java package-private one).
+/// facts. `None` for a declaration whose facts the oracle has not pinned yet (a Java inner class,
+/// or a Java package-private one).
 fn modifiers(header: &DeclarationHeader, is_fun: bool) -> Option<Vec<KspModifier>> {
-    if header.is_inner {
+    if header.is_inner && header.language == DeclarationLanguage::Java {
         return None;
     }
     let mut modifiers = vec![match header.access {
@@ -200,6 +200,9 @@ fn modifiers(header: &DeclarationHeader, is_fun: bool) -> Option<Vec<KspModifier
                 KspModifier::Open
             });
         }
+    }
+    if header.is_inner {
+        modifiers.push(KspModifier::Inner);
     }
     Some(modifiers)
 }
