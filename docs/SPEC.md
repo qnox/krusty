@@ -19262,13 +19262,41 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   structural otherwise), `===`/`!==` the reference comparison, `!` the recorded negation. A
   serialized built-in the checker's rule would classify differently (`EQEQ` over two `Double`s,
   `ieee754equals` over `Int`s or nullable operands) declines rather than picking a mode, as does a
-  `not` of any other origin (`!in`). Tests:
+  `not` of any other origin; a `not` of origin `NOT_IN` is the negated range-literal membership
+  below, and declines over any other operand. Tests:
   `klib_lowering::ir_builtins::tests::equalities_and_negation_are_signed_as_the_stdlib_calls_them`,
   `klib_lowering::tests::body_forms::equality_built_ins_lower_as_the_source_operators_do`,
   `negation_lowers_as_the_source_operator_does`,
   `an_equality_the_checker_would_classify_otherwise_declines`,
   `stdlib_built_in_calls_have_the_signed_operands`,
   `stdlib_structural_equality_lowers_as_its_source_does`.
+
+- **A KLIB body's membership in a range literal is the source comparison.** Kotlin serializes
+  `v in a..b` (`a..<b`) as a call of the range's `contains`, origin `IN`, whose dispatch receiver is
+  the call of the range operator, origin `RANGE` (`RANGE_UNTIL`); `v !in a..b` is that call, origin
+  `NOT_IN`, under a `Boolean.not` of origin `NOT_IN`. When the operator is a builtin scalar's range
+  construction by its provider role (`rangeTo`/`rangeUntil` of `Int`, `Long` or `Char` with an
+  operand of the receiver's own type), and `contains` is the constructed range's own membership
+  operator over that element, lowering builds the checked range membership checked FIR builds for
+  the source form: the value compared with both bounds, each operand evaluated once in source order,
+  and no range is constructed. Any other operator or `contains` stays an ordinary call, as kotlinc's
+  `RangeContainsLowering` leaves a range it does not recognize. Dependency preparation reads the same
+  structural form, so the folded `contains` and range operator are not emitted as declaration roots.
+  A range construction outside a membership (`val r = a..b`) is the checked range construction of its
+  provider role. Tests: `klib_lowering::tests::body_forms::stdlib_range_literal_membership_is_a_bounds_comparison`
+  (`Char.isSurrogate`), `stdlib_range_literal_negation_lowers_past_the_membership` (`checkRadix`),
+  `a_negation_of_another_source_form_declines`, box
+  `tests/box_regressions/libraryRangeMembership.kt`.
+
+- **Native's radix rendering is the runtime's.** The Native stdlib's `Int.toString(radix)` and
+  `Long.toString(radix)` reach body-less `@GCUnsafeCall` externals (`Kotlin_Int_toStringRadix`,
+  `Kotlin_Long_toStringRadix`, package `kotlin.text`, `(T, Int): String`). Like the other
+  authenticated Native externals they carry a provider role, `RadixToString`, which the runtime's
+  `kt_long_to_string_radix` realizes: lowercase digits, the magnitude in unsigned space (so
+  `Long.MIN_VALUE` renders), a leading `-`. The radix itself is checked by the stdlib's own
+  `checkRadix` body. Tests:
+  `klib_libraries::target_intrinsics::tests::native_gc_unsafe_radix_rendering_requires_the_exact_entry_package_and_shape`,
+  box `strings/kt13213a.kt`.
 
 - **A KLIB body follows kotlinc's serialized resolution exactly.** Each call in a serialized body
   names the declaration kotlinc resolved by its exact `IdSignature`, with its type arguments and
