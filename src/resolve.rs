@@ -552,34 +552,6 @@ fn resolved_compact_jvm_name(
         .unwrap_or_else(|| fallback.to_string())
 }
 
-fn classifier_bound_is_interface(
-    source_headers: &HashMap<TypeName, SourceClassHeader>,
-    source: &dyn SymbolSource,
-    bound: Ty,
-) -> bool {
-    bound
-        .non_null()
-        .kotlin_class_internal()
-        .is_some_and(|classifier| {
-            source_headers
-                .get(&classifier)
-                .is_some_and(|header| header.flags.has(ClassFlags::INTERFACE))
-                || source
-                    .classifier(classifier)
-                    .is_some_and(|shape| shape.is_interface())
-        })
-}
-
-fn order_primary_class_bounds(
-    signature: &mut GenericSig,
-    source_headers: &HashMap<TypeName, SourceClassHeader>,
-    source: &dyn SymbolSource,
-) {
-    type_parameter_bounds::order_primary_class_bounds(signature, |bound| {
-        classifier_bound_is_interface(source_headers, source, bound)
-    });
-}
-
 impl Checker<'_> {
     /// Complete bind-once facts for one selected module, body-local or dependency type-alias
     /// declaration.

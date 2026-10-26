@@ -97,6 +97,7 @@ mod source_debug;
 pub(crate) use source_debug::SourceDebug;
 mod static_properties;
 mod type_check_role;
+mod type_parameter_declarations;
 pub(crate) mod type_reflection;
 mod value_class_constructors;
 mod value_class_facts;

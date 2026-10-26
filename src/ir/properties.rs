@@ -394,4 +394,9 @@ pub struct IrModuleProperty {
     /// The own, unapplied types of the properties this one overrides, as the override edges its
     /// classifier published them (see [`super::IrModuleCallable::overridden_results`]).
     pub overridden_types: Box<[Ty]>,
+    /// The property's own type parameters and their complete bounds.
+    pub type_parameters: Box<[super::IrCallableTypeParameter]>,
+    /// The declaring classifier's type parameters, captured ones included (see
+    /// [`super::IrModuleCallable::owner_type_parameters`]).
+    pub owner_type_parameters: Box<[super::IrCallableTypeParameter]>,
 }

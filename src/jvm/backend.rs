@@ -209,6 +209,9 @@ fn run_backend_passes_after_plugins(
     lambda_modes: crate::jvm::ir_emit::LambdaModes,
     facts: &mut BackendPassFacts,
 ) -> Result<(), SkipReason> {
+    // Every later pass reads a type parameter's JVM carrier off its occurrences. Select it once,
+    // from the declarations' complete bounds, before any of them runs.
+    crate::jvm::type_parameter_carriers::realize(ir);
     let module_value_classes = classifiers.module().source_value_classes();
     let module_readable_value_classes = classifiers.module().metadata_readable_value_classes();
     // Plugins produce backend-neutral checked IR. Realize any semantic super dispatch they add at

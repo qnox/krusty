@@ -11,8 +11,10 @@ use crate::types::{Ty, TypeName};
 
 use super::{
     body_local_ownership::{semantic_owner, SemanticOwner},
-    constructors::classifier_type_parameter_ordinal,
-    generics::{attach_accessor_type_parameters, declaration_type_parameters},
+    generics::{
+        attach_accessor_type_parameters, classifier_layout_type_parameter,
+        declaration_type_parameters,
+    },
     lower_body_with_context, FileLoweringContext, FirFileLoweringFailure,
 };
 
@@ -1264,8 +1266,8 @@ fn materialize_member_property(
             let field_type_parameter = anchor
                 .owner
                 .and_then(|classifier| {
-                    classifier_type_parameter_ordinal(index, classifier, storage_ty)
-                        .and_then(|ordinal| index.type_parameter(classifier, ordinal))
+                    // An inner class's property may hold a parameter of its enclosing class.
+                    classifier_layout_type_parameter(index, classifier, storage_ty)
                 })
                 .and_then(|parameter| index.type_parameter_name(parameter))
                 .map(str::to_owned);
