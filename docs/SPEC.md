@@ -10577,6 +10577,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   copied body and uses the same accessors.
   Tests: `tests/private_inline_access_e2e.rs`, `tests/private_inline_property_access_e2e.rs`.
   Box `ir/privateSignatures/privateLeakThroughInline.kt`.
+- **A private property an inline body of another file reaches goes through its owner's accessor.**
+  A non-private inline function's body that another file inlines names its file's private
+  properties as module properties, and the JVM realizes each access as the call the declaring
+  class publishes, as kotlinc's copy makes it: `access$get<X>$p` / `access$set<X>$p` on the facade
+  for a field-backed top-level property, `access$get<X>` / `access$set<X>` when the source declares
+  the accessor or a delegate supplies it, and the instance form taking the owner first
+  (`access$getX$p(Owner)`) for a class member. A `const val` is read as its value. A private
+  `lateinit` read through `access$get<X>$p` yields the raw field, so the use site throws while it
+  is unset, as its own class's read does. Calling the property's `getX`, which a private property
+  does not publish, failed with `NoSuchMethodError`. A member's owner is the call's dispatch
+  receiver, not an argument: the declared parameters of the call stay those of its source
+  arguments (context parameters, extension receiver, setter value), and only the physical
+  descriptor carries the owner slot. Those parameters take their value-class carriers
+  (`access$setTag$p(Holder, String)`), and a declared accessor's bridge carries that accessor's
+  mangled JVM name (`access$getWeight-b--Cat4` for `val Label.weight`); a field bridge stays
+  unmangled, on a class and on a facade alike (`access$setStamp$p(String)`).
+  Test: `tests/private_property_inline_access_e2e.rs` (field, declared, delegated, `lateinit` and
+  `const` top-level properties, a member, a value-class member written through its setter, and a
+  member extension over a value class, and a value-class top-level property, against kotlinc's
+  bytes and run).
 - **A private member-extension accessor reached from another class calls `access$<name>`.** The
   accessor is an instance method of the declaring class (`getItem(Key)` for `val Key.item`).
   A local class inside the owner is a separate class file, so it cannot call that private method.
@@ -13592,8 +13612,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `set(Object)` bridge. `fun set(e: String): Nothing` does implement it, and its bridge calls the
   member's `Void` descriptor and pops the result. A Kotlin dependency superclass's member, generic
   or not, is compared by its metadata result, so a separately compiled `NBase.set(e: String):
-  Nothing` implements it too; its physical `Void` result only names the call. Tests:
-  `tests/read_only_stub_override_return_e2e.rs` (class bytes and box runs against kotlinc).
+  Nothing` implements it too; its physical `Void` result only names the call. Whether an
+  implemented member needs that adapter depends on its complete physical descriptor, the result
+  included, against the mutable member's erased one. So `fun set(e: Any): Nothing` under
+  `ListIterator<Any>` and an inherited `Base<T>.set(e: T): Nothing` under `Base<String>` already
+  take `Object`, yet the class still gets `set(Object)V`, which calls `set(Object)Void` and pops.
+  The inherited adapter casts nothing, so `java.util.ListIterator.set(1)` reaches the member.
+  Tests: `tests/read_only_stub_override_return_e2e.rs` (class bytes and box runs against kotlinc,
+  with calls through `java.util.ListIterator.set`).
 - **A read-only `Collection` gets the mutable `java.util.Collection` members as stubs.** A class
   that implements `kotlin.collections.Collection` but not `MutableCollection` gets kotlinc's
   throwing stubs, in `MutableCollection`'s order, for each mutable member it does not implement:

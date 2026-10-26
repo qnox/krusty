@@ -6,6 +6,10 @@
 //! `set(Object)` bridge. A `Nothing` member does implement it. Its bridge calls the member's
 //! `Void` descriptor and pops the result, also when a separately compiled, non-generic Kotlin
 //! superclass declares it: its metadata, not its physical `Void`, gives the `Nothing` result.
+//! The adapter is needed whenever the member's complete physical descriptor differs from the
+//! mutable declaration's erased one, so `set(e: Any): Nothing` under `ListIterator<Any>`, and an
+//! inherited `Base<T>.set(e: T): Nothing` under `Base<String>`, whose physical parameters already
+//! match, still get a `set(Object)V` adapter calling their `Void` descriptor.
 
 use super::common;
 
@@ -36,6 +40,18 @@ fn generic_superclass_result() -> String {
 fn nothing_member() -> String {
     format!(
         "class Walk : ListIterator<String> {{\n{MEMBERS}    fun set(e: String): Nothing = throw IllegalStateException(\"set \" + e)\n}}\n"
+    )
+}
+
+fn own_any_nothing_member() -> String {
+    format!(
+        "class Walk : ListIterator<Any> {{\n{MEMBERS}    fun set(e: Any): Nothing = throw IllegalStateException(\"set \" + e)\n}}\n"
+    )
+}
+
+fn generic_superclass_nothing_member() -> String {
+    format!(
+        "open class Base<T> {{\n    fun set(e: T): Nothing = throw IllegalStateException(\"set \" + e)\n}}\n\nclass Walk : Base<String>(), ListIterator<String> {{\n{MEMBERS}}}\n"
     )
 }
 
@@ -94,6 +110,27 @@ fun box(): String {{
     )
 }
 
+/// What `java.util.ListIterator.set` does on a `Walk`, for each argument, through interface
+/// dispatch.
+fn interface_box_program(source: &str, arguments: &str, expected: &str) -> String {
+    format!(
+        "{source}
+fun box(): String {{
+    val set = java.util.ListIterator::class.java.getMethod(\"set\", Any::class.java)
+    val outcome = listOf<Any>({arguments}).joinToString(\"|\") {{ argument ->
+        try {{
+            set.invoke(Walk(), argument)
+            \"returned\"
+        }} catch (e: java.lang.reflect.InvocationTargetException) {{
+            \"${{e.cause!!::class.simpleName}}: ${{e.cause!!.message}}\"
+        }}
+    }}
+    return if (outcome == \"{expected}\") \"OK\" else outcome
+}}
+"
+    )
+}
+
 const READ_ONLY: &str =
     "UnsupportedOperationException: Operation is not supported for read-only collection";
 
@@ -130,6 +167,32 @@ fn a_nothing_member_implements_the_member_and_its_bridge_pops_the_result_like_ko
     common::expect_box_same_as_kotlinc(
         &box_program(&nothing_member(), "IllegalStateException: set x"),
         "read_only_nothing_member",
+    );
+}
+
+#[test]
+fn a_nothing_member_whose_parameters_are_already_erased_gets_its_adapter_like_kotlinc() {
+    assert_classes_match_kotlinc(&own_any_nothing_member(), &[]);
+    common::expect_box_same_as_kotlinc(
+        &interface_box_program(
+            &own_any_nothing_member(),
+            "\"x\", 1",
+            "IllegalStateException: set x|IllegalStateException: set 1",
+        ),
+        "read_only_own_any_nothing_member",
+    );
+}
+
+#[test]
+fn an_inherited_generic_nothing_member_gets_its_unchecked_adapter_like_kotlinc() {
+    assert_classes_match_kotlinc(&generic_superclass_nothing_member(), &[]);
+    common::expect_box_same_as_kotlinc(
+        &interface_box_program(
+            &generic_superclass_nothing_member(),
+            "\"x\", 1",
+            "IllegalStateException: set x|IllegalStateException: set 1",
+        ),
+        "read_only_generic_superclass_nothing_member",
     );
 }
 
