@@ -207,8 +207,11 @@ impl Spelled {
                 self.mutability_upper_bound = Some(upper_bound(lower));
                 lower
             }
-            TyKind::Nullable(inner)
-            | TyKind::DefinitelyNotNull(inner)
+            // A nullable `(Mutable)X<..>?` records its interval on this same node.
+            TyKind::Nullable(inner) => {
+                return self.record_flexible_upper_bounds(inner, upper_bound)
+            }
+            TyKind::DefinitelyNotNull(inner)
             | TyKind::InProjection(inner)
             | TyKind::OutProjection(inner)
             | TyKind::StarProjection(inner) => inner,

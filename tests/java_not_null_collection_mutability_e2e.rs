@@ -67,6 +67,9 @@ fun declared(ro: List<String>): List<String> = Api.same(ro)\n\
 fun <T> generic(x: List<T>) = Api.same(x)\n\
 val given = Api.give()\n\
 fun raw() = Api.raw()\n\
+fun joined(flag: Boolean) = if (flag) Api.give() else null\n\
+fun <T> orNull(x: T, flag: Boolean): T? = if (flag) x else null\n\
+fun genericJoined(flag: Boolean) = orNull(Api.give(), flag)\n\
 fun box(): String {\n\
     val ro: List<String> = listOf(\"x\")\n\
     val m: MutableList<String> = mutableListOf(\"y\")\n\

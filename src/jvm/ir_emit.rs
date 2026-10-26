@@ -4969,10 +4969,7 @@ fn method_parameterized_sig(
 ) -> Option<String> {
     // Runs for every emitted method — bail before building any string when no position can carry one.
     let is_parameterized = |t: &Ty| {
-        let inner = match t.kind() {
-            TyKind::Nullable(t) | TyKind::PlatformNullable(t) | TyKind::MutabilityFlexible(t) => t,
-            _ => *t,
-        };
+        let inner = t.non_null();
         matches!(inner.kind(), TyKind::Fun(_) | TyKind::Intersection(_))
             || matches!(inner.kind(), TyKind::Obj(_, arguments) if !arguments.is_empty())
     };

@@ -30559,10 +30559,10 @@ pub(crate) fn semantic_common_supertype_inner(
         return semantic_common_supertype_inner(source, oracle, a, bound, visiting);
     }
     if a == Ty::Null && b.is_reference() {
-        return Some(Ty::nullable(b.non_null()));
+        return Some(Ty::nullable(b));
     }
     if b == Ty::Null && a.is_reference() {
-        return Some(Ty::nullable(a.non_null()));
+        return Some(Ty::nullable(a));
     }
     if (a == Ty::Unit && b == Ty::Null) || (b == Ty::Unit && a == Ty::Null) {
         return Some(Ty::nullable(Ty::Unit));
@@ -34691,7 +34691,7 @@ impl crate::assignable::TypeOracle for Checker<'_> {
 /// accidentally become `String?`.
 fn common_result_nullability(a: Ty, b: Ty, base: Ty) -> Ty {
     if matches!(a.kind(), TyKind::Nullable(_)) || matches!(b.kind(), TyKind::Nullable(_)) {
-        Ty::nullable(base.non_null())
+        Ty::nullable(base)
     } else if a.is_platform_nullable() || b.is_platform_nullable() {
         Ty::platform_nullable(base.non_null())
     } else {

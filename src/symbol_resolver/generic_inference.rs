@@ -682,7 +682,7 @@ pub(crate) fn merge_inferred_ty(current: Option<Ty>, actual: Ty) -> Ty {
     } else if matches!(current.kind(), TyKind::Nullable(inner) if inner == Ty::Nothing) {
         Ty::nullable(actual)
     } else if current.non_null() == actual.non_null() {
-        Ty::nullable(current.non_null())
+        Ty::nullable(current)
     } else {
         let any = Ty::obj("kotlin/Any");
         if current.is_nullable() || actual.is_nullable() {
@@ -1372,7 +1372,7 @@ pub(crate) fn merge_inferred_ty_from_symbols(
             common_supertype::common_super_type(source, current.non_null(), actual.non_null());
         if !supertype.is_erased_top() {
             return if current.is_nullable() || actual.is_nullable() {
-                Ty::nullable(supertype.non_null())
+                Ty::nullable(supertype)
             } else {
                 supertype
             };
@@ -1407,7 +1407,7 @@ pub(crate) fn merge_inferred_ty_from_symbols(
         return merged;
     };
     if current.is_nullable() || actual.is_nullable() {
-        Ty::nullable(common.non_null())
+        Ty::nullable(*common)
     } else {
         *common
     }

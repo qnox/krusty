@@ -898,14 +898,17 @@ fn encode_type_with_parameter(
             return Ok(reference);
         }
     }
-    let (nullable, flexible, base) = match ty.kind() {
-        TyKind::Nullable(inner) => (true, false, inner),
-        TyKind::PlatformNullable(inner) | TyKind::MutabilityFlexible(inner) => (false, true, inner),
-        _ => (false, spelled.flexible_upper_bound.is_some(), ty),
+    // Only a platform interval's upper face admits null on its own; a Java collection's `(Mutable)`
+    // interval is flexible in its mutability alone, with both faces as nullable as the occurrence.
+    let (nullable, flexible, mutability_only, base) = match ty.kind() {
+        TyKind::Nullable(inner) => match inner.kind() {
+            TyKind::MutabilityFlexible(inner) => (true, true, true, inner),
+            _ => (true, false, false, inner),
+        },
+        TyKind::PlatformNullable(inner) => (false, true, false, inner),
+        TyKind::MutabilityFlexible(inner) => (false, true, true, inner),
+        _ => (false, spelled.flexible_upper_bound.is_some(), false, ty),
     };
-    // Only a platform interval's upper face admits null; a non-null Java collection is flexible in
-    // its mutability alone.
-    let mutability_only = matches!(ty.kind(), TyKind::MutabilityFlexible(_));
     if let (TyKind::Obj(owner, arguments), true) = (base.kind(), base.is_raw_application()) {
         let upper_bound = if mutability_only {
             spelled.mutability_upper_bound
@@ -930,16 +933,17 @@ fn encode_type_with_parameter(
         let mut face = spelled.clone();
         face.flexible_upper_bound = None;
         face.mutability_upper_bound = None;
+        let faces = |face: Ty| if nullable { Ty::nullable(face) } else { face };
         let mut message = encode_type_with_parameter(
             strings,
-            base,
+            faces(base),
             &face,
             type_parameters,
             forced_parameter,
             expansion,
         )?;
         let upper = if mutability_only {
-            spelled.mutability_upper_bound.unwrap_or(base)
+            faces(spelled.mutability_upper_bound.unwrap_or(base))
         } else {
             Ty::nullable(spelled.flexible_upper_bound.unwrap_or(base))
         };

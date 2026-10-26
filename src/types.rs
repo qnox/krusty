@@ -772,9 +772,8 @@ impl Ty {
             // a non-null bound; nullability restores the caller parameter and its recorded bound.
             TyKind::DefinitelyNotNull(original) => Ty::nullable(original),
             TyKind::Nullable(_) | TyKind::Null | TyKind::Error => inner,
-            TyKind::PlatformNullable(inner) | TyKind::MutabilityFlexible(inner) => {
-                Ty::intern(TyKind::Nullable(inner))
-            }
+            TyKind::PlatformNullable(inner) => Ty::intern(TyKind::Nullable(inner)),
+            // `(Mutable)X<..>?` stays flexible in its mutability: nullability is independent of it.
             _ => Ty::intern(TyKind::Nullable(inner)),
         }
     }
@@ -782,9 +781,10 @@ impl Ty {
     /// Java's flexible platform-nullability form `T!`.
     pub fn platform_nullable(inner: Ty) -> Ty {
         match inner.kind() {
-            TyKind::Nullable(inner)
-            | TyKind::PlatformNullable(inner)
-            | TyKind::MutabilityFlexible(inner) => Ty::intern(TyKind::PlatformNullable(inner)),
+            TyKind::Nullable(inner) => Ty::platform_nullable(inner),
+            TyKind::PlatformNullable(inner) | TyKind::MutabilityFlexible(inner) => {
+                Ty::intern(TyKind::PlatformNullable(inner))
+            }
             TyKind::Null | TyKind::Error => inner,
             _ => Ty::intern(TyKind::PlatformNullable(inner)),
         }
@@ -795,9 +795,10 @@ impl Ty {
     /// already on `inner` is dropped, since this form is non-null.
     pub fn mutability_flexible(inner: Ty) -> Ty {
         match inner.kind() {
-            TyKind::Nullable(inner)
-            | TyKind::PlatformNullable(inner)
-            | TyKind::MutabilityFlexible(inner) => Ty::intern(TyKind::MutabilityFlexible(inner)),
+            TyKind::Nullable(inner) => Ty::mutability_flexible(inner),
+            TyKind::PlatformNullable(inner) | TyKind::MutabilityFlexible(inner) => {
+                Ty::intern(TyKind::MutabilityFlexible(inner))
+            }
             TyKind::Null | TyKind::Error => inner,
             _ => Ty::intern(TyKind::MutabilityFlexible(inner)),
         }
@@ -917,11 +918,19 @@ impl Ty {
     /// The non-null form: strips a `?` if present, else returns `self`.
     pub fn non_null(self) -> Ty {
         match self.kind() {
-            TyKind::Nullable(inner) => inner,
-            TyKind::PlatformNullable(inner) => inner,
+            TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => inner.non_null(),
             // The mutable face: a commitment to non-null has nothing left to strip, and every
             // structural reader of a non-null type sees the classifier it carries.
             TyKind::MutabilityFlexible(inner) => inner,
+            _ => self,
+        }
+    }
+
+    /// The non-null form that keeps a Java collection's `(Mutable)` interval: `(Mutable)List<T>?`
+    /// yields `(Mutable)List<T>`, where [`Self::non_null`] commits to the mutable face.
+    pub fn non_null_keeping_mutability(self) -> Ty {
+        match self.kind() {
+            TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => inner,
             _ => self,
         }
     }
@@ -2500,6 +2509,23 @@ pub const KFUNCTION_INTERNAL: &str = "kotlin/reflect/KFunction";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nullability_composes_with_a_mutability_interval() {
+        let mutable = Ty::obj_args("kotlin/collections/MutableList", &[Ty::String]);
+        let flexible = Ty::mutability_flexible(mutable);
+        let nullable = Ty::nullable(flexible);
+
+        assert!(nullable.is_nullable());
+        assert_eq!(nullable.non_null_keeping_mutability(), flexible);
+        assert_eq!(nullable.non_null(), mutable);
+        assert_eq!(Ty::nullable(nullable), nullable);
+        assert_eq!(Ty::mutability_flexible(nullable), flexible);
+        assert_eq!(
+            Ty::platform_nullable(nullable),
+            Ty::platform_nullable(mutable)
+        );
+    }
 
     #[test]
     fn array_read_element_approximates_use_site_projections() {
