@@ -161,3 +161,129 @@ fn a_top_level_property_is_written_through_its_setter_from_code_other_classes_in
         "CallerKt",
     );
 }
+
+// kotlinc's `kt22304`: a callable reference and a lambda in an inline function's body are classes
+// of that function's scope, which kotlinc makes public (`inInlineFunctionScope`), so a caller in
+// another package can construct them. The caller's literal holds another inlined literal of its
+// own, which is code of the literal's body, never a method of the caller.
+const REFERENCE_LIBRARY: &str = r#"package library
+
+fun test(): String = "O"
+
+inline fun String.switchMapOnce(crossinline mapper: (String) -> String): String {
+    val reference: () -> String = ::test
+    return reference() + { mapper(this) }()
+}
+"#;
+
+const REFERENCE_CALLER: &str = r#"package caller
+
+import library.*
+
+fun box(): String {
+    val result = "A".switchMapOnce {
+        "B".switchMapOnce { it + "K" }
+    }
+    return if (result == "OOBK") "OK" else result
+}
+"#;
+
+#[test]
+fn an_inline_functions_reference_class_is_public_to_a_caller_in_another_package() {
+    let sources = [
+        ("Library.kt", REFERENCE_LIBRARY),
+        ("Caller.kt", REFERENCE_CALLER),
+    ];
+    assert_eq!(
+        common::kotlinc_box_files_result(&sources, "caller.CallerKt"),
+        "OK",
+        "kotlinc reference for a reference class constructed from another package",
+    );
+    common::expect_box_ok_files_with_stdlib(&sources, "caller.CallerKt");
+}
+
+// An object's own outer instance and the one an inlined lambda captures are both `this$0`; kotlinc
+// renames the object's to `this$0$inline_fun` (`extractParametersMappingAndPatchConstructor`).
+// They can be different objects of the same type, or of different types.
+const OWN_OUTER_INSTANCE: &str = r#"class A(val s: String) {
+    inline fun wrap(crossinline f: () -> String): () -> String = object : () -> String {
+        override fun invoke() = s + f()
+    }
+
+    fun go(): String = wrap { s + "K" }()
+}
+
+class B(val t: String) {
+    fun go(a: A): String = a.wrap { t }()
+}
+
+fun box(): String {
+    val same = A("O").go()
+    if (same != "OOK") return "same type $same"
+    val other = B("K").go(A("O"))
+    if (other != "OK") return "other type $other"
+    return "OK"
+}
+"#;
+
+#[test]
+fn an_objects_own_outer_instance_is_renamed_beside_a_lambdas_captured_one() {
+    common::expect_box_same_as_kotlinc(OWN_OUTER_INSTANCE, "OwnOuterInstance");
+}
+
+// `filter`'s compiled body hands `predicate` to the suspend literal it passes to `source`, which
+// this compiler materializes rather than inlining into the object it regenerates. Which lowering
+// the call takes is decided from that body before anything is inlined
+// (`inliner::keeps_lambda_as_value`), never by inlining it and retrying another route.
+const KEPT_AS_VALUE: &str = r#"import kotlin.coroutines.*
+
+interface Sink {
+    suspend fun send(item: Int)
+}
+
+interface Source {
+    suspend fun consume(sink: Sink)
+}
+
+inline fun source(crossinline action: suspend Sink.() -> Unit): Source = object : Source {
+    override suspend fun consume(sink: Sink) {
+        action(sink)
+    }
+}
+
+suspend inline fun Source.consumeEach(crossinline action: suspend (Int) -> Unit) {
+    consume(object : Sink {
+        override suspend fun send(item: Int) = action(item)
+    })
+}
+
+suspend inline fun Source.fold(initial: Int, crossinline operation: suspend (Int, Int) -> Int): Int {
+    var acc = initial
+    consumeEach {
+        acc = operation(acc, it)
+    }
+    return acc
+}
+
+inline fun Source.filter(crossinline predicate: (Int) -> Boolean): Source = source {
+    consumeEach {
+        if (predicate(it)) send(it)
+    }
+}
+
+fun range(start: Int, count: Int): Source = source {
+    for (i in start until start + count) send(i)
+}
+
+fun box(): String {
+    var result = 0
+    suspend { result = range(1, 4).filter { it % 2 == 0 }.fold(0) { a, b -> a + b } }
+        .startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })
+    return if (result == 6) "OK" else "result $result"
+}
+"#;
+
+#[test]
+fn a_body_keeping_a_crossinline_lambda_as_a_value_is_routed_before_inlining() {
+    common::expect_box_same_as_kotlinc(KEPT_AS_VALUE, "KeptAsValue");
+}
