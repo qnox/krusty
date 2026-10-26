@@ -10065,6 +10065,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/elvis_branch_order_e2e.rs`
   (`a_multi_line_call_on_the_null_path_writes_no_entry_for_the_line_in_effect`).
 
+- **A not-null assertion keeps its own line beside its operand's line.** kotlinc states a `!!`'s
+  own line before its operand. When the operand's first instruction marks another line at that
+  offset (`val y = foo(\n a)!!` loads `a` on the next line), both entries stay:
+  `line 7: 0, line 8: 0`. Common lowering records the assertion, or the coercion that carries its
+  result, as an expression whose start line is kept. Test:
+  `tests/not_null_assert_e2e.rs`
+  (`a_not_null_assertion_keeps_its_own_line_beside_its_operands_line`).
+
 - **An integer-constant branch takes a sibling primitive.** An `if`, `when`, elvis, or `try` with no
   expected type still adapts an integer-constant branch to the non-null primitive of the other
   branches when every such constant fits: `if (flag) current() - start else 0` is `Long`,
