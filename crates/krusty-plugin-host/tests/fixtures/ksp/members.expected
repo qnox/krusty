@@ -1,21 +1,22 @@
 # What KSP2 2.3.12 (KSPJvmMain) logs with Members.kt over members/: every declaration with its
-# modifiers, type parameters, supertypes and types, in KSP's order.
+# modifiers, type parameters, supertypes and types, and whether a property has a backing field, in
+# KSP's order.
 w: [ksp] fun topLevel kind=TOP_LEVEL abstract=false modifiers= typeParameters= receiver=null (items: kotlin.Array<out members.Item> vararg=false default=false, sink: kotlin.collections.MutableMap<in kotlin.String, *> vararg=false default=false): kotlin.Unit
-w: [ksp] property topValue mutable=false modifiers=: kotlin.collections.List<kotlin.collections.Set<kotlin.Int>>
-w: [ksp] property shout mutable=false modifiers=: kotlin.String receiver=kotlin.String
+w: [ksp] property topValue mutable=false backingField=true modifiers=: kotlin.collections.List<kotlin.collections.Set<kotlin.Int>>
+w: [ksp] property shout mutable=false backingField=false modifiers=: kotlin.String receiver=kotlin.String
 w: [ksp] INTERFACE members.Named modifiers= typeParameters= supertypes=kotlin.Any
-w: [ksp]   property name mutable=false modifiers=: kotlin.String
+w: [ksp]   property name mutable=false backingField=false modifiers=: kotlin.String
 w: [ksp]   fun describe kind=MEMBER abstract=true modifiers= typeParameters= receiver=null (prefix: kotlin.String vararg=false default=true): kotlin.String
 w: [ksp] CLASS members.Base modifiers=ABSTRACT typeParameters=T:kotlin.Any supertypes=members.Named,java.io.Serializable
-w: [ksp]   property seed mutable=false modifiers=PROTECTED: members.Base.T?
-w: [ksp]   property name mutable=false modifiers=ABSTRACT,OVERRIDE: kotlin.String
+w: [ksp]   property seed mutable=false backingField=true modifiers=PROTECTED: members.Base.T?
+w: [ksp]   property name mutable=false backingField=false modifiers=ABSTRACT,OVERRIDE: kotlin.String
 w: [ksp]   fun seedOr kind=MEMBER abstract=false modifiers=OPEN typeParameters= receiver=null (fallback: members.Base.T vararg=false default=false): members.Base.T
 w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL typeParameters=T receiver=null (seed: members.Base.T? vararg=false default=false): members.Base<*>
 w: [ksp] CLASS members.Item modifiers=DATA typeParameters= supertypes=members.Base<kotlin.String>
-w: [ksp]   property name mutable=false modifiers=OVERRIDE: kotlin.String
-w: [ksp]   property count mutable=true modifiers=: kotlin.Int
-w: [ksp]   property tags mutable=false modifiers=PRIVATE: kotlin.collections.MutableList<kotlin.String>
-w: [ksp]   property weight mutable=true modifiers=INTERNAL: kotlin.Double?
+w: [ksp]   property name mutable=false backingField=true modifiers=OVERRIDE: kotlin.String
+w: [ksp]   property count mutable=true backingField=true modifiers=: kotlin.Int
+w: [ksp]   property tags mutable=false backingField=true modifiers=PRIVATE: kotlin.collections.MutableList<kotlin.String>
+w: [ksp]   property weight mutable=true backingField=true modifiers=INTERNAL: kotlin.Double?
 w: [ksp]   fun describe kind=MEMBER abstract=false modifiers=OVERRIDE typeParameters= receiver=null (prefix: kotlin.String vararg=false default=true): kotlin.String
 w: [ksp]   fun mapTags kind=MEMBER abstract=false modifiers= typeParameters=R receiver=null (transform: kotlin.Function1<kotlin.String, members.Item.mapTags.R> vararg=false default=false): kotlin.collections.List<members.Item.mapTags.R>
 w: [ksp]   fun load kind=MEMBER abstract=false modifiers=SUSPEND typeParameters= receiver=null (ids: kotlin.Long vararg=true default=false): kotlin.collections.Map<kotlin.Long, members.Item?>
@@ -25,30 +26,52 @@ w: [ksp]   fun copy kind=MEMBER abstract=false modifiers=FINAL,PUBLIC typeParame
 w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL typeParameters= receiver=null (name: kotlin.String vararg=false default=false, count: kotlin.Int vararg=false default=true): members.Item
 w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL typeParameters= receiver=null (name: kotlin.String vararg=false default=false, tags: kotlin.collections.List<kotlin.String> vararg=false default=false): members.Item
 w: [ksp]   OBJECT members.Item.Companion modifiers= typeParameters= supertypes=kotlin.Any
-w: [ksp]     property LIMIT mutable=false modifiers=CONST: kotlin.Int
+w: [ksp]     property LIMIT mutable=false backingField=true modifiers=CONST: kotlin.Int
 w: [ksp]     fun empty kind=MEMBER abstract=false modifiers= typeParameters= receiver=null (): members.Item
 w: [ksp]     fun <init> kind=MEMBER abstract=false modifiers=FINAL,PUBLIC typeParameters= receiver=null (): members.Item.Companion
 w: [ksp] ANNOTATION_CLASS members.Mark modifiers=ANNOTATION typeParameters= supertypes=kotlin.Annotation
 w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL,PUBLIC typeParameters= receiver=null (): members.Mark
 w: [ksp] CLASS members.Marked modifiers= typeParameters= supertypes=kotlin.Any
-w: [ksp]   property v mutable=false modifiers=: kotlin.Int
+w: [ksp]   property v mutable=false backingField=true modifiers=: kotlin.Int
 w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL typeParameters= receiver=null (v: kotlin.Int vararg=false default=false): members.Marked @Mark
 w: [ksp] CLASS members.Hidden modifiers=DATA typeParameters= supertypes=kotlin.Any
-w: [ksp]   property v mutable=false modifiers=: kotlin.Int
+w: [ksp]   property v mutable=false backingField=true modifiers=: kotlin.Int
 w: [ksp]   fun component1 kind=MEMBER abstract=false modifiers=FINAL,OPERATOR,OVERRIDE,PUBLIC typeParameters= receiver=null (): kotlin.Int
 w: [ksp]   fun copy kind=MEMBER abstract=false modifiers=FINAL,PUBLIC typeParameters= receiver=null (v: kotlin.Int vararg=false default=true): members.Hidden
 w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL,PRIVATE typeParameters= receiver=null (v: kotlin.Int vararg=false default=false): members.Hidden
 w: [ksp] CLASS members.Kept modifiers=DATA typeParameters= supertypes=kotlin.Any
-w: [ksp]   property v mutable=false modifiers=: kotlin.Int
+w: [ksp]   property v mutable=false backingField=true modifiers=: kotlin.Int
 w: [ksp]   fun component1 kind=MEMBER abstract=false modifiers=FINAL,OPERATOR,OVERRIDE,PUBLIC typeParameters= receiver=null (): kotlin.Int
 w: [ksp]   fun copy kind=MEMBER abstract=false modifiers=FINAL,PRIVATE typeParameters= receiver=null (v: kotlin.Int vararg=false default=true): members.Kept
 w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL,PRIVATE typeParameters= receiver=null (v: kotlin.Int vararg=false default=false): members.Kept
 w: [ksp] CLASS members.Packed modifiers= typeParameters= supertypes=kotlin.Any
-w: [ksp]   property words mutable=false modifiers=VARARG: kotlin.Array<out kotlin.String>
+w: [ksp]   property words mutable=false backingField=true modifiers=VARARG: kotlin.Array<out kotlin.String>
 w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL typeParameters= receiver=null (words: kotlin.String vararg=true default=false): members.Packed
 w: [ksp] CLASS members.Numbers modifiers= typeParameters= supertypes=kotlin.Any
-w: [ksp]   property ids mutable=false modifiers=VARARG: kotlin.IntArray
+w: [ksp]   property ids mutable=false backingField=true modifiers=VARARG: kotlin.IntArray
 w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL typeParameters= receiver=null (ids: kotlin.Int vararg=true default=false): members.Numbers
 w: [ksp] CLASS members.NativeApi modifiers= typeParameters= supertypes=kotlin.Any
 w: [ksp]   fun ping kind=MEMBER abstract=false modifiers=EXTERNAL typeParameters= receiver=null (): kotlin.Int
 w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL,PUBLIC typeParameters= receiver=null (): members.NativeApi
+w: [ksp] CLASS members.Fields modifiers=ABSTRACT typeParameters= supertypes=kotlin.Any
+w: [ksp]   property fromConstructor mutable=false backingField=true modifiers=: kotlin.Int
+w: [ksp]   property initialized mutable=false backingField=true modifiers=: kotlin.Int
+w: [ksp]   property computed mutable=false backingField=false modifiers=: kotlin.Int
+w: [ksp]   property usesField mutable=true backingField=true modifiers=: kotlin.Int
+w: [ksp]   property readsField mutable=false backingField=true modifiers=: kotlin.Int
+w: [ksp]   property blockReadsField mutable=false backingField=true modifiers=: kotlin.Int
+w: [ksp]   property late mutable=true backingField=true modifiers=LATEINIT: kotlin.String
+w: [ksp]   property delegated mutable=false backingField=false modifiers=: kotlin.Int
+w: [ksp]   property pending mutable=false backingField=false modifiers=ABSTRACT: kotlin.Int
+w: [ksp]   property noField mutable=true backingField=false modifiers=: kotlin.Int
+w: [ksp]   property shadowed mutable=false backingField=false modifiers=: kotlin.Int
+w: [ksp]   property throughLambda mutable=false backingField=true modifiers=: kotlin.Int
+w: [ksp]   property throughLocalFunction mutable=false backingField=true modifiers=: kotlin.Int
+w: [ksp]   property lambdaParameter mutable=false backingField=false modifiers=: kotlin.Int
+w: [ksp]   property localFunctionParameter mutable=false backingField=false modifiers=: kotlin.Int
+w: [ksp]   property throughObject mutable=false backingField=true modifiers=: kotlin.Int
+w: [ksp]   property setterShadowed mutable=true backingField=false modifiers=: kotlin.Int
+w: [ksp]   property throughParameterDefault mutable=false backingField=true modifiers=: kotlin.Int
+w: [ksp]   property objectMember mutable=false backingField=true modifiers=: kotlin.Int
+w: [ksp]   property setterWrites mutable=true backingField=true modifiers=: kotlin.Int
+w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL typeParameters= receiver=null (fromConstructor: kotlin.Int vararg=false default=false): members.Fields

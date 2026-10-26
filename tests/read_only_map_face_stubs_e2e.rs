@@ -36,6 +36,13 @@ fn own_members_map() -> String {
     )
 }
 
+/// A declared `remove(key: String)` implements the type-safe `remove(Object)`.
+fn own_remove_map() -> String {
+    format!(
+        "class Dict : Map<String, Int> {{\n{MEMBERS}    fun remove(key: String): Int? = key.length\n}}\n"
+    )
+}
+
 fn hash_set_keys_map() -> String {
     format!(
         "class Dict : Map<String, Int> {{\n{}}}\n",
@@ -218,5 +225,24 @@ fn an_abstract_entry_gets_its_set_value_stub_like_kotlinc() {
             "public java.lang.Integer setValue(int);",
             "public java.lang.Object setValue(java.lang.Object);",
         ],
+    );
+}
+
+#[test]
+fn an_own_remove_gets_kotlincs_two_type_safe_remove_bridges_like_kotlinc() {
+    assert_members_match_kotlinc(
+        &own_remove_map(),
+        &[
+            "public final java.lang.Integer remove(java.lang.String);",
+            "public final java.lang.Object remove(java.lang.Object);",
+            "public final java.lang.Integer remove(java.lang.Object);",
+        ],
+    );
+    let expected = "put: UnsupportedOperationException; remove=1; \
+        remove: UnsupportedOperationException; putAll: UnsupportedOperationException; \
+        clear: UnsupportedOperationException; get=null; keySet=[]";
+    common::expect_box_same_as_kotlinc(
+        &box_program(&own_remove_map(), expected),
+        "read_only_map_face_own_remove",
     );
 }
