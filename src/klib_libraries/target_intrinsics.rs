@@ -518,6 +518,29 @@ pub(super) fn authenticate(
     }
 }
 
+/// `intToString(value: Int, radix: Int): String` and its `Long` counterpart in `kotlin.text`.
+fn radix_to_string(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+    operand: Ty,
+) -> Option<KlibIntrinsicShape> {
+    let [value, radix] = declaration.params.as_slice() else {
+        return None;
+    };
+    (placement == crate::libraries::CallablePlacement::Package(type_name("kotlin/text"))
+        && declaration.receiver.is_none()
+        && semantic_type(value) == Some(operand)
+        && semantic_type(radix) == Some(Ty::Int)
+        && exact_type(&declaration.ret, "kotlin/String"))
+    .then(|| KlibIntrinsicShape {
+        operation: CompilerIntrinsic::RadixToString { operand },
+        kind: ExternalCallableKind::TopLevel,
+        receiver: None,
+        params: vec![operand, Ty::Int],
+        ret: Ty::obj("kotlin/String"),
+    })
+}
+
 fn native(
     placement: crate::libraries::CallablePlacement,
     declaration: &KotlinFunction,
@@ -554,6 +577,10 @@ fn native(
                 },
                 Ty::Double,
             ),
+            "Kotlin_Int_toStringRadix" => return radix_to_string(placement, declaration, Ty::Int),
+            "Kotlin_Long_toStringRadix" => {
+                return radix_to_string(placement, declaration, Ty::Long)
+            }
             _ => return None,
         };
         if placement != crate::libraries::CallablePlacement::Package(type_name("kotlin"))

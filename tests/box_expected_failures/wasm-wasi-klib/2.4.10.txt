@@ -5622,6 +5622,7 @@ regressions/lambdaAsLastExpressionInLambda.kt
 regressions/lambdaPostponeConstruction.kt
 regressions/lambdaWithTypeParameters.kt
 regressions/lambdaWrongReturnType.kt
+regressions/libraryRangeMembershipAndRadix.kt
 regressions/multimodule/inlineAssertFailsWithBlock.kt
 regressions/multimodule/inlineAssertFailsWithCompletedBlock.kt
 regressions/multimodule/inlineBuiltString.kt

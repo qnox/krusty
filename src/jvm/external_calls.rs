@@ -896,6 +896,7 @@ pub(super) fn realize(
                 crate::libraries::CompilerIntrinsic::ArraySize
                 | crate::libraries::CompilerIntrinsic::FloatingIsNaN { .. }
                 | crate::libraries::CompilerIntrinsic::FloatingIsInfinite { .. }
+                | crate::libraries::CompilerIntrinsic::RadixToString { .. }
                 | crate::libraries::CompilerIntrinsic::ArrayGet
                 | crate::libraries::CompilerIntrinsic::ArraySet
                 | crate::libraries::CompilerIntrinsic::ArrayFactory(_)

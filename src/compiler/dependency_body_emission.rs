@@ -466,7 +466,7 @@ fn prepare_bodyless_externals(
                 }
             }
         } else {
-            bodies.emitted_body_callables(&identity, crate::klib_lowering::emitted_closure_function)
+            bodies.emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
         };
         for callee in edges {
             if externals.contains_key(&callee) {
