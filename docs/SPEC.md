@@ -20750,6 +20750,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the whole signature whenever it had no descriptor, so the mangled name vanished from `d2`
   (`metadata/builder.rs`). Test:
   `tests/value_class_mangled_names_e2e.rs::a_derivable_mangled_signature_records_only_its_name`.
+- **A facade extension property over a value class records its accessors' erased descriptors.**
+  The accessor of `val Z.xx` takes the receiver's carrier (`getXx-IQRRRT4(I)I`), and the
+  property's `JvmPropertySignature` names it with that descriptor, as kotlinc's does. krusty
+  rebuilt the descriptor from the declared receiver, naming the box (`(LZ;)I`); a facade accessor
+  the value-class pass rewrote now records its physical descriptor (`jvm/backend.rs`). Test:
+  `tests/value_class_mangled_names_e2e.rs::an_extension_property_over_a_value_class_records_erased_accessors`.
 
 - **Classes with value-class constructor parameters publish full metadata; secondary VC ctors get
   the marker ABI.** The blanket "no @Metadata for a value-param ctor class" decline is lifted — the

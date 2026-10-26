@@ -129,3 +129,39 @@ fn name_only_signature_runs() {
     common::expect_box_ok_with_stdlib(NAME_ONLY_SIGNATURE, "NameOnlySignature");
 }
 
+/// A top-level extension property over a value class records its accessors' physical descriptors
+/// in the facade's `@Metadata`: the getter takes the receiver's carrier (`getXx-IQRRRT4(I)I`), as
+/// the method declares it. krusty described the receiver as the box (`(LZ;)I`).
+const VALUE_CLASS_EXTENSION_PROPERTY: &str = r#"@JvmInline
+value class Z(val x: Int)
+
+@JvmInline
+value class S(val x: String)
+
+val Z.xx: Int get() = x
+var S.text: String
+    get() = x
+    set(value) {}
+
+fun box(): String {
+    S("a").text = "b"
+    return if (Z(1).xx == 1 && S("OK").text == "OK") "OK" else "fail"
+}
+"#;
+
+#[test]
+fn an_extension_property_over_a_value_class_records_erased_accessors() {
+    common::assert_classes_identical_to_kotlinc(
+        "ValueClassExtensionProperty",
+        VALUE_CLASS_EXTENSION_PROPERTY,
+        &["ValueClassExtensionPropertyKt"],
+    );
+}
+
+#[test]
+fn value_class_extension_property_runs() {
+    common::expect_box_ok_with_stdlib(
+        VALUE_CLASS_EXTENSION_PROPERTY,
+        "ValueClassExtensionProperty",
+    );
+}
