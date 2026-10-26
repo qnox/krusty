@@ -1080,7 +1080,16 @@ impl BodyLowering<'_> {
                     lhs: condition_lhs,
                     rhs: null,
                 });
+                let chained = matches!(
+                    self.body.expr(*rhs).map(|rhs| &rhs.kind),
+                    Some(FirExprKind::Elvis { .. })
+                );
                 let rhs = self.expression(*rhs)?;
+                if chained {
+                    // `a ?: b ?: c` is one chain that begins with `a`, as kotlinc folds it: the
+                    // later elvis does not state a start line of its own.
+                    self.ir.kept_start_lines.remove(&rhs);
+                }
                 let rhs = self.coerce_result(rhs, expression.ty.get());
                 let lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
                 let lhs = self.coerce_result(lhs, expression.ty.get());

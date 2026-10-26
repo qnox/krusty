@@ -10070,7 +10070,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   instruction marks another line at that offset (`val y = foo(\n a) ?: 0` loads `a` on the next
   line), or the store marks the declaration's line there, both entries stay: `line 4: 0, line 5: 0`.
   Common lowering records the elvis block as an expression whose start line is kept, and the JVM
-  line table keeps that entry. Test: `tests/elvis_own_line_e2e.rs`.
+  line table keeps that entry. A chain `a ?: b ?: c` begins only once, at `a`: kotlinc folds it
+  into one chain, so the elvis krusty nests on the first one's right side states no start line of
+  its own. Test: `tests/elvis_own_line_e2e.rs`.
 
 - **An integer-constant branch takes a sibling primitive.** An `if`, `when`, elvis, or `try` with no
   expected type still adapts an integer-constant branch to the non-null primitive of the other
