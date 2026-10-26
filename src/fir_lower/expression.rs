@@ -1076,6 +1076,14 @@ impl BodyLowering<'_> {
             }
             FirExprKind::Elvis { lhs, rhs } => {
                 let lhs_value = self.expression(*lhs)?;
+                // kotlinc folds a safe call into the elvis over it, so the safe call no longer
+                // states its line before its receiver.
+                if matches!(
+                    self.body.expr(*lhs).map(|lhs| &lhs.kind),
+                    Some(FirExprKind::SafeCall { .. })
+                ) {
+                    self.ir.kept_start_lines.remove(&lhs_value);
+                }
                 let temporary = self.allocate_temporary();
                 let variable = self.ir.add_expr(IrExpr::Variable {
                     index: temporary,
@@ -1088,6 +1096,12 @@ impl BodyLowering<'_> {
                     init: Some(lhs_value),
                     named: false,
                 });
+                // kotlinc declares the temporary where the elvis starts and marks that line where
+                // it stores the left value, after a multi-line left side has marked its own.
+                let start = self.body.expression_debug_lines(expression_id).start;
+                if start != 0 {
+                    self.ir.temporary_store_lines.insert(variable, start);
+                }
                 let condition_lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
                 let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
                 let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
@@ -2083,7 +2097,7 @@ impl BodyLowering<'_> {
         // kotlinc reads the temporary as the selector's receiver at the receiver's own position,
         // and tests it for `null` at the safe call's (its `?.` selector's).
         let safe_call_line = self.body.expression_debug_lines(safe_call).source;
-        let receiver_line = self.body.expression_debug_lines(receiver.value).source;
+        let receiver_line = self.body.expression_debug_lines(receiver.value).start;
         if receiver_line != 0 {
             self.ir
                 .expr_source_lines

@@ -378,6 +378,7 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     if ir.kept_start_lines.contains(&source) {
         ir.kept_start_lines.insert(target);
     }
+    copy_map!(temporary_store_lines);
     if ir.inline_cleanup_results.contains(&source) {
         ir.inline_cleanup_results.insert(target);
     }

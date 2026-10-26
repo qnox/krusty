@@ -1886,6 +1886,10 @@ pub struct IrFile {
     /// offset, as kotlinc's line table does. A serializable property's default copied into a
     /// generated method starts with a property read the plugin attributes to the class's line.
     pub kept_start_lines: crate::fx_hash::HashSet<ExprId>,
+    /// Compiler temporaries kotlinc declares at a source position, by that line. It marks the line
+    /// only where it stores the initialized value, never before the initializer runs: an elvis's
+    /// temporary is declared where the elvis starts.
+    pub temporary_store_lines: crate::fx_hash::HashMap<ExprId, u32>,
     /// Compiler-generated `Variable` declarations whose semantic role is holding a call operand:
     /// an inline expansion's parameter (argument, receiver, or capture), or an argument preserved
     /// for evaluation order. This is provenance, not a storage decision; a backend decides how
