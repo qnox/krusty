@@ -18,9 +18,13 @@ use crate::jvm::backend::SkipReason;
 use crate::jvm::classpath::Classpath;
 use crate::jvm::inherited_collection_bridges::InheritedCollectionBridges;
 use crate::jvm::jvm_class_map::{
-    jvm_collection_to_kotlin_mutable_type_name, mapped_collection, to_jvm_type_name,
+    jvm_collection_to_kotlin_mutable_type_name, jvm_collection_to_kotlin_type_name,
+    mapped_collection, to_jvm_type_name,
 };
-use crate::jvm::mapped_builtin_declarations::MappedBuiltinMemberKind;
+use crate::jvm::mapped_builtin_declarations::{
+    collection_bridge_policy_for_declaration, collection_signature_policy_for_declaration,
+    CollectionSignaturePolicy, MappedBuiltinMemberKind,
+};
 use crate::jvm::method_descriptors::{jvm_declared_ty, jvm_tys};
 use crate::jvm::names::method_descriptor;
 use crate::types::{ty_subst, wk, CollectionKind, Ty, TypeName, Visibility};
@@ -38,11 +42,14 @@ const FACE_ORDER: [CollectionKind; 8] = [
     CollectionKind::ListIterator,
 ];
 
-/// The faces whose stubs are realized. The remaining faces need kotlinc's `removeAt` and
-/// `liftStubMethodReturnType` rewrites, the JDK members of the mutable collections, and the
-/// `toArray` lowering before they can be enabled.
-const REALIZED_FACES: [CollectionKind; 2] =
-    [CollectionKind::Iterator, CollectionKind::ListIterator];
+/// The faces whose stubs are realized. The remaining faces need kotlinc's `removeAt` rewrite and
+/// applied result types before they can be enabled. The JDK members of the mutable collections
+/// (`removeIf`) and the `toArray` lowering are not yet realized for any face.
+const REALIZED_FACES: [CollectionKind; 3] = [
+    CollectionKind::Collection,
+    CollectionKind::Iterator,
+    CollectionKind::ListIterator,
+];
 
 const ACC_STATIC: u16 = 0x0008;
 const ACC_BRIDGE: u16 = 0x0040;
@@ -78,6 +85,9 @@ pub(super) struct ReadOnlyStub {
     pub(super) parameters: Vec<Ty>,
     pub(super) parameter_names: Vec<String>,
     pub(super) result: Ty,
+    /// The generic signature writes every declaration-site variance of the parameters (kotlinc's
+    /// methods with declaration-site wildcards).
+    pub(super) declaration_site_wildcards: bool,
     /// The erased JVM parameters and result of the mutable declaration, when they differ from the
     /// stub's own descriptor: kotlinc's bridge lowering gives the stub a throwing bridge there.
     pub(super) bridge: Option<(Vec<Ty>, Ty)>,
@@ -226,7 +236,7 @@ fn class_stubs(
                             &TyCtx::new(),
                             &ClassifierHierarchy(classifiers),
                             implementation.result,
-                            stub.result,
+                            read_only_result(stub.result),
                         )
                     })
             else {
@@ -352,6 +362,35 @@ fn face_stubs(classpath: &Classpath, face: Face, applied: Ty) -> Vec<ReadOnlyStu
                     .collect::<Vec<_>>(),
             );
             let erased_result = jvm_declared_ty(&ty_subst(declared.ret, &erasures));
+            // kotlinc's type-safe special signatures (`MutableCollection.remove(Object)`): the
+            // checked parameters keep their erased `Any?` in the stub as in the JDK declaration.
+            let mut parameters = parameters;
+            let erased_descriptor = method_descriptor(&erased_parameters, erased_result);
+            if let Some(policy) = collection_bridge_policy_for_declaration(
+                face.mutable,
+                &member.source_name,
+                &erased_descriptor,
+                MappedBuiltinMemberKind::Function,
+            ) {
+                for &index in policy.checked_parameters {
+                    parameters[usize::from(index)] = Ty::nullable(Ty::obj("kotlin/Any"));
+                }
+            }
+            // kotlinc's signature policies for the realization of this exact declaration.
+            let signature_policy = collection_signature_policy_for_declaration(
+                face.mutable,
+                &member.source_name,
+                &erased_descriptor,
+                MappedBuiltinMemberKind::Function,
+            );
+            if let Some(CollectionSignaturePolicy::ErasedCollectionParameter(index)) =
+                signature_policy
+            {
+                let parameter = &mut parameters[usize::from(index)];
+                *parameter = star_projected(*parameter);
+            }
+            let declaration_site_wildcards =
+                signature_policy == Some(CollectionSignaturePolicy::DeclarationSiteWildcards);
             let stub_descriptor =
                 method_descriptor(&jvm_tys(&parameters), jvm_declared_ty(&result));
             let bridge = (method_descriptor(&erased_parameters, erased_result) != stub_descriptor)
@@ -362,10 +401,53 @@ fn face_stubs(classpath: &Classpath, face: Face, applied: Ty) -> Vec<ReadOnlyStu
                 parameters,
                 parameter_names: member.parameter_names,
                 result,
+                declaration_site_wildcards,
                 bridge,
             }
         })
         .collect()
+}
+
+/// A collection parameter with each of its arguments star-projected, `Collection<*>` for
+/// `Collection<E>`.
+fn star_projected(parameter: Ty) -> Ty {
+    let inner = parameter.non_null();
+    let Some(classifier) = inner.kotlin_class_internal() else {
+        return parameter;
+    };
+    let stars: Vec<Ty> = inner
+        .type_args()
+        .iter()
+        .map(|_| Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any"))))
+        .collect();
+    let projected = Ty::obj_args_name(classifier, &stars);
+    if parameter.is_nullable() {
+        Ty::nullable(projected)
+    } else {
+        projected
+    }
+}
+
+/// kotlinc's `liftStubMethodReturnType`: a mutable member whose result is itself a mutable
+/// collection (`MutableCollection.iterator(): MutableIterator<E>`) is implemented by a member that
+/// returns the read-only counterpart, as the read-only face's own member does.
+fn read_only_result(result: Ty) -> Ty {
+    let inner = result.non_null();
+    let Some(classifier) = inner.kotlin_class_internal() else {
+        return result;
+    };
+    let Some(read_only) = mapped_collection(classifier)
+        .filter(|mapped| mapped.mutable)
+        .and_then(|_| jvm_collection_to_kotlin_type_name(to_jvm_type_name(classifier)))
+    else {
+        return result;
+    };
+    let lifted = Ty::obj_args_name(read_only, inner.type_args());
+    if result.is_nullable() {
+        Ty::nullable(lifted)
+    } else {
+        lifted
+    }
 }
 
 /// One superclass of the class, with what its stubs depend on.

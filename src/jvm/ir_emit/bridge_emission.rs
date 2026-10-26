@@ -174,6 +174,21 @@ fn emit_interface_entry_checks(
     }
 }
 
+/// A bridge's member position, the one `jvm::bridges` orders the ordinary bridges by: its target
+/// function's, else the position of the class's own property it implements. An inherited
+/// implementation has none.
+fn bridge_position(ir: &IrFile, c: &crate::ir::IrClass, b: &crate::ir::Bridge) -> u32 {
+    b.target_function
+        .and_then(|function| ir.fn_source_order.get(&function).copied())
+        .or_else(|| {
+            let implementation = b.property_implementation.as_ref()?;
+            let property = ir.checked_properties.get(&implementation.property)?;
+            let owner = &ir.classes[usize::try_from(property.class?).ok()?];
+            (owner.fq_name_id() == c.fq_name_id()).then_some(property.source_order)
+        })
+        .unwrap_or(u32::MAX)
+}
+
 /// Emit `ACC_BRIDGE|ACC_SYNTHETIC` methods: each has the supertype's erased descriptor, adapts its
 /// arguments (type barrier / checkcast / unbox / numeric convert), delegates to the concrete override,
 /// and adapts the return value back (box / numeric convert). A class's read-only collection stubs
@@ -192,12 +207,7 @@ pub(super) fn emit_bridges(
         if b.kind == crate::ir::BridgeKind::ValueClassInterfaceEntry {
             continue;
         }
-        // Ordered like the ordinary bridges themselves (see `jvm::bridges`).
-        let order = b
-            .target_function
-            .and_then(|function| ir.fn_source_order.get(&function).copied())
-            .unwrap_or(u32::MAX);
-        stub_bridges.emit_before(order, c, cw);
+        stub_bridges.emit_before(bridge_position(ir, c, b), c, cw);
         let descriptor = method_descriptor(&jvm_tys(&b.erased_params), ir_ty_to_jvm(&b.erased_ret));
         if env.collection_members.inherited_bridges.replaces_ordinary(
             c.fq_name_id(),

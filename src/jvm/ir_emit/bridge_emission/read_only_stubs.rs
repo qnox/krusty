@@ -29,9 +29,13 @@ pub(super) fn emit_stubs(ir: &IrFile, class: &IrClass, cw: &mut ClassWriter, env
         let parameters = jvm_tys(&stub.parameters);
         let result = jvm_declared_ty(&stub.result);
         let descriptor = method_descriptor(&parameters, result);
-        let signature = formatter
-            .method_positions(&stub.parameters, &stub.result)
-            .filter(|signature| *signature != descriptor);
+        let signature = if stub.declaration_site_wildcards {
+            formatter
+                .method_positions_with_declaration_site_wildcards(&stub.parameters, &stub.result)
+        } else {
+            formatter.method_positions(&stub.parameters, &stub.result)
+        }
+        .filter(|signature| *signature != descriptor);
         let method = ThrowingMethod {
             name: &stub.name,
             parameters: &parameters,
