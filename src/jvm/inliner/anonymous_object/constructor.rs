@@ -11,7 +11,7 @@ use crate::fx_hash::HashMap;
 
 use crate::jvm::method_node::{Insn, MethodNode, Node};
 
-use super::RegenerationError;
+use super::{is_captured_field_name, RegenerationError};
 
 const ALOAD: u8 = 0x19;
 const PUTFIELD: u8 = 0xb5;
@@ -117,7 +117,7 @@ pub(super) fn extract(
     }
     // What is left may read a captured field from `this`, after the stores: the copy declares the
     // same field and stores it first. Any other access is refused.
-    if !super::reads_captured_fields_from_this(&body, owner, declared) {
+    if !reads_captured_fields_from_this(&body, owner, declared) {
         return Err(unsupported(
             "a constructor that accesses a captured field other than by storing its parameter",
         ));
@@ -130,6 +130,43 @@ pub(super) fn extract(
         fields: captured,
         body,
     })
+}
+
+/// Whether every access to a captured field in `code` reads one `old` declares, from `this`: the
+/// copy declares the same field, so the read stays as kotlinc's field remapper leaves it.
+pub(super) fn reads_captured_fields_from_this(
+    code: &MethodNode,
+    old: &str,
+    declared: &[DeclaredCapture<'_>],
+) -> bool {
+    let mut previous: Option<&Insn> = None;
+    for entry in &code.nodes {
+        let Node::Insn(insn) = entry else {
+            previous = None;
+            continue;
+        };
+        if let Insn::Field {
+            op,
+            owner,
+            name,
+            desc,
+        } = insn
+        {
+            if (*op == GETFIELD || *op == PUTFIELD) && is_captured_field_name(name) {
+                let direct = *op == GETFIELD
+                    && owner == old
+                    && declared
+                        .iter()
+                        .any(|field| field.name == name && field.desc == desc)
+                    && matches!(previous, Some(Insn::Var { op: ALOAD, slot: 0 }));
+                if !direct {
+                    return false;
+                }
+            }
+        }
+        previous = Some(insn);
+    }
+    true
 }
 
 impl Constructor {
@@ -193,9 +230,9 @@ impl Constructor {
                 ))?;
             fields.push(self.fields.remove(at).name);
         }
-        let reads_lambda = self.body.instructions().any(|insn| {
-            matches!(insn, Insn::Field { op: GETFIELD, name, .. } if fields.contains(name))
-        });
+        let reads_lambda = self.body.instructions().any(
+            |insn| matches!(insn, Insn::Field { op: GETFIELD, name, .. } if fields.contains(name)),
+        );
         if reads_lambda {
             return Err(unsupported(
                 "a constructor that reads a lambda other than to keep it",

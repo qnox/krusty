@@ -44,9 +44,6 @@ pub(crate) use suspend_methods::CallSiteSource;
 use suspend_methods::ContinuationMachine;
 pub(crate) use type_remapper::{MalformedType, TypeRemapper};
 
-const ALOAD: u8 = 0x19;
-const GETFIELD: u8 = 0xb4;
-const PUTFIELD: u8 = 0xb5;
 const GETSTATIC: u8 = 0xb2;
 const INVOKESPECIAL: u8 = 0xb7;
 const NEW: u8 = 0xbb;
@@ -814,48 +811,11 @@ fn check_captured_field_accesses(
     declared: &[DeclaredCapture<'_>],
 ) -> Result<(), RegenerationError> {
     match &method.code {
-        Some(code) if !reads_captured_fields_from_this(code, old, declared) => Err(
+        Some(code) if !constructor::reads_captured_fields_from_this(code, old, declared) => Err(
             RegenerationError::Unsupported("a captured field accessed other than from this"),
         ),
         _ => Ok(()),
     }
-}
-
-/// Whether every access to a captured field in `code` reads one `old` declares, from `this`: the
-/// copy declares the same field, so the read stays as kotlinc's field remapper leaves it.
-pub(super) fn reads_captured_fields_from_this(
-    code: &MethodNode,
-    old: &str,
-    declared: &[DeclaredCapture<'_>],
-) -> bool {
-    let mut previous: Option<&Insn> = None;
-    for entry in &code.nodes {
-        let Node::Insn(insn) = entry else {
-            previous = None;
-            continue;
-        };
-        if let Insn::Field {
-            op,
-            owner,
-            name,
-            desc,
-        } = insn
-        {
-            if (*op == GETFIELD || *op == PUTFIELD) && is_captured_field_name(name) {
-                let direct = *op == GETFIELD
-                    && owner == old
-                    && declared
-                        .iter()
-                        .any(|field| field.name == name && field.desc == desc)
-                    && matches!(previous, Some(Insn::Var { op: ALOAD, slot: 0 }));
-                if !direct {
-                    return false;
-                }
-            }
-        }
-        previous = Some(insn);
-    }
-    true
 }
 
 /// A body of the original as the copy carries it: every regenerated class renamed and every line

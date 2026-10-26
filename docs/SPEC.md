@@ -5911,6 +5911,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   call's scope (`RegeneratedClassContext` keeps the root `callSiteInfo`), whatever the original's
   flag: an object a private inline function creates is outside the public ABI, and its copies are
   regenerated all the same (`writeTransformedMetadata` replaces the flag, it does not require it).
+  A copied constructor keeps a read of a captured field from `this` that follows the field's
+  store (an initializer reading the captured value back): the copy declares the same field and
+  stores it before the copied body runs, as kotlinc's field remapper leaves such a read; a read of
+  a lambda field the copy inlines away is refused
+  (`anonymous_object::constructor::tests::a_captured_field_read_from_this_stays_in_the_body`,
+  `reified_anonymous_object_e2e::a_reified_anonymous_object_copies_property_accessors_like_kotlinc`).
   A callee body that creates an object of an anonymous class is therefore inlined from its
   compiled body like any other (`tests/inline_same_module_local_classes_e2e.rs`: an object reused
   by two call sites, an object a body keeps in a local, and a private reified function's object
