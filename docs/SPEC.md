@@ -1,5 +1,15 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## JVM member-class table ownership
+
+Non-local `InnerClasses` rows consume the classifier's retained declaration owner and exact
+segment. A top-level literal-dollar name contributes no member row, even if other declarations or
+the classpath share its textual prefixes. The current module owns its identities across files;
+missing ownership evidence does not authorize a stale classpath declaration to replace it.
+Anonymous classes, reference carriers and checked body-local naming keep their separate contracts.
+Complete table comparisons cover top-level and nested literal-dollar names in both source orders.
+Metadata class-ID encoding and source-name publication remain separate follow-ups.
+
 ## Classifier declaration-name ownership
 
 A non-local classifier retains its exact declaration segment and either its package or its
