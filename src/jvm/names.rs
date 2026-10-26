@@ -298,11 +298,18 @@ pub(crate) fn parse_method_descriptor(desc: &str) -> Option<(Vec<&str>, &str)> {
     Some((params, ret))
 }
 
+/// The element a Kotlin `Array<T>` stores: a primitive `T` boxed, as the JVM array holds it.
+///
+/// An unsigned element is stored as its own box (`Array<UInt>` is `kotlin.UInt[]`). Its box class
+/// `kotlin/UInt` is also the semantic scalar's name, so `Ty::obj("kotlin/UInt")` would be the
+/// unboxed `int` carrier again and describe the array as `[I`. The nullable spelling is the
+/// reference-slot marker `ir_ty_to_jvm` already uses for that box (`UInt?` is `Lkotlin/UInt;`).
 pub(crate) fn reference_array_element(ty: Ty) -> Ty {
     match ty.kind() {
         TyKind::Nullable(inner) => Ty::nullable(reference_array_element(inner)),
         TyKind::Unit => Ty::obj("kotlin/Unit"),
         TyKind::Nothing => Ty::obj("kotlin/Nothing"),
+        _ if ty.is_unsigned() => Ty::nullable(ty),
         _ => ty.boxed_ref().unwrap_or(ty),
     }
 }
@@ -779,6 +786,22 @@ mod tests {
     fn unit_array_uses_the_unit_reference_descriptor() {
         let array = Ty::obj_args("kotlin/Array", &[Ty::Unit]);
         assert_eq!(type_descriptor(array), "[Lkotlin/Unit;");
+    }
+
+    #[test]
+    fn an_array_of_unsigned_values_stores_their_boxes() {
+        for (element, boxed) in [
+            (Ty::UByte, "[Lkotlin/UByte;"),
+            (Ty::UShort, "[Lkotlin/UShort;"),
+            (Ty::UInt, "[Lkotlin/UInt;"),
+            (Ty::ULong, "[Lkotlin/ULong;"),
+        ] {
+            for element in [element, Ty::nullable(element)] {
+                let array = Ty::obj_args("kotlin/Array", &[element]);
+                assert_eq!(type_descriptor(array), boxed, "{element:?}");
+                assert_eq!(type_descriptor(Ty::nullable(array)), boxed, "{element:?}");
+            }
+        }
     }
 
     #[test]
