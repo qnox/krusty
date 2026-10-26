@@ -186,7 +186,13 @@ pub(super) fn declared_method_signature(
     function: u32,
 ) -> Option<String> {
     let declaration = &ir.functions[function as usize];
-    if let Some(policy) = override_results.collection_signatures.policy(function) {
+    // A value class's static replacement (`addAll-impl`) overrides nothing: kotlinc signs it as
+    // any member, its moved receiver first, and the policy shapes only the override it backs.
+    let policy = override_results
+        .collection_signatures
+        .policy(function)
+        .filter(|_| !ir.jvm_value_class_receiver_impls.contains(&function));
+    if let Some(policy) = policy {
         return collection_override_signature(formatter, ir, function, policy);
     }
     let signature = method_signature(formatter, ir, function, declaration)?;
