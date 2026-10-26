@@ -68,17 +68,8 @@ impl StreamedHeaderModule {
                     && !stub.flags.has(DeclarationFlags::ANONYMOUS_OBJECT)
             })
             .filter_map(|stub| {
-                let spelling = self.lookup_names.get(stub.lookup_name?)?;
-                let mut segments = spelling
-                    .split(['.', '$'])
-                    .filter(|segment| !segment.is_empty());
-                let first = segments.next()?;
-                let package = self.sources.get(stub.source)?.package;
-                let mut identity = crate::types::type_name_child(package, first);
-                for segment in segments {
-                    identity = crate::types::type_name_nested_child(identity, segment);
-                }
-                Some((identity, stub.visibility))
+                let declaration = self.classifier_declaration_name(stub)?;
+                Some((identity(&declaration), stub.visibility))
             })
             .collect::<Vec<_>>();
         let mut seen = crate::fx_hash::HashSet::default();
@@ -95,5 +86,61 @@ fn identity(name: &ClassifierDeclarationName) -> TypeName {
         ClassifierDeclarationName::Nested { owner, name } => {
             crate::types::type_name_nested_child(*owner, name)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{existing_type_name_child, type_name_child, Visibility};
+
+    fn inventory(source: &str) -> StreamedHeaderModule {
+        let mut diagnostics = crate::diag::DiagSink::new();
+        let module = crate::fir::stream_file_stub_inventory(
+            &[crate::frontend::SourceInput::kotlin(source)],
+            &crate::features::LangFeatures::new(),
+            &mut diagnostics,
+            |_, _, _| {},
+        );
+        assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+        module
+    }
+
+    #[test]
+    fn source_classifier_publication_does_not_intern_undeclared_prefixes() {
+        let module = inventory("package headerownedliteral\nclass `Only$Literal`\n");
+        let package = module
+            .sources
+            .get(crate::fir::SourceFileId::from_raw(0))
+            .unwrap()
+            .package;
+        assert_eq!(existing_type_name_child(package, "Only"), None);
+        let published = module.source_classifiers();
+        assert_eq!(
+            published,
+            [(type_name_child(package, "Only$Literal"), Visibility::Public)]
+        );
+        assert_eq!(existing_type_name_child(package, "Only"), None);
+    }
+
+    #[test]
+    fn source_classifier_publication_preserves_declared_nested_segments() {
+        let module =
+            inventory("package headerownednested\nclass `Outer$Literal` { class `Leaf$Name` }\n");
+        let package = module
+            .sources
+            .get(crate::fir::SourceFileId::from_raw(0))
+            .unwrap()
+            .package;
+        let published = module.source_classifiers();
+        let owner = type_name_child(package, "Outer$Literal");
+        let member = type_name_child(package, "Outer$Literal$Leaf$Name");
+        assert_eq!(
+            published,
+            [(owner, Visibility::Public), (member, Visibility::Public)]
+        );
+        assert_eq!(member.nested_owner(), Some(owner));
+        assert_eq!(member.nested_segment_within(owner), Some("Leaf$Name"));
+        assert_eq!(existing_type_name_child(package, "Outer"), None);
     }
 }
