@@ -229,13 +229,26 @@ pub(super) fn attach_synth_debug_tables(
             line
         };
         let pd = crate::jvm::names::type_descriptor(jvm_declared_ty(&hoisted.ty));
-        let (g, s) = accessor_jvm_names(c, &property.name);
+        let (_, s) = accessor_jvm_names(c, &property.name);
         let getter_line = if property.accessor_lines.getter != 0 {
             property.accessor_lines.getter
         } else {
             pline
         };
-        cw.set_method_debug(&g, &format!("(){pd}"), Some((0, getter_line)), &this_only);
+        // The getter is the companion's own function, under the JVM name it was finally given: a
+        // value-class result mangles it (`getZero-eEFUqEU`), which the property's spelling does
+        // not know. A private property has none.
+        if let Some(getter) = property
+            .getter
+            .and_then(|getter| ir.functions.get(getter as usize))
+        {
+            cw.set_method_debug(
+                &getter.name,
+                &format!("(){pd}"),
+                Some((0, getter_line)),
+                &this_only,
+            );
+        }
         if hoisted.is_var {
             let setter_line = if property.accessor_lines.setter != 0 {
                 property.accessor_lines.setter

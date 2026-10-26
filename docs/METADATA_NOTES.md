@@ -10,6 +10,14 @@ and provider normalization retain that fact independently of target normalizatio
 still needs the separate identity-keyed declaration-name lookup; alias semantic keys are not
 descriptor payloads and an expansion target's owner never substitutes for the alias's own owner.
 
+## Source inventory publication
+
+Compact source headers publish classifier identities from explicit declaration ownership and exact
+segments rather than splitting lookup names on dots and dollars. This avoids creating undeclared
+prefix identities before later consumers run. Metadata class-ID encoding still needs its separate
+snapshot ownership lookup; publication alone does not supply authoritative negative nesting facts
+for every cached or cross-module identity.
+
 ## JVM member-class rows
 
 The JVM attribute writer now consumes retained non-local ownership and exact declaration segments

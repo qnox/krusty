@@ -603,8 +603,13 @@ impl<'a> JvmSignatureFormatter<'a> {
             }
             // A primitive specialized array is class-shaped in the semantic model but is a JVM
             // array in descriptors and generic signatures alike. It has no type arguments to
-            // drive the general classifier path below.
-            TyKind::Obj(owner, _) if crate::types::prim_array_element(owner).is_some() => {
+            // drive the general classifier path below. A value class over an array (`UIntArray`)
+            // is a class: an element or type argument holds its box, so it takes the classifier
+            // path below like any other value class (`Array<UIntArray>` is `[Lkotlin/UIntArray;`).
+            TyKind::Obj(owner, _)
+                if crate::types::prim_array_element(owner).is_some()
+                    && !self.ir.is_value_class_name(owner) =>
+            {
                 Some(ir_type_desc(ty))
             }
             // `kotlin.Array<E>` has no JVM class: its realization is the ARRAY type `[E`, and that is

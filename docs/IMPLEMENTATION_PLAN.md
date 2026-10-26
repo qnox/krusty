@@ -8,6 +8,13 @@ metadata/classpath records. Keep existing alias identities, expansion templates,
 normalization and spelling sidecars intact. Metadata class-ID consumers and builtin declaration
 names remain separate prerequisites; this producer handoff does not repair their output by itself.
 
+## Source classifier inventory identities
+
+Replace lookup-spelling splitting in the foreign-source classifier inventory with the existing
+declaration-owned name operation. Preserve exact segments, owner edges, visibility, order and
+non-local exclusions without interning undeclared prefixes. This producer correction is separate
+from the remaining metadata class-ID encoder and dependency/alias-name fact handoff.
+
 ## JVM declaration-owned member rows
 
 Consume classifier declaration-name facts in both per-file `InnerClasses` candidates and the
