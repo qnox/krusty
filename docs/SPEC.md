@@ -13379,7 +13379,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   arguments in the child context: `Base<T>.set(T)` suppresses the parent's stub but not an applied
   child's `set(String)` stub and erased bridge. A concrete generic intermediate's existing stub is
   still inherited rather than repeated. The stubs never enter Kotlin metadata. The collection faces
-  (`Iterable`, `Set`, `Map`, `Map.Entry`; `Collection` and `List` are below), with `removeAt`, the lifted
+  (`Iterable`, `Map`, `Map.Entry`; `Collection`, `List` and `Set` are below), with `removeAt`, the lifted
   `iterator` result types, the JDK members and `toArray`, follow in later slices. Tests:
   `tests/read_only_iterator_stubs_e2e.rs`. Corpus: `objects/useAnonymousObjectAsIterator.kt`,
   `builtinStubMethods/customReadOnlyIterator.kt`.
@@ -13437,7 +13437,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A member the class declares (`fun add(element: String)`, `fun clear()`) writes no stub, and its
   forwarding `add(Object)` bridge takes the declaration's place among the ordinary bridges, which
   are ordered by their target function or, for a property accessor bridge (`size()`), by the
-  class's own property it implements. The Set and Map faces, the JDK members (`removeIf`),
+  class's own property it implements. The Map faces, the JDK members (`removeIf`),
   `toArray`, the `Collection<?>` signature of a declared `containsAll` override and an abstract
   class's fake-override bridges follow in later slices. Tests:
   `tests/read_only_collection_face_stubs_e2e.rs` (member bytes and box runs against kotlinc).
@@ -13465,6 +13465,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `containsAll`'s signature and an abstract class's fake-override bridges follow later. Tests:
   `tests/read_only_list_face_stubs_e2e.rs` (member bytes and box runs against kotlinc),
   `tests/metadata_return_types.rs::list_impls_realize_remove_at_as_remove_int`.
+- **A read-only `Set` gets `MutableSet`'s members as stubs.** A class that implements
+  `kotlin.collections.Set` without `MutableSet` gets throwing stubs for the members `MutableSet`
+  declares: `add`, `remove`, `addAll`, `removeAll`, `retainAll` and `clear`, and `iterator` when
+  the class leaves it abstract. Each takes the policies of the `MutableCollection` declaration it
+  overrides (`remove(Object)`, `addAll(Collection<? extends E>)`, `removeAll`/`retainAll` as
+  `Collection<?>`). Unlike the `Collection` face, kotlinc writes no JDK `removeIf` stub for it.
+  `toArray`, a declared `containsAll`'s signature and an abstract class's fake-override bridges
+  follow later. Tests: `tests/read_only_set_face_stubs_e2e.rs` (member bytes and box runs
+  against kotlinc).
 - **A nested value class over a reference carrier is read as its carrier.** In `ZN(val z: Z1?)`
   with `Z1(val x: En)`, `Z1?` is carried as `En?`, so `zn.z` and `zn.z!!` already are `Z1`'s
   carrier and `.x` of them is that carrier itself, with no cast. krusty took the unboxed property
