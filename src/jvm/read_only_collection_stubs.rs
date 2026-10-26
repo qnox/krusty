@@ -47,10 +47,12 @@ const FACE_ORDER: [CollectionKind; 8] = [
 
 /// The faces whose stubs are realized. The JDK members of the mutable collections (`removeIf`) and
 /// the `toArray` lowering are not yet realized for any face.
-const REALIZED_FACES: [CollectionKind; 5] = [
+const REALIZED_FACES: [CollectionKind; 7] = [
     CollectionKind::Collection,
     CollectionKind::Set,
     CollectionKind::List,
+    CollectionKind::Map,
+    CollectionKind::MapEntry,
     CollectionKind::Iterator,
     CollectionKind::ListIterator,
 ];
@@ -110,6 +112,9 @@ pub(super) struct ReadOnlyStub {
     /// physical descriptor differs from it, so a `Nothing` member's `Void` result alone also takes
     /// an adapter.
     pub(super) bridge: Option<(Vec<Ty>, Ty)>,
+    /// The declaration is type-safe (`MutableMap.remove(key)`): the stub already takes the erased
+    /// parameters, and kotlinc's bridge for its erased result forwards to it instead of throwing.
+    pub(super) type_safe: bool,
     /// The type-safe declaration's barrier (`MutableCollection.remove`): the bridge to a member
     /// that implements it with a narrower parameter first tests each checked argument.
     pub(super) barrier: Option<StubBarrier>,
@@ -520,6 +525,7 @@ fn face_stubs(classpath: &Classpath, face: Face, applied: Ty) -> Vec<ReadOnlyStu
                 boxed_result,
                 declaration_site_wildcards,
                 bridge,
+                type_safe: type_safe_policy.is_some(),
                 barrier,
             }
         })
