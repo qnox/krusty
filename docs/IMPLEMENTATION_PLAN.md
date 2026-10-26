@@ -1,5 +1,13 @@
 # krusty — implementation plan
 
+## JVM declaration-owned member rows
+
+Consume classifier declaration-name facts in both per-file `InnerClasses` candidates and the
+cross-file module resolver. Keep top-level and unavailable module records from being replaced by
+a classpath record with the same physical identity. Preserve local/coroutine/reference provenance
+and exact table order. This slice leaves source identity publication and metadata class-ID encoding
+for subsequent changes; the complete literal-dollar classfile regression remains open there.
+
 ## Classifier declaration-name handoff
 
 Retain an optional declaration-owned package/owner and exact segment across source bootstrap,
@@ -5585,7 +5593,11 @@ regress.
     a reified `when` branch of the join's own class cast again; a copy regenerates the objects its
     methods name, specializes a suspend lambda and every type argument, and drops its initializer's
     marker: 6 more box files are byte-identical on 2.4.21 (4,025 to 4,031) and none regresses.
-    ☐ `$default` calls, non-public callees of another file, suspend callers and callees,
+    ✓ Non-public callees of another file (`NonPublicCallee`): the body reaches its file's private
+    functions through its class's accessors, and another file's internal member template takes
+    its module-mangled JVM name for the frame marker: 17 more box files are byte-identical on
+    2.4.21 (4,031 to 4,048) and none regresses.
+    ☐ `$default` calls, suspend callers and callees,
     `crossinline` parameters, literals with non-local jumps, calls in default arguments, and callee
     bodies with local classes or enum switches.
 - ☐ 7. Delete `InlineBodyPlan` and its resolver/FIR threading once the coroutine state machine runs

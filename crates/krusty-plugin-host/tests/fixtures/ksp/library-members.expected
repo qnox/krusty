@@ -16,25 +16,25 @@ w: [ksp]   function fun equals(other: kotlin.Any?): kotlin.Boolean kind=MEMBER a
 w: [ksp]   function fun hashCode(): kotlin.Int kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,PUBLIC
 w: [ksp]   function fun toString(): kotlin.String kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,PUBLIC
 w: [ksp] java.lang.annotation.Retention ANNOTATION_CLASS JAVA_LIB
-w: [ksp]   declares val value: java.lang.annotation.RetentionPolicy mutable=false owner=java.lang.annotation.Retention origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   declares val value: java.lang.annotation.RetentionPolicy mutable=false backingField=true owner=java.lang.annotation.Retention origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
 w: [ksp]   declares fun <init>(value: java.lang.annotation.RetentionPolicy): java.lang.annotation.Retention kind=MEMBER abstract=false owner=java.lang.annotation.Retention origin=JAVA_LIB modifiers=FINAL,PUBLIC
-w: [ksp]   property val value: java.lang.annotation.RetentionPolicy mutable=false owner=java.lang.annotation.Retention origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   property val value: java.lang.annotation.RetentionPolicy mutable=false backingField=true owner=java.lang.annotation.Retention origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
 w: [ksp]   function fun equals(other: kotlin.Any?): kotlin.Boolean kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,OPERATOR,OVERRIDE,PUBLIC
 w: [ksp]   function fun hashCode(): kotlin.Int kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,PUBLIC
 w: [ksp]   function fun toString(): kotlin.String kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,PUBLIC
 w: [ksp]   function fun <init>(value: java.lang.annotation.RetentionPolicy): java.lang.annotation.Retention kind=MEMBER abstract=false owner=java.lang.annotation.Retention origin=JAVA_LIB modifiers=FINAL,PUBLIC
 w: [ksp] java.lang.annotation.Target ANNOTATION_CLASS JAVA_LIB
-w: [ksp]   declares val value: kotlin.Array<java.lang.annotation.ElementType> mutable=false owner=java.lang.annotation.Target origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   declares val value: kotlin.Array<java.lang.annotation.ElementType> mutable=false backingField=true owner=java.lang.annotation.Target origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
 w: [ksp]   declares fun <init>(vararg value: java.lang.annotation.ElementType): java.lang.annotation.Target kind=MEMBER abstract=false owner=java.lang.annotation.Target origin=JAVA_LIB modifiers=FINAL,PUBLIC
-w: [ksp]   property val value: kotlin.Array<java.lang.annotation.ElementType> mutable=false owner=java.lang.annotation.Target origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   property val value: kotlin.Array<java.lang.annotation.ElementType> mutable=false backingField=true owner=java.lang.annotation.Target origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
 w: [ksp]   function fun equals(other: kotlin.Any?): kotlin.Boolean kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,OPERATOR,OVERRIDE,PUBLIC
 w: [ksp]   function fun hashCode(): kotlin.Int kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,PUBLIC
 w: [ksp]   function fun toString(): kotlin.String kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,PUBLIC
 w: [ksp]   function fun <init>(vararg value: java.lang.annotation.ElementType): java.lang.annotation.Target kind=MEMBER abstract=false owner=java.lang.annotation.Target origin=JAVA_LIB modifiers=FINAL,PUBLIC
 w: [ksp] java.lang.annotation.Repeatable ANNOTATION_CLASS JAVA_LIB
-w: [ksp]   declares val value: kotlin.reflect.KClass<out kotlin.Annotation> mutable=false owner=java.lang.annotation.Repeatable origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   declares val value: kotlin.reflect.KClass<out kotlin.Annotation> mutable=false backingField=true owner=java.lang.annotation.Repeatable origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
 w: [ksp]   declares fun <init>(value: kotlin.reflect.KClass<out kotlin.Annotation>): java.lang.annotation.Repeatable kind=MEMBER abstract=false owner=java.lang.annotation.Repeatable origin=JAVA_LIB modifiers=FINAL,PUBLIC
-w: [ksp]   property val value: kotlin.reflect.KClass<out kotlin.Annotation> mutable=false owner=java.lang.annotation.Repeatable origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   property val value: kotlin.reflect.KClass<out kotlin.Annotation> mutable=false backingField=true owner=java.lang.annotation.Repeatable origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
 w: [ksp]   function fun equals(other: kotlin.Any?): kotlin.Boolean kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,OPERATOR,OVERRIDE,PUBLIC
 w: [ksp]   function fun hashCode(): kotlin.Int kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,PUBLIC
 w: [ksp]   function fun toString(): kotlin.String kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,PUBLIC
@@ -46,11 +46,11 @@ w: [ksp]   function fun hashCode(): kotlin.Int kind=MEMBER abstract=false owner=
 w: [ksp]   function fun toString(): kotlin.String kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,PUBLIC
 w: [ksp]   function fun <init>(): java.lang.annotation.Documented kind=MEMBER abstract=false owner=java.lang.annotation.Documented origin=JAVA_LIB modifiers=FINAL,PUBLIC
 w: [ksp] java.lang.Deprecated ANNOTATION_CLASS JAVA_LIB
-w: [ksp]   declares val since: kotlin.String mutable=false owner=java.lang.Deprecated origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
-w: [ksp]   declares val forRemoval: kotlin.Boolean mutable=false owner=java.lang.Deprecated origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   declares val since: kotlin.String mutable=false backingField=true owner=java.lang.Deprecated origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   declares val forRemoval: kotlin.Boolean mutable=false backingField=true owner=java.lang.Deprecated origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
 w: [ksp]   declares fun <init>(since: kotlin.String = default, forRemoval: kotlin.Boolean = default): java.lang.Deprecated kind=MEMBER abstract=false owner=java.lang.Deprecated origin=JAVA_LIB modifiers=FINAL,PUBLIC
-w: [ksp]   property val since: kotlin.String mutable=false owner=java.lang.Deprecated origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
-w: [ksp]   property val forRemoval: kotlin.Boolean mutable=false owner=java.lang.Deprecated origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   property val since: kotlin.String mutable=false backingField=true owner=java.lang.Deprecated origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   property val forRemoval: kotlin.Boolean mutable=false backingField=true owner=java.lang.Deprecated origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
 w: [ksp]   function fun equals(other: kotlin.Any?): kotlin.Boolean kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,OPERATOR,OVERRIDE,PUBLIC
 w: [ksp]   function fun hashCode(): kotlin.Int kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,PUBLIC
 w: [ksp]   function fun toString(): kotlin.String kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,PUBLIC
@@ -118,48 +118,48 @@ w: [ksp]   function fun hashCode(): kotlin.Int kind=MEMBER abstract=false owner=
 w: [ksp]   function fun toString(): kotlin.String kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,PUBLIC
 w: [ksp]   function fun <init>(vararg names: kotlin.String, types: kotlin.Array<kotlin.reflect.KClass<*>> = default, tag: dependency.Tag = default, flag: kotlin.Boolean): dependency.Choices kind=MEMBER abstract=false owner=dependency.Choices origin=KOTLIN_LIB modifiers=FINAL,PUBLIC
 w: [ksp] dependency.Constants ANNOTATION_CLASS JAVA_LIB
-w: [ksp]   declares val modes: kotlin.Array<dependency.Constants.Mode> mutable=false owner=dependency.Constants origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
-w: [ksp]   declares val prefix: kotlin.String mutable=false owner=dependency.Constants origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
-w: [ksp]   declares val entries: kotlin.Array<dependency.Constants.Entry> mutable=false owner=dependency.Constants origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   declares val modes: kotlin.Array<dependency.Constants.Mode> mutable=false backingField=true owner=dependency.Constants origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   declares val prefix: kotlin.String mutable=false backingField=true owner=dependency.Constants origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   declares val entries: kotlin.Array<dependency.Constants.Entry> mutable=false backingField=true owner=dependency.Constants origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
 w: [ksp]   declares fun <init>(modes: kotlin.Array<dependency.Constants.Mode> = default, prefix: kotlin.String = default, entries: kotlin.Array<dependency.Constants.Entry> = default): dependency.Constants kind=MEMBER abstract=false owner=dependency.Constants origin=JAVA_LIB modifiers=FINAL,PUBLIC
-w: [ksp]   declares val DEFAULT_MODES: kotlin.Array<out dependency.Constants.Mode> mutable=false owner=dependency.Constants origin=JAVA_LIB modifiers=FINAL,JAVA_STATIC,PUBLIC getter=none setter=none
-w: [ksp]   declares val PREFIX: kotlin.String mutable=false owner=dependency.Constants origin=JAVA_LIB modifiers=FINAL,JAVA_STATIC,PUBLIC getter=none setter=none
-w: [ksp]   declares val LIMIT: kotlin.Int mutable=false owner=dependency.Constants origin=JAVA_LIB modifiers=FINAL,JAVA_STATIC,PUBLIC getter=none setter=none
+w: [ksp]   declares val DEFAULT_MODES: kotlin.Array<out dependency.Constants.Mode> mutable=false backingField=true owner=dependency.Constants origin=JAVA_LIB modifiers=FINAL,JAVA_STATIC,PUBLIC getter=none setter=none
+w: [ksp]   declares val PREFIX: kotlin.String mutable=false backingField=true owner=dependency.Constants origin=JAVA_LIB modifiers=FINAL,JAVA_STATIC,PUBLIC getter=none setter=none
+w: [ksp]   declares val LIMIT: kotlin.Int mutable=false backingField=true owner=dependency.Constants origin=JAVA_LIB modifiers=FINAL,JAVA_STATIC,PUBLIC getter=none setter=none
 w: [ksp]   declares class dependency.Constants.Mode ENUM_CLASS
 w: [ksp]   declares class dependency.Constants.Entry ANNOTATION_CLASS
-w: [ksp]   property val modes: kotlin.Array<dependency.Constants.Mode> mutable=false owner=dependency.Constants origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
-w: [ksp]   property val prefix: kotlin.String mutable=false owner=dependency.Constants origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
-w: [ksp]   property val entries: kotlin.Array<dependency.Constants.Entry> mutable=false owner=dependency.Constants origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   property val modes: kotlin.Array<dependency.Constants.Mode> mutable=false backingField=true owner=dependency.Constants origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   property val prefix: kotlin.String mutable=false backingField=true owner=dependency.Constants origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   property val entries: kotlin.Array<dependency.Constants.Entry> mutable=false backingField=true owner=dependency.Constants origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
 w: [ksp]   function fun equals(other: kotlin.Any?): kotlin.Boolean kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,OPERATOR,OVERRIDE,PUBLIC
 w: [ksp]   function fun hashCode(): kotlin.Int kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,PUBLIC
 w: [ksp]   function fun toString(): kotlin.String kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,PUBLIC
 w: [ksp]   function fun <init>(modes: kotlin.Array<dependency.Constants.Mode> = default, prefix: kotlin.String = default, entries: kotlin.Array<dependency.Constants.Entry> = default): dependency.Constants kind=MEMBER abstract=false owner=dependency.Constants origin=JAVA_LIB modifiers=FINAL,PUBLIC
 w: [ksp] dependency.Constants.Entry ANNOTATION_CLASS JAVA_LIB
-w: [ksp]   declares val name: kotlin.String mutable=false owner=dependency.Constants.Entry origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   declares val name: kotlin.String mutable=false backingField=true owner=dependency.Constants.Entry origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
 w: [ksp]   declares fun <init>(name: kotlin.String): dependency.Constants.Entry kind=MEMBER abstract=false owner=dependency.Constants.Entry origin=JAVA_LIB modifiers=FINAL,PUBLIC
-w: [ksp]   property val name: kotlin.String mutable=false owner=dependency.Constants.Entry origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   property val name: kotlin.String mutable=false backingField=true owner=dependency.Constants.Entry origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
 w: [ksp]   function fun equals(other: kotlin.Any?): kotlin.Boolean kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,OPERATOR,OVERRIDE,PUBLIC
 w: [ksp]   function fun hashCode(): kotlin.Int kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,PUBLIC
 w: [ksp]   function fun toString(): kotlin.String kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,PUBLIC
 w: [ksp]   function fun <init>(name: kotlin.String): dependency.Constants.Entry kind=MEMBER abstract=false owner=dependency.Constants.Entry origin=JAVA_LIB modifiers=FINAL,PUBLIC
 w: [ksp] dependency.Aliased ANNOTATION_CLASS JAVA_LIB
-w: [ksp]   declares val value: kotlin.String mutable=false owner=dependency.Aliased origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   declares val value: kotlin.String mutable=false backingField=true owner=dependency.Aliased origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
 w: [ksp]     getter annotated @Alias=dependency.Aliased.Alias target=null origin=JAVA (annotation=type java.lang.annotation.Retention JAVA, member="value" JAVA)
-w: [ksp]   declares val produces: kotlin.Array<kotlin.String> mutable=false owner=dependency.Aliased origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   declares val produces: kotlin.Array<kotlin.String> mutable=false backingField=true owner=dependency.Aliased origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
 w: [ksp]     getter annotated @Alias=dependency.Aliased.Alias target=null origin=JAVA (annotation=type java.lang.annotation.Target JAVA, member="value" SYNTHETIC)
 w: [ksp]     getter annotated @Note=dependency.Aliased.Note target=null origin=JAVA ()
-w: [ksp]   declares val port: kotlin.String mutable=false owner=dependency.Aliased origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
-w: [ksp]   declares val plain: kotlin.String mutable=false owner=dependency.Aliased origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   declares val port: kotlin.String mutable=false backingField=true owner=dependency.Aliased origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   declares val plain: kotlin.String mutable=false backingField=true owner=dependency.Aliased origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
 w: [ksp]   declares fun <init>(value: kotlin.String = default, produces: kotlin.Array<kotlin.String> = default, port: kotlin.String = default, plain: kotlin.String): dependency.Aliased kind=MEMBER abstract=false owner=dependency.Aliased origin=JAVA_LIB modifiers=FINAL,PUBLIC
 w: [ksp]   declares class dependency.Aliased.Note ANNOTATION_CLASS
 w: [ksp]     annotated @Retention=kotlin.annotation.Retention target=null origin=JAVA_LIB (value=entry kotlin.annotation.AnnotationRetention.BINARY JAVA_LIB)
 w: [ksp]   declares class dependency.Aliased.Alias ANNOTATION_CLASS
 w: [ksp]     annotated @Retention=kotlin.annotation.Retention target=null origin=JAVA_LIB (value=entry kotlin.annotation.AnnotationRetention.RUNTIME JAVA_LIB)
 w: [ksp]     annotated @Target=kotlin.annotation.Target target=null origin=JAVA_LIB (allowedTargets=[entry kotlin.annotation.AnnotationTarget.FUNCTION, entry kotlin.annotation.AnnotationTarget.PROPERTY_GETTER, entry kotlin.annotation.AnnotationTarget.PROPERTY_SETTER] JAVA_LIB)
-w: [ksp]   property val value: kotlin.String mutable=false owner=dependency.Aliased origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
-w: [ksp]   property val produces: kotlin.Array<kotlin.String> mutable=false owner=dependency.Aliased origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
-w: [ksp]   property val port: kotlin.String mutable=false owner=dependency.Aliased origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
-w: [ksp]   property val plain: kotlin.String mutable=false owner=dependency.Aliased origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   property val value: kotlin.String mutable=false backingField=true owner=dependency.Aliased origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   property val produces: kotlin.Array<kotlin.String> mutable=false backingField=true owner=dependency.Aliased origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   property val port: kotlin.String mutable=false backingField=true owner=dependency.Aliased origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
+w: [ksp]   property val plain: kotlin.String mutable=false backingField=true owner=dependency.Aliased origin=SYNTHETIC modifiers=FINAL,PUBLIC getter=SYNTHETIC:ABSTRACT,PUBLIC setter=none
 w: [ksp]   function fun equals(other: kotlin.Any?): kotlin.Boolean kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,OPERATOR,OVERRIDE,PUBLIC
 w: [ksp]   function fun hashCode(): kotlin.Int kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,PUBLIC
 w: [ksp]   function fun toString(): kotlin.String kind=MEMBER abstract=false owner=kotlin.Any origin=KOTLIN_LIB modifiers=OPEN,PUBLIC

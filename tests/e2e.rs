@@ -544,6 +544,8 @@ mod companion_e2e;
 mod companion_init_block_e2e;
 #[path = "companion_initializer_lambda_e2e.rs"]
 mod companion_initializer_lambda_e2e;
+#[path = "companion_initializer_value_class_e2e.rs"]
+mod companion_initializer_value_class_e2e;
 #[path = "companion_member_read_e2e.rs"]
 mod companion_member_read_e2e;
 #[path = "companion_nested_classifier_scope_e2e.rs"]
@@ -605,6 +607,8 @@ mod construction_default_arg_e2e;
 #[path = "constructor_argument_specificity_e2e.rs"]
 mod constructor_argument_specificity_e2e;
 mod constructor_continuation_e2e;
+#[path = "constructor_default_expression_lines_e2e.rs"]
+mod constructor_default_expression_lines_e2e;
 #[path = "constructor_initialization_order_e2e.rs"]
 mod constructor_initialization_order_e2e;
 #[path = "constructor_locals_pool_e2e.rs"]
@@ -709,6 +713,8 @@ mod deep_nested_type_e2e;
 mod default_args_member_e2e;
 #[path = "default_args_synthetic_e2e.rs"]
 mod default_args_synthetic_e2e;
+#[path = "default_argument_fill_lines_e2e.rs"]
+mod default_argument_fill_lines_e2e;
 #[path = "default_constructor_header_pool_e2e.rs"]
 mod default_constructor_header_pool_e2e;
 #[path = "default_import_resolution_e2e.rs"]
@@ -1737,12 +1743,16 @@ mod unsigned_values;
 mod unsupported_kotlinc_arguments_e2e;
 #[path = "upper_bound_violations_e2e.rs"]
 mod upper_bound_violations_e2e;
+#[path = "value_class_any_override_e2e.rs"]
+mod value_class_any_override_e2e;
 #[path = "value_class_bound_reference_receiver_e2e.rs"]
 mod value_class_bound_reference_receiver_e2e;
 #[path = "value_class_bounded_parameter_bridge_e2e.rs"]
 mod value_class_bounded_parameter_bridge_e2e;
 #[path = "value_class_carrier_parameter_bridge_e2e.rs"]
 mod value_class_carrier_parameter_bridge_e2e;
+#[path = "value_class_companion_property_storage_e2e.rs"]
+mod value_class_companion_property_storage_e2e;
 #[path = "value_class_constructor_bodies_e2e.rs"]
 mod value_class_constructor_bodies_e2e;
 #[path = "value_class_constructor_default_e2e.rs"]
@@ -2210,6 +2220,8 @@ mod private_inline_property_ref_e2e;
 mod read_only_iterator_stubs_e2e;
 #[path = "read_only_stub_inheritability_e2e.rs"]
 mod read_only_stub_inheritability_e2e;
+#[path = "read_only_stub_override_bridges_e2e.rs"]
+mod read_only_stub_override_bridges_e2e;
 #[path = "redundant_checkcast_e2e.rs"]
 mod redundant_checkcast_e2e;
 #[path = "redundant_checkcasts_before_aastore_e2e.rs"]
@@ -3045,5 +3057,7 @@ mod field_store_lines_e2e;
 #[path = "written_default_accessor_e2e.rs"]
 mod written_default_accessor_e2e;
 
+#[path = "intersection_bound_metadata_order_e2e.rs"]
+mod intersection_bound_metadata_order_e2e;
 #[path = "where_bound_arguments_e2e.rs"]
 mod where_bound_arguments_e2e;

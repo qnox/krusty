@@ -157,6 +157,17 @@ pub(super) fn parameter_erasures_with(
     erasures
 }
 
+/// `types` as `function`'s own descriptor erases them: each of its type parameters becomes its
+/// primary bound.
+pub(super) fn erased_for_function(ir: &IrFile, function: u32, types: &[Ty]) -> Vec<Ty> {
+    let Some(signature) = ir.signatures.get(&function) else {
+        return types.to_vec();
+    };
+    let erasures =
+        parameter_erasures_with(&signature.type_params, &bound_type_parameters(ir, function));
+    erase_with(types, &erasures)
+}
+
 /// Exact non-local type-parameter declarations referenced by `function`'s own bounds.
 pub(super) fn bound_type_parameters(ir: &IrFile, function: u32) -> Vec<IrTypeParameter> {
     ir.callable_bound_type_parameters
