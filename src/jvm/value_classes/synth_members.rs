@@ -109,6 +109,38 @@ pub(super) fn record_renamed_functions(
     );
 }
 
+/// kotlinc's boxed `Any` member delegating to a source override's static `-impl` is that override
+/// on the box: it stands right after the `-impl`, at the override's place among the declared
+/// members, enters on the override's signature line and returns on its last line. The generated
+/// ones follow every declared member and map no line.
+fn realize_delegator_of_override(
+    ir: &mut IrFile,
+    custom: Option<u32>,
+    delegator: u32,
+    body: ExprId,
+) {
+    let Some(custom) = custom else {
+        return;
+    };
+    if let Some(order) = ir.fn_source_order.get(&custom).copied() {
+        ir.fn_source_order.insert(delegator, order);
+    }
+    let entry = ir.fn_sig_lines.get(&custom).copied();
+    if let Some(line) = entry {
+        ir.fn_decl_lines.insert(delegator, line);
+    }
+    let returned = match ir.expr(body) {
+        IrExpr::Block { stmts, value: None } => stmts.last().copied(),
+        _ => None,
+    };
+    // The return's line is an entry of its own only below the entry line; on that same line the
+    // method's one entry at its start already covers it.
+    let end = ir.fn_end_lines.get(&custom).copied();
+    if let (Some(returned), Some(line)) = (returned, end.filter(|&end| Some(end) != entry)) {
+        ir.mark_implicit_return_end_line(returned, line);
+    }
+}
+
 /// Synthesize a value class's unboxed-support members directly in the IR (a JVM concern, so it lives in
 /// this pass, not common lowering): `unbox-impl`/`box-impl`/`constructor-impl`/`equals-impl0` plus structural
 /// `equals`/`hashCode`/`toString` (skipped where the user defined one). The plain single-field class
@@ -216,9 +248,10 @@ pub(super) fn synth_value_members(
     // reads inside it are lowered to the carrier later in this pass. The ordinary instance override is
     // synthesized below as the ABI delegator back to this implementation.
     let custom_any_roles = ir.any_member_overrides(internal_name);
-    let mut custom_equals = false;
-    let mut custom_hash_code = false;
-    let mut custom_to_string = false;
+    // Each source override, by the `Any` member it overrides.
+    let mut custom_equals = None;
+    let mut custom_hash_code = None;
+    let mut custom_to_string = None;
     let mut custom_carrier_functions = Vec::new();
     for &fid in &ir.classes[class_id as usize].methods.clone() {
         let Some(function) = ir.functions.get_mut(fid as usize) else {
@@ -226,15 +259,15 @@ pub(super) fn synth_value_members(
         };
         let custom_impl = match custom_any_roles.get(&fid) {
             Some(crate::ir::IrValueClassAnyMember::Equals) => {
-                custom_equals = true;
+                custom_equals = Some(fid);
                 Some("equals-impl")
             }
             Some(crate::ir::IrValueClassAnyMember::HashCode) => {
-                custom_hash_code = true;
+                custom_hash_code = Some(fid);
                 Some("hashCode-impl")
             }
             Some(crate::ir::IrValueClassAnyMember::ToString) => {
-                custom_to_string = true;
+                custom_to_string = Some(fid);
                 Some("toString-impl")
             }
             _ => None,
@@ -438,7 +471,7 @@ pub(super) fn synth_value_members(
     {
         let a = ir.add_expr(IrExpr::GetValue(0));
         let b = ir.add_expr(IrExpr::GetValue(1));
-        let cmp = if custom_equals {
+        let cmp = if custom_equals.is_some() {
             let boxed = ir.add_expr(IrExpr::Call {
                 callee: Box::new(Callee::Static {
                     owner: internal_name,
@@ -491,7 +524,7 @@ pub(super) fn synth_value_members(
     // toString-impl(U v): "X(field=" + v + ")" ; toString(): return toString-impl(this.field)
     {
         let simple = internal_name.segment_ref().replace('$', ".");
-        if !custom_to_string {
+        if custom_to_string.is_none() {
             let carrier = ir.add_expr(IrExpr::GetValue(0));
             // A non-null nested value class is this slot's carrier. Name it through its own
             // `toString-impl` (`Outer(i=Inner(x=20))`); the concat then appends that String.
@@ -536,14 +569,15 @@ pub(super) fn synth_value_members(
         realized.any_delegators.insert(fid);
         ir.jvm_value_class_any_delegators
             .insert(fid, crate::ir::IrValueClassAnyMember::ToString);
+        realize_delegator_of_override(ir, custom_to_string, fid, ibody);
         ir.open_methods.insert(fid);
-        if !custom_to_string {
+        if custom_to_string.is_none() {
             ir.jvm_nullability_unannotated_methods.insert(fid);
         }
     }
     // hashCode-impl(U v): v.hashCode() ; hashCode(): return hashCode-impl(this.field)
     {
-        if !custom_hash_code {
+        if custom_hash_code.is_none() {
             let h = property_hash(ir, u_ir);
             let sbody = ret_block(ir, h);
             let impl_fid = add_static(ir, "hashCode-impl", vec![u_ir], int_ir, sbody);
@@ -574,15 +608,16 @@ pub(super) fn synth_value_members(
         realized.any_delegators.insert(fid);
         ir.jvm_value_class_any_delegators
             .insert(fid, crate::ir::IrValueClassAnyMember::HashCode);
+        realize_delegator_of_override(ir, custom_hash_code, fid, ibody);
         ir.open_methods.insert(fid);
-        if !custom_hash_code {
+        if custom_hash_code.is_none() {
             ir.jvm_nullability_unannotated_methods.insert(fid);
         }
     }
     // equals-impl(U v, Object other): other is X && equals-impl0(v, other.unbox-impl())
     // equals(other): return equals-impl(this.field, other)
     {
-        if !custom_equals {
+        if custom_equals.is_none() {
             // static: v = slot 0, other = slot 1.
             let mut stmts = Vec::new();
             let other = ir.add_expr(IrExpr::GetValue(1));
@@ -678,9 +713,10 @@ pub(super) fn synth_value_members(
         realized.any_delegators.insert(fid);
         ir.jvm_value_class_any_delegators
             .insert(fid, crate::ir::IrValueClassAnyMember::Equals);
+        realize_delegator_of_override(ir, custom_equals, fid, ibody);
         crate::jvm::method_parameters::record_function(ir, fid, &["other"], &[]);
         ir.open_methods.insert(fid);
-        if !custom_equals {
+        if custom_equals.is_none() {
             ir.jvm_nullability_unannotated_methods.insert(fid);
         }
     }

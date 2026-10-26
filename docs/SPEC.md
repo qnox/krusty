@@ -13443,6 +13443,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`m_impl$lambda$0`) are lifted by later lowerings, so they come after all of those, in their
   lifted order. krusty placed them after the last declared member. Tests:
   `tests/value_class_lifted_member_order_e2e.rs`.
+- **A value class's boxed `Any` override is the source override on the box.** A source
+  `override fun toString()` (likewise `hashCode`/`equals`) becomes the static `toString-impl` over
+  the carrier, and the box's `toString()` calls it. kotlinc places that box method right after
+  `toString-impl`, at the override's place among the declared members, entering on the override's
+  signature line and returning on its last line; only the generated `Any` members follow every
+  declared member with no line. krusty appended the box method of a source override after every
+  declared member with no line. Tests:
+  `tests/value_class_any_override_e2e.rs`.
 - **An owner reads its explicit backing field, typed as the field.** Inside the class that
   declares `val a: Any field = V(1)`, a read whose receiver's static type is exactly that class is
   kotlinc's `IrGetField` of the field, not a call of `getA()`: `a.x` over a value class
