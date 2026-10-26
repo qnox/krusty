@@ -12,6 +12,15 @@ use crate::fx_hash::{HashMap, HashSet};
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 
+/// Whether `class` declares a public instance field `name`, which a synthetic property of the same
+/// name gives way to.
+pub(super) fn declares_field(class: &crate::jvm::classreader::ClassInfo, name: &str) -> bool {
+    use crate::jvm::classfile::{ACC_PUBLIC, ACC_STATIC};
+    class.fields.iter().any(|field| {
+        field.name == name && field.access & ACC_STATIC == 0 && field.access & ACC_PUBLIC != 0
+    })
+}
+
 /// The synthetic property the Java accessor `method` declares, from its spelling alone: `getUrl` →
 /// `url`, `getURLPath` → `urlPath`, `getIsOpen` → `isOpen`, `isOpen` → `isOpen`. A lowercase letter
 /// after the prefix (`getaway`, `island`) declares nothing.

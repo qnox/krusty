@@ -1,5 +1,13 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Source inventory publication
+
+Compact source headers publish classifier identities from explicit declaration ownership and exact
+segments rather than splitting lookup names on dots and dollars. This avoids creating undeclared
+prefix identities before later consumers run. Metadata class-ID encoding still needs its separate
+snapshot ownership lookup; publication alone does not supply authoritative negative nesting facts
+for every cached or cross-module identity.
+
 ## Companion fields and class metadata
 
 Physical companion storage uses the whole segment within the recorded holder, never the last

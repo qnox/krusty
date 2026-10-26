@@ -85,15 +85,24 @@ pub(super) fn emit_barrier_outcome(
     }
 }
 
-/// An interface entry reads as its member does: the member's declaration line once its parameter
-/// checks are done, and `this` with the member's own parameter names (its carrier is `this` here).
+/// Where a bridge's code starts once its parameter checks are done, and where it returns when it
+/// does (a `Nothing` member's bridge throws instead).
+#[derive(Clone, Copy)]
+struct BridgeCodeOffsets {
+    body: u16,
+    ret: Option<u16>,
+}
+
+/// An interface entry is kotlinc's generated forwarder of its member: it enters on the member's
+/// signature line once its parameter checks are done and returns on the line the declaration ends
+/// on, and it names `this` with the member's own parameter names (its carrier is `this` here).
 fn attach_interface_entry_debug_tables(
     ir: &IrFile,
     c: &crate::ir::IrClass,
     cw: &mut ClassWriter,
     bridge: &crate::ir::Bridge,
     descriptor: &str,
-    body_pc: u16,
+    offsets: BridgeCodeOffsets,
 ) {
     let Some(member) = bridge.target_function else {
         return;
@@ -116,8 +125,17 @@ fn attach_interface_entry_debug_tables(
         }
         slot += slot_words(*parameter);
     }
-    let line = ir.fn_decl_lines.get(&member).map(|&line| (body_pc, line));
+    let entry = super::method_defaults::signature_line(ir, member);
+    let line = entry.map(|line| (offsets.body, line));
     cw.set_method_debug(&bridge.name, descriptor, line, &locals);
+    // The return's line is an entry of its own only below the entry line; on that same line the
+    // method's one entry at its start already covers it.
+    let end = ir.fn_end_lines.get(&member).copied();
+    if let (Some(line), Some(pc), Some(end)) =
+        (line, offsets.ret, end.filter(|&end| Some(end) != entry))
+    {
+        cw.set_method_lines(&bridge.name, descriptor, &[line, (pc, end)]);
+    }
 }
 
 fn is_extension_receiver(bridge: &crate::ir::Bridge, index: usize) -> bool {
@@ -328,6 +346,10 @@ fn emit_bridge(
         emit_interface_entry_checks(ir, b, &ep, cw, &mut code);
     }
     let body_pc = u16::try_from(code.bytes.len()).expect("parameter checks fit a method");
+    let diverging = BridgeCodeOffsets {
+        body: body_pc,
+        ret: None,
+    };
     if let Some(barrier) = b.barrier_plan {
         let dispatch = code.new_label();
         let parameter_slot = 1 + ep[..barrier.parameter]
@@ -478,7 +500,7 @@ fn emit_bridge(
                 owner_is_interface: c.is_interface,
             },
         );
-        attach_bridge_debug_tables(ir, c, cw, b, packs_arguments, &erased_desc, body_pc);
+        attach_bridge_debug_tables(ir, c, cw, b, packs_arguments, &erased_desc, diverging);
         return;
     }
     if b.concrete_ret == Ty::Nothing && !unboxes_result {
@@ -504,7 +526,7 @@ fn emit_bridge(
                 owner_is_interface: c.is_interface,
             },
         );
-        attach_bridge_debug_tables(ir, c, cw, b, packs_arguments, &erased_desc, body_pc);
+        attach_bridge_debug_tables(ir, c, cw, b, packs_arguments, &erased_desc, diverging);
         return;
     }
     if let Some(crate::jvm::bridge_adaptations::BridgeResultAdapter::Box(plan)) = result_adapter {
@@ -590,6 +612,10 @@ fn emit_bridge(
             code.checkcast(ci);
         }
     }
+    let offsets = BridgeCodeOffsets {
+        body: body_pc,
+        ret: Some(u16::try_from(code.bytes.len()).expect("a bridge fits a method")),
+    };
     emit_return(er, &mut code);
     finish_bridge(
         cw,
@@ -604,7 +630,7 @@ fn emit_bridge(
             owner_is_interface: c.is_interface,
         },
     );
-    attach_bridge_debug_tables(ir, c, cw, b, packs_arguments, &erased_desc, body_pc);
+    attach_bridge_debug_tables(ir, c, cw, b, packs_arguments, &erased_desc, offsets);
 }
 
 /// kotlinc gives every bridge a `LineNumberTable` rooted at the CLASS declaration and a
@@ -625,10 +651,10 @@ fn attach_bridge_debug_tables(
     bridge: &crate::ir::Bridge,
     packs_arguments: bool,
     erased_desc: &str,
-    body_pc: u16,
+    offsets: BridgeCodeOffsets,
 ) {
     if bridge.kind == crate::ir::BridgeKind::ValueClassInterfaceEntry {
-        attach_interface_entry_debug_tables(ir, c, cw, bridge, erased_desc, body_pc);
+        attach_interface_entry_debug_tables(ir, c, cw, bridge, erased_desc, offsets);
         return;
     }
     if packs_arguments {

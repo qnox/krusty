@@ -410,8 +410,9 @@ pub(super) fn default_stub_access(ir: &IrFile, fid: u32) -> u16 {
     visibility | 0x1008
 }
 
-/// The declaration's signature line, where a default stub's own instructions stand.
-fn signature_line(ir: &IrFile, fid: u32) -> Option<u32> {
+/// The declaration's signature line, where a default stub's own instructions stand. An accessor
+/// records only its declaration line, which is its header's.
+pub(super) fn signature_line(ir: &IrFile, fid: u32) -> Option<u32> {
     ir.fn_sig_lines
         .get(&fid)
         .or_else(|| ir.fn_decl_lines.get(&fid))

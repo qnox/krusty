@@ -477,26 +477,33 @@ pub(super) fn synth_value_members(
     {
         let a = ir.add_expr(IrExpr::GetValue(0));
         let b = ir.add_expr(IrExpr::GetValue(1));
+        // With a source `equals` override, kotlinc compares the two boxes through that override:
+        // `box-impl(p1).equals(box-impl(p2))`, dispatched on the box.
         let cmp = if custom_equals.is_some() {
-            let boxed = ir.add_expr(IrExpr::Call {
-                callee: Box::new(Callee::Static {
-                    owner: internal_name,
-                    name: "box-impl".to_string(),
-                    descriptor: format!("({udesc})L{};", internal_name.render()),
-                    inline: InlineKind::None,
-                }),
-                dispatch_receiver: None,
-                args: vec![b],
+            let [left, right] = [a, b].map(|carrier| {
+                ir.add_expr(IrExpr::Call {
+                    callee: Box::new(Callee::Static {
+                        owner: internal_name,
+                        name: "box-impl".to_string(),
+                        descriptor: format!("({udesc})L{};", internal_name.render()),
+                        inline: InlineKind::None,
+                    }),
+                    dispatch_receiver: None,
+                    args: vec![carrier],
+                })
             });
             ir.add_expr(IrExpr::Call {
-                callee: Box::new(Callee::Static {
+                callee: Box::new(Callee::Virtual {
                     owner: internal_name,
-                    name: "equals-impl".to_string(),
-                    descriptor: format!("({udesc}Ljava/lang/Object;)Z"),
-                    inline: InlineKind::None,
+                    name: "equals".to_string(),
+                    descriptor: "(Ljava/lang/Object;)Z".to_string(),
+                    params: None,
+                    interface: false,
+                    module_target: None,
+                    target: None,
                 }),
-                dispatch_receiver: None,
-                args: vec![a, boxed],
+                dispatch_receiver: Some(left),
+                args: vec![right],
             })
         } else if let Some(nested) = nested_value_equals(ir, a, b, u_ir, eu, under) {
             nested
@@ -715,7 +722,8 @@ pub(super) fn synth_value_members(
             args: vec![fv, other_i],
         });
         let ibody = ret_block(ir, call);
-        let fid = add_inst(ir, "equals", vec![any_ir], bool_ir, ibody);
+        // `Any.equals` declares `other: Any?`, and an override keeps that parameter type.
+        let fid = add_inst(ir, "equals", vec![Ty::nullable(any_ir)], bool_ir, ibody);
         realized.any_delegators.insert(fid);
         ir.jvm_value_class_any_delegators
             .insert(fid, crate::ir::IrValueClassAnyMember::Equals);
