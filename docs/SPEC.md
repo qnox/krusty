@@ -13559,7 +13559,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A member the class declares (`fun add(element: String)`, `fun clear()`) writes no stub, and its
   forwarding `add(Object)` bridge takes the declaration's place among the ordinary bridges, which
   are ordered by their target function or, for a property accessor bridge (`size()`), by the
-  class's own property it implements. The List, Set and Map faces, the JDK members (`removeIf`),
+  class's own property it implements. A member implements a type-safe declaration by the
+  declaration's substituted parameters, not its erased stub: a declared
+  `fun remove(element: String)` implements `remove(Object)`, which becomes kotlinc's
+  `ACC_PUBLIC|ACC_FINAL|ACC_BRIDGE` special bridge returning `false` unless the argument is
+  `instanceof String` (or `null`, for a `String?`), and an inherited `Base<T>.remove(e: T)` under
+  `Base<String>` already has the erased descriptor, so nothing is written for it. The List, Set
+  and Map faces, the JDK members (`removeIf`),
   `toArray`, the `Collection<?>` signature of a declared `containsAll` override and an abstract
   class's fake-override bridges follow in later slices. Tests:
   `tests/read_only_collection_face_stubs_e2e.rs` (member bytes and box runs against kotlinc).

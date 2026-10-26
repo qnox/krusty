@@ -16,6 +16,7 @@ use crate::fx_hash::{HashMap, HashSet};
 use crate::ir::{IrClass, IrFile};
 use crate::jvm::backend::SkipReason;
 use crate::jvm::classpath::Classpath;
+use crate::jvm::collection_barriers::BarrierOutcome;
 use crate::jvm::inherited_collection_bridges::InheritedCollectionBridges;
 use crate::jvm::jvm_class_map::{
     jvm_collection_to_kotlin_mutable_type_name, jvm_collection_to_kotlin_type_name,
@@ -23,7 +24,7 @@ use crate::jvm::jvm_class_map::{
 };
 use crate::jvm::mapped_builtin_declarations::{
     collection_bridge_policy_for_declaration, collection_signature_policy_for_declaration,
-    CollectionSignaturePolicy, MappedBuiltinMemberKind,
+    CollectionBridgeFailure, CollectionSignaturePolicy, MappedBuiltinMemberKind,
 };
 use crate::jvm::method_descriptors::{jvm_declared_ty, jvm_tys};
 use crate::jvm::names::method_descriptor;
@@ -81,16 +82,33 @@ impl ReadOnlyCollectionStubs {
 pub(super) struct ReadOnlyStub {
     pub(super) name: String,
     pub(super) body: StubBody,
-    /// The declared parameter types, substituted with the face's type arguments.
+    /// The stub's parameter types: the declared ones substituted with the face's type arguments,
+    /// except that a type-safe declaration's checked parameters keep their erased `Any?`.
     pub(super) parameters: Vec<Ty>,
+    /// The declared parameter types substituted with the face's type arguments, all of them: what
+    /// a member that implements the declaration declares (`remove(element: String)`).
+    pub(super) override_parameters: Vec<Ty>,
     pub(super) parameter_names: Vec<String>,
     pub(super) result: Ty,
     /// The generic signature writes every declaration-site variance of the parameters (kotlinc's
     /// methods with declaration-site wildcards).
     pub(super) declaration_site_wildcards: bool,
     /// The erased JVM parameters and result of the mutable declaration, when they differ from the
-    /// stub's own descriptor: kotlinc's bridge lowering gives the stub a throwing bridge there.
+    /// stub's own descriptor: kotlinc's bridge lowering gives the stub a throwing bridge there. An
+    /// implemented member's bridge is the descriptor it is reached at, when that differs from the
+    /// implementation's.
     pub(super) bridge: Option<(Vec<Ty>, Ty)>,
+    /// The type-safe declaration's barrier (`MutableCollection.remove`): the bridge to a member
+    /// that implements it with a narrower parameter first tests each checked argument.
+    pub(super) barrier: Option<StubBarrier>,
+}
+
+/// kotlinc's type check in the special bridge of a type-safe declaration: each checked argument
+/// that is not an instance of the implementation's parameter answers the neutral result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct StubBarrier {
+    pub(super) checked_parameters: &'static [u16],
+    pub(super) outcome: BarrierOutcome,
 }
 
 /// What realizes a candidate member at the stub's own descriptor.
@@ -116,8 +134,12 @@ impl ReadOnlyStub {
         method_descriptor(&jvm_tys(&self.parameters), jvm_declared_ty(&self.result))
     }
 
+    /// The declaration an implementing member matches, by its substituted parameters.
     fn parameter_key(&self) -> (String, String) {
-        (self.name.clone(), parameter_descriptor(&self.parameters))
+        (
+            self.name.clone(),
+            parameter_descriptor(&self.override_parameters),
+        )
     }
 }
 
@@ -242,9 +264,14 @@ fn class_stubs(
             else {
                 return Some(stub);
             };
-            // A generic implementation can already have the erased descriptor itself.
-            let (erased, _) = stub.bridge.as_ref()?;
-            if parameter_descriptor(&implementation.parameters) == parameter_descriptor(erased) {
+            // The member is reached at the mutable declaration's erased descriptor, or at the
+            // stub's own when they agree (a type-safe `remove(Object)`). A generic implementation
+            // can already have that descriptor itself.
+            let erased = stub
+                .bridge
+                .clone()
+                .unwrap_or_else(|| (jvm_tys(&stub.parameters), jvm_declared_ty(&stub.result)));
+            if parameter_descriptor(&implementation.parameters) == parameter_descriptor(&erased.0) {
                 return None;
             }
             let order = own_order
@@ -257,6 +284,7 @@ fn class_stubs(
                     target: implementation.parameters.clone(),
                     target_result: implementation.physical_result,
                 },
+                bridge: Some(erased),
                 ..stub
             })
         })
@@ -364,18 +392,34 @@ fn face_stubs(classpath: &Classpath, face: Face, applied: Ty) -> Vec<ReadOnlyStu
             let erased_result = jvm_declared_ty(&ty_subst(declared.ret, &erasures));
             // kotlinc's type-safe special signatures (`MutableCollection.remove(Object)`): the
             // checked parameters keep their erased `Any?` in the stub as in the JDK declaration.
+            // An implementing member still declares the substituted types.
+            let override_parameters = parameters.clone();
             let mut parameters = parameters;
             let erased_descriptor = method_descriptor(&erased_parameters, erased_result);
-            if let Some(policy) = collection_bridge_policy_for_declaration(
+            let type_safe_policy = collection_bridge_policy_for_declaration(
                 face.mutable,
                 &member.source_name,
                 &erased_descriptor,
                 MappedBuiltinMemberKind::Function,
-            ) {
+            );
+            if let Some(policy) = type_safe_policy {
                 for &index in policy.checked_parameters {
                     parameters[usize::from(index)] = Ty::nullable(Ty::obj("kotlin/Any"));
                 }
             }
+            let barrier = type_safe_policy.and_then(|policy| {
+                let outcome = match policy.failure {
+                    CollectionBridgeFailure::False => BarrierOutcome::False,
+                    CollectionBridgeFailure::Null => BarrierOutcome::Null,
+                    CollectionBridgeFailure::NotFound => BarrierOutcome::NotFound,
+                    // A default-value declaration (`getOrDefault`) is no mutable member.
+                    CollectionBridgeFailure::Argument(_) => return None,
+                };
+                Some(StubBarrier {
+                    checked_parameters: policy.checked_parameters,
+                    outcome,
+                })
+            });
             // kotlinc's signature policies for the realization of this exact declaration.
             let signature_policy = collection_signature_policy_for_declaration(
                 face.mutable,
@@ -399,10 +443,12 @@ fn face_stubs(classpath: &Classpath, face: Face, applied: Ty) -> Vec<ReadOnlyStu
                 name: member.source_name,
                 body: StubBody::Throwing,
                 parameters,
+                override_parameters,
                 parameter_names: member.parameter_names,
                 result,
                 declaration_site_wildcards,
                 bridge,
+                barrier,
             }
         })
         .collect()
