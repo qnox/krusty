@@ -2088,11 +2088,13 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
         } else {
             evaluated
         };
-        let approximated = self
-            .semantics
-            .approximate_declaration_result(declaration, declaration_result)?;
+        let approximated = self.semantics.approximate_declaration_result(
+            declaration,
+            declaration_result,
+            evaluated,
+        )?;
         // An approximated result is a new type, which carries no abbreviation.
-        let result_abbreviation = (approximated == declaration_result)
+        let result_abbreviation = (approximated.published == declaration_result)
             .then_some(publication_abbreviation)
             .flatten();
         let parameters = self.semantics.declaration_parameters(declaration);
@@ -2104,7 +2106,8 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
         }
         Ok(ResolvedSignature {
             parameters: parameters?,
-            result: approximated,
+            result: approximated.published,
+            inferred_body_result: approximated.inferred_body_result,
             result_abbreviation,
         })
     }

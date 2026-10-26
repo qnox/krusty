@@ -458,7 +458,7 @@ pub(super) fn emit_suspend_lambda_class(
         c.decl_start_line.max(c.decl_line),
         &mut cw,
     );
-    // A lambda class is local to the scope it was written in.
+    // A lambda class is local to the scope it was written in, unless an inline function's.
     let (d1, d2) = match lambda_metadata(ir, lambda, &formatter) {
         Ok(metadata) => metadata,
         Err(error) => {
@@ -469,7 +469,7 @@ pub(super) fn emit_suspend_lambda_class(
     cw.set_kotlin_metadata(
         3,
         opts.metadata_stamp(),
-        synthetic_class_xi(SYNTHETIC_LOCAL),
+        super::metadata_policy::lambda_class_xi(ir, c.enclosure),
         &d1,
         &d2,
     );
