@@ -669,6 +669,11 @@ fn inline_lambda(ir: &mut IrFile, captures: Vec<ExprId>, body: ExprId) -> ExprId
         dispatch_receiver: None,
         param_checks: Vec::new(),
     });
+    // The lambda producer's boundary: every parameter is a capture, before its own (none).
+    ir.lambda_own_params_from.insert(
+        impl_fn,
+        u32::try_from(captures.len()).expect("test capture count fits u32"),
+    );
     ir.add_expr(IrExpr::Lambda {
         impl_fn,
         arity: 0,
@@ -780,6 +785,11 @@ fn an_inline_body_that_does_not_capture_a_parameter_captures_it_for_the_step() {
         "{captured:?}"
     );
     assert_eq!(ir.functions[impl_fn as usize].params, [Ty::Int]);
+    assert_eq!(
+        ir.lambda_own_params_from.get(&impl_fn),
+        Some(&1),
+        "the new capture extends the lambda's capture prefix"
+    );
     assert!(matches!(ir.expr(local), IrExpr::Variable { index: 1, .. }));
     let IrExpr::Block { stmts, .. } = ir.expr(body).clone() else {
         panic!("the lambda's body stays a block");
