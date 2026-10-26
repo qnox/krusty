@@ -2216,6 +2216,9 @@ pub struct IrFile {
     /// carried as provenance; the JVM backend is where it becomes a class name. A suspend function
     /// with no entry has no source declaration behind it.
     pub fn_continuation_ordinal: crate::fx_hash::HashMap<u32, u32>,
+    /// A continuation class the JVM coroutine lowering synthesizes → the `suspend` function whose
+    /// state machine it carries. The class has no source enclosure; this is the code it belongs to.
+    pub(crate) continuation_owners: crate::fx_hash::HashMap<ClassId, FunId>,
     /// The declared `contract { … }` of a member function, a Kotlin declaration fact the class's
     /// metadata records. A package function carries its own on [`IrPackageFunction`].
     pub fn_contracts: crate::fx_hash::HashMap<u32, crate::contracts::ResolvedContract>,

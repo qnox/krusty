@@ -5609,6 +5609,10 @@ regress.
     (`reified/kt39256_privateInlineWithAnonymousObject`, `reified/catchParameter/nestedReifiedCatch`,
     `inline/localDeclarationsClash`, `topLevelPrivate/privateInInlineNested`), none regresses, and
     all 7,184 applicable files run.
+    Inside a regenerated copy every object its methods and constructor create is regenerated with
+    it (`capturedOuterRegenerated`), a suspend method's continuation included, so a constructor
+    that creates an object and a suspend method of a reified object compile again (the IR route
+    had taken them): the corpus is unchanged (4,137 byte-identical, none lost, all 7,184 run).
     ✓ Callees with `crossinline` parameters (`CrossinlineParameter`): a `crossinline` literal's
     body is compiled as code outside its class (setters, `access$` accessors, and a top-level
     property's accessors, as an exported inline body's own code now reads them too), its captured

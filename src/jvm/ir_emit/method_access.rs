@@ -202,7 +202,7 @@ pub(super) fn secondary_constructor_varargs(constructor: &crate::ir::IrSecondary
 /// constructor takes a value-class-typed parameter is private (kotlinc routes construction through a
 /// synthetic `(…args, DefaultConstructorMarker)` accessor); a SEALED class's is private too, since
 /// subclasses construct through that public synthetic accessor. An anonymous object's constructor is
-/// package-private, except one declared in an `inline` function: inlining copies its `new` into
+/// package-private, except one declared in an `inline` function's scope: inlining copies its `new` into
 /// every call site, including a caller in another package, so that constructor is public. A
 /// continuation class's constructor is package-private. A `vararg` last parameter adds
 /// `ACC_VARARGS`.
@@ -238,12 +238,11 @@ pub(super) fn primary_constructor_access(
     access | primary_constructor_varargs(class)
 }
 
-/// An anonymous object declared directly in an `inline` function. Inlining copies its `new` into
-/// each call site, which may live in another package, so the constructor has to be public. The
-/// class itself stays in the function's package.
+/// An anonymous object declared in an `inline` function's scope, however deeply (kotlinc's
+/// `inInlineFunctionScope`). Inlining copies its `new` into each call site, which may live in
+/// another package, so the constructor has to be public. The class itself stays in the function's
+/// package.
 fn anonymous_object_in_inline_function(ir: &IrFile, class: &crate::ir::IrClass) -> bool {
-    let Some(crate::ir::IrEnclosure::Function(function)) = class.enclosure.as_ref() else {
-        return false;
-    };
-    ir.inline_fns.contains(function)
+    super::enclosure::enclosing_functions(ir, class.enclosure)
+        .any(|(function, _)| ir.inline_fns.contains(&function))
 }
