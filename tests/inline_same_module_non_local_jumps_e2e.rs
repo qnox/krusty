@@ -210,3 +210,36 @@ fn a_tailrec_step_writes_a_parameter_its_inline_lambda_does_not_read() {
         "OK"
     );
 }
+
+/// The capture a step adds sits between the lambda's captures and its own parameters, which the
+/// value-class lowering tells apart: `total`, a value class the lambda does not read, becomes a
+/// capture, while the lambda's own `step` stays its own boxed parameter. kotlinc's result is the
+/// reference; each function runs a million deep.
+const VALUE_CLASS_TAILREC: &str = r#"@JvmInline
+value class Meters(val value: Int)
+
+private inline fun act(block: (Meters) -> Unit) = block(Meters(1))
+
+tailrec fun walk(n: Int, total: Meters): Int {
+    if (n == 0) return total.value
+    act { step -> return walk(n - step.value, Meters(step.value + 6)) }
+    return -1
+}
+
+tailrec fun pace(n: Meters, total: Meters): Int {
+    if (n.value == 0) return total.value
+    act { step -> act { return pace(Meters(n.value - step.value), Meters(it.value + 8)) } }
+    return -1
+}
+
+fun box(): String {
+    if (walk(1_000_000, Meters(0)) != 7) return "walk ${walk(1_000_000, Meters(0))}"
+    if (pace(Meters(1_000_000), Meters(0)) != 9) return "pace"
+    return "OK"
+}
+"#;
+
+#[test]
+fn a_tailrec_step_captures_a_value_class_beside_the_lambdas_own_value_class_parameter() {
+    common::expect_box_same_as_kotlinc(VALUE_CLASS_TAILREC, "ValueClassTailrec");
+}

@@ -1462,16 +1462,11 @@ fn transfer_inlined_capture_facts(
         old_arity,
     );
     replace_parallel_map(&mut ir.fn_param_no_infer, function, &no_infer, old_arity);
-    if let Some(own_from) = ir.lambda_own_params_from.get_mut(&function) {
-        assert!(*own_from as usize <= old_arity);
-        let shift = transfers
-            .iter()
-            .filter(|transfer| transfer.parameter < *own_from as usize)
-            .fold(0_isize, |shift, transfer| {
-                shift + transfer.count as isize - 1
-            });
-        *own_from = u32::try_from(*own_from as isize + shift)
-            .expect("transferred captures keep the lambda capture boundary non-negative");
+    if let Some(&own_from) = ir.lambda_own_params_from.get(&function) {
+        assert!(own_from as usize <= old_arity);
+    }
+    for transfer in transfers.iter().rev() {
+        ir.resize_lambda_capture_prefix(function, transfer.parameter, 1, transfer.count);
     }
     let mut remove_vararg = false;
     if let Some(vararg) = ir.fn_varargs.get_mut(&function) {
