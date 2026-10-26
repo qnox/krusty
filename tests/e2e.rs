@@ -1729,8 +1729,8 @@ mod type_parameter_nullability_annotations_e2e;
 mod type_resolution;
 #[path = "unit_expression_body_return_line_e2e.rs"]
 mod unit_expression_body_return_line_e2e;
-#[path = "unsigned_operations_e2e.rs"]
-mod unsigned_operations_e2e;
+#[path = "e2e/unsigned_values.rs"]
+mod unsigned_values;
 #[path = "unsupported_kotlinc_arguments_e2e.rs"]
 mod unsupported_kotlinc_arguments_e2e;
 #[path = "upper_bound_violations_e2e.rs"]

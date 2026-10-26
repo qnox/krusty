@@ -54346,8 +54346,8 @@ impl<'a> Checker<'a> {
             let its: Vec<Ty> = indices.iter().map(|&i| self.expr(scope, i)).collect();
             if let [index] = indices.as_slice() {
                 // A read consumes the projection rather than exposing it as an expression type.
-                if let Some(elem) = at
-                    .array_read_elem()
+                if let Some(elem) = self
+                    .builtin_array_read_element(at)
                     .filter(|_| self.receiver_is_assignable(its[0], Ty::Int))
                 {
                     self.expect_assignable(Ty::Int, its[0], self.span(*index), "array index");
