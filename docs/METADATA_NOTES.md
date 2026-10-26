@@ -8,6 +8,14 @@ raw qualified class name even though no physical classfile exists. Retain its pa
 exact segment before name-tree normalization, then publish that fact with the annotation shape.
 This preserves literal-dollar and nested names across separate metadata snapshots.
 
+## JVM member-class rows
+
+The JVM attribute writer now consumes retained non-local ownership and exact declaration segments
+for member rows, including names with literal dollars. The cross-file module resolver preserves
+the current declaration's precedence over classpath rows. Local and anonymous implementation rows
+retain their existing provenance. This changes no Kotlin metadata class-ID encoding; aliases and
+builtin ownership evidence belong to the remaining metadata handoff.
+
 ## Declaration-name evidence
 
 Kotlin metadata class IDs delimit the package with `/` and lexical classifier ownership with `.`;

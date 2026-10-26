@@ -940,6 +940,7 @@ impl super::Emitter<'_> {
                     };
                     self.mark_call_start(e, code);
                     code.invokestatic(m, aw, physical_call_result_words(ret));
+                    self.guard_private_lateinit_read(e, code);
                 }
                 Callee::Module { .. }
                 | Callee::ModuleWithDefaults { .. }
@@ -1055,6 +1056,7 @@ impl super::Emitter<'_> {
                     };
                     self.mark_call_start(e, code);
                     code.invokestatic(m, aw, slot_words(ret) as i32);
+                    self.guard_private_lateinit_read(e, code);
                 }
                 Callee::Virtual {
                     owner,
