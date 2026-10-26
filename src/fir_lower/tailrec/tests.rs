@@ -736,11 +736,20 @@ fn a_return_of_the_function_in_an_inline_body_steps_through_the_lambdas_capture(
 }
 
 #[test]
-fn an_inline_body_that_does_not_capture_a_parameter_keeps_its_call() {
-    // The step would have to write `n`, which the lambda's frame cannot reach: the call stays
-    // the call it was.
+fn an_inline_body_that_does_not_capture_a_parameter_captures_it_for_the_step() {
+    // `act { val local = 1; return step(local) }`: the lambda reads no parameter, but the step
+    // writes `n`. kotlinc's lowering runs before the lambda captures anything, so the write makes
+    // the lambda capture `n`; here the lambda gains that capture after its own, its local moves
+    // up past it, and the step writes the capture and continues the function's loop.
     let mut ir = file();
-    let argument = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+    let one = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+    let local = ir.add_expr(IrExpr::Variable {
+        index: 0,
+        ty: Ty::Int,
+        init: Some(one),
+        named: true,
+    });
+    let argument = ir.add_expr(IrExpr::GetValue(0));
     let call = ir.add_expr(IrExpr::Call {
         callee: Box::new(Callee::Local(FUNCTION)),
         dispatch_receiver: None,
@@ -748,12 +757,62 @@ fn an_inline_body_that_does_not_capture_a_parameter_keeps_its_call() {
     });
     let inner = ir.add_expr(IrExpr::Return(Some(call)));
     ir.checked_return_depths.insert(inner, 0);
-    let lambda = inline_lambda(&mut ir, Vec::new(), inner);
-    let tail = returned_self_call(&mut ir);
+    let body = ir.add_expr(IrExpr::Block {
+        stmts: vec![local, inner],
+        value: None,
+    });
+    let lambda = inline_lambda(&mut ir, Vec::new(), body);
+    let tail = ir.add_expr(IrExpr::Return(None));
     finish(&mut ir, vec![lambda, tail]);
 
-    assert!(matches!(ir.expr(inner), IrExpr::Return(Some(_))));
-    assert_eq!(ir.checked_return_depths.get(&inner), Some(&0));
+    let IrExpr::Lambda {
+        impl_fn, captures, ..
+    } = ir.expr(lambda).clone()
+    else {
+        panic!("the lambda stays a lambda");
+    };
+    let captured = captures
+        .iter()
+        .map(|&capture| ir.expr(capture).clone())
+        .collect::<Vec<_>>();
+    assert!(
+        matches!(captured.as_slice(), [IrExpr::GetValue(0)]),
+        "{captured:?}"
+    );
+    assert_eq!(ir.functions[impl_fn as usize].params, [Ty::Int]);
+    assert!(matches!(ir.expr(local), IrExpr::Variable { index: 1, .. }));
+    let IrExpr::Block { stmts, .. } = ir.expr(body).clone() else {
+        panic!("the lambda's body stays a block");
+    };
+    let IrExpr::Block { stmts, value: None } = ir.expr(stmts[1]).clone() else {
+        panic!(
+            "the inline body's return becomes a loop step: {:?}",
+            ir.expr(stmts[1])
+        );
+    };
+    let shapes = stmts
+        .iter()
+        .map(|&statement| ir.expr(statement).clone())
+        .collect::<Vec<_>>();
+    assert!(
+        matches!(
+            shapes.as_slice(),
+            [
+                IrExpr::Variable { index: 2, .. },
+                IrExpr::SetValue { var: 0, .. },
+                IrExpr::Continue { label: Some(label) },
+            ] if label == LOOP_LABEL
+        ),
+        "{shapes:?}"
+    );
+    let IrExpr::Variable {
+        init: Some(next), ..
+    } = shapes[0]
+    else {
+        unreachable!("matched above")
+    };
+    assert!(matches!(ir.expr(next), IrExpr::GetValue(1)));
+    assert!(depths_describe_returns(&ir));
 }
 
 #[test]

@@ -46,7 +46,13 @@ pub(super) fn finish_tailrec_body(
             roots.push(returned);
         }
     }
-    let tail_calls = tail_calls(ir, &roots, frame, unit);
+    let tail_calls = loop {
+        let walk = tail_calls(ir, &roots, frame, unit);
+        match walk.uncaptured.first() {
+            Some(lambda) => capture_parameters(ir, lambda),
+            None => break walk.found,
+        }
+    };
     if tail_calls.is_empty() {
         return super::finish_callable_body(
             ir,
@@ -187,7 +193,7 @@ impl Edge {
 ///
 /// Only a node reached by exactly ONE path is rewritten. A call below a shared ancestor is seen by
 /// another path too, which may cross a boundary this walk does not enter, so it stays a call.
-fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> Vec<TailCall> {
+fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> TailCalls {
     struct Walk<'a> {
         ir: &'a IrFile,
         frame: &'a Frame,
@@ -198,6 +204,10 @@ fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> Vec<T
         unit: bool,
         paths: &'a crate::fx_hash::HashMap<ExprId, u8>,
         found: Vec<TailCall>,
+        /// The outermost inline lambda around this walk whose frame lacks a parameter of the
+        /// frame it is written in.
+        uncaptured_lambda: Option<Rc<UncapturedParameters>>,
+        uncaptured: Vec<Rc<UncapturedParameters>>,
         seen: crate::fx_hash::HashSet<ExprId>,
         /// The source line of the innermost node visited that has one.
         line: Option<u32>,
@@ -238,7 +248,7 @@ fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> Vec<T
                         self.visit(capture, false, None);
                     }
                     if let Some(body) = inline_body {
-                        self.visit_inline_body(body, &captures, impl_fn);
+                        self.visit_inline_body(expression, body, &captures, impl_fn);
                     }
                 }
                 IrExpr::Call { .. } | IrExpr::MethodCall { .. } => {
@@ -246,12 +256,15 @@ fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> Vec<T
                     if let Some(edge) = edge.filter(|_| {
                         tail && self.is_self_call(expression) && !self.step_suspends(expression)
                     }) {
-                        self.found.push(TailCall {
-                            edge,
-                            call: expression,
-                            line: self.line,
-                            frame: self.lambda_frame.clone(),
-                        });
+                        match &self.uncaptured_lambda {
+                            Some(lambda) => self.uncaptured.push(lambda.clone()),
+                            None => self.found.push(TailCall {
+                                edge,
+                                call: expression,
+                                line: self.line,
+                                frame: self.lambda_frame.clone(),
+                            }),
+                        }
                     }
                 }
                 IrExpr::Return(Some(value)) => {
@@ -322,10 +335,21 @@ fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> Vec<T
 
         /// The body of an inline lambda written in this frame, walked in the lambda's own frame.
         /// Nothing in it runs as this frame's tail but the returns of the function it holds.
-        fn visit_inline_body(&mut self, body: ExprId, captures: &[ExprId], impl_fn: FunId) {
+        fn visit_inline_body(
+            &mut self,
+            lambda: ExprId,
+            body: ExprId,
+            captures: &[ExprId],
+            impl_fn: FunId,
+        ) {
             let frame = Rc::new(Frame::of_inline_body(
                 self.ir, self.frame, captures, impl_fn, body,
             ));
+            let uncaptured_lambda = self.uncaptured_lambda.clone().or_else(|| {
+                let parameters = frame.uncaptured_parameters(self.frame);
+                (!parameters.is_empty())
+                    .then(|| Rc::new(UncapturedParameters { lambda, parameters }))
+            });
             let mut walk = Walk {
                 ir: self.ir,
                 frame: &frame,
@@ -334,11 +358,14 @@ fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> Vec<T
                 unit: self.unit,
                 paths: self.paths,
                 found: Vec::new(),
+                uncaptured_lambda,
+                uncaptured: Vec::new(),
                 seen: crate::fx_hash::HashSet::default(),
                 line: self.line,
             };
             walk.visit(body, false, None);
             self.found.append(&mut walk.found);
+            self.uncaptured.append(&mut walk.uncaptured);
         }
 
         /// Whether `returned` leaves the function, not an inline lambda the walk is inside.
@@ -354,8 +381,12 @@ fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> Vec<T
             }
         }
 
+        /// A self-call in a frame that lacks a parameter is one only once the lambda captures it:
+        /// the walk reports the lambda instead of the call.
         fn is_self_call(&self, call: ExprId) -> bool {
-            self.paths.get(&call) == Some(&1) && is_self_call(self.ir, call, self.frame)
+            self.paths.get(&call) == Some(&1)
+                && (self.uncaptured_lambda.is_some() || self.frame.holds_every_position())
+                && is_self_call(self.ir, call, self.frame)
         }
 
         /// See [`stepped_evaluation_suspends`].
@@ -395,6 +426,8 @@ fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> Vec<T
         unit,
         paths: &paths,
         found: Vec::new(),
+        uncaptured_lambda: None,
+        uncaptured: Vec::new(),
         seen: crate::fx_hash::HashSet::default(),
         line: None,
     };
@@ -405,7 +438,115 @@ fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> Vec<T
         };
         walk.visit(root, tail, Some(Edge::Root(index)));
     }
-    walk.found
+    TailCalls {
+        found: walk.found,
+        uncaptured: walk.uncaptured,
+    }
+}
+
+/// What [`tail_calls`] found: the self-calls in tail position a loop step replaces, and the inline
+/// lambdas that must first capture a parameter a self-call written in them writes.
+struct TailCalls {
+    found: Vec<TailCall>,
+    uncaptured: Vec<Rc<UncapturedParameters>>,
+}
+
+/// An inline lambda whose body holds a self-call in tail position but does not capture every
+/// parameter of the frame it is written in. kotlinc's `TailrecLowering` runs before its lambdas
+/// capture anything, so the step's write of such a parameter makes the lambda capture it; here the
+/// lambda is already lowered, and [`capture_parameters`] gives it those captures.
+struct UncapturedParameters {
+    lambda: ExprId,
+    /// The parameters it lacks, as the enclosing frame holds them.
+    parameters: Vec<FrameParameter>,
+}
+
+/// A parameter as a frame holds it: its value slot there, and the function whose parameter list
+/// that slot indexes (the function's own, or an inline lambda's, whose captures lead its list).
+#[derive(Clone, Copy, Debug)]
+struct FrameParameter {
+    slot: u32,
+    numbering: FunId,
+    index: usize,
+}
+
+/// Give `uncaptured.lambda` a capture of each parameter it lacks, after its own captures. The
+/// lambda's frame numbers its captures first, so its parameters and locals each move up one slot
+/// per capture added, in both its method body and its inline template; the inliner binds the new
+/// capture to the enclosing frame's own slot, so the step's write reaches it.
+fn capture_parameters(ir: &mut IrFile, uncaptured: &UncapturedParameters) {
+    for parameter in &uncaptured.parameters {
+        let IrExpr::Lambda {
+            impl_fn,
+            captures,
+            inline_body,
+            ..
+        } = ir.expr(uncaptured.lambda).clone()
+        else {
+            unreachable!("an uncaptured parameter belongs to a lambda")
+        };
+        let position = u32::try_from(captures.len()).expect("capture count fits packed value ids");
+        let index = captures.len();
+        let ty = ir.functions[parameter.numbering as usize].params[parameter.index];
+        let source_name = ir
+            .fn_params
+            .get(&parameter.numbering)
+            .and_then(|info| info.identities.get(parameter.index))
+            .and_then(|identity| identity.source_name.clone());
+        let read = ir.add_expr(IrExpr::GetValue(parameter.slot));
+        let bodies = [inline_body, ir.functions[impl_fn as usize].body];
+        for body in bodies.into_iter().flatten() {
+            crate::ir::shift_value_indices(ir, body, position, 1);
+        }
+        let function = &mut ir.functions[impl_fn as usize];
+        function.params.insert(index, ty);
+        if function.param_checks.len() >= index && !function.param_checks.is_empty() {
+            function.param_checks.insert(index, None);
+        }
+        if let Some(info) = ir.fn_params.get_mut(&impl_fn) {
+            info.identities.insert(
+                index,
+                crate::ir::IrParameterIdentity::captured_value(
+                    source_name,
+                    position,
+                    crate::ir::IrValueCapture {
+                        declaration: crate::ir::IrCapturedDeclaration::Parameter,
+                        capturer: crate::ir::IrCapturingCallable::Lambda,
+                    },
+                ),
+            );
+            if !info.inline_modifiers.is_empty() {
+                info.inline_modifiers
+                    .insert(index, crate::types::InlineParameterModifier::None);
+            }
+            if !info.expansion_modes.is_empty() {
+                info.expansion_modes
+                    .insert(index, crate::types::InlineExpansionMode::Materialize);
+            }
+        }
+        let shared = ir
+            .shared_capture_parameters
+            .keys()
+            .filter(|(function, slot)| *function == impl_fn && *slot >= position)
+            .copied()
+            .collect::<Vec<_>>();
+        let moved = shared
+            .into_iter()
+            .filter_map(|key| {
+                ir.shared_capture_parameters
+                    .remove(&key)
+                    .map(|ty| (key, ty))
+            })
+            .collect::<Vec<_>>();
+        for ((function, slot), ty) in moved {
+            ir.shared_capture_parameters
+                .insert((function, slot + 1), ty);
+        }
+        let IrExpr::Lambda { captures, .. } = &mut ir.exprs[uncaptured.lambda as usize] else {
+            unreachable!("an uncaptured parameter belongs to a lambda")
+        };
+        captures.push(read);
+    }
 }
 
 /// Find every value slot that holds THIS frame's instance.
@@ -631,6 +772,9 @@ fn returns_from_here(ir: &IrFile, expression: ExprId) -> bool {
 /// zero there would write the receiver and shift every argument by one.
 pub(super) struct Frame {
     function: FunId,
+    /// The function whose parameter list this frame's slots index: [`Self::function`], or the
+    /// inline lambda's method, whose captures lead its list.
+    numbering: FunId,
     /// The value slot holding each argument position of a self-call: the capture prefix, then the
     /// logical parameters. In an inline lambda's frame a position is `None` where the lambda does
     /// not capture the slot of the enclosing frame that holds it.
@@ -682,6 +826,7 @@ impl Frame {
             u32::try_from(count).expect("tailrec parameter count exceeds packed value ids");
         Self {
             function,
+            numbering: function,
             slots: (slots.first_parameter..slots.first_parameter + count_slots)
                 .map(Some)
                 .collect(),
@@ -730,6 +875,7 @@ impl Frame {
         };
         let mut frame = Self {
             function: outer.function,
+            numbering: impl_fn,
             slots: outer
                 .slots
                 .iter()
@@ -778,6 +924,30 @@ impl Frame {
         self.slots.iter().all(Option::is_some)
     }
 
+    /// The parameters `outer` holds that this inline lambda's frame does not capture.
+    fn uncaptured_parameters(&self, outer: &Frame) -> Vec<FrameParameter> {
+        self.slots
+            .iter()
+            .zip(&outer.slots)
+            .enumerate()
+            .filter_map(|(position, (own, outer_slot))| {
+                let slot = (*outer_slot).filter(|_| own.is_none())?;
+                // A function's frame lists its parameters in argument order; an inline lambda's
+                // lists each capture at its own slot.
+                let index = if outer.inline_lambda {
+                    slot as usize
+                } else {
+                    position
+                };
+                Some(FrameParameter {
+                    slot,
+                    numbering: outer.numbering,
+                    index,
+                })
+            })
+            .collect()
+    }
+
     fn temporary(&self) -> u32 {
         let slot = self.next_slot.get();
         self.next_slot.set(slot + 1);
@@ -794,9 +964,6 @@ impl Frame {
 /// or a companion has only one instance, so `O.rec(n - 1)` is the same frame whatever its receiver
 /// expression says (kotlinc's `hasSameDispatchReceiver` for a singleton).
 fn is_self_call(ir: &IrFile, call: ExprId, frame: &Frame) -> bool {
-    if !frame.holds_every_position() {
-        return false;
-    }
     match ir.expr(call) {
         IrExpr::Call {
             callee: call_callee,
