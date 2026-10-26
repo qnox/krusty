@@ -227,8 +227,8 @@ impl BodyFirChecker<'_> {
         if let Some(built) = self.progression_builder(source, checked)? {
             return Ok(Some(built));
         }
-        if let Some(indices) = self.indices_source(source, checked)? {
-            return Ok(Some(indices));
+        if let Some(indices) = self.checked_indices(source, checked)? {
+            return Ok(Some(FirProgressionSource::Indices(indices)));
         }
         let Some(expression) = self.body.expr(checked) else {
             return Ok(None);
@@ -395,14 +395,14 @@ impl BodyFirChecker<'_> {
         Some((intrinsic, *receiver_source, receiver.value, argument))
     }
 
-    /// `IndicesHandler`: an `indices` read resolution matched for a counted loop is counted from 0
-    /// until the size member it selected on the class the declaration receives. The read's own
-    /// receiver, with its checked conversion, is the receiver of that size read.
-    fn indices_source(
+    /// `IndicesHandler`: an `indices` read is the range from 0 until the size member resolution
+    /// selected on the class the declaration receives. The read's own receiver, with its checked
+    /// conversion, is the receiver of that size read.
+    pub(super) fn checked_indices(
         &self,
         source: ExprId,
         checked: FirExprId,
-    ) -> Result<Option<FirProgressionSource>, BodyCheckFailure> {
+    ) -> Result<Option<crate::fir::FirIndices>, BodyCheckFailure> {
         let Some(plan) = self.info.indices_size(source) else {
             return Ok(None);
         };
@@ -440,7 +440,7 @@ impl BodyFirChecker<'_> {
             false,
             &[],
         )?;
-        Ok(Some(FirProgressionSource::Indices {
+        Ok(Some(crate::fir::FirIndices {
             receiver,
             view,
             size,

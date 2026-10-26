@@ -1,0 +1,37 @@
+diff --git a/gradle.properties b/gradle.properties
+index ac6c0db..8ae9b1a 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -24,3 +24,6 @@ org.gradle.jvmargs=-Dfile.encoding=UTF-8
+ # AGP 9.0 Settings
+ android.builtInKotlin=true
+ android.newDsl=true
++
++# Kotlin 2.4 infers kotlin-test-junit5 beside the declared kotlin-test-junit; keep the declared one.
++kotlin.test.infer.jvm.variant=false
+diff --git a/gradle/libs.versions.toml b/gradle/libs.versions.toml
+index 877177f..b23da5d 100644
+--- a/gradle/libs.versions.toml
++++ b/gradle/libs.versions.toml
+@@ -13,7 +13,7 @@ assertk = "0.28.1"
+ binary-compatibility-validator = "0.18.2"
+ bnd = "7.4.0"
+ brotli-dec = "0.1.2"
+-burst = "2.10.2"
++burst = "2.14.0"
+ checkstyle = "14.3.0"
+ clikt = "5.1.0"
+ extra-java-module-info = "1.14.2"
+diff --git a/okcurl/build.gradle.kts b/okcurl/build.gradle.kts
+index 440ba43..0cda275 100644
+--- a/okcurl/build.gradle.kts
++++ b/okcurl/build.gradle.kts
+@@ -50,7 +50,7 @@ dependencies {
+   testImplementation(projects.mockwebserver3Junit5)
+   testImplementation(libs.junit)
+   testImplementation(libs.assertk)
+-  testImplementation(kotlin("test"))
++  testImplementation(kotlin("test-junit5"))
+ }
+ 
+ val jvmSignature = configurations.getByName("jvmSignature")

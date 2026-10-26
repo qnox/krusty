@@ -123,13 +123,16 @@ fn verify_task_reports_only_the_current_invocation() {
         .map(str::trim)
         .filter(|line| line.starts_with("krusty verify: "))
         .collect::<Vec<_>>();
-    assert_eq!(
-        reports,
-        [
+    let expected = [
             "krusty verify: :compileKotlin: no Kotlin sources",
             "krusty verify: :compileTestKotlin: no Kotlin sources",
             "krusty verify: 0/0 compilations compiled (0 byte-identical), 0 failed, 0 unsupported, 2 without Kotlin sources; n/a of classes byte-identical",
-        ],
+        ];
+    // Independent verification tasks can finish in either order. Both complete events must
+    // precede the final summary; an extra, missing or duplicated event still fails.
+    let other_completion_order = [expected[1], expected[0], expected[2]];
+    assert!(
+        reports == expected || reports == other_completion_order,
         "{output}"
     );
 
