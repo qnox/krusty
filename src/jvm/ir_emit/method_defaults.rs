@@ -445,20 +445,6 @@ pub(super) fn emit_default_param_overwrites(
             let skip = code.new_label();
             code.ifeq(skip);
             mark_default_fill(emitter, *expression, code);
-            if crate::jvm::lambda_classes::inline_default_value_requires_reification(
-                emitter.ir,
-                *expression,
-            ) {
-                // The marker is the default's first instruction, so it opens the default's line:
-                // an inliner reads it as the instruction just before the lambda's instance load.
-                emitter.mark_expression_start(*expression, code);
-                let marker = emitter.cw.methodref(
-                    "kotlin/jvm/internal/Intrinsics",
-                    "needClassReification",
-                    "()V",
-                );
-                code.invokestatic(marker, 0, 0);
-            }
             emitter.emit_value(*expression, code);
             let produced = ir_ty_to_jvm(&emitter.value_ty(*expression));
             emit_primitive_box_if_needed(emitter.cw, produced, ty, code);
@@ -484,7 +470,7 @@ pub(super) fn mark_default_fill(
     emitter.mark_kept_start_line(default, code);
 }
 
-pub(super) fn body_has_reified_markers(ir: &IrFile, expression: crate::ir::ExprId) -> bool {
+pub(in crate::jvm) fn body_has_reified_markers(ir: &IrFile, expression: crate::ir::ExprId) -> bool {
     if matches!(
         ir.expr(expression),
         IrExpr::ReifiedClassMarker { .. } | IrExpr::ReifiedTypeOp { .. }

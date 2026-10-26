@@ -1138,6 +1138,8 @@ mod generic_suspend_member_return_e2e;
 mod generic_value_class_result_e2e;
 #[path = "generic_vararg_inference_e2e.rs"]
 mod generic_vararg_inference_e2e;
+#[path = "getter_return_line_e2e.rs"]
+mod getter_return_line_e2e;
 #[path = "hidden_mapped_member_e2e.rs"]
 mod hidden_mapped_member_e2e;
 #[path = "hides_members_overload_e2e.rs"]
@@ -1715,6 +1717,8 @@ mod source_map_annotation_parts_e2e;
 mod special_collection_bridge_e2e;
 #[path = "splice_nullable_value_class_lambda_e2e.rs"]
 mod splice_nullable_value_class_lambda_e2e;
+#[path = "split_line_conditions_parse_e2e.rs"]
+mod split_line_conditions_parse_e2e;
 #[path = "static_access_type_arguments_e2e.rs"]
 mod static_access_type_arguments_e2e;
 #[path = "string_when_switch_e2e.rs"]
@@ -2212,6 +2216,8 @@ mod private_constructor_accessors_e2e;
 mod private_inline_property_ref_e2e;
 #[path = "read_only_iterator_stubs_e2e.rs"]
 mod read_only_iterator_stubs_e2e;
+#[path = "read_only_stub_inheritability_e2e.rs"]
+mod read_only_stub_inheritability_e2e;
 #[path = "redundant_checkcast_e2e.rs"]
 mod redundant_checkcast_e2e;
 #[path = "redundant_checkcasts_before_aastore_e2e.rs"]

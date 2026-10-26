@@ -22,7 +22,7 @@ use crate::jvm::jvm_class_map::{
 use crate::jvm::mapped_builtin_declarations::MappedBuiltinMemberKind;
 use crate::jvm::method_descriptors::{jvm_declared_ty, jvm_tys};
 use crate::jvm::names::method_descriptor;
-use crate::types::{ty_subst, wk, CollectionKind, Ty, TypeName};
+use crate::types::{ty_subst, wk, CollectionKind, Ty, TypeName, Visibility};
 
 /// kotlinc's `preComputedStubs` order: a class's applicable faces contribute their stubs in this
 /// order.
@@ -44,7 +44,6 @@ const REALIZED_FACES: [CollectionKind; 2] =
     [CollectionKind::Iterator, CollectionKind::ListIterator];
 
 const ACC_STATIC: u16 = 0x0008;
-const ACC_PRIVATE: u16 = 0x0002;
 const ACC_BRIDGE: u16 = 0x0040;
 const ACC_SYNTHETIC: u16 = 0x1000;
 const ACC_ABSTRACT: u16 = 0x0400;
@@ -343,7 +342,10 @@ fn superclass_chain(
     let mut chain = Vec::new();
     let mut current = class.superclass;
     let mut seen = HashSet::default();
+    let package = class.fq_name_id().namespace();
+    let mut same_package_path = true;
     while current != wk::java_object() && current != wk::any() && seen.insert(current) {
+        same_package_path &= current.namespace() == package;
         if let Some(source) = ir.classes.iter().find(|c| c.fq_name_id() == current) {
             let mut superclass = Superclass {
                 supertypes: ir
@@ -362,7 +364,9 @@ fn superclass_chain(
             };
             for &function_id in &source.methods {
                 let function = &ir.functions[function_id as usize];
-                if function.is_static {
+                if function.is_static
+                    || !inherited_along(ir.method_visibility(function_id), same_package_path)
+                {
                     continue;
                 }
                 let key = (
@@ -427,8 +431,9 @@ fn superclass_chain(
             implemented_members: HashSet::default(),
         };
         for method in &info.methods {
-            if method.access & (ACC_STATIC | ACC_PRIVATE | ACC_BRIDGE | ACC_SYNTHETIC) != 0
+            if method.access & (ACC_STATIC | ACC_BRIDGE | ACC_SYNTHETIC) != 0
                 || method.name == "<init>"
+                || !inherited_along(method.visibility(), same_package_path)
             {
                 continue;
             }
@@ -502,6 +507,18 @@ fn superclass_chain(
         current = next;
     }
     Ok(chain)
+}
+
+/// Whether a member a superclass declares with `visibility` reaches the class, given whether every
+/// class from the class up to that superclass shares the class's package. A private member is
+/// never inherited, and a package-private one only along a path that stays in its package; only
+/// an inherited member can implement a stub's member.
+fn inherited_along(visibility: Visibility, same_package_path: bool) -> bool {
+    match visibility {
+        Visibility::Private => false,
+        Visibility::PackagePrivate => same_package_path,
+        Visibility::Public | Visibility::Internal | Visibility::Protected => true,
+    }
 }
 
 /// Every classifier a dependency classifier extends, through its published direct supertypes.

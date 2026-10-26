@@ -9,6 +9,40 @@ use super::{type_signatures::EnclosingBounds, TypeParameterIdentities};
 use crate::fir::ResolvedParameterIdentity;
 use crate::libraries::function_classifiers::supertype_classifier;
 use crate::libraries::ParamFlags;
+
+pub(crate) fn metadata_declaration_name(
+    metadata_name: &str,
+) -> crate::types::ClassifierDeclarationName {
+    use crate::types::{
+        type_name_child, type_name_nested_child, ClassifierDeclarationName, TypeName,
+    };
+    // Package and class boundaries are distinct in the metadata class-id schema. Dollar signs
+    // within either kind of segment are literal identifier content.
+    let (package, classes) = metadata_name
+        .rsplit_once('/')
+        .unwrap_or(("", metadata_name));
+    let package = if package.is_empty() {
+        TypeName::ROOT
+    } else {
+        package.split('/').fold(TypeName::ROOT, type_name_child)
+    };
+    let Some((owners, name)) = classes.rsplit_once('.') else {
+        return ClassifierDeclarationName::TopLevel {
+            package,
+            name: classes.into(),
+        };
+    };
+    let mut owners = owners.split('.');
+    let first = owners
+        .next()
+        .expect("a nested metadata class id names an owner");
+    let owner = owners.fold(type_name_child(package, first), type_name_nested_child);
+    ClassifierDeclarationName::Nested {
+        owner,
+        name: name.into(),
+    }
+}
+
 use crate::libraries::{
     constructor_generic_signature, CallSig, ClassifierInheritance, FnKind, FunctionInfo,
     ImplicitClassifierCallable, LibraryMember, LibraryType, ParamList, TypeKind,
@@ -195,6 +229,7 @@ pub(crate) fn classifier_shape(
         .transpose()?;
     let is_interface = matches!(kind, TypeKind::Interface | TypeKind::Annotation);
     Ok(LibraryType {
+        declaration_name: Some(metadata_declaration_name(metadata_name)),
         access: class.visibility.into(),
         is_kotlin: true,
         is_data: crate::metadata::semantic::class_is_data(class.metadata_flags),
@@ -440,4 +475,44 @@ pub(crate) fn declared_targets(declaration: &KotlinClass) -> crate::types::Annot
         }
         _ => None,
     }))
+}
+
+#[cfg(test)]
+mod declaration_name_tests {
+    use super::metadata_declaration_name;
+    use crate::types::{type_name_child, ClassifierDeclarationName, TypeName};
+
+    #[test]
+    fn metadata_class_ids_preserve_literal_dollars_and_declared_nesting() {
+        let package = type_name_child(TypeName::ROOT, "package$literal");
+        let outer = type_name_child(package, "Outer$Literal");
+        assert_eq!(
+            metadata_declaration_name("package$literal/Outer$Literal"),
+            ClassifierDeclarationName::TopLevel {
+                package,
+                name: "Outer$Literal".into()
+            }
+        );
+        assert_eq!(
+            metadata_declaration_name("package$literal/Outer$Literal.Part$Name"),
+            ClassifierDeclarationName::Nested {
+                owner: outer,
+                name: "Part$Name".into()
+            }
+        );
+        assert_eq!(
+            metadata_declaration_name("package$literal/Outer$Literal.$serializer"),
+            ClassifierDeclarationName::Nested {
+                owner: outer,
+                name: "$serializer".into()
+            }
+        );
+        assert_eq!(
+            metadata_declaration_name("Default$Package"),
+            ClassifierDeclarationName::TopLevel {
+                package: TypeName::ROOT,
+                name: "Default$Package".into()
+            }
+        );
+    }
 }
