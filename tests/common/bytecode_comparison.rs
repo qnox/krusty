@@ -877,7 +877,7 @@ impl ClassSets {
     /// The `javap -v -p` block of each method `class` declares, from kotlinc and from krusty, keyed
     /// by its declaration line (`public boolean add(java.lang.String);`): its descriptor, flags,
     /// code, debug tables and attributes, pool indices erased as in [`Self::class_listing`].
-    pub fn method_blocks(&self, class: &str) -> (Vec<(String, String)>, Vec<(String, String)>) {
+    pub fn method_blocks(&self, class: &str) -> (MethodBlocks, MethodBlocks) {
         let (reference, krusty) = self.class_listing(class);
         (
             verbose_method_blocks(&reference),
@@ -1090,10 +1090,13 @@ fn declared_methods(listing: &str) -> Vec<String> {
         .collect()
 }
 
+/// Each method's `javap -v -p` block, keyed by its declaration line.
+pub type MethodBlocks = Vec<(String, String)>;
+
 /// The member blocks of a `javap -v -p` listing that declare a method. A blank line ends each
 /// member's block.
-fn verbose_method_blocks(listing: &str) -> Vec<(String, String)> {
-    let mut blocks: Vec<(String, String)> = Vec::new();
+fn verbose_method_blocks(listing: &str) -> MethodBlocks {
+    let mut blocks: MethodBlocks = Vec::new();
     let mut current: Option<(String, Vec<&str>)> = None;
     for line in listing.lines().map(str::trim) {
         if line.is_empty() || line == "}" {
