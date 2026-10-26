@@ -259,6 +259,10 @@ fn a_processor_sees_generates_and_logs_what_it_does_under_ksp2() {
         std::fs::read_to_string(outputs.kotlin.join("gen/Generated.kt")).unwrap(),
         "package gen\n\n@sample.Marker\nclass Generated {\n    class Nested\n}\n"
     );
+    assert_eq!(
+        std::fs::read_to_string(outputs.resources.join("META-INF/services/dump.Service")).unwrap(),
+        "dump.Implementation\n"
+    );
 }
 
 #[test]
@@ -587,6 +591,50 @@ fn library_annotation_members_are_what_ksp2_reports() {
         "ksp-outputs-library-members",
         "library-members.expected",
     );
+}
+
+/// A type that names a typealias, as a whole or in a type argument, annotated or not, is one the
+/// round leaves undescribed: KSP2 resolves it to the alias, keeping the alias's arguments (its log
+/// shows `List<members.KeptString>`) and answering no annotations for any of these, but the round
+/// does not describe a source alias type yet, so it refuses rather than report the expansion.
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn a_type_naming_an_alias_is_refused() {
+    let (runtime, env) = runtime();
+    let processor = processor_in(
+        &runtime,
+        "Members",
+        "members.MembersProvider",
+        "ksp-processor-members-alias-refusals",
+    );
+    for (case, source) in [
+        ("annotated", "members-refused/AnnotatedAlias.kt"),
+        ("plain", "members-refused/PlainAlias.kt"),
+        ("nested", "members-refused/NestedAlias.kt"),
+    ] {
+        let out = scratch(&format!("ksp-outputs-alias-annotations-{case}"));
+        let outputs = KspOutputs {
+            kotlin: out.join("kotlin"),
+            java: out.join("java"),
+            classes: out.join("classes"),
+            resources: out.join("resources"),
+        };
+        let error = run(
+            &runtime,
+            &env,
+            &processor,
+            &[fixtures().join(source)],
+            &[],
+            &outputs,
+        )
+        .err()
+        .unwrap_or_else(|| panic!("the host refuses the {case} alias"));
+        assert_eq!(
+            error.to_string(),
+            "krusty's KSP host does not implement KSPropertyDeclaration.type of a type it cannot describe yet, which a processor uses",
+            "{case}"
+        );
+    }
 }
 
 #[test]

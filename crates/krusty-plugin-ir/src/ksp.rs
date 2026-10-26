@@ -239,6 +239,8 @@ pub struct KspProperty {
     pub getter: Option<KspAccessor>,
     /// A `var`'s setter.
     pub setter: Option<KspAccessor>,
+    /// Whether it has a backing field; `None` when the round cannot say.
+    pub has_backing_field: Option<bool>,
     /// What `Resolver.mapToJvmSignature` answers; `None` when the round cannot say.
     pub jvm_signature: Option<String>,
 }
@@ -501,6 +503,10 @@ pub struct KspType {
     pub declaration: KspTypeDeclaration,
     pub nullable: bool,
     pub arguments: Vec<KspTypeArgument>,
+    /// Whether KSP reports the type with no annotations: source spells it with no type-use
+    /// annotation, or it is the classifier type a constructor returns. Otherwise its annotations
+    /// are not described.
+    pub unannotated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

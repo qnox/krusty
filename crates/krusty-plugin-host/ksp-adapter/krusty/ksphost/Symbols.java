@@ -253,6 +253,9 @@ final class Symbols {
             setter.jvmName = readOptionalString(in);
             property.setter = setter;
         }
+        if (Wire.readBoolean(in)) {
+            property.hasBackingField = Wire.readBoolean(in);
+        }
         property.jvmSignature = readOptionalString(in);
         return property;
     }
@@ -411,6 +414,7 @@ final class Symbols {
             name = Wire.readString(in);
         }
         boolean nullable = Wire.readBoolean(in);
+        boolean unannotated = Wire.readBoolean(in);
         int count = in.readInt();
         List<KSTypeArgument> arguments = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
@@ -421,7 +425,7 @@ final class Symbols {
             }
             arguments.add(argument);
         }
-        reference.type = new SourceType(this, name, parameter, nullable, arguments);
+        reference.type = new SourceType(this, name, parameter, nullable, unannotated, arguments);
         reference.type.alias = alias;
         return reference;
     }
