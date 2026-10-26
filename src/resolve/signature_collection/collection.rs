@@ -621,11 +621,6 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         });
                     if let Some(signature) = &mut generic_sig {
                         signature.receiver = source_receiver;
-                        order_primary_class_bounds(
-                            signature,
-                            &table.source_class_headers,
-                            &*libraries,
-                        );
                     }
                     let projected_return_hazard = if compact_headers.is_some() {
                         has_projected_generic_return_hazard_from_header(&callable_header)

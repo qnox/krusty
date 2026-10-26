@@ -10330,6 +10330,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   name no declaration in scope declares has no primary bound, and the function does not align. Tests:
   `tests/intersection_bound_metadata_order_e2e.rs`,
   `tests/krusty_roundtrip_class_metadata_e2e.rs`.
+- **A type parameter erases to its declaration's primary bound in every physical slot.** For
+  `class Holder<T>(val value: T) where T : Marker, T : Base`, kotlinc's `erasedUpperBound` is
+  `Base`, though `Marker` is written first. The constructor parameter, the backing field, the
+  getter and setter, an `Array<T>` slot, every member taking or returning `T`, and an inner class's
+  members and fields over its captured `T` all erase to `Base`. A member's own
+  `<R> where R : Marker, R : Base` does the same. A call from another file links those
+  descriptors. Common IR keeps a type parameter's written bounds on the declaration records: the
+  file's own generic functions and classes, the formals a body captures, and each module callable,
+  property and constructor the file calls, which carries its own and its owner's formals. Each
+  occurrence carries only the first written bound. Before any other JVM pass reads an
+  occurrence's carrier, the backend selects the carrier from those complete bounds (the first
+  class bound, else the first bound) and rebinds every occurrence of that semantic identity,
+  keeping the occurrence's nullability. The resolver no longer reorders a top-level callable's
+  bounds class-first; the frontend keeps written order everywhere. An inner class's field over a
+  captured formal also gets its `TT;` generic signature, found in the class's complete
+  type-parameter layout. Tests: `tests/type_parameter_bound_erasure_e2e.rs` (`class_formals`),
+  `tests/intersection_bound_metadata_order_e2e.rs`.
 - **`ClassName.Companion` named explicitly.** The bare `ClassName` already denotes the companion
   singleton in a value position (`val f: Factory = Widget`); both spellings mean the same object, so
   they resolve to the same type and lower to the same `getstatic C.Companion:LC$Companion;`. As in
