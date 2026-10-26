@@ -13705,6 +13705,33 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   initialized in its `<clinit>` after `Companion`, reached from the companion's accessors through
   `access$getX$cp`/`access$setX$cp`; a companion `init` block runs there in source order. krusty
   kept them as `Companion` instance fields. Tests: `tests/value_class_companion_property_storage_e2e.rs`.
+- **A value class's interface entry is a forwarder of its member.** The box's instance entry for
+  an interface member realized as a static replacement enters on the member's signature line, even
+  when an expression body starts on a later line, and returns on the line the declaration ends on
+  (a block's `}` or an expression body's last line); on a one-line member its single entry covers
+  the return. krusty entered on the body's line and mapped no return. Tests:
+  `tests/value_class_interface_entry_e2e.rs`.
+- **A hoisted companion property's getter is described under its final JVM name.** The companion
+  getter of a property hoisted onto the outer class maps the property's line (its getter's, when
+  one is written) and names `this`. A value-class result mangles its name (`getZero-eEFUqEU`);
+  krusty described it under the property's unmangled spelling, which names no method, so the
+  mangled getter had no tables, in a value class's companion and an ordinary one's. Tests:
+  `tests/value_class_companion_property_storage_e2e.rs`.
+- **A reference to a value class's underlying property reads it with `unbox-impl`.** The
+  underlying property is the carrier, so kotlinc's `get` reads it from the box with `unbox-impl`
+  whatever its visibility, and reports the property's own getter (`getX()I`) to reflection. A
+  private one therefore needs no `access$getX$p` bridge. krusty called `getX()` for a public one
+  and gave a private one a bridge. Tests: `tests/value_class_property_reference_e2e.rs`.
+- **A value class's source `equals` override keeps `other: Any?`.** The box's `equals(Object)`
+  calling `equals-impl` is the override, so its parameter is `@Nullable` like `Any.equals`'s;
+  krusty annotated it `@NotNull`. With such an override, `equals-impl0` compares the carriers
+  through it on their boxes, `box-impl(p1).equals(box-impl(p2))`; krusty called
+  `equals-impl(p1, box-impl(p2))`. Tests: `tests/value_class_any_override_e2e.rs`.
+- **A delegated companion property's metadata names its hoisted `x$delegate`.** The delegate is
+  stored as a static of the outer class, and the companion's `@Metadata` property signature still
+  names that field (`lazyTwo$delegate:Lkotlin/Lazy;`), as it names an ordinary hoisted backing
+  field. krusty wrote no field signature for it. Tests:
+  `tests/value_class_companion_property_storage_e2e.rs`.
 - **An owner reads its explicit backing field, typed as the field.** Inside the class that
   declares `val a: Any field = V(1)`, a read whose receiver's static type is exactly that class is
   kotlinc's `IrGetField` of the field, not a call of `getA()`: `a.x` over a value class

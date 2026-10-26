@@ -1596,6 +1596,10 @@ pub struct IrFile {
     /// index is stable within its declaring class; backend consumers must not recover this edge by
     /// matching the property's spelling against a static field name.
     jvm_companion_property_statics: crate::fx_hash::HashMap<(TypeName, u32), u32>,
+    /// Exact delegated companion property declaration → the outer-class static holding its
+    /// `x$delegate`. Kept apart from `jvm_companion_property_statics`: the delegate is storage the
+    /// property's accessors read, not the property itself.
+    jvm_companion_delegate_statics: crate::fx_hash::HashMap<(TypeName, u32), u32>,
     /// User annotations applied to FUNCTIONS (top-level and members share the `functions` arena),
     /// by function id, retaining the resolved semantic retention. A side table rather than a field on [`IrFunction`], for the
     /// same reason [`IrClass::field_annotations`] is one: the overwhelming majority of functions
