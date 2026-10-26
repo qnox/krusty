@@ -1556,6 +1556,7 @@ impl super::IrFile {
         remap_first_key(&mut self.generated_functions, names);
         remap_first_key(&mut self.generated_secondary_constructors, names);
         remap_first_key(&mut self.jvm_companion_property_statics, names);
+        remap_first_key(&mut self.jvm_companion_delegate_statics, names);
         remap_first_key(&mut self.property_annotation_markers, names);
         remap_first_key(&mut self.external_secondary_super_constructors, names);
         remap_first_key(&mut self.prop_declared_spellings, names);
