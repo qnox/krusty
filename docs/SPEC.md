@@ -20742,6 +20742,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   every such function was `unresolved function` from a krusty-built classpath.
   `FnMeta::jvm_name` carries the f1 name (written only when it differs from the Kotlin name).
   Test: `tests/classpath_value_class_param_e2e.rs` (krusty-built by default).
+- **A facade function's `JvmMethodSignature` records its name without a descriptor when only the
+  name is underivable.** kotlinc's serializer writes the physical name whenever it differs from the
+  Kotlin one and the descriptor only when the proto types do not pin it, each on its own, as class
+  members already did: `accept(x: NX?, y: NY?)` over nullable value classes boxes both parameters,
+  so its record is `JvmMethodSignature(name = "accept-6FUe0Y4")` alone. The facade writer dropped
+  the whole signature whenever it had no descriptor, so the mangled name vanished from `d2`
+  (`metadata/builder.rs`). Test:
+  `tests/value_class_mangled_names_e2e.rs::a_derivable_mangled_signature_records_only_its_name`.
 
 - **Classes with value-class constructor parameters publish full metadata; secondary VC ctors get
   the marker ABI.** The blanket "no @Metadata for a value-param ctor class" decline is lifted — the

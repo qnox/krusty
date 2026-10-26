@@ -99,3 +99,33 @@ fn a_constructor_is_hidden_exactly_when_a_parameter_requires_mangling() {
         &["ResultHolder", "Bounded", "HiddenConstructorsKt"],
     );
 }
+
+/// A mangled function whose JVM descriptor a reader can rebuild from its declared types (every
+/// value-class parameter nullable and boxed) still records its physical name in `@Metadata`, with
+/// no descriptor: `JvmMethodSignature(name = "accept-6FUe0Y4")`. krusty recorded a name only beside
+/// a descriptor, so the facade's metadata lost the mangled name.
+const NAME_ONLY_SIGNATURE: &str = r#"@JvmInline
+value class NX(val x: String?)
+
+@JvmInline
+value class NY(val y: Number?)
+
+fun accept(x: NX?, y: NY?): String = if (x == null && y?.y == 1) "OK" else "fail"
+
+fun box(): String = accept(null, NY(1))
+"#;
+
+#[test]
+fn a_derivable_mangled_signature_records_only_its_name() {
+    common::assert_classes_identical_to_kotlinc(
+        "NameOnlySignature",
+        NAME_ONLY_SIGNATURE,
+        &["NameOnlySignatureKt"],
+    );
+}
+
+#[test]
+fn name_only_signature_runs() {
+    common::expect_box_ok_with_stdlib(NAME_ONLY_SIGNATURE, "NameOnlySignature");
+}
+
