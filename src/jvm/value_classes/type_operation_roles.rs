@@ -36,9 +36,33 @@ pub(super) fn record_unbox_type_operation_edge(ir: &mut IrFile, call: ExprId, re
     );
 }
 
+/// Record a generated null-safe value-class unbox call whose temporary holds a type operation.
+/// Other values need no preservation during type erasure and therefore create no edge.
+pub(super) fn record_null_safe_unbox_type_operation_edge(
+    ir: &mut IrFile,
+    call: ExprId,
+    value: ExprId,
+) {
+    if !matches!(ir.exprs.get(value as usize), Some(IrExpr::TypeOp { .. })) {
+        return;
+    }
+    assert!(
+        matches!(ir.exprs.get(call as usize), Some(IrExpr::Call { .. })),
+        "a null-safe value-class unbox edge must start at its call"
+    );
+    assert!(
+        ir.value_class_null_safe_unbox_type_operation_edges
+            .insert(call, value)
+            .is_none_or(|recorded| recorded == value),
+        "a null-safe value-class unbox call has one exact type-operation value"
+    );
+}
+
 /// `call` is about to be replaced, so it is no longer the unbox operation this edge named.
 pub(super) fn retire_unbox_type_operation_edge(ir: &mut IrFile, call: ExprId) {
     ir.value_class_unbox_type_operation_edges.remove(&call);
+    ir.value_class_null_safe_unbox_type_operation_edges
+        .remove(&call);
 }
 
 /// Exact type-operation receivers of generated value-class unbox calls still present in the IR.
@@ -99,8 +123,17 @@ pub(super) fn record_primitive_array_allocation_carriers(ir: &mut IrFile, under:
 
 /// Record the classfile role of every type operation on a primitive-array value class.
 pub(super) fn record_primitive_array_type_operations(ir: &mut IrFile, under: &Under) {
-    let receivers = recorded_unbox_type_operation_receivers(ir).collect::<HashSet<_>>();
+    let mut receivers = recorded_unbox_type_operation_receivers(ir).collect::<HashSet<_>>();
     ir.value_class_unbox_type_operation_edges.clear();
+    // A null-safe unbox reads the same checked box through its temporary.
+    for (call, value) in std::mem::take(&mut ir.value_class_null_safe_unbox_type_operation_edges) {
+        assert!(
+            matches!(ir.exprs.get(call as usize), Some(IrExpr::Call { .. }))
+                && matches!(ir.exprs.get(value as usize), Some(IrExpr::TypeOp { .. })),
+            "a recorded null-safe value-class unbox edge must still join its call and type operation"
+        );
+        receivers.insert(value);
+    }
     for (id, expr) in ir.exprs.iter().enumerate() {
         let IrExpr::TypeOp {
             op, type_operand, ..

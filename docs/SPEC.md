@@ -14273,6 +14273,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   construction as it did while the call was mistaken for one.
   (`tests/unsigned_array_allocation_e2e.rs`, `tests/native_unsigned_e2e.rs`.)
 
+- **A cast to a value class checks its box, and a safe cast unboxes where it succeeds.**
+  `a as X`, `a as X?` and `a as? X` from a reference test the box (`checkcast X`) and then read
+  `unbox-impl`, as kotlinc does. The written cast is that box test, so the unbox reads it as its
+  receiver instead of adding a second cast; a null-safe unbox of `a as X?` reads it through its
+  temporary and records that edge too (`value_class_null_safe_unbox_type_operation_edges`). This
+  matters most for a value class over a primitive array (`UIntArray`), whose box and carrier
+  share the descriptor `[I`: the recorded edge is what makes the cast name the box, and a cast
+  naming the carrier (`checkcast [I`) threw `ClassCastException` for every real `UIntArray`. A
+  safe cast's `when { a is X -> a as X; else -> null }` unboxes its cast branch in place and
+  keeps the `null` branch as the carrier's `null`, for every value class; unboxing the merged
+  result behind a null check instead read `unbox-impl` from the carrier.
+  (`tests/unsigned_array_cast_e2e.rs`.)
+
 - **A `checkcast` right before an `aastore` is removed, as kotlinc's
   `RedundantCheckcastsBeforeAastoreMethodTransformer` does.** The pass runs after jump negation and
   before the final dead-code elimination (`bytecode_passes/checkcasts_before_aastore.rs`, step
