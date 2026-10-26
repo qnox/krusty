@@ -83,6 +83,8 @@ pub(super) struct StaticAccessorPlan {
     companion_fields: HashMap<(TypeName, TypeName), Box<str>>,
     /// Inline functions whose private reads and calls are published through accessors.
     exporting_private_access: HashSet<u32>,
+    /// The bodies of `crossinline` literals, which reach every class's members through accessors.
+    exporting_lambda_bodies: HashSet<krusty::ir::ExprId>,
     /// Top-level `lateinit` statics whose `isInitialized` some class other than the facade probes.
     foreign_initialization_probes: HashSet<u32>,
 }
@@ -100,6 +102,12 @@ impl StaticAccessorPlan {
     /// Whether emitting `function` must route private access through public accessors.
     pub(super) fn exports_private_access(&self, function: u32) -> bool {
         self.exporting_private_access.contains(&function)
+    }
+
+    /// Whether the inline lambda body `body` is a `crossinline` literal's, emitted as code outside
+    /// its class ([`super::crossinline_literals`]).
+    pub(super) fn exports_lambda_body(&self, body: krusty::ir::ExprId) -> bool {
+        self.exporting_lambda_bodies.contains(&body)
     }
 
     /// Whether a class other than the facade probes top-level `lateinit` static `index` with
@@ -244,6 +252,7 @@ pub(super) fn routes_through_accessor(
 pub(super) fn inline_functions_exporting_private_access(
     ir: &IrFile,
     contexts: &[EmissionContext],
+    exporting_lambda_bodies: &HashSet<krusty::ir::ExprId>,
 ) -> HashSet<u32> {
     let mut exporting = HashSet::default();
     let mut stack = Vec::new();
@@ -259,6 +268,15 @@ pub(super) fn inline_functions_exporting_private_access(
     for function in compiled_inline_callees_of_other_classes(ir, contexts) {
         if exporting.insert(function) {
             stack.push(function);
+        }
+    }
+    // A `crossinline` literal's body runs outside its class, and so do the inline functions it
+    // calls.
+    for &body in exporting_lambda_bodies {
+        for callee in inline_template_dependencies(ir, body) {
+            if ir.inline_fns.contains(&callee) && exporting.insert(callee) {
+                stack.push(callee);
+            }
         }
     }
     while let Some(function) = stack.pop() {
@@ -406,8 +424,10 @@ pub(super) fn plan(
     contexts: &[EmissionContext],
     class_member_fids: &HashSet<u32>,
     private_calls: &HashMap<krusty::ir::ExprId, (u32, u32)>,
+    exporting_lambda_bodies: HashSet<krusty::ir::ExprId>,
 ) -> StaticAccessorPlan {
-    let exporting_private_access = inline_functions_exporting_private_access(ir, contexts);
+    let exporting_private_access =
+        inline_functions_exporting_private_access(ir, contexts, &exporting_lambda_bodies);
     let protected_calls = env.run.protected_member_access_bridges.borrow();
     let private_member_bridges = env.run.private_member_access_bridges.borrow();
     let walk = Walk {
@@ -420,6 +440,7 @@ pub(super) fn plan(
         protected: RefCell::default(),
         private_calls,
         helper_access: env.local_delegate_access,
+        exporting_lambda_bodies: &exporting_lambda_bodies,
         foreign_initialization_probes: RefCell::default(),
     };
     let mut carriers: HashMap<TypeName, Vec<Use>> = HashMap::default();
@@ -499,11 +520,13 @@ pub(super) fn plan(
     // particular, `collect` places an assignment target before its value without moving that
     // setter ahead of unrelated reads elsewhere on the line.
     uses.sort_by_key(|found| found.line);
+    let foreign_initialization_probes = walk.foreign_initialization_probes.into_inner();
     let mut plan = StaticAccessorPlan {
         protected: walk.protected.into_inner(),
         companion_fields: walk.companion_fields.into_inner(),
         exporting_private_access,
-        foreign_initialization_probes: walk.foreign_initialization_probes.into_inner(),
+        foreign_initialization_probes,
+        exporting_lambda_bodies,
         ..StaticAccessorPlan::default()
     };
     let mut seen = HashSet::default();
@@ -773,6 +796,8 @@ struct Walk<'a> {
     /// function.
     private_calls: &'a HashMap<krusty::ir::ExprId, (u32, u32)>,
     helper_access: &'a crate::local_delegate_accessors::HelperAccess,
+    /// The bodies of `crossinline` literals, whose code exports private access wherever it is.
+    exporting_lambda_bodies: &'a HashSet<krusty::ir::ExprId>,
     /// Top-level `lateinit` statics probed with `isInitialized` outside the facade.
     foreign_initialization_probes: RefCell<HashSet<u32>>,
 }
@@ -804,7 +829,8 @@ impl Walk<'_> {
     /// class's private static declaration. A use without a source line takes its parent's; the
     /// construction of a carrier in `carriers` stands for that carrier's own uses. `export_private`
     /// is set when `root` is a non-private `inline` function: that body is copied into other
-    /// classes, so its private calls need accessors even when `context` is their owner.
+    /// classes, so its private calls need accessors even when `context` is their owner. A
+    /// `crossinline` literal's body under `root` exports them too.
     fn collect(
         &self,
         context: StaticOwner,
@@ -816,8 +842,10 @@ impl Walk<'_> {
     ) {
         let ir = self.ir;
         // Post-order: an operand's use precedes the use of the call or store consuming it.
-        let mut stack = vec![(root, line, false)];
-        while let Some((expression, inherited, expanded)) = stack.pop() {
+        let mut stack = vec![(root, line, false, export_private)];
+        while let Some((expression, inherited, expanded, export_private)) = stack.pop() {
+            let export_private =
+                export_private || self.exporting_lambda_bodies.contains(&expression);
             let line = ir.source_line(expression).unwrap_or(inherited);
             if !expanded {
                 // Kotlin discovers a store's target after its receiver but before its assigned
@@ -827,30 +855,35 @@ impl Walk<'_> {
                     IrExpr::PropertyWrite {
                         receiver, value, ..
                     } => {
-                        stack.push((*value, line, false));
-                        stack.push((expression, inherited, true));
+                        stack.push((*value, line, false, export_private));
+                        stack.push((expression, inherited, true, export_private));
                         if let Some(receiver) = receiver {
-                            stack.push((*receiver, line, false));
+                            stack.push((*receiver, line, false, export_private));
                         }
                     }
                     IrExpr::SetField {
                         receiver, value, ..
                     } => {
-                        stack.push((*value, line, false));
-                        stack.push((expression, inherited, true));
-                        stack.push((*receiver, line, false));
+                        stack.push((*value, line, false, export_private));
+                        stack.push((expression, inherited, true, export_private));
+                        stack.push((*receiver, line, false, export_private));
                     }
                     IrExpr::SetStatic { value, .. } => {
-                        stack.push((*value, line, false));
-                        stack.push((expression, inherited, true));
+                        stack.push((*value, line, false, export_private));
+                        stack.push((expression, inherited, true, export_private));
                     }
                     _ => {
-                        stack.push((expression, inherited, true));
+                        stack.push((expression, inherited, true, export_private));
                         let mut children = Vec::new();
                         krusty::ir::for_each_child(&ir.exprs, expression, &mut |child| {
                             children.push(child)
                         });
-                        stack.extend(children.into_iter().rev().map(|child| (child, line, false)));
+                        stack.extend(
+                            children
+                                .into_iter()
+                                .rev()
+                                .map(|child| (child, line, false, export_private)),
+                        );
                     }
                 }
                 continue;
