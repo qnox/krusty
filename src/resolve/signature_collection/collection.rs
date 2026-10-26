@@ -1764,6 +1764,9 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     table.insert_class_sig(
                         internal,
                         ClassSig::with_declared_callable_headers(DeclaredCallableClassHeader {
+                            declaration_name: compact_headers.zip(compact_classifier).and_then(
+                                |(headers, stub)| headers.classifier_declaration_name(stub),
+                            ),
                             internal,
                             stable_declaration: compact_classifier.map(|stub| stub.id),
                             source_file: i as u32,
@@ -1913,6 +1916,11 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     companion_internal,
                                     ClassSig::with_declared_callable_headers(
                                         DeclaredCallableClassHeader {
+                                            declaration_name: compact_headers
+                                                .zip(compact_companion)
+                                                .and_then(|(headers, stub)| {
+                                                    headers.classifier_declaration_name(stub)
+                                                }),
                                             internal: companion_internal,
                                             stable_declaration: compact_companion
                                                 .map(|stub| stub.id),
@@ -3465,6 +3473,9 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     table.insert_class_sig(
                         internal_ref,
                         ClassSig {
+                            declaration_name: compact_headers.zip(compact_classifier).and_then(
+                                |(headers, stub)| headers.classifier_declaration_name(stub),
+                            ),
                             internal: internal_ref,
                             stable_declaration: compact_classifier.map(|stub| stub.id),
                             source_file: i as u32,
@@ -3582,6 +3593,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         companion_internal_ref.filter(|_| !contributed_companion_methods.is_empty())
                     {
                         contributed_companions.push(ContributedCompanion {
+                            owner: internal_ref,
                             internal,
                             source_file: i as u32,
                             order: contributed_companion_order,

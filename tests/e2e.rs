@@ -1132,6 +1132,8 @@ mod generic_suspend_member_return_e2e;
 mod generic_value_class_result_e2e;
 #[path = "generic_vararg_inference_e2e.rs"]
 mod generic_vararg_inference_e2e;
+#[path = "getter_return_line_e2e.rs"]
+mod getter_return_line_e2e;
 #[path = "hidden_mapped_member_e2e.rs"]
 mod hidden_mapped_member_e2e;
 #[path = "hides_members_overload_e2e.rs"]
@@ -1264,6 +1266,8 @@ mod internal_classpath_access_e2e;
 mod internal_component_names_e2e;
 #[path = "internal_member_names_e2e.rs"]
 mod internal_member_names_e2e;
+#[path = "internal_primary_constructor_metadata_e2e.rs"]
+mod internal_primary_constructor_metadata_e2e;
 #[path = "intersection_reified_type_of_e2e.rs"]
 mod intersection_reified_type_of_e2e;
 #[path = "invariant_argument_wildcards_e2e.rs"]
@@ -1707,6 +1711,10 @@ mod source_map_annotation_parts_e2e;
 mod special_collection_bridge_e2e;
 #[path = "splice_nullable_value_class_lambda_e2e.rs"]
 mod splice_nullable_value_class_lambda_e2e;
+#[path = "split_line_conditions_parse_e2e.rs"]
+mod split_line_conditions_parse_e2e;
+#[path = "split_membership_conditions_e2e.rs"]
+mod split_membership_conditions_e2e;
 #[path = "static_access_type_arguments_e2e.rs"]
 mod static_access_type_arguments_e2e;
 #[path = "string_when_switch_e2e.rs"]
@@ -1739,6 +1747,8 @@ mod value_class_carrier_parameter_bridge_e2e;
 mod value_class_constructor_bodies_e2e;
 #[path = "value_class_constructor_default_e2e.rs"]
 mod value_class_constructor_default_e2e;
+#[path = "value_class_constructor_default_lines_e2e.rs"]
+mod value_class_constructor_default_lines_e2e;
 #[path = "value_class_constructor_reference_e2e.rs"]
 mod value_class_constructor_reference_e2e;
 #[path = "value_class_declaration_e2e.rs"]
@@ -1775,6 +1785,8 @@ mod value_class_java_generic_constructor_e2e;
 mod value_class_java_nullable_element_e2e;
 #[path = "value_class_lambda_class_e2e.rs"]
 mod value_class_lambda_class_e2e;
+#[path = "value_class_lifted_member_order_e2e.rs"]
+mod value_class_lifted_member_order_e2e;
 #[path = "value_class_nested_carrier_e2e.rs"]
 mod value_class_nested_carrier_e2e;
 #[path = "value_class_nested_property_to_string_e2e.rs"]

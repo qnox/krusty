@@ -20,8 +20,8 @@ use crate::ir::{
 use crate::types::Ty;
 
 use super::{
-    constant_bound, constant_value, is_unsigned, step_constant, CounterLoopStyle, Operand,
-    Realizer, UntilSteps,
+    constant_bound, constant_node, constant_value, is_unsigned, step_constant, CounterLoopStyle,
+    Operand, Realizer, UntilSteps,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -199,35 +199,38 @@ fn step_type(ty: Ty) -> Ty {
     }
 }
 
-fn exclusive_bound(ir: &mut IrFile, last: ExprId, direction: Direction, ty: Ty) -> Option<ExprId> {
-    let moved = moved_bound(ir, last, direction)?;
-    Some(ir.add_expr(IrExpr::TypeOp {
-        op: crate::ir::IrTypeOp::ImplicitCoercion,
-        arg: moved,
-        type_operand: ty,
-    }))
-}
-
-/// `convertToExclusiveUpperBound`/`convertToExclusiveLowerBound` of a constant bound: the constant
-/// one step further in `direction`, of the bound's own kind, unless that step overflows it.
-pub(super) fn moved_bound(ir: &mut IrFile, last: ExprId, direction: Direction) -> Option<ExprId> {
-    let delta: i64 = match direction {
-        Direction::Increasing => 1,
-        Direction::Decreasing => -1,
-        Direction::Unknown => return None,
-    };
-    let moved = match constant_bound(ir, last)? {
-        IrConst::Byte(value) => IrConst::Byte(value.checked_add(i8::try_from(delta).ok()?)?),
-        IrConst::Short(value) => IrConst::Short(value.checked_add(i16::try_from(delta).ok()?)?),
-        IrConst::Int(value) => IrConst::Int(value.checked_add(i32::try_from(delta).ok()?)?),
-        IrConst::Long(value) => IrConst::Long(value.checked_add(delta)?),
-        IrConst::Char(value) => IrConst::Char(u16::try_from(i64::from(value) + delta).ok()?),
-        _ => return None,
-    };
-    Some(ir.add_expr(IrExpr::Const(moved)))
-}
-
 impl Realizer<'_> {
+    fn exclusive_bound(&mut self, last: ExprId, direction: Direction, ty: Ty) -> Option<ExprId> {
+        let moved = self.moved_bound(last, direction)?;
+        Some(self.ir.add_expr(IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::ImplicitCoercion,
+            arg: moved,
+            type_operand: ty,
+        }))
+    }
+
+    /// `convertToExclusiveUpperBound`/`convertToExclusiveLowerBound` of a constant bound: the
+    /// constant one step further in `direction`, of the bound's own kind, unless that step
+    /// overflows it. `convertIrConst` builds it at the written constant's offsets.
+    pub(super) fn moved_bound(&mut self, last: ExprId, direction: Direction) -> Option<ExprId> {
+        let delta: i64 = match direction {
+            Direction::Increasing => 1,
+            Direction::Decreasing => -1,
+            Direction::Unknown => return None,
+        };
+        let written = constant_node(self.ir, last)?;
+        let moved = match constant_bound(self.ir, written)? {
+            IrConst::Byte(value) => IrConst::Byte(value.checked_add(i8::try_from(delta).ok()?)?),
+            IrConst::Short(value) => IrConst::Short(value.checked_add(i16::try_from(delta).ok()?)?),
+            IrConst::Int(value) => IrConst::Int(value.checked_add(i32::try_from(delta).ok()?)?),
+            IrConst::Long(value) => IrConst::Long(value.checked_add(delta)?),
+            IrConst::Char(value) => IrConst::Char(u16::try_from(i64::from(value) + delta).ok()?),
+            _ => return None,
+        };
+        let moved = self.ir.add_expr(IrExpr::Const(moved));
+        Some(self.derived_constant(written, moved))
+    }
+
     pub(super) fn progression_header(
         &mut self,
         source: &IrProgressionSource,
@@ -320,7 +323,7 @@ impl Realizer<'_> {
         if is_unsigned(ty) {
             return None;
         }
-        let last = exclusive_bound(self.ir, end, Direction::Decreasing, ty)?;
+        let last = self.exclusive_bound(end, Direction::Decreasing, ty)?;
         let nested = self.range_literal_header(ty, FirRangeOperation::Through, start, last);
         Some(self.stepped_header(nested, *step, last_element))
     }
@@ -346,7 +349,7 @@ impl Realizer<'_> {
             FirRangeOperation::Through | FirRangeOperation::DownTo
         );
         let exclusive = (inclusive && self.style == CounterLoopStyle::JavaLike && !is_unsigned(ty))
-            .then(|| exclusive_bound(self.ir, last.value, direction, ty))
+            .then(|| self.exclusive_bound(last.value, direction, ty))
             .flatten();
         let step_ty = step_type(ty);
         let unit = if direction == Direction::Decreasing {

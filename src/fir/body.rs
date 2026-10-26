@@ -32,8 +32,8 @@ pub use branches::{FirCatch, FirWhenBranch, FirWhenCondition, FirWhenSubjectNume
 mod call_storage;
 mod ranges;
 pub use ranges::{
-    FirProgressionClass, FirProgressionSource, FirRangeComparisonProvenance, FirRangeCounterKind,
-    FirRangeOperation, FirRuntimeFunction,
+    FirIndices, FirProgressionClass, FirProgressionSource, FirRangeComparisonProvenance,
+    FirRangeCounterKind, FirRangeOperation, FirRuntimeFunction,
 };
 mod indexed_iteration;
 pub use indexed_iteration::{FirBuiltinIterableKind, FirCharSequenceIndexing};
@@ -1180,6 +1180,14 @@ pub enum FirExprKind {
         upper_bound: FirExprId,
         negated: bool,
     },
+    /// `value in receiver.indices` (kotlinc's `RangeContainsLowering` over an `IndicesHandler`
+    /// header): `0 <= value && value < size`, compared in `comparison`. Neither `indices` nor
+    /// `contains` is called.
+    IndicesContainment {
+        value: FirExprId,
+        indices: Box<FirIndices>,
+        comparison: ResolvedTy,
+    },
     CallableReference {
         target: FirCallableReferenceTarget,
         /// Exact callable shape selected by the checker. This remains a function type even when
@@ -1424,6 +1432,7 @@ impl FirExprKind {
             | FirExprKind::NullableNumericComparison { .. }
             | FirExprKind::Range { .. }
             | FirExprKind::InRange { .. }
+            | FirExprKind::IndicesContainment { .. }
             | FirExprKind::SafeCall { .. }
             | FirExprKind::Elvis { .. }
             | FirExprKind::Throw(_)

@@ -1293,6 +1293,7 @@ mod tests {
     fn blank_class(name: &str) -> IrClass {
         IrClass {
             fq_name: name.into(),
+            declaration_name: None,
             is_source_declared: true,
             is_compiler_generated: false,
             is_anonymous_object: false,
