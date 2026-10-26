@@ -161,14 +161,12 @@ fn inline_default_class_contexts(
     contexts
 }
 
-fn inline_default_type_requires_reification(
-    ir: &IrFile,
-    context: InlineDefaultClassContext,
-    function_type: Ty,
-) -> bool {
+/// Whether a lambda class written in the inline function `owner` names one of its reified
+/// parameters in its function type, so the class's own type must be specialized for each call.
+fn type_requires_reification(ir: &IrFile, owner: FunId, function_type: Ty) -> bool {
     let reified = ir
         .signatures
-        .get(&context.root_owner)
+        .get(&owner)
         .into_iter()
         .flat_map(|signature| &signature.type_params)
         .filter(|parameter| parameter.reified)
@@ -516,22 +514,6 @@ pub(in crate::jvm) fn has_inline_default_lambda(ir: &IrFile, function: FunId) ->
     })
 }
 
-/// Whether this exact default value materializes an inline lambda class whose semantic function
-/// type still contains a reified parameter. kotlinc marks the load/construction in the `$default`
-/// stub in addition to marking the class initializer itself.
-pub(in crate::jvm) fn inline_default_value_requires_reification(
-    ir: &IrFile,
-    expression: ExprId,
-) -> bool {
-    let internal = match ir.expr(expression) {
-        IrExpr::ExternalStaticInstance { ty, .. } | IrExpr::New { internal: ty, .. } => *ty,
-        _ => return false,
-    };
-    ir.class_id_by_name(internal)
-        .and_then(|class| ir.classes[class as usize].lambda.as_ref())
-        .is_some_and(|lambda| lambda.inline_default_owner.is_some() && lambda.requires_reification)
-}
-
 /// The lambda a default expression materializes, if it is one.
 fn default_expression_lambda(ir: &IrFile, expression: ExprId) -> Option<FunId> {
     match ir.exprs.get(expression as usize) {
@@ -612,6 +594,10 @@ pub(super) fn realize(
     lambdas.dedup();
     let inline_default_classes = inline_default_class_contexts(ir, &lambdas);
     let inline_scopes = inline_scope::InlineScopes::new(ir);
+    let compiled_callees = ir
+        .compiled_inline_calls()
+        .map(|(_, function)| function)
+        .collect::<crate::fx_hash::HashSet<_>>();
     let mut reachable = ReachableLambdaIndex::default();
     for fid in lambdas {
         let runtime_reified = ir.runtime_reified_lambda_implementations.contains(&fid);
@@ -667,11 +653,15 @@ pub(super) fn realize(
         }
         // Every step past here may realize a class or replace a value.
         reachable.invalidate();
-        if let Some(scope) = inline_scope
-            .filter(|scope| scope.foreign && !ir.specialized_functions.contains_key(&fid))
-        {
+        if let Some(scope) = inline_scope.filter(|scope| {
+            scope.foreign
+                && !ir.specialized_functions.contains_key(&fid)
+                && !compiled_callees.contains(&scope.owner)
+        }) {
             // The declaring file writes the class; here only its constructor is known, from the
-            // captured values' types.
+            // captured values' types. A callee this file inlines from its compiled body realizes
+            // the class in full instead, as kotlinc's `IrSourceCompilerForInline` generates the
+            // callee's classes with it: the inliner reads them, and that file still writes them.
             let site = site_in_roots(ir, fid, every_emitted_root, Some(scope.node), None);
             let constructor = site.as_ref().and_then(|site| {
                 let body = ir.functions[fid as usize].body?;
@@ -699,9 +689,13 @@ pub(super) fn realize(
             if sites.is_empty() {
                 continue;
             }
-            if source != current_source && !ir.specialized_functions.contains_key(&fid) {
+            if source != current_source
+                && !ir.specialized_functions.contains_key(&fid)
+                && !inline_scope.is_some_and(|scope| compiled_callees.contains(&scope.owner))
+            {
                 // The retained source closure is emitted by its declaration file. Consumers use
-                // that exact class, not another declaration of its body or private helpers.
+                // that exact class, not another declaration of its body or private helpers. A
+                // callee inlined from its compiled body realizes it in full, as any of its lambdas.
                 for site in &sites {
                     replace_value(ir, site, false);
                 }
@@ -720,7 +714,11 @@ pub(super) fn realize(
                 &sites[0],
                 signature,
                 &captures,
-                ClassRole::default(),
+                // The inline function a closure is written in owns it as it owns any lambda.
+                ClassRole {
+                    scope: inline_scope,
+                    ..ClassRole::default()
+                },
             );
             if let Some(result) = super::local_delegate_closures::invoke_result(ir, fid) {
                 let signed_result = ir.functions[fid as usize].ret;
@@ -1329,9 +1327,8 @@ fn declare_class(
     let public_inline = inline_owner.is_some();
     let public_inline_abi = !ir.specialized_functions.contains_key(&fid)
         && inline_owner.is_some_and(|owner| !ir.method_visibility(owner).is_private());
-    let requires_reification = inline_default.is_some_and(|context| {
-        inline_default_type_requires_reification(ir, context, site.function_type)
-    });
+    let requires_reification =
+        inline_owner.is_some_and(|owner| type_requires_reification(ir, owner, site.function_type));
     let extension_receiver_label = ir
         .lambda_origins
         .get(&fid)

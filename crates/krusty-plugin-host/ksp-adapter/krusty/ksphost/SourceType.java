@@ -118,6 +118,13 @@ final class SourceType implements KSType {
     // nullability.
     @Override
     public boolean equals(Object other) {
+        if (other instanceof ClassType) {
+            ClassType that = (ClassType) other;
+            return parameter < 0
+                    && name.equals(that.getDeclaration().getQualifiedName().asString())
+                    && nullable == that.isMarkedNullable()
+                    && argumentKeys(arguments).equals(argumentKeys(that.getArguments()));
+        }
         if (!(other instanceof SourceType)) {
             return false;
         }
@@ -125,10 +132,11 @@ final class SourceType implements KSType {
         return name.equals(that.name)
                 && parameter == that.parameter
                 && nullable == that.nullable
-                && argumentKeys().equals(that.argumentKeys());
+                && argumentKeys(arguments).equals(argumentKeys(that.arguments));
     }
 
-    private List<Object> argumentKeys() {
+    // Each argument's variance and resolved type, a star's with none.
+    static List<Object> argumentKeys(List<? extends KSTypeArgument> arguments) {
         List<Object> keys = new ArrayList<>();
         for (KSTypeArgument argument : arguments) {
             keys.add(argument.getVariance());
@@ -139,7 +147,13 @@ final class SourceType implements KSType {
 
     @Override
     public int hashCode() {
-        return name.hashCode() * 31 + parameter;
+        return parameter < 0 ? classifierHash(name, nullable) : name.hashCode() * 31 + parameter;
+    }
+
+    // The hash of a type naming the classifier `qualifiedName`, whichever kind of type names it. As
+    // in KSP2, a nullable type hashes apart from its non-null form.
+    static int classifierHash(String qualifiedName, boolean nullable) {
+        return qualifiedName.hashCode() * 31 + (nullable ? 1 : -1);
     }
 
     // KSP's rendering: simple names, arguments in angle brackets, and `?` when nullable.

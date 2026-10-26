@@ -143,6 +143,7 @@ mod expression_qualifier_tree;
 mod expression_qualifiers;
 mod nested_type_aliases;
 use explicit_receiver_levels::{FunctionValueLevel, FunctionValueRungs};
+mod expected_expression;
 mod expression_getter;
 mod extension_receiver_uses;
 mod final_property_overrides;
@@ -195,7 +196,7 @@ use member_extension_properties::MemberExtensionProperty;
 mod member_overload_clash;
 mod missing_dependency_supertypes;
 mod named_class_constructors;
-mod operator_calls;
+pub(crate) mod operator_calls;
 mod operator_declarations;
 mod opt_in_usage;
 use operator_calls::{
@@ -11977,8 +11978,7 @@ impl<'a> Checker<'a> {
                     let span = self.span(expression);
                     self.expect_assignable(declared, actual, span, "extension receiver");
                 }
-                self.expr_lowers
-                    .insert(expression, ExprLowering::ExtensionPropertyGet { access });
+                self.record_extension_property_get(expression, access);
             }
         }
         ty
@@ -47691,6 +47691,7 @@ impl<'a> Checker<'a> {
                                             *body,
                                             ty,
                                             bp.ty.is_some(),
+                                            None,
                                         );
                                     }
                                     FunBody::Block(body) => {
@@ -49103,6 +49104,7 @@ impl<'a> Checker<'a> {
                                         *g,
                                         prop_ty,
                                         bp.declared_ty().is_some(),
+                                        stable_property,
                                     );
                                     if bp.declared_ty().is_none() {
                                         if let Some(declaration) = stable_property {
@@ -52269,42 +52271,6 @@ impl<'a> Checker<'a> {
     /// Commit the contextual numeric conversion chosen for a value boundary. Candidate probing uses
     /// [`Self::expression_type_for_expected`] read-only; only the selected declaration/argument path
     /// calls this method and publishes a decision consumed by checked FIR.
-    fn recorded_expression_type_for_expected(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        expression: ExprId,
-        nominal: Ty,
-        expected: Ty,
-    ) -> Ty {
-        let contextual = self.expression_type_for_expected(scope, expression, nominal, expected);
-        let selected_intersection_projection = contextual != nominal
-            && (self
-                .expr_access_path(expression)
-                .map(|path| self.lookup_intersection_narrowing(scope, &path))
-                .is_some_and(|constituents| constituents.contains(&contextual))
-                || self
-                    .intersection_constituent_for_expected(nominal, contextual)
-                    .is_some());
-        if selected_intersection_projection {
-            // This is a committed value boundary, not candidate probing. Publish the exact
-            // constituent selected from the proven non-denotable intersection so checked FIR can
-            // carry the cast and every later phase remains purely structural.
-            self.selected_value_smartcasts
-                .insert(expression, contextual);
-        }
-        if contextual != nominal
-            && !matches!(
-                self.file.expr(expression),
-                Expr::IntLit(_) | Expr::UIntLit(_)
-            )
-            && self.integer_constant_provenance(expression).is_some()
-        {
-            self.selected_numeric_conversions
-                .insert(expression, expected);
-        }
-        contextual
-    }
-
     /// Normalize a provider-facing scalar classifier to its source-language primitive identity for
     /// integer-literal range checks. Unsigned value storage is deliberately irrelevant here:
     /// `kotlin/UByte` is the semantic `UByte`, not its JVM `Byte` carrier.
