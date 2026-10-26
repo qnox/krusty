@@ -11,7 +11,8 @@
 
 use super::member_names::vc_mangle;
 use super::{erase, ir_method_desc, Under};
-use crate::ir::{Callee, IrExpr, IrFile};
+use crate::fx_hash::HashMap;
+use crate::ir::{Callee, ExprId, IrExpr, IrFile};
 use crate::jvm::private_static_access::member_property_accessor_name;
 use crate::types::Ty;
 
@@ -64,4 +65,13 @@ pub(super) fn realize(ir: &mut IrFile, under: &Under, callable_under: &Under) {
             *name = member_property_accessor_name(&mangled, true);
         }
     }
+}
+
+/// Whether the cross-file pass keeps the name of the call at `index`: a private accessor call,
+/// which `realize` already named. A field accessor's name carries no value-class hash.
+pub(super) fn keeps_name(
+    recorded: &HashMap<ExprId, crate::ir::PrivatePropertyAccessorCall>,
+    index: usize,
+) -> bool {
+    ExprId::try_from(index).is_ok_and(|call| recorded.contains_key(&call))
 }

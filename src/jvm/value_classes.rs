@@ -1064,26 +1064,7 @@ pub(crate) fn lower_value_classes(
         );
     }
     sam_names::rename(ir, &callable_under);
-    // Common IR keeps the SAM declaration semantic. Once this backend has chosen value-class
-    // carriers, publish the exact physical interface slot beside it. LambdaMetafactory (and the
-    // class-based SAM strategy) must implement that erased slot, not a descriptor reconstructed
-    // from the value-class classifier spelling.
-    ir.lambda_sam_jvm_signature = ir
-        .lambda_sam_signature
-        .iter()
-        .map(|(&implementation, (parameters, result))| {
-            (
-                implementation,
-                (
-                    parameters
-                        .iter()
-                        .map(|parameter| erase(parameter, &under))
-                        .collect(),
-                    erase(result, &under),
-                ),
-            )
-        })
-        .collect();
+    sam_names::publish_jvm_signatures(ir, &under);
     // A member of a sibling file's value class is realized by that file's pass as a static
     // implementation over the carrier: derive the same name from the declared signature the call
     // retains (and its checked suspend fact); step 4 moves the receiver to parameter zero. The
@@ -1198,11 +1179,7 @@ pub(crate) fn lower_value_classes(
                 ir.declaration_argument_boundaries
                     .contains_key(&(index as ExprId))
             } else {
-                // `private_accessor_calls` already named a private property's accessor.
-                if !ir
-                    .private_property_accessor_calls
-                    .contains_key(&(index as ExprId))
-                {
+                if !private_accessor_calls::keeps_name(&ir.private_property_accessor_calls, index) {
                     *name = vc_mangle(name, params, ret, &callable_under, true, false);
                 }
                 false
