@@ -17,7 +17,7 @@ pub(crate) use callable_declarations::{
 pub(crate) use classifier_declarations::{
     classifier_shape, constructor_parameter_list, declared_constructor, declared_retention,
     declared_targets, enum_entries_getter, enum_value_of, enum_values, member_record,
-    settle_no_arg_construction, ClassTypeParameters,
+    metadata_declaration_name, settle_no_arg_construction, ClassTypeParameters,
 };
 pub(crate) use parameter_identities::{
     associated_function_parameter_identities, associated_property_parameter_identities,

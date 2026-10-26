@@ -6,6 +6,7 @@ use super::{DeclarationAnnotations, IrClass};
 pub(crate) fn blank_class(fq: &str) -> IrClass {
     IrClass {
         fq_name: fq.into(),
+        declaration_name: None,
         is_source_declared: false,
         is_compiler_generated: false,
         is_anonymous_object: false,

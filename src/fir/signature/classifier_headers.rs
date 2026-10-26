@@ -13,6 +13,7 @@ use crate::types::{Ty, TypeName};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedClassifierHeader {
+    pub declaration_name: Option<crate::types::ClassifierDeclarationName>,
     pub declaration: DeclarationId,
     pub classifier: TypeName,
     pub superclass: Option<ResolvedTy>,
@@ -82,6 +83,21 @@ impl ResolvedClassifierHeader {
 }
 
 impl ResolvedModuleIndex {
+    pub(crate) fn publish_classifier_declaration_name(
+        &mut self,
+        declaration: DeclarationId,
+        name: crate::types::ClassifierDeclarationName,
+    ) {
+        let header = self
+            .classifiers
+            .get_mut(&declaration)
+            .expect("a declaration name belongs to a published classifier header");
+        assert!(
+            header.declaration_name.replace(name).is_none(),
+            "a classifier may publish its declaration name only once"
+        );
+    }
+
     pub(crate) fn publish_classifier_header(
         &mut self,
         declaration: DeclarationId,
@@ -132,6 +148,7 @@ impl ResolvedModuleIndex {
                 .insert(
                     declaration,
                     ResolvedClassifierHeader {
+                        declaration_name: None,
                         declaration,
                         classifier,
                         superclass,

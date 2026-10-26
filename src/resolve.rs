@@ -1347,6 +1347,7 @@ pub struct DeclaredPropertySig {
 
 #[derive(Clone, Debug)]
 pub struct ClassSig {
+    pub declaration_name: Option<crate::types::ClassifierDeclarationName>,
     pub internal: TypeName,
     /// Stable frontend identity for a source classifier. Parser `DeclId` remains a temporary
     /// collection coordinate and is never needed by signature solving or checked FIR.
@@ -1520,6 +1521,7 @@ impl std::ops::Deref for ClassSig {
 }
 
 struct DeclaredCallableClassHeader {
+    declaration_name: Option<crate::types::ClassifierDeclarationName>,
     internal: TypeName,
     stable_declaration: Option<crate::fir::DeclarationId>,
     source_file: u32,
@@ -1546,6 +1548,7 @@ impl ClassSig {
     /// signature before checking or lowering.
     fn with_declared_callable_headers(header: DeclaredCallableClassHeader) -> Self {
         let DeclaredCallableClassHeader {
+            declaration_name,
             internal,
             stable_declaration,
             source_file,
@@ -1564,6 +1567,7 @@ impl ClassSig {
             captured_type_parameters,
         } = header;
         Self {
+            declaration_name,
             internal,
             stable_declaration,
             source_file,
@@ -23669,6 +23673,7 @@ fun after(): Int = 2
 
     fn import_test_classifier(alias_target: Option<TypeName>) -> crate::libraries::LibraryType {
         crate::libraries::LibraryType {
+            declaration_name: None,
             is_kotlin: true,
             is_data: false,
             access: crate::libraries::ClassifierAccess::Public,
@@ -26068,6 +26073,7 @@ fun box(): String {
                         )
                     };
                 return Some(std::sync::Arc::new(crate::libraries::LibraryType {
+                    declaration_name: None,
                     is_kotlin: true,
                     is_data: false,
                     access: crate::libraries::ClassifierAccess::Public,
@@ -26200,6 +26206,7 @@ fun box(): String {
                     })
                     .collect();
                 std::sync::Arc::new(crate::libraries::LibraryType {
+                    declaration_name: None,
                     is_kotlin: true,
                     is_data: false,
                     access: crate::libraries::ClassifierAccess::Public,

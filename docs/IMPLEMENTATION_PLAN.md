@@ -1,5 +1,14 @@
 # krusty — implementation plan
 
+## Classifier declaration-name handoff
+
+Retain an optional declaration-owned package/owner and exact segment across source bootstrap,
+resolved headers, normalized dependency shapes, module symbols, common IR and backend freezing.
+Unknown, known top-level and known nested declarations stay distinct; lexical ownership does not
+imply enclosing-instance capture. Snapshot and provider tests constrain the handoff. Consuming this
+fact in JVM `InnerClasses`, cross-file owner tables and metadata class IDs is a separate follow-up;
+this phase leaves emission unchanged.
+
 JVM return consumers now use authenticated declaration-result slots across reference-preserving
 null assertions. Value-class refinement shares that producer boundary, while inline and suspension
 owners keep their existing result materialization. Full classfile/runtime controls cover ordinary
