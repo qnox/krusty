@@ -136,6 +136,23 @@ impl Emitter<'_> {
         }
     }
 
+    /// Restate an intrinsic call's line right before its own instruction, after its operands, as
+    /// kotlinc's intrinsic function does once it has generated them (`arraylength` of `.size`,
+    /// `ineg` of `unaryMinus()`, the conversion of `toLong()`). Only an expression that states
+    /// its line before its operands (`IrFile::kept_start_lines`) is such an intrinsic call.
+    pub(super) fn mark_intrinsic_instruction(
+        &mut self,
+        expression: ExprId,
+        code: &mut CodeBuilder,
+    ) {
+        if !self.ir.kept_start_lines.contains(&expression) {
+            return;
+        }
+        if let Some(&line) = self.ir.expr_source_lines.get(&expression) {
+            self.mark_expression_line(expression, line, code);
+        }
+    }
+
     /// Mark one expression line, mapping a same-module inline copy through the class's SMAP. Common
     /// IR supplies the semantic declaration owner, the callee's source file, and the call line;
     /// this boundary chooses JVM source paths and output line numbers.

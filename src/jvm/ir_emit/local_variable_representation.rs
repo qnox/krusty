@@ -116,8 +116,15 @@ impl Emitter<'_> {
         // Enter before evaluating the initializer, as kotlinc does. A call-operand holder is the
         // exception: its value is materialized first and the slot is entered afterwards.
         let holds_operand = self.ir.call_operand_bindings.contains(&declaration);
+        // So is the receiver temporary of a folded safe-call chain (`a?.b?.c`): kotlinc's chain
+        // folding declares the inner receiver's temporary first.
+        let chained_receiver = self
+            .safe_call_exit_temporaries
+            .values()
+            .any(|temporaries| temporaries.contains(&index));
         let entered = reused.or_else(|| {
-            (!holds_operand).then(|| self.enter_unassigned_value(index, slot_ty, false))
+            (!holds_operand && !chained_receiver)
+                .then(|| self.enter_unassigned_value(index, slot_ty, false))
         });
 
         if let Some(cell) = initializer.and_then(|value| self.stored_shared_cell(value)) {

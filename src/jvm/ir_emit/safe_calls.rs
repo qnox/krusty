@@ -357,6 +357,13 @@ fn duplicated_safe_call(
     {
         return None;
     }
+    // kotlinc's optimizer folds the temporary into `dup` only when no line entry separates its
+    // store from its loads: the null check reads it at the safe call's line, the selector at the
+    // receiver's, and the receiver leaves its own line in effect. A receiver or selector on
+    // another line keeps the temporary.
+    if !reads_share_receiver_line(emitter.ir, init, *condition, *selector, temporary) {
+        return None;
+    }
     selector_reads_temporary_once_as_receiver(emitter.ir, *selector, temporary).then_some(
         DuplicatedSafeCall {
             declaration: *variable,
@@ -369,6 +376,51 @@ fn duplicated_safe_call(
             null_result: *null_result,
         },
     )
+}
+
+fn reads_share_receiver_line(
+    ir: &crate::ir::IrFile,
+    init: u32,
+    condition: u32,
+    selector: u32,
+    temporary: u32,
+) -> bool {
+    let line = |expression: u32| ir.expr_source_lines.get(&expression).copied();
+    let condition_read = match ir.expr(condition) {
+        IrExpr::PrimitiveBinOp { lhs, rhs, .. } => [*lhs, *rhs]
+            .into_iter()
+            .find(|&operand| reads_temporary(ir, operand, temporary)),
+        _ => None,
+    };
+    let selector_read =
+        selector_receiver(ir, selector).filter(|&read| reads_temporary(ir, read, temporary));
+    let receiver = line(init);
+    [condition_read, selector_read]
+        .into_iter()
+        .flatten()
+        .filter_map(|read| receiver_read_line(ir, read, &line))
+        .all(|read_line| Some(read_line) == receiver)
+}
+
+/// The line a receiver read of the temporary carries, looking through its coercion.
+fn receiver_read_line(
+    ir: &crate::ir::IrFile,
+    mut read: u32,
+    line: &impl Fn(u32) -> Option<u32>,
+) -> Option<u32> {
+    loop {
+        if let Some(line) = line(read) {
+            return Some(line);
+        }
+        match ir.expr(read) {
+            IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg,
+                ..
+            } => read = *arg,
+            _ => return None,
+        }
+    }
 }
 
 fn duplicable_receiver_slot(slot_ty: Ty) -> bool {
@@ -394,9 +446,13 @@ fn selector_reads_temporary_once_as_receiver(
     selector: u32,
     temporary: u32,
 ) -> bool {
-    if value_reads(ir, selector, temporary) != 1 {
-        return false;
-    }
+    value_reads(ir, selector, temporary) == 1
+        && selector_receiver(ir, selector)
+            .is_some_and(|receiver| reads_temporary(ir, receiver, temporary))
+}
+
+/// The receiver operand of the call or property read a selector performs.
+fn selector_receiver(ir: &crate::ir::IrFile, selector: u32) -> Option<u32> {
     let mut expression = selector;
     loop {
         match ir.expr(expression) {
@@ -410,7 +466,7 @@ fn selector_reads_temporary_once_as_receiver(
                 args,
                 ..
             } => {
-                let receiver = match dispatch_receiver {
+                return match dispatch_receiver {
                     Some(receiver) => Some(*receiver),
                     None => ir
                         .static_extension_receivers
@@ -418,13 +474,12 @@ fn selector_reads_temporary_once_as_receiver(
                         .copied()
                         .and_then(|position| args.get(position as usize).copied()),
                 };
-                return receiver.is_some_and(|receiver| reads_temporary(ir, receiver, temporary));
             }
             IrExpr::PropertyRead {
                 receiver: Some(receiver),
                 ..
-            } => return reads_temporary(ir, *receiver, temporary),
-            _ => return false,
+            } => return Some(*receiver),
+            _ => return None,
         }
     }
 }

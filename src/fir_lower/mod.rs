@@ -54,6 +54,7 @@ mod inline_catch_tests;
 mod inline_returns;
 mod inlining;
 mod interface_delegation;
+mod intrinsic_call_lines;
 mod local_callables;
 mod local_delegates;
 #[cfg(test)]
