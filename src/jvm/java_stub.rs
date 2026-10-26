@@ -110,7 +110,9 @@ pub fn stub_classes(
                     ),
                     JavaMemberType {
                         internal: declaration.internal.clone(),
-                        visibility: member_types::visibility_of_access(declaration.access),
+                        visibility: crate::jvm::classreader::visibility_of_access(
+                            declaration.access,
+                        ),
                     },
                 ))
             }),

@@ -145,6 +145,25 @@ pub(super) fn parse_string_table(body: &[u8]) -> Vec<Rec> {
     records
 }
 
+/// `StringTableTypes.local_name` marks local class IDs independently of visibility. In
+/// particular, a public member of a local classifier still has a local class ID.
+pub(super) fn class_name_is_local(body: &[u8], id: usize) -> Option<bool> {
+    let mut pb = Pb::new(body);
+    let mut local = false;
+    while !pb.at_end() {
+        let tag = pb.varint()?;
+        match (tag >> 3, tag & 7) {
+            (5, 0) => local |= pb.varint()? == id as u64,
+            (5, 2) => {
+                let length = usize::try_from(pb.varint()?).ok()?;
+                local |= packed_varints(pb.bytes(length)?)?.contains(&(id as u64));
+            }
+            (_, wire) => pb.skip(wire)?,
+        }
+    }
+    Some(local)
+}
+
 /// Resolve a class-name id to its qualified internal name, exactly as kotlinc's `JvmNameResolverBase.
 /// getString`: pick the record's explicit string, else its predefined-table entry, else `d2[id]`; then
 /// apply the substring/replace/operation transforms.
@@ -218,4 +237,18 @@ pub(super) fn split_d1(bytes: &[u8]) -> (&[u8], &[u8]) {
         }
     }
     (&[], bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::class_name_is_local;
+
+    #[test]
+    fn local_class_name_indices_are_read_atomically() {
+        assert_eq!(class_name_is_local(&[], 0), Some(false));
+        assert_eq!(class_name_is_local(&[0x28, 0], 0), Some(true));
+        assert_eq!(class_name_is_local(&[0x2a, 2, 0, 1], 1), Some(true));
+        assert_eq!(class_name_is_local(&[0x2a, 2, 0, 1], 2), Some(false));
+        assert_eq!(class_name_is_local(&[0x28, 0, 0x2a, 1, 0x80], 0), None);
+    }
 }
