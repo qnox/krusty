@@ -2361,7 +2361,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   default expression runs on its own lines, and the call after the defaults returns to the
   signature line. A `$DefaultImpls` forward of an interface stub calls on the declaration's line and
   returns on its end line, which for an abstract member is the last line of its declaration (the
-  `): String` of a multi-line parameter list). Test: `tests/default_stub_lines_e2e.rs`. A call with
+  `): String` of a multi-line parameter list). Test: `tests/default_stub_lines_e2e.rs`. kotlinc
+  stores each masked default as a statement at its expression's position, so the fill opens on
+  the expression's first line even when its first operand marks another line at that same offset
+  (`k(` above an argument on the next line): the table keeps both entries. Test:
+  `tests/default_argument_fill_lines_e2e.rs`. A call with
   holes passes the computed mask + null marker. Byte-identical to kotlinc
   for data-class `copy` and instance methods. **Mask bits are LOGICAL**: kotlinc numbers them over
   the DECLARED value parameters, so an EXTENSION's receiver — physically the leading parameter of

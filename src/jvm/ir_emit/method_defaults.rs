@@ -444,6 +444,7 @@ pub(super) fn emit_default_param_overwrites(
             code.iand();
             let skip = code.new_label();
             code.ifeq(skip);
+            mark_default_fill(emitter, *expression, code);
             if crate::jvm::lambda_classes::inline_default_value_requires_reification(
                 emitter.ir,
                 *expression,
@@ -469,6 +470,18 @@ pub(super) fn emit_default_param_overwrites(
             code.bind(skip);
         }
     }
+}
+
+/// kotlinc stores a masked default into its parameter as a statement at the default expression's
+/// position, so the fill opens on that expression's first line before the value's own code marks
+/// any line. The value's first operand may mark another line at that same offset (a call whose
+/// argument starts on the next line); kotlinc's table keeps both entries.
+pub(super) fn mark_default_fill(
+    emitter: &mut Emitter<'_>,
+    default: ExprId,
+    code: &mut CodeBuilder,
+) {
+    emitter.mark_kept_start_line(default, code);
 }
 
 pub(super) fn body_has_reified_markers(ir: &IrFile, expression: crate::ir::ExprId) -> bool {
