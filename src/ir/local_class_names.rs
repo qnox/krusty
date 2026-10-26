@@ -1604,10 +1604,6 @@ impl super::IrFile {
             .into_iter()
             .map(|value| remapped_name(value, names))
             .collect();
-        self.public_synthetics = std::mem::take(&mut self.public_synthetics)
-            .into_iter()
-            .map(|value| remapped_name(value, names))
-            .collect();
         self.module_source_value_classes = std::mem::take(&mut self.module_source_value_classes)
             .into_iter()
             .map(|value| remapped_name(value, names))

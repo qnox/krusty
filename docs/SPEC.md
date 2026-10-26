@@ -1069,6 +1069,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/suspend_coroutine_inline_e2e.rs`, the `coroutines/` box corpus through the kotlinc
   byte-diff harness, and
   `fir/body_check/call_tests.rs::suspend_coroutine_is_an_ordinary_inline_suspend_call`.
+- **A synthesized class takes kotlinc's public-ABI flag.** A function or property reference class
+  is public, its constructor too, and `@Metadata.xi` carries `METADATA_PUBLIC_ABI_FLAG` when it is
+  written in an inline function's scope (`enclosure::in_inline_function_scope`, the predicate a
+  local class's access already uses). An annotation implementation (`…$annotationImpl$A$0`) is one
+  class per annotation and file, and kotlinc flags it when it creates it, at the first
+  construction in declaration order: flagged when that construction is in the scope of an inline
+  function that is not private nor a member of a private class (its lambdas and local classes
+  included), even when a later construction is. Tests:
+  `metadata_inline_object_abi_e2e::a_synthesized_reference_or_annotation_class_is_marked_public_abi_like_kotlinc`.
+
 - **A suspend inline function emits its own `$$forInline` copy.** Beside the state machine a
   direct caller runs, krusty now writes kotlinc's private `name$$forInline` method: the body before
   the coroutine transform, with `InlineMarker` calls around each suspend call (not around the invoke
@@ -7121,8 +7131,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   no lines. The copy's locals are renumbered as kotlinc's class builder sorts them, the machine's
   `$continuation`, `$result` and suspension marker first. The lambda is no function of its own: no
   `access$…$lambda$0` bridge is written for it, nor the continuation its lowering prepared, unless
-  a call keeps it as a value. A library object without the `$$forInline` copy keeps the lambda as a
-  value. An object the copied method constructs that reads the lambda through the copy's field (the
+  a call keeps it as a value. A library object without the `$$forInline` copy (one krusty compiled,
+  which writes no such copy for an object's method yet) keeps the lambda as a value. That route is
+  decided once from the callee's facts before any code is emitted: the constructions the body
+  passes a suspend lambda are paired with their classes, and a method other than a `$$forInline`
+  copy that reads the lambda's field names the bridge (`SuspendMethodWithoutForInlineCopy`). The
+  body is not inlined on trial: once a call is routed to the inliner, or a lambda-free call to a
+  compiled body is, a failure to inline or regenerate is an emission error, never a direct call.
+  Tests: `tests/crossinline_suspend_object_e2e.rs`. An object the copied method constructs that reads the lambda through the copy's field (the
   `FlowCollector` that `Flow.map`'s object creates) is regenerated too, as kotlinc's
   `MethodInliner` does: it takes the copy's next number after the continuation
   (`…$map$1$2`, its own continuation `…$map$1$2$1`), the lambda is inlined into its methods, and

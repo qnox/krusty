@@ -272,6 +272,21 @@ pub(super) fn emit_annotation_impl_class(
         );
     }
     env.inner_classes.register(&mut cw);
+    // Part of the public ABI when created in a public inline function's body.
+    if ir
+        .public_abi_annotation_implementations
+        .contains(&c.fq_name_id())
+    {
+        cw.set_kotlin_metadata(
+            3,
+            env.metadata_stamp,
+            super::metadata_policy::synthetic_class_xi(super::metadata_policy::SYNTHETIC_LOCAL)
+                | super::metadata_policy::METADATA_PUBLIC_ABI_FLAG,
+            &[],
+            &[],
+        );
+        return env.run.finish_class(cw);
+    }
     finish_local_synthetic_class(cw, env)
 }
 

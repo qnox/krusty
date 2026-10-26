@@ -4,7 +4,7 @@
 //! interface and cannot itself be allocated, so this pass creates kotlinc's one implementation class
 //! per annotation per source file and retargets every tagged construction to that physical class.
 
-use crate::fx_hash::HashMap;
+use crate::fx_hash::{HashMap, HashSet};
 
 use crate::ir::{IrClass, IrCtorArg, IrEnclosure, IrExpr, IrField, IrFile};
 use crate::types::{type_name, Ty, TypeName};
@@ -41,6 +41,7 @@ pub(crate) fn lower_annotation_constructions(ir: &mut IrFile, facade: &str) {
         }
     }
 
+    let public_abi = public_abi_interfaces(ir, &sites);
     let mut implementations = HashMap::<TypeName, TypeName>::default();
     let mut generated = Vec::new();
     for expression in 0..ir.exprs.len() as u32 {
@@ -76,6 +77,10 @@ pub(crate) fn lower_annotation_constructions(ir: &mut IrFile, facade: &str) {
                 facade,
                 &segment,
             );
+            if public_abi.contains(&site.interface) {
+                ir.public_abi_annotation_implementations
+                    .insert(implementation);
+            }
             generated.push(annotation_implementation(
                 implementation,
                 site.interface,
@@ -115,6 +120,63 @@ pub(crate) fn lower_annotation_constructions(ir: &mut IrFile, facade: &str) {
     for class in generated {
         ir.add_class(class);
     }
+}
+
+/// The annotations whose implementation joins the public ABI. kotlinc decides when it creates the
+/// implementation, at the first construction it lowers in declaration order: when that one is
+/// evaluated in the scope of an `inline` function other code can inline (one that is not private,
+/// nor a member of a private class), its lambdas and local classes included, the class is
+/// `isInPublicInlineScope`.
+fn public_abi_interfaces(
+    ir: &IrFile,
+    sites: &HashMap<u32, crate::ir::IrAnnotationConstruction>,
+) -> HashSet<TypeName> {
+    let mut first_sites = HashMap::<TypeName, ((usize, u32), bool)>::default();
+    for (function, declaration) in ir.functions.iter().enumerate() {
+        let Some(body) = declaration.body else {
+            continue;
+        };
+        let function = u32::try_from(function).expect("too many functions for a function id");
+        let scope = crate::jvm::ir_emit::enclosure::enclosing_functions(
+            ir,
+            Some(IrEnclosure::Function(function)),
+        )
+        .collect::<Vec<_>>();
+        let root = scope.last().map_or(function, |&(root, _)| root) as usize;
+        let public = scope.iter().any(|&(enclosing, owner)| {
+            ir.inline_fns.contains(&enclosing)
+                && !ir.method_visibility(enclosing).is_private()
+                && owner.is_none_or(|owner| {
+                    !ir.class_visibilities
+                        .get(&owner)
+                        .is_some_and(|visibility| visibility.is_private())
+                })
+        });
+        let mut pending = vec![body];
+        while let Some(expression) = pending.pop() {
+            crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+            let Some(site) = sites
+                .get(&expression)
+                .filter(|site| !site.scopes.is_empty())
+            else {
+                continue;
+            };
+            let order = (root, expression);
+            first_sites
+                .entry(site.interface)
+                .and_modify(|first| {
+                    if order < first.0 {
+                        *first = (order, public);
+                    }
+                })
+                .or_insert((order, public));
+        }
+    }
+    first_sites
+        .into_iter()
+        .filter(|(_, (_, public))| *public)
+        .map(|(interface, _)| interface)
+        .collect()
 }
 
 fn annotation_implementation(

@@ -16,8 +16,6 @@ const NEW: u8 = 0xbb;
 /// A body shape the ported stages do not inline yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UnsupportedShape {
-    /// An anonymous object could not be regenerated for the call site.
-    AnonymousObject,
     /// It reads a `$WhenMappings` table, which kotlinc regenerates for the call site.
     WhenMappings,
     /// It reads `$assertionsDisabled`, a field kotlinc moves to the calling class.

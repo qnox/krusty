@@ -1634,6 +1634,10 @@ pub struct IrFile {
     /// keeps one generic construction node; a backend consumes this semantic annotation tag when it
     /// must realize annotation instances through a platform-specific implementation class.
     pub annotation_constructions: crate::fx_hash::HashMap<ExprId, IrAnnotationConstruction>,
+    /// The annotation implementation classes created for a construction in a non-private inline
+    /// function's body, which kotlinc marks part of the public ABI (`isInPublicInlineScope`): a
+    /// caller in another module regenerates them.
+    pub public_abi_annotation_implementations: crate::fx_hash::HashSet<TypeName>,
     /// Each annotation class this file declares → the closed declaration default of each element
     /// that has one, by element name. A backend records them with the annotation's declaration.
     pub annotation_element_defaults: crate::fx_hash::HashMap<TypeName, Vec<(String, AnnoValue)>>,
@@ -2170,11 +2174,6 @@ pub struct IrFile {
     /// `ValueParameter.vararg_element_type` (f4) or a consumer demands one literal array (`too many
     /// arguments`).
     pub fn_varargs: crate::fx_hash::HashMap<u32, IrVarargParameter>,
-    /// Synthesized classes (function-reference/suspend-conversion adapters) that must be PUBLIC:
-    /// they are referenced from a PUBLIC INLINE function's body, whose splice copies the reference
-    /// into arbitrary other packages/modules (kotlinc marks such synthetics public for the same
-    /// reason). Package-private would be an IllegalAccessError at every cross-package splice site.
-    pub public_synthetics: crate::fx_hash::HashSet<TypeName>,
     /// Declaring class to indices in `statics` for class properties whose JVM field is static.
     pub declared_class_statics: crate::fx_hash::HashMap<TypeName, Vec<u32>>,
     /// (class internal name, property name) → 1-based source line of a BODY property's declaration.
