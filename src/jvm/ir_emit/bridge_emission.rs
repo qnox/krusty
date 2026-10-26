@@ -177,7 +177,7 @@ fn emit_interface_entry_checks(
 /// Emit `ACC_BRIDGE|ACC_SYNTHETIC` methods: each has the supertype's erased descriptor, adapts its
 /// arguments (type barrier / checkcast / unbox / numeric convert), delegates to the concrete override,
 /// and adapts the return value back (box / numeric convert). A class's read-only collection stubs
-/// precede its bridges, and their throwing bridges follow the ordinary ones.
+/// precede its bridges, and their bridges merge into the ordinary ones in kotlinc's member order.
 pub(super) fn emit_bridges(
     ir: &IrFile,
     c: &crate::ir::IrClass,
@@ -186,11 +186,18 @@ pub(super) fn emit_bridges(
 ) {
     read_only_stubs::emit_stubs(ir, c, cw, env);
     let class = ClassBridges::new(ir, c, env);
+    let mut stub_bridges = read_only_stubs::StubBridges::of(c, env);
     for (bridge_index, b) in c.bridges.iter().enumerate() {
         // An interface entry stands beside its static member, which emits it.
         if b.kind == crate::ir::BridgeKind::ValueClassInterfaceEntry {
             continue;
         }
+        // Ordered like the ordinary bridges themselves (see `jvm::bridges`).
+        let order = b
+            .target_function
+            .and_then(|function| ir.fn_source_order.get(&function).copied())
+            .unwrap_or(u32::MAX);
+        stub_bridges.emit_before(order, c, cw);
         let descriptor = method_descriptor(&jvm_tys(&b.erased_params), ir_ty_to_jvm(&b.erased_ret));
         if env.collection_members.inherited_bridges.replaces_ordinary(
             c.fq_name_id(),
@@ -201,7 +208,7 @@ pub(super) fn emit_bridges(
         }
         emit_bridge(&class, cw, bridge_index, b, None);
     }
-    read_only_stubs::emit_stub_bridges(c, cw, env);
+    stub_bridges.emit_rest(c, cw);
     let inherited = &env.collection_members.inherited_bridges;
     for bridge in inherited.for_class(c.fq_name_id()) {
         emit_inherited_collection_bridge(ir, c, cw, bridge);

@@ -5,26 +5,35 @@ import com.google.devtools.ksp.symbol.KSClassDeclaration;
 import com.google.devtools.ksp.symbol.KSDeclaration;
 import com.google.devtools.ksp.symbol.KSType;
 import com.google.devtools.ksp.symbol.KSTypeArgument;
+import com.google.devtools.ksp.symbol.KSTypeReference;
 import com.google.devtools.ksp.symbol.Modifier;
 import com.google.devtools.ksp.symbol.Nullability;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Deque;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Set;
 import kotlin.sequences.Sequence;
 
-// A classifier that is not nullable, applied either to no type arguments, such as the type an
-// annotation names, or to a star for each of its type parameters.
+// A classifier applied either to no type arguments, such as the type an annotation names, or to a
+// star for each of its type parameters, and nullable only when made so.
 final class ClassType implements KSType {
     private final KSClassDeclaration declaration;
     private final List<KSTypeArgument> arguments;
+    private final boolean nullable;
 
     ClassType(KSClassDeclaration declaration) {
-        this(declaration, Collections.emptyList());
+        this(declaration, Collections.emptyList(), false);
     }
 
-    private ClassType(KSClassDeclaration declaration, List<KSTypeArgument> arguments) {
+    private ClassType(
+            KSClassDeclaration declaration, List<KSTypeArgument> arguments, boolean nullable) {
         this.declaration = declaration;
         this.arguments = arguments;
+        this.nullable = nullable;
     }
 
     // `declaration.asStarProjectedType()`: KSP2 applies the classifier to a star for each of its type
@@ -41,7 +50,7 @@ final class ClassType implements KSType {
                     ? (KSClassDeclaration) current.getParentDeclaration()
                     : null;
         }
-        return new ClassType(declaration, stars);
+        return new ClassType(declaration, stars, false);
     }
 
     @Override
@@ -51,7 +60,7 @@ final class ClassType implements KSType {
 
     @Override
     public Nullability getNullability() {
-        return Nullability.NOT_NULL;
+        return nullable ? Nullability.NULLABLE : Nullability.NOT_NULL;
     }
 
     @Override
@@ -66,7 +75,45 @@ final class ClassType implements KSType {
 
     @Override
     public boolean isAssignableFrom(KSType that) {
-        throw Nodes.notImplemented("KSType.isAssignableFrom");
+        if (that.isMarkedNullable() && !nullable) {
+            return false;
+        }
+        KSClassDeclaration classifier = classifier(that.getDeclaration());
+        // `Nothing` is a subtype of every type; any other classifier is assignable when it is this
+        // one or inherits it, whatever its arguments, since this type's are stars.
+        return classifier.getQualifiedName().asString().equals("kotlin.Nothing")
+                || inherits(classifier);
+    }
+
+    private boolean inherits(KSClassDeclaration classifier) {
+        String target = declaration.getQualifiedName().asString();
+        Set<String> seen = new HashSet<>();
+        Deque<KSClassDeclaration> pending = new ArrayDeque<>();
+        pending.add(classifier);
+        while (!pending.isEmpty()) {
+            KSClassDeclaration next = pending.remove();
+            String name = next.getQualifiedName().asString();
+            if (name.equals(target)) {
+                return true;
+            }
+            if (!seen.add(name)) {
+                continue;
+            }
+            Iterator<KSTypeReference> supertypes = next.getSuperTypes().iterator();
+            while (supertypes.hasNext()) {
+                pending.add(classifier(supertypes.next().resolve().getDeclaration()));
+            }
+        }
+        return false;
+    }
+
+    // A type parameter's or a typealias's subtypes follow its bounds or expansion, which the host
+    // does not model yet.
+    private static KSClassDeclaration classifier(KSDeclaration declaration) {
+        if (declaration instanceof KSClassDeclaration) {
+            return (KSClassDeclaration) declaration;
+        }
+        throw Nodes.notImplemented("KSType.isAssignableFrom over a type parameter or typealias");
     }
 
     @Override
@@ -91,17 +138,17 @@ final class ClassType implements KSType {
 
     @Override
     public KSType makeNullable() {
-        throw Nodes.notImplemented("KSType.makeNullable");
+        return nullable ? this : new ClassType(declaration, arguments, true);
     }
 
     @Override
     public KSType makeNotNullable() {
-        return this;
+        return nullable ? new ClassType(declaration, arguments, false) : this;
     }
 
     @Override
     public boolean isMarkedNullable() {
-        return false;
+        return nullable;
     }
 
     @Override
@@ -133,19 +180,24 @@ final class ClassType implements KSType {
         return other instanceof SourceType && other.equals(this);
     }
 
-    // A source type's hash for the same classifier.
+    // A source type's hash for the same classifier and nullability.
     @Override
     public int hashCode() {
-        return SourceType.classifierHash(declaration.getQualifiedName().asString());
+        return SourceType.classifierHash(declaration.getQualifiedName().asString(), nullable);
     }
 
     @Override
     public String toString() {
-        String simple = declaration.getSimpleName().asString();
-        if (arguments.isEmpty()) {
-            return simple;
+        StringBuilder out = new StringBuilder(declaration.getSimpleName().asString());
+        if (!arguments.isEmpty()) {
+            // Every argument is a star, which the type's text writes as `*`.
+            out.append('<')
+                    .append(String.join(", ", Collections.nCopies(arguments.size(), "*")))
+                    .append('>');
         }
-        // Every argument is a star, which the type's text writes as `*`.
-        return simple + "<" + String.join(", ", Collections.nCopies(arguments.size(), "*")) + ">";
+        if (nullable) {
+            out.append('?');
+        }
+        return out.toString();
     }
 }

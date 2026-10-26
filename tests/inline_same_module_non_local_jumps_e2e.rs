@@ -166,3 +166,47 @@ fun box(): String {
 fn a_tailrec_self_call_returned_from_an_inline_lambda_loops() {
     assert_eq!(common::expect_box_run_with_stdlib(TAILREC, "Tailrec"), "OK");
 }
+
+/// A lambda that reads only some of the parameters its tail call writes. kotlinc's tail-recursion
+/// lowering runs before its lambdas capture anything, so the step's write of `result` makes the
+/// lambda capture it; the lambda here gains that capture, and the step writes it through the
+/// function's own slot. Each function returns the value only the last step writes, a million deep.
+/// kotlinc keeps each parameter in a variable of its own across the loop, so the bytes differ and
+/// only the run is compared.
+const UNCAPTURED_TAILREC: &str = r#"private inline fun act(block: () -> Unit) = block()
+
+tailrec fun count(n: Int, result: Int): Int {
+    if (n == 0) return result
+    act { return count(n - 1, 7) }
+    return -1
+}
+
+tailrec fun nested(n: Int, result: Int, tag: String): Int {
+    if (n == 0) return result + tag.length
+    act { act { return nested(n - 1, 7, "x") } }
+    return -1
+}
+
+class Counter(val step: Int) {
+    tailrec fun count(n: Int, result: Int): Int {
+        if (n == 0) return result
+        act { return count(n - step, 3) }
+        return -1
+    }
+}
+
+fun box(): String {
+    if (count(1_000_000, 0) != 7) return "count"
+    if (nested(1_000_000, 0, "") != 8) return "nested"
+    if (Counter(1).count(1_000_000, 0) != 3) return "member"
+    return "OK"
+}
+"#;
+
+#[test]
+fn a_tailrec_step_writes_a_parameter_its_inline_lambda_does_not_read() {
+    assert_eq!(
+        common::expect_box_run_with_stdlib(UNCAPTURED_TAILREC, "UncapturedTailrec"),
+        "OK"
+    );
+}

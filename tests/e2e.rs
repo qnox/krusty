@@ -1713,6 +1713,8 @@ mod special_collection_bridge_e2e;
 mod splice_nullable_value_class_lambda_e2e;
 #[path = "split_line_conditions_parse_e2e.rs"]
 mod split_line_conditions_parse_e2e;
+#[path = "split_membership_conditions_e2e.rs"]
+mod split_membership_conditions_e2e;
 #[path = "static_access_type_arguments_e2e.rs"]
 mod static_access_type_arguments_e2e;
 #[path = "string_when_switch_e2e.rs"]
@@ -2206,6 +2208,10 @@ mod private_constructor_accessors_e2e;
 mod private_inline_property_ref_e2e;
 #[path = "read_only_iterator_stubs_e2e.rs"]
 mod read_only_iterator_stubs_e2e;
+#[path = "read_only_stub_inheritability_e2e.rs"]
+mod read_only_stub_inheritability_e2e;
+#[path = "read_only_stub_override_bridges_e2e.rs"]
+mod read_only_stub_override_bridges_e2e;
 #[path = "redundant_checkcast_e2e.rs"]
 mod redundant_checkcast_e2e;
 #[path = "redundant_checkcasts_before_aastore_e2e.rs"]
