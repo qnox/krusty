@@ -1,5 +1,24 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Classifier declaration-name ownership
+
+A non-local classifier retains its exact declaration segment and either its package or its
+declaring classifier. A literal `$` belongs to that segment. This declaration evidence is
+independent of an enclosing-instance capture, and belongs to the compilation snapshot rather than
+the global interned-name tree. A missing fact remains unknown; a known top-level declaration is
+positive evidence that there is no declaring classifier.
+
+Source headers, Kotlin metadata class IDs and structural classfile self entries normalize this
+fact at their declaration boundary. It survives signature publication, module symbols, common IR
+construction and frozen backend facts. Tests in `src/backend/module_facts.rs` cover repeated
+snapshots and capture independence; provider tests cover literal-dollar and actual nested names.
+This handoff does not yet change JVM name or metadata emission.
+
+Kotlin metadata remains authoritative when its annotation is present, including an empty or
+synthetic payload. Missing declaration ownership does not authorize a classfile-name guess. Local
+visibility and metadata local-name indices both exclude non-local ownership; a public member of a
+local class still carries a local class ID.
+
 ## JVM generic result consumption
 
 A checked generic call's declaration-result coercion can retain its recorded reference slot until
@@ -13479,6 +13498,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `iterator` result types, the JDK members and `toArray`, follow in later slices. Tests:
   `tests/read_only_iterator_stubs_e2e.rs`. Corpus: `objects/useAnonymousObjectAsIterator.kt`,
   `builtinStubMethods/customReadOnlyIterator.kt`.
+- **Only an inherited superclass member implements a read-only stub's member.** The superclass
+  members that suppress a stub are those the class actually inherits, decided from each member's
+  declaration visibility at every edge of the superclass walk: a private member is never inherited,
+  and a Java package-private member only when every class from the class up to its declaring class
+  is in that member's package. So `open class Base { private fun remove() }` and a Java
+  `lib.JBase` with a package-private `void remove()` leave `Walk : Base(), Iterator<String>` (or
+  `app.Walk : lib.JBase()`) its public throwing `remove()` stub, as kotlinc emits it. Tests:
+  `tests/read_only_stub_inheritability_e2e.rs` (class bytes and box run against kotlinc).
 - **A nested value class over a reference carrier is read as its carrier.** In `ZN(val z: Z1?)`
   with `Z1(val x: En)`, `Z1?` is carried as `En?`, so `zn.z` and `zn.z!!` already are `Z1`'s
   carrier and `.x` of them is that carrier itself, with no cast. krusty took the unboxed property
@@ -19681,6 +19708,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/unsigned_range_contains_e2e.rs` (full-byte against kotlinc). The common backend realizes the checked membership for every target, as
   it realizes counted loops. Tests: `range_literal_membership_e2e` (class bytes and run against
   kotlinc), box `ranges/contains/comparisonWithRangeBoundEliminated.kt`.
+
+- **A constant range bound kotlinc derives keeps the written constant's line.** `convertIrConst`
+  (the exclusive bound of `RangeToHandler`/`DownToHandler`, used by membership and counted loops)
+  and `castIfNecessary` (a constant converted to the comparison type) build the new constant with
+  `IrConstImpl(startOffset, endOffset, …)` of the written one. Codegen marks a constant's line where
+  it is loaded, so `x !in` on one line and `1..3` on the next marks the bound's line before
+  `iconst_4`, then the `in` line again at the comparison's jump; `for (i in 1..` then `3)` marks the
+  bound's line before the loop test's `iconst_4`. Every other node the lowering generates keeps
+  the construct's line. Test: `split_membership_conditions_e2e` (class bytes and run against
+  kotlinc).
 
 - **Membership in a `Comparable` range literal is kotlinc's `ComparableRangeToHandler`.** When the
   range is built by the stdlib's `operator fun <T : Comparable<T>> T.rangeTo(that: T): ClosedRange<T>`

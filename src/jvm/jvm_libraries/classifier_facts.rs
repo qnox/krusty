@@ -2,6 +2,31 @@
 
 use super::*;
 
+pub(super) fn classifier_declaration_name(
+    class: &crate::jvm::classreader::ClassInfo,
+) -> Option<crate::types::ClassifierDeclarationName> {
+    use crate::types::ClassifierDeclarationName;
+    // Annotation presence remains authoritative even for synthetic/empty metadata whose decoded
+    // declaration inventory is empty. Do not turn missing Kotlin ownership into a Java guess.
+    if class
+        .annotations
+        .iter()
+        .any(|annotation| annotation.annotation == type_name("kotlin/Metadata"))
+    {
+        return class.meta.class_declaration_name.clone();
+    }
+    match class.inner_class_self() {
+        None => Some(ClassifierDeclarationName::TopLevel {
+            package: class.this_class.parent().unwrap_or(TypeName::ROOT),
+            name: class.this_class.segment_ref().into(),
+        }),
+        Some(entry) => Some(ClassifierDeclarationName::Nested {
+            owner: type_name(entry.outer.as_deref()?),
+            name: entry.name.as_deref()?.into(),
+        }),
+    }
+}
+
 /// Give every metadata-declared constructor the classifier parameters it can infer, independently
 /// of how the JVM realizes that declaration. Value classes use `constructor-impl` rather than a
 /// directly callable `<init>`, while ordinary and marker-backed constructors do have `<init>`
@@ -536,6 +561,154 @@ impl crate::types::ClassifierFactSource for JvmLibraries {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn kotlin_declaration_name(
+        metadata_name: &str,
+        flags: u64,
+        table: &[u8],
+    ) -> Option<crate::types::ClassifierDeclarationName> {
+        use crate::jvm::classfile::{ClassWriter, InnerClassSpec, MetadataStamp};
+        let internal = metadata_name.replace('.', "$");
+        let mut writer = ClassWriter::new(&internal, "java/lang/Object");
+        // A contradictory physical self entry must not override the Kotlin declaration.
+        writer.add_inner_class(InnerClassSpec {
+            inner: internal.clone(),
+            outer: Some("ownership/PhysicalOwner".into()),
+            name: Some("PhysicalMember".into()),
+            access: 0x0019,
+        });
+        let mut message = crate::metadata::protobuf::Pb::new();
+        message.field_varint(1, flags);
+        message.field_varint(3, 0);
+        assert!(table.len() < 128);
+        let mut payload = vec![0, table.len() as u8];
+        payload.extend_from_slice(table);
+        payload.extend_from_slice(message.as_bytes());
+        let d1 = payload.into_iter().map(char::from).collect();
+        writer.set_kotlin_metadata(
+            1,
+            MetadataStamp {
+                version: [2, 4, 0],
+                pre_release: false,
+            },
+            0,
+            &[d1],
+            &[metadata_name.into()],
+        );
+        let class = crate::jvm::classreader::parse_class(&writer.finish()).unwrap();
+        classifier_declaration_name(&class)
+    }
+
+    #[test]
+    fn kotlin_classifier_declaration_names_use_metadata_class_ids() {
+        use crate::types::{type_name_child, ClassifierDeclarationName};
+        let package = type_name("ownership");
+        let owner = type_name_child(package, "Outer$Literal");
+        assert_eq!(
+            kotlin_declaration_name("ownership/Outer$Literal", 6, &[]),
+            Some(ClassifierDeclarationName::TopLevel {
+                package,
+                name: "Outer$Literal".into()
+            })
+        );
+        assert_eq!(
+            kotlin_declaration_name("ownership/Outer$Literal.Part$Name", 6, &[]),
+            Some(ClassifierDeclarationName::Nested {
+                owner,
+                name: "Part$Name".into()
+            })
+        );
+        assert_eq!(
+            kotlin_declaration_name("Default$Literal", 6, &[]),
+            Some(ClassifierDeclarationName::TopLevel {
+                package: TypeName::ROOT,
+                name: "Default$Literal".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn kotlin_classifier_declaration_names_exclude_local_class_ids() {
+        assert_eq!(kotlin_declaration_name("ownership/Local", 10, &[]), None);
+        // Public members of local classes retain local IDs independently of their visibility.
+        for table in [&[0x28, 0][..], &[0x2a, 1, 0][..]] {
+            assert_eq!(
+                kotlin_declaration_name("ownership/Facade$box$Local.Member", 6, table),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn kotlin_classifier_declaration_names_require_metadata_evidence() {
+        use crate::jvm::classfile::{ClassWriter, InnerClassSpec, MetadataStamp};
+        for kind in [1, 3] {
+            let mut writer = ClassWriter::new("ownership/Outer$Literal", "java/lang/Object");
+            writer.add_inner_class(InnerClassSpec {
+                inner: "ownership/Outer$Literal".into(),
+                outer: Some("ownership/Outer".into()),
+                name: Some("Literal".into()),
+                access: 0x0019,
+            });
+            writer.set_kotlin_metadata(
+                kind,
+                MetadataStamp {
+                    version: [2, 4, 0],
+                    pre_release: false,
+                },
+                0,
+                &[],
+                &[],
+            );
+            let class = crate::jvm::classreader::parse_class(&writer.finish()).unwrap();
+            assert_eq!(
+                classifier_declaration_name(&class),
+                None,
+                "metadata kind {kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn classfile_declaration_names_use_structural_self_entries() {
+        use crate::types::{type_name_child, ClassifierDeclarationName};
+        let read = |internal: &str, row: Option<(Option<&str>, Option<&str>)>| {
+            let mut writer = crate::jvm::classfile::ClassWriter::new(internal, "java/lang/Object");
+            if let Some((outer, name)) = row {
+                writer.add_inner_class(crate::jvm::classfile::InnerClassSpec {
+                    inner: internal.into(),
+                    outer: outer.map(Into::into),
+                    name: name.map(Into::into),
+                    access: 0x0019,
+                });
+            }
+            let class = crate::jvm::classreader::parse_class(&writer.finish()).unwrap();
+            classifier_declaration_name(&class)
+        };
+        let package = type_name("ownership");
+        let owner = type_name_child(package, "Outer");
+        assert_eq!(
+            read("ownership/Outer$Literal", None),
+            Some(ClassifierDeclarationName::TopLevel {
+                package,
+                name: "Outer$Literal".into()
+            })
+        );
+        assert_eq!(
+            read(
+                "ownership/Outer$$serializer",
+                Some((Some("ownership/Outer"), Some("$serializer")))
+            ),
+            Some(ClassifierDeclarationName::Nested {
+                owner,
+                name: "$serializer".into()
+            })
+        );
+        assert_eq!(
+            read("ownership/Outer$1Local", Some((None, Some("Local")))),
+            None
+        );
+    }
 
     fn method(access: u16, name: &str, descriptor: &str) -> crate::jvm::classreader::MethodSig {
         crate::jvm::classreader::MethodSig {

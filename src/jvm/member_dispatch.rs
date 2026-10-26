@@ -144,6 +144,7 @@ mod tests {
 
     fn class(supertypes: &[TypeName]) -> Arc<BackendClassifierFact> {
         Arc::new(BackendClassifierFact {
+            declaration_name: None,
             access: ClassifierAccess::Public,
             is_kotlin: true,
             source: true,

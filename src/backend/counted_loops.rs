@@ -110,6 +110,7 @@ pub(crate) fn realize(ir: &mut IrFile, policy: CountedLoopPolicy) {
             unsigned_compare,
             inlined_calls: Vec::new(),
             represented: Vec::new(),
+            derived_constants: Vec::new(),
         };
         let replacement = realizer.progression_loop(CountedLoop {
             variable,
@@ -122,8 +123,10 @@ pub(crate) fn realize(ir: &mut IrFile, policy: CountedLoopPolicy) {
         });
         next_slot = Some(realizer.next_slot);
         let inlined_calls = std::mem::take(&mut realizer.inlined_calls);
+        let derived_constants = std::mem::take(&mut realizer.derived_constants);
         record_generated_origins(ir, expression as ExprId, first_generated, &inlined_calls);
         record_generated_lines(ir, expression as ExprId, first_generated);
+        keep_written_offsets(ir, &derived_constants);
         ir.exprs[expression] = replacement;
     }
     realize_memberships(ir, style, inlining, &mut next_slot);
@@ -156,6 +159,7 @@ fn realize_memberships(
                     unsigned_compare: None,
                     inlined_calls: Vec::new(),
                     represented: Vec::new(),
+                    derived_constants: Vec::new(),
                 };
                 let contains = realizer.comparable_range_contains(lower, end);
                 *next_slot = Some(realizer.next_slot);
@@ -165,6 +169,7 @@ fn realize_memberships(
                     contains,
                     negated,
                     first_generated,
+                    &[],
                     &[],
                 );
                 continue;
@@ -195,6 +200,7 @@ fn realize_memberships(
             unsigned_compare,
             inlined_calls: Vec::new(),
             represented: Vec::new(),
+            derived_constants: Vec::new(),
         };
         let contains = realizer.range_contains(&contains::Membership {
             operation,
@@ -205,6 +211,7 @@ fn realize_memberships(
         });
         *next_slot = Some(realizer.next_slot);
         let inlined_calls = std::mem::take(&mut realizer.inlined_calls);
+        let derived_constants = std::mem::take(&mut realizer.derived_constants);
         finish_membership(
             ir,
             expression as ExprId,
@@ -212,6 +219,7 @@ fn realize_memberships(
             negated,
             first_generated,
             &inlined_calls,
+            &derived_constants,
         );
     }
 }
@@ -225,6 +233,7 @@ fn finish_membership(
     negated: bool,
     first_generated: usize,
     inlined_calls: &[ExprId],
+    derived_constants: &[DerivedConstant],
 ) {
     if negated {
         let contains = ir.add_expr(contains);
@@ -237,6 +246,7 @@ fn finish_membership(
     if let Some(line) = ir.expr_source_lines.get(&expression).copied() {
         record_generated_line(ir, line, first_generated);
     }
+    keep_written_offsets(ir, derived_constants);
 }
 
 /// The checked pieces of one counted loop.
@@ -281,6 +291,19 @@ struct Realizer<'a> {
     unsigned_compare: Option<IrRuntimeFunction>,
     inlined_calls: Vec<ExprId>,
     represented: Vec<ExprId>,
+    /// Constants built from a written constant, which keep its source offsets.
+    derived_constants: Vec<DerivedConstant>,
+}
+
+/// A constant a lowering built from a written one: an inclusive bound moved to its exclusive
+/// neighbour (`convertIrConst`) or a bound converted to the comparison type (`castIfNecessary`).
+/// kotlinc builds either with `IrConstImpl(startOffset, endOffset, ...)` of the written constant,
+/// so codegen marks the written constant's line where it is loaded, not the line of the
+/// construct the lowering generated it for.
+#[derive(Clone, Copy)]
+struct DerivedConstant {
+    written: ExprId,
+    built: ExprId,
 }
 
 impl Realizer<'_> {
@@ -293,6 +316,13 @@ impl Realizer<'_> {
         let id = self.add(expression);
         self.ir.logical_types.insert(id, ty);
         id
+    }
+
+    /// Record that `built` is a constant derived from `written`, at its source offsets.
+    fn derived_constant(&mut self, written: ExprId, built: ExprId) -> ExprId {
+        self.derived_constants
+            .push(DerivedConstant { written, built });
+        built
     }
 
     /// A second use of a leaf operand (a constant or a value read) as its own node.
@@ -509,13 +539,21 @@ fn integral_value(constant: &IrConst) -> Option<i64> {
 
 /// The constant under an implicit numeric coercion, which is how a lowered literal bound arrives.
 fn constant_bound(ir: &IrFile, expression: ExprId) -> Option<IrConst> {
-    match ir.expr(expression) {
+    match ir.expr(constant_node(ir, expression)?) {
         IrExpr::Const(constant) => Some(constant.clone()),
+        _ => None,
+    }
+}
+
+/// The constant node an expression is, through implicit coercions.
+fn constant_node(ir: &IrFile, expression: ExprId) -> Option<ExprId> {
+    match ir.expr(expression) {
+        IrExpr::Const(_) => Some(expression),
         IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
             arg,
             ..
-        } => constant_bound(ir, *arg),
+        } => constant_node(ir, *arg),
         _ => None,
     }
 }
@@ -584,5 +622,20 @@ fn record_generated_lines(ir: &mut IrFile, source: ExprId, first_generated: usiz
 fn record_generated_line(ir: &mut IrFile, line: u32, first_generated: usize) {
     for raw in first_generated..ir.exprs.len() {
         ir.expr_source_lines.insert(raw as ExprId, line);
+    }
+}
+
+/// Put each derived constant back at its written constant's source lines, after the generated
+/// nodes took the construct's line.
+fn keep_written_offsets(ir: &mut IrFile, derived_constants: &[DerivedConstant]) {
+    for &DerivedConstant { written, built } in derived_constants {
+        match ir.expr_source_lines.get(&written).copied() {
+            Some(line) => ir.expr_source_lines.insert(built, line),
+            None => ir.expr_source_lines.remove(&built),
+        };
+        match ir.expr_end_lines.get(&written).copied() {
+            Some(line) => ir.expr_end_lines.insert(built, line),
+            None => ir.expr_end_lines.remove(&built),
+        };
     }
 }

@@ -1,5 +1,14 @@
 # krusty — implementation plan
 
+## Classifier declaration-name handoff
+
+Retain an optional declaration-owned package/owner and exact segment across source bootstrap,
+resolved headers, normalized dependency shapes, module symbols, common IR and backend freezing.
+Unknown, known top-level and known nested declarations stay distinct; lexical ownership does not
+imply enclosing-instance capture. Snapshot and provider tests constrain the handoff. Consuming this
+fact in JVM `InnerClasses`, cross-file owner tables and metadata class IDs is a separate follow-up;
+this phase leaves emission unchanged.
+
 JVM return consumers now use authenticated declaration-result slots across reference-preserving
 null assertions. Value-class refinement shares that producer boundary, while inline and suspension
 owners keep their existing result materialization. Full classfile/runtime controls cover ordinary
@@ -6038,6 +6047,13 @@ checked argument types nor callable selection are rewritten to obtain a JVM cast
 reference controls cover source dependent bounds and independently bounded dependency slots,
 with width, Object, exact-wrapper and runtime controls. The dependency inner-constructor frontend
 prerequisite landed in #2593; its declaration normalization remains separate from this representation fix (#2590).
+
+## Callable applicability ownership
+
+Syntax-aware callable applicability lives in `resolve/call_applicability`: source argument slots,
+candidate ranks and selected SAM adaptations share one operation across the existing call paths.
+The resolver facade delegates to that owner, preserving parameter mapping and scoring policy.
+Captured input constraints remain tracked separately in #2648 and #2649.
 
 ## Direct projected input diagnostics
 
