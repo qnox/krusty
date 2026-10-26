@@ -78,6 +78,7 @@ fn publish_callable(
                 .collect()
         })
         .unwrap_or_default();
+    let owner_type_parameters = owner_type_parameters(index, owner);
     let owner = owner.map(|classifier| classifier.classifier);
     let placement = super::companion_blocks::static_placement(
         flags,
@@ -140,17 +141,10 @@ fn publish_callable(
                 .enumerate()
                 .filter_map(|(position, &default)| default.then_some(position))
                 .collect(),
-            type_parameters: super::generics::declaration_type_parameters(
-                index,
-                callable.declaration,
-            )
-            .into_iter()
-            .map(|parameter| crate::ir::IrCallableTypeParameter {
-                semantic_name: parameter.semantic_name,
-                bounds: parameter.bounds.into_boxed_slice(),
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice(),
+            type_parameters: callable_type_parameters(
+                super::generics::declaration_type_parameters(index, callable.declaration),
+            ),
+            owner_type_parameters,
             result: signature.result.get(),
             annotations: index
                 .declaration_annotations(callable.declaration)
@@ -180,6 +174,33 @@ fn publish_callable(
         }
         _ => Ok(()),
     }
+}
+
+/// The records a module declaration carries for its type parameters: identity and bounds.
+fn callable_type_parameters(
+    parameters: Vec<crate::ir::IrTypeParameter>,
+) -> Box<[crate::ir::IrCallableTypeParameter]> {
+    parameters
+        .into_iter()
+        .map(|parameter| crate::ir::IrCallableTypeParameter {
+            semantic_name: parameter.semantic_name,
+            bounds: parameter.bounds.into_boxed_slice(),
+        })
+        .collect()
+}
+
+/// The complete type-parameter layout of a member's declaring classifier, none for a top-level
+/// declaration.
+fn owner_type_parameters(
+    index: &ResolvedModuleIndex,
+    owner: Option<&crate::fir::ResolvedClassifierHeader>,
+) -> Box<[crate::ir::IrCallableTypeParameter]> {
+    owner.map_or_else(Box::default, |owner| {
+        callable_type_parameters(super::generics::classifier_type_parameters(
+            index,
+            owner.declaration,
+        ))
+    })
 }
 
 fn classifier_kind(flags: DeclarationFlags) -> IrClassifierKind {
@@ -331,6 +352,10 @@ fn publish_property(
                 FirFileLoweringFailure::MissingProperty(property.declaration),
             )?,
             overridden_types,
+            type_parameters: callable_type_parameters(
+                super::generics::declaration_type_parameters(index, property.declaration),
+            ),
+            owner_type_parameters: owner_type_parameters(index, owner),
         },
     );
     Ok(())
@@ -427,6 +452,9 @@ fn publish_constructor(
             context_parameter_count: callable.shape.context_parameter_count,
             parameters,
             outer,
+            owner_type_parameters: callable_type_parameters(
+                super::generics::classifier_type_parameters(index, owner.declaration),
+            ),
         },
     );
     Ok(())

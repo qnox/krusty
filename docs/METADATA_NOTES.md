@@ -1,5 +1,21 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Source inventory publication
+
+Compact source headers publish classifier identities from explicit declaration ownership and exact
+segments rather than splitting lookup names on dots and dollars. This avoids creating undeclared
+prefix identities before later consumers run. Metadata class-ID encoding still needs its separate
+snapshot ownership lookup; publication alone does not supply authoritative negative nesting facts
+for every cached or cross-module identity.
+
+## JVM member-class rows
+
+The JVM attribute writer now consumes retained non-local ownership and exact declaration segments
+for member rows, including names with literal dollars. The cross-file module resolver preserves
+the current declaration's precedence over classpath rows. Local and anonymous implementation rows
+retain their existing provenance. This changes no Kotlin metadata class-ID encoding; aliases and
+builtin ownership evidence belong to the remaining metadata handoff.
+
 ## Builtin declaration-name evidence
 
 Capture raw builtin Class names before name-tree normalization, so a literal dollar remains
@@ -9,14 +25,6 @@ Exact physical classifiers retain their own classfile/Kotlin metadata authority.
 function, array, reflection and JVM Cloneable factories publish names from their existing
 declaration definitions. These facts are input to the later metadata name consumer; this producer
 change does not itself repair the retained complete-classfile literal-dollar regression.
-
-## JVM member-class rows
-
-The JVM attribute writer now consumes retained non-local ownership and exact declaration segments
-for member rows, including names with literal dollars. The cross-file module resolver preserves
-the current declaration's precedence over classpath rows. Local and anonymous implementation rows
-retain their existing provenance. This changes no Kotlin metadata class-ID encoding; aliases and
-builtin ownership evidence belong to the remaining metadata handoff.
 
 ## Declaration-name evidence
 

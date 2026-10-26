@@ -160,6 +160,34 @@ pub(super) fn classifier_own_type_parameters(
         .collect()
 }
 
+/// A classifier's complete type-parameter layout: the ones it captures from enclosing
+/// classifiers and its own, each with its complete written bounds.
+pub(super) fn classifier_type_parameters(
+    index: &ResolvedModuleIndex,
+    declaration: DeclarationId,
+) -> Vec<IrTypeParameter> {
+    classifier_type_parameter_layout(index, declaration)
+        .0
+        .iter()
+        .map(|parameter| type_parameter(index, *parameter))
+        .collect()
+}
+
+/// The type parameter of `classifier`'s complete layout, its own or one it captures from an
+/// enclosing classifier, that a bare `parameter` occurrence names.
+pub(super) fn classifier_layout_type_parameter(
+    index: &ResolvedModuleIndex,
+    classifier: DeclarationId,
+    parameter: crate::types::Ty,
+) -> Option<TypeParameterId> {
+    let semantic_name = parameter.non_null().ty_param_name()?;
+    index
+        .classifier_type_arguments(classifier)?
+        .iter()
+        .copied()
+        .find(|identity| index.type_parameter_semantic_name(*identity) == Some(semantic_name))
+}
+
 fn classifier_type_parameter_layout(
     index: &ResolvedModuleIndex,
     declaration: DeclarationId,

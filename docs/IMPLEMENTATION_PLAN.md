@@ -1,12 +1,11 @@
 # krusty — implementation plan
 
-## Builtin declaration-name producers
+## Source classifier inventory identities
 
-Populate the existing declaration-name fact from admitted core/function/array factories and raw
-`.kotlin_builtins` declarations. Carry the selected builtin identity alongside its name through
-signature and classless/mapped shape publication; retain exact physical declaration authority.
-Reuse the current inventories and mappings. Metadata name lookup/encoding, source classifier
-projection and optional-annotation name retention remain separate follow-ups.
+Replace lookup-spelling splitting in the foreign-source classifier inventory with the existing
+declaration-owned name operation. Preserve exact segments, owner edges, visibility, order and
+non-local exclusions without interning undeclared prefixes. This producer correction is separate
+from the remaining metadata class-ID encoder and dependency/alias-name fact handoff.
 
 ## JVM declaration-owned member rows
 
@@ -15,6 +14,14 @@ cross-file module resolver. Keep top-level and unavailable module records from b
 a classpath record with the same physical identity. Preserve local/coroutine/reference provenance
 and exact table order. This slice leaves source identity publication and metadata class-ID encoding
 for subsequent changes; the complete literal-dollar classfile regression remains open there.
+
+## Builtin declaration-name producers
+
+Populate the existing declaration-name fact from admitted core/function/array factories and raw
+`.kotlin_builtins` declarations. Carry the selected builtin identity alongside its name through
+signature and classless/mapped shape publication; retain exact physical declaration authority.
+Reuse the current inventories and mappings. Metadata name lookup/encoding, source classifier
+projection and optional-annotation name retention remain separate follow-ups.
 
 ## Classifier declaration-name handoff
 
