@@ -398,6 +398,12 @@ pub(super) fn synth_value_members(
         ir.jvm_value_class_representation_order.insert(cfid, 0);
         realized.constructor_impls.insert((internal_name, 0), cfid);
         ir.jvm_value_class_constructor_impls.insert(cfid, 0);
+        // `constructor-impl` itself records no line, but its `$default` stub stands on the source
+        // constructor's own line, like the rebuilt `<init>` above.
+        let constructor_line = ir.classes[class_id as usize].primary_ctor_lines.decl_line;
+        if constructor_line != 0 {
+            ir.fn_sig_lines.insert(cfid, constructor_line);
+        }
         crate::jvm::method_parameters::record_function(ir, cfid, &[&fname], &[]);
         // Unlike a source value-class member converted to `member-impl`, this generated function's
         // carrier is its declared constructor parameter, not a former dispatch receiver. Keeping an
@@ -405,9 +411,14 @@ pub(super) fn synth_value_members(
         // mask ordinals and silently skip its checked default.
         ir.functions[cfid as usize].dispatch_receiver = None;
         ir.open_methods.insert(cfid); // kotlinc emits `constructor-impl` `public static` (non-final)
-                                      // A default on the single underlying property (`ItemId(val value: String = …)`) → register it as
-                                      // `constructor-impl`'s param default so the backend emits `constructor-impl$default(U, int, marker)`
-                                      // (kotlinc's synthetic). The generic constructor default was reframed to this static layout above.
+                                      // A private primary constructor is a private `constructor-impl`: another class reaches it
+                                      // through the box's `access$constructor-impl` accessor, as any private static member.
+        if ir.ctor_visibilities.get(&internal_name) == Some(&crate::types::Visibility::Private) {
+            ir.set_method_visibility(cfid, crate::types::Visibility::Private);
+        }
+        // A default on the single underlying property (`ItemId(val value: String = …)`) → register it as
+        // `constructor-impl`'s param default so the backend emits `constructor-impl$default(U, int, marker)`
+        // (kotlinc's synthetic). The generic constructor default was reframed to this static layout above.
         if let Some(def) = constructor_default {
             ir.fn_params.insert(
                 cfid,
@@ -822,8 +833,12 @@ pub(super) fn synth_value_members(
             }
             crate::jvm::method_parameters::record_function(ir, constructor, &names, &[]);
             ir.fn_source_order.insert(constructor, sc.source_order);
-            // `public static`, non-final — like the primary's `constructor-impl`.
+            // `static`, non-final, and as visible as the declaration — like the primary's
+            // `constructor-impl`.
             ir.open_methods.insert(constructor);
+            if sc.metadata_visibility == Some(crate::types::Visibility::Private) {
+                ir.set_method_visibility(constructor, crate::types::Visibility::Private);
+            }
         }
     }
     true

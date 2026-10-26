@@ -57,7 +57,7 @@ impl Classpath {
 
     /// The annotations, with their arguments, that each method of class `internal` states, read
     /// again from its class file. `None` when the class has no class file or it cannot be read.
-    pub(in crate::jvm) fn method_annotations(
+    pub(in crate::jvm) fn class_method_annotations(
         &self,
         internal: TypeName,
     ) -> Option<Vec<crate::jvm::classreader::MethodAnnotations>> {

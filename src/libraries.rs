@@ -54,8 +54,8 @@ pub use call_realization::{
 pub(crate) use call_realization::{KlibBodyCallableShape, KlibBodyCompanionReceiver};
 pub use call_sig::required_arity;
 pub use callable_scope_rung::CallableScopeRung;
-pub(crate) use classifier_callables::constructor_generic_signature;
 pub use classifier_callables::BoundInnerConstructor;
+pub(crate) use classifier_callables::{constructor_generic_signature, ConstructorAlias};
 pub(crate) use classifier_declaration::type_alias_target_classifier;
 pub use classifier_declaration::{AliasExpansion, ClassifierDeclaration};
 pub use classifier_kind::TypeKind;
@@ -92,7 +92,9 @@ use crate::types::InlineParameterModifier;
 pub use crate::types::Visibility;
 use crate::types::{SemanticCallRole, SemanticCallableOwner, Ty, TyKind, TypeName, TypeNameList};
 pub(crate) use array_factories::kotlin_array_factory_kind;
-pub use compiler_intrinsic::{CompilerIntrinsic, ListStorageConstruction, ResultFailureIntrinsic};
+pub use compiler_intrinsic::{
+    CompilerIntrinsic, IndicesReceiver, ListStorageConstruction, ResultFailureIntrinsic,
+};
 pub(crate) use core_builtins::add_core_builtin_declarations;
 pub use generic_signature::{GenericReturnPolicy, GenericSig};
 pub use inline_body::{
@@ -244,6 +246,9 @@ pub struct LibraryMember {
     /// facts (a constructor's `(TA;TB;)V`) without making consumers parse backend signature strings.
     /// Used to infer a construction's type arguments against the enclosing type's [`LibraryType::type_params`].
     pub generic_sig: Option<GenericSig>,
+    /// Pre-substitution source parameters: contexts, extension receiver, then values, as in
+    /// [`LibraryCallable::declared_params`]. Runtime outer/default ABI slots are excluded.
+    pub declared_params: Option<Box<[Ty]>>,
     /// The declaration returns through a projected generic position whose erased top result must
     /// not be treated as an ordinary inferred `Any`. This semantic applicability fact is retained
     /// on the selected member so Pass 2 never reopens the signature graph to rediscover it.
@@ -733,6 +738,7 @@ impl LibraryMember {
             signature: None,
             generic_sig: None,
             projected_return_hazard: false,
+            declared_params: None,
             flags: LmFlags::default(),
             inline: InlineKind::None,
             reified: false,
@@ -757,18 +763,6 @@ impl LibraryMember {
             stable_declaration: None,
             source_member: None,
         }
-    }
-
-    /// The selected constructor's parameter types before classifier type-argument substitution,
-    /// aligned with [`Self::params`]. Constructor selection specializes `params` from the generic
-    /// signature exactly when that signature has the same arity, so the same rule names the
-    /// declaration shape a specialized `params` came from (`Holder(T)` selected as `Holder(Money)`).
-    pub fn constructor_declaration_params(&self) -> &[Ty] {
-        self.generic_sig
-            .as_ref()
-            .map(|signature| signature.params.as_slice())
-            .filter(|params| params.len() == self.params.len())
-            .unwrap_or(&self.params)
     }
 
     #[inline]
@@ -1434,6 +1428,8 @@ pub struct FunctionInfo {
     /// receiver's member level beside same-named member functions; selection runs once over both
     /// and the constructor path then materializes the selected declaration.
     pub bound_inner_constructor: Option<BoundInnerConstructor>,
+    /// The alias selected on the caller's scope tower for this constructor candidate.
+    pub(crate) constructor_alias: Option<Box<ConstructorAlias>>,
 }
 
 /// Where an extension receiver sits among a callable's PHYSICAL parameters. Kotlin puts the leading
@@ -1658,6 +1654,7 @@ impl FunctionInfo {
             source_member: None,
             implicit_classifier_callable: None,
             bound_inner_constructor: None,
+            constructor_alias: None,
         }
     }
 
@@ -1698,6 +1695,7 @@ impl FunctionInfo {
         member.external_default_provider = self.callable.external_default_provider;
         member.nonvirtual_realization = self.callable.nonvirtual_realization.clone();
         member.generic_sig = self.generic_sig.clone();
+        member.declared_params = self.callable.declared_params.clone();
         member.projected_return_hazard = self.projected_return_hazard;
         member.inline = self.flags.inline;
         member.inline_body_plan = self.callable.inline_body_plan.clone();

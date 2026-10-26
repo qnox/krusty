@@ -10,6 +10,7 @@ use crate::kt_string::{KtString, KtStringBuf};
 use crate::token::{decode_char_literal_content, Token, TokenKind};
 use crate::types::Visibility;
 
+mod annotation_values;
 mod anonymous_functions;
 mod class_recovery;
 mod companion_declarations;
@@ -626,6 +627,8 @@ struct Parser<'a> {
     /// used where a following `{` belongs to an enclosing construct (a `: I by Impl()` delegate, whose
     /// `{` opens the class body, not a lambda on the delegate call).
     no_trailing_lambda: bool,
+    /// Array syntax anywhere inside an annotation value retains its annotation-array role.
+    annotation_value_context: bool,
     /// Whether physical line breaks are whitespace, as inside `(…)` and `[…]`; see
     /// `parser/line_breaks.rs`.
     newlines_insignificant: bool,
@@ -797,6 +800,7 @@ impl<'a> Parser<'a> {
             context_receivers: features.has("ContextReceivers"),
             when_guards: features.has("WhenGuards"),
             no_trailing_lambda: false,
+            annotation_value_context: false,
             newlines_insignificant: false,
             block_trailing_is_value: false,
             bare_branch_value: false,
@@ -1570,15 +1574,15 @@ impl<'a> Parser<'a> {
     /// resolver commits the exact annotation identity for this occurrence.
     fn parse_annotation_reference(&mut self) -> (String, Span) {
         let annotation_span = self.tok().span;
-        let (qname, qualifier_arguments) = self.parse_annotation_name();
-        if !qualifier_arguments.is_empty() {
-            self.file
-                .annotation_qualifier_arguments
-                .insert(annotation_span.lo, qualifier_arguments);
-        }
+        let (qname, arguments, qualifier_arguments) = self.parse_annotation_name();
         if !qname.is_empty() {
             let mut reference = simple_type_ref(&qname, annotation_span);
             reference.flags = reference.flags.with_annotation(true);
+            reference.targs = arguments;
+            reference.qualifier_arguments = qualifier_arguments.into();
+            self.file
+                .annotation_type_references
+                .insert(annotation_span.lo, reference.clone());
             self.file.detached_type_refs.push(reference);
             let suppressions = self
                 .pending_annotations
@@ -1602,101 +1606,6 @@ impl<'a> Parser<'a> {
             }
         }
         (qname, annotation_span)
-    }
-
-    /// Parse an annotation argument list `( (name =)? value ,* )` through the real grammar. Values
-    /// the checker cannot model retain an explicit [`UnsupportedAnnotationArgument`] node so the
-    /// annotation-consumption site can reject them without fabricating a resolvable name.
-    fn parse_annotation_args(&mut self) -> Vec<ExprId> {
-        let mut out = Vec::new();
-        if !self.eat(TokenKind::LParen) {
-            return out;
-        }
-        self.skip_newlines();
-        while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
-            // optional named argument `name = value` — the label binds the value to an element by
-            // NAME, so it is recorded rather than skipped (annotation elements have defaults and
-            // may appear in any order).
-            let mut argument_name = None;
-            if self.at_named_arg() {
-                argument_name = Some(self.text().to_string());
-                self.bump(); // name
-                self.bump(); // '='
-            }
-            if let Some(e) = self.parse_annotation_value() {
-                if let Some(name) = argument_name {
-                    self.file.annotation_arg_names.insert(e.0, name);
-                }
-                out.push(e);
-            }
-            self.skip_newlines();
-            if !self.eat(TokenKind::Comma) {
-                break;
-            }
-            self.skip_newlines();
-        }
-        self.expect(TokenKind::RParen, "')'");
-        out
-    }
-
-    /// A single annotation argument value: an array literal `[…]`, a nested annotation `@Foo(…)`,
-    /// or an ordinary expression (including `Foo::class`).
-    fn parse_annotation_value(&mut self) -> Option<ExprId> {
-        // Annotation arrays, nested annotations, and spreads recurse while a declaration prefix is
-        // still being consumed, before `parse_bp` or a class-like parser is necessarily entered.
-        // They are expression syntax, so join the shared expression lane instead of owning another
-        // origin-specific counter/recovery policy.
-        self.with_nesting_guard(
-            ParserNesting::Expression,
-            |_parser, _span| None,
-            Self::parse_annotation_value_inner,
-        )
-    }
-
-    fn parse_annotation_value_inner(&mut self) -> Option<ExprId> {
-        if self.at(TokenKind::LBracket) {
-            let start = self.tok().span;
-            self.bump(); // '['
-            self.skip_newlines();
-            // The elements are kept AS PARSED. Which array factory they belong to follows the
-            // annotation element's declared type, which the parser cannot see, so the checker
-            // folds this literal against that type.
-            let mut elements = Vec::new();
-            while !self.at(TokenKind::RBracket) && !self.at(TokenKind::Eof) {
-                if let Some(element) = self.parse_annotation_value() {
-                    elements.push(element);
-                }
-                self.skip_newlines();
-                if !self.eat(TokenKind::Comma) {
-                    break;
-                }
-                self.skip_newlines();
-            }
-            self.expect(TokenKind::RBracket, "']'");
-            Some(
-                self.file
-                    .add_expr(Expr::AnnotationArrayLiteral(elements), start),
-            )
-        } else if self.at(TokenKind::At) {
-            let start = self.tok().span;
-            let _ = self.parse_annotation();
-            Some(self.file.add_expr(
-                Expr::UnsupportedAnnotationArgument(
-                    crate::ast::UnsupportedAnnotationArgument::NestedAnnotation,
-                ),
-                start,
-            ))
-        } else if self.at(TokenKind::Star) {
-            // A spread argument in an annotation (`@A(*arrayOf("O"), "K")` — a `vararg` annotation
-            // parameter). Preserve the same spread fact as an ordinary call argument; checking uses
-            // it to type the whole array and constant folding flattens its elements into the vararg.
-            self.bump(); // '*'
-            let argument = self.parse_annotation_value()?;
-            self.file.spread_arg_ids.insert(argument.0);
-            Some(argument)
-        } else {
-            Some(self.parse_expr())
-        }
     }
 
     /// Parse the complete declaration-shaped part of a type alias. Semantic registration differs
@@ -2181,31 +2090,13 @@ impl<'a> Parser<'a> {
                     let entry_name = self.text().to_string();
                     self.bump();
                     // Optional constructor arguments: `RED(0xFF0000)`, incl. named `RED(rgb = 0xFF0000)`.
-                    let mut args = Vec::new();
-                    let mut arg_names: Vec<Option<String>> = Vec::new();
-                    if self.eat(TokenKind::LParen) {
-                        self.skip_newlines();
-                        while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
-                            // A named argument `name = value` — the identifier is followed by `=` (but not
-                            // `==`). Capture the name so the lowering can reorder to constructor order.
-                            let named = self.at_named_arg();
-                            if named {
-                                arg_names.push(Some(self.text().to_string()));
-                                self.bump(); // name
-                                self.bump(); // '='
-                                self.skip_newlines();
-                            } else {
-                                arg_names.push(None);
-                            }
-                            args.push(self.parse_expr());
-                            self.skip_newlines();
-                            if !self.eat(TokenKind::Comma) {
-                                break;
-                            }
-                            self.skip_newlines();
-                        }
+                    let (args, arg_names) = if self.eat(TokenKind::LParen) {
+                        let (args, names, _) = self.parse_call_argument_list();
                         self.expect(TokenKind::RParen, "')'");
-                    }
+                        (args, names)
+                    } else {
+                        (Vec::new(), Vec::new())
+                    };
                     // A per-entry class body (`RED { override fun m() = … }`) is an anonymous subclass.
                     // Capture its method overrides and `val`/`var` properties; anything else bails cleanly.
                     let mut body = Vec::new();
@@ -2630,8 +2521,15 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse a value-argument list after its opening parenthesis.
+    /// Parse a value-argument list after its opening parenthesis, up to its closing one. Line breaks
+    /// inside it are whitespace, as in every parenthesized construct.
     fn parse_call_argument_list(
+        &mut self,
+    ) -> (Vec<ExprId>, Vec<Option<String>>, Vec<Option<Span>>) {
+        self.with_newlines_insignificant(Self::parse_call_argument_items)
+    }
+
+    fn parse_call_argument_items(
         &mut self,
     ) -> (Vec<ExprId>, Vec<Option<String>>, Vec<Option<Span>>) {
         // A delegation guard applies to the delegate expression's OUTER postfix chain only. Calls
@@ -3326,32 +3224,7 @@ impl<'a> Parser<'a> {
                 if self.eat(TokenKind::LParen) {
                     // constructor call → base class. Arguments may be NAMED (`Base(name = …, addr = …)`);
                     // the per-arg name is recorded so the checker/lowerer reorder to the base ctor order.
-                    self.skip_newlines();
-                    let mut args = Vec::new();
-                    let mut arg_names: Vec<Option<String>> = Vec::new();
-                    while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
-                        let named = self.at_named_arg();
-                        if named {
-                            arg_names.push(Some(self.text().to_string()));
-                            self.bump(); // name
-                            self.bump(); // '='
-                            self.skip_newlines();
-                        } else {
-                            arg_names.push(None);
-                        }
-                        // Spread `*expr` — an array spread into the base ctor's `vararg` parameter.
-                        let spread = self.eat(TokenKind::Star);
-                        let arg = self.parse_expr();
-                        if spread {
-                            self.file.spread_arg_ids.insert(arg.0);
-                        }
-                        args.push(arg);
-                        self.skip_newlines();
-                        if !self.eat(TokenKind::Comma) {
-                            break;
-                        }
-                        self.skip_newlines();
-                    }
+                    let (args, arg_names, _) = self.parse_call_argument_list();
                     self.expect(TokenKind::RParen, "')'");
                     let mut reference = simple_type_ref(&name, sup_span);
                     reference.targs = targs.clone();

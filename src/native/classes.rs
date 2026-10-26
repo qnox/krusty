@@ -18,12 +18,19 @@
 //! out — an annotation's implementation class and a callable reference's class — and the shared
 //! tables decline a superclass declared in another file and an override of a method declared
 //! outside it, so the file declines with a diagnostic instead of emitting something unverified.
+//!
+//! **Interfaces** of the module are not slots of the vtable: each class also has an interface
+//! table indexed by the module-wide member number ([`Dispatch::Interface`]), so a call through an
+//! interface reaches the receiver's implementation from any file.
 
 use super::value_classes::NativeValueClasses;
 use crate::fx_hash::HashMap;
 
-use crate::backend::class_tables::module_slots::ModuleSlotPlan;
+use crate::backend::class_tables::module_interfaces::ModuleInterfaces;
+use crate::backend::class_tables::module_slots::{ModuleSlotPlan, PlanKey};
+use crate::backend::class_tables::planned_itable::InterfaceEntry;
 use crate::backend::class_tables::{self, ClassTable, Representation};
+use crate::fir::{CallableId, ResolvedPropertyOverrideTarget};
 use crate::ir::{ClassId, FunId, IrClass, IrFile};
 use crate::types::{Ty, TypeName};
 
@@ -280,9 +287,19 @@ pub(super) enum Slot {
         setter: bool,
         target_slot: u32,
     },
+    /// See [`InterfaceEntry::ModuleFunction`]: an interface's body another file defines.
+    ModuleFunction(CallableId),
 }
 
 impl Slot {
+    /// An interface table entry as Native realizes it.
+    fn interface_entry(entry: InterfaceEntry, root: &IrClass) -> Self {
+        match entry {
+            InterfaceEntry::Slot(slot) => Self::realized(slot, root),
+            InterfaceEntry::ModuleFunction(callable) => Self::ModuleFunction(callable),
+        }
+    }
+
     /// A shared table's slot as Native realizes it, where `kotlin.Any`'s members are those of the
     /// base `root` — the class at the top of the hierarchy in this file — extends.
     fn realized(slot: class_tables::Slot, root: &IrClass) -> Self {
@@ -388,6 +405,10 @@ pub(super) struct ClassLayout {
     pub reference_offsets: Vec<u32>,
     pub vtable: Vec<Slot>,
     pub slots: HashMap<SlotKey, u32>,
+    /// Indexed by the module-wide interface member number; empty for a class implementing no
+    /// interface of the module. An interface's own is what an implementor supplying nothing would
+    /// hold: where an object a lambda becomes starts.
+    pub itable: Vec<Slot>,
 }
 
 /// The layouts of every class in a file, indexed by `ClassId`, plus the order in which a
@@ -396,9 +417,23 @@ pub(super) struct ClassLayout {
 pub(super) struct ClassModel {
     pub layouts: Vec<ClassLayout>,
     pub order: Vec<ClassId>,
-    /// Every interface each class implements, transitively — what its descriptor carries so `is`
-    /// can answer for a type that is not on the single-inheritance chain. Indexed by `ClassId`.
+    /// Every interface of this file each class implements, transitively. Indexed by `ClassId`.
     pub interfaces: Vec<Vec<ClassId>>,
+    /// Every module interface each class implements (an interface: extends), itself included —
+    /// what its descriptor carries so `is` can answer for a type that is not on the
+    /// single-inheritance chain. Indexed by `ClassId`.
+    pub implemented: Vec<Vec<TypeName>>,
+    /// The checked callable each function of this file realizes.
+    callables: HashMap<FunId, CallableId>,
+}
+
+/// Which table a member dispatches through, and at which index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Dispatch {
+    /// The receiver's class table, by class slot.
+    Class(u32),
+    /// The receiver's interface table, by module-wide member number.
+    Interface(u32),
 }
 
 impl ClassModel {
@@ -406,13 +441,43 @@ impl ClassModel {
         &self.layouts[class as usize]
     }
 
-    /// The slot a member dispatches through, looked up on the class the call names.
+    /// The class slot a member dispatches through, looked up on the class the call names. An
+    /// interface has no class slots of its own beyond `kotlin.Any`'s; see [`Self::dispatch`].
     pub(super) fn slot(&self, class: ClassId, key: &SlotKey) -> Option<u32> {
         self.layout(class).slots.get(key).copied()
     }
+
+    /// How a call through `class`, which `ir` declares, reaches the member `key` names: by its
+    /// class slot, or for an interface by the member's module-wide number.
+    pub(super) fn dispatch(
+        &self,
+        ir: &IrFile,
+        numbers: &ModuleInterfaces,
+        class: ClassId,
+        key: &SlotKey,
+    ) -> Option<Dispatch> {
+        if !ir.classes[class as usize].is_interface {
+            return self.slot(class, key).map(Dispatch::Class);
+        }
+        if let Some(slot) = self.slot(class, key) {
+            return Some(Dispatch::Class(slot));
+        }
+        let plan_key = match key {
+            SlotKey::Function(fid) => PlanKey::Callable(*self.callables.get(fid)?),
+            SlotKey::Getter(ResolvedPropertyOverrideTarget::Module(property)) => {
+                PlanKey::Getter(*property)
+            }
+            SlotKey::Setter(ResolvedPropertyOverrideTarget::Module(property)) => {
+                PlanKey::Setter(*property)
+            }
+            SlotKey::Getter(ResolvedPropertyOverrideTarget::External(_))
+            | SlotKey::Setter(ResolvedPropertyOverrideTarget::External(_))
+            | SlotKey::Any(_) => return None,
+        };
+        numbers.number(plan_key).map(Dispatch::Interface)
+    }
 }
 
-/// Reject, by name, a class this step does not lower.
 /// Reject, by name, a class this step does not lower.
 pub(super) fn check_supported(class: &IrClass) -> Result<(), Unsupported> {
     let name = class.fq_name();
@@ -438,17 +503,23 @@ pub(super) fn build(
     for class in &ir.classes {
         check_supported(class)?;
     }
-    let tables = class_tables::build(&NativeRepresentation(values), ir, plan)?;
+    let numbered = class_tables::build_numbered(&NativeRepresentation(values), ir, plan)?;
     let mut layouts: Vec<Option<ClassLayout>> = vec![None; ir.classes.len()];
-    for &id in &tables.order {
-        let table = tables.table(id);
+    for &id in &numbered.order {
+        let table = &numbered.tables[id as usize];
         let layout = {
             let parent = table.superclass.map(|parent| {
                 layouts[parent as usize]
                     .as_ref()
                     .expect("superclasses are laid out first")
             });
-            layout_class(values, ir, id, table, parent)?
+            let mut layout = layout_class(values, ir, id, table, parent)?;
+            let root = root_class(ir, id);
+            layout.itable = numbered.interface_tables.tables[id as usize]
+                .iter()
+                .map(|entry| Slot::interface_entry(entry.clone(), root))
+                .collect();
+            layout
         };
         layouts[id as usize] = Some(layout);
     }
@@ -462,7 +533,8 @@ pub(super) fn build(
         if !values.is_value_class(class.fq_name) {
             continue;
         }
-        for slot in &mut layouts[id].vtable {
+        let layout = &mut layouts[id];
+        for slot in layout.vtable.iter_mut().chain(layout.itable.iter_mut()) {
             if let Slot::Function(function) = *slot {
                 if class.methods.contains(&function) {
                     *slot = Slot::ValueBridge {
@@ -475,8 +547,14 @@ pub(super) fn build(
     }
     Ok(ClassModel {
         layouts,
-        order: tables.order,
-        interfaces: tables.interfaces,
+        order: numbered.order,
+        interfaces: numbered.interfaces,
+        implemented: numbered.interface_tables.implemented,
+        callables: ir
+            .checked_callable_functions
+            .iter()
+            .map(|(callable, function)| (*function, *callable))
+            .collect(),
     })
 }
 
@@ -589,6 +667,7 @@ fn layout_class(
         reference_offsets,
         vtable,
         slots: table.slots.clone(),
+        itable: Vec::new(),
     })
 }
 

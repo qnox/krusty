@@ -145,6 +145,77 @@ struct Ran {
     _temp: support::TempDir,
 }
 
+#[test]
+fn same_label_temporary_directories_preserve_each_live_owners_state() {
+    let first = support::TempDir::new("compile-live-owner");
+    let first_path = first.0.clone();
+    std::fs::create_dir(first.0.join("record.lock")).unwrap();
+    std::fs::write(first.0.join("record"), "first invocation\n").unwrap();
+
+    let second = support::TempDir::new("compile-live-owner");
+    assert_eq!(
+        std::fs::read_to_string(first.0.join("record")).expect("the first owner's record survives"),
+        "first invocation\n"
+    );
+    assert!(first.0.join("record.lock").is_dir());
+    assert_ne!(first.0, second.0);
+    let second_path = second.0.clone();
+    drop(second);
+    assert!(!second_path.exists());
+    assert_eq!(
+        std::fs::read_to_string(first.0.join("record")).unwrap(),
+        "first invocation\n"
+    );
+    assert!(first.0.join("record.lock").is_dir());
+    drop(first);
+    assert!(!first_path.exists());
+}
+
+#[test]
+fn a_malformed_record_reports_the_slot_bytes_and_completed_child_output() {
+    let temp = support::TempDir::new("compile-malformed-record");
+    let directory = temp.0.clone();
+    let recorder = directory.join("malformed-recorder");
+    std::fs::write(
+        &recorder,
+        r#"#!/bin/sh
+if [ "${1:-}" = compilation-fingerprint ]; then exit 1; fi
+mkdir "$KRUSTY_RECORD/0" || exit 9
+(set -C; : > "$KRUSTY_RECORD/0/owner") || exit 9
+printf 'broken\000' > "$KRUSTY_RECORD/0/arguments"
+printf 'producer stdout\n'
+printf 'producer stderr\n' >&2
+exit 7
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&recorder, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let failure = std::panic::catch_unwind(|| {
+        krusty_toolchain_in(
+            temp,
+            &case("lib-and-app"),
+            &[":app:compileJvm"],
+            |command| {
+                command.env("KRUSTY_BIN", &recorder);
+            },
+        )
+    });
+    let failure = match failure {
+        Err(failure) => failure,
+        Ok(_) => panic!("a malformed invocation record must fail the fixture"),
+    };
+    let message = failure.downcast_ref::<String>().expect("formatted panic");
+    assert_eq!(
+        placed(&directory.display().to_string(), message.as_bytes()),
+        "cannot collect recorded invocations: <directory>/record: unterminated invocation record at <directory>/record/0/arguments (7 bytes): [98, 114, 111, 107, 101, 110, 0]\ntask status: 7\nstdout: \"producer stdout\\n\"\nstderr: \"producer stderr\\n\\nERROR: Task ':lib:compileJvm' failed: krusty exited with status 7\\n\""
+    );
+    assert!(!directory.exists(), "the report survives fixture cleanup");
+}
+
 fn krusty_toolchain(
     run: &str,
     case: &CompileCase,
@@ -152,15 +223,33 @@ fn krusty_toolchain(
     configure: impl Fn(&mut Command),
 ) -> Ran {
     let temp = support::TempDir::new(&format!("compile-{run}"));
+    krusty_toolchain_in(temp, case, tasks, configure)
+}
+
+fn krusty_toolchain_in(
+    temp: support::TempDir,
+    case: &CompileCase,
+    tasks: &[&str],
+    configure: impl Fn(&mut Command),
+) -> Ran {
     let directory = temp.0.clone();
     let root = support::materialize(&temp, &case.project);
     Resolving::write_repository(&directory, &case.repository);
     compiling::lay_out(&directory);
     let output = run_task(&directory, &root, tasks, configure);
-    let record = std::fs::read_to_string(directory.join(compiling::RECORD)).unwrap_or_default();
+    let record = compiling::InvocationRecords::new(&directory)
+        .read_snapshot()
+        .unwrap_or_else(|error| {
+            panic!(
+                "cannot collect recorded invocations: {error}\ntask status: {}\nstdout: {:?}\nstderr: {:?}",
+                output.code,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
     Ran {
         output,
-        record: placed(&directory.display().to_string(), record.as_bytes()),
+        record: placed(&directory.display().to_string(), &record),
         outputs: compiling::artifact_outputs(&directory, None),
         directory,
         _temp: temp,
@@ -672,9 +761,9 @@ fn an_unchanged_ksp_run_is_skipped() {
         placed(&first.output.root, &first.output.stderr)
     );
     let project = first.directory.join(Resolving::PROJECT);
-    let record = first.directory.join(compiling::RECORD);
+    let record = compiling::InvocationRecords::new(&first.directory);
     let ksp_runs = || {
-        runs_ksp(&std::fs::read_to_string(&record).unwrap())
+        runs_ksp(&String::from_utf8(record.read_snapshot().unwrap()).unwrap())
             .into_iter()
             .filter(|&ksp| ksp)
             .count()
@@ -1077,7 +1166,7 @@ fn timed_run(
     let case = diamond();
     let temp = support::TempDir::new(&format!("compile-{run}"));
     let events = temp.0.join("events");
-    let ran = krusty_toolchain(run, &case, tasks, |command| {
+    let ran = krusty_toolchain_in(temp, &case, tasks, |command| {
         command
             .env("KRUSTY_EVENTS", &events)
             .env("KRUSTY_RECORDER_SLEEP", "0.4");
@@ -1352,12 +1441,11 @@ fn a_module_whose_inputs_and_output_are_unchanged_is_not_compiled_again() {
     };
     let first = krusty_toolchain("avoidance", &case, &[":app:compileJvm"], fingerprinted);
     let project = first.directory.join(Resolving::PROJECT);
-    let record = first.directory.join(compiling::RECORD);
+    let record = compiling::InvocationRecords::new(&first.directory);
     // The modules each run compiles, in plan order (`left` and `right` compile together, so sorted).
     let compiled = |ran: &Output| {
         // A run that compiles nothing writes no record.
-        let modules = modules(&std::fs::read_to_string(&record).unwrap_or_default());
-        let _ = std::fs::remove_file(&record);
+        let modules = modules(&String::from_utf8(record.consume_after_run().unwrap()).unwrap());
         let mut together = modules.clone();
         if let Some(middle) = together.get_mut(1..3).filter(|_| modules.len() == 4) {
             middle.sort();

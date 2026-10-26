@@ -64,7 +64,8 @@ pub(super) fn realize(
             };
             let node = ExprId::try_from(node).expect("IR expression index exceeds ExprId");
             let inline_scope = scopes.get(&node).copied();
-            let foreign_facade = foreign_inline_wrapper_facade(ir, node);
+            let foreign_facade = foreign_inline_wrapper_facade(ir, node)
+                .or_else(|| foreign_declaration_wrapper_facade(ir, &owners, node));
             if !wraps(
                 target,
                 class_java_sam,
@@ -176,6 +177,21 @@ fn wrapper_construction(
 fn foreign_inline_wrapper_facade(ir: &IrFile, node: ExprId) -> Option<TypeName> {
     let declaration = ir.inline_copy_provenance(node)?.first()?.function;
     ir.foreign_template_facade(declaration)
+}
+
+/// The declaration facade whose wrapper a conversion written in another file's inline function
+/// constructs: that function is compiled here only for its callers to inline, and its declaring
+/// file publishes the wrapper its compiled body constructs.
+fn foreign_declaration_wrapper_facade(
+    ir: &IrFile,
+    owners: &HashMap<ExprId, FunId>,
+    node: ExprId,
+) -> Option<TypeName> {
+    let function = *owners.get(&node)?;
+    if !ir.foreign_inline_templates.contains(&function) {
+        return None;
+    }
+    ir.foreign_template_facade(function)
 }
 
 /// The conversion node is the operand of an explicit cast, so that cast is the checkcast.

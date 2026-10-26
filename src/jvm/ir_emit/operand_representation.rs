@@ -77,8 +77,9 @@ impl Emitter<'_> {
         // and then back to `Comparable` for a function that returns the bound itself.
         let source = if matches!(
             self.erased_reference_result(expression),
-            Some(ErasedResult::Coerced { slot, .. })
+            Some(ErasedResult::Coerced { call, slot })
                 if !jvm_is_erased_top(ir_ty_to_jvm(&slot))
+                    || self.retains_declaration_result_slot(expression, call, slot)
         ) {
             self.emit_consumed_operand(expression, code)
         } else {
@@ -98,6 +99,34 @@ impl Emitter<'_> {
             return;
         }
         self.coerce_reference_on_stack(source, expected, code);
+    }
+
+    /// Defer only the checked declaration-result conversion while that call still owns its
+    /// recorded reference slot. Inline expansion and suspension-result materialization own their
+    /// replacement values; ordinary smart casts are separate checked conversions.
+    fn retains_declaration_result_slot(
+        &self,
+        expression: crate::ir::ExprId,
+        producer: crate::ir::ExprId,
+        slot: Ty,
+    ) -> bool {
+        if !self.ir.declaration_result_coercions.contains(&expression)
+            || self.ir.physical_types.get(&producer) != Some(&slot)
+            || self.transformed_result(producer).is_some()
+        {
+            return false;
+        }
+        let Some(call) =
+            crate::jvm::call_result_boundaries::declaration_result_call(self.ir, producer)
+        else {
+            return false;
+        };
+        !matches!(
+            self.ir.expr(call),
+            IrExpr::Call { callee, .. }
+                if matches!(&**callee, crate::ir::Callee::Static { inline, .. } if inline.can_inline())
+        ) && self.ir.compiled_inline_call(call).is_none()
+            && self.transformed_result(call).is_none()
     }
 
     /// Emit an operand whose consumer materializes it at its own slot type, answering the stack type
@@ -377,7 +406,7 @@ impl Emitter<'_> {
             } else {
                 semantic
             };
-            box_prim_free(self.cw, code, semantic_scalar_adapter(semantic, source_jvm));
+            self.box_scalar_as_reference(semantic, source_jvm, physical, code);
         } else if source_jvm.is_reference() && physical.is_jvm_scalar() {
             unbox_prim_from(
                 self.cw,
@@ -389,6 +418,25 @@ impl Emitter<'_> {
             emit_num_conv(source_jvm, physical, code);
         } else if source_jvm.is_reference() && physical.is_reference() {
             self.coerce_reference_on_stack(source_jvm, physical, code);
+        }
+    }
+
+    /// Materialize a scalar's wrapper at the consumer's reference type. The declared physical
+    /// slot can retain a generic bound even when the checked argument is a concrete scalar.
+    pub(super) fn box_scalar_as_reference(
+        &mut self,
+        semantic: Ty,
+        physical: Ty,
+        target: Ty,
+        code: &mut CodeBuilder,
+    ) {
+        let scalar = semantic_scalar_adapter(semantic, physical);
+        box_prim_free(self.cw, code, scalar);
+        // kotlinc coerces the materialized wrapper even when this widens it to Number or
+        // Comparable. Object and the same wrapper need no cast; unsigned carriers have their
+        // own value-class adaptation instead of ordinary reference coercion.
+        if let Some(wrapper) = scalar.jvm_boxed_ref() {
+            self.coerce_reference_on_stack(wrapper, target, code);
         }
     }
 

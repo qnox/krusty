@@ -1372,7 +1372,7 @@ pub(crate) fn merge_inferred_ty_from_symbols(
                     if left_ty == right_ty {
                         *left_ty
                     } else {
-                        Ty::obj_name(left_name)
+                        common_supertype::common_super_type(source, *left_ty, *right_ty)
                     },
                 ))
             })

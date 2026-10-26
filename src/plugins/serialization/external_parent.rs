@@ -1,5 +1,6 @@
 //! Serializable superclasses compiled apart from the file being lowered: in a dependency, as
-//! kotlinc's plugin reads them from the superclass's metadata.
+//! kotlinc's plugin reads them from the superclass's metadata, or in another file of the module,
+//! as the module's stable declarations describe them.
 //!
 //! A subclass's generated serializer inherits its superclass's elements: the superclass's
 //! `write$Self` writes them and its deserialization constructor stores them, and the subclass's
@@ -76,11 +77,27 @@ pub(crate) fn external_serializable_parents(
 }
 
 /// The types of every element the published superclasses declare, whose serializers a subclass's
-/// generated members name.
-pub(crate) fn inherited_element_types(parents: &ExternalSerializableParents) -> Vec<Ty> {
-    parents
-        .values()
-        .flatten()
-        .flat_map(|record| record.elements.iter().map(|element| element.ty))
+/// generated members name. A generic superclass declares its elements over its own type
+/// parameters, so the type arguments each class of this file and each published superclass gives
+/// its superclass are listed too: `Child : Holder<Item>` inherits `value: T` as `Item`.
+pub(crate) fn inherited_element_types(
+    ir: &IrFile,
+    parents: &ExternalSerializableParents,
+) -> Vec<Ty> {
+    let records = parents.values().flatten();
+    let declared = records
+        .clone()
+        .flat_map(|record| record.elements.iter().map(|element| element.ty));
+    let published_arguments = records
+        .filter_map(|record| record.superclass)
+        .flat_map(|superclass| superclass.type_args().to_vec());
+    let source_arguments = ir
+        .classes
+        .iter()
+        .flat_map(|class| class.supertypes.iter())
+        .flat_map(|supertype| supertype.type_args().to_vec());
+    declared
+        .chain(published_arguments)
+        .chain(source_arguments)
         .collect()
 }

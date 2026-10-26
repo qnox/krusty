@@ -58,8 +58,6 @@ pub(in super::super) enum ExpansionReason {
     NonPublicCallee,
     /// The callee has no body of its own in this file's IR.
     NoTemplate,
-    /// The callee's body creates a lambda or a callable reference.
-    LambdaInBody,
     /// The callee's body creates an object of a local or anonymous class.
     LocalClassInBody,
     /// The callee's body holds a subject `when` that switches on an enum's keys. The keys are
@@ -198,9 +196,6 @@ impl BodyLowering<'_> {
                 return Some(ExpansionReason::EnumSwitchInBody);
             }
             match self.ir.expr(expression) {
-                IrExpr::Lambda { .. } | IrExpr::CallableReference(_) => {
-                    return Some(ExpansionReason::LambdaInBody);
-                }
                 IrExpr::New { internal, .. }
                     if self
                         .ir
@@ -219,9 +214,11 @@ impl BodyLowering<'_> {
         None
     }
 
-    /// Record the call-site value of each reified type parameter of `function`, which `call`
-    /// inlines from its compiled body, by the parameter's source name the body's markers carry.
-    pub(in super::super) fn record_compiled_reified_arguments(
+    /// Record the call-site value of each type parameter of `function`, which `call` inlines from
+    /// its compiled body, by the parameter's source name the body's markers and signatures carry:
+    /// every one specializes the generic signatures of the objects the call regenerates, and the
+    /// reified ones the body's operations too.
+    pub(in super::super) fn record_compiled_type_arguments(
         &mut self,
         call: ExprId,
         function: FunId,
@@ -230,9 +227,8 @@ impl BodyLowering<'_> {
         let Some(signature) = self.ir.signatures.get(&function) else {
             return;
         };
-        let reified = substitutions
+        let arguments = substitutions
             .iter()
-            .filter(|substitution| substitution.reified)
             .filter_map(|substitution| {
                 let crate::fir::FirTypeParameterRef::Module(parameter) = substitution.parameter
                 else {
@@ -242,12 +238,26 @@ impl BodyLowering<'_> {
                 let formal = signature
                     .type_params
                     .iter()
-                    .find(|formal| formal.reified && formal.semantic_name == semantic)?;
-                Some((formal.name.clone(), substitution.reified_runtime.get()))
+                    .find(|formal| formal.semantic_name == semantic)?;
+                Some((formal, substitution))
             })
+            .collect::<Vec<_>>();
+        let reified = arguments
+            .iter()
+            .filter(|(formal, substitution)| formal.reified && substitution.reified)
+            .map(|(formal, substitution)| (formal.name.clone(), substitution.reified_runtime.get()))
+            .collect::<Vec<_>>();
+        let type_arguments = arguments
+            .iter()
+            .map(|(formal, substitution)| (formal.name.clone(), substitution.value.get()))
             .collect::<Vec<_>>();
         if !reified.is_empty() {
             self.ir.reified_call_subst.insert(call, reified);
+        }
+        if !type_arguments.is_empty() {
+            self.ir
+                .inline_call_type_arguments
+                .insert(call, type_arguments);
         }
     }
 

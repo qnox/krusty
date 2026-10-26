@@ -356,8 +356,10 @@ pub(crate) fn is_usable_delegate_convention(is_operator: bool, context_count: us
     is_operator && context_count == 0
 }
 
-/// The `KProperty` classifier every delegated-property convention receives its second argument as,
-/// RESOLVED through the symbol source that answers applicability.
+/// The `KProperty<*>` every delegated-property convention receives its second argument as, its
+/// classifier RESOLVED through the symbol source that answers applicability. The argument is the
+/// declaration's star projection, never a raw `KProperty`: Kotlin has no raw types, and an applied
+/// subtype proof requires every argument.
 ///
 /// ONE definition. It is the classifier applicability is decided against, the type of the value
 /// lowering builds, and the type published on the checked plan — three places that must agree, and
@@ -374,9 +376,9 @@ pub(crate) fn delegate_property_reference_type(
     resolver: &crate::symbol_resolver::SymbolResolver,
 ) -> Option<Ty> {
     let classifier = crate::types::type_name("kotlin/reflect/KProperty");
-    resolver
-        .classifier(classifier)
-        .map(|_| Ty::obj_name(classifier))
+    resolver.classifier(classifier).map(|declaration| {
+        super::star_projected_classifier::star_projected_classifier(classifier, &declaration)
+    })
 }
 
 /// Select one delegated-property convention from the normalized member/extension family. Operator

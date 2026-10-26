@@ -43,6 +43,15 @@ pub(super) fn local_variable(
             Some(format!("$context_receiver_{ordinal}"))
         }
         IrParameterRole::ExtensionReceiver => Some(format!("$this${function_name}")),
+        // kotlinc `$`-prefixes the constructor parameter's own name.
+        IrParameterRole::CapturedValue {
+            capture:
+                crate::ir::IrValueCapture {
+                    declaration: IrCapturedDeclaration::ScriptReceiver { ordinal },
+                    ..
+                },
+            ..
+        } => Some(format!("$$script_receiver_{}", ordinal + 1)),
         IrParameterRole::CapturedValue { ordinal, .. } => Some(format!("$capture{ordinal}")),
         IrParameterRole::CapturedReceiver { ordinal } => Some(format!("$this${ordinal}")),
         IrParameterRole::PropertySetterValue => Some("<set-?>".to_string()),
@@ -54,6 +63,10 @@ pub(super) fn local_variable(
             IrGeneratedParameterRole::HolderReceiver => Some("$this".to_string()),
             // kotlinc names the parameter like the field it initializes.
             IrGeneratedParameterRole::OuterInstance => Some("this$0".to_string()),
+            // kotlinc numbers a script's implicit receivers from one.
+            IrGeneratedParameterRole::ScriptReceiver { ordinal } => {
+                Some(format!("$script_receiver_{}", ordinal + 1))
+            }
             IrGeneratedParameterRole::ValueClassCarrier => Some("arg0".to_string()),
             IrGeneratedParameterRole::ValueClassEqualsOperand { ordinal } => {
                 Some(value_class_equals_operand(ordinal).to_string())
@@ -377,6 +390,14 @@ pub(super) fn constructor_identities(
         .iter()
         .enumerate()
         .map(|(physical_ordinal, argument)| {
+            if let crate::ir::IrCtorParameterProvenance::ScriptReceiver { ordinal } =
+                argument.provenance
+            {
+                return IrParameterIdentity::generated(
+                    IrGeneratedParameterRole::ScriptReceiver { ordinal },
+                    None,
+                );
+            }
             let identity = match argument.context_kind {
                 crate::types::ContextParameterKind::Named => IrParameterIdentity::context_value(
                     argument

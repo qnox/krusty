@@ -235,6 +235,22 @@ impl ProductionSignatureSemantics<'_> {
                 expected,
             ) {
                 RejectedCandidateResult::Fixed(ty) => {
+                    let ty = if candidate.bound_inner_constructor.is_some() {
+                        self.named_construction_result(
+                            scope,
+                            origin,
+                            super::callable_references::AppliedSourceAlias::selected(
+                                candidate.constructor_alias(),
+                                type_arguments,
+                            ),
+                            ty.get(),
+                            arguments.first().map(|argument| argument.ty.get()),
+                            expected
+                                .and_then(|expected| crate::fir::ResolvedTy::new(expected).ok()),
+                        )?
+                    } else {
+                        ty
+                    };
                     return Ok(crate::fir::ResolvedMemberCall {
                         ty: Some(ty),
                         declaration: None,
@@ -256,7 +272,7 @@ impl ProductionSignatureSemantics<'_> {
         if candidates.is_empty() {
             if let Some(candidate) = unavailable_context
                 .iter()
-                .min_by_key(|candidate| candidate.scope_rank)
+                .min_by_key(|candidate| candidate.scope_rung.selection_key(candidate.scope_rank))
             {
                 return Err(self.record_unavailable_context_call(scope, origin, candidate));
             }

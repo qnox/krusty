@@ -45,6 +45,10 @@ pub(super) struct SelectedGenericCall {
     additional_bounds: Vec<Vec<Ty>>,
     pub(super) reified_parameters: Vec<(usize, String)>,
     pub(super) intersections: HashMap<usize, InferredIntersection>,
+    /// The runtime classifier of each reified slot inferred as an intersection: kotlinc reifies
+    /// the whole intersection to its common supertype. Only reification reads it; the semantic
+    /// argument and its additional bounds stay the checked intersection.
+    reified_runtimes: HashMap<usize, Ty>,
 }
 
 impl SelectedGenericCall {
@@ -308,6 +312,18 @@ impl TypeInfo {
         selected.arguments = arguments;
     }
 
+    /// The runtime classifier of reified slot `ordinal` of `expression`, when inference selected
+    /// an intersection for it.
+    pub(crate) fn resolved_call_type_argument_reified_runtime(
+        &self,
+        expression: ExprId,
+        ordinal: usize,
+    ) -> Option<Ty> {
+        self.selected_generic_calls
+            .get(&expression)
+            .and_then(|call| call.reified_runtimes.get(&ordinal).copied())
+    }
+
     pub(crate) fn resolved_call_type_argument_bounds(
         &self,
         expression: ExprId,
@@ -478,6 +494,31 @@ impl Checker<'_> {
                 ..Default::default()
             },
         );
+    }
+
+    /// The common supertype kotlinc reifies `intersection` to, walking every constituent's
+    /// declared hierarchy through the same oracle as assignability, so a dependency classifier's
+    /// supertypes count as a source one's do.
+    fn reified_intersection_runtime(&self, intersection: &InferredIntersection) -> Ty {
+        let parts = intersection
+            .parts
+            .iter()
+            .map(|part| part.non_null())
+            .collect::<Vec<_>>();
+        let checked = Ty::intersection(&parts);
+        let checked = if intersection.selected_result.is_nullable() {
+            Ty::nullable(checked)
+        } else {
+            checked
+        };
+        crate::symbol_resolver::reified_runtime_type(checked, &|name| {
+            Some(
+                crate::assignable::TypeOracle::direct_supertypes(self, Ty::obj_name(name))
+                    .into_iter()
+                    .filter_map(|supertype| supertype.obj_internal())
+                    .collect(),
+            )
+        })
     }
 
     fn reified_parameters(
@@ -898,14 +939,23 @@ impl Checker<'_> {
             );
             additional_bounds[ordinal].extend(bounds_other_than_primary(parts, selected_result));
         }
+        let reified_parameters = Self::reified_parameters(signature, call_sig);
+        let reified_runtimes = reified_parameters
+            .iter()
+            .filter_map(|(ordinal, _)| {
+                let intersection = intersections.get(ordinal)?;
+                Some((*ordinal, self.reified_intersection_runtime(intersection)))
+            })
+            .collect();
         self.selected_generic_calls.insert(
             call,
             SelectedGenericCall {
                 arguments,
                 argument_provenance,
                 additional_bounds,
-                reified_parameters: Self::reified_parameters(signature, call_sig),
+                reified_parameters,
                 intersections,
+                reified_runtimes,
             },
         );
 
@@ -1027,6 +1077,7 @@ mod tests {
             additional_bounds: vec![vec![retained_bound], Vec::new()],
             reified_parameters: vec![(1, "sample:produce:U".to_string())],
             intersections,
+            reified_runtimes: HashMap::default(),
         };
         let signature = crate::libraries::GenericSig {
             formals: vec![formal.clone(), "sample:produce:U".to_string()],

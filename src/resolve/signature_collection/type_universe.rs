@@ -552,10 +552,10 @@ pub(in crate::resolve) fn source_type_universe(
         }
         for (simple, full) in consensus {
             if let Some(full) = full {
+                class_names.insert_name(simple.clone(), full);
                 if let Some(expansion) = expansion_consensus.remove(&simple).flatten() {
-                    class_names.insert_alias_expansion(simple.clone(), expansion);
+                    class_names.insert_alias_expansion(simple, expansion);
                 }
-                class_names.insert_name(simple, full);
             }
         }
         imports_by_file
@@ -567,8 +567,9 @@ pub(in crate::resolve) fn source_type_universe(
     // `typealias A = Primitive` → A maps to `"__ty/<PrimName>"` (decoded in ty_of_ref).
     // `typealias A = java.lang.Foo` → A resolves to the JVM internal name `java/lang/Foo`.
     // Multiple passes handle chains: A = B, B = C.
-    let mut alias_map: HashMap<String, String> = HashMap::default();
-    // The declaring package is known HERE and nowhere downstream — `alias_map` is spelling-keyed —
+    // Keep the exact alias declaration and declaring file beside each spelling until both
+    // file visibility and the selected declaration have been checked.
+    let mut alias_entries = Vec::new();
     // so the alias's qualified identity is captured alongside, for `Type.abbreviated_type`.
     let mut source_alias_identities: Vec<(String, TypeName)> = Vec::new();
     for file_index in 0..source_packages.len() {
@@ -579,7 +580,13 @@ pub(in crate::resolve) fn source_type_universe(
             if target.name == "<fun>" || target.name.is_empty() {
                 continue;
             }
-            alias_map.insert(alias.clone(), target.name.clone());
+            let identity = crate::types::type_name_child(source_package_ids[file_index], alias);
+            alias_entries.push(SourceAliasTarget {
+                spelling: alias.clone(),
+                identity,
+                target: target.name.clone(),
+                file: file_index,
+            });
             // A FULLY QUALIFIED spelling (`app.Cargo`) reaches name resolution intact — the parse
             // seam expands only simple spellings — and qualified resolution answers it with the
             // alias's OWN declaration, because an alias declaration is a name a package contains.
@@ -588,7 +595,12 @@ pub(in crate::resolve) fn source_type_universe(
             // exactly as the bare one does. Without this the emitted descriptor named `app/Cargo`,
             // a class nothing declares or emits.
             if !alias_package.is_empty() {
-                alias_map.insert(format!("{alias_package}.{alias}"), target.name.clone());
+                alias_entries.push(SourceAliasTarget {
+                    spelling: format!("{alias_package}.{alias}"),
+                    identity,
+                    target: target.name.clone(),
+                    file: file_index,
+                });
             }
         }
         // Identities come from `type_alias_fun`, not `type_aliases`: the latter records only aliases
@@ -609,14 +621,42 @@ pub(in crate::resolve) fn source_type_universe(
     for (spelling, identity) in &source_alias_identities {
         class_names.insert_source_alias_identity(spelling.clone(), *identity);
     }
-    expand_type_aliases(&mut class_names, &alias_map);
+    let fragments = crate::source::SourceFragments::new(files.iter().map(|file| file.fragment));
+    let visible_aliases = |from: Option<usize>, selected: Option<&HashMap<String, TypeName>>| {
+        alias_entries
+            .iter()
+            .filter(|entry| {
+                let visible = match from {
+                    Some(from) => fragments.sees(Some(from as u32), Some(entry.file as u32), None),
+                    None => (0..source_packages.len()).all(|from| {
+                        fragments.sees(Some(from as u32), Some(entry.file as u32), None)
+                    }),
+                };
+                visible
+                    && selected.is_none_or(|selected| {
+                        selected.get(&entry.spelling) == Some(&entry.identity)
+                    })
+            })
+            .map(|entry| {
+                (
+                    entry.spelling.clone(),
+                    (entry.identity, entry.target.clone()),
+                )
+            })
+            .collect::<HashMap<_, _>>()
+    };
+    let shared_aliases = visible_aliases(None, None);
+    expand_type_aliases(&mut class_names, &shared_aliases, None);
     let class_names = class_names.into_shared();
     let mut selected_source_aliases = Vec::with_capacity(imports_by_file.len());
     let mut file_class_names: Vec<ClassNames> = imports_by_file
         .into_iter()
+        .enumerate()
         .map(
-            |(imports, expansions, source_aliases, unresolved, ambiguous, classifier_segments)| {
-                selected_source_aliases.push(source_aliases);
+            |(
+                file_index,
+                (imports, expansions, source_aliases, unresolved, ambiguous, classifier_segments),
+            )| {
                 let mut names = class_names.clone();
                 for (simple, full) in imports {
                     names.insert_name(simple, full);
@@ -635,7 +675,9 @@ pub(in crate::resolve) fn source_type_universe(
                 for (spelling, segment) in classifier_segments {
                     names.insert_classifier_segment(spelling, segment);
                 }
-                expand_type_aliases(&mut names, &alias_map);
+                let aliases = visible_aliases(Some(file_index), Some(&source_aliases));
+                expand_type_aliases(&mut names, &aliases, Some(&source_aliases));
+                selected_source_aliases.push(source_aliases);
                 names
             },
         )
@@ -673,6 +715,14 @@ enum SourceAliasSeed {
     Skip,
 }
 
+/// One source alias occurrence, before per-file visibility and identity selection.
+struct SourceAliasTarget {
+    spelling: String,
+    identity: TypeName,
+    target: String,
+    file: usize,
+}
+
 /// Record source-alias templates before signature collection types their use sites.
 ///
 /// Pass 1 types declared signatures before `source_alias_expansions` exists. A name edge only knows
@@ -680,6 +730,42 @@ enum SourceAliasSeed {
 /// duplicated, fixed, or projected arguments in the right-hand side. Type each template from its
 /// declaring file and install it only under spellings whose ordinary scope lookup selected that
 /// exact alias declaration.
+fn expand_type_aliases(
+    class_names: &mut ClassNames,
+    aliases: &HashMap<String, (TypeName, String)>,
+    selected: Option<&HashMap<String, TypeName>>,
+) {
+    for _ in 0..8 {
+        let mut changed = false;
+        for (alias, (identity, target)) in aliases {
+            if selected.is_some_and(|selected| selected.get(alias) != Some(identity)) {
+                continue;
+            }
+            let resolved = if let Some(internal) = class_names.get(target) {
+                Some(internal)
+            } else if Ty::from_name(target).is_some() {
+                Some(crate::types::type_name(&format!("__ty/{target}")))
+            } else if target.contains('/') {
+                Some(crate::types::type_name(target))
+            } else if target.contains('.') {
+                Some(crate::types::type_name(&target.replace('.', "/")))
+            } else {
+                None
+            };
+            if let Some(internal) = resolved {
+                // Normalize only the source alias already selected by this file. Equality of
+                // expanded targets does not authenticate a different alias declaration.
+                changed |= class_names.get(alias) != Some(internal);
+                class_names.insert_name(alias.clone(), internal);
+                class_names.insert_source_alias_identity(alias.clone(), *identity);
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
 fn seed_source_alias_expansions(
     file_class_names: &mut [ClassNames],
     file_type_aliases: &[Vec<(String, Vec<String>, TypeRef)>],

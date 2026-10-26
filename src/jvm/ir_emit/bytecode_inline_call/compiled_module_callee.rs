@@ -22,11 +22,13 @@ pub(in crate::jvm::ir_emit) struct CompiledInlineCallee {
     body: crate::jvm::classreader::MethodCode,
 }
 
-/// The callees of one emission pass, compiled before any of their callers.
+/// The callees of one emission pass and the classes they declare, compiled before any of their
+/// callers.
 #[derive(Default)]
-pub(in crate::jvm::ir_emit) struct CompiledInlineCallees(
-    std::cell::RefCell<HashMap<u32, Result<Rc<CompiledInlineCallee>, &'static str>>>,
-);
+pub(in crate::jvm::ir_emit) struct CompiledInlineCallees {
+    functions: std::cell::RefCell<HashMap<u32, Result<Rc<CompiledInlineCallee>, &'static str>>>,
+    pub(super) classes: super::compiled_module_classes::CompiledModuleClasses,
+}
 
 /// Compile every function this file inlines from its compiled body, replacing the previous
 /// pass's bodies.
@@ -35,6 +37,7 @@ pub(in crate::jvm::ir_emit) fn compile_inline_callees(
     facade: &str,
     env: &EmitEnv,
     opts: &EmitOptions,
+    class_meta: &dyn Fn(&str) -> Option<KotlinMetadata>,
 ) {
     let mut functions = Vec::new();
     for (call, function) in ir.compiled_inline_calls() {
@@ -49,21 +52,41 @@ pub(in crate::jvm::ir_emit) fn compile_inline_callees(
     }
     functions.sort_unstable();
     functions.dedup();
-    env.run.compiled_inline_callees.0.borrow_mut().clear();
+    env.run
+        .compiled_inline_callees
+        .functions
+        .borrow_mut()
+        .clear();
+    env.run.compiled_inline_callees.classes.clear();
     // kotlinc compiles a callee's node when a call first needs it, so a callee whose body inlines
     // another same-module callee reads that one's node, compiled first.
     for function in callees_before_callers(ir, &functions) {
+        // Objects the body regenerates for its own inline calls are classes of its file. The
+        // callee's callers read them; its file writes them when it emits the function itself,
+        // under the same names.
+        let names = env.run.regenerated_object_names.snapshot();
+        let machines = env.run.machine_classes.borrow().len();
         let callee = compile_callee(ir, function, facade, env, opts).map(Rc::new);
+        let regenerated = env.run.machine_classes.borrow_mut().split_off(machines);
         env.run
             .compiled_inline_callees
-            .0
+            .classes
+            .read_only(regenerated);
+        env.run.regenerated_object_names.restore(names);
+        env.run
+            .compiled_inline_callees
+            .functions
             .borrow_mut()
             .insert(function, callee);
+        // The classes its body declares, which its callers' inlining reads and may regenerate.
+        super::compiled_module_classes::compile_declared_classes(
+            ir, function, facade, env, opts, class_meta,
+        );
     }
 }
 
-/// `functions` ordered so each comes after every same-module callee its own body inlines from a
-/// compiled body, in the order the bodies are first reached.
+/// `functions` ordered so each comes after every same-module callee its own body, or a class it
+/// declares, inlines from a compiled body, in the order the bodies are first reached.
 fn callees_before_callers(ir: &IrFile, functions: &[u32]) -> Vec<u32> {
     let mut ordered = Vec::with_capacity(functions.len());
     let mut visited = std::collections::HashSet::new();
@@ -83,11 +106,20 @@ fn visit_callee(
         return;
     }
     let mut nested = Vec::new();
-    let mut pending = ir
-        .functions
-        .get(function as usize)
-        .and_then(|function| function.body)
-        .into_iter()
+    // The callee's own body and the methods of the classes it declares, which are compiled with
+    // it and inline their own same-module callees.
+    let declared_methods = ir
+        .classes
+        .iter()
+        .filter(|class| {
+            class.enclosure.is_some_and(|scope| {
+                crate::jvm::inner_classes::scope_within(ir, scope, &|owner| owner == function)
+            })
+        })
+        .flat_map(|class| class.methods.iter().copied());
+    let mut pending = std::iter::once(function)
+        .chain(declared_methods)
+        .filter_map(|function| ir.functions.get(function as usize)?.body)
         .collect::<Vec<_>>();
     let mut seen = std::collections::HashSet::new();
     while let Some(expression) = pending.pop() {
@@ -264,7 +296,7 @@ impl Emitter<'_> {
         let compiled = self
             .run
             .compiled_inline_callees
-            .0
+            .functions
             .borrow()
             .get(&function)
             .cloned()

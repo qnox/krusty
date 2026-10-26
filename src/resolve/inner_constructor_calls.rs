@@ -8,6 +8,10 @@
 //! such, and the constructor path only materializes the declaration that selection chose.
 
 use super::*;
+use crate::symbol_resolver::{
+    apply_inner_alias_outer_in_source, apply_inner_classifier_outer_in_source,
+    InnerAliasOuterApplication,
+};
 
 /// The inner classifier a receiver binds for one call spelling.
 enum BoundInnerClassifier {
@@ -18,120 +22,6 @@ enum BoundInnerClassifier {
         /// The in-scope typealias application that named the classifier, when one did.
         alias_target: Option<Ty>,
     },
-}
-
-pub(super) enum InnerAliasOuterApplication {
-    Applied(Ty),
-    ReceiverMismatch,
-    NotInner,
-}
-
-pub(super) fn apply_inner_alias_outer_in_source(
-    source: &dyn SymbolSource,
-    target: Ty,
-    receiver: Ty,
-) -> InnerAliasOuterApplication {
-    let Some(internal) = target.kotlin_class_internal() else {
-        return InnerAliasOuterApplication::NotInner;
-    };
-    let Some(classifier) = source.classifier(internal) else {
-        return InnerAliasOuterApplication::NotInner;
-    };
-    let Some(outer_owner) = classifier.outer_instance else {
-        return InnerAliasOuterApplication::NotInner;
-    };
-    let Some(applied_outer) = crate::symbol_resolver::applied_hierarchy(
-        source,
-        crate::symbol_resolver::member_scope_receiver(receiver),
-    )
-    .into_iter()
-    .find_map(|(owner, applied, _)| (owner == outer_owner).then_some(applied)) else {
-        return InnerAliasOuterApplication::ReceiverMismatch;
-    };
-    let own_count = classifier
-        .own_type_parameter_count
-        .min(classifier.type_params().len());
-    let captured_count = classifier.type_params().len().saturating_sub(own_count);
-    let arguments = target.type_args();
-    if arguments.len() < own_count + captured_count {
-        return InnerAliasOuterApplication::ReceiverMismatch;
-    }
-    let expected_outer = Ty::obj_args_name(
-        outer_owner,
-        &arguments[own_count..own_count + captured_count],
-    );
-    let mut bindings = crate::symbol_resolver::GSigBinds::default();
-    crate::symbol_resolver::unify_ty_from_symbols(
-        source,
-        expected_outer,
-        applied_outer,
-        &mut bindings,
-    );
-    let expected_outer = crate::symbol_resolver::ty_subst_keep_unbound(expected_outer, &bindings);
-    let oracle = crate::symbol_resolver::SourceOracle(source);
-    if !crate::assignable::is_assignable(
-        &crate::assignable::TyCtx::new(),
-        &oracle,
-        applied_outer,
-        expected_outer,
-    ) {
-        return InnerAliasOuterApplication::ReceiverMismatch;
-    }
-    let target = crate::types::ty_subst_alias_expansion(target, &bindings);
-    InnerAliasOuterApplication::Applied(apply_inner_classifier_outer_in_source(
-        source, target, receiver,
-    ))
-}
-
-fn apply_inner_classifier_outer_in_source(source: &dyn SymbolSource, target: Ty, outer: Ty) -> Ty {
-    let Some(internal) = target.kotlin_class_internal() else {
-        return target;
-    };
-    let Some(classifier) = source.classifier(internal) else {
-        return target;
-    };
-    let Some(outer_owner) = classifier.outer_instance else {
-        return target;
-    };
-    let Some(applied_outer) = crate::symbol_resolver::applied_hierarchy(
-        source,
-        crate::symbol_resolver::member_scope_receiver(outer),
-    )
-    .into_iter()
-    .find_map(|(owner, applied, _)| (owner == outer_owner).then_some(applied)) else {
-        return target;
-    };
-    let own_count = classifier
-        .own_type_parameter_count
-        .min(classifier.type_params().len());
-    let captured_count = classifier.type_params().len().saturating_sub(own_count);
-    if applied_outer.type_args().len() < captured_count {
-        return target;
-    }
-    let mut arguments = target
-        .type_args()
-        .iter()
-        .copied()
-        .take(own_count)
-        .collect::<Vec<_>>();
-    for index in arguments.len()..own_count {
-        let formal = &classifier.type_params()[index];
-        let bound = classifier
-            .type_param_bounds()
-            .get(index)
-            .and_then(|bounds| bounds.first())
-            .copied()
-            .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-        arguments.push(Ty::ty_param(formal, bound));
-    }
-    arguments.extend(
-        applied_outer
-            .type_args()
-            .iter()
-            .copied()
-            .take(captured_count),
-    );
-    Ty::obj_args_name(internal, &arguments)
 }
 
 /// One receiver-bound construction being committed.
@@ -399,6 +289,10 @@ impl Checker<'_> {
             .cloned()
             .collect::<Vec<_>>();
         declarations.extend(checked_local.into_iter().flatten().cloned());
+        for declaration in &mut declarations {
+            declaration.generic_sig =
+                crate::libraries::constructor_generic_signature(internal, classifier, declaration);
+        }
         declarations
     }
 
@@ -434,6 +328,7 @@ impl Checker<'_> {
             LibraryConstructorOptions {
                 arg_names,
                 applied_classifier: alias_target,
+                bound_outer: Some(receiver),
                 expected,
                 priority: ConstructorPriorityTier::All,
                 selected,
@@ -523,51 +418,6 @@ impl Checker<'_> {
         receiver: Ty,
         name: &str,
     ) -> InheritedNestedClassifier {
-        let Some(root) = receiver.kotlin_class_internal() else {
-            return InheritedNestedClassifier::NotFound;
-        };
-        let source = self.fed_source();
-        let mut level = vec![root];
-        let mut seen = crate::fx_hash::HashSet::default();
-        while !level.is_empty() {
-            let mut matches = crate::fx_hash::HashSet::default();
-            let mut next = Vec::new();
-            for owner in level {
-                if !seen.insert(owner) {
-                    continue;
-                }
-                let symbols = source.symbols(
-                    crate::symbol_source::SymbolNamespace::Classifier(owner),
-                    name,
-                );
-                if let Some(classifier) = symbols.classifier_name.filter(|_| {
-                    symbols
-                        .classifier
-                        .as_ref()
-                        .and_then(|shape| shape.outer_instance)
-                        .is_some_and(|outer| {
-                            self.receiver_is_assignable(receiver, Ty::obj_name(outer))
-                        })
-                }) {
-                    matches.insert(classifier);
-                }
-                next.extend(
-                    crate::symbol_resolver::direct_supertypes(&source, Ty::obj_name(owner))
-                        .into_iter()
-                        .filter_map(Ty::kotlin_class_internal),
-                );
-            }
-            match matches.len() {
-                0 => level = next,
-                1 => {
-                    return InheritedNestedClassifier::Found(
-                        matches.into_iter().next().expect("one inner classifier"),
-                    )
-                }
-                _ => return InheritedNestedClassifier::Ambiguous,
-            }
-        }
-
-        InheritedNestedClassifier::NotFound
+        crate::symbol_resolver::bound_inner_classifier_in_source(&self.fed_source(), receiver, name)
     }
 }

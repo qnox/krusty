@@ -32,8 +32,8 @@ pub use branches::{FirCatch, FirWhenBranch, FirWhenCondition, FirWhenSubjectNume
 mod call_storage;
 mod ranges;
 pub use ranges::{
-    FirProgressionClass, FirProgressionSource, FirRangeComparisonProvenance, FirRangeCounterKind,
-    FirRangeOperation, FirRuntimeFunction,
+    FirIndices, FirProgressionClass, FirProgressionSource, FirRangeComparisonProvenance,
+    FirRangeCounterKind, FirRangeOperation, FirRuntimeFunction,
 };
 mod indexed_iteration;
 pub use indexed_iteration::{FirBuiltinIterableKind, FirCharSequenceIndexing};
@@ -1121,6 +1121,9 @@ pub enum FirExprKind {
         target: FirLocalCallableRef,
         extension_receiver: Option<FirReceiver>,
         arguments: Box<[FirCallArgument]>,
+        /// Checker-applied value parameters, including context slots but excluding the extension
+        /// receiver and lifted captures. Varargs retain their complete selected array type.
+        parameter_types: Box<[ResolvedTy]>,
     },
     /// Invocation of an already-typed function value. The callable expression and final parameter
     /// types are semantic inputs; lowering only chooses their backend representation.
@@ -1176,6 +1179,14 @@ pub enum FirExprKind {
         lower: FirCall,
         upper_bound: FirExprId,
         negated: bool,
+    },
+    /// `value in receiver.indices` (kotlinc's `RangeContainsLowering` over an `IndicesHandler`
+    /// header): `0 <= value && value < size`, compared in `comparison`. Neither `indices` nor
+    /// `contains` is called.
+    IndicesContainment {
+        value: FirExprId,
+        indices: Box<FirIndices>,
+        comparison: ResolvedTy,
     },
     CallableReference {
         target: FirCallableReferenceTarget,
@@ -1421,6 +1432,7 @@ impl FirExprKind {
             | FirExprKind::NullableNumericComparison { .. }
             | FirExprKind::Range { .. }
             | FirExprKind::InRange { .. }
+            | FirExprKind::IndicesContainment { .. }
             | FirExprKind::SafeCall { .. }
             | FirExprKind::Elvis { .. }
             | FirExprKind::Throw(_)
@@ -1529,12 +1541,17 @@ impl FirExprKind {
                     + object.super_arguments.len()
                         * std::mem::size_of::<FirAnonymousSuperArgument>()
             }
-            FirExprKind::LocalCall { arguments, .. } => {
+            FirExprKind::LocalCall {
+                arguments,
+                parameter_types,
+                ..
+            } => {
                 arguments.len() * std::mem::size_of::<FirCallArgument>()
                     + arguments
                         .iter()
                         .map(FirCallArgument::storage_payload_bytes)
                         .sum::<usize>()
+                    + parameter_types.len() * std::mem::size_of::<ResolvedTy>()
             }
             FirExprKind::FunctionInvoke {
                 context_arguments,

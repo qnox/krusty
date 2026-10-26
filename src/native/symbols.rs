@@ -27,7 +27,7 @@ pub(super) fn module_function_symbol(
 }
 
 /// Injective target spelling of a source-module identity.
-fn module_namespace(module_name: &str) -> String {
+pub(super) fn module_namespace(module_name: &str) -> String {
     let mut namespace = String::new();
     mangle_name(&mut namespace, module_name);
     namespace
@@ -188,6 +188,7 @@ fn mangle_ty(out: &mut String, ty: crate::types::Ty) -> Option<()> {
         TyKind::InProjection(inner) => nested(out, 'M', inner)?,
         TyKind::OutProjection(inner) => nested(out, 'O', inner)?,
         TyKind::StarProjection(bound) => nested(out, 'S', bound)?,
+        TyKind::RawProjection(erased) => nested(out, 'J', erased)?,
         TyKind::DefinitelyNotNull(inner) => nested(out, 'D', inner)?,
         TyKind::Error | TyKind::Pending => return None,
     }
