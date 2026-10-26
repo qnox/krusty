@@ -57,6 +57,17 @@ unnarrowed or narrowed only to `Base`. Tests:
 `tests/consumer_materialized_result_e2e.rs` (`bound_results`), for one file, a sibling file, and a
 kotlinc-built dependency.
 
+`!!` and string templates consume the same erased slot. `!!` checks the value the call or property
+read left, then the consumer narrows it if it needs to: for `Simple<T : Base>.nul: T?` read as
+`Both`, a `Both` consumer does `checkNotNull` and then `checkcast Both`, and a `Base` consumer or
+`===` takes no cast. A `!!` that unboxes (`m[k]!!` or `r.getOrNull()!!` read as `Int`) changes representation, so
+its unboxing stays after the check (`map_get_nullable_elvis_e2e`, `result_property_carrier_e2e`).
+A template part reaches `String.valueOf(Object)`, `StringBuilder.append(Object)`,
+or an `invokedynamic` argument in its erased slot, whose descriptor is `Base` or `Object`, not
+`Both`. Only `append(String)` narrows a `String`-typed part. Tests:
+`tests/consumer_materialized_result_e2e.rs` (`bound_result_order`), for one file and for a
+kotlinc-built dependency at JVM 1.8 and JVM 11.
+
 ## Serialization constructor contract checks
 
 The deserialization-constructor handoff test retains nullable value-class element parameters and
