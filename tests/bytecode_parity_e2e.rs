@@ -972,6 +972,11 @@ fn for_in_intarray_is_byte_identical_to_kotlinc() {
 /// Normalized javap of `class_file`, optionally sliced to just the method whose disassembly contains
 /// `marker` (up to the next blank line) — for asserting one synthesized method (`hashCode`/`equals`).
 fn disasm(jh: &str, class_file: &std::path::Path, marker: Option<&str>) -> String {
+    assert!(
+        class_file.is_file(),
+        "missing parity class: {}",
+        class_file.display()
+    );
     let full = javap(jh, class_file);
     match marker {
         Some(m) => {
@@ -986,8 +991,8 @@ fn disasm(jh: &str, class_file: &std::path::Path, marker: Option<&str>) -> Strin
     }
 }
 
-/// One differential parity case: a uniquely-named source, the class to disassemble, and an optional
-/// method-slice marker. The unique file name gives each its own facade so they all compile together.
+/// One differential parity case: a source, the class to disassemble, and an optional method marker.
+/// Each case gets its own package so unrelated declarations can share one compilation batch.
 struct DiffCase {
     name: &'static str,
     file: &'static str,
@@ -1037,82 +1042,91 @@ fn diff_cases() -> Vec<DiffCase> {
     ]
 }
 
+type DifferentialReferences = std::collections::HashMap<String, (String, String)>;
+
 /// Compile ALL differential cases with kotlinc ONCE and krusty ONCE (fresh — so it tracks whatever
 /// kotlinc version/config is configured, no committed goldens to go stale), disassemble each side, and
-/// cache `name → (krusty_disasm, kotlinc_disasm)` for the whole test process. `None` when the
-/// provisioned toolchain is unavailable (the tests then skip).
-fn diff_refs() -> Option<&'static std::collections::HashMap<String, (String, String)>> {
-    static CACHE: std::sync::OnceLock<Option<std::collections::HashMap<String, (String, String)>>> =
+/// cache `name → (krusty_disasm, kotlinc_disasm)` for the whole test process. Initialization errors
+/// are cached too: a failed reference compilation fails each comparison without retrying the batch.
+fn diff_refs() -> &'static Result<DifferentialReferences, String> {
+    static CACHE: std::sync::OnceLock<Result<DifferentialReferences, String>> =
         std::sync::OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let jh = java_home();
-            let cases = diff_cases();
-            let dir = std::env::temp_dir().join(format!("krusty_diff_{}", std::process::id()));
+    CACHE.get_or_init(|| {
+        let jh = java_home();
+        let cases = diff_cases();
+        let case_sources = cases
+            .iter()
+            .map(|case| format!("package bytecode_parity.{}\n\n{}", case.name, case.src))
+            .collect::<Vec<_>>();
+        let dir = std::env::temp_dir().join(format!("krusty_diff_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let src_dir = dir.join("src");
+        let kref = dir.join("kref");
+        let krout = dir.join("krout");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::create_dir_all(&kref).unwrap();
+        fs::create_dir_all(&krout).unwrap();
+        let files: Vec<std::path::PathBuf> = cases
+            .iter()
+            .zip(&case_sources)
+            .map(|(c, source)| {
+                let p = src_dir.join(c.file);
+                fs::write(&p, source).unwrap();
+                p
+            })
+            .collect();
+        // kotlinc — one server-backed invocation for every case.
+        let mut args: Vec<String> = files
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        args.extend(["-d".to_string(), kref.to_string_lossy().into_owned()]);
+        let Some((code, stderr)) = common::kotlinc_compile(&args) else {
             let _ = fs::remove_dir_all(&dir);
-            let src_dir = dir.join("src");
-            let kref = dir.join("kref");
-            let krout = dir.join("krout");
-            fs::create_dir_all(&src_dir).unwrap();
-            fs::create_dir_all(&kref).unwrap();
-            fs::create_dir_all(&krout).unwrap();
-            let files: Vec<std::path::PathBuf> = cases
-                .iter()
-                .map(|c| {
-                    let p = src_dir.join(c.file);
-                    fs::write(&p, c.src).unwrap();
-                    p
-                })
-                .collect();
-            // kotlinc — one server-backed invocation for every case.
-            let mut args: Vec<String> = files
-                .iter()
-                .map(|p| p.to_string_lossy().into_owned())
-                .collect();
-            args.extend(["-d".to_string(), kref.to_string_lossy().into_owned()]);
-            let Some((code, stderr)) = common::kotlinc_compile(&args) else {
-                eprintln!("skip (provisioned kotlinc server unavailable)");
-                let _ = fs::remove_dir_all(&dir);
-                return None;
-            };
-            if code != 0 {
-                eprintln!("skip (kotlinc batch failed): {stderr}");
-                let _ = fs::remove_dir_all(&dir);
-                return None;
-            }
-            // krusty — one in-process module compile for every case (same driver as `krusty -d`).
-            let sources: Vec<(&str, &str)> = cases
-                .iter()
-                .map(|c| (c.file.trim_end_matches(".kt"), c.src))
-                .collect();
-            let classes =
-                common::compile_in_process_files(&sources, &[], None).expect("krusty batch failed");
-            for (internal, bytes) in &classes {
-                let path = krout.join(format!("{internal}.class"));
-                if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent).unwrap();
-                }
-                fs::write(path, bytes).unwrap();
-            }
-            let mut map = std::collections::HashMap::new();
-            for c in &cases {
-                let kr = disasm(&jh, &krout.join(format!("{}.class", c.class)), c.marker);
-                let ko = disasm(&jh, &kref.join(format!("{}.class", c.class)), c.marker);
-                map.insert(c.name.to_string(), (kr, ko));
-            }
+            return Err("provisioned kotlinc server unavailable".to_owned());
+        };
+        if code != 0 {
             let _ = fs::remove_dir_all(&dir);
-            Some(map)
-        })
-        .as_ref()
+            return Err(format!("kotlinc batch failed with exit {code}:\n{stderr}"));
+        }
+        // krusty — one in-process module compile for every case (same driver as `krusty -d`).
+        let sources: Vec<(&str, &str)> = cases
+            .iter()
+            .zip(&case_sources)
+            .map(|(c, source)| (c.file.trim_end_matches(".kt"), source.as_str()))
+            .collect();
+        let Some(classes) = common::compile_in_process_files(
+            &sources,
+            &[common::stdlib_jar()],
+            Some(&common::jdk_modules()),
+        ) else {
+            let _ = fs::remove_dir_all(&dir);
+            return Err("krusty batch failed".to_owned());
+        };
+        for (internal, bytes) in &classes {
+            let path = krout.join(format!("{internal}.class"));
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(path, bytes).unwrap();
+        }
+        let mut map = std::collections::HashMap::new();
+        for c in &cases {
+            let class = format!("bytecode_parity/{}/{}.class", c.name, c.class);
+            let kr = disasm(&jh, &krout.join(&class), c.marker);
+            let ko = disasm(&jh, &kref.join(&class), c.marker);
+            map.insert(c.name.to_string(), (kr, ko));
+        }
+        let _ = fs::remove_dir_all(&dir);
+        Ok(map)
+    })
 }
 
-/// Assert the named differential case's krusty disassembly equals the fresh kotlinc one. Skips when the
-/// provisioned kotlinc toolchain is unavailable.
+/// Assert the named differential case's krusty disassembly equals the fresh provisioned kotlinc one.
 fn assert_diff(name: &str) {
-    let Some(refs) = diff_refs() else {
-        eprintln!("skip ({name}: provisioned kotlinc/JAVA_HOME unavailable)");
-        return;
-    };
+    let refs = diff_refs()
+        .as_ref()
+        .unwrap_or_else(|error| panic!("{name}: {error}"));
     let (kr, ko) = refs
         .get(name)
         .expect("differential case registered in diff_cases()");

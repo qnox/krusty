@@ -7,6 +7,7 @@
 
 mod callable_registry;
 mod classes;
+mod interface_members;
 mod lower;
 mod property_registry;
 
@@ -49,6 +50,11 @@ pub struct WasmModule {
     declined: bool,
     /// The function the program starts in, and the file that declares it, once one has.
     entry: Option<(u32, String)>,
+    /// The interface member numbers of the source module being lowered, by its name.
+    slot_plan: Option<(
+        String,
+        crate::backend::class_tables::module_slots::ModuleSlotPlan,
+    )>,
     /// Each file's top-level property initializer, in file order. They all run before the entry,
     /// as the native target runs them at program start: a program's first touch of a file is
     /// through its entry or a call that follows it, so starting with every initializer is the same
@@ -96,6 +102,10 @@ impl Backend for WasmBackend {
         true
     }
 
+    fn numbers_slots(&self) -> bool {
+        true
+    }
+
     fn lower_ir_file(
         &self,
         mut file: CheckedIrFile<'_>,
@@ -137,15 +147,30 @@ impl Backend for WasmBackend {
             started.callables.enter_source_module(file.module_name);
             started.properties.enter_source_module(file.module_name);
         }
+        if state
+            .slot_plan
+            .as_ref()
+            .is_none_or(|(module, _)| module != file.module_name)
+        {
+            let plan = classes::module_plan(file.classifiers.module().classes());
+            state.slot_plan = Some((file.module_name.to_owned(), plan));
+        }
+        let plan = &state.slot_plan.as_ref().expect("planned just above").1;
         let lowered = match lower::lower_file(
-            &file.ir,
-            &properties,
-            &file.callables,
-            &file.dependency_exports,
-            &mut started.module,
-            &mut started.runtime,
-            &mut started.callables,
-            &mut started.properties,
+            lower::FileInput {
+                ir: &file.ir,
+                properties: &properties,
+                callables: &file.callables,
+                dependency_exports: &file.dependency_exports,
+                module_name: file.module_name,
+                plan,
+            },
+            lower::ModuleState {
+                module: &mut started.module,
+                runtime: &mut started.runtime,
+                callables: &mut started.callables,
+                properties: &mut started.properties,
+            },
         ) {
             Ok(lowered) => lowered,
             Err(construct) => {
@@ -199,6 +224,10 @@ impl Backend for WasmBackend {
         else {
             return Vec::new();
         };
+        started
+            .runtime
+            .objects
+            .finalize_interfaces(&mut started.module);
         let start = started.module.declare();
         let ty = started.module.func_type(Vec::new(), Vec::new());
         let mut code = Code::default();
@@ -366,6 +395,68 @@ mod tests {
             );
             assert_eq!(diagnostics, Vec::<String>::new());
             assert_eq!(outputs.len(), 2);
+        }
+    }
+
+    #[test]
+    fn a_class_implementing_an_interface_of_another_file_is_dispatched_and_tested() {
+        // Backend contract: interface members are numbered per module, not per file.
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile_program(
+                target,
+                Entry::Box,
+                &[
+                    "class Named(private val text: String) : Greeting { override fun greet() = text }\n\
+                     fun box(): String {\n\
+                     \x20   val value: Any = Named(\"OK\")\n\
+                     \x20   if (value !is Greeting) return \"not a greeting\"\n\
+                     \x20   return value.greet()\n\
+                     }",
+                    "interface Greeting { fun greet(): String }",
+                ],
+            );
+            assert_eq!(diagnostics, Vec::<String>::new());
+            assert_eq!(outputs.len(), 2);
+        }
+    }
+
+    #[test]
+    fn an_interface_member_with_two_implementations_compiles_to_one_module() {
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile_program(
+                target,
+                Entry::Box,
+                &[
+                    "class First : Part { override fun part() = \"O\" }\n\
+                     class Second : Part { override fun part() = \"K\" }\n\
+                     fun box(): String = (First() as Part).part() + (Second() as Part).part()",
+                    "interface Part { fun part(): String }",
+                ],
+            );
+            assert_eq!(diagnostics, Vec::<String>::new());
+            assert_eq!(outputs.len(), 2);
+        }
+    }
+
+    #[test]
+    fn a_local_class_cloned_from_another_files_inline_template_declines_by_name() {
+        // Backend contract: the clone realizes the template's callables a second time, which no
+        // Wasm function can carry twice.
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile_program(
+                target,
+                Entry::Box,
+                &[
+                    "fun box(): String = make() + \"K\"",
+                    "interface I { fun run(): String }\n\
+                     inline fun make(): String = object : I { override fun run() = \"O\" }.run()",
+                ],
+            );
+            assert_eq!(outputs, Vec::<Artifact>::new());
+            assert_eq!(
+                diagnostics,
+                ["krusty: the wasm backend does not support a callable realized by two functions yet"]
+            );
         }
     }
 

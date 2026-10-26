@@ -1698,7 +1698,7 @@ pub(crate) fn lower_value_classes(
         else {
             continue;
         };
-        if let Some(call) = crate::jvm::call_result_boundaries::terminal_call(&ir.exprs, *arg) {
+        if let Some(call) = crate::jvm::call_result_boundaries::declaration_result_call(ir, *arg) {
             applied_call_results.insert(call, *type_operand);
         }
     }
@@ -2323,6 +2323,18 @@ pub(crate) fn lower_value_classes(
                 underlying,
             }) => {
                 ir.record_erased_value_construction(id, owner, underlying);
+                // The call targets the selected constructor's own `constructor-impl`, so a private
+                // one reached from another class is bridged like any private static member.
+                let constructor = ir
+                    .construction_targets
+                    .get(&id)
+                    .and_then(|target| {
+                        realized_members
+                            .constructor_impls
+                            .get(&(owner, target.ordinal))
+                    })
+                    .copied();
+                ir.record_realized_member_target(id, constructor, None);
                 // The construction becomes a static `constructor-impl` call over the same checked
                 // declaration parameters. A generic `T` parameter consumes its argument as a box.
                 if let Some(parameters) = ir.construction_declared_params.remove(&id) {

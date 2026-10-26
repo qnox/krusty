@@ -119,8 +119,6 @@ pub struct IrSecondaryCtorLines {
     pub delegation_line: u32,
     /// The declaration's last line — its delegation's closing `)` or its block's `}`.
     pub decl_end_line: u32,
-    /// Each parameter's default expression, parallel to the DECLARED parameters; 0 = no default.
-    pub defaults: Vec<u32>,
 }
 
 impl IrSecondaryCtorLines {
@@ -199,6 +197,9 @@ pub enum IrCtorParameterProvenance {
     Continuation,
     /// The dispatch receiver a generated continuation constructor stores.
     ContinuationDispatchReceiver,
+    /// A script's implicit receiver, numbered in its definition's order, which a script takes
+    /// after its template's parameters.
+    ScriptReceiver { ordinal: u32 },
 }
 
 /// A constructor parameter that carries a value a local or anonymous class captures from its

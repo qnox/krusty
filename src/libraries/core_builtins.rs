@@ -140,7 +140,14 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
             member_property(classifier, owner, name, ty, intrinsic);
         }
     }
-    if owner.matches("kotlin/Array") || Ty::primitive_array_element(owner.segment_ref()).is_some() {
+    // An unsigned array is a value class over its carrier. The `size` its library declares is the
+    // class's own member (`UIntArray.getSize-impl` on the JVM), never the carrier's length
+    // operation, so it is kept as declared. Only a classifier no library declares gets the core one.
+    let array_size = owner.matches("kotlin/Array")
+        || crate::types::prim_array_element(owner).is_some_and(|element| {
+            !element.is_unsigned() || !classifier.declared_callables.contains_key("size")
+        });
+    if array_size {
         member_property(
             classifier,
             owner,
@@ -220,6 +227,12 @@ impl EmptySymbolSource {
             classifier.kind = TypeKind::Interface;
             classifier.type_parameters =
                 TypeParameters::invariant(vec!["R".to_string()], vec![Vec::new()]);
+        }
+        if name == "Array" {
+            // `class Array<T>`: a runtime test or subtype proof against `Array<*>` projects the
+            // symbolic application `Array<T>`, never a raw `Array`.
+            classifier.type_parameters =
+                TypeParameters::invariant(vec!["T".to_string()], vec![Vec::new()]);
         }
         if name == "Enum" {
             // `enum class E` has the implicit semantic supertype `Enum<E>` even with an empty
@@ -333,6 +346,9 @@ impl EmptySymbolSource {
                 );
             }
         }
+        // These are top-level language declarations: every formal belongs to this classifier,
+        // and none is captured from an enclosing declaration.
+        classifier.own_type_parameter_count = classifier.type_params().len();
         add_core_builtin_declarations(&mut classifier, internal);
         Some(classifier)
     }
@@ -632,6 +648,7 @@ impl crate::symbol_source::SymbolSource for EmptySymbolSource {
             classifier.kind = TypeKind::Interface;
             classifier.type_parameters =
                 TypeParameters::invariant(vec!["R".to_string()], vec![Vec::new()]);
+            classifier.own_type_parameter_count = classifier.type_params().len();
             return std::rc::Rc::new(ResolvedSymbols {
                 classifier_name: Some(internal),
                 classifier_declaration: Some(ClassifierDeclaration::Ordinary(internal)),
@@ -676,6 +693,38 @@ impl crate::symbol_source::SymbolSource for EmptySymbolSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::symbol_source::SymbolSource;
+
+    #[test]
+    fn top_level_core_classifier_formals_never_capture_an_enclosing_declaration() {
+        let source = EmptySymbolSource;
+        for (owner, parameter) in [
+            ("kotlin/Array", "T"),
+            ("kotlin/Enum", "E"),
+            ("kotlin/Function", "R"),
+            ("kotlin/reflect/KProperty", "R"),
+            ("kotlin/reflect/KFunction", "R"),
+        ] {
+            let identity = crate::types::type_name(owner);
+            let declaration = source.classifier(identity).expect("core declaration");
+            assert_eq!(
+                declaration.type_params(),
+                &[parameter.to_owned()],
+                "{owner}"
+            );
+            assert_eq!(declaration.own_type_parameter_count, 1, "{owner}");
+            assert_eq!(
+                &declaration.type_params()[declaration.own_type_parameter_count..],
+                &[] as &[String],
+                "a top-level declaration has no captured classifier formals: {owner}"
+            );
+            assert_eq!(
+                declaration.type_param_bounds().len(),
+                declaration.type_params().len(),
+                "{owner}"
+            );
+        }
+    }
 
     #[test]
     fn core_any_declarations_publish_their_semantic_roles() {
@@ -709,5 +758,57 @@ mod tests {
         let mut same_spelling = LibraryType::declaration_header();
         add_core_builtin_declarations(&mut same_spelling, crate::types::type_name("sample/Enum"));
         assert!(!same_spelling.declared_callables.contains_key("name"));
+    }
+
+    #[test]
+    fn array_size_intrinsic_belongs_to_the_exact_array_classifiers() {
+        let size_intrinsic = |classifier: &LibraryType| {
+            let [size] = classifier.declared_callables["size"].properties() else {
+                panic!("one size property");
+            };
+            size.getter.compiler_intrinsic
+        };
+        for owner in [
+            "kotlin/Array",
+            "kotlin/IntArray",
+            "kotlin/BooleanArray",
+            "kotlin/UIntArray",
+        ] {
+            let mut array = LibraryType::declaration_header();
+            add_core_builtin_declarations(&mut array, crate::types::type_name(owner));
+            assert_eq!(
+                size_intrinsic(&array),
+                Some(CompilerIntrinsic::ArraySize),
+                "{owner}"
+            );
+        }
+        // The `size` a library declares on an unsigned array stays its value class's member.
+        let declared = |owner: &str| {
+            let mut classifier = LibraryType::declaration_header();
+            add_core_builtin_declarations(
+                &mut classifier,
+                crate::types::type_name("kotlin/IntArray"),
+            );
+            let mut declared = LibraryType::declaration_header();
+            let mut size = classifier.declared_callables["size"].clone();
+            let (functions, mut properties) = std::mem::take(&mut size).into_parts();
+            for property in &mut properties.overloads {
+                property.getter.compiler_intrinsic = None;
+            }
+            declared.insert_declared_callables(
+                "size".to_string(),
+                Callables::from_parts(functions, properties),
+            );
+            add_core_builtin_declarations(&mut declared, crate::types::type_name(owner));
+            size_intrinsic(&declared)
+        };
+        assert_eq!(declared("kotlin/UByteArray"), None);
+        assert_eq!(
+            declared("kotlin/ShortArray"),
+            Some(CompilerIntrinsic::ArraySize)
+        );
+        let mut user = LibraryType::declaration_header();
+        add_core_builtin_declarations(&mut user, crate::types::type_name("sample/IntArray"));
+        assert!(!user.declared_callables.contains_key("size"));
     }
 }

@@ -36,6 +36,9 @@ pub enum SkipReason {
     InlineParameters,
     /// A read-only collection superclass lacks the exact semantic declaration its stubs need.
     ReadOnlyCollectionStubs(String),
+    /// A `suspend inline` callee's compiled body does not say where it places a suspend lambda
+    /// passed to it: in the caller's frame, or in an object it constructs.
+    SuspendLambdaPlacement(String),
 }
 
 /// What the plugin pass of [`run_backend_passes`] runs: the native plugins the frontend ran for this
@@ -399,6 +402,8 @@ fn run_backend_passes_after_plugins(
     crate::jvm::shared_captures::restore_erased_escaping_capture_holders(ir);
     let null_out_dead_spills =
         crate::jvm::runtime_capabilities::null_out_spilled_variable(classpath);
+    crate::jvm::suspend::lambda_placement::record(ir, classpath, &facts.default_call_operands)
+        .map_err(SkipReason::SuspendLambdaPlacement)?;
     if !crate::jvm::suspend::lower_suspend(
         ir,
         facade,
@@ -413,6 +418,7 @@ fn run_backend_passes_after_plugins(
         return Err(SkipReason::Suspend);
     }
     crate::jvm::suspend::finalize_suspend_bridges(ir, &mut facts.bridge_adaptations);
+    crate::jvm::reified_operations::record_lowered_classes(ir);
     // After the suspend transform: the body moved onto the static is the finished state machine.
     crate::jvm::suspend_impls::lower_suspend_impls(ir);
     // Source lambda names are inputs to lifting. Fix them before reparenting so the lifted-name
@@ -682,6 +688,7 @@ fn checked_module_inner_class_resolver(
             .classifiers()
             .map(|(classifier, shape)| InnerModuleClassifier {
                 classifier,
+                declaration_name: shape.declaration_name.clone(),
                 visibility: shape.access.visibility(),
                 inner: shape.outer_instance.is_some(),
                 annotation: shape.is_annotation(),
@@ -691,13 +698,13 @@ fn checked_module_inner_class_resolver(
                 final_class: !shape.is_abstract && !shape.is_extensible,
             }),
         module.generated_classifiers().iter(),
-        cp,
+        classpath_inner_class_resolver(cp),
     )
 }
 
-#[derive(Clone, Copy)]
 struct InnerModuleClassifier {
     classifier: crate::types::TypeName,
+    declaration_name: Option<crate::types::ClassifierDeclarationName>,
     visibility: crate::types::Visibility,
     inner: bool,
     annotation: bool,
@@ -710,7 +717,7 @@ struct InnerModuleClassifier {
 fn module_inner_class_resolver_from_shapes<'a>(
     classes: impl IntoIterator<Item = InnerModuleClassifier>,
     generated: impl IntoIterator<Item = &'a crate::types::GeneratedClassifierFact>,
-    cp: std::rc::Rc<crate::jvm::classpath::Classpath>,
+    classpath: crate::jvm::classfile::InnerClassResolver,
 ) -> crate::jvm::classfile::InnerClassResolver {
     const PUBLIC: u16 = 0x0001;
     const PROTECTED: u16 = 0x0004;
@@ -723,36 +730,18 @@ fn module_inner_class_resolver_from_shapes<'a>(
     const ENUM: u16 = 0x4000;
     const SYNTHETIC: u16 = 0x1000;
 
-    let classes = classes.into_iter().collect::<Vec<_>>();
-    let module_names = classes
-        .iter()
-        .map(|class| class.classifier)
-        .collect::<crate::fx_hash::HashSet<_>>();
     let mut source = crate::fx_hash::HashMap::default();
     for class in classes {
         let internal = class.classifier.render();
-        // Only MEMBER-nested classes get snapshot entries, and the outer boundary is NOT the last
-        // `$` (mirroring `register_inner_classes`): the boundary is the longest proper prefix that
-        // is itself a module class. A name whose remainder still carries `$` past that boundary is
-        // a hoisted LOCAL class (`pkg/Outer$m$Local` — `m` is a function, not a class) or a
-        // backticked simple name; kotlinc spells a local's entry with `outer_class_info_index = 0`,
-        // and inventing an outer makes the loader chase a class that does not exist
-        // (`NoClassDefFoundError`). The two are not distinguishable from the name alone (a
-        // backticked MEMBER `` class `X$Y` `` is denotable cross-file and would deserve an entry),
-        // so the snapshot omits the ambiguous shape rather than risk fabricating an outer.
-        let Some(boundary) = internal
-            .char_indices()
-            .filter(|&(_, ch)| ch == '$')
-            .map(|(at, _)| at)
-            .filter(|&at| module_names.contains(&crate::types::type_name(&internal[..at])))
-            .max()
-        else {
-            continue; // top-level (or nested under nothing this module declares)
+        let (outer, simple) = match class.declaration_name {
+            Some(crate::types::ClassifierDeclarationName::Nested { owner, name }) => (owner, name),
+            Some(crate::types::ClassifierDeclarationName::TopLevel { .. }) | None => {
+                // This compilation owns the declaration even when ownership is unavailable.
+                // A classpath record with the same physical name cannot fill that gap.
+                source.insert(internal, None);
+                continue;
+            }
         };
-        let (outer, simple) = (&internal[..boundary], &internal[boundary + 1..]);
-        if simple.contains('$') {
-            continue;
-        }
         let visibility = match class.visibility {
             crate::types::Visibility::Protected => PROTECTED,
             crate::types::Visibility::Private => PRIVATE,
@@ -771,12 +760,12 @@ fn module_inner_class_resolver_from_shapes<'a>(
             access |= FINAL;
         }
         source.insert(
-            internal.clone(),
-            crate::jvm::classfile::InnerClassDetails {
-                outer: Some(outer.to_string()),
+            internal,
+            Some(crate::jvm::classfile::InnerClassDetails {
+                outer: Some(outer.render()),
                 name: Some(simple.to_string()),
                 access,
-            },
+            }),
         );
     }
     for class in generated {
@@ -807,19 +796,16 @@ fn module_inner_class_resolver_from_shapes<'a>(
         }
         source.insert(
             class.classifier.render(),
-            crate::jvm::classfile::InnerClassDetails {
+            Some(crate::jvm::classfile::InnerClassDetails {
                 outer: Some(class.lexical_owner.render()),
                 name: Some(class.source_name.to_string()),
                 access,
-            },
+            }),
         );
     }
-    let classpath = classpath_inner_class_resolver(cp);
-    std::rc::Rc::new(move |internal: &str| {
-        source
-            .get(internal)
-            .cloned()
-            .or_else(|| classpath(internal))
+    std::rc::Rc::new(move |internal: &str| match source.get(internal) {
+        Some(details) => details.clone(),
+        None => classpath(internal),
     })
 }
 
@@ -1235,6 +1221,13 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
             );
             return;
         }
+        SkipReason::SuspendLambdaPlacement(detail) => {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                format!("krusty: cannot tell {detail}"),
+            );
+            return;
+        }
         SkipReason::MemberDispatch(classifier) => {
             diags.error(
                 crate::diag::Span::new(0, 0),
@@ -1256,6 +1249,7 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
         | SkipReason::CallArguments(_)
         | SkipReason::InlineParameters
         | SkipReason::ReadOnlyCollectionStubs(_)
+        | SkipReason::SuspendLambdaPlacement(_)
         | SkipReason::MemberDispatch(_) => {
             unreachable!()
         }
@@ -1484,7 +1478,7 @@ pub fn facade_package_metadata_from_ir(
             };
             // Recorded exactly when a reader cannot rebuild the physical descriptor from the
             // declared types (kotlinc's `requiresFunctionSignature`).
-            let jvm_desc = super::metadata_method_signatures::requires_function_signature(
+            let jvm_desc = (super::metadata_method_signatures::requires_function_signature(
                 declaration.receiver,
                 declaration
                     .params
@@ -1500,7 +1494,7 @@ pub fn facade_package_metadata_from_ir(
                 declaration.ret,
                 &physical_descriptor,
                 &Default::default(),
-            )
+            ) || declaration.spellings.names_actualized_expect())
             .then_some(physical_descriptor);
             crate::metadata::builder::FnMeta {
                 jvm_desc,
@@ -1608,11 +1602,12 @@ pub fn facade_package_metadata_from_ir(
                 delegate_method,
                 field_name: field.as_ref().and_then(|(name, _)| name.clone()),
                 field_desc: field.map(|(_, descriptor)| descriptor).filter(|physical| {
-                    super::metadata_method_signatures::requires_field_signature(
-                        declaration.ty,
-                        physical,
-                        &Default::default(),
-                    )
+                    declaration.spellings.ret.actualized_expect
+                        || super::metadata_method_signatures::requires_field_signature(
+                            declaration.ty,
+                            physical,
+                            &Default::default(),
+                        )
                 }),
                 annotation_method: ir
                     .jvm_package_property_annotation_marker(declaration.property)
@@ -1765,6 +1760,78 @@ mod tests {
     use super::*;
     use crate::diag::DiagSink;
     use crate::frontend::{collect_signatures, parse_source_with_detected_features};
+
+    #[test]
+    fn module_inner_classes_use_declaration_names_and_shadow_classpath_rows() {
+        use crate::types::{type_name_child, ClassifierDeclarationName, TypeName, Visibility};
+        let package = type_name("member/ownership");
+        let outer = type_name_child(package, "Outer");
+        let literal = type_name_child(package, "Outer$Literal");
+        let member = literal.nested_child("Part$Name");
+        let unknown = type_name_child(package, "Unknown$Owner");
+        let shape = |classifier, declaration_name| InnerModuleClassifier {
+            classifier,
+            declaration_name,
+            visibility: Visibility::Public,
+            inner: false,
+            annotation: false,
+            interface: false,
+            enum_class: false,
+            abstract_class: false,
+            final_class: true,
+        };
+        let classes = [
+            shape(
+                outer,
+                Some(ClassifierDeclarationName::TopLevel {
+                    package,
+                    name: "Outer".into(),
+                }),
+            ),
+            shape(
+                literal,
+                Some(ClassifierDeclarationName::TopLevel {
+                    package,
+                    name: "Outer$Literal".into(),
+                }),
+            ),
+            shape(
+                member,
+                Some(ClassifierDeclarationName::Nested {
+                    owner: literal,
+                    name: "Part$Name".into(),
+                }),
+            ),
+            shape(unknown, None),
+        ];
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let observed = calls.clone();
+        let classpath = std::rc::Rc::new(move |_: &str| {
+            observed.set(observed.get() + 1);
+            Some(crate::jvm::classfile::InnerClassDetails {
+                outer: Some("stale/Owner".into()),
+                name: Some("Stale".into()),
+                access: 0x0001,
+            })
+        });
+        let resolve =
+            module_inner_class_resolver_from_shapes(classes, std::iter::empty(), classpath);
+        assert!(resolve(&outer.render()).is_none());
+        assert!(resolve(&literal.render()).is_none());
+        assert!(resolve(&unknown.render()).is_none());
+        let row = resolve(&member.render()).expect("declared member row");
+        assert_eq!(
+            (row.outer, row.name, row.access),
+            (Some(literal.render()), Some("Part$Name".into()), 0x0019)
+        );
+        assert_eq!(calls.get(), 0);
+        let row = resolve(&type_name_child(TypeName::ROOT, "External").render()).unwrap();
+        assert_eq!(
+            (row.outer, row.name, row.access),
+            (Some("stale/Owner".into()), Some("Stale".into()), 0x0001)
+        );
+        assert_eq!(calls.get(), 1);
+    }
 
     struct NoClassifierFacts;
 

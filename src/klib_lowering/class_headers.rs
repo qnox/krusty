@@ -13,6 +13,7 @@ pub(super) struct ClassMemberHeader<'a, 'b> {
     pub(super) contract: &'a KlibBodyClassContract,
     pub(super) arena: &'b KlibIrArena,
     pub(super) function: &'b KlibIrFunction,
+    pub(super) class: &'b KlibIrClass,
     pub(super) types: KlibTypeParameters,
     pub(super) formals: Vec<String>,
 }
@@ -54,6 +55,7 @@ pub(super) fn authenticate<'a, 'b>(
         contract: class,
         arena: member.arena,
         function: member.function,
+        class: member.class,
         types,
         formals,
     })

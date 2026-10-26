@@ -235,6 +235,24 @@ fn collect_reified_parameters(ir: &IrFile) -> HashMap<String, ReifiedParameter> 
     parameters
 }
 
+/// Whether `ty` is, or has among its type arguments, a reified type parameter of a declaration in
+/// this file (kotlinc's `anyTypeArgument { it.isReified }`).
+pub(super) fn names_reified_type_parameter(ir: &IrFile, ty: Ty) -> bool {
+    match ty.non_null().kind() {
+        TyKind::TyParam(name, _) => ir.signatures.values().any(|signature| {
+            signature
+                .type_params
+                .iter()
+                .any(|parameter| parameter.reified && parameter.semantic_name == name.as_str())
+        }),
+        TyKind::Obj(_, arguments) => arguments
+            .as_slice()
+            .iter()
+            .any(|&argument| names_reified_type_parameter(ir, argument)),
+        _ => false,
+    }
+}
+
 fn owns_reified_parameter(ir: &IrFile, function: FunId) -> bool {
     ir.signatures.get(&function).is_some_and(|signature| {
         signature
@@ -477,6 +495,7 @@ fn collect_type_reified_parameters(
         | TyKind::PlatformNullable(inner)
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner)
+        | TyKind::RawProjection(inner)
         | TyKind::DefinitelyNotNull(inner) => {
             collect_type_reified_parameters(inner, parameters, found);
         }
@@ -666,6 +685,27 @@ pub(super) fn realize(ir: &mut IrFile, lambdas: &super::lambda_classes::LambdaMe
     }
     record_reifying_classes(ir, reifying);
     record_reified_catches(ir, &parameters, &functions);
+}
+
+/// Record the classes suspend lowering realized in a reified body whose methods execute a marker,
+/// as [`realize`] records the classes that existed before it: a suspend lambda becomes a class of
+/// its own only then, and constructing it must still ask an inliner to regenerate it.
+pub(super) fn record_lowered_classes(ir: &mut IrFile) {
+    let reifying = (0..ir.classes.len() as ClassId)
+        .filter(|&class| {
+            let declaration = &ir.classes[class as usize];
+            !ir.reified_anonymous_declarations.contains(&class)
+                && in_reified_body(ir, declaration.enclosure)
+                // A member's own reified operations are its callers' to specialize, not the class's.
+                && declaration.methods.iter().any(|&method| {
+                    !owns_reified_parameter(ir, method)
+                        && ir.functions[method as usize]
+                            .body
+                            .is_some_and(|body| super::ir_emit::body_has_reified_markers(ir, body))
+                })
+        })
+        .collect::<Vec<_>>();
+    record_reifying_classes(ir, reifying);
 }
 
 #[cfg(test)]

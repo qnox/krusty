@@ -474,6 +474,7 @@ fn substitute_expansion_spelling(
         parameter_name: spelling.parameter_name.clone(),
         flexible_upper_bound: spelling.flexible_upper_bound,
         enhanced_nullability: spelling.enhanced_nullability,
+        actualized_expect: spelling.actualized_expect,
     }
 }
 

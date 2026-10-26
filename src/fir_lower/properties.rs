@@ -1585,7 +1585,8 @@ pub(super) fn add_accessor_function(ir: &mut IrFile, input: AccessorFunctionInpu
     // another. Whether the node costs an unbox, a `checkcast` or no instruction at all is the
     // backend's to decide from the physical types.
     // A getter returns at the line its value is stated on: after an inlined call there, the return
-    // marks that line again, as kotlinc's does.
+    // marks that line again, as kotlinc's does. An expression body's recorded exit (its end line)
+    // takes precedence, as a function's does.
     let line = returns_value
         .then(|| ir.expr_source_lines.get(&value).copied())
         .flatten();
@@ -1606,10 +1607,7 @@ pub(super) fn add_accessor_function(ir: &mut IrFile, input: AccessorFunctionInpu
     if let Some(line) = line {
         ir.expr_source_lines.insert(returned, line);
     }
-    if let Some(exit) = (!returns_value)
-        .then(|| ir.accessor_body_exit(value))
-        .flatten()
-    {
+    if let Some(exit) = ir.accessor_body_exit(value) {
         ir.mark_unit_body_exit(returned, exit);
     }
     let body = if returns_value {
@@ -1911,6 +1909,10 @@ fn merge_class_initialization(
                 .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
             let prefix = ir.classes[class_id as usize].constructor_prefix_count;
             rebase_initializer_values(ir, initialization, prefix, constructor_value_count)?;
+            let base = prefix
+                .checked_add(constructor_value_count)
+                .ok_or(FirFileLoweringFailure::ValueIdentityOverflow)?;
+            ir.secondary_initializer_value_bases.insert(class_id, base);
             let direct_super_bodies = ir.classes[class_id as usize]
                 .secondary_ctors
                 .iter()
@@ -2183,6 +2185,9 @@ pub(super) fn accept_property_body(
         .map(|statement| statement.origin);
     let is_setter = anchor.kind == DeclarationKind::Accessor && anchor.sibling == 1;
     let setter_exit = is_setter.then(|| setter_exit_line(&body)).flatten();
+    let expression_getter = anchor.kind == DeclarationKind::Accessor
+        && anchor.sibling == 0
+        && body.has_implicit_return();
     let declared_ty = ir
         .checked_properties
         .get(&property_id)
@@ -2222,7 +2227,12 @@ pub(super) fn accept_property_body(
             super::unit_expression_end(ir, value).map(crate::ir::UnitBodyExit::ExpressionEnd)
         }
     });
-    if let Some(exit) = setter_exit {
+    // A getter's expression body returns at the expression's end, as a function's does.
+    let getter_exit = expression_getter
+        .then(|| super::implicit_return_end(ir, value))
+        .flatten()
+        .map(crate::ir::UnitBodyExit::ExpressionEnd);
+    if let Some(exit) = setter_exit.or(getter_exit) {
         ir.record_accessor_body_exit(value, exit);
     }
     let companion_block_member = index

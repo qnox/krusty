@@ -1439,8 +1439,12 @@ impl super::Emitter<'_> {
                 code.getstatic(f, 1);
             }
             IrExpr::StaticInstance { owner, ty, field } => {
+                let ty_name = self.ir.classes[*ty as usize].fq_name;
+                crate::jvm::reified_anonymous::guard_reified_construction(
+                    self.ir, self.cw, code, ty_name,
+                );
                 let owner_fq = self.ir.classes[*owner as usize].fq_name();
-                let ty_fq = self.ir.classes[*ty as usize].fq_name();
+                let ty_fq = ty_name.render();
                 let f = self.cw.fieldref(&owner_fq, field, &format!("L{ty_fq};"));
                 code.getstatic(f, 1);
             }
@@ -1448,6 +1452,9 @@ impl super::Emitter<'_> {
                 self.emit_singleton_instance(*classifier, code);
             }
             IrExpr::ExternalStaticInstance { owner, ty, field } => {
+                crate::jvm::reified_anonymous::guard_reified_construction(
+                    self.ir, self.cw, code, *ty,
+                );
                 let (owner, field) = singleton_instance_load::loaded_instance(
                     self.self_companion,
                     *ty,
