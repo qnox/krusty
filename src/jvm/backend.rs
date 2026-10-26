@@ -301,6 +301,10 @@ fn run_backend_passes_after_plugins(
     )?;
     facts.override_results.collection_signatures =
         crate::jvm::collection_override_signatures::select(ir, classpath);
+    // An abstract class's materialized builtin members precede bridge derivation: their final
+    // bridges are ones a subclass inherits rather than declares.
+    let abstract_overrides =
+        crate::jvm::abstract_builtin_overrides::select(ir, classpath, classifiers);
     crate::jvm::bridges::derive_bridges(
         ir,
         classpath,
@@ -308,6 +312,7 @@ fn run_backend_passes_after_plugins(
         &facts.override_results,
         &mut facts.function_argument_arrays,
         facts.jvm_default,
+        &abstract_overrides,
     )?;
     crate::jvm::collection_barriers::select(
         ir,
@@ -325,6 +330,7 @@ fn run_backend_passes_after_plugins(
             classpath,
             classifiers,
         )?,
+        abstract_overrides,
         to_array: crate::jvm::collection_to_array::select(ir, classpath),
     };
     // The value-class pass reads same-module SOURCE value classes (internal name → sole-field

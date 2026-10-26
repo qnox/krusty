@@ -48,6 +48,9 @@ pub(super) struct InheritedCollectionBridge {
 
 #[derive(Clone, Debug)]
 pub(super) enum InheritedCollectionBridgeBody {
+    /// `ACC_PUBLIC|ACC_ABSTRACT`: the superclass leaves the member abstract (`AbstractList.size()`),
+    /// so its specialization stays abstract (`abstract int getSize()`) for a subclass to implement.
+    Abstract { signature: Option<String> },
     /// `ACC_PUBLIC|ACC_BRIDGE`: call the immediate superclass implementation.
     SuperDelegate {
         owner: TypeName,
@@ -520,12 +523,18 @@ fn member_bridges(
             .map(crate::jvm::parameter_names::inherited_collection_specialized_local)
             .collect(),
         result: specialized_result,
-        body: InheritedCollectionBridgeBody::SuperDelegate {
-            owner: class.superclass,
-            name: specification.physical_name.clone(),
-            descriptor: member.method.descriptor.clone(),
-            delegate_result: super_result,
-            signature: specialized_property_signature.map(|pair| pair.0),
+        body: if member.method.is_abstract() {
+            InheritedCollectionBridgeBody::Abstract {
+                signature: specialized_property_signature.map(|pair| pair.0),
+            }
+        } else {
+            InheritedCollectionBridgeBody::SuperDelegate {
+                owner: class.superclass,
+                name: specification.physical_name.clone(),
+                descriptor: member.method.descriptor.clone(),
+                delegate_result: super_result,
+                signature: specialized_property_signature.map(|pair| pair.0),
+            }
         },
     }];
 

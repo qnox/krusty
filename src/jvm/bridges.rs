@@ -27,6 +27,7 @@ pub(super) fn derive_bridges(
     override_results: &crate::jvm::override_results::OverrideResults,
     argument_arrays: &mut crate::jvm::function_argument_arrays::FunctionArgumentArrays,
     jvm_default: crate::jvm::ir_emit::JvmDefaultMode,
+    abstract_overrides: &crate::jvm::abstract_builtin_overrides::AbstractBuiltinOverrides,
 ) -> Result<(), SkipReason> {
     for cid in 0..ir.classes.len() {
         // Source-declared classes, declaration-owned enum-entry subclasses, and anonymous classes
@@ -61,7 +62,7 @@ pub(super) fn derive_bridges(
         ir.classes[cid].bridges.extend(inherited);
         declaration_order(&mut ir.classes[cid].bridges[first..], order);
     }
-    finalize_special_collection_bridges(ir, classpath);
+    finalize_special_collection_bridges(ir, classpath, abstract_overrides);
     Ok(())
 }
 
@@ -71,6 +72,7 @@ pub(super) fn derive_bridges(
 fn finalize_special_collection_bridges(
     ir: &mut IrFile,
     classpath: &crate::jvm::classpath::Classpath,
+    abstract_overrides: &crate::jvm::abstract_builtin_overrides::AbstractBuiltinOverrides,
 ) {
     for class in &mut ir.classes {
         for bridge in &mut class.bridges {
@@ -99,6 +101,7 @@ fn finalize_special_collection_bridges(
                         method_descriptor(&bridge.erased_params, bridge.erased_ret),
                     )
                 })
+                .chain(abstract_overrides.final_bridges(class.fq_name_id()))
                 .collect::<Vec<_>>();
             (class.fq_name, methods)
         })
