@@ -854,6 +854,8 @@ pub enum IrEnclosure {
 /// constructor's `val`/`var` parameters (in order); the constructor stores each.
 #[derive(Clone, Debug)]
 pub struct IrClass {
+    /// Non-local lexical declaration name retained independently from the class's physical name.
+    pub declaration_name: Option<crate::types::ClassifierDeclarationName>,
     pub fq_name: TypeName,
     /// `true` when this classifier comes from a source declaration. Synthesized implementation
     /// classes must not be published as declared nested classifiers in language metadata, even when

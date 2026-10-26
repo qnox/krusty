@@ -621,8 +621,12 @@ pub trait SignatureSemantics:
         &self,
         _declaration: DeclarationId,
         result: ResolvedTy,
-    ) -> Result<ResolvedTy, DiagnosticId> {
-        Ok(result)
+        _evaluated_body: ResolvedTy,
+    ) -> Result<DeclarationResultTypes, DiagnosticId> {
+        Ok(DeclarationResultTypes {
+            published: result,
+            inferred_body_result: None,
+        })
     }
 
     fn classifier_type(

@@ -126,6 +126,7 @@ mod metadata_policy;
 mod method_access;
 pub(crate) use method_access::is_reifiable;
 mod method_defaults;
+pub(in crate::jvm) use method_defaults::body_has_reified_markers;
 mod method_entry;
 mod method_signatures;
 mod must_inline_lambdas;
@@ -228,8 +229,7 @@ use metadata_policy::{
     synthetic_class_xi, SYNTHETIC_LOCAL, SYNTHETIC_PROTECTED, SYNTHETIC_PUBLIC,
 };
 use method_defaults::{
-    body_has_reified_markers, emit_default_stub, emit_facade_default_stub,
-    static_default_stub_marker, DefaultStubSource,
+    emit_default_stub, emit_facade_default_stub, static_default_stub_marker, DefaultStubSource,
 };
 pub use must_inline_lambdas::mark_must_inline_lambdas;
 use must_inline_lambdas::splice_called_impls;
@@ -1249,7 +1249,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
 ) -> Option<Vec<(String, Vec<u8>)>> {
     let env = EmitEnv {
         facade_class,
-        bodies,
+        bodies: &bytecode_inline_call::ModuleClassBodies::new(bodies, run),
         run,
         continuation_metadata: facts.metadata.continuations,
         emit_time_machines: facts.metadata.emit_time_machines,
@@ -1478,7 +1478,7 @@ fn emit_pass(
         &class_member_fids,
         &member_access_bridges.private_calls,
     );
-    bytecode_inline_call::compile_inline_callees(ir, facade, env, opts);
+    bytecode_inline_call::compile_inline_callees(ir, facade, env, opts, class_meta);
     let mut cw = new_writer(facade, "java/lang/Object", opts);
     // The facade constructs the file's local classes, and a class that references one as a class
     // constant must list it in `InnerClasses` — reflection cross-checks the two sides and throws
@@ -1650,14 +1650,8 @@ fn emit_pass(
         if unwritten_continuations.contains(&c.fq_name) {
             continue;
         }
-        let cm = class_meta(&fq_name);
-        let mut extra: Vec<(String, Vec<u8>)> = Vec::new();
-        out.push((
-            fq_name,
-            emit_class(ir, class_id, c, facade, env, opts, cm.as_ref(), &mut extra),
-        ));
-        // An interface's `$DefaultImpls` holder (its `name$default` synthetics), when any exist.
-        out.extend(extra);
+        // With an interface's `$DefaultImpls` holder (its `name$default` synthetics), if any.
+        bytecode_inline_call::write_class(ir, class_id, facade, env, opts, class_meta, &mut out);
         out.extend(drain_lambda_classes(env, opts));
         // A member's coroutine machine builds its continuation class while the method is emitted,
         // which is after the facade drained the ones its own top-level functions produced.

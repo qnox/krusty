@@ -147,7 +147,7 @@ final class LibraryClass implements KSClassDeclaration {
 
     @Override
     public KSType asStarProjectedType() {
-        throw library("asStarProjectedType");
+        return ClassType.starProjected(this);
     }
 
     @Override
