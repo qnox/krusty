@@ -13751,7 +13751,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   stubs use. The policy belongs to the overridden declaration, found from the class's exact
   override edges through the builtin supertypes of the declaration's owner, so it applies through
   a mutable or read-only face, in a generic class, and over a Java collection superclass
-  (`java.util.ArrayList`). A descriptor-only signature is still omitted. Tests:
+  (`java.util.ArrayList`). A descriptor-only signature is still omitted. A value class's static
+  replacement of such an override (`addAll-impl`) overrides nothing, so it keeps the ordinary
+  signature of a member, its moved receiver first (`(ILjava/util/Collection<+TT;>;)Z`,
+  `(ILjava/util/Collection<Ljava/lang/String;>;)Z`). Tests:
   `tests/collection_override_signature_e2e.rs` (member bytes and a reflective box run against
   kotlinc), and the face suites above, which now compare the declared `containsAll`.
 - **A type-safe collection override that keeps its declaration's descriptor is signed with
