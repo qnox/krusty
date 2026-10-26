@@ -20756,6 +20756,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   rebuilt the descriptor from the declared receiver, naming the box (`(LZ;)I`); a facade accessor
   the value-class pass rewrote now records its physical descriptor (`jvm/backend.rs`). Test:
   `tests/value_class_mangled_names_e2e.rs::an_extension_property_over_a_value_class_records_erased_accessors`.
+- **An extension receiver is named after the function's value-class mangle.** kotlinc names the
+  receiver `$this$<IR name>` when it writes the method, and by then its inline-class lowering has
+  renamed a function with a value class in its signature to `<source name>-<hash>`, which the local
+  escapes (`$this$top_u2dK5cTq2M`, `$this$ext2_u2d_u2dSqozA0` in a class). A value class's own
+  member (`memberExt--SqozA0`, `memberExt2-impl`) and a property accessor keep the source spelling
+  (`$this$memberExt`, `$this$prop`, `$this$xx` for `getXx-IQRRRT4`). Only the local table takes the
+  mangle: the receiver's null-check guard quotes the name the replacement parameter was declared
+  under, before the rename (`$this$top2`). The value-class pass records the `-<hash>` suffix it
+  appended to any other function (`IrFile::value_class_mangle_suffixes`); the JVM local-table
+  projection formats the receiver from the source name and that suffix
+  (`jvm/parameter_names.rs`). Test:
+  `tests/value_class_mangled_names_e2e.rs::an_extension_receiver_is_named_after_the_mangled_function`.
 
 - **Classes with value-class constructor parameters publish full metadata; secondary VC ctors get
   the marker ABI.** The blanket "no @Metadata for a value-param ctor class" decline is lifted — the

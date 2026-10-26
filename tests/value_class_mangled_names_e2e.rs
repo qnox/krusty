@@ -100,6 +100,48 @@ fn a_constructor_is_hidden_exactly_when_a_parameter_requires_mangling() {
     );
 }
 
+/// An extension function's receiver is named after the function's IR name, which kotlinc's
+/// inline-class lowering has already replaced with the `-<hash>` mangle: `$this$top_u2dK5cTq2M`.
+/// A value class's own member and a property accessor keep the source spelling (`$this$memberExt`,
+/// `$this$prop`). The receiver's null-check guard still quotes the name it was declared under
+/// (`$this$top2`). krusty named every receiver after the source declaration.
+const MANGLED_RECEIVERS: &str = r#"@JvmInline
+value class IC(val x: Int) {
+    fun Int.memberExt(y: IC): Int = this + y.x + x
+}
+
+class Holder {
+    fun IC.ext(): Int = x
+    fun String.ext2(y: IC): Int = y.x + length
+}
+
+fun IC.top(): Int = x
+fun String.top2(y: IC): Int = y.x + length
+internal fun IC.internalTop(): Int = x
+val IC.prop: Int get() = x
+
+fun box(): String {
+    val ic = IC(1)
+    val sum = with(ic) { 2.memberExt(ic) } + with(Holder()) { ic.ext() + "s".ext2(ic) } +
+        ic.top() + "x".top2(ic) + ic.internalTop() + ic.prop
+    return if (sum == 12) "OK" else "fail $sum"
+}
+"#;
+
+#[test]
+fn an_extension_receiver_is_named_after_the_mangled_function() {
+    common::assert_classes_identical_to_kotlinc(
+        "MangledReceivers",
+        MANGLED_RECEIVERS,
+        &["MangledReceiversKt", "Holder", "IC"],
+    );
+}
+
+#[test]
+fn mangled_receivers_run() {
+    common::expect_box_ok_with_stdlib(MANGLED_RECEIVERS, "MangledReceivers");
+}
+
 /// A mangled function whose JVM descriptor a reader can rebuild from its declared types (every
 /// value-class parameter nullable and boxed) still records its physical name in `@Metadata`, with
 /// no descriptor: `JvmMethodSignature(name = "accept-6FUe0Y4")`. krusty recorded a name only beside
