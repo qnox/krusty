@@ -442,6 +442,7 @@ impl<'a> ModuleSymbols<'a> {
         .into_iter()
         .collect();
         let mut shape = LibraryType {
+            declaration_name: c.declaration_name.clone(),
             // A current-module classifier is by definition a Kotlin declaration.
             is_kotlin: true,
             is_data: c.is_data(),
@@ -1779,6 +1780,7 @@ mod tests {
 
     fn class(internal: &str) -> FrontendClassSig {
         FrontendClassSig {
+            declaration_name: None,
             internal: internal.into(),
             stable_declaration: None,
             source_file: 0,
