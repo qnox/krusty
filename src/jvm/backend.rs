@@ -325,6 +325,11 @@ fn run_backend_passes_after_plugins(
             classpath,
             classifiers,
         )?,
+        abstract_overrides: crate::jvm::abstract_builtin_overrides::select(
+            ir,
+            classpath,
+            classifiers,
+        ),
         to_array: crate::jvm::collection_to_array::select(ir, classpath),
     };
     // The value-class pass reads same-module SOURCE value classes (internal name → sole-field
