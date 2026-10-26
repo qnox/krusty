@@ -10,18 +10,25 @@ use crate::fx_hash::HashSet;
 use crate::ir::{ExprId, IrExpr, IrFile};
 use crate::types::InlineParameterModifier;
 
-/// The inline body of each literal an inlined call passes to a `crossinline` parameter.
+/// The inline body of each literal an inline call passes to a `crossinline` parameter, whichever
+/// module declares the callee: every realized inline call publishes its operands' modifiers.
 pub(super) fn crossinline_literal_bodies(ir: &IrFile) -> HashSet<ExprId> {
     let mut bodies = HashSet::default();
-    for index in 0..ir.exprs.len() {
-        let call = u32::try_from(index).expect("IR expression index exceeds ExprId");
-        let Some(arguments) = super::must_inline_lambdas::inlined_call_arguments(ir, call) else {
+    for (&call, modifiers) in &ir.call_inline_modifiers {
+        // `suspendCoroutine`'s block is `crossinline` only to forbid non-local returns; kotlinc
+        // inlines it in place (`isCoroutineIntrinsic`).
+        if ir.ordinary_intrinsic_calls.get(&call)
+            == Some(&crate::libraries::CompilerIntrinsic::SuspendCoroutine)
+        {
             continue;
+        }
+        let arguments: Vec<Option<ExprId>> = match ir.expr(call) {
+            IrExpr::Call { args, .. } => args.iter().copied().map(Some).collect(),
+            IrExpr::MethodCall { args, .. } => args.clone(),
+            _ => continue,
         };
-        let Some(modifiers) = ir.call_inline_modifiers.get(&call) else {
-            continue;
-        };
-        for (argument, modifier) in arguments.into_iter().zip(modifiers) {
+        for (argument, modifier) in arguments.into_iter().zip(modifiers.iter()) {
+            let Some(argument) = argument else { continue };
             if *modifier != InlineParameterModifier::Crossinline {
                 continue;
             }

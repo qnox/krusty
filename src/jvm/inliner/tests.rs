@@ -625,6 +625,10 @@ fn an_invoke_of_an_inline_lambda_becomes_the_lambdas_body() {
         }],
         capture_owners: vec![0],
     };
+    assert_eq!(
+        super::keeps_lambda_as_value(&apply_to_one(), &parameters, &NoClasses),
+        Ok(false)
+    );
     let inlined = inline(
         &apply_to_one(),
         &parameters,
@@ -731,6 +735,11 @@ fn a_lambda_passed_to_another_call_is_not_inlined() {
         }],
         capture_owners: vec![0],
     };
+    // The route is decided from this fact before the body is inlined.
+    assert_eq!(
+        super::keeps_lambda_as_value(&callee, &parameters, &NoClasses),
+        Ok(true)
+    );
     let inlined = inline(
         &callee,
         &parameters,

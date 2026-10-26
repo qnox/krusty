@@ -730,7 +730,13 @@ fn property_reference_writer(
     opts: &EmitOptions,
 ) -> ClassWriter {
     let mut cw = new_writer(&c.fq_name(), &c.superclass(), opts);
-    cw.set_access(0x1000 | 0x0010 | 0x0020); // SYNTHETIC | FINAL | SUPER
+    // kotlinc makes a class in an inline function's scope public (`inInlineFunctionScope`).
+    let public = if super::enclosure::in_inline_function_scope(ir, c) {
+        0x0001
+    } else {
+        0
+    };
+    cw.set_access(0x1000 | 0x0010 | 0x0020 | public); // SYNTHETIC | FINAL | SUPER
     if let Some((owner, method)) = class_enclosure(ir, env.override_results, c, facade) {
         match method {
             Some((name, descriptor)) => cw.set_enclosing_method(&owner, &name, &descriptor),

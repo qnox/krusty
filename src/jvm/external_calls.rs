@@ -910,6 +910,7 @@ pub(super) fn realize(
                 | crate::libraries::CompilerIntrinsic::CoroutineContext
                 | crate::libraries::CompilerIntrinsic::CoroutineSuspended
                 | crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn
+                | crate::libraries::CompilerIntrinsic::SuspendCoroutine
                 | crate::libraries::CompilerIntrinsic::EnumValues
                 | crate::libraries::CompilerIntrinsic::EnumName
                 | crate::libraries::CompilerIntrinsic::IsEmpty
@@ -945,6 +946,14 @@ pub(super) fn realize(
             )
             | None => None,
         };
+        if callable.compiler_intrinsic
+            == Some(crate::libraries::CompilerIntrinsic::SuspendCoroutine)
+        {
+            ir.ordinary_intrinsic_calls.insert(
+                expression,
+                crate::libraries::CompilerIntrinsic::SuspendCoroutine,
+            );
+        }
         if let Some(operation) = selected_intrinsic {
             **callee = Callee::Intrinsic {
                 operation,

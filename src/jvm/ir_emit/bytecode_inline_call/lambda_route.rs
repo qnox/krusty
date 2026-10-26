@@ -35,6 +35,11 @@ pub(in crate::jvm::ir_emit) enum SpliceReason {
     /// lambda of its own, which kotlinc reaches from the regenerated object through a synthetic
     /// accessor and a class of that lambda's own.
     PrivateMemberInObject,
+    /// The callee's compiled body keeps one of the call's lambdas as a value
+    /// ([`inliner::keeps_lambda_as_value`]): a same-module body captures it in a suspend literal it
+    /// materialized ([`Self::SuspendingLambda`]), which kotlinc would have inlined into the object
+    /// it regenerates.
+    LambdaKeptAsValue,
 }
 
 impl Emitter<'_> {
@@ -100,55 +105,65 @@ impl Emitter<'_> {
                 return splice(SpliceReason::CaptureOutsideFrame);
             }
         }
-        // Whether the call's objects regenerate is settled before any code is emitted: the body is
-        // inlined once with each lambda's shape in place of its body, and nothing of it is kept.
-        if inliner::constructs_regenerated_object(&callee, &self.bodies) {
+        let constructs_objects = inliner::constructs_regenerated_object(&callee, &self.bodies);
+        if constructs_objects {
             for &argument in &lambda_arguments {
                 if self.lambda_reaches_private_members(argument)? {
                     return splice(SpliceReason::PrivateMemberInObject);
                 }
             }
-            let mut lambdas = Vec::new();
-            let mut captured = Vec::new();
-            let mut lambda_bindings = HashMap::default();
-            for (index, &argument) in args.iter().enumerate() {
-                if !lambda_arguments.contains(&argument) {
-                    continue;
-                }
-                let (mut lambda, captures) = self.lambda_shape(argument)?;
-                let start = captured.len();
-                for (capture, ty) in captures {
-                    captured.push(Parameter {
-                        category: Category::of_descriptor(&type_descriptor(ty)),
-                        binding: self.capture_binding(capture, ty),
-                    });
-                }
-                lambda.captured = start..captured.len();
-                lambda_bindings.insert(index, lambdas.len());
-                lambdas.push(lambda);
+        }
+        let mut lambdas = Vec::new();
+        let mut captured = Vec::new();
+        let mut lambda_bindings = HashMap::default();
+        for (index, &argument) in args.iter().enumerate() {
+            if !lambda_arguments.contains(&argument) {
+                continue;
             }
-            let loaded = self
-                .load_default_lambdas(call, &default_lambdas, &physical)
-                .and_then(|loaded| {
-                    for (operand, mut lambda) in loaded {
-                        default_bridge::append_default_lambda_captures(&mut lambda, &mut captured)?;
-                        lambda_bindings.insert(operand, lambdas.len());
-                        lambdas.push(lambda);
-                    }
-                    Ok(())
+            let (mut lambda, captures) = self.lambda_shape(argument)?;
+            let start = captured.len();
+            for (capture, ty) in captures {
+                captured.push(Parameter {
+                    category: Category::of_descriptor(&type_descriptor(ty)),
+                    binding: self.capture_binding(capture, ty),
                 });
-            loaded.map_err(|error| {
-                crate::trace_compiler!("splice", "a default lambda is not inlined: {error:?}");
-                "a default lambda of the call cannot be inlined"
-            })?;
-            let parameters = self.call_parameters(
-                &supplies,
-                &physical,
-                args,
-                &lambda_bindings,
-                captured,
-                &lambdas,
-            );
+            }
+            lambda.captured = start..captured.len();
+            lambda_bindings.insert(index, lambdas.len());
+            lambdas.push(lambda);
+        }
+        let loaded = self
+            .load_default_lambdas(call, &default_lambdas, &physical)
+            .and_then(|loaded| {
+                for (operand, mut lambda) in loaded {
+                    default_bridge::append_default_lambda_captures(&mut lambda, &mut captured)?;
+                    lambda_bindings.insert(operand, lambdas.len());
+                    lambdas.push(lambda);
+                }
+                Ok(())
+            });
+        loaded.map_err(|error| {
+            crate::trace_compiler!("splice", "a default lambda is not inlined: {error:?}");
+            "a default lambda of the call cannot be inlined"
+        })?;
+        let parameters = self.call_parameters(
+            &supplies,
+            &physical,
+            args,
+            &lambda_bindings,
+            captured,
+            &lambdas,
+        );
+        // kotlinc's `MethodInliner` meets only the uses `markPlacesForInlineAndRemoveInlinable`
+        // places; a body that keeps a lambda as a value is decided here, from the callee alone.
+        if inliner::keeps_lambda_as_value(&callee, &parameters, &self.bodies)
+            .map_err(|_| "a compiled inline body does not analyze")?
+        {
+            return splice(SpliceReason::LambdaKeptAsValue);
+        }
+        // Whether the call's objects regenerate is settled before any code is emitted: the body is
+        // inlined once with each lambda's shape in place of its body, and nothing of it is kept.
+        if constructs_objects {
             let probe = inliner::inline(
                 &callee,
                 &parameters,

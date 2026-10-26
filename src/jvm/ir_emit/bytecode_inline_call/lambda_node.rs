@@ -516,15 +516,28 @@ impl Emitter<'_> {
         let (lambda, _) = self.literal_lambda(argument)?;
         let mut pending = vec![lambda.inline_body];
         let mut seen = HashSet::default();
+        // The literals an inline call written in the body inlines: their bodies are code of the
+        // body itself, never a method of their own.
+        let mut inlined = HashSet::default();
         while let Some(expression) = pending.pop() {
             if !seen.insert(expression) {
                 continue;
             }
             let private = match self.ir.expr(expression) {
-                IrExpr::Call { callee, .. } => matches!(&**callee, Callee::Special { .. }),
-                // A nested lambda may be materialized as a method of the caller, which the object
-                // could not reach and route planning cannot tell from its shape.
-                IrExpr::Lambda { .. } => true,
+                IrExpr::Call { callee, args, .. } => {
+                    inlined.extend(
+                        self.inlined_literal_arguments(expression, args.iter().copied().map(Some)),
+                    );
+                    matches!(&**callee, Callee::Special { .. })
+                }
+                IrExpr::MethodCall { args, .. } => {
+                    inlined
+                        .extend(self.inlined_literal_arguments(expression, args.iter().copied()));
+                    false
+                }
+                // Any other nested lambda may be materialized as a method of the caller, which the
+                // object could not reach and route planning cannot tell from its shape.
+                IrExpr::Lambda { .. } => !inlined.contains(&expression),
                 _ => false,
             };
             if private {
@@ -533,6 +546,24 @@ impl Emitter<'_> {
             crate::ir::for_each_child(&self.ir.exprs, expression, &mut |child| pending.push(child));
         }
         Ok(false)
+    }
+
+    /// The literal lambdas among `args`, the operands of the call `call`, that it passes to inline
+    /// parameters (`is_inline_parameter`).
+    fn inlined_literal_arguments(
+        &self,
+        call: ExprId,
+        args: impl Iterator<Item = Option<ExprId>>,
+    ) -> Vec<ExprId> {
+        args.enumerate()
+            .filter_map(|(parameter, argument)| {
+                let argument = argument?;
+                (matches!(self.ir.expr(argument), IrExpr::Lambda { .. })
+                    && crate::jvm::inline_parameters::is_inline_parameter(self.ir, call, parameter)
+                        == Some(true))
+                .then_some(argument)
+            })
+            .collect()
     }
 
     /// Whether every value the lambda `argument` captures can be bound: kotlinc binds a captured
