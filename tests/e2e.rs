@@ -528,6 +528,8 @@ mod codegen_host_e2e;
 mod collection_bridge_barrier_e2e;
 #[path = "collection_members_e2e.rs"]
 mod collection_members_e2e;
+#[path = "collection_override_signature_e2e.rs"]
+mod collection_override_signature_e2e;
 #[path = "collection_special_member_stub_e2e.rs"]
 mod collection_special_member_stub_e2e;
 #[path = "collection_to_array_e2e.rs"]

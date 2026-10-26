@@ -15,7 +15,9 @@ use super::{
     method_signature, type_descriptor, CodeBuilder, Emitter,
 };
 use crate::ir::{ExprId, IrExpr, IrFile, IrTypeOp};
+use crate::jvm::mapped_builtin_declarations::CollectionSignaturePolicy;
 use crate::jvm::override_results::OverrideResults;
+use crate::jvm::read_only_collection_stubs::star_projected;
 use crate::types::Ty;
 
 const NOT_NULL: &str = "Lorg/jetbrains/annotations/NotNull;";
@@ -183,6 +185,9 @@ pub(super) fn declared_method_signature(
     function: u32,
 ) -> Option<String> {
     let declaration = &ir.functions[function as usize];
+    if let Some(policy) = override_results.collection_signatures.policy(function) {
+        return collection_override_signature(formatter, ir, function, policy);
+    }
     let signature = method_signature(formatter, ir, function, declaration)?;
     if !override_results.boxes(function) {
         return Some(signature);
@@ -193,4 +198,32 @@ pub(super) fn declared_method_signature(
         .expect("a boxed override result is signed as its primitive");
     let wrapper = type_descriptor(jvm_declared_ty(&Ty::nullable(declaration.ret)));
     Some(format!("{parameters}{wrapper}"))
+}
+
+/// kotlinc's signature for an override of a collection declaration with a signature policy: the
+/// declaration's collection parameter star-projected, or every declaration-site variance of the
+/// parameters written. `None` when that spells the descriptor back.
+fn collection_override_signature(
+    formatter: &JvmSignatureFormatter<'_>,
+    ir: &IrFile,
+    function: u32,
+    policy: CollectionSignaturePolicy,
+) -> Option<String> {
+    let declaration = &ir.functions[function as usize];
+    let (mut parameters, result) = ir
+        .member_semantic_sigs
+        .get(&function)
+        .cloned()
+        .unwrap_or_else(|| (declaration.params.clone(), declaration.ret));
+    let signature = match policy {
+        CollectionSignaturePolicy::ErasedCollectionParameter(index) => {
+            let parameter = &mut parameters[usize::from(index)];
+            *parameter = star_projected(*parameter);
+            formatter.method_positions(&parameters, &result)
+        }
+        CollectionSignaturePolicy::DeclarationSiteWildcards => {
+            formatter.method_positions_with_declaration_site_wildcards(&parameters, &result)
+        }
+    }?;
+    (signature != ir_method_desc(&declaration.params, &declaration.ret)).then_some(signature)
 }

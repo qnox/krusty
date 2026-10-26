@@ -5,9 +5,9 @@
 //! E>)`, `removeAll`/`retainAll(Collection<?>)`. Unlike `Collection`, the face has no JDK
 //! `removeIf` stub: kotlinc writes none for a `Set`.
 //!
-//! A declared `containsAll` override's signature and an abstract class's fake-override bridges
-//! are later realizations; these comparisons leave them out by their exact spelling and compare
-//! every other member, the `toArray` pair included, byte for byte.
+//! An abstract class's fake-override bridges are a later realization; these comparisons leave
+//! them out by their exact spelling and compare every other member, the `toArray` pair and the
+//! declared `containsAll` override included, byte for byte.
 
 use super::common;
 
@@ -36,8 +36,6 @@ const ABSTRACT_GENERIC_SET: &str = "abstract class Bag<T> : Set<T>\n";
 
 /// The members a later realization writes, as `javap -p` spells them in either compiler's class.
 const LATER_REALIZATIONS: &[&str] = &[
-    "public boolean containsAll(java.util.Collection<?>);",
-    "public boolean containsAll(java.util.Collection<java.lang.String>);",
     "public abstract boolean contains(java.lang.String);",
     "public abstract boolean contains(int);",
     "public final boolean contains(java.lang.Object);",

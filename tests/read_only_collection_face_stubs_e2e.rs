@@ -6,9 +6,9 @@
 //! implements its stub, and the erased `add(Object)` bridge forwards to it, among the bridges in
 //! member order. An abstract class gets a throwing `iterator()` stub as well.
 //!
-//! The JDK default `removeIf` is a later realization, and so is the signature of a declared
-//! `containsAll` override; these comparisons leave those members out by their exact spelling and
-//! compare every other member, the `toArray` pair included, byte for byte.
+//! The JDK default `removeIf` is a later realization; these comparisons leave it out by its exact
+//! spelling and compare every other member, the `toArray` pair and the declared `containsAll`
+//! override included, byte for byte.
 
 use super::common;
 
@@ -57,10 +57,6 @@ const ABSTRACT_BAG: &str = "abstract class Bag : Collection<String>\n";
 
 /// The members a later realization writes, as `javap -p` spells them in either compiler's class.
 const LATER_REALIZATIONS: &[&str] = &[
-    "public boolean containsAll(java.util.Collection<?>);",
-    "public boolean containsAll(java.util.Collection<java.lang.String>);",
-    "public boolean containsAll(java.util.Collection<java.lang.Integer>);",
-    "public boolean containsAll(java.util.Collection<? extends T>);",
     "public boolean removeIf(java.util.function.Predicate<? super java.lang.String>);",
     "public boolean removeIf(java.util.function.Predicate<? super java.lang.Integer>);",
     "public boolean removeIf(java.util.function.Predicate<? super T>);",
