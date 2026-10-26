@@ -960,9 +960,11 @@ impl<'a> Emitter<'a> {
                 .expect("a companion initializer belongs to a class that declares one");
             let companion_name = companion.render();
             let descriptor = format!("L{companion_name};");
-            let field = self
-                .cw
-                .fieldref(fq_name, companion.nested_segment_ref(), &descriptor);
+            let field = self.cw.fieldref(
+                fq_name,
+                crate::jvm::companion_storage::field_name(c.fq_name, companion),
+                &descriptor,
+            );
             clinit.getstatic(field, 1);
             let receiver_ty = Ty::obj_name(companion);
             let existing = self.slots.get(&0).map(|(slot, _)| *slot);
@@ -1230,7 +1232,12 @@ impl Emitter<'_> {
                     .unwrap_or_else(|| self.ir.functions[setter as usize].name.clone());
                 Some((
                     companion_name,
-                    companion.fq_name.nested_segment_ref().to_string(),
+                    crate::jvm::companion_storage::field_name(
+                        s.owner
+                            .expect("a hoisted companion static has an outer owner"),
+                        companion.fq_name,
+                    )
+                    .to_string(),
                     setter_name,
                 ))
             })

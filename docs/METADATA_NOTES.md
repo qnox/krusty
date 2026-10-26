@@ -1,5 +1,12 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Companion fields and class metadata
+
+Physical companion storage uses the whole segment within the recorded holder, never the last
+dollar-delimited fragment. This field-ABI change preserves metadata production independently.
+The declaration-owned metadata header work retains the separate whole-owner classfile oracle;
+field inventories and complete caller classfiles validate this change without omitting any field.
+
 ## JVM member-class rows
 
 The JVM attribute writer now consumes retained non-local ownership and exact declaration segments

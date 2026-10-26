@@ -1,5 +1,16 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## JVM companion storage names
+
+A companion's instance field keeps its entire declared name within its recorded holder, including
+literal dollars. Field declarations, initialization, loads, JVM-static wrappers and collision checks
+use that same pair. In-file singleton loads use the explicit holder-to-companion relation; sibling
+files use their retained companion owner. Shared singleton realization authenticates that owner
+against its companion record. Unknown ownership stays unavailable; top-level and ordinary nested
+objects keep their own `INSTANCE` field. Dependency-published field names remain authoritative.
+Tests: `declared_companion_fields_e2e` compares complete holder-field inventories, complete caller
+classfiles and reference/runtime results across class/interface and single/sibling-file cases.
+
 ## JVM member-class table ownership
 
 Non-local `InnerClasses` rows consume the classifier's retained declaration owner and exact
