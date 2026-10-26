@@ -9,11 +9,11 @@
 //! `String removeAt(int)`). A type-safe member's bridge tests its argument (`final boolean
 //! contains(Object)`), as two methods when the member's result is a narrower reference (`Object
 //! get(Object)`, then `Integer get(Object)`). A member whose type parameter erases like the
-//! declaration's needs nothing (`containsKey(K)`), a member the class declares or inherits a default
-//! for keeps its own bridges, and a subclass of a class that materialized the members inherits
-//! them. A Java superclass's abstract member stays abstract in its specialization
-//! (`AbstractList.size()` makes `abstract int getSize()`). Each class is compared byte for byte
-//! with kotlinc's.
+//! declaration's needs nothing (`containsKey(K)`), a member the class declares or inherits a
+//! default for keeps its own bridges, and a subclass of a class that materialized the members
+//! inherits them, its own implementations included. A Java superclass's abstract member stays
+//! abstract in its specialization (`AbstractList.size()` makes `abstract int getSize()`). Each
+//! class is compared byte for byte with kotlinc's.
 
 use super::common;
 
@@ -97,6 +97,28 @@ fn only_the_members_left_abstract_are_materialized_like_kotlinc() {
             "ViaDefaulted",
             "Mixed",
         ],
+    );
+}
+
+const IMPLEMENTING_SUBCLASSES: &str = "abstract class Bag : Collection<String>
+abstract class Two : Bag() {
+    override val size: Int get() = 2
+    override fun contains(element: String) = element == \"a\"
+}
+abstract class Dict : Map<String, Int>
+abstract class One : Dict() {
+    override fun get(key: String): Int? = null
+    override val keys: Set<String> get() = emptySet()
+}
+";
+
+/// A subclass that implements a materialized member inherits the final bridges to it.
+#[test]
+fn a_subclass_implementing_a_materialized_member_inherits_its_bridges_like_kotlinc() {
+    common::assert_classes_identical_to_kotlinc(
+        "ImplementingSubclasses",
+        IMPLEMENTING_SUBCLASSES,
+        &["Bag", "Two", "Dict", "One"],
     );
 }
 

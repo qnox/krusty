@@ -38,6 +38,36 @@ impl AbstractBuiltinOverrides {
     pub(super) fn for_class(&self, class: TypeName) -> &[AbstractBuiltinOverride] {
         self.by_class.get(&class).map(Vec::as_slice).unwrap_or(&[])
     }
+
+    /// The `(name, descriptor)` of each final special bridge `class` writes, which its subclasses
+    /// inherit and must not declare again.
+    pub(super) fn final_bridges(&self, class: TypeName) -> Vec<(String, String)> {
+        self.for_class(class)
+            .iter()
+            .flat_map(|member| {
+                let parameters = member.physical_parameters();
+                let result = member.physical_result();
+                match &member.bridge {
+                    SpecialBridge::Renamed { jvm_name, .. } => {
+                        vec![(jvm_name.clone(), method_descriptor(&parameters, result))]
+                    }
+                    SpecialBridge::TypeSafe {
+                        erased: (erased_parameters, erased_result),
+                        ..
+                    } => vec![
+                        (
+                            member.name.clone(),
+                            method_descriptor(erased_parameters, *erased_result),
+                        ),
+                        (
+                            member.name.clone(),
+                            method_descriptor(erased_parameters, result),
+                        ),
+                    ],
+                }
+            })
+            .collect()
+    }
 }
 
 /// One materialized abstract member and the special bridge that reaches it.

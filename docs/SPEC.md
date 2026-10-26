@@ -13719,7 +13719,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the class or a superclass declares, abstract or not, or an inherited interface default stands
   for itself; a Kotlin interface that redeclares the member abstract does not. A builtin a
   non-builtin superclass reaches is that superclass's to materialize, so its subclasses inherit
-  the final bridges. A Java superclass's abstract method keeps its specialization abstract
+  the final bridges, and one that implements the member (`override val size`) declares none of
+  its own. A Java superclass's abstract method keeps its specialization abstract
   (`AbstractList.size()` gives `abstract int getSize()` beside `final int size()`). Tests:
   `tests/abstract_builtin_overrides_e2e.rs` (classes byte for byte, and a box run through the JVM
   names), `tests/read_only_collection_face_stubs_e2e.rs`, `tests/read_only_list_face_stubs_e2e.rs`,
