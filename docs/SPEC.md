@@ -13737,6 +13737,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   names that field (`lazyTwo$delegate:Lkotlin/Lazy;`), as it names an ordinary hoisted backing
   field. krusty wrote no field signature for it. Tests:
   `tests/value_class_companion_property_storage_e2e.rs`.
+- **A hoisted companion delegate's store maps to its property's line.** The outer class's
+  `<clinit>` stores each companion `x$delegate` at its declaration's line, exactly as it stores a
+  hoisted backing field, and the `Companion` construction before them has no entry. Every hoisted
+  static carries that line from the companion declaration (`IrStatic::line`); krusty instead
+  looked the line up by the static's spelling, which for `x$delegate` names no property, and wrote
+  no entry (`jvm/ir_emit/static_fields.rs`). Test:
+  `tests/value_class_companion_property_storage_e2e.rs::hoisted_companion_delegates_keep_their_lines`.
+- **A representation adaptation after a call carries no line of its own.** When the value-class
+  pass boxes or unboxes a call's result (`unbox-impl` after `Lazy.getValue`, `box-impl` around an
+  argument), the source line stays with the call: kotlinc marks it where the call starts and at its
+  dispatch, and writes the adaptation after it unmarked. After an inlined call that resets the
+  line, the next mark is therefore the consumer's (`ireturn` in `val x by lazy { Id(1) }`'s getter,
+  the outer call's `invokevirtual` for `C().foo(Result.success("OK"))`). krusty left the line on
+  the wrapper, marking it at the adaptation (`jvm/operation_relocation.rs`). Test:
+  `tests/value_class_companion_property_storage_e2e.rs::hoisted_companion_delegates_keep_their_lines`.
 - **An owner reads its explicit backing field, typed as the field.** Inside the class that
   declares `val a: Any field = V(1)`, a read whose receiver's static type is exactly that class is
   kotlinc's `IrGetField` of the field, not a call of `getA()`: `a.x` over a value class
