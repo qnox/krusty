@@ -67,10 +67,12 @@ impl ReadOnlyCollectionStubs {
     }
 }
 
-/// One throwing stub, in the substitution context of the class that declares it.
+/// One candidate member of a read-only face, in the substitution context of the class that declares
+/// it: a throwing stub, or a member the class already implements that still needs its bridge.
 #[derive(Clone, Debug)]
 pub(super) struct ReadOnlyStub {
     pub(super) name: String,
+    pub(super) body: StubBody,
     /// The declared parameter types, substituted with the face's type arguments.
     pub(super) parameters: Vec<Ty>,
     pub(super) parameter_names: Vec<String>,
@@ -78,6 +80,21 @@ pub(super) struct ReadOnlyStub {
     /// The erased JVM parameters and result of the mutable declaration, when they differ from the
     /// stub's own descriptor: kotlinc's bridge lowering gives the stub a throwing bridge there.
     pub(super) bridge: Option<(Vec<Ty>, Ty)>,
+}
+
+/// What realizes a candidate member at the stub's own descriptor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum StubBody {
+    /// Nothing implements it: the class gets the throwing stub, and its bridge throws too.
+    Throwing,
+    /// A member the class declares or inherits effectively overrides it (kotlinc's non-abstract
+    /// fake override). No stub is written, but the mutable declaration's erased descriptor still
+    /// needs a bridge, which forwards to that member.
+    Implemented {
+        /// The source order of the class's own implementing member, which places its bridge among
+        /// the ordinary ones; `u32::MAX` for an inherited member, whose bridge follows them.
+        order: u32,
+    },
 }
 
 impl ReadOnlyStub {
@@ -169,11 +186,43 @@ fn class_stubs(
         }
     }
 
+    // An effectively overridden member keeps only its bridge, and only when the mutable
+    // declaration's erased descriptor differs from the implementation's.
     let implemented = implemented_members(ir, class, &chain);
+    let own_order: HashMap<(String, String), u32> = class
+        .methods
+        .iter()
+        .filter(|&&function| !ir.functions[function as usize].is_static)
+        .map(|&function| {
+            let declaration = &ir.functions[function as usize];
+            (
+                (
+                    declaration.name.clone(),
+                    parameter_descriptor(&declaration.params),
+                ),
+                ir.fn_source_order
+                    .get(&function)
+                    .copied()
+                    .unwrap_or(u32::MAX),
+            )
+        })
+        .collect();
     Ok(candidates
         .into_iter()
         .filter(|stub| present.insert((stub.name.clone(), stub.descriptor())))
-        .filter(|stub| !implemented.contains(&stub.parameter_key()))
+        .filter_map(|stub| {
+            if !implemented.contains(&stub.parameter_key()) {
+                return Some(stub);
+            }
+            let order = own_order
+                .get(&stub.parameter_key())
+                .copied()
+                .unwrap_or(u32::MAX);
+            stub.bridge.is_some().then_some(ReadOnlyStub {
+                body: StubBody::Implemented { order },
+                ..stub
+            })
+        })
         .collect())
 }
 
@@ -282,6 +331,7 @@ fn face_stubs(classpath: &Classpath, face: Face, applied: Ty) -> Vec<ReadOnlyStu
                 .then_some((erased_parameters, erased_result));
             ReadOnlyStub {
                 name: member.source_name,
+                body: StubBody::Throwing,
                 parameters,
                 parameter_names: member.parameter_names,
                 result,

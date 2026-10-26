@@ -916,13 +916,9 @@ fn indices(facts: &BuiltinPropertyDeclaration<'_>) -> Option<CompilerIntrinsic> 
             [TyKind::OutProjection(element)] if receiver.is_reference_array() => {
                 (generic == 1 && element.is_ty_param()).then_some(IndicesReceiver::Array)?
             }
-            // kotlinc's `isPrimitiveArray()`: an unsigned array is a value class, not one.
-            [] if receiver.is_array()
-                && !receiver.array_elem().is_some_and(Ty::is_unsigned)
-                && generic == 0 =>
-            {
-                IndicesReceiver::Array
-            }
+            // kotlinc's `isPrimitiveArray()`, and `isUnsignedArray()` under the JVM backend's
+            // `optimizeLoopsOverUnsignedArrays`: an unsigned array's `size` is its value class's.
+            [] if receiver.is_array() && generic == 0 => IndicesReceiver::Array,
             [TyKind::StarProjection(_)]
                 if receiver.obj_internal() == Some(wk::collection()) && generic == 0 =>
             {
@@ -1830,6 +1826,10 @@ mod tests {
                 IndicesReceiver::Array,
             ),
             (
+                property("kotlin/collections", Ty::obj("kotlin/UIntArray"), 0),
+                IndicesReceiver::Array,
+            ),
+            (
                 property("kotlin/collections", collection, 0),
                 IndicesReceiver::Collection,
             ),
@@ -1860,10 +1860,6 @@ mod tests {
                 "a nullable receiver",
             ),
             (property("kotlin/collections", list, 0), "a List receiver"),
-            (
-                property("kotlin/collections", Ty::obj("kotlin/UIntArray"), 0),
-                "an unsigned array receiver",
-            ),
             (
                 property("kotlin/collections", invariant_array, 1),
                 "an invariant array receiver",
