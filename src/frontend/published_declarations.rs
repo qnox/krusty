@@ -3,11 +3,30 @@
 
 use super::{FrontendDeclarationId, SourceSetAnalysis};
 use crate::fir::{DeclarationFlags, DeclarationKind, PropertyAccessor, ResolvedModuleIndex};
+use crate::spelling::DeclaredSpellings;
 use crate::types::{AnnotationValue, ResolvedAnnotation};
 
 impl SourceSetAnalysis {
     fn published_index(&self) -> Option<&ResolvedModuleIndex> {
         Some(self.streamed.as_ref()?.module.index())
+    }
+
+    /// The source spellings of `declaration`'s declared types: the alias each type node names and
+    /// the annotations it records, its own and those an alias expansion gives it. `None` when the
+    /// analysis has no record, or deferred the spellings to the body check.
+    pub fn declared_type_spellings(
+        &self,
+        declaration: FrontendDeclarationId,
+    ) -> Option<&DeclaredSpellings> {
+        let index = self.published_index()?;
+        if index.declaration_spellings_deferred(declaration) {
+            return None;
+        }
+        Some(
+            index
+                .declaration_spellings(declaration)
+                .unwrap_or(DeclaredSpellings::NONE),
+        )
     }
 
     /// The checked applications written on the function, property, constructor or type alias
