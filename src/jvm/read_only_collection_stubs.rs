@@ -108,7 +108,9 @@ pub(super) struct ReadOnlyStub {
     /// The erased JVM parameters and result of the mutable declaration, when they differ from the
     /// stub's own descriptor: kotlinc's bridge lowering gives the stub a throwing bridge there. A
     /// renamed member's bridge is its own parameters with an `Any?` result. An implemented member's
-    /// bridge is the descriptor it is reached at, when that differs from the implementation's.
+    /// bridge is the descriptor it is reached at, whenever the implementation's own complete
+    /// physical descriptor differs from it, so a `Nothing` member's `Void` result alone also takes
+    /// an adapter.
     pub(super) bridge: Option<(Vec<Ty>, Ty)>,
     /// The declaration is type-safe (`MutableMap.remove(key)`): the stub already takes the erased
     /// parameters, and kotlinc's bridge for its erased result forwards to it instead of throwing.
@@ -306,29 +308,21 @@ fn class_stubs(
             };
             // The member is reached at the mutable declaration's erased descriptor, or at the
             // stub's own when they agree (a type-safe `remove(Object)`, a renamed `remove(int)`).
-            // A generic implementation can already have that descriptor itself. A renamed member
-            // always needs the special bridge under its JVM name, and the erased bridge to it
-            // whenever the implementation's physical descriptor differs from the erased one, its
-            // covariantly narrower result included (`String remove(int)` of a `List<Any>`).
+            // It needs an adapter there whenever its complete physical descriptor differs, the
+            // result included: a generic implementation can already have that descriptor, while
+            // `set(e: Any): Nothing` matches its parameters but returns its physical `Void`, and
+            // `String remove(int)` of a `List<Any>` is covariantly narrower. A renamed member
+            // always needs the special bridge under its JVM name besides.
             let erased = stub
                 .bridge
                 .clone()
                 .unwrap_or_else(|| (jvm_tys(&stub.parameters), stub.physical_result()));
-            let bridge = if stub.is_renamed() {
-                (method_descriptor(&erased.0, erased.1)
-                    != method_descriptor(
-                        &implementation.parameters,
-                        implementation.physical_result,
-                    ))
-                .then_some(erased)
-            } else {
-                if parameter_descriptor(&implementation.parameters)
-                    == parameter_descriptor(&erased.0)
-                {
-                    return None;
-                }
-                Some(erased)
-            };
+            let bridge = (method_descriptor(&erased.0, erased.1)
+                != method_descriptor(&implementation.parameters, implementation.physical_result))
+            .then_some(erased);
+            if bridge.is_none() && !stub.is_renamed() {
+                return None;
+            }
             let order = own_order
                 .get(&stub.parameter_key())
                 .copied()
