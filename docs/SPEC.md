@@ -16690,6 +16690,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   one. Every classifier reaches `kotlin.Any`. A type parameter or typealias on the right is refused
   for that query, as is `isAssignableFrom` on a type a source declaration names.
   (`crates/krusty-plugin-host/tests/ksp.rs`, `class_headers_are_what_ksp2_reports`.)
+- **A KSP property has a backing field as KSP2 reads it off the declaration.** A source property
+  has one exactly when the frontend gives it storage: it has an initializer, is a constructor
+  property, `lateinit` or `const`, or has a default getter or a getter that uses the backing
+  field (a `var` with a default setter included); an interface, abstract, extension, context or
+  delegated property has none, so a computed `val` and a `var` with a bodied setter whose getter
+  never uses `field` have none; a `var` whose setter alone uses `field` has one. `field` binds
+  lexically: a local `val field` from the next statement on, or a lambda, local-function, catch or
+  loop parameter named `field` (in the defaults after it as in the body), shadows the backing
+  field, while a read through a lambda, a local function, a local function's parameter default or
+  an object expression uses it, even where the object declares a member `field`: kotlinc binds
+  the backing field before the object's members. A getter whose property declares neither a type
+  nor an initializer infers the property's type from itself and has no backing field `field`:
+  there `field` resolves as any other name (a property named `field`, or unresolved), and that
+  getter gives the property no storage; its setter keeps the backing field.
+  An enum's synthetic `entries` has none; a Java annotation element and a Java field have one. An
+  `expect` or `external` property and a Kotlin library property are refused for that query (KSP2
+  answers the latter from what the deserialized declaration records: `true` for an annotation
+  element with a constant default, `false` for one with an enum, array or annotation default).
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `members_and_their_types_are_what_ksp2_reports`,
+  `declarations_are_in_the_order_ksp2_lists_them` and `library_annotation_members_are_what_ksp2_reports`;
+  `src/ast/backing_field_reads.rs`; `tests/backing_field_accessor_e2e.rs`,
+  `getter_field_binding_decides_storage`, `a_getter_inferring_its_property_type_reads_a_property_named_field`.)
 - **KSP members are listed as KSP2 lists them.** A file lists its functions and properties in
   source order, then its classifiers and type aliases in source order. A class lists its
   constructor properties, then its properties and functions interleaved in source order, then a
