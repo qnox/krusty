@@ -418,6 +418,7 @@ fn run_backend_passes_after_plugins(
         return Err(SkipReason::Suspend);
     }
     crate::jvm::suspend::finalize_suspend_bridges(ir, &mut facts.bridge_adaptations);
+    crate::jvm::reified_operations::record_lowered_classes(ir);
     // After the suspend transform: the body moved onto the static is the finished state machine.
     crate::jvm::suspend_impls::lower_suspend_impls(ir);
     // Source lambda names are inputs to lifting. Fix them before reparenting so the lifted-name

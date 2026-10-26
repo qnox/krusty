@@ -32,7 +32,8 @@ pub(super) struct GeneratedLineMarks {
     /// Return a block body falls off its end into → the body's closing `}` line, which kotlinc's
     /// `setExtraLineNumberForVoidReturningFunction` marks BEFORE the returned value is loaded.
     fallthrough_returns: HashMap<ExprId, u32>,
-    /// A `Unit` accessor body → the exit the `return` appended after it takes its line from.
+    /// An accessor body → the exit the `return` appended after it takes its line from: a setter's
+    /// closing `}` or expression end, and a getter's expression end.
     accessor_body_exits: HashMap<ExprId, UnitBodyExit>,
     /// Line a generated call enters only where it dispatches: its operands carry no source
     /// position of their own, so nothing marks the line at its start (a callable-reference
@@ -102,7 +103,7 @@ impl IrFile {
             .copied()
     }
 
-    /// Mark the line a `Unit` body's appended `return` carries.
+    /// Mark the line an appended `return` carries: a `Unit` body's exit or an expression end.
     pub(crate) fn mark_unit_body_exit(&mut self, returned: ExprId, exit: UnitBodyExit) {
         match exit {
             UnitBodyExit::ClosingBrace(line) => self.mark_fallthrough_return_line(returned, line),
@@ -110,8 +111,7 @@ impl IrFile {
         }
     }
 
-    /// Record the exit of a `Unit` accessor body, before the accessor that appends its `return`
-    /// exists.
+    /// Record the exit of an accessor body, before the accessor that appends its `return` exists.
     pub(crate) fn record_accessor_body_exit(&mut self, body: ExprId, exit: UnitBodyExit) {
         self.generated_lines.accessor_body_exits.insert(body, exit);
     }

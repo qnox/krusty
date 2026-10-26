@@ -147,6 +147,8 @@ impl Parser<'_> {
                 destructured,
             );
         };
+        // `rangeExpression`/`infixFunctionCall` allow `NL*` after the operator.
+        self.skip_plain_newlines();
         let rend = self.parse_bp(9);
         // A `..`/`until`/`downTo` range may be followed by ordinary infix calls (`step`, or any user
         // infix), possibly chained (`a..b step 2 step 3`). These are NOT special syntax — recognizing
