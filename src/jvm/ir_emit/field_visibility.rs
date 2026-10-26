@@ -21,14 +21,20 @@ pub(super) fn is_jvm_field(c: &IrClass, property: &str) -> bool {
     !c.is_companion && c.property_has_jvm_field(property)
 }
 
-/// Whether a script class stores one of its constructor parameters in this field. kotlinc
-/// publishes no nullability for the field or for the constructor parameter it stores.
+/// Whether a script class stores one of its template's constructor parameters in this field.
+/// kotlinc publishes no nullability for the field or for the constructor parameter it stores. An
+/// implicit receiver's field is an ordinary private one.
 pub(super) fn is_script_parameter_field(c: &IrClass, field_index: usize) -> bool {
     let field_index = Some(field_index as u32);
     c.is_script
-        && c.ctor_args
-            .iter()
-            .any(|argument| argument.is_field && argument.field_index == field_index)
+        && c.ctor_args.iter().any(|argument| {
+            argument.is_field
+                && argument.field_index == field_index
+                && !matches!(
+                    argument.provenance,
+                    crate::ir::IrCtorParameterProvenance::ScriptReceiver { .. }
+                )
+        })
         && c.properties
             .iter()
             .all(|property| property.backing_field != field_index)

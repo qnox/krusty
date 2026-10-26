@@ -271,7 +271,11 @@ impl ReceiverMro {
         if self.recv.non_null() == decl_recv.non_null() {
             return Some((0, self.recv));
         }
-        let want = decl_recv.erased_recv().kotlin_class_internal();
+        // A platform source realizes an `expect` receiver as its `actual typealias` target.
+        let want = decl_recv
+            .erased_recv()
+            .kotlin_class_internal()
+            .map(|want| src.actualized_expect(want).unwrap_or(want));
         if let Some(want) = want {
             if let Some(&(applied, rung)) = self.ranks.iter().find(|(applied, _)| {
                 if applied.kotlin_class_internal() != Some(want) {

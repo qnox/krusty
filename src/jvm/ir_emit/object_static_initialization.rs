@@ -65,10 +65,7 @@ pub(super) fn emit(
             .map(|&(_, _, init)| init)
             .chain(init_body),
     );
-    emitter.regeneration_site = Some(
-        super::bytecode_inline_call::RegenerationSite::class_initializer(env.signature_symbols),
-    );
-    emitter.record_locals = true;
+    emitter.enter_class_initializer(env.signature_symbols);
     let mut clinit = CodeBuilder::new(0);
     emitter.emit_delegated_property_array(env, c.fq_name, fq_name, &mut clinit);
     if delegated_property_array::exists(env, c.fq_name) {
@@ -105,7 +102,7 @@ pub(super) fn emit(
         emitter.render_initializer_boundaries = false;
         let marks = clinit.line_marks()[first..].iter();
         clinit_line_entries.extend(marks.map(|&(pc, line)| (pc, u32::from(line))));
-        clinit_line_entries.dedup_by_key(|(_, line)| *line);
+        clinit_line_entries.dedup();
         if !c.is_source_declared && c.decl_line != 0 && c.decl_end_line != 0 {
             let start = if c.decl_start_line == 0 {
                 c.decl_line

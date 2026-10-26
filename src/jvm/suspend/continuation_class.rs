@@ -288,6 +288,7 @@ pub(super) fn build_continuation_class(
 
     let super_arg = ir.add_expr(IrExpr::GetValue(super_completion_idx));
     let class = IrClass {
+        declaration_name: None,
         fq_name: crate::types::type_name(internal),
         is_source_declared: false,
         is_compiler_generated: false,

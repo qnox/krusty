@@ -39,6 +39,7 @@ use declared_capabilities::{
 mod functions;
 mod implementor_dispatch;
 mod imported_functions;
+mod interface_records;
 pub(super) use imported_functions::ImportedAbis;
 mod lists;
 mod local_delegates;
@@ -53,6 +54,7 @@ mod scope;
 mod statics;
 mod strings;
 mod type_checks;
+mod type_of;
 mod unsigned;
 
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
@@ -209,6 +211,8 @@ pub struct FileInput<'a> {
     pub unit_kind: crate::backend::CheckedIrUnitKind,
     /// Stable dependency symbols this file must export, keyed by its common-IR callable identity.
     pub dependency_exports: &'a HashMap<FunId, super::DependencyExportDefinition>,
+    /// The KLIB identities this file publishes, among them those of its interface members.
+    pub dependency_signatures: &'a crate::backend::DependencyExportSignatures,
     /// Stable dependency exports already published by preceding source modules, keyed by the exact
     /// KLIB identity the dependency provider attaches to `Callee::External`.
     pub dependency_symbols:
@@ -222,6 +226,8 @@ pub struct FileInput<'a> {
     pub value_classes: &'a super::super::value_classes::NativeValueClasses,
     /// The dispatch numbering of the module's named classes, shared by every file.
     pub slot_plan: &'a crate::backend::class_tables::module_slots::ModuleSlotPlan,
+    /// The module's classifier facts, which every file reads alike.
+    pub module_facts: &'a crate::backend::BackendModuleFacts,
 }
 
 pub fn lower_file(
@@ -243,9 +249,11 @@ pub fn lower_file(
         module_name,
         unit_kind,
         dependency_exports,
+        dependency_signatures,
         dependency_symbols,
         value_classes,
         slot_plan,
+        module_facts,
     } = input;
     let class_model = model::build(ir, value_classes, slot_plan)?;
 
@@ -289,12 +297,16 @@ pub fn lower_file(
         inert_singleton_bindings,
         values: value_classes,
         slot_plan,
+        module_facts,
         module: &mut module,
         symbols: super::super::symbols::symbols(ir, module_name, runtime_symbols.clone()),
         model: class_model,
         functions: Vec::new(),
         imports: imported_functions::ImportedFunctions::new(imported_abis),
         data_imports: HashMap::default(),
+        type_of_objects: HashMap::default(),
+        static_classes: HashMap::default(),
+        comdat_objects: Vec::new(),
         strings: HashMap::default(),
         string_objects: HashMap::default(),
         classes: Vec::new(),
@@ -321,6 +333,7 @@ pub fn lower_file(
         implemented_dependencies: implemented_dependencies(ir),
         module_name,
         unit_kind,
+        dependency_signatures,
         dependency_symbols,
     };
     // Before anything reads a shape: the walking members a class answers for decide both which
@@ -381,9 +394,23 @@ pub fn lower_file(
     };
     lowering.define_c_exports(file_init, &abi)?;
     lowering.define_dependency_exports(file_init, dependency_exports)?;
+    lowering.define_interface_identities()?;
 
-    let object = module
-        .finish()
+    let comdat_objects = std::mem::take(&mut lowering.comdat_objects);
+    let mut product = module.finish();
+    for data in comdat_objects {
+        use cranelift_object::object::write::{Comdat, SymbolSection};
+        let symbol = product.data_symbol(data);
+        let SymbolSection::Section(section) = product.object.symbol(symbol).section else {
+            return Err("a program-wide static object without its own section".into());
+        };
+        product.object.add_comdat(Comdat {
+            kind: cranelift_object::object::ComdatKind::Any,
+            symbol,
+            sections: vec![section],
+        });
+    }
+    let object = product
         .emit()
         .map_err(|error| format!("object emission ({error})"))?;
     Ok(Lowered {
@@ -406,6 +433,8 @@ struct FileLowering<'a> {
     values: &'a super::super::value_classes::NativeValueClasses,
     /// The module's dispatch numbering, which a call through a class of another file reads.
     slot_plan: &'a crate::backend::class_tables::module_slots::ModuleSlotPlan,
+    /// The module's classifier facts, which say what every file, not only this one, declares.
+    module_facts: &'a crate::backend::BackendModuleFacts,
     module: &'a mut ObjectModule,
     /// Symbols of this file's classes and functions.
     symbols: Symbols,
@@ -417,6 +446,12 @@ struct FileLowering<'a> {
     imports: imported_functions::ImportedFunctions<'a>,
     /// Runtime data this file imports (the built-in type descriptors), by symbol.
     data_imports: HashMap<String, DataId>,
+    /// The static `KType` object of each distinct type a `typeOf` in this file names.
+    type_of_objects: HashMap<Ty, DataId>,
+    /// The static `KClass` of each descriptor a `typeOf` classifier names.
+    static_classes: HashMap<DataId, DataId>,
+    /// The program-wide static objects this file emits, each the COMDAT group of its own section.
+    comdat_objects: Vec<DataId>,
     /// String literal data, deduplicated by content.
     strings: HashMap<Vec<u8>, DataId>,
     /// The interned string OBJECT for each distinct literal text — one slot per text, filled on
@@ -487,6 +522,9 @@ struct FileLowering<'a> {
     /// Exact source-module identity used only for collision-free target symbol realization.
     module_name: &'a str,
     unit_kind: crate::backend::CheckedIrUnitKind,
+    /// The KLIB identities this file publishes: what its interface members are named by in the
+    /// modules that implement them.
+    dependency_signatures: &'a crate::backend::DependencyExportSignatures,
     /// Exact declaration-identity join to code and retained ABI facts emitted for preceding source
     /// modules.
     dependency_symbols:
@@ -596,6 +634,15 @@ impl<'a> FileLowering<'a> {
     /// A runtime function by symbol, declared as an import on first use.
     fn import(&mut self, symbol: &str, params: &[Ty], ret: Ty) -> Result<FuncId, Unsupported> {
         let signature = self.signature_of(params, ret)?;
+        self.import_signature(symbol, signature)
+    }
+
+    /// Import `symbol` with exactly `signature`.
+    fn import_signature(
+        &mut self,
+        symbol: &str,
+        signature: Signature,
+    ) -> Result<FuncId, Unsupported> {
         if let Some(id) = self.imports.existing(symbol, &signature)? {
             return Ok(id);
         }
@@ -1855,6 +1902,20 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     .class_name_accessor(*target)
                     .expect("checked by the guard");
                 self.class_name(symbol, *receiver)
+            }
+            // `t.classifier` / `t.isMarkedNullable`: read off a `typeOf` object.
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    receiver: Some(receiver),
+                    ..
+                } = &**checked_op
+                    && self.type_of_member_of(*target).is_some() =>
+            {
+                let member = self
+                    .type_of_member_of(*target)
+                    .expect("checked by the guard");
+                self.type_of_member(member, *target, *receiver)
             }
             // `e.message`: the one field a runtime `Throwable` carries.
             IrExpr::Checked(ref checked_op)

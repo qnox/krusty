@@ -67,10 +67,7 @@ fn explicit_import_alias(candidate: &ScopedClassifier) -> SelectedAliasProvenanc
 fn unaliased_candidates(candidates: Vec<TypeName>) -> Vec<ScopedClassifier> {
     candidates
         .into_iter()
-        .map(|classifier| ScopedClassifier {
-            classifier,
-            alias: None,
-        })
+        .map(|classifier| ScopedClassifier::new(classifier, None))
         .collect()
 }
 
@@ -280,7 +277,7 @@ impl Checker<'_> {
                     let alias = (classifier == candidate.classifier)
                         .then(|| candidate.alias.clone())
                         .flatten();
-                    completed.push((binding, ScopedClassifier { classifier, alias }));
+                    completed.push((binding, ScopedClassifier::new(classifier, alias)));
                 }
                 match completed.len() {
                     0 => {}

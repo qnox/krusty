@@ -394,7 +394,8 @@ impl Checker<'_> {
             member.context_count,
             call.shape.arg_names,
         )?;
-        self.call_candidate_score(
+        super::call_applicability::score(
+            self,
             scope,
             &contextual.params,
             &contextual.call_sig,

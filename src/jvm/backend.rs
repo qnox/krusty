@@ -36,6 +36,9 @@ pub enum SkipReason {
     InlineParameters,
     /// A read-only collection superclass lacks the exact semantic declaration its stubs need.
     ReadOnlyCollectionStubs(String),
+    /// A `suspend inline` callee's compiled body does not say where it places a suspend lambda
+    /// passed to it: in the caller's frame, or in an object it constructs.
+    SuspendLambdaPlacement(String),
 }
 
 /// What the plugin pass of [`run_backend_passes`] runs: the native plugins the frontend ran for this
@@ -399,6 +402,8 @@ fn run_backend_passes_after_plugins(
     crate::jvm::shared_captures::restore_erased_escaping_capture_holders(ir);
     let null_out_dead_spills =
         crate::jvm::runtime_capabilities::null_out_spilled_variable(classpath);
+    crate::jvm::suspend::lambda_placement::record(ir, classpath, &facts.default_call_operands)
+        .map_err(SkipReason::SuspendLambdaPlacement)?;
     if !crate::jvm::suspend::lower_suspend(
         ir,
         facade,
@@ -413,6 +418,7 @@ fn run_backend_passes_after_plugins(
         return Err(SkipReason::Suspend);
     }
     crate::jvm::suspend::finalize_suspend_bridges(ir, &mut facts.bridge_adaptations);
+    crate::jvm::reified_operations::record_lowered_classes(ir);
     // After the suspend transform: the body moved onto the static is the finished state machine.
     crate::jvm::suspend_impls::lower_suspend_impls(ir);
     // Source lambda names are inputs to lifting. Fix them before reparenting so the lifted-name
@@ -1235,6 +1241,13 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
             );
             return;
         }
+        SkipReason::SuspendLambdaPlacement(detail) => {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                format!("krusty: cannot tell {detail}"),
+            );
+            return;
+        }
         SkipReason::MemberDispatch(classifier) => {
             diags.error(
                 crate::diag::Span::new(0, 0),
@@ -1256,6 +1269,7 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
         | SkipReason::CallArguments(_)
         | SkipReason::InlineParameters
         | SkipReason::ReadOnlyCollectionStubs(_)
+        | SkipReason::SuspendLambdaPlacement(_)
         | SkipReason::MemberDispatch(_) => {
             unreachable!()
         }
@@ -1484,7 +1498,7 @@ pub fn facade_package_metadata_from_ir(
             };
             // Recorded exactly when a reader cannot rebuild the physical descriptor from the
             // declared types (kotlinc's `requiresFunctionSignature`).
-            let jvm_desc = super::metadata_method_signatures::requires_function_signature(
+            let jvm_desc = (super::metadata_method_signatures::requires_function_signature(
                 declaration.receiver,
                 declaration
                     .params
@@ -1500,7 +1514,7 @@ pub fn facade_package_metadata_from_ir(
                 declaration.ret,
                 &physical_descriptor,
                 &Default::default(),
-            )
+            ) || declaration.spellings.names_actualized_expect())
             .then_some(physical_descriptor);
             crate::metadata::builder::FnMeta {
                 jvm_desc,
@@ -1608,11 +1622,12 @@ pub fn facade_package_metadata_from_ir(
                 delegate_method,
                 field_name: field.as_ref().and_then(|(name, _)| name.clone()),
                 field_desc: field.map(|(_, descriptor)| descriptor).filter(|physical| {
-                    super::metadata_method_signatures::requires_field_signature(
-                        declaration.ty,
-                        physical,
-                        &Default::default(),
-                    )
+                    declaration.spellings.ret.actualized_expect
+                        || super::metadata_method_signatures::requires_field_signature(
+                            declaration.ty,
+                            physical,
+                            &Default::default(),
+                        )
                 }),
                 annotation_method: ir
                     .jvm_package_property_annotation_marker(declaration.property)

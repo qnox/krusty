@@ -107,6 +107,7 @@ fn authenticated_header(
         function,
         types,
         formals,
+        ..
     } = super::class_headers::authenticate(selected, bodies)?;
     let parameters = &class.parameters;
     let dispatch = function

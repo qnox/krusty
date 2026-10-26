@@ -51,7 +51,10 @@ pub(super) fn declarations(
         let realization = match platform.external_callable_by_dependency(&identity) {
             Some((_, realization)) => realization,
             None if raw_header_capability && known_target.is_none() => {
-                pending.extend(bodies.direct_body_callables(&identity));
+                pending.extend(bodies.emitted_body_callables(
+                    &identity,
+                    crate::klib_lowering::emitted_closure_function,
+                ));
                 continue;
             }
             None => {
@@ -70,6 +73,14 @@ pub(super) fn declarations(
         let constructor = facts
             .authenticates_constructor(&identity, bodies)
             .map_err(|reason| format!("an invalid constructor declaration: {reason:?}"))?;
+        if constructor {
+            if let Some(callees) = facts
+                .constructor_initialization_callees(&identity, bodies)
+                .map_err(|reason| format!("an invalid class initialization: {reason:?}"))?
+            {
+                pending.extend(callees);
+            }
+        }
         let primitive = facts
             .common_primitive(&identity, bodies)
             .map_err(|reason| format!("an invalid common primitive declaration: {reason:?}"))?;
@@ -94,7 +105,12 @@ pub(super) fn declarations(
             return Err(format!("a transitive KLIB body has no supported ordinary declaration contract: {identity:?}"));
         }
         if emits_body {
-            pending.extend(bodies.direct_body_callables(&identity));
+            pending.extend(
+                bodies.emitted_body_callables(
+                    &identity,
+                    crate::klib_lowering::emitted_closure_function,
+                ),
+            );
         }
         declarations.push(realization);
     }

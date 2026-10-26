@@ -17,7 +17,6 @@ use crate::metadata::builder::TypeAliasMeta;
 use crate::metadata::class_builder::{
     CapturedTypeParameters, ClassDeclaration, ClassMemberOrder, ClassTail, CtorMeta, EnumEntryMeta,
     FnMeta, PropMeta, EQUALS_FN_FLAGS, FN_IS_SUSPEND, HASHCODE_TOSTRING_FN_FLAGS,
-    OBJECT_CTOR_FLAGS, SEALED_CTOR_FLAGS,
 };
 use crate::metadata::declaration_flags::{
     class_flags, data_component_flags, data_copy_flags, declaration_visibility_bits, function_flags,
@@ -215,6 +214,121 @@ impl ClassDeclarationRecord {
             .iter()
             .map(|&classifier| renaming.name(classifier))
             .collect();
+    }
+}
+
+/// Abbreviate each type in `types` with the spelling at the same position, growing `spellings` to
+/// hold the ones that name an actualized expect.
+pub(crate) fn abbreviate_actualized_expects(
+    types: impl IntoIterator<Item = Ty>,
+    spellings: &mut Vec<crate::spelling::Spelled>,
+    expects: &crate::fx_hash::HashMap<TypeName, TypeName>,
+) {
+    for (index, ty) in types.into_iter().enumerate() {
+        if spellings.len() <= index {
+            spellings.resize_with(index + 1, Default::default);
+        }
+        spellings[index].abbreviate_actualized_expects(ty, expects);
+    }
+}
+
+/// [`abbreviate_actualized_expects`] over each type parameter's upper bounds.
+pub(crate) fn abbreviate_actualized_expect_bounds<Bounds: IntoIterator<Item = Ty>>(
+    parameters: impl IntoIterator<Item = Bounds>,
+    spellings: &mut Vec<Vec<crate::spelling::Spelled>>,
+    expects: &crate::fx_hash::HashMap<TypeName, TypeName>,
+) {
+    for (index, bounds) in parameters.into_iter().enumerate() {
+        if spellings.len() <= index {
+            spellings.resize_with(index + 1, Vec::new);
+        }
+        abbreviate_actualized_expects(bounds, &mut spellings[index], expects);
+    }
+}
+
+impl ClassDeclarationRecord {
+    /// Abbreviate every declared occurrence of an `expect` class `expects` actualizes by alias, before
+    /// the target renames the occurrence to the classifier the alias names.
+    pub(crate) fn abbreviate_actualized_expects(
+        &mut self,
+        expects: &crate::fx_hash::HashMap<TypeName, TypeName>,
+    ) {
+        let declared = |spellings: &mut crate::spelling::DeclaredSpellings,
+                        receiver: Option<Ty>,
+                        params: &[(String, Ty)],
+                        ret: Ty| {
+            if let Some(receiver) = receiver {
+                spellings
+                    .receiver
+                    .abbreviate_actualized_expects(receiver, expects);
+            }
+            abbreviate_actualized_expects(
+                params.iter().map(|(_, ty)| *ty),
+                &mut spellings.params,
+                expects,
+            );
+            spellings.ret.abbreviate_actualized_expects(ret, expects);
+        };
+        for property in &mut self.props {
+            declared(&mut property.spellings, property.receiver, &[], property.ty);
+            abbreviate_actualized_expect_bounds(
+                property
+                    .type_params
+                    .iter()
+                    .map(|parameter| parameter.bounds.iter().map(|(bound, _)| *bound)),
+                &mut property.spellings.type_param_bounds,
+                expects,
+            );
+            property
+                .spellings
+                .getter_ret
+                .abbreviate_actualized_expects(property.ty, expects);
+        }
+        for function in &mut self.methods {
+            declared(
+                &mut function.spellings,
+                function.receiver,
+                &function.params,
+                function.ret,
+            );
+            abbreviate_actualized_expect_bounds(
+                function
+                    .type_param_bounds
+                    .iter()
+                    .map(|bounds| bounds.iter().copied()),
+                &mut function.spellings.type_param_bounds,
+                expects,
+            );
+        }
+        abbreviate_actualized_expect_bounds(
+            self.type_param_bounds
+                .iter()
+                .map(|parameter| parameter.bounds.iter().map(|(bound, _)| *bound)),
+            &mut self.spellings.type_param_bounds,
+            expects,
+        );
+        for alias in &mut self.type_aliases {
+            alias
+                .expansion_spelling
+                .abbreviate_actualized_expects(alias.expansion, expects);
+        }
+        abbreviate_actualized_expects(
+            self.ctor_params.iter().map(|(_, ty)| *ty),
+            &mut self.spellings.params,
+            expects,
+        );
+        abbreviate_actualized_expects(
+            self.supertypes.iter().copied(),
+            &mut self.supertype_spellings,
+            expects,
+        );
+        for constructor in &mut self.secondary_ctors {
+            abbreviate_actualized_expects(
+                constructor.params.iter().map(|(_, ty)| *ty),
+                &mut constructor.param_spellings,
+                expects,
+            );
+        }
     }
 }
 
@@ -954,13 +1068,15 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         // An `enum class`'s primary ctor is private too — entries are the only instances.
         // A DECLARED constructor visibility (`class C protected constructor(…)`) takes
         // precedence: the consumer must reject constructions the declaration forbids.
-        primary_ctor_flags: match ir.ctor_visibilities.get(&c.fq_name_id()) {
-            Some(Visibility::Protected) => SEALED_CTOR_FLAGS,
-            Some(Visibility::Private) => OBJECT_CTOR_FLAGS,
-            _ if c.is_sealed => SEALED_CTOR_FLAGS,
-            _ if c.is_singleton() || c.is_enum => OBJECT_CTOR_FLAGS,
-            _ => 0,
-        },
+        // A sealed class's is protected, and an `internal constructor` keeps its own visibility.
+        primary_ctor_flags: primary_constructor_flags(
+            match ir.ctor_visibilities.get(&c.fq_name_id()).copied() {
+                Some(declared @ (Visibility::Protected | Visibility::Private)) => declared,
+                _ if c.is_sealed => Visibility::Protected,
+                _ if c.is_singleton() || c.is_enum => Visibility::Private,
+                declared => declared.unwrap_or(Visibility::Public),
+            },
+        ),
         type_params: c.type_params.clone(),
         type_param_bounds: ir
             .class_signature(&c.fq_name())
@@ -1643,6 +1759,11 @@ fn secondary_constructor(
     })
 }
 
+/// `Constructor.flags` of a primary constructor: its visibility alone.
+fn primary_constructor_flags(visibility: Visibility) -> u64 {
+    declaration_visibility_bits(visibility) << 1
+}
+
 /// `Constructor.flags` of a secondary constructor: `IS_SECONDARY` and its visibility.
 fn secondary_constructor_flags(visibility: Visibility) -> u64 {
     const IS_SECONDARY: u64 = 16;
@@ -1651,8 +1772,9 @@ fn secondary_constructor_flags(visibility: Visibility) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::secondary_constructors;
     use super::{generated_function_flags, generated_functions, SecondaryConstructorRecord};
-    use super::{secondary_constructor, secondary_constructor_flags, secondary_constructors};
+    use super::{primary_constructor_flags, secondary_constructor, secondary_constructor_flags};
     use crate::ir::{
         CtorDelegateTarget, DeclarationAnnotations, IrFile, IrFunction,
         IrGeneratedDeclarationDebug, IrGeneratedFunctionMetadata, IrGeneratedFunctionMetadataScope,
@@ -1796,6 +1918,14 @@ mod tests {
         assert_eq!(secondary_constructor_flags(Visibility::Private), 18);
         assert_eq!(secondary_constructor_flags(Visibility::Protected), 20);
         assert_eq!(secondary_constructor_flags(Visibility::Public), 22);
+    }
+
+    #[test]
+    fn primary_constructor_flags_encode_exact_semantic_visibility() {
+        assert_eq!(primary_constructor_flags(Visibility::Internal), 0);
+        assert_eq!(primary_constructor_flags(Visibility::Private), 2);
+        assert_eq!(primary_constructor_flags(Visibility::Protected), 4);
+        assert_eq!(primary_constructor_flags(Visibility::Public), 6);
     }
 
     fn generated_function(ir: &mut IrFile, body: bool) -> u32 {

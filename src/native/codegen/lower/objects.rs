@@ -15,6 +15,8 @@ use super::type_checks::{is_runtime_constructed, ThrowableOperands};
 use super::*;
 use crate::types::TypeName;
 
+#[cfg(test)]
+mod layout_tests;
 mod walking;
 pub(super) use walking::WalkMembers;
 
@@ -50,7 +52,10 @@ pub(super) mod ktype {
     pub const SIMPLE_NAME_LENGTH: u32 = 144;
     pub const CLASS_NAMES: u32 = 148;
     pub const COLLECTION_SIZE: u32 = 152;
-    pub const SIZE: usize = 160;
+    /// The interface table; see the note on `KType`. Absent for a type implementing no interface
+    /// of the program.
+    pub const ITABLE: u32 = 160;
+    pub const SIZE: usize = 168;
 }
 
 const CLASS_NAMES_MEMBER: u32 = 1;
@@ -59,6 +64,11 @@ const CLASS_NAMES_ANONYMOUS: u32 = 3;
 
 /// Where an object keeps its type: the header is one pointer.
 pub(super) const TYPE_OFFSET: i32 = 0;
+// The link's interface stubs read the same two fields.
+const _: () = {
+    assert!(TYPE_OFFSET as u32 == super::super::super::interface_calls::RECEIVER_TYPE_OFFSET);
+    assert!(ktype::ITABLE == super::super::super::interface_calls::ITABLE_OFFSET);
+};
 
 /// The emitted items of one class.
 pub(super) struct ClassItems {
@@ -119,6 +129,13 @@ pub(super) struct DescriptorShape<'s> {
     /// Where the collector finds this type's references.
     pub(super) reference_offsets: &'s [u32],
     pub(super) vtable: &'s [FuncId],
+    /// Indexed by interface member number; empty for a type implementing no interface of the
+    /// program.
+    pub(super) itable: &'s [FuncId],
+    /// Whether objects of exactly this type are made. An interface's or an abstract class's
+    /// descriptor is only ever a supertype, so the link counts none of its table's functions among
+    /// a member's implementations.
+    pub(super) instantiable: bool,
     pub(super) superclass: DataId,
     /// Every interface the type implements, transitively.
     pub(super) interfaces: &'s [DataId],
@@ -143,6 +160,16 @@ impl<'a> FileLowering<'a> {
     }
 
     /// The in-file class a name denotes, or the decline for one declared elsewhere.
+    /// How a call through `class` reaches the member `key` names: see [`model::ClassModel::dispatch`].
+    pub(super) fn dispatch_of(
+        &self,
+        class: ClassId,
+        key: &model::SlotKey,
+    ) -> Option<model::Dispatch> {
+        self.model
+            .dispatch(self.ir, self.slot_plan.interfaces(), class, key)
+    }
+
     pub(super) fn class_of(&self, internal: TypeName, what: &str) -> Result<ClassId, Unsupported> {
         self.ir.class_id_by_name(internal).ok_or_else(|| {
             declined!(
@@ -235,7 +262,7 @@ impl<'a> FileLowering<'a> {
             .model
             .layouts
             .iter()
-            .flat_map(|layout| layout.vtable.iter().cloned())
+            .flat_map(|layout| layout.vtable.iter().chain(&layout.itable).cloned())
             .filter(|slot| {
                 matches!(
                     slot,
@@ -419,8 +446,9 @@ impl<'a> FileLowering<'a> {
         self.ir.classes[class as usize].fq_name().replace('/', ".")
     }
 
-    /// Define a `KType` and the two tables it points at, byte for byte as `krusty_rt.h` declares
-    /// the struct. Every emitted type goes through here — a class, a lambda, a captured-variable
+    /// Define a `KType` and the tables it points at, byte for byte as `krusty_rt.h` declares the
+    /// struct, except its interface table, which the link writes from the implementation records
+    /// (see `native::interface_calls`). Every emitted type goes through here — a class, a lambda, a captured-variable
     /// holder — so the descriptor the collector reads and the layout the code uses are written by
     /// one piece of code.
     pub(super) fn define_type_descriptor(
@@ -434,6 +462,8 @@ impl<'a> FileLowering<'a> {
             instance_size,
             reference_offsets,
             vtable,
+            itable,
+            instantiable,
             superclass,
             interfaces,
             reference_target,
@@ -472,6 +502,10 @@ impl<'a> FileLowering<'a> {
         self.module
             .define_data(table, &description)
             .map_err(|error| format!("defining `kt_vtable_{base}` ({error})"))?;
+
+        if instantiable {
+            self.record_interface_implementations(descriptor, base, itable)?;
+        }
 
         // The interfaces this type implements, transitively. An interface is not on the super
         // chain — that chain is single inheritance — so `is` finds it here instead.
@@ -589,14 +623,11 @@ impl<'a> FileLowering<'a> {
         Ok(entries)
     }
 
-    /// The reference-offset table, the vtable and the `KType` of one class.
-    fn define_descriptor(&mut self, class: ClassId) -> Result<(), Unsupported> {
-        let layout = self.model.layout(class).clone();
-        let base = self.class_base(class).to_string();
-
-        let mut vtable = Vec::with_capacity(layout.vtable.len());
-        for slot in &layout.vtable {
-            vtable.push(match slot {
+    /// What realizes each entry of a class or interface table.
+    pub(super) fn table_functions(&mut self, table: &[Slot]) -> Result<Vec<FuncId>, Unsupported> {
+        let mut functions = Vec::with_capacity(table.len());
+        for slot in table {
+            functions.push(match slot {
                 Slot::Runtime(symbol) => {
                     let (params, ret) = any_member(symbol).expect("a kotlin.Any member");
                     self.import(symbol, &params, ret)?
@@ -617,6 +648,7 @@ impl<'a> FileLowering<'a> {
                     }
                 },
                 Slot::Abstract => self.import("kt_abstract_method_called", &[], Ty::Unit)?,
+                Slot::ModuleFunction(callable) => self.interface_default_import(*callable)?,
                 Slot::FieldGetter { .. }
                 | Slot::FieldSetter { .. }
                 | Slot::AnnotationMember { .. }
@@ -627,6 +659,45 @@ impl<'a> FileLowering<'a> {
                 | Slot::AccessorBridge { .. } => self.accessors[slot],
             });
         }
+        Ok(functions)
+    }
+
+    /// The body an interface another file of the module declares, under the member's module
+    /// symbol, which that file exports: it takes the receiver as an object and the member's
+    /// declared carriers.
+    fn interface_default_import(
+        &mut self,
+        callable: crate::fir::CallableId,
+    ) -> Result<FuncId, Unsupported> {
+        let (parameters, result) = self
+            .slot_plan
+            .interfaces()
+            .function_carriers(
+                crate::backend::class_tables::module_slots::PlanKey::Callable(callable),
+            )
+            .ok_or("an interface default with no module-wide carriers")?;
+        let mut params = vec![any()];
+        params.extend_from_slice(parameters);
+        let symbol =
+            super::super::super::symbols::module_function_symbol(self.module_name, callable);
+        self.import(&symbol, &params, result)
+    }
+
+    /// The reference-offset table, the vtable and the `KType` of one class.
+    fn define_descriptor(&mut self, class: ClassId) -> Result<(), Unsupported> {
+        let layout = self.model.layout(class).clone();
+        let base = self.class_base(class).to_string();
+
+        let vtable = self.table_functions(&layout.vtable)?;
+        let declared = &self.ir.classes[class as usize];
+        let instantiable = !(declared.is_interface || declared.is_abstract || declared.is_sealed);
+        let itable = if self.ir.classes[class as usize].is_interface {
+            // An interface has no instances; its own table is the template a lambda converted to
+            // it starts from, and is read there rather than through this descriptor.
+            Vec::new()
+        } else {
+            self.table_functions(&layout.itable)?
+        };
         let name = self.kotlin_name(class);
         let descriptor = self.classes[class as usize].descriptor;
         // A class's `super` is its superclass where it has one, because `is` walks that chain.
@@ -646,6 +717,19 @@ impl<'a> FileLowering<'a> {
             .into_iter()
             .map(|interface| self.classes[interface as usize].descriptor)
             .collect();
+        // An interface another file declares is named by the module symbol its file defines.
+        let own = self.ir.classes[class as usize].fq_name;
+        for name in self.model.implemented[class as usize].clone() {
+            if name == own || self.ir.class_id_by_name(name).is_some() {
+                continue;
+            }
+            let descriptor = self
+                .type_descriptor(Ty::obj_name(name))?
+                .ok_or("an interface of the module with no descriptor")?;
+            if !interfaces.contains(&descriptor) {
+                interfaces.push(descriptor);
+            }
+        }
         let runtime_markers = super::classifier_shapes::class_runtime_interface_descriptors(
             self.ir,
             self.classifiers,
@@ -660,6 +744,9 @@ impl<'a> FileLowering<'a> {
         }
         let walk = self.define_walk_members(class, &base)?;
         let (qualified_name, simple_name, class_names) = self.reflection_names(class);
+        if instantiable {
+            self.record_dependency_implementations(descriptor, &base, class, (&vtable, &itable))?;
+        }
         self.define_type_descriptor(
             descriptor,
             &base,
@@ -668,6 +755,8 @@ impl<'a> FileLowering<'a> {
                 instance_size: layout.instance_size,
                 reference_offsets: &layout.reference_offsets,
                 vtable: &vtable,
+                itable: &itable,
+                instantiable,
                 superclass,
                 interfaces: &interfaces,
                 reference_target: None,
@@ -2073,7 +2162,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Err(declined!("a class-static call (`{}`)", function.name));
         }
         let key = model::function_key(self.file.ir, class, fid);
-        let Some(slot) = self.file.model.slot(class, &key) else {
+        let Some(slot) = self.file.dispatch_of(class, &key) else {
             return Err(declined!(
                 "a method with no dispatch slot (`{}`)",
                 function.name
@@ -2088,7 +2177,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if self.terminated {
             return Ok(None);
         }
-        self.dispatch(object, slot, &params, ret, &arguments)
+        self.dispatch_through(object, slot, &params, ret, &arguments)
     }
 
     /// The member or top-level realization a checked property operation names.
@@ -2259,11 +2348,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         object: Value,
     ) -> Result<Option<(Value, Ty)>, Unsupported> {
         let property = self.file.ir.classes[class as usize].properties[index].clone();
-        let through_slot = model::local_property_target(self.file.ir, class, index)
-            .and_then(|target| self.file.model.slot(class, &model::SlotKey::Getter(target)));
+        let through_slot =
+            model::local_property_target(self.file.ir, class, index).and_then(|target| {
+                self.file
+                    .dispatch_of(class, &model::SlotKey::Getter(target))
+            });
         if let Some(slot) = through_slot {
             return Ok(self
-                .dispatch(object, slot, &[], property.ty, &[])?
+                .dispatch_through(object, slot, &[], property.ty, &[])?
                 .map(|value| (value, property.ty)));
         }
         if let Some(getter) = property.getter {
@@ -2335,8 +2427,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         index: usize,
     ) -> Result<Ty, Unsupported> {
         let property = &self.file.ir.classes[class as usize].properties[index];
-        let through_slot = model::local_property_target(self.file.ir, class, index)
-            .and_then(|target| self.file.model.slot(class, &model::SlotKey::Setter(target)));
+        let through_slot =
+            model::local_property_target(self.file.ir, class, index).and_then(|target| {
+                self.file
+                    .dispatch_of(class, &model::SlotKey::Setter(target))
+            });
         match (through_slot, property.setter, property.backing_field) {
             (Some(_), _, _) | (None, Some(_), _) => Ok(property.ty),
             (None, None, Some(field)) => {
@@ -2358,10 +2453,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         value: Value,
     ) -> Result<(), Unsupported> {
         let property = self.file.ir.classes[class as usize].properties[index].clone();
-        let through_slot = model::local_property_target(self.file.ir, class, index)
-            .and_then(|target| self.file.model.slot(class, &model::SlotKey::Setter(target)));
+        let through_slot =
+            model::local_property_target(self.file.ir, class, index).and_then(|target| {
+                self.file
+                    .dispatch_of(class, &model::SlotKey::Setter(target))
+            });
         if let Some(slot) = through_slot {
-            self.dispatch(object, slot, &[property.ty], Ty::Unit, &[value])?;
+            self.dispatch_through(object, slot, &[property.ty], Ty::Unit, &[value])?;
             return Ok(());
         }
         if let Some(setter) = property.setter {

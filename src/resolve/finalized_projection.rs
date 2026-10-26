@@ -5,6 +5,8 @@
 //! with the compact solver. This adapter is deliberately keyed only by stable declaration identity;
 //! it performs no source lookup and no spelling-based matching.
 
+mod plugin_declared_classes;
+
 use super::{Signature, SymbolTable};
 use crate::fir::{DeclarationId, ResolvedModuleIndex};
 use crate::spelling::Spelled;
@@ -498,6 +500,7 @@ pub(crate) fn publish_stable_declaration_metadata(
             index.publish_compile_time_constant(declaration, constant.clone());
         }
     }
+    plugin_declared_classes::publish_plugin_class_records(index, table);
 }
 
 /// The spelling of a type reached through a typealias application, as if the alias had been

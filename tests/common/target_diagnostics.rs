@@ -34,11 +34,26 @@ pub fn front_end_diagnostic_records_with_features_for(
     let platform = Box::new(
         krusty::jvm::jvm_libraries::JvmLibraries::new(cp).expect("JVM provider initialization"),
     );
+    front_end_diagnostic_records_with_provider(
+        src,
+        common::with_native_plugins(target, platform),
+        features,
+    )
+}
+
+/// Complete diagnostics against the caller's explicit target and dependency declarations.
+/// A target's reference compiler must be compared with equivalent library evidence; selecting
+/// Native source rules alone does not turn a JVM classpath into the Native stdlib.
+pub fn front_end_diagnostic_records_with_provider(
+    src: &str,
+    provider: krusty::frontend::PlatformProvider,
+    features: &krusty::features::LangFeatures,
+) -> Vec<krusty::diag::Diagnostic> {
     let inputs = [krusty::source::SourceInput::kotlin(src)];
     let mut diags = krusty::diag::DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        common::with_native_plugins(target, platform),
+        provider,
         features,
         |_, _| {},
         &mut diags,
@@ -55,7 +70,15 @@ pub fn front_end_diagnostics_located_for(
     cp_jars: &[PathBuf],
     jdk_modules: Option<&Path>,
 ) -> Vec<String> {
-    front_end_diagnostic_records_for(target, src, cp_jars, jdk_modules)
+    diagnostic_locations(
+        src,
+        &front_end_diagnostic_records_for(target, src, cp_jars, jdk_modules),
+    )
+}
+
+/// Render every diagnostic in emission order, shared by classpath and explicit-provider callers.
+pub fn diagnostic_locations(src: &str, records: &[krusty::diag::Diagnostic]) -> Vec<String> {
+    records
         .iter()
         .map(|diagnostic| {
             let (line, column) = krusty::diag::line_col(src, diagnostic.span.lo);

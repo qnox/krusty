@@ -159,3 +159,48 @@ fn an_erased_result_reaches_its_consumer_intact() {
     .expect("the source compiles and the JVM runner is provisioned");
     assert_eq!(actual, "OK");
 }
+
+// PLATFORM: JVM result-slot casts and complete classfiles; ordinary Kotlin runtime is also
+// checked against kotlinc through the shared runner.
+const RETURN_CONSUMERS: &str = r#"
+var calls = 0
+fun <T> supplied(value: T): T { calls++; return value }
+fun widenedReturn(): CharSequence = supplied<String>("OK")
+fun erasedReturn(): Any = supplied<String>("OK")
+fun storedReturn(): CharSequence {
+    val value = supplied<String>("OK")
+    return value
+}
+fun explicitReturn(): CharSequence = supplied<Any>("OK") as String
+fun assertedReturn(): CharSequence = supplied<String?>("OK")!!
+fun box(): String {
+    if (widenedReturn() != "OK") return "widened"
+    if (erasedReturn() != "OK") return "erased"
+    if (storedReturn() != "OK") return "stored"
+    if (explicitReturn() != "OK") return "explicit"
+    if (assertedReturn() != "OK") return "asserted"
+    return if (calls == 5) "OK" else "evaluation"
+}
+"#;
+
+#[test]
+fn erased_generic_return_consumers_match_complete_kotlinc_classfiles() {
+    let classes =
+        common::classes_against_kotlinc_module(&[("GenericReturnConsumers.kt", RETURN_CONSUMERS)]);
+    assert_eq!(classes.differences(), Vec::<String>::new());
+}
+
+#[test]
+fn erased_generic_returns_preserve_materialization_and_single_evaluation() {
+    assert_eq!(common::kotlinc_box_result(RETURN_CONSUMERS), "OK");
+    assert_eq!(
+        common::compile_and_run_box(
+            RETURN_CONSUMERS,
+            "GenericReturnConsumers",
+            &[common::stdlib_jar()],
+            Some(&common::jdk_modules()),
+        )
+        .expect("generic return consumers compile and run"),
+        "OK"
+    );
+}
