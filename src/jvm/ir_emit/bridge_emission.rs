@@ -317,7 +317,8 @@ enum BridgeRealization {
 /// bridge at the implementation's result (`final HashSet<String> keySet()`, `final Integer
 /// get(Object)`) and a bridge at the erased descriptor. For a type-safe function the erased one
 /// is a final synthetic copy of the special body and comes first; for a renamed property getter
-/// it is an ordinary bridge to the special one, after it.
+/// or function (`final String remove(int)` of a `removeAt` override) it is an ordinary bridge to
+/// the special one, after it.
 fn emit_planned_bridge(
     class: &ClassBridges<'_>,
     cw: &mut ClassWriter,
@@ -360,7 +361,10 @@ fn emit_planned_bridge(
             None,
             BridgeRealization::Planned,
         );
-    } else if narrower_result && b.kind == crate::ir::BridgeKind::PropertyGetter {
+    } else if narrower_result
+        && (b.kind == crate::ir::BridgeKind::PropertyGetter
+            || (b.kind == crate::ir::BridgeKind::Function && b.collection_barrier.is_none()))
+    {
         emit_bridge(
             class,
             cw,
@@ -440,7 +444,9 @@ fn emit_bridge(
     // property getter's (`keySet()Ljava/util/Set<Ljava/lang/String;>;`).
     let signature = (realization == BridgeRealization::Planned
         && b.special
-        && (b.collection_barrier.is_some() || b.kind == crate::ir::BridgeKind::PropertyGetter))
+        && (b.collection_barrier.is_some()
+            || b.kind == crate::ir::BridgeKind::PropertyGetter
+            || b.kind == crate::ir::BridgeKind::Function))
         .then(|| {
             let formatter = JvmSignatureFormatter::with_symbols(ir, signature_symbols, run);
             if b.concrete_ret.mentions_ty_param()
@@ -593,7 +599,13 @@ fn emit_bridge(
             code.invokevirtual(m, argw, slot_words(tr) as i32);
         }
     }
-    if b.target_ret.is_some() && tr != cr {
+    // As kotlinc's `irCastIfNeeded`, nothing is cast to `Object`: the erased bridge of a renamed
+    // member returns the special bridge's narrower result as is (`Object remove(int)` calling
+    // `String remove(int)`), while `Set getKeys()` still casts `keySet()`'s `HashSet`.
+    if b.target_ret.is_some()
+        && tr != cr
+        && crate::jvm::names::instanceof_internal_name(cr) != "java/lang/Object"
+    {
         // A CPS target returns Object while this bridge must recover a reference value-class
         // carrier before `box-impl`. Scalar carriers arrive already boxed and never take this path.
         debug_assert!(tr.is_reference() && cr.is_reference());

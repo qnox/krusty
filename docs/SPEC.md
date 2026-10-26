@@ -13690,9 +13690,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   methods. For a type-safe function a final synthetic `Object get(Object)` copy of the barrier
   body comes first, then the final `Integer get(Object)`; for a renamed getter the final
   `HashSet<String> keySet()` calling `getKeys()` comes first, then an ordinary `Set keySet()`
-  bridge that calls it and casts. A declared `fun remove(key: String): Int?` implements the
-  type-safe `remove(Object)` the same way: a final synthetic `Object remove(Object)` and the final
-  `Integer remove(Object)`, each returning `null` unless the key is `instanceof String`. The JDK
+  bridge that calls it and casts. A renamed function takes the same form: an override
+  `removeAt(index: Int): String` of a `MutableList<Any>` or `MutableList<String>`, abstract or
+  not, gets the final `String remove(int)` calling `removeAt`, then an ordinary synthetic `Object
+  remove(int)` that calls it and, as kotlinc's `irCastIfNeeded`, casts nothing to `Object`. A
+  generic `removeAt(index: Int): T` keeps the single final `remove(int)` with its generic signature
+  `(I)TT;` (`tests/renamed_member_narrower_result_e2e.rs`). A declared
+  `fun remove(key: String): Int?` implements the type-safe `remove(Object)` the same way: a final
+  synthetic `Object remove(Object)` and the final `Integer remove(Object)`, each returning `null` unless the key is `instanceof String`. The JDK
   defaults (`replaceAll`, `putIfAbsent`, `replace`, `compute*`, `merge`) and an abstract class's
   materialized members are below. Tests:
   `tests/read_only_map_face_stubs_e2e.rs` (member bytes and box runs against kotlinc).
@@ -13752,9 +13757,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   names), `tests/read_only_collection_face_stubs_e2e.rs`, `tests/read_only_list_face_stubs_e2e.rs`,
   `tests/read_only_set_face_stubs_e2e.rs`. Not yet like kotlinc: a member implemented by
   `kotlin.collections.AbstractCollection` (kotlinc writes a concrete `contains(String)` and its
-  bridge), a declared `abstract override fun removeAt(index: Int): String` (kotlinc writes
-  `final String remove(int)` beside `Object remove(int)`), and the order and shortcuts of members a
-  Java collection superclass leaves abstract.
+  bridge), and the order and shortcuts of members a Java collection superclass leaves abstract.
 - **A collection class gets the JDK's `toArray` pair.** As kotlinc's `ToArrayLowering`, every
   non-interface class that implements `Collection` (any face, read-only or mutable, abstract or
   not, enum and anonymous classes included) gets `public <T> T[] toArray(T[])`, which checks its
