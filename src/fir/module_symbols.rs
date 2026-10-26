@@ -15,6 +15,9 @@ use crate::types::{stored_value_ty, Ty, TyKind, TypeName};
 
 use super::{DeclarationFlags, DeclarationId, DeclarationKind, ResolvedModuleIndex, SourceFileId};
 
+#[cfg(test)]
+mod declaration_name_tests;
+
 /// Pass-2 current-module provider. Its type deliberately cannot retain the Pass-1 symbol table.
 pub(crate) struct StreamedModuleSymbols<'a> {
     index: &'a ResolvedModuleIndex,
@@ -287,6 +290,7 @@ impl<'a> StreamedModuleSymbols<'a> {
         let flags = declaration_header.flags;
         let mut projected = crate::libraries::LibraryType::declaration_header();
 
+        projected.declaration_name = classifier_header.declaration_name.clone();
         projected.is_kotlin = true;
         projected.access = declaration_header.visibility.into();
         projected.source_file = Some(anchor.source.raw());

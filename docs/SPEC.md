@@ -1,5 +1,12 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Declaration-name projection
+
+A finalized source classifier keeps its declaration-name fact when projected into a common
+provider shape. Optional-expectation annotations without JVM classfiles keep their raw module
+metadata name through publication. Exact segments and lexical ownership remain snapshot-owned;
+a later declaration with the same flattened identity cannot change an earlier snapshot's fact.
+
 ## Classifier declaration-name ownership
 
 A non-local classifier retains its exact declaration segment and either its package or its

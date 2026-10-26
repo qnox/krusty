@@ -1,5 +1,13 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Source and optional-annotation projection
+
+The source index already owns each classifier's optional declaration name; its provider projection
+copies that fact without reinterpretation. A `.kotlin_module` optional-annotation class supplies a
+raw qualified class name even though no physical classfile exists. Retain its package/owner and
+exact segment before name-tree normalization, then publish that fact with the annotation shape.
+This preserves literal-dollar and nested names across separate metadata snapshots.
+
 ## Declaration-name evidence
 
 Kotlin metadata class IDs delimit the package with `/` and lexical classifier ownership with `.`;

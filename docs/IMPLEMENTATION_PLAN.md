@@ -1,5 +1,11 @@
 # krusty — implementation plan
 
+## Preserve classifier name evidence at projection boundaries
+
+Copy source header declaration names into finalized module provider shapes. Retain optional
+annotation names from decoded module metadata until annotation shape publication. These close two
+producer omissions; the metadata name inventory/query and class-ID consumers remain separate work.
+
 ## Classifier declaration-name handoff
 
 Retain an optional declaration-owned package/owner and exact segment across source bootstrap,
