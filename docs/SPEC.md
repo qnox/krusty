@@ -10098,7 +10098,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   bounds and spellings unchanged, as class and member metadata do. The JVM signature writer, a
   package property's `JvmPropertySignature` accessor descriptors, and the classpath reader each
   pick the primary bound themselves. The reader needs it to pair a dependency's metadata function
-  with the JVM method its descriptor erases to. Tests:
+  with the JVM method its descriptor erases to. A parameter typed by an enclosing class's type
+  parameter (`class C<T : A, U : B> { fun choose(a: T); fun choose(b: U) }`) erases through that
+  class's declared formals, which the reader passes beside the function's own; the function's
+  formals shadow a same-named enclosing one, and the enclosing ones never count toward the
+  function's explicit type-argument arity. An unbounded formal erases to its implicit `Any?`; a
+  name no declaration in scope declares has no primary bound, and the function does not align. Tests:
   `tests/intersection_bound_metadata_order_e2e.rs`,
   `tests/krusty_roundtrip_class_metadata_e2e.rs`.
 - **`ClassName.Companion` named explicitly.** The bare `ClassName` already denotes the companion

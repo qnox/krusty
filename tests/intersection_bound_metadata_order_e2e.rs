@@ -85,3 +85,48 @@ fn a_dependency_function_erases_an_interface_first_bound_to_its_class() {
         "OK"
     );
 }
+
+const OWNER_BOUNDS: &str = "package owner\n\
+                            \n\
+                            open class A\n\
+                            \n\
+                            open class B\n\
+                            \n\
+                            class C<T : A, U : B> {\n\
+                            \x20   fun choose(a: T): String = \"A\"\n\
+                            \n\
+                            \x20   fun choose(b: U): String = \"B\"\n\
+                            }\n";
+
+/// Each overload is called by its own parameter name, which only its metadata function declares.
+const OWNER_BOUND_CALLS: &str = "import owner.*\n\
+                                 \n\
+                                 fun box(): String {\n\
+                                 \x20   val c = C<A, B>()\n\
+                                 \x20   val positional = c.choose(A()) + c.choose(B())\n\
+                                 \x20   val named = c.choose(a = A()) + c.choose(b = B())\n\
+                                 \x20   return if (positional == \"AB\" && named == \"AB\") \"OK\" else \"$positional $named\"\n\
+                                 }\n";
+
+/// A kotlinc-built class's overloads that differ only in which of its own type parameters they
+/// take erase to that parameter's bound, `choose(LA;)` and `choose(LB;)`. Each call, positional or
+/// named, links the overload it selected with that overload's parameter.
+#[test]
+fn dependency_overloads_over_enclosing_class_parameters_are_called_like_kotlinc() {
+    let results = common::class_bytes_diffs_against_kotlinc(
+        "OwnerBoundCalls",
+        &[("OwnerBounds.kt", OWNER_BOUNDS)],
+        OWNER_BOUND_CALLS,
+        "OwnerBoundCallsKt",
+        &["box"],
+    )
+    .expect("reference kotlinc is provisioned");
+    for result in results {
+        result.unwrap_or_else(|diff| panic!("{diff}"));
+    }
+    assert_eq!(
+        common::expect_box_run_against_kotlinc(OWNER_BOUNDS, OWNER_BOUND_CALLS)
+            .expect("reference kotlinc is provisioned"),
+        "OK"
+    );
+}
