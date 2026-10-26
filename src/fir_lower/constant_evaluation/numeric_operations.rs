@@ -2,7 +2,11 @@
 //! [`ConstNumericOperation`]s, and of the unsigned bitwise intrinsics.
 //!
 //! Every value is read as the exact integer it denotes (a signed type sign-extended, an unsigned
-//! type zero-extended), computed exactly, and wrapped to the declared result type, which is how
+//! type zero-extended) in an `i128` host, computed with wrapping `i128` arithmetic, and wrapped
+//! to the declared result type. Operands and results are at most 64 bits wide, so a quotient or
+//! remainder is exact in the host and a sum, difference or product keeps the low 64 bits the
+//! result needs: `ULong.MAX_VALUE * ULong.MAX_VALUE` is `1uL` and `Long.MIN_VALUE.floorDiv(-1L)`
+//! is `Long.MIN_VALUE`, without overflowing the host. This is how
 //! the stdlib bodies behave: an unsigned operation on two widths widens both to the wider type
 //! (at least `UInt`), and a signed `floorDiv`/`mod` computes at the wider of `Int` and its operands
 //! before converting to its declared result.
@@ -31,36 +35,52 @@ pub(super) fn evaluate(
         }
         (_, [other]) => {
             let (lhs, rhs) = (integral(receiver)?, integral(other)?);
-            let value = match operation {
-                ConstNumericOperation::Add => lhs + rhs,
-                ConstNumericOperation::Subtract => lhs - rhs,
-                ConstNumericOperation::Multiply => lhs * rhs,
-                ConstNumericOperation::Divide => lhs.checked_div(rhs)?,
-                ConstNumericOperation::Remainder => lhs.checked_rem(rhs)?,
-                ConstNumericOperation::FloorDivide => {
-                    let quotient = lhs.checked_div(rhs)?;
-                    if lhs % rhs != 0 && (lhs < 0) != (rhs < 0) {
-                        quotient - 1
-                    } else {
-                        quotient
-                    }
-                }
-                ConstNumericOperation::Modulo => {
-                    let remainder = lhs.checked_rem(rhs)?;
-                    if remainder != 0 && ((remainder < 0) != (rhs < 0)) {
-                        remainder + rhs
-                    } else {
-                        remainder
-                    }
-                }
-                ConstNumericOperation::Conversion | ConstNumericOperation::CompareTo => {
-                    return None
-                }
-            };
+            let value = wrapping_integral(operation, lhs, rhs)?;
             integral_constant(value, result)
         }
         _ => None,
     }
+}
+
+/// `operation` on two exact integral operands with wrapping `i128` arithmetic; the caller wraps
+/// the value to the declared result type, whose bits are the low bits of this value. A zero
+/// divisor is `None`: the division throws at run time.
+fn wrapping_integral(operation: ConstNumericOperation, lhs: i128, rhs: i128) -> Option<i128> {
+    if rhs == 0
+        && matches!(
+            operation,
+            ConstNumericOperation::Divide
+                | ConstNumericOperation::Remainder
+                | ConstNumericOperation::FloorDivide
+                | ConstNumericOperation::Modulo
+        )
+    {
+        return None;
+    }
+    Some(match operation {
+        ConstNumericOperation::Add => lhs.wrapping_add(rhs),
+        ConstNumericOperation::Subtract => lhs.wrapping_sub(rhs),
+        ConstNumericOperation::Multiply => lhs.wrapping_mul(rhs),
+        ConstNumericOperation::Divide => lhs.wrapping_div(rhs),
+        ConstNumericOperation::Remainder => lhs.wrapping_rem(rhs),
+        ConstNumericOperation::FloorDivide => {
+            let quotient = lhs.wrapping_div(rhs);
+            if lhs.wrapping_rem(rhs) != 0 && (lhs < 0) != (rhs < 0) {
+                quotient.wrapping_sub(1)
+            } else {
+                quotient
+            }
+        }
+        ConstNumericOperation::Modulo => {
+            let remainder = lhs.wrapping_rem(rhs);
+            if remainder != 0 && ((remainder < 0) != (rhs < 0)) {
+                remainder.wrapping_add(rhs)
+            } else {
+                remainder
+            }
+        }
+        ConstNumericOperation::Conversion | ConstNumericOperation::CompareTo => return None,
+    })
 }
 
 /// An unsigned `and`/`or`/`xor`/`shl`/`shr` at `ty`'s width; a shift distance is masked to it.
@@ -76,9 +96,9 @@ pub(super) fn unsigned_bitwise(
         FirBinaryOperation::BitwiseAnd => lhs & i128::from(unsigned(rhs)?),
         FirBinaryOperation::BitwiseOr => lhs | i128::from(unsigned(rhs)?),
         FirBinaryOperation::BitwiseXor => lhs ^ i128::from(unsigned(rhs)?),
-        FirBinaryOperation::ShiftLeft => lhs << shift_distance(rhs, width)?,
+        FirBinaryOperation::ShiftLeft => lhs.wrapping_shl(shift_distance(rhs, width)?),
         FirBinaryOperation::ShiftRight | FirBinaryOperation::UnsignedShiftRight => {
-            lhs >> shift_distance(rhs, width)?
+            lhs.wrapping_shr(shift_distance(rhs, width)?)
         }
         _ => return None,
     };
@@ -274,6 +294,84 @@ mod tests {
             evaluate(ConstNumericOperation::Conversion, &double, &[], Ty::UInt)
                 .map(|value| value.value),
             Some(FirConstant::UInt(0))
+        );
+    }
+
+    #[test]
+    fn integral_operations_wrap_at_the_result_width_without_overflowing_the_host() {
+        let ulong = |value: u64| constant(FirConstant::ULong(value as i64), Ty::ULong);
+        let long = |value| constant(FirConstant::Long(value), Ty::Long);
+        let apply = |operation, lhs: &EvaluatedConstant, rhs: &EvaluatedConstant, result| {
+            evaluate(operation, lhs, std::slice::from_ref(rhs), result).map(|value| value.value)
+        };
+        let max = ulong(u64::MAX);
+        assert_eq!(
+            apply(ConstNumericOperation::Multiply, &max, &max, Ty::ULong),
+            Some(FirConstant::ULong(1))
+        );
+        assert_eq!(
+            apply(ConstNumericOperation::Add, &max, &max, Ty::ULong),
+            Some(FirConstant::ULong(u64::MAX.wrapping_add(u64::MAX) as i64))
+        );
+        assert_eq!(
+            apply(ConstNumericOperation::Subtract, &ulong(0), &max, Ty::ULong),
+            Some(FirConstant::ULong(1))
+        );
+        let uint_max = constant(FirConstant::UInt(i64::from(u32::MAX)), Ty::UInt);
+        assert_eq!(
+            apply(ConstNumericOperation::Multiply, &max, &uint_max, Ty::ULong),
+            Some(FirConstant::ULong(
+                u64::MAX.wrapping_mul(u64::from(u32::MAX)) as i64
+            ))
+        );
+        assert_eq!(
+            apply(ConstNumericOperation::Divide, &max, &max, Ty::ULong),
+            Some(FirConstant::ULong(1))
+        );
+        assert_eq!(
+            apply(
+                ConstNumericOperation::Remainder,
+                &max,
+                &ulong(10),
+                Ty::ULong
+            ),
+            Some(FirConstant::ULong(5))
+        );
+        assert_eq!(
+            apply(ConstNumericOperation::Divide, &max, &ulong(0), Ty::ULong),
+            None
+        );
+        assert_eq!(
+            apply(ConstNumericOperation::Modulo, &max, &ulong(0), Ty::ULong),
+            None
+        );
+        let (min, minus_one) = (long(i64::MIN), long(-1));
+        assert_eq!(
+            apply(
+                ConstNumericOperation::FloorDivide,
+                &min,
+                &minus_one,
+                Ty::Long
+            ),
+            Some(FirConstant::Long(i64::MIN))
+        );
+        assert_eq!(
+            apply(ConstNumericOperation::Modulo, &min, &minus_one, Ty::Long),
+            Some(FirConstant::Long(0))
+        );
+        assert_eq!(
+            apply(ConstNumericOperation::Multiply, &min, &min, Ty::Long),
+            Some(FirConstant::Long(0))
+        );
+        assert_eq!(
+            unsigned_bitwise(
+                FirBinaryOperation::ShiftLeft,
+                &max,
+                &constant(FirConstant::Int(63), Ty::Int),
+                Ty::ULong
+            )
+            .map(|value| value.value),
+            Some(FirConstant::ULong(i64::MIN))
         );
     }
 }

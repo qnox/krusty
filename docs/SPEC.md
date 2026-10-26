@@ -15304,9 +15304,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   declarations. The provider classifies each from its complete declaration (the annotation, the
   qualified owner or package, receiver, parameters and result) into the semantic role
   `IntrinsicConstNumeric`, and a call to one folds the same way: `1u + 2u` is `iconst_3`, not
-  `iadd` and `UInt.constructor-impl`, and `(7u / 2u).toString()` is `ldc "3"`. Values are exact and
-  wrap to the declared result: an operation on two widths computes at the wider operand type (at
-  least `UInt` for unsigned operands, `Int` for signed ones), so `300u.mod(7.toUByte())` is `6`;
+  `iadd` and `UInt.constructor-impl`, and `(7u / 2u).toString()` is `ldc "3"`. Values wrap to the
+  declared result: an operation on two widths computes at the wider operand type (at least `UInt`
+  for unsigned operands, `Int` for signed ones), so `300u.mod(7.toUByte())` is `6`. The evaluator
+  uses wrapping 128-bit arithmetic over the exact operands, so a product of two `ULong` values
+  wraps at the result width instead of overflowing the compiler's intermediate
+  (`18446744073709551615uL * 18446744073709551615uL` is `1uL`), and `Long.MIN_VALUE.floorDiv(-1L)`
+  is `Long.MIN_VALUE` as at run time;
   `floorDiv` rounds toward negative infinity and `mod` takes the divisor's sign (`Double.mod` too);
   a signed value converts to an unsigned type by its bits (`(-1).toByte().toUInt()` is 4294967295),
   a floating value saturates (`(-3.5).toUInt()` is 0), and an unsigned value converts to `Float`
