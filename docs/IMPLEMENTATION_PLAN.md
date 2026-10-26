@@ -5589,8 +5589,9 @@ regress.
     caller's: 1 more box file is byte-identical on 2.4.21
     (`coroutines/featureIntersection/suspendInlineSuspendFinally`), none regresses, and all 7,184
     applicable files run.
-    ☐ `$default` calls, non-public callees of another file, suspend callees, `crossinline`
-    parameters, calls in default arguments, and callee bodies with local classes or enum switches.
+    ☐ `$default` calls, non-public callees of another file, suspend callees (and the calls a
+    suspend inline function holds), `crossinline` parameters, calls in default arguments, and
+    callee bodies with local classes or enum switches.
 - ☐ 7. Delete `InlineBodyPlan` and its resolver/FIR threading once the coroutine state machine runs
   on inlined bytecode (the plans exist only to reach IR before `lower_suspend`).
 
