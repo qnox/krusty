@@ -13461,6 +13461,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   companion's constructor code (over no parameters) for the value-class rewrite, so `Id(0)` there
   is `Id.constructor-impl(0)` stored as the carrier. krusty left `new Id(0)`, a `VerifyError`.
   Tests: `tests/companion_initializer_value_class_e2e.rs`.
+- **A value class's companion properties are statics of the value class.** kotlinc stores them as
+  for any class: private statics of the value class (a `@JvmField`/`lateinit` one public),
+  initialized in its `<clinit>` after `Companion`, reached from the companion's accessors through
+  `access$getX$cp`/`access$setX$cp`; a companion `init` block runs there in source order. krusty
+  kept them as `Companion` instance fields. Tests: `tests/value_class_companion_property_storage_e2e.rs`.
 - **An owner reads its explicit backing field, typed as the field.** Inside the class that
   declares `val a: Any field = V(1)`, a read whose receiver's static type is exactly that class is
   kotlinc's `IrGetField` of the field, not a call of `getA()`: `a.x` over a value class
