@@ -176,7 +176,7 @@ impl BodyLowering<'_, '_, '_> {
             // array's own `toString` answers — `data class D(val xs: IntArray)` prints
             // `D(xs=[1, 2])`. That is the same rendering `xs.contentToString()` asks for, and the
             // runtime already answers it for every array it lays out.
-            IrIntrinsic::DataClassArrayToString { .. } => {
+            IrIntrinsic::GeneratedPropertyArrayToString { .. } => {
                 let [value] = args else {
                     return Err("a malformed data-class array rendering".into());
                 };

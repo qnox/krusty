@@ -957,7 +957,7 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                     "(String({}).split('').reduce((h,c)=>((h*31+c.charCodeAt(0))|0),0))",
                     emit_expr(ir, args[0], inst)
                 ),
-                crate::ir::IrIntrinsic::DataClassArrayToString { .. } => {
+                crate::ir::IrIntrinsic::GeneratedPropertyArrayToString { .. } => {
                     format!("String([{}])", emit_expr(ir, args[0], inst))
                 }
             },

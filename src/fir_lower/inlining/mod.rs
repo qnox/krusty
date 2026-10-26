@@ -1824,7 +1824,7 @@ fn specialize_intrinsic(operation: &mut IrIntrinsic, bindings: &HashMap<String, 
         | IrIntrinsic::GeneratedPropertyEquals { ty: operand }
         | IrIntrinsic::Ieee754Equals { operand }
         | IrIntrinsic::GeneratedPropertyHash { ty: operand }
-        | IrIntrinsic::DataClassArrayToString { ty: operand }
+        | IrIntrinsic::GeneratedPropertyArrayToString { ty: operand }
         | IrIntrinsic::TypeOf { ty: operand } => specialize_ty(operand, bindings),
         IrIntrinsic::Assert { .. }
         | IrIntrinsic::ArrayGet
