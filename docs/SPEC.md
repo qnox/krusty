@@ -1022,8 +1022,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **A suspend function's result is annotated `@Nullable`.** Its CPS `Object` result is either
   the value or `COROUTINE_SUSPENDED`, so kotlinc annotates it `@Nullable` whatever the declared
   result: a non-null value class, a bare type parameter (otherwise unannotated), or an abstract
-  declaration's (`jvm/ir_emit/declared_nullability.rs`, `jvm/abstract_method_nullability.rs`).
+  declaration's (`jvm/ir_emit/declared_nullability.rs`).
   Tests: `tests/suspend_result_nullability_e2e.rs`.
+- **An abstract method's nullability annotations come from its declaration.** kotlinc classifies
+  a bodiless method's parameters and result exactly as a concrete method's: a non-null value-class
+  parameter is `@NotNull` even when its carrier admits null (`Result<T>`, a value class over
+  `Any?`). krusty classified an abstract method from its erased carrier, writing `@Nullable`
+  (`jvm/ir_emit/function_annotations.rs`). Test: `tests/value_class_member_nullability_e2e.rs`.
 - **`suspendCoroutine` is an ordinary inline suspend call.** The stdlib declares it a public
   `@InlineOnly` suspend function whose compiled body already holds kotlinc's suspension markers
   and `SafeContinuation` protocol, and kotlinc inlines that body like any other: no declaration
