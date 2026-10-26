@@ -1737,8 +1737,8 @@ mod type_parameter_nullability_annotations_e2e;
 mod type_resolution;
 #[path = "unit_expression_body_return_line_e2e.rs"]
 mod unit_expression_body_return_line_e2e;
-#[path = "unsigned_operations_e2e.rs"]
-mod unsigned_operations_e2e;
+#[path = "e2e/unsigned_values.rs"]
+mod unsigned_values;
 #[path = "unsupported_kotlinc_arguments_e2e.rs"]
 mod unsupported_kotlinc_arguments_e2e;
 #[path = "upper_bound_violations_e2e.rs"]
@@ -2218,6 +2218,8 @@ mod private_constructor_accessors_e2e;
 mod private_inline_property_ref_e2e;
 #[path = "read_only_iterator_stubs_e2e.rs"]
 mod read_only_iterator_stubs_e2e;
+#[path = "read_only_stub_generic_override_e2e.rs"]
+mod read_only_stub_generic_override_e2e;
 #[path = "read_only_stub_inheritability_e2e.rs"]
 mod read_only_stub_inheritability_e2e;
 #[path = "read_only_stub_override_bridges_e2e.rs"]
@@ -2381,6 +2383,7 @@ mod private_inline_access_e2e;
 mod private_inline_property_access_e2e;
 #[path = "private_member_extension_accessor_e2e.rs"]
 mod private_member_extension_accessor_e2e;
+mod private_property_inline_access_e2e;
 #[path = "private_set_e2e.rs"]
 mod private_set_e2e;
 #[path = "probe_argument_call_e2e.rs"]
@@ -3057,5 +3060,7 @@ mod field_store_lines_e2e;
 #[path = "written_default_accessor_e2e.rs"]
 mod written_default_accessor_e2e;
 
+#[path = "intersection_bound_metadata_order_e2e.rs"]
+mod intersection_bound_metadata_order_e2e;
 #[path = "where_bound_arguments_e2e.rs"]
 mod where_bound_arguments_e2e;

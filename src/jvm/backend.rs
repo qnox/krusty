@@ -1542,17 +1542,27 @@ pub fn facade_package_metadata_from_ir(
             };
             let companion = declaration.is_companion_extension();
             let field = property_field(ir, declaration);
-            let accessor_parameters = declaration
+            // The accessors' descriptors erase the property's type parameters to their primary
+            // bounds, as the accessor methods themselves do.
+            let mut accessor_types = declaration
                 .context_parameters
                 .iter()
                 .copied()
                 .chain(declaration.receiver.filter(|_| !companion))
                 .collect::<Vec<_>>();
-            let descriptor_parameters = accessor_parameters
+            accessor_types.push(declaration.ty);
+            if let Some(getter) = getter_function {
+                accessor_types =
+                    crate::jvm::generic_erasure::erased_for_function(ir, getter, &accessor_types);
+            }
+            let erased_ty = accessor_types
+                .pop()
+                .expect("the property type was pushed last");
+            let descriptor_parameters = accessor_types
                 .iter()
                 .map(|parameter| crate::jvm::names::type_descriptor(*parameter))
                 .collect::<String>();
-            let ty_descriptor = crate::jvm::names::type_descriptor(declaration.ty);
+            let ty_descriptor = crate::jvm::names::type_descriptor(erased_ty);
             // A value class is stored as its carrier. The getter kotlinc records, and the field
             // descriptor a reader cannot derive from `S`, both name that carrier.
             let value_descriptor =

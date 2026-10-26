@@ -10293,6 +10293,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   simply the first declared bound: kotlinc hoists a CLASS bound ahead of interface bounds regardless of
   order (`where T : Named, T : Base` erases to `Base`), and writes `<T extends Base & Named>` in the
   generic signature where krusty writes only the first.
+- **Kotlin metadata keeps a type parameter's bounds in written order.** For `fun <T> f() where
+  T : Marker, T : Base`, kotlinc's metadata serializer writes `TypeParameter.upper_bound` in the
+  declaration's order, `Marker` then `Base`. Only the JVM side leads with the class bound:
+  `writeFormalTypeParameter` writes the first class bound, then the other bounds in written order
+  (`<T:LBase;:LMarker;>`), and `erasedUpperBound` erases `T` to `Base` (the first class bound, else
+  the first bound) for either written order. krusty's package metadata reads the declaration's own
+  bounds and spellings unchanged, as class and member metadata do. The JVM signature writer, a
+  package property's `JvmPropertySignature` accessor descriptors, and the classpath reader each
+  pick the primary bound themselves. The reader needs it to pair a dependency's metadata function
+  with the JVM method its descriptor erases to. A parameter typed by an enclosing class's type
+  parameter (`class C<T : A, U : B> { fun choose(a: T); fun choose(b: U) }`) erases through that
+  class's declared formals, which the reader passes beside the function's own; the function's
+  formals shadow a same-named enclosing one, and the enclosing ones never count toward the
+  function's explicit type-argument arity. An unbounded formal erases to its implicit `Any?`; a
+  name no declaration in scope declares has no primary bound, and the function does not align. Tests:
+  `tests/intersection_bound_metadata_order_e2e.rs`,
+  `tests/krusty_roundtrip_class_metadata_e2e.rs`.
 - **`ClassName.Companion` named explicitly.** The bare `ClassName` already denotes the companion
   singleton in a value position (`val f: Factory = Widget`); both spellings mean the same object, so
   they resolve to the same type and lower to the same `getstatic C.Companion:LC$Companion;`. As in
@@ -10559,6 +10576,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   copied body and uses the same accessors.
   Tests: `tests/private_inline_access_e2e.rs`, `tests/private_inline_property_access_e2e.rs`.
   Box `ir/privateSignatures/privateLeakThroughInline.kt`.
+- **A private property an inline body of another file reaches goes through its owner's accessor.**
+  A non-private inline function's body that another file inlines names its file's private
+  properties as module properties, and the JVM realizes each access as the call the declaring
+  class publishes, as kotlinc's copy makes it: `access$get<X>$p` / `access$set<X>$p` on the facade
+  for a field-backed top-level property, `access$get<X>` / `access$set<X>` when the source declares
+  the accessor or a delegate supplies it, and the instance form taking the owner first
+  (`access$getX$p(Owner)`) for a class member. A `const val` is read as its value. A private
+  `lateinit` read through `access$get<X>$p` yields the raw field, so the use site throws while it
+  is unset, as its own class's read does. Calling the property's `getX`, which a private property
+  does not publish, failed with `NoSuchMethodError`. A member's owner is the call's dispatch
+  receiver, not an argument: the declared parameters of the call stay those of its source
+  arguments (context parameters, extension receiver, setter value), and only the physical
+  descriptor carries the owner slot. Those parameters take their value-class carriers
+  (`access$setTag$p(Holder, String)`), and a declared accessor's bridge carries that accessor's
+  mangled JVM name (`access$getWeight-b--Cat4` for `val Label.weight`); a field bridge stays
+  unmangled, on a class and on a facade alike (`access$setStamp$p(String)`).
+  Test: `tests/private_property_inline_access_e2e.rs` (field, declared, delegated, `lateinit` and
+  `const` top-level properties, a member, a value-class member written through its setter, and a
+  member extension over a value class, and a value-class top-level property, against kotlinc's
+  bytes and run).
 - **A private member-extension accessor reached from another class calls `access$<name>`.** The
   accessor is an instance method of the declaring class (`getItem(Key)` for `val Key.item`).
   A local class inside the owner is a separate class file, so it cannot call that private method.
@@ -13552,6 +13589,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   order, interleaved with the throwing ones. An abstract superclass that has the face writes the
   bridge, and its subclass does not repeat it. Tests: `tests/read_only_stub_override_bridges_e2e.rs`
   (class bytes and box runs against kotlinc).
+- **A generic superclass member implements a read-only stub's member after substitution.** A
+  superclass member is compared with the mutable member in the class's substitution context:
+  `Base<T>.set(e: T)` under `Walk : Base<String>(), ListIterator<String>` implements
+  `set(String)`, through any chain of generic superclasses. For a source superclass the
+  declaration's recorded semantic signature is substituted with the class's checked application.
+  For a Kotlin dependency it is the metadata signature. Such a member writes no throwing stub. Its
+  bridge targets the member's own physical descriptor, and it is written only when that differs
+  from the erased one. So `Base<T>` (physically `set(Object)`) needs none, and
+  `Base<T : CharSequence>` gets `set(Object)` that checkcasts to `CharSequence` and calls
+  `set(CharSequence)`. The nearest implementation is the bridge's target. A suspend member
+  implements no such member: its continuation is a physical parameter, so a dependency's
+  `suspend fun set(e: T)` leaves the class kotlinc's throwing `set(Object)` stub. Tests:
+  `tests/read_only_stub_generic_override_e2e.rs` (class bytes and box runs against kotlinc).
 - **A nested value class over a reference carrier is read as its carrier.** In `ZN(val z: Z1?)`
   with `Z1(val x: En)`, `Z1?` is carried as `En?`, so `zn.z` and `zn.z!!` already are `Z1`'s
   carrier and `.x` of them is that carrier itself, with no cast. krusty took the unboxed property
@@ -14255,7 +14305,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   declaration's class as a loop reads it, and the operands ordered and stored as for a range
   literal (`make().indices` is read before a value with side effects). `!in` keeps its negation of
   the test, as kotlinc keeps its `not()` call. A nullable value (`IntRange.contains(Int?)`) and a
-  user `indices` property call `contains`. (`tests/indices_contains_e2e.rs`.)
+  user `indices` property call `contains`. An unsigned array's `indices` has the same role, so
+  `i in uints.indices` reads its bound through the value class's own `size`
+  (`UIntArray.getSize-impl`), as kotlinc does. (`tests/indices_contains_e2e.rs`,
+  `tests/unsigned_array_indices_e2e.rs`.)
 
   kotlinc's `ArrayIndicesHandler` matches `isUnsignedArray()` on the JVM
   (`optimizeLoopsOverUnsignedArrays`) and reads the bound once through
@@ -14274,10 +14327,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `getSize([I)I` that no class declares, which is a missing dependency realization. The Native
   backend stores an unsigned array as its signed carrier, so it realizes that member as the
   carrier's length when the getter's declaring classifier is an unsigned array whose frozen
-  value-class declaration stores a signed primitive array (`is_unsigned_array_carrier_size`). Not yet ported: `xs[i]` and
-  `xs[i] = v` on an unsigned array, which krusty still realizes as the carrier's
-  `iaload`/`iastore` where kotlinc calls `get-pVg5ArA`/`set-VXSXFK8`.
+  value-class declaration stores a signed primitive array (`is_unsigned_array_carrier_size`).
   (`tests/unsigned_array_indices_e2e.rs`.)
+
+- **A subscript on an unsigned array is its value class's own `get`/`set` operator.** Kotlin
+  resolves `xs[i]` to the `get` operator and `xs[i] = v` to the `set` operator of the receiver's
+  class. Only an array classifier's element access is the built-in array operation: the checker
+  takes that rung for a single `Int` index only when the receiver is not declared a value class
+  (`builtin_array_read_element`, `builtin_array_store_element`, through `ty_is_value_class`).
+  `UIntArray`, `UByteArray`, `UShortArray` and `ULongArray` are value classes over the signed
+  arrays, so their subscripts select the stdlib's members and the JVM backend calls them as
+  value-class statics, as kotlinc does: `UIntArray.get-pVg5ArA([II)I` and
+  `UIntArray.set-VXSXFK8([III)V`, and the mangled pair of each other width. The carrier's
+  `iaload`/`iastore` would store the same bits, but is not kotlinc's class file. Compound
+  assignment (`xs[i] += v`), increment and decrement, and a safe-call receiver (`h?.xs[i]`) read
+  and store through the same two members. Without a stdlib an unsigned array has no value-class
+  declaration and keeps the built-in element access. An `Array<UIntArray>` stores each element
+  as its box and its element load leaves the box: the value-class pass unboxes it once where the
+  class's member needs the carrier and keeps it where a reference is wanted, so
+  `back[1][0]` is `aaload`, `unbox-impl`, `get-pVg5ArA` and `val a: Any = back[1]` stays the box.
+  The Native backend stores an unsigned array as its signed carrier, so it realizes that `get`
+  as the carrier's element load and that `set` as its store when the callable's declaring
+  classifier is an unsigned array whose frozen value-class declaration stores a signed primitive
+  array (`unsigned_array_carrier_access`).
+  (`tests/unsigned_array_element_access_e2e.rs`, `tests/unsigned_arrays_e2e.rs`.)
 
 - **A `checkcast` right before an `aastore` is removed, as kotlinc's
   `RedundantCheckcastsBeforeAastoreMethodTransformer` does.** The pass runs after jump negation and
