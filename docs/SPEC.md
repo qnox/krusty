@@ -13635,6 +13635,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   whatever its visibility, and reports the property's own getter (`getX()I`) to reflection. A
   private one therefore needs no `access$getX$p` bridge. krusty called `getX()` for a public one
   and gave a private one a bridge. Tests: `tests/value_class_property_reference_e2e.rs`.
+- **A value class's source `equals` override keeps `other: Any?`.** The box's `equals(Object)`
+  calling `equals-impl` is the override, so its parameter is `@Nullable` like `Any.equals`'s;
+  krusty annotated it `@NotNull`. With such an override, `equals-impl0` compares the carriers
+  through it on their boxes, `box-impl(p1).equals(box-impl(p2))`; krusty called
+  `equals-impl(p1, box-impl(p2))`. Tests: `tests/value_class_any_override_e2e.rs`.
 - **An owner reads its explicit backing field, typed as the field.** Inside the class that
   declares `val a: Any field = V(1)`, a read whose receiver's static type is exactly that class is
   kotlinc's `IrGetField` of the field, not a call of `getA()`: `a.x` over a value class
