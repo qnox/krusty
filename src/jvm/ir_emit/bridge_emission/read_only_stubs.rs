@@ -4,12 +4,15 @@
 //! carries no line numbers: kotlinc builds it without a source offset. Its bridge to the mutable
 //! declaration's erased descriptor is `ACC_PUBLIC|ACC_BRIDGE|ACC_SYNTHETIC` with the same body.
 //! A member the class already implements gets no stub, only that bridge, which forwards to the
-//! implementation like any bridge and maps to the class declaration's line.
+//! implementation like any bridge and maps to the class declaration's line. A builtin with a
+//! different JVM name (`removeAt`) is realized under that name, and its erased bridge directly
+//! follows the stub; an implementation of it gets kotlinc's final special bridge under the JVM
+//! name, `ACC_PUBLIC|ACC_FINAL|ACC_BRIDGE`, and the erased bridge forwards to that.
 
 use super::super::{
-    box_prim_free, discard, emit_return, finish_code_sig, jvm_declared_ty, jvm_tys, load,
-    local_variable_desc, method_descriptor, slot_words, unbox_prim_from, ClassWriter, CodeBuilder,
-    EmitEnv, JvmSignatureFormatter,
+    box_prim_free, discard, emit_return, finish_code_sig, jvm_tys, load, local_variable_desc,
+    method_descriptor, slot_words, unbox_prim_from, ClassWriter, CodeBuilder, EmitEnv,
+    JvmSignatureFormatter,
 };
 use crate::ir::{IrClass, IrFile};
 use crate::jvm::read_only_collection_stubs::{ReadOnlyStub, StubBody};
@@ -27,23 +30,28 @@ pub(super) fn emit_stubs(ir: &IrFile, class: &IrClass, cw: &mut ClassWriter, env
         .for_class(class.fq_name_id());
     for stub in stubs.iter().filter(|stub| stub.body == StubBody::Throwing) {
         let parameters = jvm_tys(&stub.parameters);
-        let result = jvm_declared_ty(&stub.result);
-        let descriptor = method_descriptor(&parameters, result);
+        let descriptor = method_descriptor(&parameters, stub.physical_result());
+        let signature_result = stub.signature_result();
         let signature = if stub.declaration_site_wildcards {
-            formatter
-                .method_positions_with_declaration_site_wildcards(&stub.parameters, &stub.result)
+            formatter.method_positions_with_declaration_site_wildcards(
+                &stub.parameters,
+                &signature_result,
+            )
         } else {
-            formatter.method_positions(&stub.parameters, &stub.result)
+            formatter.method_positions(&stub.parameters, &signature_result)
         }
         .filter(|signature| *signature != descriptor);
         let method = ThrowingMethod {
-            name: &stub.name,
+            name: &stub.physical_name,
             parameters: &parameters,
             parameter_names: &stub.parameter_names,
             descriptor: &descriptor,
             signature: signature.as_deref(),
         };
         emit_throwing::<0x0001>(class, cw, &method);
+        if stub.is_renamed() && stub.bridge.is_some() {
+            emit_stub_bridge(class, cw, stub);
+        }
     }
 }
 
@@ -62,7 +70,11 @@ impl<'a> StubBridges<'a> {
             .read_only_stubs
             .for_class(class.fq_name_id())
             .iter()
-            .filter(|stub| stub.bridge.is_some())
+            .filter(|stub| match stub.body {
+                // A renamed stub's bridge directly follows it.
+                StubBody::Throwing => stub.bridge.is_some() && !stub.is_renamed(),
+                StubBody::Implemented { .. } => stub.bridge.is_some() || stub.is_renamed(),
+            })
             .collect();
         // Stable: equal keys keep the candidates' order.
         pending.sort_by_key(|stub| match &stub.body {
@@ -96,39 +108,76 @@ impl<'a> StubBridges<'a> {
 }
 
 fn emit_stub_bridge(class: &IrClass, cw: &mut ClassWriter, stub: &ReadOnlyStub) {
+    if let StubBody::Implemented {
+        target,
+        target_result,
+        ..
+    } = &stub.body
+    {
+        let mut target = Target {
+            name: &stub.name,
+            parameters: target,
+            result: *target_result,
+        };
+        if stub.is_renamed() {
+            // kotlinc's special bridge: the implementation under the builtin's JVM name.
+            let descriptor = method_descriptor(target.parameters, target.result);
+            if !cw.has_method(&stub.physical_name, &descriptor) {
+                let special = ThrowingMethod {
+                    name: &stub.physical_name,
+                    parameters: target.parameters,
+                    parameter_names: &stub.parameter_names,
+                    descriptor: &descriptor,
+                    signature: None,
+                };
+                emit_forwarding::<{ 0x0001 | 0x0010 | 0x0040 }>(
+                    class,
+                    cw,
+                    &target,
+                    &special,
+                    target.result,
+                );
+            }
+            target.name = &stub.physical_name;
+        }
+        let Some((parameters, result)) = stub.bridge.as_ref() else {
+            return;
+        };
+        let descriptor = method_descriptor(parameters, *result);
+        if cw.has_method(&stub.physical_name, &descriptor) {
+            return;
+        }
+        let method = ThrowingMethod {
+            name: &stub.physical_name,
+            parameters,
+            parameter_names: &stub.parameter_names,
+            descriptor: &descriptor,
+            signature: None,
+        };
+        emit_forwarding::<{ 0x0001 | 0x0040 | 0x1000 }>(class, cw, &target, &method, *result);
+        return;
+    }
     let (parameters, result) = stub
         .bridge
         .as_ref()
         .expect("only a stub with a bridge descriptor is pending");
     let descriptor = method_descriptor(parameters, *result);
-    if cw.has_method(&stub.name, &descriptor) {
+    if cw.has_method(&stub.physical_name, &descriptor) {
         return;
     }
     let method = ThrowingMethod {
-        name: &stub.name,
+        name: &stub.physical_name,
         parameters,
         parameter_names: &stub.parameter_names,
         descriptor: &descriptor,
         signature: None,
     };
-    match &stub.body {
-        StubBody::Throwing => emit_throwing::<{ 0x0001 | 0x0040 | 0x1000 }>(class, cw, &method),
-        StubBody::Implemented {
-            target,
-            target_result,
-            ..
-        } => {
-            let target = Target {
-                parameters: target,
-                result: *target_result,
-            };
-            emit_forwarding(class, cw, &target, &method, *result);
-        }
-    }
+    emit_throwing::<{ 0x0001 | 0x0040 | 0x1000 }>(class, cw, &method);
 }
 
-/// The physical descriptor of the member a bridge forwards to.
+/// The member a bridge forwards to, by its JVM name and physical descriptor.
 struct Target<'a> {
+    name: &'a str,
     parameters: &'a [Ty],
     result: Ty,
 }
@@ -137,7 +186,7 @@ struct Target<'a> {
 /// implementation's physical parameter, the class's member at that descriptor is called, and its
 /// result is discarded for a `void` bridge (a `Nothing` member's `Void`) or boxed back to the
 /// erased result when that is a reference.
-fn emit_forwarding(
+fn emit_forwarding<const ACCESS: u16>(
     class: &IrClass,
     cw: &mut ClassWriter,
     target: &Target<'_>,
@@ -169,7 +218,7 @@ fn emit_forwarding(
     }
     let result = target.result;
     let owner = class.fq_name();
-    let method = cw.methodref(&owner, bridge.name, &method_descriptor(targets, result));
+    let method = cw.methodref(&owner, target.name, &method_descriptor(targets, result));
     let arguments: i32 = targets.iter().map(|ty| i32::from(slot_words(*ty))).sum();
     code.invokevirtual(method, arguments, i32::from(slot_words(result)));
     if erased_result == Ty::Unit {
@@ -186,7 +235,7 @@ fn emit_forwarding(
         }
     }
     emit_return(erased_result, &mut code);
-    finish_code_sig::<{ 0x0001 | 0x0040 | 0x1000 }>(
+    finish_code_sig::<ACCESS>(
         cw,
         bridge.name,
         bridge.descriptor,

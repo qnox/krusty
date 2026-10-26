@@ -874,6 +874,17 @@ impl ClassSets {
         )
     }
 
+    /// The `javap -v -p` block of each method `class` declares, from kotlinc and from krusty, keyed
+    /// by its declaration line (`public boolean add(java.lang.String);`): its descriptor, flags,
+    /// code, debug tables and attributes, pool indices erased as in [`Self::class_listing`].
+    pub fn method_blocks(&self, class: &str) -> (Vec<(String, String)>, Vec<(String, String)>) {
+        let (reference, krusty) = self.class_listing(class);
+        (
+            verbose_method_blocks(&reference),
+            verbose_method_blocks(&krusty),
+        )
+    }
+
     /// The `javap -c -p -l` block of the method `class` declares as `declaration` (javap's spelling,
     /// such as `public static final int f();`), from kotlinc and from krusty, with constant-pool
     /// indices erased as in [`Self::code_differences`].
@@ -1077,6 +1088,25 @@ fn declared_methods(listing: &str) -> Vec<String> {
         .filter(|line| line.contains('(') && line.ends_with(';'))
         .map(str::to_string)
         .collect()
+}
+
+/// The member blocks of a `javap -v -p` listing that declare a method. A blank line ends each
+/// member's block.
+fn verbose_method_blocks(listing: &str) -> Vec<(String, String)> {
+    let mut blocks: Vec<(String, String)> = Vec::new();
+    let mut current: Option<(String, Vec<&str>)> = None;
+    for line in listing.lines().map(str::trim) {
+        if line.is_empty() || line == "}" {
+            if let Some((declaration, body)) = current.take() {
+                blocks.push((declaration, body.join("\n")));
+            }
+        } else if let Some((_, body)) = current.as_mut() {
+            body.push(line);
+        } else if line.contains('(') && line.ends_with(';') {
+            current = Some((line.to_string(), Vec::new()));
+        }
+    }
+    blocks
 }
 
 /// `javap -c -p -l` of a class with every `#N` pool index erased.
