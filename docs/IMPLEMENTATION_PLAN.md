@@ -1,5 +1,12 @@
 # krusty — implementation plan
 
+## Bound declaration-name inventory
+
+Expose selected declaration-name evidence by typed resolved key across source, JVM, KLIB and their
+federated views. Preserve absent, selected-unknown and selected-known records in caches and frozen
+backend facts, including aliases without target shapes. This supplies the metadata consumer seam;
+the full class-ID encoder and callable-reference adapter regressions remain separate follow-ups.
+
 ## Alias declaration-name producers
 
 Retain an alias's own optional container and exact segment through stable source headers, the

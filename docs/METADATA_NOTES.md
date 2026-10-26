@@ -1,5 +1,15 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Identity-keyed declaration-name projection
+
+Providers project name evidence directly from their selected classifier and alias records. Typed
+ordinary/alias keys retain both declarations when their flattened identity is the same. The
+outer option distinguishes an absent declaration from a selected declaration whose name is unknown.
+Federation stops at the first present record; source-unit caches retain all three states. Frozen
+backend module facts keep source class and alias names independently of alias targets, and forward
+only absent identities to the dependency inventory. Literal-dollar ownership stays snapshot-owned.
+The metadata encoder callback and class-ID sinks remain a separate consumer change.
+
 ## Alias declaration-name evidence
 
 Package and Class type-alias tables supply the alias's exact simple name and declaring container.

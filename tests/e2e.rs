@@ -2782,6 +2782,9 @@ mod typealias_abbreviated_type_e2e;
 mod typealias_constructor_inference_e2e;
 #[path = "typealias_emission_e2e.rs"]
 mod typealias_emission_e2e;
+
+#[path = "classifier_declaration_identity_e2e.rs"]
+mod classifier_declaration_identity_e2e;
 #[path = "typealias_function_type_e2e.rs"]
 mod typealias_function_type_e2e;
 #[path = "typealias_generic_target_e2e.rs"]

@@ -13,6 +13,7 @@ mod classpath_annotation_classes;
 mod collection_canonicalization;
 mod declaration_headers;
 mod declared_members;
+mod symbol_source;
 use classpath_annotation_classes::{
     annotation_element_defaults, classpath_annotation_targets, java_annotation_parameter_list,
 };
@@ -4012,57 +4013,6 @@ impl JvmLibraries {
                 importable_declaration,
             },
         )
-    }
-}
-
-impl SymbolSource for JvmLibraries {
-    /// Both answered by the classpath, which is where this provider interned them.
-    fn external_callable(
-        &self,
-        identity: crate::fir::ExternalCallableId,
-    ) -> Option<crate::libraries::ExternalCallableRealization> {
-        self.cp.external_callable(identity)
-    }
-
-    fn external_property(
-        &self,
-        identity: crate::fir::ExternalPropertyId,
-    ) -> Option<crate::libraries::ExternalPropertyRealization> {
-        self.cp.external_property(identity)
-    }
-
-    fn package_exists(&self, parent: TypeName, name: &str) -> bool {
-        JvmLibraries::package_exists(self, parent, name)
-    }
-
-    fn symbols(
-        &self,
-        namespace: SymbolNamespace,
-        name: &str,
-    ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
-        JvmLibraries::symbols(self, namespace, name)
-    }
-
-    fn api_withheld_callable(&self, owner: TypeName, name: &str) -> bool {
-        self.api_withheld
-            .borrow()
-            .get(&owner)
-            .is_some_and(|names| names.contains(name))
-    }
-
-    fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
-        super::jvm_class_map::platform_flexible_upper_bound(lower)
-    }
-
-    fn generated_serializer_singleton(&self, classifier: TypeName) -> Option<TypeName> {
-        classifier_facts::generated_serializer_singleton(self, classifier)
-    }
-
-    fn serializable_class_elements(
-        &self,
-        classifier: TypeName,
-    ) -> Option<crate::types::SerializableClassElements> {
-        classifier_facts::serializable_class_elements(self, classifier)
     }
 }
 

@@ -583,6 +583,25 @@ impl EmptySymbolSource {
 }
 
 impl crate::symbol_source::SymbolSource for EmptySymbolSource {
+    fn classifier_declaration_name(
+        &self,
+        declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        let crate::libraries::ClassifierDeclarationKey::Ordinary(identity) = declaration else {
+            return None;
+        };
+        let record = self.symbols(
+            crate::symbol_source::SymbolNamespace::Package(identity.namespace()),
+            identity.segment_ref(),
+        );
+        (record.classifier_name == Some(identity)).then(|| {
+            record
+                .classifier
+                .as_ref()
+                .and_then(|shape| shape.declaration_name.clone())
+        })
+    }
+
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
         (parent == TypeName::ROOT && name == "kotlin")
             || (parent.matches("kotlin")

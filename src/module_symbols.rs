@@ -133,7 +133,7 @@ impl<'a> ModuleSymbols<'a> {
     }
 
     /// Build the classifier half of this provider's single symbol record. Kept private so callers
-    /// cannot query classifier metadata through a second `SymbolSource` operation.
+    /// cannot publish a classifier shape independently of its declaration record.
     fn classifier_record(&self, internal: TypeName) -> Option<std::sync::Arc<LibraryType>> {
         if self.syms.module_cache_enabled() {
             if let Some(shape) = self.syms.module_shape_cache.borrow().get(&internal) {
@@ -1288,6 +1288,28 @@ fn source_property(
 }
 
 impl SymbolSource for ModuleSymbols<'_> {
+    fn classifier_declaration_name(
+        &self,
+        declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        use crate::libraries::ClassifierDeclarationKey as Key;
+        match declaration {
+            Key::TypeAlias(identity) => self
+                .syms
+                .source_alias_expansions
+                .get(&identity)
+                .map(|alias| alias.declaration_name.clone()),
+            Key::Ordinary(identity) => self
+                .class_by_type_name(identity)
+                .map(|class| class.declaration_name.clone())
+                .or_else(|| {
+                    self.syms
+                        .source_class_header_shape(identity)
+                        .map(|shape| shape.declaration_name)
+                }),
+        }
+    }
+
     fn actualized_expect(&self, internal: TypeName) -> Option<TypeName> {
         self.syms
             .source_fragments

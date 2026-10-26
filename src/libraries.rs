@@ -57,7 +57,9 @@ pub use callable_scope_rung::CallableScopeRung;
 pub use classifier_callables::BoundInnerConstructor;
 pub(crate) use classifier_callables::{constructor_generic_signature, ConstructorAlias};
 pub(crate) use classifier_declaration::type_alias_target_classifier;
-pub use classifier_declaration::{AliasExpansion, ClassifierDeclaration, TypeAliasTemplate};
+pub use classifier_declaration::{
+    AliasExpansion, ClassifierDeclaration, ClassifierDeclarationKey, TypeAliasTemplate,
+};
 pub use classifier_kind::TypeKind;
 pub use declaration_header::{
     DeclarationHeader, DeclarationLanguage, HeaderSignature, HeaderSupertype, HeaderTypeParameter,

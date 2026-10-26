@@ -1,5 +1,14 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Bound declaration-name evidence
+
+A query for an already-bound classifier or alias key projects the selected declaration's own
+name. Ordinary and alias keys remain distinct: a top-level alias and a nested class can legally
+share a flattened JVM name. A present declaration with unavailable evidence shadows later declarations, just as a
+known name does. An alias retains its own identity and name even when its expanded classifier has
+no shape in that provider. Metadata naming does not reopen source-name binding or borrow a target's
+name. Body-local aliases remain owned by the active checker rather than the frozen module inventory.
+
 ## Type-alias declaration names
 
 A type alias retains its own declaring package or classifier and exact name segment, independently
