@@ -1,5 +1,13 @@
 # krusty — implementation plan
 
+## JVM declaration-owned member rows
+
+Consume classifier declaration-name facts in both per-file `InnerClasses` candidates and the
+cross-file module resolver. Keep top-level and unavailable module records from being replaced by
+a classpath record with the same physical identity. Preserve local/coroutine/reference provenance
+and exact table order. This slice leaves source identity publication and metadata class-ID encoding
+for subsequent changes; the complete literal-dollar classfile regression remains open there.
+
 ## Classifier declaration-name handoff
 
 Retain an optional declaration-owned package/owner and exact segment across source bootstrap,
