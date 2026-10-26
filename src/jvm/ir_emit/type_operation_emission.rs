@@ -99,7 +99,11 @@ impl Emitter<'_> {
             }
             _ => self.emit_type_op_operand(arg, code),
         };
-        if op == IrTypeOp::ImplicitCoercion {
+        // A conversion restates its intrinsic line; the unboxing after a `!!` keeps the line the
+        // assertion stated before its operand and states none of its own.
+        if op == IrTypeOp::ImplicitCoercion
+            && !matches!(self.ir.expr(arg), IrExpr::NotNullAssert { .. })
+        {
             self.mark_intrinsic_instruction(expression, code);
         }
         if matches!(op, IrTypeOp::Cast | IrTypeOp::CastNonNull)

@@ -10088,7 +10088,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     other than `&&`/`||`, and a numeric conversion, when no operand is unsigned. The receiver's
     own first line, marked at the same offset, stays as a second entry.
   - **Some intrinsics state it again at the instruction.** These are `arraylength`, `ineg`, the
-    widening and narrowing conversions, and `inv`'s `iconst_m1`.
+    widening and narrowing conversions, and `inv`'s `iconst_m1`. An unboxing is no conversion:
+    `b\n.v!!` states the `!!` line before its operand and nothing at `intValue`.
   - **Calls mark only at their invoke.** A member call, a getter, `toString`, or `!!.length` marks
     after the receiver's last line. Unsigned operators are inline functions, so they belong here
     too.

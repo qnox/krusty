@@ -33,9 +33,16 @@ pub(super) fn states_line_before_operands(body: &FirBody, expression: &FirExpr) 
                 && signed_operand(body, *lhs)
                 && signed_operand(body, *rhs)
         }
+        // A widening or narrowing between two primitives; an unboxing is no intrinsic call.
         FirExprKind::ImplicitConversion { value, conversion } => {
-            matches!(conversion.kind, FirConversionKind::NumericConversion { .. })
-                && !body.is_inlined_call_conversion(conversion.origin)
+            let FirConversionKind::NumericConversion { to } = conversion.kind else {
+                return false;
+            };
+            let from = body.expr(*value).map(|value| value.ty.get());
+            !body.is_inlined_call_conversion(conversion.origin)
+                && from.is_some_and(|from| {
+                    from.is_numeric_or_char() && to.get().is_numeric_or_char() && from != to.get()
+                })
                 && signed(expression)
                 && signed_operand(body, *value)
         }
