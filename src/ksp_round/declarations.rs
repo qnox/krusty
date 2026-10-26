@@ -541,6 +541,10 @@ impl Source<'_> {
             ty,
             getter: Some(getter),
             setter,
+            has_backing_field: super::backing_field::source_property_has_backing_field(
+                property,
+                matches!(owner, Owner::Class { header, .. } if header.kind == KspClassKind::Interface),
+            ),
             jvm_signature: None,
         };
         self.add_jvm_names(
@@ -609,6 +613,7 @@ impl Source<'_> {
             ty: header.constructor_property_type(index),
             getter: Some(getter),
             setter,
+            has_backing_field: Some(true),
             jvm_signature: None,
         };
         self.add_jvm_names(
@@ -958,6 +963,7 @@ impl Source<'_> {
                 ty: Some(applied("kotlin.enums.EnumEntries")),
                 getter: Some(super::accessors::compiler_getter()),
                 setter: None,
+                has_backing_field: Some(false),
                 jvm_signature: None,
             };
             let entries_ty = Ty::obj_args_name(

@@ -15,7 +15,8 @@ use super::super::{
     JvmSignatureFormatter,
 };
 use crate::ir::{IrClass, IrFile};
-use crate::jvm::read_only_collection_stubs::{ReadOnlyStub, StubBody};
+use crate::jvm::collection_barriers::BarrierOutcome;
+use crate::jvm::read_only_collection_stubs::{ReadOnlyStub, StubBarrier, StubBody};
 use crate::types::Ty;
 
 const MESSAGE: &str = "Operation is not supported for read-only collection";
@@ -136,6 +137,7 @@ fn emit_stub_bridge(class: &IrClass, cw: &mut ClassWriter, stub: &ReadOnlyStub) 
                     &target,
                     &special,
                     target.result,
+                    None,
                 );
             }
             target.name = &stub.physical_name;
@@ -154,7 +156,21 @@ fn emit_stub_bridge(class: &IrClass, cw: &mut ClassWriter, stub: &ReadOnlyStub) 
             descriptor: &descriptor,
             signature: None,
         };
-        emit_forwarding::<{ 0x0001 | 0x0040 | 0x1000 }>(class, cw, &target, &method, *result);
+        match stub.barrier {
+            // kotlinc's special bridge of a type-safe declaration is final, not synthetic, and
+            // tests each checked argument before the call.
+            Some(barrier) => emit_forwarding::<{ 0x0001 | 0x0010 | 0x0040 }>(
+                class,
+                cw,
+                &target,
+                &method,
+                *result,
+                Some((barrier, &stub.override_parameters)),
+            ),
+            None => emit_forwarding::<{ 0x0001 | 0x0040 | 0x1000 }>(
+                class, cw, &target, &method, *result, None,
+            ),
+        }
         return;
     }
     let (parameters, result) = stub
@@ -185,18 +201,37 @@ struct Target<'a> {
 /// The bridge of an implemented member: each erased argument is cast or unboxed to the
 /// implementation's physical parameter, the class's member at that descriptor is called, and its
 /// result is discarded for a `void` bridge (a `Nothing` member's `Void`) or boxed back to the
-/// erased result when that is a reference.
+/// erased result when that is a reference. A type-safe declaration's bridge first tests each
+/// checked argument against its declared type.
 fn emit_forwarding<const ACCESS: u16>(
     class: &IrClass,
     cw: &mut ClassWriter,
     target: &Target<'_>,
     bridge: &ThrowingMethod,
     erased_result: Ty,
+    barrier: Option<(StubBarrier, &[Ty])>,
 ) {
     let targets = target.parameters;
     cw.reserve_method_pool(bridge.name, bridge.descriptor, None, &[]);
     let words: u16 = bridge.parameters.iter().map(|ty| slot_words(*ty)).sum();
     let mut code = CodeBuilder::new(1 + words);
+    if let Some((barrier, declared)) = barrier {
+        for &index in barrier.checked_parameters {
+            let index = usize::from(index);
+            let slot = 1 + bridge.parameters[..index]
+                .iter()
+                .map(|ty| slot_words(*ty))
+                .sum::<u16>();
+            emit_type_check(
+                cw,
+                &mut code,
+                slot,
+                declared[index],
+                targets[index],
+                barrier.outcome,
+            );
+        }
+    }
     code.aload(0);
     let mut slot = 1u16;
     for (&erased, &target) in bridge.parameters.iter().zip(targets) {
@@ -255,6 +290,41 @@ fn emit_forwarding<const ACCESS: u16>(
         lines,
         &method_locals(class, bridge),
     );
+}
+
+/// kotlinc's test of one checked argument at `slot` against the declared type it reaches the
+/// implementation as: `instanceof` of its class, which a `null` passes when the type admits it.
+fn emit_type_check(
+    cw: &mut ClassWriter,
+    code: &mut CodeBuilder,
+    slot: u16,
+    declared: Ty,
+    physical: Ty,
+    outcome: BarrierOutcome,
+) {
+    let class = cw.class_ref(&declared.jvm_boxed_ref().map_or_else(
+        || crate::jvm::names::instanceof_internal_name(physical),
+        crate::jvm::names::instanceof_internal_name,
+    ));
+    let next = code.new_label();
+    code.aload(slot);
+    if declared.is_nullable() {
+        let present = code.new_label();
+        let tested = code.new_label();
+        code.dup();
+        code.ifnonnull(present);
+        code.pop();
+        code.push_int(1, cw);
+        code.goto(tested);
+        code.bind(present);
+        code.instance_of(class);
+        code.bind(tested);
+    } else {
+        code.instance_of(class);
+    }
+    code.ifne(next);
+    super::emit_barrier_outcome(outcome, cw, code);
+    code.bind(next);
 }
 
 fn method_locals(class: &IrClass, method: &ThrowingMethod) -> Vec<(String, String, u16)> {
