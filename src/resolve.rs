@@ -47,6 +47,7 @@ mod annotation_bindings;
 use annotation_bindings::{BoundAnnotation, BoundAnnotations};
 mod anonymous_extension_functions;
 mod anonymous_object_capture;
+mod backing_field_binding;
 mod boolean_implications;
 mod dependency_annotation_defaults;
 use anonymous_object_capture::{
@@ -21260,7 +21261,10 @@ impl<'a> Checker<'a> {
         self.record_local_write(s, scoped);
         let local = self
             .lookup(scope, &name)
-            .filter(|local| !matches!(local.origin, ReceiverFnValueOrigin::DispatchProperty { .. }))
+            .filter(|local| {
+                !matches!(local.origin, ReceiverFnValueOrigin::DispatchProperty { .. })
+                    && !self.backing_field_shadows(&name, local.origin)
+            })
             .map(|local| {
                 (
                     local.write_ty.unwrap_or(local.ty),
@@ -47279,7 +47283,9 @@ impl<'a> Checker<'a> {
                         let field_ty =
                             (bp.receiver.is_none() && bp.context_params.is_empty()).then_some(ty);
                         if let Some(getter) = &bp.getter {
-                            self.with_ret_field(ty, field_ty, &accessor_scope, |checker| {
+                            let getter_field = field_ty
+                                .filter(|_| backing_field_binding::getter_declares_field(bp));
+                            self.with_ret_field(ty, getter_field, &accessor_scope, |checker| {
                                 match getter {
                                     FunBody::Expr(body) => {
                                         checker.check_expression_getter(
@@ -48693,7 +48699,9 @@ impl<'a> Checker<'a> {
                             .as_ref()
                             .filter(|body| self.should_check_selected_fun_body(body))
                         {
-                            self.with_ret_field(prop_ty, field_ty, scope, |c| match getter {
+                            let getter_field = field_ty
+                                .filter(|_| backing_field_binding::getter_declares_field(bp));
+                            self.with_ret_field(prop_ty, getter_field, scope, |c| match getter {
                                 FunBody::Expr(g) => {
                                     c.check_expression_getter(
                                         scope,
@@ -53943,8 +53951,8 @@ impl<'a> Checker<'a> {
             let its: Vec<Ty> = indices.iter().map(|&i| self.expr(scope, i)).collect();
             if let [index] = indices.as_slice() {
                 // A read consumes the projection rather than exposing it as an expression type.
-                if let Some(elem) = at
-                    .array_read_elem()
+                if let Some(elem) = self
+                    .builtin_array_read_element(at)
                     .filter(|_| self.receiver_is_assignable(its[0], Ty::Int))
                 {
                     self.expect_assignable(Ty::Int, its[0], self.span(*index), "array index");
@@ -55768,6 +55776,9 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+        }
+        if lookup.is_some_and(|binding| self.backing_field_shadows(&n, binding.origin)) {
+            lookup = None;
         }
         if let Some(local) = lookup {
             self.report_uninitialized_default_parameter_read(e, local.flow_identity);

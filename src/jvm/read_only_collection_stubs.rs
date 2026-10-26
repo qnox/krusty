@@ -761,13 +761,14 @@ fn superclass_chain(
             };
             let raw_key = format!("{parameters})V");
             if method.access & ACC_ABSTRACT == 0 {
-                // A member a generic Kotlin class declares implements its member in the class's
-                // substitution context, so `DBase<T>.set(e: T)` under `DBase<String>` implements
-                // `set(String)`. A generated member has no declaration and only its descriptor.
+                // A member a Kotlin class declares implements its member with its metadata
+                // signature, in the class's substitution context: `DBase<T>.set(e: T)` under
+                // `DBase<String>` implements `set(String)`, and a non-generic
+                // `set(e: String): Nothing` keeps its `Nothing` result, which its physical `Void`
+                // does not tell. A generated member has no declaration and only its descriptor.
                 // A suspend declaration's continuation is a real parameter its metadata signature
                 // omits, so it keeps its physical key and implements no non-suspend member.
                 let declaration = (is_kotlin
-                    && !info.meta.class_type_parameters.type_params().is_empty()
                     && candidates.iter().any(|stub| stub.name == method.name))
                 .then(|| {
                     info.meta.class_functions.iter().find(|declaration| {
