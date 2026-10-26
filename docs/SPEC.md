@@ -13412,7 +13412,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   bridge targets the member's own physical descriptor, and it is written only when that differs
   from the erased one. So `Base<T>` (physically `set(Object)`) needs none, and
   `Base<T : CharSequence>` gets `set(Object)` that checkcasts to `CharSequence` and calls
-  `set(CharSequence)`. The nearest implementation is the bridge's target. Tests:
+  `set(CharSequence)`. The nearest implementation is the bridge's target. A suspend member
+  implements no such member: its continuation is a physical parameter, so a dependency's
+  `suspend fun set(e: T)` leaves the class kotlinc's throwing `set(Object)` stub. Tests:
   `tests/read_only_stub_generic_override_e2e.rs` (class bytes and box runs against kotlinc).
 - **A nested value class over a reference carrier is read as its carrier.** In `ZN(val z: Z1?)`
   with `Z1(val x: En)`, `Z1?` is carried as `En?`, so `zn.z` and `zn.z!!` already are `Z1`'s
