@@ -14043,6 +14043,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   nullable property stays the value erasure stored, so a primitive-backed `Inner?` is the box and
   its `toString()` runs from there.
   Tests: `tests/value_class_nested_property_to_string_e2e.rs`.
+- **A value class over an array renders the array's contents.** Its synthesized `toString-impl`
+  appends `Arrays.toString(raw)` (`Bits(raw=[1, 2])`), as a data class does for an array property
+  and as kotlinc does. The choice follows the property's declared type, through the same
+  `GeneratedPropertyArrayToString` intrinsic the data-class generator uses. A primitive array takes
+  its own overload, and every reference array takes `Object[]`. A nullable array takes the same
+  call, which renders `null`. An unsigned array is a value class, so it is rendered through its
+  own `toString-impl` (`UBits(raw=UIntArray(storage=[...]))`). `hashCode-impl` already used
+  `Arrays.hashCode`, and `equals-impl` compares the arrays with `Intrinsics.areEqual`, both as
+  kotlinc does.
+  Tests: `tests/value_class_array_to_string_e2e.rs`.
 - **`==` with a value class on the left is kotlinc's specialized call.** With the left operand of
   value class `V` (nullable or not) and at least one operand carried unboxed (a non-null `V`, or a
   `V?` over a reference carrier), `a == b` calls `equals-impl0(a, b)` when `b` is an unboxed `V`

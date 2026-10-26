@@ -1053,7 +1053,8 @@ fn guard_false(ir: &mut IrFile, cond: ExprId) -> ExprId {
 /// that class's carrier, and the call's descriptor names the fully erased carrier. Its logical
 /// type stays the nested class, so the `StringBuilder` path appends with `append(Object)`; its
 /// physical result is the `String` the call returns, which an `invokedynamic` concat passes as
-/// `String`. A nullable property is left as the value erasure stored.
+/// `String`. An array property, nullable or not, renders its contents through `Arrays.toString`.
+/// Any other nullable property is left as the value erasure stored.
 fn nested_value_text(
     ir: &mut IrFile,
     underlying: Ty,
@@ -1061,6 +1062,25 @@ fn nested_value_text(
     value: ExprId,
     rendered_value_class_text: &mut HashSet<ExprId>,
 ) -> ExprId {
+    let declared_value_class = underlying
+        .non_null()
+        .obj_internal()
+        .is_some_and(|name| under.contains_key(&name));
+    if underlying.non_null().is_array() && !declared_value_class {
+        // An array renders its contents (`Bits(raw=[1, 2])`), as a data-class array property does;
+        // `Arrays.toString` renders a null array as `null`, so a nullable one takes it as well. An
+        // unsigned array is a value class, rendered below through its own `toString-impl`.
+        return ir.add_expr(IrExpr::Call {
+            callee: Box::new(Callee::Intrinsic {
+                operation: crate::ir::IrIntrinsic::GeneratedPropertyArrayToString {
+                    ty: underlying,
+                },
+                ret: Ty::String,
+            }),
+            dispatch_receiver: None,
+            args: vec![value],
+        });
+    }
     if underlying.is_nullable() {
         return value;
     }

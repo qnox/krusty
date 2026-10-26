@@ -869,7 +869,7 @@ impl super::Emitter<'_> {
                     crate::ir::IrIntrinsic::Ieee754Equals { operand } => {
                         self.emit_nullable_ieee754_equals(e, *operand, args, code)
                     }
-                    crate::ir::IrIntrinsic::DataClassArrayToString { ty } => {
+                    crate::ir::IrIntrinsic::GeneratedPropertyArrayToString { ty } => {
                         self.emit_value(args[0], code);
                         let descriptor =
                             crate::jvm::array_representation::arrays_to_string_descriptor(*ty);

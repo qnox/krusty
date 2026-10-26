@@ -420,7 +420,7 @@ fn callee(callee: &mut Callee, names: &HashMap<TypeName, TypeName>) {
                 }
                 | super::IrIntrinsic::GeneratedPropertyEquals { ty: classifier }
                 | super::IrIntrinsic::GeneratedPropertyHash { ty: classifier }
-                | super::IrIntrinsic::DataClassArrayToString { ty: classifier }
+                | super::IrIntrinsic::GeneratedPropertyArrayToString { ty: classifier }
                 | super::IrIntrinsic::TypeOf { ty: classifier }
                 | super::IrIntrinsic::Ieee754Equals {
                     operand: classifier,

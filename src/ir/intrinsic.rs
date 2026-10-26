@@ -80,8 +80,9 @@ pub enum IrIntrinsic {
     GeneratedPropertyHash {
         ty: Ty,
     },
-    /// Kotlin's content rendering for an array stored in a data-class property.
-    DataClassArrayToString {
+    /// Generated-member content rendering of one array property (a data class's, or a value
+    /// class's sole one): `[1, 2]` rather than the array's identity, and `null` for a null one.
+    GeneratedPropertyArrayToString {
         ty: Ty,
     },
 }

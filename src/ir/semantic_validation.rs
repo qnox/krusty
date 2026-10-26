@@ -75,7 +75,7 @@ fn validate_intrinsic(operation: &IrIntrinsic) -> Result<(), UndeterminedIrType>
         IrIntrinsic::TypeOf { ty } => reject("typeOf type argument", *ty),
         IrIntrinsic::GeneratedPropertyEquals { ty }
         | IrIntrinsic::GeneratedPropertyHash { ty }
-        | IrIntrinsic::DataClassArrayToString { ty } => reject("intrinsic property", *ty),
+        | IrIntrinsic::GeneratedPropertyArrayToString { ty } => reject("intrinsic property", *ty),
         IrIntrinsic::Assert { .. }
         | IrIntrinsic::ArrayGet
         | IrIntrinsic::ArraySet

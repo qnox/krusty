@@ -335,7 +335,7 @@ fn synthesize_to_string(
         if field.ty.non_null().is_array() {
             value = intrinsic(
                 ir,
-                crate::ir::IrIntrinsic::DataClassArrayToString { ty: field.ty },
+                crate::ir::IrIntrinsic::GeneratedPropertyArrayToString { ty: field.ty },
                 vec![value],
                 Ty::String,
             );

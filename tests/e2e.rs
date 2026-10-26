@@ -1737,6 +1737,8 @@ mod unsigned_values;
 mod unsupported_kotlinc_arguments_e2e;
 #[path = "upper_bound_violations_e2e.rs"]
 mod upper_bound_violations_e2e;
+#[path = "e2e/value_class_any_members.rs"]
+mod value_class_any_members;
 #[path = "value_class_bound_reference_receiver_e2e.rs"]
 mod value_class_bound_reference_receiver_e2e;
 #[path = "value_class_bounded_parameter_bridge_e2e.rs"]
@@ -1759,8 +1761,6 @@ mod value_class_delegated_result_e2e;
 mod value_class_dependency_bridge_e2e;
 #[path = "value_class_equality_e2e.rs"]
 mod value_class_equality_e2e;
-#[path = "value_class_equals_hash_e2e.rs"]
-mod value_class_equals_hash_e2e;
 #[path = "value_class_generic_argument_join_e2e.rs"]
 mod value_class_generic_argument_join_e2e;
 #[path = "value_class_generic_carrier_e2e.rs"]
@@ -1789,8 +1789,6 @@ mod value_class_lambda_class_e2e;
 mod value_class_lifted_member_order_e2e;
 #[path = "value_class_nested_carrier_e2e.rs"]
 mod value_class_nested_carrier_e2e;
-#[path = "value_class_nested_property_to_string_e2e.rs"]
-mod value_class_nested_property_to_string_e2e;
 #[path = "value_class_nested_sole_property_e2e.rs"]
 mod value_class_nested_sole_property_e2e;
 #[path = "value_class_nothing_override_bridges_e2e.rs"]
