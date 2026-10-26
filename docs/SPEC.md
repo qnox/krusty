@@ -18949,7 +18949,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   provider role. Tests: `klib_lowering::tests::body_forms::stdlib_range_literal_membership_is_a_bounds_comparison`
   (`Char.isSurrogate`), `stdlib_range_literal_negation_lowers_past_the_membership` (`checkRadix`),
   `a_negation_of_another_source_form_declines`, box
-  `tests/box_regressions/libraryRangeMembershipAndRadix.kt`.
+  `tests/box_regressions/libraryRangeMembership.kt`.
 
 - **Native's radix rendering is the runtime's.** The Native stdlib's `Int.toString(radix)` and
   `Long.toString(radix)` reach body-less `@GCUnsafeCall` externals (`Kotlin_Int_toStringRadix`,
@@ -18957,8 +18957,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   authenticated Native externals they carry a provider role, `RadixToString`, which the runtime's
   `kt_long_to_string_radix` realizes: lowercase digits, the magnitude in unsigned space (so
   `Long.MIN_VALUE` renders), a leading `-`. The radix itself is checked by the stdlib's own
-  `checkRadix` body. Tests: box `tests/box_regressions/libraryRangeMembershipAndRadix.kt`,
-  `strings/kt13213a.kt`.
+  `checkRadix` body. Tests:
+  `klib_libraries::target_intrinsics::tests::native_gc_unsafe_radix_rendering_requires_the_exact_entry_package_and_shape`,
+  box `strings/kt13213a.kt`.
 
 - **A KLIB body follows kotlinc's serialized resolution exactly.** Each call in a serialized body
   names the declaration kotlinc resolved by its exact `IdSignature`, with its type arguments and

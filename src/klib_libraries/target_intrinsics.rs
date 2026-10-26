@@ -1306,4 +1306,106 @@ mod tests {
         )
         .is_none());
     }
+
+    #[test]
+    fn native_gc_unsafe_radix_rendering_requires_the_exact_entry_package_and_shape() {
+        let gc_unsafe = |callee: &str| AnnotationApplication {
+            identity: type_name("kotlin/native/internal/GCUnsafeCall"),
+            arguments: vec![(
+                "callee".to_owned(),
+                AnnotationArgument::String(callee.to_owned()),
+            )],
+        };
+        let native = Some(TargetIntrinsicPlatform::Native);
+        let text = crate::libraries::CallablePlacement::Package(type_name("kotlin/text"));
+        for (name, entry, operand_class, operand) in [
+            (
+                "intToString",
+                "Kotlin_Int_toStringRadix",
+                "kotlin/Int",
+                Ty::Int,
+            ),
+            (
+                "longToString",
+                "Kotlin_Long_toStringRadix",
+                "kotlin/Long",
+                Ty::Long,
+            ),
+        ] {
+            let exact = declaration(
+                name,
+                &[operand_class, "kotlin/Int"],
+                "kotlin/String",
+                gc_unsafe(entry),
+            );
+            assert_eq!(
+                authenticate(native, text, &exact),
+                Some(KlibIntrinsicShape {
+                    operation: CompilerIntrinsic::RadixToString { operand },
+                    kind: ExternalCallableKind::TopLevel,
+                    receiver: None,
+                    params: vec![operand, Ty::Int],
+                    ret: Ty::obj("kotlin/String"),
+                }),
+                "{entry}"
+            );
+            assert!(authenticate(None, text, &exact).is_none(), "{entry}");
+            assert!(authenticate(
+                native,
+                crate::libraries::CallablePlacement::Package(type_name("spoof")),
+                &exact
+            )
+            .is_none());
+            let mut bodyful = declaration(
+                name,
+                &[operand_class, "kotlin/Int"],
+                "kotlin/String",
+                gc_unsafe(entry),
+            );
+            bodyful.is_external = false;
+            assert!(authenticate(native, text, &bodyful).is_none(), "{entry}");
+            let wrong_radix = declaration(
+                name,
+                &[operand_class, "kotlin/Long"],
+                "kotlin/String",
+                gc_unsafe(entry),
+            );
+            assert!(
+                authenticate(native, text, &wrong_radix).is_none(),
+                "{entry}"
+            );
+            let wrong_result = declaration(
+                name,
+                &[operand_class, "kotlin/Int"],
+                "kotlin/Int",
+                gc_unsafe(entry),
+            );
+            assert!(
+                authenticate(native, text, &wrong_result).is_none(),
+                "{entry}"
+            );
+            let mut extension = declaration(
+                name,
+                &[operand_class, "kotlin/Int"],
+                "kotlin/String",
+                gc_unsafe(entry),
+            );
+            extension.receiver = Some(KotlinType::class(operand_class));
+            assert!(authenticate(native, text, &extension).is_none(), "{entry}");
+        }
+        let spoofed = declaration(
+            "intToString",
+            &["kotlin/Int", "kotlin/Int"],
+            "kotlin/String",
+            gc_unsafe("User_Int_toStringRadix"),
+        );
+        assert!(authenticate(native, text, &spoofed).is_none());
+        let swapped = declaration(
+            "intToString",
+            &["kotlin/Long", "kotlin/Int"],
+            "kotlin/String",
+            gc_unsafe("Kotlin_Int_toStringRadix"),
+        );
+        assert!(authenticate(native, text, &swapped).is_none());
+    }
 }
