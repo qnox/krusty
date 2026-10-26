@@ -2200,6 +2200,8 @@ mod read_only_collection_face_stubs_e2e;
 mod read_only_iterator_stubs_e2e;
 #[path = "read_only_list_face_stubs_e2e.rs"]
 mod read_only_list_face_stubs_e2e;
+#[path = "read_only_map_face_stubs_e2e.rs"]
+mod read_only_map_face_stubs_e2e;
 #[path = "read_only_set_face_stubs_e2e.rs"]
 mod read_only_set_face_stubs_e2e;
 #[path = "read_only_stub_generic_override_e2e.rs"]

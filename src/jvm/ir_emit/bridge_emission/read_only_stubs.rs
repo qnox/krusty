@@ -2,7 +2,8 @@
 //!
 //! A stub is `public`, throws `UnsupportedOperationException` with kotlinc's fixed message, and
 //! carries no line numbers: kotlinc builds it without a source offset. Its bridge to the mutable
-//! declaration's erased descriptor is `ACC_PUBLIC|ACC_BRIDGE|ACC_SYNTHETIC` with the same body.
+//! declaration's erased descriptor is `ACC_PUBLIC|ACC_BRIDGE|ACC_SYNTHETIC` with the same body,
+//! except that a type-safe stub's bridge (`Object remove(Object)`) calls the stub.
 //! A member the class already implements gets no stub, only that bridge, which forwards to the
 //! implementation like any bridge and maps to the class declaration's line. A builtin with a
 //! different JVM name (`removeAt`) is realized under that name, and its erased bridge directly
@@ -172,6 +173,17 @@ fn emit_stub_bridge(class: &IrClass, cw: &mut ClassWriter, stub: &ReadOnlyStub) 
         descriptor: &descriptor,
         signature: None,
     };
+    if stub.type_safe {
+        // A type-safe stub already takes the erased parameters: its bridge calls it.
+        let stub_parameters = jvm_tys(&stub.parameters);
+        let target = Target {
+            name: &stub.physical_name,
+            parameters: &stub_parameters,
+            result: stub.physical_result(),
+        };
+        emit_forwarding::<{ 0x0001 | 0x0040 | 0x1000 }>(class, cw, &target, &method, *result);
+        return;
+    }
     emit_throwing::<{ 0x0001 | 0x0040 | 0x1000 }>(class, cw, &method);
 }
 

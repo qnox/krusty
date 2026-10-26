@@ -45,10 +45,12 @@ const FACE_ORDER: [CollectionKind; 8] = [
 
 /// The faces whose stubs are realized. The JDK members of the mutable collections (`removeIf`) and
 /// the `toArray` lowering are not yet realized for any face.
-const REALIZED_FACES: [CollectionKind; 5] = [
+const REALIZED_FACES: [CollectionKind; 7] = [
     CollectionKind::Collection,
     CollectionKind::Set,
     CollectionKind::List,
+    CollectionKind::Map,
+    CollectionKind::MapEntry,
     CollectionKind::Iterator,
     CollectionKind::ListIterator,
 ];
@@ -101,6 +103,9 @@ pub(super) struct ReadOnlyStub {
     /// stub's own descriptor: kotlinc's bridge lowering gives the stub a throwing bridge there. A
     /// renamed member's bridge is its own parameters with an `Any?` result.
     pub(super) bridge: Option<(Vec<Ty>, Ty)>,
+    /// The declaration is type-safe (`MutableMap.remove(key)`): the stub already takes the erased
+    /// parameters, and kotlinc's bridge for its erased result forwards to it instead of throwing.
+    pub(super) type_safe: bool,
 }
 
 /// What realizes a candidate member at the stub's own descriptor.
@@ -407,14 +412,16 @@ fn face_stubs(classpath: &Classpath, face: Face, applied: Ty) -> Vec<ReadOnlyStu
             let erased_descriptor = method_descriptor(&erased_parameters, erased_result);
             // The policies belong to the declaration the member overrides: `MutableList.remove`
             // overrides `MutableCollection.remove` with the same erased descriptor.
-            if let Some(policy) = overridden_declaration_policy(classpath, face.mutable, |owner| {
-                collection_bridge_policy_for_declaration(
-                    owner,
-                    &member.source_name,
-                    &erased_descriptor,
-                    MappedBuiltinMemberKind::Function,
-                )
-            }) {
+            let type_safe_policy =
+                overridden_declaration_policy(classpath, face.mutable, |owner| {
+                    collection_bridge_policy_for_declaration(
+                        owner,
+                        &member.source_name,
+                        &erased_descriptor,
+                        MappedBuiltinMemberKind::Function,
+                    )
+                });
+            if let Some(policy) = type_safe_policy {
                 for &index in policy.checked_parameters {
                     parameters[usize::from(index)] = Ty::nullable(Ty::obj("kotlin/Any"));
                 }
@@ -469,6 +476,7 @@ fn face_stubs(classpath: &Classpath, face: Face, applied: Ty) -> Vec<ReadOnlyStu
                 boxed_result,
                 declaration_site_wildcards,
                 bridge,
+                type_safe: type_safe_policy.is_some(),
             }
         })
         .collect();
