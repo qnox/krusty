@@ -13579,7 +13579,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `ACC_BRIDGE|ACC_SYNTHETIC` `Object remove(int)` directly follows it unless the two erase alike
   (`T remove(int)`). A class's own `removeAt` implements it and gets kotlinc's
   `ACC_PUBLIC|ACC_FINAL|ACC_BRIDGE` `remove(int)` calling it, followed by the erased bridge
-  calling that, in the member's place among the bridges. The override check compares results
+  calling that, in the member's place among the bridges. The erased bridge is decided against the
+  implementation's own physical descriptor, so a `List<Any>`'s `fun removeAt(index: Int): String`
+  still gets `Object remove(int)` beside its `String remove(int)`, though a throwing stub's `Object`
+  result would have erased alike. The override check compares results
   through applied supertypes: a builtin's generic supertypes from `.kotlin_builtins` and a source
   classifier's checked applied hierarchy, so `listIterator(): MutableListIterator<String>` and
   `listIterator(): Walk` with `Walk : ListIterator<String>` implement `listIterator`. The JDK

@@ -277,14 +277,29 @@ fn class_stubs(
                 return Some(stub);
             };
             // A generic implementation can already have the erased descriptor itself. A renamed
-            // member always needs the special bridge under its JVM name.
-            if !stub.is_renamed() {
+            // member always needs the special bridge under its JVM name, and the erased bridge
+            // to it whenever the implementation's physical descriptor differs from the erased
+            // one, its covariantly narrower result included (`String remove(int)` of a
+            // `List<Any>`): the throwing stub's `Object` result erased alike, so it had none.
+            let bridge = if stub.is_renamed() {
+                let erased = stub
+                    .bridge
+                    .clone()
+                    .unwrap_or_else(|| (jvm_tys(&stub.parameters), stub.physical_result()));
+                (method_descriptor(&erased.0, erased.1)
+                    != method_descriptor(
+                        &implementation.parameters,
+                        implementation.physical_result,
+                    ))
+                .then_some(erased)
+            } else {
                 let (erased, _) = stub.bridge.as_ref()?;
                 if parameter_descriptor(&implementation.parameters) == parameter_descriptor(erased)
                 {
                     return None;
                 }
-            }
+                stub.bridge.clone()
+            };
             let order = own_order
                 .get(&stub.parameter_key())
                 .copied()
@@ -295,6 +310,7 @@ fn class_stubs(
                     target: implementation.parameters.clone(),
                     target_result: implementation.physical_result,
                 },
+                bridge,
                 ..stub
             })
         })
