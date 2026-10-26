@@ -1,5 +1,29 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## JVM member-class rows
+
+The JVM attribute writer now consumes retained non-local ownership and exact declaration segments
+for member rows, including names with literal dollars. The cross-file module resolver preserves
+the current declaration's precedence over classpath rows. Local and anonymous implementation rows
+retain their existing provenance. This changes no Kotlin metadata class-ID encoding; aliases and
+builtin ownership evidence belong to the remaining metadata handoff.
+
+## Declaration-name evidence
+
+Kotlin metadata class IDs delimit the package with `/` and lexical classifier ownership with `.`;
+`$` within either segment is literal content. Normalization retains that exact declaration segment
+and package or classifier parent in the common classifier shape. Source headers and structural
+classfile self entries publish the equivalent fact, independently of outer-instance capture.
+Resolved source headers, common IR and backend snapshots retain it without consulting global
+interned-name nesting. Missing evidence remains unknown. This phase changes no metadata encoding;
+the emission consumers will adopt the fact in a separate follow-up.
+
+For JVM dependencies, retain ownership from raw `Class.fq_name`, before flattening package and
+classifier delimiters for rendering. `StringTableTypes.local_name` indices exclude local class IDs
+independently of visibility, including public members of local classes. Actual resolved metadata
+annotation presence chooses Kotlin authority even when the decoded declaration inventory is empty;
+the inventory's inferred `is_present()` query cannot establish annotation absence.
+
 JVM generic result consumption joins the retained declaration-result coercion with its physical
 producer after erasure. Null assertions preserve that producer's slot, and value-class lowering
 uses the same marked edge to distinguish declaration carriers from generic boxes. The extra

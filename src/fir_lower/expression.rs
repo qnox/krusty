@@ -540,7 +540,7 @@ impl BodyLowering<'_> {
                             operand,
                             check: crate::ir::NullCheck::Source,
                         });
-                        if operand_ty != target.get() {
+                        let asserted = if operand_ty != target.get() {
                             self.ir
                                 .logical_types
                                 .insert(asserted, operand_ty.non_null());
@@ -551,7 +551,11 @@ impl BodyLowering<'_> {
                             })
                         } else {
                             asserted
-                        }
+                        };
+                        // kotlinc states a `!!`'s own line before its operand, and keeps it when
+                        // the operand's first instruction marks another line there.
+                        self.ir.kept_start_lines.insert(asserted);
+                        asserted
                     }
                     FirTypeOperation::SafeCast => {
                         self.safe_cast_expression(operand_id, target.get())?

@@ -119,8 +119,6 @@ pub struct IrSecondaryCtorLines {
     pub delegation_line: u32,
     /// The declaration's last line — its delegation's closing `)` or its block's `}`.
     pub decl_end_line: u32,
-    /// Each parameter's default expression, parallel to the DECLARED parameters; 0 = no default.
-    pub defaults: Vec<u32>,
 }
 
 impl IrSecondaryCtorLines {
