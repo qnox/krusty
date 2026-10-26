@@ -210,6 +210,41 @@ impl Emitter<'_> {
 }
 
 impl Emitter<'_> {
+    /// kotlinc's `castForReified`: a `when` materializes each branch at its own type, and a branch
+    /// whose class already is that type still casts to it when the branch's type names a reified
+    /// type parameter (`PromisedValue.materializeAt`). A call that inlines the body specializes the
+    /// branch's own cast to the type argument, and the join still sees the erasure in every branch.
+    /// `StackValue.coerce` casts to no `Object`, and the redundant-cast pass keeps these casts only
+    /// in a method that still holds a reified-operation marker, as kotlinc's does.
+    fn cast_reified_branch(&mut self, branch: u32, result_ty: Ty, code: &mut CodeBuilder) {
+        if code.is_dead() || !result_ty.is_reference() {
+            return;
+        }
+        let reified = self.ir.logical_types.get(&branch).is_some_and(|&ty| {
+            crate::jvm::reified_operations::names_reified_type_parameter(self.ir, ty)
+        });
+        let class = crate::jvm::names::instanceof_internal_name(result_ty);
+        let branch_class = crate::jvm::names::instanceof_internal_name(self.uncoerced_ty(branch));
+        if reified && class != "java/lang/Object" && class == branch_class {
+            let class = self.cw.class_ref(&class);
+            code.checkcast(class);
+        }
+    }
+
+    /// The class `expression` leaves before the coercion from a generic call's erased result to
+    /// its substituted type, which kotlinc materializes as a branch's own `coerce`.
+    fn uncoerced_ty(&self, expression: u32) -> Ty {
+        match self.ir.expr(expression) {
+            IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg,
+                ..
+            } => self.ir.physical_types.get(arg).copied(),
+            _ => None,
+        }
+        .unwrap_or_else(|| self.value_ty(expression))
+    }
+
     pub(super) fn emit_when(
         &mut self,
         expression: u32,
@@ -399,6 +434,7 @@ impl Emitter<'_> {
         } else {
             self.emit_value(body, code);
             self.adapt_physical_operand_for(body, self.value_ty(body), result_ty, code);
+            self.cast_reified_branch(body, result_ty, code);
             self.diverges(body)
         }
     }

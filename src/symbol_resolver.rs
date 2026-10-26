@@ -96,11 +96,12 @@ pub(crate) use member_hierarchy::{
     InnerAliasOuterApplication, OverrideInputShape,
 };
 pub(crate) use member_specialization::{
-    apply_property_bindings, instantiate_input_slot, instantiate_signature_parameters,
-    instantiate_signature_result, instantiate_slot, instantiate_vararg_element,
-    specialize_inline_collection_transform, specialize_inline_iteration_traversal,
-    specialize_signature_input_type, specialize_signature_output_type,
-    specialize_signature_receiver_type, InputProjection, TypePosition, UnboundSpecialization,
+    apply_property_bindings, compose_position as compose_type_position, instantiate_input_slot,
+    instantiate_signature_parameters, instantiate_signature_result, instantiate_slot,
+    instantiate_vararg_element, specialize_inline_collection_transform,
+    specialize_inline_iteration_traversal, specialize_signature_input_type,
+    specialize_signature_output_type, specialize_signature_receiver_type, InputProjection,
+    TypePosition, UnboundSpecialization,
 };
 use member_specialization::{
     bind_member_return, bind_member_return_from_call_args_tracking,

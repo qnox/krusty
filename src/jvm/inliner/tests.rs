@@ -828,9 +828,14 @@ fn a_lambda_invoked_over_a_stacked_value_is_bracketed_for_fix_stack() {
 struct NumberingObjects {
     asked: Vec<(String, String)>,
     singletons: Vec<String>,
+    same_module: bool,
 }
 
 impl AnonymousObjects for NumberingObjects {
+    fn same_module(&self) -> bool {
+        self.same_module
+    }
+
     fn regenerate(
         &mut self,
         class: &str,
@@ -928,6 +933,55 @@ fn a_nested_construction_pairs_each_new_with_the_call_that_initializes_it() {
             "new Main$g$$inlined$f$1",
             "new Main$g$$inlined$f$2",
             "init Main$g$$inlined$f$2(II)V",
+            "init Main$g$$inlined$f$1(I)V",
+        ]
+    );
+}
+
+#[test]
+fn a_same_module_body_reuses_an_object_only_its_reification_marker_regenerates() {
+    // `A()` then `needClassReification(); B()`: kotlinc's `shouldRegenerate(sameModule = true)`.
+    let mut node = MethodNode::new(ACC_STATIC, "f", "()V");
+    node.nodes = vec![
+        new("lib/A$f$1"),
+        op(0x59),
+        init("lib/A$f$1", "()V"),
+        op(0x57),
+        Node::Insn(Insn::Method {
+            op: 0xb8,
+            owner: "kotlin/jvm/internal/Intrinsics".to_string(),
+            name: "needClassReification".to_string(),
+            desc: "()V".to_string(),
+            interface: false,
+        }),
+        new("lib/B$f$2"),
+        op(0x59),
+        init("lib/B$f$2", "()V"),
+        op(0x57),
+        op(0xb1),
+    ];
+    let mut objects = NumberingObjects {
+        same_module: true,
+        ..NumberingObjects::default()
+    };
+    object_regeneration::regenerate_objects(
+        &mut node,
+        &Parameters::default(),
+        &[],
+        &OBJECTS,
+        &mut objects,
+    )
+    .expect("regenerates");
+    assert_eq!(
+        objects.asked,
+        [("lib/B$f$2".to_string(), "()V".to_string())]
+    );
+    assert_eq!(
+        constructions(&node),
+        [
+            "new lib/A$f$1",
+            "init lib/A$f$1()V",
+            "new Main$g$$inlined$f$1",
             "init Main$g$$inlined$f$1(I)V",
         ]
     );

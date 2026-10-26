@@ -207,7 +207,8 @@ impl Checker<'_> {
             return false;
         }
         let call_sig = CallSig::metadata_plain(parts.values.len());
-        self.call_candidate_score(
+        super::call_applicability::score(
+            self,
             scope,
             parts.values,
             &call_sig,
