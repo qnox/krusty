@@ -24,6 +24,7 @@ mod sam_wrapper;
 mod suspend_methods;
 mod type_remapper;
 
+use super::lambda_expansion::{merged_outer_instances, CAPTURED_THIS};
 use crate::fx_hash::HashMap;
 use std::rc::Rc;
 
@@ -634,7 +635,8 @@ fn remap_declaration(
 /// (`extractParametersMappingAndPatchConstructor`). A captured value's field is named after it with
 /// `$inlined` added, numbered when that name is taken (`getNewFieldName`, `addUniqueField`): every
 /// field the original declares is taken first, as kotlinc's `visitField` records each one it
-/// copies before the constructor is patched.
+/// copies before the constructor is patched. A captured outer instance keeps `this$0`, one field
+/// per type ([`merged_outer_instances`]).
 fn plan_lambdas<'a>(
     plan: &mut constructor::Constructor,
     regeneration: &Regeneration<'a>,
@@ -664,6 +666,15 @@ fn plan_lambdas<'a>(
             let name = name.as_deref().ok_or(RegenerationError::Unsupported(
                 "a lambda capturing a value the port does not name",
             ))?;
+            if name == CAPTURED_THIS {
+                if plan.fields.iter().any(|field| field.name == CAPTURED_THIS) {
+                    return Err(RegenerationError::Unsupported(
+                        "an object whose own outer instance an inlined lambda also captures",
+                    ));
+                }
+                captured.push((name.to_string(), desc));
+                continue;
+            }
             let base = format!("{name}$inlined");
             let seen = taken.entry(base.clone()).or_default();
             let unique = match *seen {
@@ -684,9 +695,12 @@ fn plan_lambdas<'a>(
         .iter()
         .map(|passed| passed.argument)
         .collect();
+    let merged = merged_outer_instances(lambdas.iter().map(|lambda| lambda.lambda));
     let recaptured: Vec<(String, String)> = lambdas
         .iter()
         .flat_map(|lambda| lambda.captured.iter().cloned())
+        .zip(merged)
+        .filter_map(|(captured, merged)| (!merged).then_some(captured))
         .collect();
     let fields = plan.inline_lambdas(regeneration.constructor_desc, &arguments, &recaptured)?;
     for (lambda, field) in lambdas.iter_mut().zip(fields) {

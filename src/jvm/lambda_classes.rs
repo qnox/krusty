@@ -1264,12 +1264,18 @@ fn declare_class(
     });
     // The value is built by the inline function's `$default` stub, so that stub is the
     // enclosing method. A lambda nested in another lambda of an inline function is enclosed by that
-    // lambda's `invoke`. A lambda the source names directly keeps its recorded scope.
+    // lambda's `invoke`. A lambda the source names directly keeps its recorded scope; a copy an
+    // expansion wrote directly into an inline function is enclosed by that function.
     class.enclosure = inline_default
         .and_then(|context| context.direct_owner.or(context.parent_lambda))
         .or(inline_scope.and_then(|scope| scope.parent_lambda))
         .map(crate::ir::IrEnclosure::Function)
-        .or_else(|| ir.callable_reference_enclosures.get(&site.node).copied());
+        .or_else(|| ir.callable_reference_enclosures.get(&site.node).copied())
+        .or_else(|| {
+            inline_scope
+                .filter(|scope| scope.direct)
+                .map(|scope| crate::ir::IrEnclosure::Function(scope.owner))
+        });
     class
         .interfaces
         .push(&crate::jvm::names::function_interface_internal_name(

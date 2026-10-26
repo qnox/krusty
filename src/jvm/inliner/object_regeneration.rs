@@ -88,6 +88,13 @@ pub(super) struct PendingConstructor {
     captured_loads: Vec<Insn>,
 }
 
+impl PendingConstructor {
+    /// Whether this is the constructor of `class`, the copy that keeps the call's lambdas.
+    pub(super) fn constructs(&self, class: &str) -> bool {
+        self.class == class
+    }
+}
+
 /// Regenerate every anonymous object `node` constructs and rename the references to it. Each
 /// `new`, in instruction order as kotlinc visits them, takes a fresh copy; its own constructor
 /// call is renamed to that copy, and every other reference names the latest copy of its class.
@@ -366,15 +373,22 @@ fn reification_marker() -> Node {
 }
 
 /// The loads of every value the `passed` lambdas capture, from the body's captured parameters, in
-/// the order the copy's constructor takes them.
+/// the order the copy's constructor takes them: an outer instance once per type.
 fn captured_loads(
     parameters: &Parameters,
     lambdas: &[Lambda],
     passed: &[(usize, usize)],
 ) -> Vec<Insn> {
     let mut loads = Vec::new();
+    let mut merged = super::lambda_expansion::merged_outer_instances(
+        passed.iter().map(|&(_, lambda)| &lambdas[lambda]),
+    )
+    .into_iter();
     for &(_, lambda) in passed {
         for index in lambdas[lambda].captured.clone() {
+            if merged.next().unwrap_or(false) {
+                continue;
+            }
             let slot = parameters.real_size()
                 + parameters.captured[..index]
                     .iter()

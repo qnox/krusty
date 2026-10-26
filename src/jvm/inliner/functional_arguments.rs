@@ -198,6 +198,7 @@ fn top(frame: Option<FrameView<'_, ArgumentValue>>, depth: usize) -> Option<&Arg
 pub(super) fn mark_places(
     node: &mut MethodNode,
     parameters: &Parameters,
+    retained_by: &[super::object_regeneration::PendingConstructor],
 ) -> Result<Vec<Option<usize>>, InlineError> {
     let mut interpreter = FunctionalArgumentInterpreter {
         parameters,
@@ -210,6 +211,7 @@ pub(super) fn mark_places(
     };
     let frames = analyze_with(node, "fake", &mut interpreter, &mut PlainFrames, options)
         .map_err(|error| InlineError::Analysis(error.message))?;
+    reject_value_uses(node, &interpreter.consumers, retained_by)?;
     let lambda_after = |at: usize| top(frames.get(at + 1), 0)?.lambda();
     let lambda_before = |at: usize, depth: usize| top(frames.get(at), depth)?.lambda();
 
@@ -264,6 +266,43 @@ pub(super) fn mark_places(
     });
     super::preparation::remove_empty_try_catch_blocks(node);
     Ok(invokes)
+}
+
+/// Refuse a body that passes one of the call's lambdas to an operation that keeps it as a value:
+/// anything but the receiver of a `FunctionN.invoke`, a field store or parameter null check the
+/// inliner removes, and the constructor of an object regenerated around it (`retained_by`). Such a
+/// value has no class at the call site; its load would be removed under the operation that takes
+/// it (kotlinc's non-inlinable usage of a functional argument).
+fn reject_value_uses(
+    node: &MethodNode,
+    consumers: &HashSet<(usize, usize, usize)>,
+    retained_by: &[super::object_regeneration::PendingConstructor],
+) -> Result<(), InlineError> {
+    for &(_, at, operand) in consumers {
+        let Node::Insn(insn) = &node.nodes[at] else {
+            continue;
+        };
+        let removed = match insn {
+            Insn::Method { .. } if is_invoke_on_lambda(insn) => operand == 0,
+            Insn::Method {
+                op: INVOKESPECIAL,
+                owner,
+                name,
+                ..
+            } if name == "<init>" => retained_by
+                .iter()
+                .any(|constructor| constructor.constructs(owner)),
+            Insn::Method {
+                op: INVOKESTATIC, ..
+            } => at >= 2 && is_load_before_parameter_check(&node.nodes, at - 2),
+            Insn::Method { .. } | Insn::InvokeDynamic { .. } => false,
+            _ => true,
+        };
+        if !removed {
+            return Err(InlineError::LambdaParameterAccess);
+        }
+    }
+    Ok(())
 }
 
 /// Where `node`, a compiled inline body with the call's lambdas bound in `parameters`, places each

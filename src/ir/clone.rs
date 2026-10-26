@@ -483,6 +483,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     if ir.transparent_loop_bodies.contains(&source) {
         ir.transparent_loop_bodies.insert(target);
     }
+    if ir.inline_return_frame_bodies.contains(&source) {
+        ir.inline_return_frame_bodies.insert(target);
+    }
     if ir.for_loop_next_loops.contains(&source) {
         ir.for_loop_next_loops.insert(target);
     }

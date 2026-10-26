@@ -158,7 +158,7 @@ pub(in crate::jvm) fn inline(
         call.classes,
         call.objects,
     )?;
-    let invokes = functional_arguments::mark_places(&mut node, parameters)?;
+    let invokes = functional_arguments::mark_places(&mut node, parameters, &constructors)?;
     object_regeneration::complete_constructor_calls(&mut node, constructors)?;
     let context = lambda_expansion::Context {
         parameters,

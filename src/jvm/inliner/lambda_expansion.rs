@@ -69,6 +69,36 @@ impl Lambda {
     }
 }
 
+/// The name kotlinc gives a captured outer instance (`AsmUtil.CAPTURED_THIS_FIELD`).
+pub(crate) const CAPTURED_THIS: &str = "this$0";
+
+/// For each value `lambdas` capture, in order, whether it is an outer instance (`this$0`) that an
+/// earlier one of them already captures with the same type. An object regenerated to inline the
+/// lambdas keeps one such field per type and its constructor takes it once
+/// (`capturedOuterThisTypes` in `extractParametersMappingAndPatchConstructor`): the instances are
+/// the same object.
+pub(crate) fn merged_outer_instances<'a>(
+    lambdas: impl IntoIterator<Item = &'a Lambda>,
+) -> Vec<bool> {
+    let mut types = Vec::new();
+    let mut merged = Vec::new();
+    for lambda in lambdas {
+        let captured = lambda.captured_types().unwrap_or_default();
+        for (index, name) in lambda.capture_names.iter().enumerate() {
+            let outer = name.as_deref() == Some(CAPTURED_THIS);
+            merged.push(match captured.get(index) {
+                Some(ty) if outer && types.contains(ty) => true,
+                Some(ty) if outer => {
+                    types.push(ty.clone());
+                    false
+                }
+                _ => false,
+            });
+        }
+    }
+    merged
+}
+
 /// How the inlined code's line numbers reach the caller's line table (kotlinc's `SourceMapper`).
 pub(crate) trait SourceLines {
     /// `SourceMapCopier.mapLineNumber` of a line of the inlined function's own file; `None` for a
@@ -537,7 +567,7 @@ fn inline_lambda(
     let mut node = super::preprocess_node_before_inline(node)?;
     preparation::remove_fake_variable_initializations(&mut node);
     returns::normalize_local_returns(&mut node)?;
-    let invokes = super::functional_arguments::mark_places(&mut node, &parameters)?;
+    let invokes = super::functional_arguments::mark_places(&mut node, &parameters, &[])?;
     let context = Context {
         parameters: &parameters,
         lambdas: &[],

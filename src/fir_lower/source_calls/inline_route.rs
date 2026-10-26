@@ -11,7 +11,7 @@ use crate::fir::{
 };
 use crate::fx_hash::HashSet;
 use crate::ir::{ExprId, FunId, IrExpr, SameModuleInlining};
-use crate::types::{InlineParameterModifier, Ty, TyKind};
+use crate::types::{Ty, TyKind};
 
 #[cfg(test)]
 mod tests;
@@ -45,9 +45,6 @@ pub(in super::super) enum ExpansionReason {
     /// A parameter (or the receiver) of the callee has a suspend function type, whose lambdas
     /// suspend inside the caller's state machine.
     SuspendFunctionParameter,
-    /// A parameter of the callee is `crossinline`: its lambda is placed in an object or lambda the
-    /// callee's body creates.
-    CrossinlineParameter,
     /// The callee has no body of its own in this file's IR.
     NoTemplate,
     /// The callee's body holds a subject `when` that switches on an enum's keys. The keys are
@@ -142,13 +139,6 @@ impl BodyLowering<'_> {
         let Some(function) = function else {
             return Some(ExpansionReason::NoTemplate);
         };
-        if self
-            .ir
-            .declared_inline_modifiers(function)
-            .contains(&InlineParameterModifier::Crossinline)
-        {
-            return Some(ExpansionReason::CrossinlineParameter);
-        }
         let Some(body) = self
             .ir
             .functions

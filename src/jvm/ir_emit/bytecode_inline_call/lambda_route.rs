@@ -31,8 +31,9 @@ pub(in crate::jvm::ir_emit) enum SpliceReason {
     InPlaceArguments,
     /// A lambda captures a caller local whose type is not the captured value's.
     CaptureOutsideFrame,
-    /// A lambda the callee may pass to an object it creates reaches a private declaration, which
-    /// kotlinc reaches from the regenerated object through synthetic accessors.
+    /// A lambda the callee may pass to an object it creates calls a super member or holds a
+    /// lambda of its own, which kotlinc reaches from the regenerated object through a synthetic
+    /// accessor and a class of that lambda's own.
     PrivateMemberInObject,
 }
 

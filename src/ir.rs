@@ -65,6 +65,7 @@ mod field_flags;
 mod fields;
 mod function_scope;
 mod inline_copies;
+mod inline_return_frame_bodies;
 mod suspension_points;
 pub use suspension_points::{IrIntrinsicSuspensionPoint, IrValueClassSuspendResult};
 mod intrinsic;
@@ -1621,6 +1622,9 @@ pub struct IrFile {
     /// nested in it writes [`IrExpr::SetFrameResult`], which every renumbering of either body
     /// leaves pointing at the same frame.
     pub inline_return_frames: crate::fx_hash::HashMap<ExprId, String>,
+    /// The bodies an inline-return frame wraps: each template body whose own returns became the
+    /// frame's exits. See [`IrFile::inline_return_frame_body`].
+    pub inline_return_frame_bodies: crate::fx_hash::HashSet<ExprId>,
     /// `try` expressions whose result is the value of a spliced inline lambda protected by the
     /// inline call's cleanup. This is semantic inline-frame provenance: a backend chooses how the
     /// result crosses `finally`; common IR does not prescribe a local slot, reload, or branch.

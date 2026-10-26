@@ -407,20 +407,35 @@ pub(super) fn cross_owner_member_calls(
     facade: &str,
     contexts: &[static_accessors::EmissionContext],
     private_interface_bodies_are_members: bool,
+    exporting_lambda_bodies: &crate::fx_hash::HashSet<crate::ir::ExprId>,
 ) -> MemberAccessBridges {
-    let exporting = static_accessors::inline_functions_exporting_private_access(ir, contexts);
+    let exporting = static_accessors::inline_functions_exporting_private_access(
+        ir,
+        contexts,
+        exporting_lambda_bodies,
+    );
     let mut private = crate::fx_hash::HashSet::default();
     let mut private_calls = crate::fx_hash::HashMap::default();
     let mut protected = crate::fx_hash::HashMap::default();
     let mut scan = |owner: &str,
                     caller: Option<crate::ir::ClassId>,
                     roots: Vec<crate::ir::ExprId>,
-                    export_private: bool| {
+                    exports_root: bool| {
         let mut seen = crate::fx_hash::HashSet::default();
+        // The expressions inside a `crossinline` literal's body, which exports private access.
+        let mut exported = crate::fx_hash::HashSet::default();
         let mut stack = roots;
         while let Some(expression) = stack.pop() {
             if !seen.insert(expression) {
                 continue;
+            }
+            let export_private = exports_root
+                || exported.contains(&expression)
+                || exporting_lambda_bodies.contains(&expression);
+            if export_private && !exports_root {
+                crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
+                    exported.insert(child);
+                });
             }
             // Local members carry a `FunId`; sibling-source members carry the exact stable module
             // declaration selected by FIR. Neither path reconstructs identity from owner/name. A
