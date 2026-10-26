@@ -2301,8 +2301,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   lives only in `Ty::descriptor()` — the backend boundary. A JVM class descriptor is a reference
   slot for every classifier, including `Lkotlin/UInt;`. A class-array descriptor such as
   `[Lkotlin/UInt;` stays a reference array: the element is not passed through `Ty::array`, which
-  would select the specialized `UIntArray` (`[I`). A primitive-array descriptor `[I` stays that
-  specialized array. Ordinary class and array descriptors retain their exact physical identity;
+  would select the specialized `UIntArray` (`[I`). In the other direction, the semantic
+  `Array<UInt>` (with or without `?` on the element or the array) is described as `[Lkotlin/UInt;`
+  wherever its descriptor is written, local-variable tables included, as kotlinc writes it. The
+  stored element is the unsigned box. Its class has the scalar's name, so the element is
+  described through the nullable reference-slot marker (`UInt?`), never `Ty::obj("kotlin/UInt")`,
+  which is the `int` carrier again (`tests/unsigned_element_array_debug_info_e2e.rs`). A
+  primitive-array descriptor `[I` stays that specialized array. Ordinary class and array descriptors retain their exact physical identity;
   the checked type participates only where a scalar class descriptor cannot otherwise be
   distinguished from its unboxed carrier. Constructor arguments, including ones spilled to
   temporaries and reloaded, use that operand type. The parse does not invent common semantic

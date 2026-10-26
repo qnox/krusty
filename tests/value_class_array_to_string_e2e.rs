@@ -8,8 +8,6 @@
 //! (`UBits(raw=UIntArray(storage=[1, -294967296]))`), not through `Arrays.toString` of its
 //! carrier. `hashCode` already used `Arrays.hashCode` and `equals` compares the arrays by
 //! reference, both as kotlinc does; the byte comparison of each whole class covers them too.
-//! `Uns` (`Array<UInt>`) runs but is not byte-compared: its local-variable tables differ from
-//! kotlinc's, which is unrelated to rendering.
 
 use super::common;
 
@@ -61,7 +59,7 @@ fn a_value_class_over_an_array_renders_its_contents_like_kotlinc() {
     common::assert_classes_identical_to_kotlinc(
         "ArrayValueClasses",
         DECLARATIONS,
-        &["Bits", "Longs", "NBits", "Names", "NNames", "UBits"],
+        &["Bits", "Longs", "NBits", "Names", "NNames", "UBits", "Uns"],
     );
 }
 
