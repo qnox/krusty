@@ -42,6 +42,8 @@ pub enum IrProgressionSource {
     },
     /// `nested.reversed()`.
     Reversed(Box<IrProgressionSource>),
+    /// `receiver.indices` (kotlinc's `IndicesHandler`): 0 until `size`, the receiver's size read.
+    Indices { size: ExprId },
 }
 
 impl IrProgressionSource {
@@ -78,6 +80,7 @@ impl IrProgressionSource {
                 f(*step);
             }
             Self::Reversed(nested) => nested.visit(f),
+            Self::Indices { size } => f(*size),
         }
     }
 
@@ -112,6 +115,7 @@ impl IrProgressionSource {
                 *step = map(*step);
             }
             Self::Reversed(nested) => nested.map_operands(map),
+            Self::Indices { size } => *size = map(*size),
         }
     }
 }

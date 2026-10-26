@@ -159,3 +159,200 @@ fn an_erased_result_reaches_its_consumer_intact() {
     .expect("the source compiles and the JVM runner is provisioned");
     assert_eq!(actual, "OK");
 }
+
+// PLATFORM: JVM result-slot casts and complete classfiles; ordinary Kotlin runtime is also
+// checked against kotlinc through the shared runner.
+const RETURN_CONSUMERS: &str = r#"
+var calls = 0
+fun <T> supplied(value: T): T { calls++; return value }
+fun widenedReturn(): CharSequence = supplied<String>("OK")
+fun erasedReturn(): Any = supplied<String>("OK")
+fun storedReturn(): CharSequence {
+    val value = supplied<String>("OK")
+    return value
+}
+fun explicitReturn(): CharSequence = supplied<Any>("OK") as String
+fun assertedReturn(): CharSequence = supplied<String?>("OK")!!
+fun box(): String {
+    if (widenedReturn() != "OK") return "widened"
+    if (erasedReturn() != "OK") return "erased"
+    if (storedReturn() != "OK") return "stored"
+    if (explicitReturn() != "OK") return "explicit"
+    if (assertedReturn() != "OK") return "asserted"
+    return if (calls == 5) "OK" else "evaluation"
+}
+"#;
+
+#[test]
+fn erased_generic_return_consumers_match_complete_kotlinc_classfiles() {
+    let classes =
+        common::classes_against_kotlinc_module(&[("GenericReturnConsumers.kt", RETURN_CONSUMERS)]);
+    assert_eq!(classes.differences(), Vec::<String>::new());
+}
+
+#[test]
+fn erased_generic_returns_preserve_materialization_and_single_evaluation() {
+    assert_eq!(common::kotlinc_box_result(RETURN_CONSUMERS), "OK");
+    assert_eq!(
+        common::compile_and_run_box(
+            RETURN_CONSUMERS,
+            "GenericReturnConsumers",
+            &[common::stdlib_jar()],
+            Some(&common::jdk_modules()),
+        )
+        .expect("generic return consumers compile and run"),
+        "OK"
+    );
+}
+
+/// A result erased to a declared bound (`<T : Base>` returns `Base`) follows the same rule as an
+/// erased `Object`: kotlinc narrows it only for a consumer that needs the narrower type. An identity
+/// or null comparison, `areEqual`, an `Any` or `Base` consumer take the slot unchanged; a `Marker`
+/// consumer casts once to `Marker`, never to the substituted `Both` first. A dispatch receiver
+/// narrows to the class the call names (`Both.base()`), even when the member is declared on `Base`.
+mod bound_results {
+    use super::common;
+
+    const DECLARATIONS: &str = "package bounds\n\
+        \n\
+        interface Marker\n\
+        \n\
+        open class Base { open fun base(): String = \"B\" }\n\
+        \n\
+        class Both : Base(), Marker { fun both(): String = \"O\" }\n\
+        \n\
+        class Simple<T : Base>(val value: T) { fun get(): T = value }\n\
+        \n\
+        class Pair<T>(val value: T) where T : Marker, T : Base {\n\
+        \x20   fun get(): T = value\n\
+        \x20   fun <R> echo(r: R): R where R : Marker, R : Base = r\n\
+        }\n\
+        \n\
+        class Plain<T>(val value: T) { fun get(): T = value }\n\
+        \n\
+        class Maybe<T : Base>(val value: T?) { fun get(): T? = value }\n\
+        \n\
+        fun <T : Base> pass(value: T): T = value\n";
+
+    const USES: &str = "package bounds\n\
+        \n\
+        fun same(s: Simple<Both>, b: Both): Boolean = s.get() === b\n\
+        \n\
+        fun notSame(s: Simple<Both>, b: Both): Boolean = s.value !== b\n\
+        \n\
+        fun intersection(p: Pair<Both>, b: Both): Boolean =\n\
+        \x20   p.get() === b && p.value === b && p.echo(b) === b\n\
+        \n\
+        fun topLevel(b: Both): Boolean = pass(b) === b\n\
+        \n\
+        fun absent(m: Maybe<Both>): Boolean = m.get() == null\n\
+        \n\
+        fun present(m: Maybe<Both>): Boolean = m.value != null\n\
+        \n\
+        fun equal(s: Simple<Both>, b: Both): Boolean = s.get() == b\n\
+        \n\
+        fun asAny(s: Simple<Both>): Any = s.get()\n\
+        \n\
+        fun asBound(s: Simple<Both>): Base = s.value\n\
+        \n\
+        fun asMarker(p: Pair<Both>): Marker = p.get()\n\
+        \n\
+        fun declared(s: Simple<Both>): String = s.get().base() + s.value.base()\n\
+        \n\
+        fun erasedDeclared(p: Plain<Both>): String = p.get().base() + p.value.base()\n\
+        \n\
+        fun own(s: Simple<Both>): String = s.get().both() + s.value.both()\n\
+        \n\
+        fun box(): String {\n\
+        \x20   val b = Both()\n\
+        \x20   val s = Simple(b)\n\
+        \x20   val p = Pair(b)\n\
+        \x20   if (!same(s, b) || notSame(s, b)) return \"identity\"\n\
+        \x20   if (!intersection(p, b) || !topLevel(b)) return \"intersection\"\n\
+        \x20   if (absent(Maybe(b)) || !absent(Maybe<Both>(null))) return \"absent\"\n\
+        \x20   if (!present(Maybe(b)) || present(Maybe<Both>(null))) return \"present\"\n\
+        \x20   if (!equal(s, b) || asAny(s) !== b || asBound(s) !== b) return \"consumers\"\n\
+        \x20   if (asMarker(p) !== b) return \"marker\"\n\
+        \x20   if (declared(s) != \"BB\" || erasedDeclared(Plain(b)) != \"BB\") return \"declared\"\n\
+        \x20   return if (own(s) == \"OO\") \"OK\" else \"own\"\n\
+        }\n";
+
+    /// The declarations and their uses as one default-package file.
+    fn one_file() -> String {
+        format!(
+            "{}\n{}",
+            DECLARATIONS.replacen("package bounds\n", "", 1),
+            USES.replacen("package bounds\n", "", 1)
+        )
+    }
+
+    const CONSUMERS: [&str; 14] = [
+        "same",
+        "notSame",
+        "intersection",
+        "topLevel",
+        "absent",
+        "present",
+        "equal",
+        "asAny",
+        "asBound",
+        "asMarker",
+        "declared",
+        "erasedDeclared",
+        "own",
+        "box",
+    ];
+
+    #[test]
+    fn bound_results_in_one_file_match_kotlinc_classfiles() {
+        let source = one_file();
+        let classes = common::classes_against_kotlinc_module(&[("BoundResults.kt", &source)]);
+        assert_eq!(classes.differences(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn bound_results_from_another_file_match_kotlinc_classfiles() {
+        let classes = common::classes_against_kotlinc_module(&[
+            ("Declarations.kt", DECLARATIONS),
+            ("Uses.kt", USES),
+        ]);
+        assert_eq!(classes.differences(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn bound_results_of_a_kotlinc_dependency_match_kotlinc() {
+        let consumer = USES.replacen("package bounds\n", "import bounds.*\n", 1);
+        let results = common::class_bytes_diffs_against_kotlinc(
+            "BoundResultUses",
+            &[("Declarations.kt", DECLARATIONS)],
+            &consumer,
+            "BoundResultUsesKt",
+            &CONSUMERS,
+        )
+        .expect("reference kotlinc is provisioned");
+        for result in results {
+            result.unwrap_or_else(|diff| panic!("{diff}"));
+        }
+        assert_eq!(
+            common::expect_box_run_against_kotlinc(DECLARATIONS, &consumer)
+                .expect("reference kotlinc is provisioned"),
+            "OK"
+        );
+    }
+
+    #[test]
+    fn bound_results_run() {
+        let source = one_file();
+        assert_eq!(common::kotlinc_box_result(&source), "OK");
+        assert_eq!(
+            common::compile_and_run_box(
+                &source,
+                "BoundResults",
+                &[common::stdlib_jar()],
+                Some(&common::jdk_modules()),
+            )
+            .expect("bound results compile and run"),
+            "OK"
+        );
+    }
+}

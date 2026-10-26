@@ -6,15 +6,17 @@ use super::classpath_annotation_classes::{
     is_java_annotation_element, java_annotation_element_type,
 };
 use super::*;
-use crate::jvm::classreader::ClassInfo;
+use crate::jvm::classreader::{ClassInfo, FieldSig, MethodAnnotations};
+use crate::jvm::jvm_class_map;
 use crate::libraries::{
     DeclaredConstructor, DeclaredMembers, DeclaredParameter, DeclaredProperty, ParamList, TypeKind,
 };
 use crate::metadata::semantic::KotlinModality;
-use crate::types::Visibility;
+use crate::types::{wk, TyKind, Visibility};
 
 const ACC_SYNTHETIC: u16 = 0x1000;
 const ACC_ANNOTATION: u16 = 0x2000;
+const ACC_PUBLIC_STATIC_FINAL: u16 = 0x0019;
 
 impl JvmLibraries {
     /// The members `classifier` declares, read from where its header is: a class file with Kotlin
@@ -35,8 +37,74 @@ impl JvmLibraries {
         if let Some(builtin) = self.cp.builtin_classifier_name(classifier) {
             return self.cp.builtin_declared_members(builtin);
         }
-        let class = class.filter(|class| class.this_class == classifier)?;
-        java_annotation_members(classifier, &class)
+        let class = class
+            .filter(|class| class.this_class == classifier && class.access & ACC_ANNOTATION != 0)?;
+        let constants = class
+            .fields
+            .iter()
+            .filter(|field| field.access & ACC_SYNTHETIC == 0)
+            .map(|field| self.java_constant(field))
+            .collect::<Option<Vec<_>>>()?;
+        let annotated_element = class
+            .methods
+            .iter()
+            .any(|method| is_java_annotation_element(method) && !method.annotations.is_empty());
+        let element_annotations = match annotated_element {
+            true => self.cp.class_method_annotations(classifier)?,
+            false => Vec::new(),
+        };
+        java_annotation_members(classifier, &class, constants, &element_annotations)
+    }
+
+    /// The property Kotlin reads off a constant a Java interface declares, which is public, static
+    /// and final. `None` for a generic one, whose type is not described yet.
+    fn java_constant(&self, field: &FieldSig) -> Option<DeclaredProperty> {
+        if field.access & ACC_PUBLIC_STATIC_FINAL != ACC_PUBLIC_STATIC_FINAL
+            || field.signature.is_some()
+        {
+            return None;
+        }
+        Some(DeclaredProperty {
+            name: field.name.clone(),
+            ty: self.java_field_type(declared_desc_to_ty(&field.descriptor))?,
+            is_var: false,
+            visibility: Visibility::Public,
+            modality: KotlinModality::Final,
+            from_java_method: false,
+            getter_annotations: Vec::new(),
+            annotated: field.annotated || field.nullability.is_some(),
+        })
+    }
+
+    /// The type Kotlin reads a Java field's erased type as, as declared: a mapped class as its
+    /// Kotlin classifier and a reference array as `Array<out E>`. `None` for a raw generic class
+    /// or a collection interface, whose Kotlin faces are not described yet.
+    fn java_field_type(&self, ty: Ty) -> Option<Ty> {
+        match ty.kind() {
+            TyKind::Obj(name, arguments) if name == wk::array() => {
+                let [element] = arguments.as_slice() else {
+                    return None;
+                };
+                Some(Ty::obj_args_name(
+                    wk::array(),
+                    &[Ty::out_projection(self.java_field_type(*element)?)],
+                ))
+            }
+            TyKind::Obj(name, arguments) if arguments.is_empty() => {
+                let generic = self.cp.find_name(name).is_some_and(|class| {
+                    class
+                        .signature
+                        .as_deref()
+                        .is_some_and(|s| s.starts_with('<'))
+                });
+                let collection =
+                    jvm_class_map::jvm_collection_to_kotlin_mutable_type_name(name).is_some();
+                (!generic && !collection)
+                    .then(|| Ty::obj_name(jvm_class_map::to_kotlin_type_name(name)))
+            }
+            TyKind::Obj(..) => None,
+            _ => Some(ty),
+        }
     }
 }
 
@@ -80,6 +148,7 @@ fn kotlin_annotation_members(classifier: TypeName, class: &ClassInfo) -> Option<
                     false => KotlinModality::Open,
                 },
                 from_java_method: false,
+                getter_annotations: Vec::new(),
                 annotated,
             })
         })
@@ -91,6 +160,7 @@ fn kotlin_annotation_members(classifier: TypeName, class: &ClassInfo) -> Option<
             parameters: declared_parameters(parameters)?,
             visibility: parameters.visibility,
         }],
+        static_properties: Vec::new(),
         nested: meta
             .nested_class_names
             .iter()
@@ -99,13 +169,16 @@ fn kotlin_annotation_members(classifier: TypeName, class: &ClassInfo) -> Option<
     })
 }
 
-/// A Java annotation class's members: a property Kotlin reads off each element, the constructor
-/// Kotlin reads off them, whose array `value` is a `vararg`, and its nested classifiers in
-/// `InnerClasses` order. A class that also declares a constant is not read yet.
-fn java_annotation_members(classifier: TypeName, class: &ClassInfo) -> Option<DeclaredMembers> {
-    if class.access & ACC_ANNOTATION == 0 || !class.fields.is_empty() {
-        return None;
-    }
+/// A Java annotation class's members: a property Kotlin reads off each element, whose getter
+/// states what the element's method states (`element_annotations`), the constructor Kotlin reads
+/// off them, whose array `value` is a `vararg`, its constants, and its nested classifiers in
+/// `InnerClasses` order.
+fn java_annotation_members(
+    classifier: TypeName,
+    class: &ClassInfo,
+    constants: Vec<DeclaredProperty>,
+    element_annotations: &[MethodAnnotations],
+) -> Option<DeclaredMembers> {
     let mut properties = Vec::new();
     let mut parameters = Vec::new();
     for method in class.methods.iter() {
@@ -120,6 +193,17 @@ fn java_annotation_members(classifier: TypeName, class: &ClassInfo) -> Option<De
             is_vararg,
             method.has_annotation_default,
         )?);
+        let getter_annotations = element_annotations
+            .iter()
+            .find(|read| read.name == method.name && read.descriptor == method.descriptor)
+            .map_or_else(Vec::new, |read| read.annotations.clone());
+        // Kotlin reads a Java annotation it maps as its Kotlin counterpart, and a nullability
+        // qualifier into the type; neither is described yet.
+        let annotated = method.return_nullability.is_some()
+            || getter_annotations.len() < method.annotations.len()
+            || getter_annotations
+                .iter()
+                .any(|annotation| kotlin_maps_java_annotation(annotation.annotation));
         properties.push(DeclaredProperty {
             name: method.name.clone(),
             ty,
@@ -127,7 +211,8 @@ fn java_annotation_members(classifier: TypeName, class: &ClassInfo) -> Option<De
             visibility: Visibility::Public,
             modality: KotlinModality::Final,
             from_java_method: true,
-            annotated: !method.annotations.is_empty(),
+            getter_annotations,
+            annotated,
         });
     }
     let nested = class
@@ -152,8 +237,18 @@ fn java_annotation_members(classifier: TypeName, class: &ClassInfo) -> Option<De
             parameters,
             visibility: Visibility::Public,
         }],
+        static_properties: constants,
         nested,
     })
+}
+
+/// Whether Kotlin reads the Java annotation class `annotation` as a Kotlin one: `Deprecated` and
+/// the meta-annotations.
+fn kotlin_maps_java_annotation(annotation: TypeName) -> bool {
+    annotation == crate::types::type_name("java/lang/Deprecated")
+        || annotation
+            .parent()
+            .is_some_and(|package| package.matches("java/lang/annotation"))
 }
 
 /// The parameters of a constructor's metadata parameter list, a `vararg` one as its element.

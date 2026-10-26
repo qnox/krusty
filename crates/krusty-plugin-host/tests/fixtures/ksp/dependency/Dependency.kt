@@ -22,3 +22,11 @@ sealed class Empty
 sealed interface Shape
 
 class Circle : Shape
+
+class Holder<A> {
+    inner class Inner<B>
+
+    inner class Bare
+
+    class Nested<C>
+}

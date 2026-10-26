@@ -1,11 +1,105 @@
 //! Direct classifier parents published from compact Pass-1 syntax, with the superclass kept in its
 //! written slot among the interfaces.
 
-use crate::fx_hash::HashSet;
+use crate::fx_hash::{HashMap, HashSet};
 
 use super::{semantic_type_with_classifier_captures, ProductionSignatureSemantics};
 use crate::resolve::ClassSig;
 use crate::types::{Ty, TypeName};
+
+pub(super) type ResolvedGraphParents = HashMap<crate::fir::DeclarationId, (Option<Ty>, Vec<Ty>)>;
+pub(super) type ParentInventory = HashMap<crate::fir::DeclarationId, ParentFacts>;
+
+pub(super) fn resolve_graph_parents(
+    graph: &crate::fir::SignatureGraph,
+    semantics: &ProductionSignatureSemantics<'_>,
+    failed: &mut Vec<crate::fir::DeclarationId>,
+) -> ResolvedGraphParents {
+    let mut resolved_classifier_parents = HashMap::default();
+    for (declaration, parents) in graph.explicit_classifier_parents() {
+        let superclass = match parents.superclass {
+            Some(expression) => {
+                let Some(parent) = semantics.resolve_compact_graph_type(graph, expression) else {
+                    failed.push(declaration);
+                    continue;
+                };
+                Some(parent)
+            }
+            None => None,
+        };
+        let resolved_supertypes = graph
+            .operands(parents.supertypes)
+            .iter()
+            .map(|expression| semantics.resolve_compact_graph_type(graph, *expression))
+            .collect::<Option<Vec<_>>>();
+        let Some(resolved_supertypes) = resolved_supertypes else {
+            failed.push(declaration);
+            continue;
+        };
+        resolved_classifier_parents.insert(declaration, (superclass, resolved_supertypes));
+    }
+    resolved_classifier_parents
+}
+
+/// Canonical declaration templates. Written edges remain distinct from implicit language parents:
+/// anonymous exposure counts written parents, while header publication needs the full hierarchy.
+pub(super) struct CanonicalParents {
+    pub(super) superclass: Option<crate::fir::DeclaredSuperclass>,
+    pub(super) interfaces: Vec<Ty>,
+    pub(super) source_supertypes: Vec<Ty>,
+    pub(super) declared: Vec<Ty>,
+}
+
+pub(super) struct ParentFacts {
+    pub(super) parents: Option<CanonicalParents>,
+    diagnostics: Vec<super::ProductionSignatureDiagnostic>,
+}
+
+impl ParentFacts {
+    /// Normalization happens before inferred signatures. Preserve its diagnostic effects at the
+    /// original classifier-publication boundary, without resolving the source edges a second time.
+    pub(super) fn publish_diagnostics(&self, semantics: &ProductionSignatureSemantics<'_>) {
+        semantics
+            .diagnostics
+            .borrow_mut()
+            .extend(self.diagnostics.iter().cloned());
+    }
+}
+
+pub(super) fn inventory(
+    semantics: &ProductionSignatureSemantics<'_>,
+    resolved: &ResolvedGraphParents,
+    compact_cycle_edges: &HashSet<(crate::fir::DeclarationId, TypeName)>,
+) -> ParentInventory {
+    let mut inventory = ParentInventory::default();
+    for stub in super::deferred_local_headers::classifiers(semantics.headers) {
+        let Some(classifier) = semantics.classifier_signature(stub.id) else {
+            continue;
+        };
+        if semantics.headers.syntax.declaration(stub.id).is_none() {
+            continue;
+        }
+        let start = semantics.diagnostics.borrow().len();
+        let parents = compact_classifier_parents(
+            semantics.headers,
+            semantics,
+            stub.id,
+            stub.source,
+            classifier,
+            resolved.get(&stub.id),
+            compact_cycle_edges,
+        );
+        let diagnostics = semantics.diagnostics.borrow()[start..].to_vec();
+        inventory.insert(
+            stub.id,
+            ParentFacts {
+                parents,
+                diagnostics,
+            },
+        );
+    }
+    inventory
+}
 
 /// Publish classifier inheritance from compact Pass-1 syntax. Every source-written edge is resolved
 /// from its compact semantic type. The transitional collector contributes only language-defined
@@ -18,7 +112,7 @@ pub(super) fn compact_classifier_parents(
     classifier: &ClassSig,
     resolved_local: Option<&(Option<Ty>, Vec<Ty>)>,
     compact_cycle_edges: &HashSet<(crate::fir::DeclarationId, TypeName)>,
-) -> Option<(Option<crate::fir::DeclaredSuperclass>, Vec<Ty>, Vec<Ty>)> {
+) -> Option<CanonicalParents> {
     let header = headers.syntax.declaration(declaration)?;
     let crate::fir::HeaderDeclarationKind::Classifier {
         supertypes,
@@ -165,9 +259,10 @@ pub(super) fn compact_classifier_parents(
         .iter()
         .filter(|(ordinal, _)| *ordinal < superclass_slot)
         .count();
-    let superclass = explicit_base
+    let written_superclass = explicit_base
         .or_else(|| source_superclass.map(|ordinal| resolved_source_supertypes[ordinal]))
-        .filter(|parent| retained_parent(*parent))
+        .filter(|parent| retained_parent(*parent));
+    let superclass = written_superclass
         .map(|ty| crate::fir::DeclaredSuperclass::after(ty, written_before))
         .or_else(|| {
             let owner = classifier.super_internal?;
@@ -178,6 +273,13 @@ pub(super) fn compact_classifier_parents(
             (!implicit.mentions_error()).then(|| crate::fir::DeclaredSuperclass::after(implicit, 0))
         });
 
+    let mut declared = source_interfaces
+        .iter()
+        .map(|(_, parent)| *parent)
+        .collect::<Vec<_>>();
+    if let Some(parent) = written_superclass {
+        declared.insert(written_before, parent);
+    }
     let mut interfaces = source_interfaces
         .into_iter()
         .map(|(_, parent)| parent)
@@ -212,5 +314,10 @@ pub(super) fn compact_classifier_parents(
         }
         interfaces.push(implicit);
     }
-    Some((superclass, interfaces, resolved_source_supertypes))
+    Some(CanonicalParents {
+        superclass,
+        interfaces,
+        source_supertypes: resolved_source_supertypes,
+        declared,
+    })
 }

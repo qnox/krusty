@@ -13,6 +13,7 @@ use retained_defaults::{retain_class_default_spans, retain_param_default_spans};
 pub(crate) use return_labels::ReturnLabelSpans;
 use traversal::{any_class_decl_expr, any_fun_decl_expr, any_property_decl_expr};
 
+mod backing_field_reads;
 mod binary_reference_tokens;
 mod call_shape;
 mod classifier_owners;
@@ -29,6 +30,7 @@ mod property_shape;
 mod type_refs;
 pub use type_refs::{QualifierArgumentLists, QualifierSegmentArguments, TrFlags, TypeRef};
 mod use_site_annotations;
+pub use backing_field_reads::{accessor_uses_backing_field, getter_declares_field};
 pub use binary_reference_tokens::BinaryReferenceTokens;
 pub(crate) use call_shape::explicit_call_receiver;
 pub use call_shape::{first_lambda_param_or_it, lambda_params_or_implicit};
@@ -1673,8 +1675,8 @@ pub struct File {
     /// the terminal segment's source provenance without spelling recovery.
     pub exact_member_name_spans: crate::fx_hash::HashMap<u32, Span>,
     /// Exact operator tokens the expression span cannot locate: the `..`/`..<`/`until`/`downTo` of a
-    /// range value or membership test, and the `!in` a negated `contains` call stands for. Kept
-    /// sparse rather than widening those expression nodes.
+    /// range value or membership test, and the `in`/`!in` a `contains` call (and its negation)
+    /// stands for, which marks that call as kotlinc's `IN`/`NOT_IN` origin. Kept sparse.
     pub operator_token_spans: crate::fx_hash::HashMap<u32, Span>,
     /// The assignment tokens kotlinc's binary-expression diagnostic positioning searches.
     pub binary_reference_tokens: BinaryReferenceTokens,

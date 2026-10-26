@@ -8,6 +8,7 @@ use crate::resolve::*;
 
 /// The companion members one class contributes, recorded while its declaration is collected.
 pub(super) struct ContributedCompanion {
+    pub(super) owner: TypeName,
     pub(super) internal: TypeName,
     pub(super) source_file: u32,
     pub(super) order: Vec<String>,
@@ -48,6 +49,10 @@ fn extend_companion(companion: &mut ClassSig, mut contribution: ContributedCompa
 
 fn synthesized_companion(contribution: ContributedCompanion) -> ClassSig {
     ClassSig {
+        declaration_name: Some(crate::types::ClassifierDeclarationName::Nested {
+            owner: contribution.owner,
+            name: "Companion".into(),
+        }),
         internal: contribution.internal,
         stable_declaration: None,
         source_file: contribution.source_file,

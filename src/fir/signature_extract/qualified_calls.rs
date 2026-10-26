@@ -81,7 +81,7 @@ pub(super) fn receiver_expression(
     origin: &mut impl FnMut(crate::diag::Span) -> OriginId,
 ) -> Result<SigExprId, ExpressionForm> {
     match file.expr(expression) {
-        Expr::Name(_) => extractor.consumed_expression(file, expression, scope, origin),
+        Expr::Name(_) => extractor.expression(file, expression, scope, origin),
         Expr::Member { receiver, name } => {
             let receiver = receiver_expression(extractor, file, *receiver, scope, origin)?;
             let fallback = file

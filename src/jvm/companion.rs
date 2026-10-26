@@ -231,9 +231,6 @@ pub(super) fn lower_companion_properties(
         let Some(companion_name) = outer_class.companion_class else {
             continue;
         };
-        if outer_class.is_value {
-            continue;
-        }
         // Annotation classes are distinct in common IR but are JVM interfaces for storage rules.
         let outer_is_interface = outer_class.is_interface || outer_class.is_annotation;
         let Some(companion) = ir.class_id_by_name(companion_name) else {
@@ -462,12 +459,11 @@ pub(super) fn lower_companion_properties(
         // A delegate field is not the property. Reads of `secret` stay on `getSecret`, which
         // then loads `secret$delegate`. Recording the delegate as the property static would
         // bypass that accessor.
-        if !candidate.delegate_storage {
-            ir.mark_jvm_companion_property_static(
-                ir.classes[candidate.companion as usize].fq_name,
-                candidate.property as u32,
-                index,
-            );
+        let companion = ir.classes[candidate.companion as usize].fq_name;
+        if candidate.delegate_storage {
+            ir.mark_jvm_companion_delegate_static(companion, candidate.property as u32, index);
+        } else {
+            ir.mark_jvm_companion_property_static(companion, candidate.property as u32, index);
         }
         static_for_field.insert((candidate.companion, candidate.field), index);
     }
@@ -1294,7 +1290,6 @@ fn initializer_needs_companion_instance(
 fn outer_runs_companion_initializer(outer: &crate::ir::IrClass) -> bool {
     !outer.is_interface
         && !outer.is_annotation
-        && !outer.is_value
         && !outer.is_object
         && outer.companion_class.is_some()
 }

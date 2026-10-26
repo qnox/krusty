@@ -868,6 +868,13 @@ impl Checker<'_> {
             .any(|constraints| constraints.mentions_formal(ty))
     }
 
+    /// Receiver selection may admit a satisfiable active inference variable without publishing
+    /// its solution. Concrete receivers still require ordinary strict assignability.
+    pub(super) fn receiver_accepts_inference(&self, actual: Ty, expected: Ty) -> bool {
+        self.receiver_is_assignable(actual, expected)
+            || self.postponed_assignability_trial(expected, actual)
+    }
+
     /// Test one symbolic assignability relation against cloned postponed-call frames. Selection
     /// may use the answer, but only the ordinary argument-commit path may publish the constraints.
     pub(super) fn postponed_assignability_trial(&self, expected: Ty, actual: Ty) -> bool {

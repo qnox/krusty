@@ -54,8 +54,8 @@ pub use call_realization::{
 pub(crate) use call_realization::{KlibBodyCallableShape, KlibBodyCompanionReceiver};
 pub use call_sig::required_arity;
 pub use callable_scope_rung::CallableScopeRung;
-pub(crate) use classifier_callables::constructor_generic_signature;
 pub use classifier_callables::BoundInnerConstructor;
+pub(crate) use classifier_callables::{constructor_generic_signature, ConstructorAlias};
 pub(crate) use classifier_declaration::type_alias_target_classifier;
 pub use classifier_declaration::{AliasExpansion, ClassifierDeclaration};
 pub use classifier_kind::TypeKind;
@@ -92,7 +92,9 @@ use crate::types::InlineParameterModifier;
 pub use crate::types::Visibility;
 use crate::types::{SemanticCallRole, SemanticCallableOwner, Ty, TyKind, TypeName, TypeNameList};
 pub(crate) use array_factories::kotlin_array_factory_kind;
-pub use compiler_intrinsic::{CompilerIntrinsic, ListStorageConstruction, ResultFailureIntrinsic};
+pub use compiler_intrinsic::{
+    CompilerIntrinsic, IndicesReceiver, ListStorageConstruction, ResultFailureIntrinsic,
+};
 pub(crate) use core_builtins::add_core_builtin_declarations;
 pub use generic_signature::{GenericReturnPolicy, GenericSig};
 pub use inline_body::{
@@ -109,10 +111,11 @@ pub(crate) use metadata_normalization::{
     declared_constructor, declared_formal_types, declared_function, declared_nested_type_alias,
     declared_property, declared_retention, declared_targets, declared_type_alias,
     enum_entries_getter, enum_value_of, enum_values, function_generic_sig,
-    function_parameter_identities, member_record, only_input_type_formals,
-    property_parameter_identities, reified_type_parameter_ordinals, settle_no_arg_construction,
-    CallablePlacement, ClassTypeParameters, EnclosingBounds, FunctionParameterIdentities,
-    PropertyAccessorNames, PropertyParameterIdentities, TypeParameterIdentities,
+    function_parameter_identities, member_record, metadata_declaration_name,
+    only_input_type_formals, property_parameter_identities, reified_type_parameter_ordinals,
+    settle_no_arg_construction, CallablePlacement, ClassTypeParameters, EnclosingBounds,
+    FunctionParameterIdentities, PropertyAccessorNames, PropertyParameterIdentities,
+    TypeParameterIdentities,
 };
 pub use scalar_instruction::{ScalarClass, ScalarComparison, ScalarInstruction};
 use std::borrow::Cow;
@@ -1426,6 +1429,8 @@ pub struct FunctionInfo {
     /// receiver's member level beside same-named member functions; selection runs once over both
     /// and the constructor path then materializes the selected declaration.
     pub bound_inner_constructor: Option<BoundInnerConstructor>,
+    /// The alias selected on the caller's scope tower for this constructor candidate.
+    pub(crate) constructor_alias: Option<Box<ConstructorAlias>>,
 }
 
 /// Where an extension receiver sits among a callable's PHYSICAL parameters. Kotlin puts the leading
@@ -1650,6 +1655,7 @@ impl FunctionInfo {
             source_member: None,
             implicit_classifier_callable: None,
             bound_inner_constructor: None,
+            constructor_alias: None,
         }
     }
 
@@ -2100,6 +2106,9 @@ impl ResolvedSymbols {
 /// knowing the target ABI.
 #[derive(Clone)]
 pub struct LibraryType {
+    /// Exact lexical declaration ownership, independent of captured outer instances. `None` is
+    /// unavailable evidence; a recorded top-level declaration is an authoritative negative owner.
+    pub declaration_name: Option<crate::types::ClassifierDeclarationName>,
     pub access: ClassifierAccess,
     /// This classifier is a KOTLIN declaration: a current-module class, or a classpath class whose
     /// class file carries `@Metadata`. A Java classifier (no metadata) is `false`. `-jvm-default`
@@ -2298,6 +2307,7 @@ impl LibraryType {
     /// query whose answer could disagree with the record.
     pub fn declaration_header() -> Self {
         Self {
+            declaration_name: None,
             // The header commits existence only; the provider's full record supplies the real
             // declaration facts, this one included.
             is_kotlin: false,
@@ -2594,6 +2604,7 @@ mod tests {
 
     fn ty_with<F: FnOnce(&mut super::LibraryType)>(f: F) -> super::LibraryType {
         let mut t = super::LibraryType {
+            declaration_name: None,
             is_kotlin: true,
             is_data: false,
             access: super::ClassifierAccess::Public,

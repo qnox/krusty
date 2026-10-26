@@ -4,7 +4,7 @@
 //! `PluginHost`. This closes the gap between the self-contained unit tests (hand-built IR) and the
 //! production pipeline — the plugin operates on IR krusty itself produced, not a fixture.
 //!
-//! Skips (does not fail) when no kotlin-stdlib jar is locatable, like other classpath-dependent tests.
+//! Serialization fixtures provision the pinned runtime rather than depending on incidental caches.
 
 use std::rc::Rc;
 
@@ -40,13 +40,10 @@ fn lower_with_classpath(
 }
 
 /// Lower `src`, which uses `@Serializable` from kotlinx.serialization, to the IR the backend
-/// receives, or `None` when the runtime jar is unavailable or the source cannot compile.
+/// receives, provisioning the pinned runtime. `None` means the source could not compile.
 fn lower_serializable(src: &str) -> Option<krusty::ir::IrFile> {
-    let Some(serialization) = common::find_jar("kotlinx-serialization-core-jvm-", &["sources"])
-    else {
-        eprintln!("skipping: no kotlinx-serialization core jar");
-        return None;
-    };
+    let serialization = krusty::toolchain::serialization_core_jar()
+        .expect("the pinned kotlinx-serialization core runtime must be available");
     lower_with_classpath(
         &format!("import kotlinx.serialization.Serializable\n{src}"),
         &[serialization],
@@ -146,18 +143,13 @@ fn serialization_plugin_runs_on_real_lowered_ir() {
 fn serialization_activates_from_source_annotation() {
     // The keystone: the surface activates from a REAL `@Serializable` in source. The frontend binds
     // it to its qualified identity and lowering retains it in IR; the plugin needs no source lookup.
-    let Some(serialization) = common::find_jar("kotlinx-serialization-core-jvm-", &["sources"])
-    else {
-        eprintln!("skipping: no kotlinx-serialization core jar");
-        return;
-    };
-    let Some(mut ir) = lower_with_classpath(
+    let serialization = krusty::toolchain::serialization_core_jar()
+        .expect("the pinned kotlinx-serialization core runtime must be available");
+    let mut ir = lower_with_classpath(
         "import kotlinx.serialization.Serializable as Wire\n@Wire class Foo(val a: Int, val b: String)",
         &[serialization],
-    ) else {
-        eprintln!("skipping: class outside IR subset");
-        return;
-    };
+    )
+    .expect("the aliased serialization annotation fixture must lower");
 
     let ctx = PluginContext::from_ir(&ir);
     assert!(
@@ -259,16 +251,11 @@ fn serializable_enum_relocates_serializer_to_companion() {
 
 #[test]
 fn deser_ctor_retains_the_value_class_parameter_and_serialization_marker() {
-    // A `@Serializable` data class with a value-class-typed field keeps the semantic value-class
-    // parameter on its private deserialization ctor. The JVM value-class pass emits the separate
-    // public `DefaultConstructorMarker` accessor; that marker is not part of this constructor.
-    let Some(mut ir) = lower_serializable(
-        "@Serializable @JvmInline value class V(val s: String)\n\
-         @Serializable class D(val v: V, val n: Int)",
-    ) else {
-        eprintln!("skipping: class outside IR subset");
-        return;
-    };
+    // The plugin declares reference elements nullable, including a non-null value-class property.
+    // The JVM value-class pass emits the separate public `DefaultConstructorMarker` accessor;
+    // that marker is not part of this constructor.
+    let mut ir = lower_serializable(DESERIALIZATION_VALUE_CLASS)
+        .expect("the serializable value-class constructor fixture must lower");
     let d_id = ir
         .classes
         .iter()
@@ -286,15 +273,87 @@ fn deser_ctor_retains_the_value_class_parameter_and_serialization_marker() {
         deser.params,
         vec![
             krusty::types::Ty::Int,
-            krusty::types::Ty::obj("V"),
+            krusty::types::Ty::nullable(krusty::types::Ty::obj("V")),
             krusty::types::Ty::Int,
             krusty::types::Ty::obj("kotlinx/serialization/internal/SerializationConstructorMarker",),
         ],
         "deserialization ctor has the exact mask, fields, and serialization marker shape"
     );
+    assert_eq!(
+        deser.named_params,
+        vec![
+            ("seen0".to_string(), krusty::types::Ty::Int),
+            (
+                "v".to_string(),
+                krusty::types::Ty::nullable(krusty::types::Ty::obj("V")),
+            ),
+            ("n".to_string(), krusty::types::Ty::Int),
+            (
+                "serializationConstructorMarker".to_string(),
+                krusty::types::Ty::nullable(krusty::types::Ty::obj(
+                    "kotlinx/serialization/internal/SerializationConstructorMarker",
+                )),
+            ),
+        ],
+        "metadata keeps the exact parameter names, order and nullable reference types"
+    );
     assert!(
         deser.vc_params,
         "the backend must emit the separate value-class constructor accessor"
+    );
+}
+
+const DESERIALIZATION_VALUE_CLASS: &str = "@Serializable @JvmInline value class V(val s: String)\n\
+    @Serializable class D(val v: V, val n: Int)\n";
+
+// PLATFORM: JVM classfile, constructor accessor and Kotlin metadata representation.
+#[test]
+fn deser_value_class_constructor_matches_complete_kotlinc_classfile() {
+    let (plugin, cp) = super::serialization_companion_byte_parity_e2e::plugin_and_runtime()
+        .expect("the matching serialization plugin and pinned runtime are required");
+    let source =
+        format!("import kotlinx.serialization.Serializable\n{DESERIALIZATION_VALUE_CLASS}");
+    let built = common::compare_with_kotlinc_plugin(
+        "DeserValueClassConstructor",
+        &source,
+        "D",
+        &cp,
+        "25",
+        &[format!("-Xplugin={}", plugin.display())],
+    )
+    .expect("the reference compiler and disassembler are required");
+    assert_eq!(
+        built.krusty_bytes, built.reference_bytes,
+        "D differs from kotlinc\n--- kotlinc ---\n{}\n--- krusty ---\n{}",
+        built.reference, built.krusty
+    );
+}
+
+#[test]
+fn deser_value_class_constructor_round_trips_and_rejects_missing_fields() {
+    let source = format!(
+        "import kotlinx.serialization.Serializable\n\
+         import kotlinx.serialization.json.Json\n\
+         {DESERIALIZATION_VALUE_CLASS}\
+         fun box(): String {{\n\
+             val text = Json.encodeToString(D.serializer(), D(V(\"OK\"), 7))\n\
+             if (text != \"{{\\\"v\\\":\\\"OK\\\",\\\"n\\\":7}}\") return text\n\
+             val decoded = Json.decodeFromString(D.serializer(), text)\n\
+             if (decoded.v.s != \"OK\" || decoded.n != 7) return \"decoded\"\n\
+             try {{\n\
+                 Json.decodeFromString(D.serializer(), \"{{\\\"n\\\":7}}\")\n\
+                 return \"missing field accepted\"\n\
+             }} catch (error: kotlinx.serialization.MissingFieldException) {{\n\
+                 return \"OK\"\n\
+             }}\n\
+         }}\n"
+    );
+    assert_eq!(
+        super::serialization_test_support::both_compilers_box(
+            &source,
+            "deser_value_class_constructor",
+        ),
+        "OK"
     );
 }
 

@@ -55,6 +55,10 @@ struct PropertyCallTarget<'a> {
 
 struct PropertyReferenceTarget {
     owner: String,
+    /// The property is the underlying storage of the value class it is read from: its value IS
+    /// the box's carrier, which kotlinc reads with `unbox-impl` in place of the getter the
+    /// reference reports.
+    reads_value_class_storage: bool,
     call_owner: String,
     reflection_facade: Option<String>,
     getter_facade: Option<String>,
@@ -115,6 +119,8 @@ impl PropertyReferenceTarget {
             .unwrap_or_else(|| format!("{}{getter_descriptor}", property.getter_name));
         Self {
             owner,
+            reads_value_class_storage: realization.declares_value_class_storage
+                && !property.static_dispatch,
             call_owner,
             array_length: array_owner.is_some() && reflection_facade.is_none(),
             signature,
@@ -137,7 +143,11 @@ impl PropertyReferenceTarget {
             owner: &self.call_owner,
             facade: self.getter_facade.as_deref(),
             array_length: self.array_length,
-            name: &property.getter_name,
+            name: if self.reads_value_class_storage {
+                "unbox-impl"
+            } else {
+                &property.getter_name
+            },
             descriptor: &self.getter_descriptor,
             params: &self.getter_params,
             owner_is_interface: property.owner_is_interface,

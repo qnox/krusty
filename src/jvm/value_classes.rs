@@ -36,6 +36,7 @@ mod member_names;
 mod module_members;
 mod operand_nullness;
 mod parameter_guards;
+mod private_accessor_calls;
 mod property_annotation_markers;
 mod property_references;
 mod reference_returns;
@@ -214,6 +215,7 @@ pub(crate) fn lower_value_classes(
     if under.is_empty() && callable_under.is_empty() {
         return true;
     }
+    private_accessor_calls::realize(ir, &under, &callable_under);
     call_result_boundaries::realize(ir, &callable_under);
     type_operation_roles::record_primitive_array_allocation_carriers(ir, &under);
     // Publish only the distinction the existing unified value-class lookup cannot answer: which
@@ -1062,26 +1064,7 @@ pub(crate) fn lower_value_classes(
         );
     }
     sam_names::rename(ir, &callable_under);
-    // Common IR keeps the SAM declaration semantic. Once this backend has chosen value-class
-    // carriers, publish the exact physical interface slot beside it. LambdaMetafactory (and the
-    // class-based SAM strategy) must implement that erased slot, not a descriptor reconstructed
-    // from the value-class classifier spelling.
-    ir.lambda_sam_jvm_signature = ir
-        .lambda_sam_signature
-        .iter()
-        .map(|(&implementation, (parameters, result))| {
-            (
-                implementation,
-                (
-                    parameters
-                        .iter()
-                        .map(|parameter| erase(parameter, &under))
-                        .collect(),
-                    erase(result, &under),
-                ),
-            )
-        })
-        .collect();
+    sam_names::publish_jvm_signatures(ir, &under);
     // A member of a sibling file's value class is realized by that file's pass as a static
     // implementation over the carrier: derive the same name from the declared signature the call
     // retains (and its checked suspend fact); step 4 moves the receiver to parameter zero. The
@@ -1196,7 +1179,9 @@ pub(crate) fn lower_value_classes(
                 ir.declaration_argument_boundaries
                     .contains_key(&(index as ExprId))
             } else {
-                *name = vc_mangle(name, params, ret, &callable_under, true, false);
+                if !private_accessor_calls::keeps_name(&ir.private_property_accessor_calls, index) {
+                    *name = vc_mangle(name, params, ret, &callable_under, true, false);
+                }
                 false
             };
             for parameter in params.iter_mut() {
@@ -1698,7 +1683,7 @@ pub(crate) fn lower_value_classes(
         else {
             continue;
         };
-        if let Some(call) = crate::jvm::call_result_boundaries::terminal_call(&ir.exprs, *arg) {
+        if let Some(call) = crate::jvm::call_result_boundaries::declaration_result_call(ir, *arg) {
             applied_call_results.insert(call, *type_operand);
         }
     }
@@ -2323,6 +2308,18 @@ pub(crate) fn lower_value_classes(
                 underlying,
             }) => {
                 ir.record_erased_value_construction(id, owner, underlying);
+                // The call targets the selected constructor's own `constructor-impl`, so a private
+                // one reached from another class is bridged like any private static member.
+                let constructor = ir
+                    .construction_targets
+                    .get(&id)
+                    .and_then(|target| {
+                        realized_members
+                            .constructor_impls
+                            .get(&(owner, target.ordinal))
+                    })
+                    .copied();
+                ir.record_realized_member_target(id, constructor, None);
                 // The construction becomes a static `constructor-impl` call over the same checked
                 // declaration parameters. A generic `T` parameter consumes its argument as a box.
                 if let Some(parameters) = ir.construction_declared_params.remove(&id) {

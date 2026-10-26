@@ -35,7 +35,9 @@ impl ExceptionTransport {
             module.reference_function(function);
             table.ref_func(function);
         }
-        table.struct_new(objects.any_table);
+        table
+            .ref_null(HeapType::Concrete(objects.itable))
+            .struct_new(objects.any_table);
         let table = module.constant_global(ValType::reference(objects.any_table), table);
         Self {
             tag,

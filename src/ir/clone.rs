@@ -621,6 +621,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     if let Some(line) = ir.whens.source_lines.get(&source).copied() {
         ir.whens.source_lines.insert(target, line);
     }
+    if let Some(line) = ir.whens.elvises.get(&source).copied() {
+        ir.whens.elvises.insert(target, line);
+    }
     copy_map!(binding_read_stability);
     copy_map!(short_circuits);
     copy_map!(physical_types);
@@ -636,6 +639,7 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(dispatch_classes);
     copy_map!(call_declared_ret);
     copy_map!(synthesized_accessor_calls);
+    copy_map!(private_property_accessor_calls);
     copy_map!(call_declared_params);
     copy_map!(module_member_accesses);
     copy_map!(jvm_protected_dependency_calls);

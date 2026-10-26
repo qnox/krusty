@@ -541,6 +541,19 @@ impl super::Emitter<'_> {
                 // unverifiable call: the operand contract refuses, this arm bails the file (the gate
                 // SKIPS it) and pushes a typed zero so the dead code that follows still assembles.
                 let desc = method_descriptor(&param_tys, ret);
+                // A virtual call names the receiver's dispatch class, and its receiver is
+                // materialized at that class, not at the member's declaring class.
+                let virtual_owner =
+                    if protected_bridge.is_none() && !self.ir.method_visibility(fid).is_private() {
+                        let Some(virtual_owner) =
+                            self.module_member_call_owner(e, c.fq_name_id(), is_iface)
+                        else {
+                            return;
+                        };
+                        Some(virtual_owner)
+                    } else {
+                        None
+                    };
                 let operand_result = if let Some(bridge) = protected_bridge.as_ref() {
                     let mut operands = Vec::with_capacity(call_args.len() + 1);
                     operands.push(*receiver);
@@ -553,7 +566,9 @@ impl super::Emitter<'_> {
                     self.emit_descriptor_virtual_operands(
                         e,
                         crate::jvm::ir_emit::call_operands::VirtualCallTarget {
-                            owner: &owner,
+                            owner: virtual_owner
+                                .as_ref()
+                                .map_or(owner.as_str(), |(owner, _)| owner.as_str()),
                             name: &name,
                             descriptor: &desc,
                         },
@@ -628,10 +643,8 @@ impl super::Emitter<'_> {
                         code.invokespecial(m, aw, physical_call_result_words(ret));
                     }
                 } else {
-                    let Some((owner, is_iface)) =
-                        self.module_member_call_owner(e, c.fq_name_id(), is_iface)
-                    else {
-                        return;
+                    let Some((owner, is_iface)) = virtual_owner else {
+                        unreachable!("an ordinary virtual call selected its owner before operands");
                     };
                     let (name, desc, result_narrow) = self
                         .ir
@@ -940,6 +953,7 @@ impl super::Emitter<'_> {
                     };
                     self.mark_call_start(e, code);
                     code.invokestatic(m, aw, physical_call_result_words(ret));
+                    self.guard_private_lateinit_read(e, code);
                 }
                 Callee::Module { .. }
                 | Callee::ModuleWithDefaults { .. }
@@ -1055,6 +1069,7 @@ impl super::Emitter<'_> {
                     };
                     self.mark_call_start(e, code);
                     code.invokestatic(m, aw, slot_words(ret) as i32);
+                    self.guard_private_lateinit_read(e, code);
                 }
                 Callee::Virtual {
                     owner,
@@ -1134,8 +1149,22 @@ impl super::Emitter<'_> {
                         let call_parameters = bridge.as_ref().map_or(ptys.as_slice(), |bridge| {
                             bridge.bridge_parameters.as_slice()
                         });
+                        // A receiver read from a generic declaration's erased result narrows once,
+                        // to the class the call names, as kotlinc's does: an upcast to the
+                        // member's declaring class between them would leave the slot unnarrowed.
+                        let erased_receiver = bridge
+                            .is_none()
+                            .then(|| self.erased_dispatch_receiver(recv))
+                            .flatten()
+                            .filter(|_| !owner.starts_with('['));
+                        if let Some(erased) = erased_receiver {
+                            ops[0] = erased;
+                        }
                         let mut physical = vec![bridge.as_ref().map_or_else(
-                            || self.value_ty(recv),
+                            || match erased_receiver {
+                                Some(_) => Ty::obj(&owner),
+                                None => self.value_ty(recv),
+                            },
                             |bridge| Ty::obj_name(bridge.owner),
                         )];
                         physical.extend(call_parameters.iter().copied());
@@ -1439,8 +1468,12 @@ impl super::Emitter<'_> {
                 code.getstatic(f, 1);
             }
             IrExpr::StaticInstance { owner, ty, field } => {
+                let ty_name = self.ir.classes[*ty as usize].fq_name;
+                crate::jvm::reified_anonymous::guard_reified_construction(
+                    self.ir, self.cw, code, ty_name,
+                );
                 let owner_fq = self.ir.classes[*owner as usize].fq_name();
-                let ty_fq = self.ir.classes[*ty as usize].fq_name();
+                let ty_fq = ty_name.render();
                 let f = self.cw.fieldref(&owner_fq, field, &format!("L{ty_fq};"));
                 code.getstatic(f, 1);
             }
@@ -1448,6 +1481,9 @@ impl super::Emitter<'_> {
                 self.emit_singleton_instance(*classifier, code);
             }
             IrExpr::ExternalStaticInstance { owner, ty, field } => {
+                crate::jvm::reified_anonymous::guard_reified_construction(
+                    self.ir, self.cw, code, *ty,
+                );
                 let (owner, field) = singleton_instance_load::loaded_instance(
                     self.self_companion,
                     *ty,

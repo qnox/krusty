@@ -15,6 +15,7 @@ mod codegen;
 mod encode;
 mod exception_transport;
 mod host;
+mod interface_dispatch;
 mod objects;
 mod runtime;
 mod target;

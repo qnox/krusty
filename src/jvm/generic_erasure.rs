@@ -14,12 +14,16 @@ use crate::ir::{IrFile, IrTypeParameter};
 use crate::types::{wk, Ty, TyKind};
 
 pub(super) fn declared_primary_bound(parameter: &IrTypeParameter) -> Option<Ty> {
-    parameter
-        .bounds
+    primary_bound(&parameter.bounds).map(|index| parameter.bounds[index].0)
+}
+
+/// The position of the bound a type parameter erases through: the first written class bound,
+/// otherwise the first written bound. `None` for a parameter with no written bound.
+pub(super) fn primary_bound(bounds: &[(Ty, bool)]) -> Option<usize> {
+    bounds
         .iter()
-        .find(|(bound, is_interface)| !*is_interface && !bound.non_null().is_ty_param())
-        .or_else(|| parameter.bounds.first())
-        .map(|(bound, _)| *bound)
+        .position(|(bound, is_interface)| !*is_interface && !bound.non_null().is_ty_param())
+        .or_else(|| (!bounds.is_empty()).then_some(0))
 }
 
 fn parameter_named<'a>(
@@ -155,6 +159,17 @@ pub(super) fn parameter_erasures_with(
         );
     }
     erasures
+}
+
+/// `types` as `function`'s own descriptor erases them: each of its type parameters becomes its
+/// primary bound.
+pub(super) fn erased_for_function(ir: &IrFile, function: u32, types: &[Ty]) -> Vec<Ty> {
+    let Some(signature) = ir.signatures.get(&function) else {
+        return types.to_vec();
+    };
+    let erasures =
+        parameter_erasures_with(&signature.type_params, &bound_type_parameters(ir, function));
+    erase_with(types, &erasures)
 }
 
 /// Exact non-local type-parameter declarations referenced by `function`'s own bounds.

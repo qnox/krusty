@@ -29,6 +29,9 @@ pub(super) struct SynthesizedValueMembers {
     /// Exact generated instance methods that delegate Kotlin `Any` members to their static
     /// carrier implementations. A same-spelled source overload is not one of these functions.
     pub(super) any_delegators: HashSet<u32>,
+    /// Source `Any` overrides realized as the static `toString-impl`/`hashCode-impl`/`equals-impl`
+    /// over the carrier. kotlinc names what it lifts out of one after that realized name.
+    pub(super) any_impls: HashSet<u32>,
 }
 
 impl SynthesizedValueMembers {
@@ -95,7 +98,8 @@ pub(super) fn enclose_in_constructor_impls(ir: &mut IrFile, realized: &Synthesiz
 }
 
 /// Record every function whose JVM name the value-class pass chose: one it mangled or renamed
-/// `-impl`, a static accessor implementation, and each `constructor-impl`.
+/// `-impl`, a static accessor implementation, a source `Any` override's static `-impl`, and each
+/// `constructor-impl`.
 pub(super) fn record_renamed_functions(
     ir: &mut IrFile,
     realized: &SynthesizedValueMembers,
@@ -105,8 +109,41 @@ pub(super) fn record_renamed_functions(
         renamed
             .iter()
             .chain(realized.accessors.keys())
+            .chain(&realized.any_impls)
             .chain(realized.constructor_impls.values()),
     );
+}
+
+/// kotlinc's boxed `Any` member delegating to a source override's static `-impl` is that override
+/// on the box: it stands right after the `-impl`, at the override's place among the declared
+/// members, enters on the override's signature line and returns on its last line. The generated
+/// ones follow every declared member and map no line.
+fn realize_delegator_of_override(
+    ir: &mut IrFile,
+    custom: Option<u32>,
+    delegator: u32,
+    body: ExprId,
+) {
+    let Some(custom) = custom else {
+        return;
+    };
+    if let Some(order) = ir.fn_source_order.get(&custom).copied() {
+        ir.fn_source_order.insert(delegator, order);
+    }
+    let entry = ir.fn_sig_lines.get(&custom).copied();
+    if let Some(line) = entry {
+        ir.fn_decl_lines.insert(delegator, line);
+    }
+    let returned = match ir.expr(body) {
+        IrExpr::Block { stmts, value: None } => stmts.last().copied(),
+        _ => None,
+    };
+    // The return's line is an entry of its own only below the entry line; on that same line the
+    // method's one entry at its start already covers it.
+    let end = ir.fn_end_lines.get(&custom).copied();
+    if let (Some(returned), Some(line)) = (returned, end.filter(|&end| Some(end) != entry)) {
+        ir.mark_implicit_return_end_line(returned, line);
+    }
 }
 
 /// Synthesize a value class's unboxed-support members directly in the IR (a JVM concern, so it lives in
@@ -216,9 +253,10 @@ pub(super) fn synth_value_members(
     // reads inside it are lowered to the carrier later in this pass. The ordinary instance override is
     // synthesized below as the ABI delegator back to this implementation.
     let custom_any_roles = ir.any_member_overrides(internal_name);
-    let mut custom_equals = false;
-    let mut custom_hash_code = false;
-    let mut custom_to_string = false;
+    // Each source override, by the `Any` member it overrides.
+    let mut custom_equals = None;
+    let mut custom_hash_code = None;
+    let mut custom_to_string = None;
     let mut custom_carrier_functions = Vec::new();
     for &fid in &ir.classes[class_id as usize].methods.clone() {
         let Some(function) = ir.functions.get_mut(fid as usize) else {
@@ -226,15 +264,15 @@ pub(super) fn synth_value_members(
         };
         let custom_impl = match custom_any_roles.get(&fid) {
             Some(crate::ir::IrValueClassAnyMember::Equals) => {
-                custom_equals = true;
+                custom_equals = Some(fid);
                 Some("equals-impl")
             }
             Some(crate::ir::IrValueClassAnyMember::HashCode) => {
-                custom_hash_code = true;
+                custom_hash_code = Some(fid);
                 Some("hashCode-impl")
             }
             Some(crate::ir::IrValueClassAnyMember::ToString) => {
-                custom_to_string = true;
+                custom_to_string = Some(fid);
                 Some("toString-impl")
             }
             _ => None,
@@ -248,6 +286,7 @@ pub(super) fn synth_value_members(
             function.name = name.to_string();
             super::parameter_guards::prepend_carrier(function, u_ir);
             function.is_static = true;
+            realized.any_impls.insert(fid);
             custom_carrier_functions.push((fid, declared));
         }
     }
@@ -398,6 +437,12 @@ pub(super) fn synth_value_members(
         ir.jvm_value_class_representation_order.insert(cfid, 0);
         realized.constructor_impls.insert((internal_name, 0), cfid);
         ir.jvm_value_class_constructor_impls.insert(cfid, 0);
+        // `constructor-impl` itself records no line, but its `$default` stub stands on the source
+        // constructor's own line, like the rebuilt `<init>` above.
+        let constructor_line = ir.classes[class_id as usize].primary_ctor_lines.decl_line;
+        if constructor_line != 0 {
+            ir.fn_sig_lines.insert(cfid, constructor_line);
+        }
         crate::jvm::method_parameters::record_function(ir, cfid, &[&fname], &[]);
         // Unlike a source value-class member converted to `member-impl`, this generated function's
         // carrier is its declared constructor parameter, not a former dispatch receiver. Keeping an
@@ -405,9 +450,14 @@ pub(super) fn synth_value_members(
         // mask ordinals and silently skip its checked default.
         ir.functions[cfid as usize].dispatch_receiver = None;
         ir.open_methods.insert(cfid); // kotlinc emits `constructor-impl` `public static` (non-final)
-                                      // A default on the single underlying property (`ItemId(val value: String = …)`) → register it as
-                                      // `constructor-impl`'s param default so the backend emits `constructor-impl$default(U, int, marker)`
-                                      // (kotlinc's synthetic). The generic constructor default was reframed to this static layout above.
+                                      // A private primary constructor is a private `constructor-impl`: another class reaches it
+                                      // through the box's `access$constructor-impl` accessor, as any private static member.
+        if ir.ctor_visibilities.get(&internal_name) == Some(&crate::types::Visibility::Private) {
+            ir.set_method_visibility(cfid, crate::types::Visibility::Private);
+        }
+        // A default on the single underlying property (`ItemId(val value: String = …)`) → register it as
+        // `constructor-impl`'s param default so the backend emits `constructor-impl$default(U, int, marker)`
+        // (kotlinc's synthetic). The generic constructor default was reframed to this static layout above.
         if let Some(def) = constructor_default {
             ir.fn_params.insert(
                 cfid,
@@ -427,26 +477,33 @@ pub(super) fn synth_value_members(
     {
         let a = ir.add_expr(IrExpr::GetValue(0));
         let b = ir.add_expr(IrExpr::GetValue(1));
-        let cmp = if custom_equals {
-            let boxed = ir.add_expr(IrExpr::Call {
-                callee: Box::new(Callee::Static {
-                    owner: internal_name,
-                    name: "box-impl".to_string(),
-                    descriptor: format!("({udesc})L{};", internal_name.render()),
-                    inline: InlineKind::None,
-                }),
-                dispatch_receiver: None,
-                args: vec![b],
+        // With a source `equals` override, kotlinc compares the two boxes through that override:
+        // `box-impl(p1).equals(box-impl(p2))`, dispatched on the box.
+        let cmp = if custom_equals.is_some() {
+            let [left, right] = [a, b].map(|carrier| {
+                ir.add_expr(IrExpr::Call {
+                    callee: Box::new(Callee::Static {
+                        owner: internal_name,
+                        name: "box-impl".to_string(),
+                        descriptor: format!("({udesc})L{};", internal_name.render()),
+                        inline: InlineKind::None,
+                    }),
+                    dispatch_receiver: None,
+                    args: vec![carrier],
+                })
             });
             ir.add_expr(IrExpr::Call {
-                callee: Box::new(Callee::Static {
+                callee: Box::new(Callee::Virtual {
                     owner: internal_name,
-                    name: "equals-impl".to_string(),
-                    descriptor: format!("({udesc}Ljava/lang/Object;)Z"),
-                    inline: InlineKind::None,
+                    name: "equals".to_string(),
+                    descriptor: "(Ljava/lang/Object;)Z".to_string(),
+                    params: None,
+                    interface: false,
+                    module_target: None,
+                    target: None,
                 }),
-                dispatch_receiver: None,
-                args: vec![a, boxed],
+                dispatch_receiver: Some(left),
+                args: vec![right],
             })
         } else if let Some(nested) = nested_value_equals(ir, a, b, u_ir, eu, under) {
             nested
@@ -480,7 +537,7 @@ pub(super) fn synth_value_members(
     // toString-impl(U v): "X(field=" + v + ")" ; toString(): return toString-impl(this.field)
     {
         let simple = internal_name.segment_ref().replace('$', ".");
-        if !custom_to_string {
+        if custom_to_string.is_none() {
             let carrier = ir.add_expr(IrExpr::GetValue(0));
             // A non-null nested value class is this slot's carrier. Name it through its own
             // `toString-impl` (`Outer(i=Inner(x=20))`); the concat then appends that String.
@@ -525,14 +582,15 @@ pub(super) fn synth_value_members(
         realized.any_delegators.insert(fid);
         ir.jvm_value_class_any_delegators
             .insert(fid, crate::ir::IrValueClassAnyMember::ToString);
+        realize_delegator_of_override(ir, custom_to_string, fid, ibody);
         ir.open_methods.insert(fid);
-        if !custom_to_string {
+        if custom_to_string.is_none() {
             ir.jvm_nullability_unannotated_methods.insert(fid);
         }
     }
     // hashCode-impl(U v): v.hashCode() ; hashCode(): return hashCode-impl(this.field)
     {
-        if !custom_hash_code {
+        if custom_hash_code.is_none() {
             let h = property_hash(ir, u_ir);
             let sbody = ret_block(ir, h);
             let impl_fid = add_static(ir, "hashCode-impl", vec![u_ir], int_ir, sbody);
@@ -563,15 +621,16 @@ pub(super) fn synth_value_members(
         realized.any_delegators.insert(fid);
         ir.jvm_value_class_any_delegators
             .insert(fid, crate::ir::IrValueClassAnyMember::HashCode);
+        realize_delegator_of_override(ir, custom_hash_code, fid, ibody);
         ir.open_methods.insert(fid);
-        if !custom_hash_code {
+        if custom_hash_code.is_none() {
             ir.jvm_nullability_unannotated_methods.insert(fid);
         }
     }
     // equals-impl(U v, Object other): other is X && equals-impl0(v, other.unbox-impl())
     // equals(other): return equals-impl(this.field, other)
     {
-        if !custom_equals {
+        if custom_equals.is_none() {
             // static: v = slot 0, other = slot 1.
             let mut stmts = Vec::new();
             let other = ir.add_expr(IrExpr::GetValue(1));
@@ -663,13 +722,15 @@ pub(super) fn synth_value_members(
             args: vec![fv, other_i],
         });
         let ibody = ret_block(ir, call);
-        let fid = add_inst(ir, "equals", vec![any_ir], bool_ir, ibody);
+        // `Any.equals` declares `other: Any?`, and an override keeps that parameter type.
+        let fid = add_inst(ir, "equals", vec![Ty::nullable(any_ir)], bool_ir, ibody);
         realized.any_delegators.insert(fid);
         ir.jvm_value_class_any_delegators
             .insert(fid, crate::ir::IrValueClassAnyMember::Equals);
+        realize_delegator_of_override(ir, custom_equals, fid, ibody);
         crate::jvm::method_parameters::record_function(ir, fid, &["other"], &[]);
         ir.open_methods.insert(fid);
-        if !custom_equals {
+        if custom_equals.is_none() {
             ir.jvm_nullability_unannotated_methods.insert(fid);
         }
     }
@@ -822,8 +883,12 @@ pub(super) fn synth_value_members(
             }
             crate::jvm::method_parameters::record_function(ir, constructor, &names, &[]);
             ir.fn_source_order.insert(constructor, sc.source_order);
-            // `public static`, non-final — like the primary's `constructor-impl`.
+            // `static`, non-final, and as visible as the declaration — like the primary's
+            // `constructor-impl`.
             ir.open_methods.insert(constructor);
+            if sc.metadata_visibility == Some(crate::types::Visibility::Private) {
+                ir.set_method_visibility(constructor, crate::types::Visibility::Private);
+            }
         }
     }
     true

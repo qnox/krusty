@@ -1,4 +1,4 @@
-//! Declaration consensus used to type constructor arguments before selection.
+//! Declaration-owned constructor argument shapes and contextual inference admission.
 
 use super::*;
 
@@ -19,7 +19,10 @@ pub(super) struct ConstructionExpectations {
     /// Declaration bounds parallel to `type_params`, used when an expected applied supertype
     /// supplies the classifier arguments before a contextual constructor argument is checked.
     pub(super) type_param_bounds: Vec<Vec<Ty>>,
+    /// Declaration signatures of every constructor contributing to the mapped consensus.
+    signatures: Vec<Option<crate::libraries::GenericSig>>,
 }
+
 impl Checker<'_> {
     /// The constructor shapes each argument of `Name(args)` is typed against, in SOURCE-ARGUMENT
     /// order. Providers normalize every declaration origin into the classifier's constructor list;
@@ -37,6 +40,7 @@ impl Checker<'_> {
     ) -> Option<ConstructionExpectations> {
         let classifier = self.resolved_type_name(internal)?;
         let declarations = self.constructor_declarations(internal, &classifier);
+        let mut signatures = Vec::new();
         let candidates = declarations
             .iter()
             .filter_map(|constructor| {
@@ -47,28 +51,32 @@ impl Checker<'_> {
                     trailing_lambda,
                     &constructor.call_sig,
                 )?;
-                let symbolic = constructor
-                    .generic_sig
+                let signature = crate::libraries::constructor_generic_signature(
+                    internal,
+                    &classifier,
+                    constructor,
+                );
+                let symbolic = signature
                     .as_ref()
                     .filter(|generic| generic.params.len() == constructor.params.len());
-                Some(
-                    slots
-                        .into_iter()
-                        .map(|slot| {
-                            let parameter = (
-                                constructor.params[slot],
-                                constructor
-                                    .call_sig
-                                    .lambda_receiver_params
-                                    .get(slot)
-                                    .copied()
-                                    .unwrap_or(false),
-                            );
-                            let symbolic = symbolic.map(|generic| generic.params[slot]);
-                            (parameter, symbolic)
-                        })
-                        .collect::<Vec<_>>(),
-                )
+                let parameters = slots
+                    .into_iter()
+                    .map(|slot| {
+                        let parameter = (
+                            constructor.params[slot],
+                            constructor
+                                .call_sig
+                                .lambda_receiver_params
+                                .get(slot)
+                                .copied()
+                                .unwrap_or(false),
+                        );
+                        let symbolic = symbolic.map(|generic| generic.params[slot]);
+                        (parameter, symbolic)
+                    })
+                    .collect::<Vec<_>>();
+                signatures.push(signature);
+                Some(parameters)
             })
             .collect::<Vec<_>>();
         // A functional interface exposes a language-level single-argument constructor even though
@@ -92,6 +100,7 @@ impl Checker<'_> {
                 symbolic: vec![Some(function)],
                 type_params: classifier.type_params.clone(),
                 type_param_bounds: classifier.type_param_bounds().to_vec(),
+                signatures: Vec::new(),
             });
         }
         let first = candidates.first()?;
@@ -119,6 +128,113 @@ impl Checker<'_> {
                 .collect(),
             type_params: classifier.type_params.clone(),
             type_param_bounds: classifier.type_param_bounds().to_vec(),
+            signatures,
+        })
+    }
+
+    /// Bind the constructed classifier's type parameters from everything known at the call BEFORE a
+    /// contextual (lambda) argument is checked: explicit type arguments, the expected result, and
+    /// the arguments already typed. `actuals` holds `Ty::Error` for a slot not yet typed.
+    ///
+    /// This is the constructor half of ordinary bidirectional inference. Lambda input shaping and
+    /// admitted nested result constraints use it: `Store<ROOT, DOMAIN>(wrapper: Wrapper<ROOT>, toDomain: (ROOT) -> DOMAIN)`
+    /// must hand `{ dto -> … }` a `dto: RootDto`, not the unbound `ROOT` (which erases to its bound
+    /// and fails every member read in the body).
+    pub(super) fn construction_type_param_binds(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        internal: TypeName,
+        expected: Option<Ty>,
+        plan: &ConstructionExpectations,
+        actuals: &[Ty],
+    ) -> crate::symbol_resolver::GSigBinds {
+        let mut binds = crate::symbol_resolver::GSigBinds::default();
+        if plan.type_params.is_empty() {
+            return binds;
+        }
+        let fixed = self.constructor_fixed_bindings(scope, call, internal, expected, plan);
+        for (slot, shape) in plan.symbolic.iter().enumerate() {
+            let (Some(shape), Some(&actual)) = (*shape, actuals.get(slot)) else {
+                continue;
+            };
+            if actual == Ty::Error || !shape.mentions_ty_param() {
+                continue;
+            }
+            crate::symbol_resolver::unify_inferred_ty(shape, actual, &mut binds);
+        }
+        // Written and expected applications are fixed independently of argument inference.
+        binds.extend(fixed);
+        binds.retain(|name, ty| plan.type_params.contains(name) && *ty != Ty::Error);
+        binds
+    }
+
+    fn constructor_fixed_bindings(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        internal: TypeName,
+        expected: Option<Ty>,
+        plan: &ConstructionExpectations,
+    ) -> crate::symbol_resolver::GSigBinds {
+        let mut expected_bindings = crate::symbol_resolver::GSigBinds::default();
+        {
+            let source = self.fed_source();
+            crate::symbol_resolver::seed_unbound_constructor_result_from_symbols(
+                &source,
+                internal,
+                &plan.type_params,
+                &plan.type_param_bounds,
+                expected,
+                &mut expected_bindings,
+            );
+        }
+        let mut explicit = crate::symbol_resolver::GSigBinds::default();
+        if let Some(refs) = self
+            .file
+            .call_type_args
+            .get(&call.0)
+            .map(|syntax| syntax.arguments.clone())
+        {
+            for (name, type_ref) in plan.type_params.iter().zip(refs.iter()) {
+                let ty = self.type_ref_ty_silent(scope, type_ref);
+                if ty != Ty::Error {
+                    explicit.insert(name.clone(), ty);
+                }
+            }
+        }
+        expected_bindings.extend(explicit);
+        expected_bindings
+    }
+
+    /// A rejected class application cannot supply result constraints to a nested producer.
+    /// This does not retract declaration input types, including explicit lambda parameter context.
+    pub(super) fn constructor_result_context_admitted(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        internal: TypeName,
+        expected: Option<Ty>,
+        plan: &ConstructionExpectations,
+    ) -> bool {
+        if plan.signatures.is_empty() || plan.type_params.is_empty() {
+            return true;
+        }
+        let fixed = self.constructor_fixed_bindings(scope, call, internal, expected, plan);
+        let Some(arguments) = plan
+            .type_params
+            .iter()
+            .map(|formal| fixed.get(formal).copied())
+            .collect::<Option<Vec<_>>>()
+        else {
+            // An open application still needs ordinary argument inference and selection.
+            return true;
+        };
+        !plan.signatures.iter().all(|signature| {
+            signature.as_ref().is_some_and(|signature| {
+                self.explicit_constructor_bound_violation(&plan.type_params, signature, &arguments)
+                    .is_some()
+            })
         })
     }
 

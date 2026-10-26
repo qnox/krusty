@@ -83,6 +83,7 @@ impl Classpath {
         let mut members = DeclaredMembers {
             functions: Vec::new(),
             properties: Vec::new(),
+            static_properties: Vec::new(),
             constructors: class
                 .constructors
                 .iter()
@@ -114,6 +115,7 @@ impl Classpath {
                     visibility: member.visibility,
                     modality: member.modality,
                     from_java_method: false,
+                    getter_annotations: Vec::new(),
                     annotated: !member.annotations.is_empty(),
                 });
             } else {

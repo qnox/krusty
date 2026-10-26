@@ -39,7 +39,6 @@ arithmetic/division.kt
 arithmetic/github1856.kt
 arrays/arrayConstructorWithNonInlineLambda.kt
 arrays/arrayConstructorsSimple.kt
-arrays/arraysOfInlineClass/arrayOfInlineClassOfArrayOfInlineClass.kt
 arrays/forInReversed/reversedArrayOriginalUpdatedInLoopBody.kt
 arrays/forInReversed/reversedArrayReversedArrayOriginalUpdatedInLoopBody.kt
 arrays/forInReversed/reversedOriginalUpdatedInLoopBody.kt
@@ -1216,7 +1215,6 @@ initializers/throw2.kt
 inline/LocalEntitiesInAnonymousObjectInInlineCallables.kt
 inline/anonymousFunction.kt
 inline/anonymousObjectInlineMethod.kt
-inline/astCopy.kt
 inline/blocksMaterialization.kt
 inline/callInlineFunctionOnTopLevel.kt
 inline/callInlineFunctionOnTopLevelSimple.kt
@@ -1591,7 +1589,6 @@ multiplatform/k2/anonymousObjectAndSpecificImplementationInDeserializedIr.kt
 multiplatform/k2/basic/contextInFakeOverride.kt
 multiplatform/k2/basic/delegatedByExpectExtensionProperty.kt
 multiplatform/k2/basic/expectActualFakeOverrides2.kt
-multiplatform/k2/basic/expectActualFakeOverrides3.kt
 multiplatform/k2/basic/expectActualFakeOverridesWithTypeParameters.kt
 multiplatform/k2/basic/expectActualIntersectionOverride2.kt
 multiplatform/k2/basic/expectActualOverloads.kt
@@ -1886,7 +1883,6 @@ ranges/forInCharSequenceLengthDecreasedInLoopBody.kt
 ranges/forInCharSequenceLengthIncreasedInLoopBody.kt
 ranges/forInCharSequenceWithCustomIterator.kt
 ranges/forInCharSequenceWithMultipleGetFunctions.kt
-ranges/forInCustomCharSequence.kt
 ranges/forInCustomIterable.kt
 ranges/forInDoubleRangeWithCustomIterator.kt
 ranges/forInDownTo/forIntInDownTo.kt
@@ -1896,8 +1892,6 @@ ranges/forInDownTo/forLongInDownTo.kt
 ranges/forInDownTo/forNullableIntInDownTo.kt
 ranges/forInFloatRangeWithCustomIterator.kt
 ranges/forInIndices/forInArrayListIndices.kt
-ranges/forInIndices/forInCharSequenceIndices.kt
-ranges/forInIndices/forInCharSequenceTypeParameterIndices.kt
 ranges/forInIndices/forInCollectionImplicitReceiverIndices.kt
 ranges/forInIndices/forInCollectionIndices.kt
 ranges/forInIndices/forInCollectionTypeParameterIndices.kt
@@ -1910,15 +1904,11 @@ ranges/forInIndices/forInPrimitiveArrayIndices.kt
 ranges/forInIndices/forNullableIntInArrayIndices.kt
 ranges/forInIndices/forNullableIntInCollectionIndices.kt
 ranges/forInIndices/indexOfLast.kt
-ranges/forInIndices/kt12983_forInGenericArrayIndices.kt
 ranges/forInIndices/kt12983_forInGenericCollectionIndices.kt
-ranges/forInIndices/kt12983_forInSpecificArrayIndices.kt
 ranges/forInIndices/kt12983_forInSpecificCollectionIndices.kt
 ranges/forInIndices/kt13241_Array.kt
 ranges/forInIndices/kt13241_CharSequence.kt
 ranges/forInIndices/kt13241_Collection.kt
-ranges/forInIndices/kt43159_ArrayUpperBound.kt
-ranges/forInIndices/kt43159_GenericArray.kt
 ranges/forInProgressionWithIndex/forInDownToWithIndex.kt
 ranges/forInProgressionWithIndex/forInIndicesWithIndex.kt
 ranges/forInProgressionWithIndex/forInRangeToWithIndex.kt
@@ -1954,7 +1944,6 @@ ranges/forInUntil/forInUntilInt.kt
 ranges/forInUntil/forInUntilLong.kt
 ranges/forInUntil/forIntInIntUntilSmartcastInt.kt
 ranges/forInUntil/kt42533.kt
-ranges/forIntRange.kt
 ranges/forNullableIntInRangeWithImplicitReceiver.kt
 ranges/forWithPossibleOverflow/forInUntilIntMinValueReversed.kt
 ranges/kt37370a.kt
@@ -2532,7 +2521,6 @@ regressions/kt51927.kt
 regressions/kt5953.kt
 regressions/kt6434.kt
 regressions/kt68727.kt
-regressions/kt998.kt
 regressions/multimodule/inlineAssertFailsWithBlock.kt
 regressions/multimodule/inlineAssertFailsWithCompletedBlock.kt
 regressions/multimodule/inlineNarrowElementInRange.kt
@@ -2625,7 +2613,6 @@ strings/concatGenericWithStringUpperBound.kt
 strings/concatNullableGenericWithPrimitiveUpperBound.kt
 strings/constInStringTemplate.kt
 strings/kt13213.kt
-strings/kt13213a.kt
 strings/kt2592.kt
 strings/kt3571.kt
 strings/nestedConcat.kt
