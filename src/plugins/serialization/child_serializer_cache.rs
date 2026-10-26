@@ -590,7 +590,7 @@ mod tests {
         holder.ctor_param_count = 1;
         let class_id = ir.add_class(holder);
         let wire = vec![super::super::WireElement {
-            declared: Some(class_id),
+            declared: super::super::serial_elements::ElementDeclaration::Property(class_id),
             name: "tags".to_string(),
             ty: element,
             serializer_ty: element,

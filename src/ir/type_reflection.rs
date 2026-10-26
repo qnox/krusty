@@ -317,7 +317,8 @@ pub(crate) fn type_parameters_named_by(ty: Ty, names: &mut Vec<&'static str>) {
         | TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
         | TyKind::InProjection(inner)
-        | TyKind::OutProjection(inner) => type_parameters_named_by(inner, names),
+        | TyKind::OutProjection(inner)
+        | TyKind::RawProjection(inner) => type_parameters_named_by(inner, names),
         TyKind::Intersection(parts) => {
             for &part in parts {
                 type_parameters_named_by(part, names);

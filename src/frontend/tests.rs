@@ -9,6 +9,7 @@ use crate::types::{Ty, TypeName, TypeNameList, Visibility};
 
 mod analysis;
 mod annotation_publication;
+mod builtin_formals;
 mod retention;
 mod streaming;
 

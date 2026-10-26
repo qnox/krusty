@@ -540,7 +540,7 @@ impl BodyLowering<'_> {
                             operand,
                             check: crate::ir::NullCheck::Source,
                         });
-                        if operand_ty != target.get() {
+                        let asserted = if operand_ty != target.get() {
                             self.ir
                                 .logical_types
                                 .insert(asserted, operand_ty.non_null());
@@ -551,7 +551,11 @@ impl BodyLowering<'_> {
                             })
                         } else {
                             asserted
-                        }
+                        };
+                        // kotlinc states a `!!`'s own line before its operand, and keeps it when
+                        // the operand's first instruction marks another line there.
+                        self.ir.kept_start_lines.insert(asserted);
+                        asserted
                     }
                     FirTypeOperation::SafeCast => {
                         self.safe_cast_expression(operand_id, target.get())?
@@ -918,6 +922,11 @@ impl BodyLowering<'_> {
                 *negated,
                 origin,
             ))?,
+            FirExprKind::IndicesContainment {
+                value,
+                indices,
+                comparison,
+            } => self.indices_contains_expression(*value, indices, comparison.get())?,
             FirExprKind::StringTemplate(_) => {
                 unreachable!("a string template folds to a constant or is a concatenation")
             }
@@ -1083,6 +1092,8 @@ impl BodyLowering<'_> {
                     branches: vec![(Some(condition), rhs), (None, lhs)],
                 });
                 self.ir.logical_types.insert(result, expression.ty.get());
+                let line = self.body.expression_debug_lines(expression_id).source;
+                self.ir.whens.elvises.insert(result, line);
                 // An elvis over a safe call is one more guard of that call's chain: its left
                 // value's null check joins the chain's, and every `null` reaches the right side.
                 let over_safe_call = matches!(
@@ -1403,9 +1414,14 @@ impl BodyLowering<'_> {
                 target,
                 extension_receiver,
                 arguments,
+                parameter_types,
             } => {
-                let (call, declared) =
-                    self.checked_local_call(target.clone(), *extension_receiver, arguments)?;
+                let (call, declared) = self.checked_local_call(
+                    target.clone(),
+                    *extension_receiver,
+                    arguments,
+                    parameter_types,
+                )?;
                 self.declaration_result(call, Some(declared), expression.ty.get())
             }
             FirExprKind::Lambda {

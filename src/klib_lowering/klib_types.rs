@@ -52,6 +52,39 @@ impl KlibTypeParameters {
     }
 }
 
+/// A class application, with the same classifier and annotation normalization as closure planning.
+fn class_type(
+    arena: &KlibIrArena,
+    parameters: &KlibTypeParameters,
+    classifier: &KlibIrSymbol,
+    arguments: &[KlibIrTypeArgument],
+    annotations: &[KlibIrAnnotation],
+) -> Result<Ty, KlibBodyDeclineReason> {
+    let (name, receiver) = class_head(classifier, annotations)?;
+    let mut arguments = arguments
+        .iter()
+        .map(|argument| type_argument(arena, parameters, *argument))
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(function) = function_shape(name, arguments.len())? {
+        if !function.is_reflective() {
+            let ret = arguments.pop().expect("a function type has its result");
+            let receiver = receiver && !arguments.is_empty();
+            return Ok(Ty::fun_with_shape(arguments, ret, 0, receiver, false));
+        }
+    }
+    if receiver {
+        return Err(mismatch(
+            "a type other than a function type is marked `@ExtensionFunctionType`",
+        ));
+    }
+    if arguments.is_empty() {
+        if let Some(builtin) = builtin_semantic(name) {
+            return Ok(builtin);
+        }
+    }
+    Ok(Ty::obj_args_name(name, &arguments))
+}
+
 /// The semantic type of the KLIB type `id`, naming only the type parameters of `parameters`.
 pub(super) fn semantic_type(
     arena: &KlibIrArena,
@@ -110,15 +143,10 @@ pub(super) fn semantic_type(
     })
 }
 
-/// A class type with its arguments: a `kotlin.FunctionN` application is the function type it
-/// denotes, any other class the classifier applied to its converted arguments.
-fn class_type(
-    arena: &KlibIrArena,
-    parameters: &KlibTypeParameters,
+fn class_head(
     classifier: &KlibIrSymbol,
-    arguments: &[KlibIrTypeArgument],
     annotations: &[KlibIrAnnotation],
-) -> Result<Ty, KlibBodyDeclineReason> {
+) -> Result<(TypeName, bool), KlibBodyDeclineReason> {
     let KlibIrSignature::Public(signature) = &classifier.signature else {
         return Err(KlibBodyDeclineReason::UnsupportedType(
             "a type of a non-public class",
@@ -143,38 +171,50 @@ fn class_type(
             ));
         }
     }
-    let mut arguments = arguments
-        .iter()
-        .map(|argument| type_argument(arena, parameters, *argument))
-        .collect::<Result<Vec<_>, _>>()?;
+    Ok((name, receiver))
+}
+
+fn function_shape(
+    name: TypeName,
+    arguments: usize,
+) -> Result<Option<function_classifiers::FunctionClassifier>, KlibBodyDeclineReason> {
     if let Some(function) = function_classifiers::classifier(name) {
         if function.is_suspend() {
             return Err(KlibBodyDeclineReason::UnsupportedType(
                 "a suspend function type",
             ));
         }
-        if !function.is_reflective() {
-            if arguments.len() != function.arity() + 1 {
-                return Err(mismatch(
-                    "a function type has another number of arguments than its arity",
-                ));
-            }
-            let ret = arguments.pop().expect("a function type has its result");
-            let receiver = receiver && !arguments.is_empty();
-            return Ok(Ty::fun_with_shape(arguments, ret, 0, receiver, false));
+        if !function.is_reflective() && arguments != function.arity() + 1 {
+            return Err(mismatch(
+                "a function type has another number of arguments than its arity",
+            ));
         }
+        return Ok(Some(function));
     }
-    if receiver {
-        return Err(mismatch(
-            "a type other than a function type is marked `@ExtensionFunctionType`",
-        ));
+    Ok(None)
+}
+
+/// The outer function-class shape, independent of the enclosing type-parameter bindings.
+/// Full argument types are checked by `semantic_type` when the body is lowered.
+pub(super) fn closure_type_arity(arena: &KlibIrArena, id: KlibIrTypeId) -> Option<usize> {
+    let KlibIrType::Simple {
+        classifier,
+        nullability,
+        arguments,
+        annotations,
+        ..
+    } = arena.ty(id)
+    else {
+        return None;
+    };
+    if classifier.kind != KlibIrSymbolKind::Class
+        || *nullability == KlibIrNullability::MarkedNullable
+    {
+        return None;
     }
-    if arguments.is_empty() {
-        if let Some(builtin) = builtin_semantic(name) {
-            return Ok(builtin);
-        }
-    }
-    Ok(Ty::obj_args_name(name, &arguments))
+    let (name, _) = class_head(classifier, annotations).ok()?;
+    let function = function_shape(name, arguments.len()).ok()??;
+    (!function.is_reflective()).then(|| function.arity())
 }
 
 /// One type argument, as the provider converts a metadata type argument.

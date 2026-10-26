@@ -226,7 +226,9 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 let s = e.frame.enter(FrameKey::Value(value), t);
                 e.slots.insert(value, (s, t));
             }
-            e.record_locals = !generated;
+            // A generated constructor that keeps debug locals keeps its body's too: kotlinc lists
+            // an `init` block's or a copied default's locals ahead of the parameters.
+            e.record_locals = !generated || sc.generated_debug.records_locals();
             // kotlinc guards each checked parameter at the very start, ahead of the delegation.
             for (ordinal, check) in sc.param_checks.iter().enumerate() {
                 let Some(crate::ir::IrParameterCheck::NonNull) = check else {
@@ -519,7 +521,27 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             }
             locals
         });
+        // The body's locals, which a generated constructor's table lists ahead of `this`. One still
+        // open at the return stays in scope through it, as in any method's table.
+        let body_ranged_locals = if generated && debug_locals.is_some() {
+            let code_length = sctor.bytes.len();
+            sctor
+                .local_entries()
+                .iter()
+                .filter(|&&(start, ..)| usize::from(start) < code_length)
+                .map(|&(start, length, slot, ref name, ref desc)| {
+                    let length = length.unwrap_or_else(|| {
+                        u16::try_from(code_length - usize::from(start))
+                            .expect("a method's code fits u16")
+                    });
+                    (start, length, slot, name.clone(), desc.clone())
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         if let Some(locals) = &debug_locals {
+            cw.reserve_ranged_local_names(&body_ranged_locals);
             cw.reserve_method_lvt(locals);
         }
         let body_line_marks = sctor.line_marks().to_vec();
@@ -544,6 +566,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 sc.generated_debug.line().map(|line| (0, line)),
                 locals,
             );
+            cw.prepend_ranged_locals("<init>", &sc_desc, &body_ranged_locals);
         }
         // A constructor's line table is CURATED: `add_method` drops the marks a body emitted,
         // because an ordinary `<init>` builds its table from the class declaration and its property
@@ -604,18 +627,10 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             // `(String, int, …declared, mask, marker)` as kotlinc writes it. Only the capture
             // prefix is LOGICAL: a default initializer can mention a capture, never `$enum$name`.
             // This stub belongs to the SECONDARY constructor, so its line table is the secondary's:
-            // each masked fill maps to the default expression it evaluates, and the entry to the
-            // first of them — the `constructor(…)` declaration itself. Borrowing the primary's
-            // class/field/closing-paren provenance put the whole stub on the class line.
-            // Every one of these is the DECLARATION's own recorded line, never a descendant
-            // expression's: the entry at the `constructor` keyword, each masked fill at that
-            // parameter's default, and the delegation at the declaration's closing line.
-            let default_lines = sc
-                .lines
-                .defaults
-                .iter()
-                .map(|line| (*line != 0).then_some(*line))
-                .collect::<Vec<_>>();
+            // the entry, each mask test and the delegation at the `constructor` keyword, the
+            // return at the declaration's closing line, and each masked fill on the lines its
+            // default expression marks. Borrowing the primary's class/closing-paren provenance put
+            // the whole stub on the class line.
             // An enum's constructors are private, and kotlinc marks the synthetic overload of a
             // private constructor ACC_SYNTHETIC alone: PUBLIC|SYNTHETIC would publish a way to build
             // the class that the declaration does not grant.
@@ -634,11 +649,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                     logical_prefix_count: sc_prefix_tys.len(),
                     real_params: &sc_source_tys,
                     defaults: &sc.defaults,
-                    secondary_lines: Some((
-                        sc.lines.decl_line,
-                        &default_lines,
-                        sc.lines.decl_end_line,
-                    )),
+                    secondary_lines: Some((sc.lines.decl_line, sc.lines.decl_end_line)),
                     target_uses_marker_accessor: sc.vc_params
                         || super::constructor_accessors::hides_secondary(ir, c, secondary_ordinal),
                     deprecated: sc.annotations.deprecated(),

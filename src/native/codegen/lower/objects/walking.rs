@@ -381,6 +381,11 @@ impl FileLowering<'_> {
         class: ClassId,
         base: &str,
     ) -> Result<Option<FuncId>, Unsupported> {
+        // An interface's descriptor is never an object's type, and its members are numbered in
+        // the interface table rather than given class slots: nothing is sized through it.
+        if self.ir.classes[class as usize].is_interface {
+            return Ok(None);
+        }
         let Some(slot) = self.collection_size_slot(class)? else {
             return Ok(None);
         };
@@ -388,7 +393,7 @@ impl FileLowering<'_> {
         // valid implementations too; the generic iterator-result reader cannot describe them.
         let entry = &self.model.layout(class).vtable[slot as usize];
         let owner = &self.ir.classes[class as usize];
-        if matches!(entry, Slot::Abstract) && (owner.is_abstract || owner.is_interface) {
+        if matches!(entry, Slot::Abstract) && owner.is_abstract {
             // No instance can reach this descriptor's abstract member. A concrete subclass
             // resolves the inherited property identity against its own executable table.
             return Ok(None);

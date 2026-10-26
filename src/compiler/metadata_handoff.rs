@@ -208,7 +208,6 @@ pub(super) fn accept_active_debug_metadata(
                         decl_line: secondary.decl_line,
                         delegation_line: secondary.delegation_line,
                         decl_end_line: secondary.decl_end_line,
-                        defaults: secondary.default_lines.clone(),
                     },
                 );
             }

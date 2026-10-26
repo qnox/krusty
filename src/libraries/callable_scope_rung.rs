@@ -28,6 +28,10 @@ impl CallableScopeRung {
         }
     }
 
+    pub(crate) fn selection_key(self, within_rung: u32) -> (u8, u32) {
+        (self.selection_rank(), within_rung)
+    }
+
     pub fn is_import(self) -> bool {
         matches!(self, Self::ExplicitImport | Self::Import)
     }

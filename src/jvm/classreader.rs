@@ -63,7 +63,25 @@ pub struct MethodSig {
     pub annotations: Box<[crate::types::TypeName]>,
 }
 
+/// The declaration visibility JVM access flags state. No access flag is Java's package-private.
+pub(crate) fn visibility_of_access(access: u16) -> crate::types::Visibility {
+    use crate::types::Visibility;
+    if access & ACC_PUBLIC != 0 {
+        Visibility::Public
+    } else if access & ACC_PROTECTED != 0 {
+        Visibility::Protected
+    } else if access & ACC_PRIVATE != 0 {
+        Visibility::Private
+    } else {
+        Visibility::PackagePrivate
+    }
+}
+
 impl MethodSig {
+    /// The method's declaration visibility, from its access flags.
+    pub(crate) fn visibility(&self) -> crate::types::Visibility {
+        visibility_of_access(self.access)
+    }
     pub fn is_public(&self) -> bool {
         self.access & ACC_PUBLIC != 0
     }
@@ -633,6 +651,66 @@ pub fn read_class_attribute(bytes: &[u8], attribute: &str) -> Option<Vec<u8>> {
     None
 }
 
+/// The annotations applied to one declared method, with their arguments: its
+/// `RuntimeVisibleAnnotations` and `RuntimeInvisibleAnnotations` in that order. `None` when the
+/// class cannot be read or declares no such method.
+///
+/// [`MethodSig::annotations`] keeps only the classes, as almost no reader needs more; a reader
+/// that needs a method's argument values (a property's annotations on its `$annotations` marker,
+/// which its metadata names) reads them here, from the class file itself.
+pub fn read_method_annotations(
+    bytes: &[u8],
+    name: &str,
+    descriptor: &str,
+) -> Option<Vec<crate::types::ResolvedAnnotation>> {
+    let mut r = Reader { b: bytes, i: 0 };
+    if r.u4().ok()? != 0xCAFEBABE {
+        return None;
+    }
+    r.u2().ok()?; // minor
+    r.u2().ok()?; // major
+    let cp = parse_constant_pool(&mut r).ok()?;
+    let utf8 = |index: u16| match cp.get(index as usize) {
+        Some(C::Utf8(value)) => value.as_str(),
+        _ => "",
+    };
+    r.u2().ok()?; // access_flags
+    r.u2().ok()?; // this_class
+    r.u2().ok()?; // super_class
+    let interfaces = r.u2().ok()?;
+    for _ in 0..interfaces {
+        r.u2().ok()?;
+    }
+    for _ in 0..r.u2().ok()? {
+        r.u2().ok()?; // access
+        r.u2().ok()?; // name
+        r.u2().ok()?; // descriptor
+        skip_attributes(&mut r).ok()?;
+    }
+    for _ in 0..r.u2().ok()? {
+        r.u2().ok()?; // access
+        let method_name = utf8(r.u2().ok()?);
+        let method_descriptor = utf8(r.u2().ok()?);
+        if method_name != name || method_descriptor != descriptor {
+            skip_attributes(&mut r).ok()?;
+            continue;
+        }
+        let mut annotations = Vec::new();
+        for _ in 0..r.u2().ok()? {
+            let attribute = utf8(r.u2().ok()?);
+            let length = usize::try_from(r.u4().ok()?).ok()?;
+            let body = r.take(length).ok()?;
+            if attribute == "RuntimeVisibleAnnotations"
+                || attribute == "RuntimeInvisibleAnnotations"
+            {
+                read_class_annotations(body, &cp, &mut annotations).ok()?;
+            }
+        }
+        return Some(annotations);
+    }
+    None
+}
+
 /// Where one declared method's `Code` attribute lies in its class file: the byte range of the
 /// attribute's body, or `None` for a method declared without one (abstract or native).
 type CodeRange = Option<std::ops::Range<usize>>;
@@ -761,6 +839,26 @@ impl ClassBodies {
     /// Decode one method's `Code` attribute against the shared constant pool. `None` when the
     /// class declares no such method, declares it without `Code`, or its `Code` is unreadable.
     pub fn method_code(&self, name: &str, descriptor: &str) -> Option<MethodCode> {
+        self.read_method_code(name, descriptor, false)
+    }
+
+    /// [`Self::method_code`] for a class read whole: a line the class's source map does not cover
+    /// is kept, and fails only where a copy maps it. kotlinc's coroutine transformer writes line 0
+    /// in a machine it built without a call-site line, which a copy skips.
+    pub(crate) fn method_code_with_unmapped_lines(
+        &self,
+        name: &str,
+        descriptor: &str,
+    ) -> Option<MethodCode> {
+        self.read_method_code(name, descriptor, true)
+    }
+
+    fn read_method_code(
+        &self,
+        name: &str,
+        descriptor: &str,
+        unmapped_lines: bool,
+    ) -> Option<MethodCode> {
         let range = self
             .methods
             .get(&(Box::<str>::from(name), Box::<str>::from(descriptor)))?
@@ -834,10 +932,11 @@ impl ClassBodies {
                 }
             }
         }
-        if self
-            .dependency_source_map
-            .as_ref()
-            .is_some_and(|map| lines.iter().any(|&(_, line)| map.resolve(line).is_none()))
+        if !unmapped_lines
+            && self
+                .dependency_source_map
+                .as_ref()
+                .is_some_and(|map| lines.iter().any(|&(_, line)| map.resolve(line).is_none()))
         {
             return None;
         }

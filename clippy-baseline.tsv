@@ -137,10 +137,8 @@
 1	src/parser.rs	field assignment outside of initializer for an instance created with Default::default()
 1	src/parser.rs	this manual char comparison can be written more succinctly: help: consider using an array of `char`: `['L', 'l', 'u', 'U']`
 1	src/parser.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if header_ctor_kw { self.tok().span.lo } else { 0 }`
-1	src/plugins/mod.rs	large size difference between variants: the entire enum is at least 1032 bytes
 1	src/plugins/mod.rs	this `map_or` can be simplified
 1	src/plugins/serialization.rs	the following explicit lifetimes could be elided: 'ir
-1	src/plugins/serialization/intrinsic_serializer.rs	large size difference between variants: the entire enum is at least 1008 bytes
 1	src/resolve.rs	called `expect` on `current_owner` after checking its variant with `is_some`
 1	src/resolve.rs	redundant closure: help: replace the closure with the function itself: `&hidden`
 1	src/resolve.rs	redundant closure: help: replace the closure with the function itself: `matches_qual`

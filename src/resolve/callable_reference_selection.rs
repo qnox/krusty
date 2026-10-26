@@ -861,6 +861,39 @@ pub(super) fn shift_plan_values(plan: &mut [AdaptedRefArgument], offset: usize) 
     shift_plan_values_from(plan, 0, offset);
 }
 
+/// Remove a synthetic enclosing receiver from an extension-style reference plan. Constructor
+/// references carry that receiver separately; their value indices exclude its input slot.
+pub(super) fn constructor_plan_without_receiver(
+    mut plan: Vec<AdaptedRefArgument>,
+    receiver: usize,
+) -> Option<Vec<AdaptedRefArgument>> {
+    if plan.get(receiver) != Some(&AdaptedRefArgument::Value(receiver)) {
+        return None;
+    }
+    plan.remove(receiver);
+    let without_receiver = |value: &mut usize| {
+        if *value == receiver {
+            return None;
+        }
+        if *value > receiver {
+            *value -= 1;
+        }
+        Some(())
+    };
+    for argument in &mut plan {
+        match argument {
+            AdaptedRefArgument::Value(value) => without_receiver(value)?,
+            AdaptedRefArgument::Vararg { values, .. } => {
+                for value in values {
+                    without_receiver(value)?;
+                }
+            }
+            AdaptedRefArgument::Default => {}
+        }
+    }
+    Some(plan)
+}
+
 pub(super) fn shift_plan_values_from(
     plan: &mut [AdaptedRefArgument],
     first_value: usize,

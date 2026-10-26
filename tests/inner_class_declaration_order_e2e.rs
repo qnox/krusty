@@ -7,6 +7,51 @@
 //! named nested class, since `<` precedes every letter, which a table sorted by the classes' own
 //! names alone gets backwards.
 use super::common;
+
+fn assert_module_inner_class_rows(sources: &[(&str, &str)]) {
+    let classes = common::classes_against_kotlinc_module(sources);
+    assert_eq!(
+        classes.krusty.keys().collect::<Vec<_>>(),
+        classes.reference.keys().collect::<Vec<_>>()
+    );
+    for (name, bytes) in &classes.krusty {
+        assert_eq!(
+            parse_class(bytes).unwrap().inner_classes,
+            parse_class(&classes.reference[name]).unwrap().inner_classes,
+            "complete InnerClasses table for {name}"
+        );
+    }
+}
+
+#[test]
+fn literal_dollar_top_level_names_do_not_invent_member_rows() {
+    assert_module_inner_class_rows(&[(
+        "Declared.kt",
+        r#"package rows
+class Outer
+class `Outer$Literal`
+"#,
+    )]);
+}
+
+#[test]
+fn nested_literal_dollar_names_keep_their_declared_owner_across_files() {
+    let declarations = (
+        "Declared.kt",
+        r#"package rows
+class Outer
+class `Outer$Literal` { class `Part$Name` }
+"#,
+    );
+    let caller = (
+        "Caller.kt",
+        r#"package rows
+fun keep(value: `Outer$Literal`.`Part$Name`): `Outer$Literal`.`Part$Name` = value
+"#,
+    );
+    assert_module_inner_class_rows(&[declarations, caller]);
+    assert_module_inner_class_rows(&[caller, declarations]);
+}
 use krusty::jvm::classreader::parse_class;
 
 const SHAPE: &str = "interface Shape { fun sides(): Int }\n";

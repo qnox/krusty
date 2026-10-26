@@ -255,28 +255,13 @@ impl ProductionSignatureSemantics<'_> {
         receiver: Ty,
         spelling: &str,
     ) -> Result<Option<crate::types::TypeName>, crate::fir::DiagnosticId> {
-        let Some(outer) = receiver.kotlin_class_internal() else {
-            return Ok(None);
-        };
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
         let source = crate::symbol_source::CompositeSource::new(vec![
             &module as &dyn crate::symbol_source::SymbolSource,
             &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
         ]);
-        let selected = crate::symbol_resolver::inherited_nested_classifier_name(
-            spelling,
-            vec![outer],
-            |owner| {
-                crate::symbol_resolver::direct_supertypes(&source, Ty::obj_name(owner))
-                    .into_iter()
-                    .filter_map(Ty::kotlin_class_internal)
-                    .collect()
-            },
-            |candidate| {
-                crate::symbol_resolver::inherited_classifier_shape(&source, candidate, outer)
-                    .is_some_and(|shape| shape.outer_instance.is_some())
-            },
-        );
+        let selected =
+            crate::symbol_resolver::bound_inner_classifier_in_source(&source, receiver, spelling);
         match selected {
             crate::symbol_resolver::InheritedNestedClassifier::NotFound => Ok(None),
             crate::symbol_resolver::InheritedNestedClassifier::Ambiguous => Err(Self::failure()),

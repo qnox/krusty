@@ -44,6 +44,7 @@ names! {
     string => "kotlin/String",
     char_sequence => "kotlin/CharSequence",
     iterable => "kotlin/collections/Iterable",
+    collection => "kotlin/collections/Collection",
     sequence => "kotlin/sequences/Sequence",
     indexed_value => "kotlin/collections/IndexedValue",
     unit => "kotlin/Unit",
@@ -203,6 +204,15 @@ pub const INDEXED_VALUE_VALUE: &str = "value";
 /// The `kotlin.CharSequence` property kotlinc's `CharSequenceIterationHandler` bounds an indexed
 /// loop over a `CharSequence` with.
 pub const CHAR_SEQUENCE_LENGTH: &str = "length";
+
+/// The `indices` extension property of `kotlin.collections` (arrays, `Collection`) and
+/// `kotlin.text` (`CharSequence`) that kotlinc's `ForLoopsLowering` (`IndicesHandler`) counts
+/// through instead of reading.
+pub const INDICES: &str = "indices";
+
+/// The `size` property an array or a `kotlin.collections.Collection` declares, which kotlinc's
+/// `ArrayIndicesHandler` and `CollectionIndicesHandler` bound an `indices` loop with.
+pub const SIZE: &str = "size";
 
 /// The indexed-access operator convention (`OperatorNameConventions.GET`).
 pub const INDEXED_GET: &str = "get";

@@ -1543,6 +1543,8 @@ pub struct File {
     pub is_script: bool,
     /// Common-source role supplied by the source-set driver, not parsed from Kotlin syntax.
     pub is_common: bool,
+    /// Refined multiplatform fragment supplied by the source-set driver.
+    pub fragment: Option<crate::source::SourceFragment>,
     /// Source imports in declaration order.
     pub import_paths: Vec<ImportPath>,
     /// Classifier references that are not retained by another AST node. Import entries are candidates
@@ -1673,8 +1675,8 @@ pub struct File {
     /// the terminal segment's source provenance without spelling recovery.
     pub exact_member_name_spans: crate::fx_hash::HashMap<u32, Span>,
     /// Exact operator tokens the expression span cannot locate: the `..`/`..<`/`until`/`downTo` of a
-    /// range value or membership test, and the `!in` a negated `contains` call stands for. Kept
-    /// sparse rather than widening those expression nodes.
+    /// range value or membership test, and the `in`/`!in` a `contains` call (and its negation)
+    /// stands for, which marks that call as kotlinc's `IN`/`NOT_IN` origin. Kept sparse.
     pub operator_token_spans: crate::fx_hash::HashMap<u32, Span>,
     /// The assignment tokens kotlinc's binary-expression diagnostic positioning searches.
     pub binary_reference_tokens: BinaryReferenceTokens,
@@ -1713,10 +1715,9 @@ pub struct File {
     /// whether the access is a deprecated or invalid singleton value access.
     pub standalone_type_argument_qualifiers: crate::fx_hash::HashSet<u32>,
     pub anonymous_object_classes: crate::fx_hash::HashMap<ExprId, DeclId>,
-    /// The `<…>` lists written on an annotation name's segments before the last one
-    /// (`@part1<Int>.part2.Anno`), keyed by the annotation reference's start.
-    pub annotation_qualifier_arguments:
-        crate::fx_hash::HashMap<u32, Vec<QualifierSegmentArguments>>,
+    /// Complete written annotation type syntax, including terminal and qualifier arguments,
+    /// keyed by the annotation reference's start. Semantic binding retains its declaration separately.
+    pub annotation_type_references: crate::fx_hash::HashMap<u32, TypeRef>,
     /// Anonymous class declaration → exact lexically enclosing source function.
     pub anonymous_object_enclosing_functions:
         crate::fx_hash::HashMap<DeclId, AnonymousEnclosingFunction>,
@@ -2055,7 +2056,7 @@ impl File {
         self.infix_calls = Default::default();
         self.call_type_args = Default::default();
         self.parenthesized_expression_spans = Default::default();
-        self.annotation_qualifier_arguments = Default::default();
+        self.annotation_type_references = Default::default();
         self.standalone_type_argument_qualifiers = Default::default();
         self.anonymous_object_classes = Default::default();
         self.anonymous_object_enclosing_functions = Default::default();

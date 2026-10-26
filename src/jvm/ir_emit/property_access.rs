@@ -266,17 +266,7 @@ impl Emitter<'_> {
                 }
                 // A `lateinit var` read throws while the field is still null, wherever it is read from.
                 if lateinit {
-                    code.dup();
-                    let lbl = code.new_label();
-                    code.ifnonnull(lbl);
-                    code.push_string(&name, self.cw);
-                    let m = self.cw.methodref(
-                        "kotlin/jvm/internal/Intrinsics",
-                        "throwUninitializedPropertyAccessException",
-                        "(Ljava/lang/String;)V",
-                    );
-                    code.invokestatic(m, 1, 0);
-                    self.bind(lbl, code);
+                    self.emit_lateinit_use_guard(&name, code);
                 }
                 (slot.ty, slot.reference)
             }
@@ -355,17 +345,7 @@ impl Emitter<'_> {
                 // a private property, so the uninitialized guard has to sit at this read, the same
                 // place a direct field load puts it.
                 if let Some(property) = inline_uninitialized_guard {
-                    code.dup();
-                    let initialized = code.new_label();
-                    code.ifnonnull(initialized);
-                    code.push_string(&property, self.cw);
-                    let throw_uninitialized = self.cw.methodref(
-                        "kotlin/jvm/internal/Intrinsics",
-                        "throwUninitializedPropertyAccessException",
-                        "(Ljava/lang/String;)V",
-                    );
-                    code.invokestatic(throw_uninitialized, 1, 0);
-                    self.bind(initialized, code);
+                    self.emit_lateinit_use_guard(&property, code);
                 }
                 (slot.ty, slot.reference)
             }

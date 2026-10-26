@@ -86,12 +86,20 @@ pub(super) fn emit_lambda_class(
                 cw.set_source_file(Some(origin.source_file));
                 cw.start_inline_origin_source_map_at(origin.lines, &origin.path);
             }
-            None => {
-                let lines = u16::try_from(ir.source_line_count)
-                    .unwrap_or(u16::MAX)
-                    .max(1);
-                cw.start_inline_origin_source_map(lines);
-            }
+            None => match foreign_declaration_source(ir, c) {
+                // Another file's class, compiled here for a call site that inlines its declaring
+                // function: that file is its source, as it is where that file writes it.
+                Some((source_file, lines)) => {
+                    cw.set_source_file(Some(source_file));
+                    cw.start_inline_origin_source_map(lines);
+                }
+                None => {
+                    let lines = u16::try_from(ir.source_line_count)
+                        .unwrap_or(u16::MAX)
+                        .max(1);
+                    cw.start_inline_origin_source_map(lines);
+                }
+            },
         }
     }
     env.inner_classes.register(&mut cw);
@@ -368,6 +376,18 @@ fn regenerated_inline_origin(
     })
 }
 
+/// The source file name and line count of the file whose inline function declares `class`, when
+/// that is another file.
+fn foreign_declaration_source(ir: &IrFile, class: &IrClass) -> Option<(String, u16)> {
+    let template = crate::jvm::inner_classes::foreign_declaration(ir, class)?;
+    let debug = ir
+        .source_debug
+        .file(ir.foreign_template_source(template)?.source)?;
+    let source_file = debug.name.rsplit(['/', '\\']).next().unwrap_or(&debug.name);
+    let lines = u16::try_from(debug.line_count).unwrap_or(u16::MAX).max(1);
+    Some((source_file.to_string(), lines))
+}
+
 fn emit_initialization(
     ir: &IrFile,
     class: &IrClass,
@@ -389,23 +409,20 @@ fn emit_initialization(
         Ty::Unit,
         std::iter::empty(),
     );
+    emitter.enter_class_initializer(env.signature_symbols);
     let mut code = CodeBuilder::new(0);
     emitter.emit_delegated_property_array(env, class.fq_name, internal, &mut code);
     if delegated_property_array::exists(env, class.fq_name) {
         emitter.cw.omit_method_lines("<clinit>", "()V");
     }
     if singleton {
-        // Retained typed operations still require class reification. A concrete call-site copy
-        // contains ordinary specialized operations and therefore has no declaration marker.
+        // A class whose own function type names a reified parameter constructs an unspecialized
+        // instance of itself. kotlinc marks only that; a class whose methods alone use one is
+        // marked where its instance is loaded, and a call-site copy is specialized.
         if class
             .lambda
             .as_ref()
             .is_some_and(|lambda| lambda.requires_reification)
-            || class.methods.iter().any(|&method| {
-                ir.functions[method as usize]
-                    .body
-                    .is_some_and(|body| body_has_reified_markers(ir, body))
-            })
         {
             let marker = emitter.cw.methodref(
                 "kotlin/jvm/internal/Intrinsics",

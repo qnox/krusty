@@ -318,8 +318,12 @@ impl<'a> FileLowering<'a> {
                 // table has to be one a caller can dispatch through — full length, with the
                 // interface's own member pointing at this lambda's body.
                 Some(target) => {
-                    let (mut vtable, interfaces, kotlin_name) =
-                        self.sam_table(target, &base, impl_fn, &capture_offsets)?;
+                    let SamTables {
+                        mut vtable,
+                        itable,
+                        interfaces,
+                        kotlin_name,
+                    } = self.sam_table(target, &base, impl_fn, &capture_offsets)?;
                     let marker = match &identity {
                         Some(name) => {
                             let marker = self.reference_identity_marker(name)?;
@@ -337,6 +341,8 @@ impl<'a> FileLowering<'a> {
                             instance_size,
                             reference_offsets: &references,
                             vtable: &vtable,
+                            itable: &itable,
+                            instantiable: true,
                             superclass: any_type,
                             interfaces: &interfaces,
                             reference_target: marker,
@@ -409,6 +415,8 @@ impl<'a> FileLowering<'a> {
                             instance_size,
                             reference_offsets: &references,
                             vtable: &vtable,
+                            itable: &[],
+                            instantiable: true,
                             superclass: any_type,
                             interfaces: &markers,
                             reference_target: marker,
@@ -450,22 +458,23 @@ impl<'a> FileLowering<'a> {
         Ok(())
     }
 
-    /// The table, interface list and name of the object a lambda becomes when it is converted to a
-    /// `fun interface`.
+    /// The tables, interface list and name of the object a lambda becomes when it is converted to
+    /// a `fun interface`.
     ///
     /// A SAM conversion changes the TYPE a function value wears, and a type is a table here. The
     /// object holds its captures exactly as a lambda's does; what differs is that a caller reaches
-    /// it through the interface's own member number rather than through the single invoke slot, so
-    /// the table must be as long as every class's — the interface region included — with that one
-    /// member filled. The rest is the abstract trap, and unreachable for the same reason it is in
-    /// a class: nothing can name a member through a type this object does not have.
+    /// it through the interface member's module-wide number rather than through the single invoke
+    /// slot, so the object's interface table is the one the interface itself supplies — its
+    /// default bodies — with that one member filled. The rest is the abstract trap, and
+    /// unreachable for the same reason it is in a class: nothing can name a member through a type
+    /// this object does not have.
     fn sam_table(
         &mut self,
         target: &crate::ir::IrSamTarget,
         base: &str,
         impl_fn: u32,
         capture_offsets: &[u32],
-    ) -> Result<(Vec<FuncId>, Vec<DataId>, String), Unsupported> {
+    ) -> Result<SamTables, Unsupported> {
         if target.suspend {
             return Err("a suspend functional interface".into());
         }
@@ -475,7 +484,7 @@ impl<'a> FileLowering<'a> {
                 target.classifier.render()
             ));
         };
-        let (method, slot) = match target.method_target {
+        let (method, entry) = match target.method_target {
             crate::ir::IrSamMethod::Module(callable) => {
                 let method = self
                     .ir
@@ -483,22 +492,20 @@ impl<'a> FileLowering<'a> {
                     .get(&callable)
                     .copied()
                     .ok_or_else(|| "a functional interface method outside this file".to_string())?;
-                if !self.ir.classes[interface as usize]
-                    .methods
-                    .contains(&method)
-                {
-                    return Err("a functional interface method owned by another classifier".into());
-                }
+                // A member the interface numbers, or a `kotlin.Any` member it redeclares, which
+                // keeps its class slot.
                 let key = model::function_key(self.ir, interface, method);
-                let slot = self.model.slot(interface, &key).ok_or_else(|| {
-                    "a functional interface method with no dispatch slot".to_string()
-                })? as usize;
-                (Some(method), slot)
+                let entry = self.dispatch_of(interface, &key).ok_or_else(|| {
+                    "a functional interface method with no dispatch entry".to_string()
+                })?;
+                (Some(method), entry)
             }
             crate::ir::IrSamMethod::External(_) => {
                 return Err("a functional interface declared outside this file".into());
             }
-            crate::ir::IrSamMethod::FunctionTypeInvoke => (None, model::FUNCTION_SLOT as usize),
+            crate::ir::IrSamMethod::FunctionTypeInvoke => {
+                (None, model::Dispatch::Class(model::FUNCTION_SLOT))
+            }
         };
 
         // The thunk wears the interface member's own signature, because that is what the call site
@@ -515,42 +522,70 @@ impl<'a> FileLowering<'a> {
         let thunk = self.declare_local_function(&format!("{base}_invoke"), &signature, result)?;
         self.define_sam_thunk(thunk, base, impl_fn, capture_offsets, &parameters, result)?;
 
-        // Start from the table the interface itself defines — its default methods, and any
+        // Start from the tables the interface itself defines — its default methods, and any
         // `kotlin.Any` member it overrides — so a SAM object answers `result()` or `toString()`
         // the way an ordinary implementor would, and only then fill in the member the lambda is.
-        let template = self.model.layout(interface).vtable.clone();
-        let mut vtable = Vec::with_capacity(template.len());
-        for entry in &template {
-            vtable.push(match entry {
-                model::Slot::Runtime(symbol) => self.runtime_member_import(symbol)?,
-                model::Slot::Function(fid) => match self.functions[*fid as usize] {
-                    Some(id) => id,
-                    None => self.import("kt_abstract_method_called", &[], Ty::Unit)?,
-                },
-                model::Slot::Abstract => self.import("kt_abstract_method_called", &[], Ty::Unit)?,
-                model::Slot::FieldGetter { .. }
-                | model::Slot::FieldSetter { .. }
-                | model::Slot::AnnotationMember { .. }
-                | model::Slot::ValueMember { .. }
-                | model::Slot::ValueBridge { .. }
-                | model::Slot::Bridge { .. }
-                | model::Slot::FunctionBridge { .. }
-                | model::Slot::AccessorBridge { .. } => {
-                    return Err("a functional interface with a synthesized member".into())
+        let layout = self.model.layout(interface).clone();
+        let mut vtable = self.table_functions(&layout.vtable)?;
+        let itable_template = layout.itable;
+        let sam_number = match entry {
+            model::Dispatch::Class(slot) => {
+                let slot = slot as usize;
+                if slot >= vtable.len() {
+                    return Err("a functional interface member outside the vtable".into());
                 }
-            });
-        }
-        if slot >= vtable.len() {
-            return Err("a functional interface member outside the vtable".into());
-        }
-        vtable[slot] = thunk;
-
-        let interfaces: Vec<DataId> = std::iter::once(interface)
-            .chain(self.model.interfaces[interface as usize].iter().copied())
-            .map(|id| self.classes[id as usize].descriptor)
+                vtable[slot] = thunk;
+                None
+            }
+            model::Dispatch::Interface(number) => {
+                if number as usize >= itable_template.len() {
+                    return Err("a functional interface member outside its interface table".into());
+                }
+                Some(number)
+            }
+        };
+        // Every other member the interface has must answer with a body. The interface's own table
+        // leaves abstract only a body of another file it cannot name: a property default, or one
+        // reached through a bridge.
+        let implemented = self.model.implemented[interface as usize]
+            .iter()
+            .copied()
             .collect();
+        let inherited_default = self
+            .slot_plan
+            .interfaces()
+            .numbers_of(&implemented)
+            .into_iter()
+            .any(|other| {
+                Some(other) != sam_number
+                    && itable_template[other as usize] == model::Slot::Abstract
+            });
+        if inherited_default {
+            return Err(
+                "a functional interface inheriting a body of another file it cannot name".into(),
+            );
+        }
+        let mut itable = self.table_functions(&itable_template)?;
+        if let Some(number) = sam_number {
+            itable[number as usize] = thunk;
+        }
+
+        let mut interfaces: Vec<DataId> = Vec::new();
+        for name in self.model.implemented[interface as usize].clone() {
+            let descriptor = self
+                .type_descriptor(Ty::obj_name(name))?
+                .ok_or("an interface of the module with no descriptor")?;
+            if !interfaces.contains(&descriptor) {
+                interfaces.push(descriptor);
+            }
+        }
         let kotlin_name = target.classifier.render().replace(['/', '$'], ".");
-        Ok((vtable, interfaces, kotlin_name))
+        Ok(SamTables {
+            vtable,
+            itable,
+            interfaces,
+            kotlin_name,
+        })
     }
 
     /// Why a lambda's body function was not emitted, for a thunk that needs to call it.
@@ -719,6 +754,8 @@ impl<'a> FileLowering<'a> {
                 instance_size,
                 reference_offsets: &references,
                 vtable: &vtable,
+                itable: &[],
+                instantiable: true,
                 superclass: any_type,
                 interfaces: &[],
                 reference_target: None,
@@ -956,4 +993,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             .store(trusted(), value, holder, offsets[0] as i32);
         Ok(Some(value))
     }
+}
+
+/// What [`FileLowering::sam_table`] builds for the object a lambda becomes.
+struct SamTables {
+    vtable: Vec<FuncId>,
+    itable: Vec<FuncId>,
+    interfaces: Vec<DataId>,
+    kotlin_name: String,
 }
