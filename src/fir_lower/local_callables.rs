@@ -100,11 +100,7 @@ impl BodyLowering<'_> {
                         external_capture_arguments: None,
                     },
                 ))?;
-            let FirStatementKind::LocalFunction {
-                body,
-                tailrec,
-                ..
-            } = &self
+            let FirStatementKind::LocalFunction { body, tailrec, .. } = &self
                 .body
                 .statement(statement)
                 .ok_or(FirLoweringFailure::MissingStatement(statement))?

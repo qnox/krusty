@@ -36,7 +36,9 @@ pub(in super::super) enum ExpansionReason {
     /// function's inline parameters. A caller that expands the function's template splices its
     /// own literal for that parameter, which reaches the literal only through an expanded body.
     InlineParameterInLiteral,
-    /// The callee is a suspend function.
+    /// The callee is a suspend function, or the call is written in a suspend inline function.
+    /// Such a function's template is expanded in IR at its call sites, and the calls it holds are
+    /// expanded with it.
     SuspendCallee,
     /// The call omits an argument that has a default.
     DefaultArguments,
@@ -89,6 +91,17 @@ impl BodyLowering<'_> {
         }
         if self.in_default_argument {
             return Some(ExpansionReason::DefaultArgument);
+        }
+        let suspend = |declaration| {
+            self.index
+                .declaration_header(declaration)
+                .is_some_and(|header| header.flags.has(DeclarationFlags::SUSPEND))
+        };
+        if self
+            .inline_declaration
+            .is_some_and(|inline| suspend(inline.declaration))
+        {
+            return Some(ExpansionReason::SuspendCallee);
         }
         if has_defaults {
             return Some(ExpansionReason::DefaultArguments);

@@ -74,21 +74,46 @@ fn routed_bodies(ir: &IrFile) -> (Vec<&str>, Vec<&str>) {
 fn calls_in_suspend_callers_are_kept_for_the_compiled_body_inliner() {
     let ir = lowered_for_compiled_bodies(SUSPEND_CONTEXT_CALLERS);
     let (compiled, expanded) = routed_bodies(&ir);
-    assert!(expanded.is_empty(), "{expanded:?}");
-    let lambda_of = |owner: &str| {
-        compiled
-            .iter()
-            .filter(|name| name.starts_with(&format!("{owner}$")))
-            .count()
-    };
-    // `plain`, its lambda, the `builder { result = applied { … } }` lambda and the
-    // `run { applied { … } }` lambda of `local`.
-    assert!(compiled.contains(&"plain"), "{compiled:?}");
+    // Only the library's inline calls are expanded: `suspendCoroutine`, `startCoroutine`, the
+    // `Continuation { … }` builder and `run`, with the lambdas they are handed.
     assert_eq!(
-        (lambda_of("plain"), lambda_of("box"), lambda_of("local")),
-        (1, 1, 1),
-        "{compiled:?}"
+        expanded,
+        [
+            "yielded",
+            "builder",
+            "yielded$fir_1_0_6",
+            "builder$fir_2_0_7",
+            "local$fir_3_0_8"
+        ]
     );
+    // `plain` and its lambda, the `builder { result = applied { … } }` lambda of `box` (which
+    // `box` reaches through the literal it passes) and the `run { applied { … } }` lambda of `local`.
+    assert_eq!(
+        compiled,
+        [
+            "plain",
+            "box",
+            "local$fir_3_0_8",
+            "plain$fir_4_0_11",
+            "box$fir_5_0_13"
+        ]
+    );
+}
+
+const SUSPEND_INLINE_CALLER: &str = r#"inline fun applied(block: () -> String): String = block()
+
+suspend inline fun outer(prefix: String): String = applied { prefix }
+
+suspend fun run(seed: String): String = outer(seed)
+"#;
+
+// A suspend inline function's template is expanded at its call sites in IR, so the call to
+// `applied` it holds is expanded with it rather than kept for the compiled-body inliner.
+#[test]
+fn calls_in_a_suspend_inline_function_stay_expanded() {
+    let ir = lowered_for_compiled_bodies(SUSPEND_INLINE_CALLER);
+    let (compiled, expanded) = routed_bodies(&ir);
+    assert_eq!((compiled, expanded), (vec![], vec!["outer", "run"]));
 }
 
 const INLINE_PARAMETER_LITERALS: &str = r#"inline fun inner(g: () -> Unit) { g() }
