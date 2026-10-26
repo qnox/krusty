@@ -3057,5 +3057,7 @@ mod field_store_lines_e2e;
 #[path = "written_default_accessor_e2e.rs"]
 mod written_default_accessor_e2e;
 
+#[path = "intersection_bound_metadata_order_e2e.rs"]
+mod intersection_bound_metadata_order_e2e;
 #[path = "where_bound_arguments_e2e.rs"]
 mod where_bound_arguments_e2e;
