@@ -534,6 +534,8 @@ mod collection_override_signature_e2e;
 mod collection_special_member_stub_e2e;
 #[path = "collection_to_array_e2e.rs"]
 mod collection_to_array_e2e;
+#[path = "collection_type_safe_members_e2e.rs"]
+mod collection_type_safe_members_e2e;
 #[path = "companion_block_members_e2e.rs"]
 mod companion_block_members_e2e;
 #[path = "companion_const_e2e.rs"]

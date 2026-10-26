@@ -15,6 +15,7 @@ use super::{
     method_signature, type_descriptor, CodeBuilder, Emitter,
 };
 use crate::ir::{ExprId, IrExpr, IrFile, IrTypeOp};
+use crate::jvm::collection_override_signatures::OverrideSignature;
 use crate::jvm::mapped_builtin_declarations::CollectionSignaturePolicy;
 use crate::jvm::override_results::OverrideResults;
 use crate::jvm::read_only_collection_stubs::star_projected;
@@ -201,13 +202,14 @@ pub(super) fn declared_method_signature(
 }
 
 /// kotlinc's signature for an override of a collection declaration with a signature policy: the
-/// declaration's collection parameter star-projected, or every declaration-site variance of the
-/// parameters written. `None` when that spells the descriptor back.
+/// declaration's collection parameter star-projected, every declaration-site variance of the
+/// parameters written, or a type-safe declaration's checked parameters as `Object`. `None` when
+/// that spells the descriptor back.
 fn collection_override_signature(
     formatter: &JvmSignatureFormatter<'_>,
     ir: &IrFile,
     function: u32,
-    policy: CollectionSignaturePolicy,
+    policy: OverrideSignature,
 ) -> Option<String> {
     let declaration = &ir.functions[function as usize];
     let (mut parameters, result) = ir
@@ -216,13 +218,19 @@ fn collection_override_signature(
         .cloned()
         .unwrap_or_else(|| (declaration.params.clone(), declaration.ret));
     let signature = match policy {
-        CollectionSignaturePolicy::ErasedCollectionParameter(index) => {
+        OverrideSignature::Policy(CollectionSignaturePolicy::ErasedCollectionParameter(index)) => {
             let parameter = &mut parameters[usize::from(index)];
             *parameter = star_projected(*parameter);
             formatter.method_positions(&parameters, &result)
         }
-        CollectionSignaturePolicy::DeclarationSiteWildcards => {
+        OverrideSignature::Policy(CollectionSignaturePolicy::DeclarationSiteWildcards) => {
             formatter.method_positions_with_declaration_site_wildcards(&parameters, &result)
+        }
+        OverrideSignature::ErasedCheckedParameters(checked) => {
+            for &index in checked {
+                parameters[usize::from(index)] = Ty::nullable(Ty::obj("kotlin/Any"));
+            }
+            formatter.method_positions(&parameters, &result)
         }
     }?;
     (signature != ir_method_desc(&declaration.params, &declaration.ret)).then_some(signature)
