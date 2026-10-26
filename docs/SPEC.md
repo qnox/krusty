@@ -10056,6 +10056,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   fold. Test:
   `tests/elvis_branch_order_e2e.rs`.
 
+- **A line mark replaced by the line in effect leaves no entry.** When two marks land on one
+  offset, the later one wins. If it names the line the previous entry already put in effect, the
+  offset keeps no entry, because kotlinc's last-line state never left that line. On the null path
+  of `s ?: boxed(\n).toString()` the call's line and then its receiver's line are marked where
+  `boxed()` begins, and kotlinc writes no entry there. A forgotten line's restatement after an
+  inlined call, a control-flow entry, and an inlined body's copied line keep their entry. Test:
+  `tests/elvis_branch_order_e2e.rs`
+  (`a_multi_line_call_on_the_null_path_writes_no_entry_for_the_line_in_effect`).
+
 - **An integer-constant branch takes a sibling primitive.** An `if`, `when`, elvis, or `try` with no
   expected type still adapts an integer-constant branch to the non-null primitive of the other
   branches when every such constant fits: `if (flag) current() - start else 0` is `Long`,
