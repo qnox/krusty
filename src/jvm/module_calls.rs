@@ -839,6 +839,7 @@ pub(super) fn realize(
         // A property accessor call keeps its declaration's parameter vector (contexts, receiver,
         // value), the same checked fact an ordinary call carries for representation boundaries.
         let mut accessor_parameters = None;
+        let mut private_accessor_call = None;
         let mut annotation_member_semantic = None::<(PropertyId, crate::types::Ty)>;
         let mut declared_getter_result = None::<crate::types::Ty>;
         let replacement = match ir.exprs[raw].clone() {
@@ -921,7 +922,12 @@ pub(super) fn realize(
                         operation: Some(raw as ExprId),
                     })
                 } else {
-                    let (call, parameters, semantic) = realize_property(
+                    let RealizedAccessor {
+                        call,
+                        parameters,
+                        semantic,
+                        private_accessor,
+                    } = realize_property(
                         &property,
                         facades,
                         *target,
@@ -931,6 +937,7 @@ pub(super) fn realize(
                         None,
                     )?;
                     accessor_parameters = Some(parameters);
+                    private_accessor_call = private_accessor;
                     annotation_member_semantic = semantic.map(|ty| (*target, ty));
                     // The getter returns the property's declared type: a property declared as a
                     // value class hands back its carrier, never a box.
@@ -981,7 +988,12 @@ pub(super) fn realize(
                         operation: Some(raw as ExprId),
                     })
                 } else {
-                    let (call, parameters, _) = realize_property(
+                    let RealizedAccessor {
+                        call,
+                        parameters,
+                        private_accessor,
+                        ..
+                    } = realize_property(
                         &property,
                         facades,
                         *target,
@@ -991,6 +1003,7 @@ pub(super) fn realize(
                         Some(*value),
                     )?;
                     accessor_parameters = Some(parameters);
+                    private_accessor_call = private_accessor;
                     Some(call)
                 }
             }
@@ -1045,6 +1058,10 @@ pub(super) fn realize(
         if let Some(parameters) = accessor_parameters {
             ir.call_declared_params
                 .insert(raw as ExprId, parameters.into_boxed_slice());
+        }
+        if let Some(accessor) = private_accessor_call {
+            ir.private_property_accessor_calls
+                .insert(raw as ExprId, accessor);
         }
         if let Some(declared) = declared_getter_result {
             ir.call_declared_ret.insert(raw as ExprId, declared);
@@ -1160,6 +1177,18 @@ fn prepare_inherited_default_calls(ir: &mut IrFile) -> Result<(), ModuleRealizat
     Ok(())
 }
 
+/// A module property access realized as an accessor call.
+struct RealizedAccessor {
+    call: IrExpr,
+    /// The declared parameters of the call's source arguments, in argument order. A dispatch
+    /// receiver is never one of them, even when the physical accessor takes it first.
+    parameters: Vec<crate::types::Ty>,
+    /// The semantic result of an annotation member read whose JVM result differs from it.
+    semantic: Option<crate::types::Ty>,
+    /// Set when the call is a private member property's static accessor.
+    private_accessor: Option<crate::ir::PrivatePropertyAccessorCall>,
+}
+
 fn realize_property(
     property: &IrModuleProperty,
     facades: &[String],
@@ -1168,7 +1197,7 @@ fn realize_property(
     extension_receiver: Option<crate::ir::ExprId>,
     context_arguments: Vec<crate::ir::ExprId>,
     value: Option<crate::ir::ExprId>,
-) -> Result<(IrExpr, Vec<crate::types::Ty>, Option<crate::types::Ty>), ModuleRealizationTarget> {
+) -> Result<RealizedAccessor, ModuleRealizationTarget> {
     let failure = ModuleRealizationTarget::Property(target);
     if context_arguments.len() != property.context_parameters.len() {
         return Err(failure);
@@ -1205,36 +1234,47 @@ fn realize_property(
         stored
     };
     let semantic = (value.is_none() && stored != ty).then_some(ty);
-    let accessor =
-        module_property_accessor_name(property, value.is_some()).map_err(|()| failure)?;
-    let private = private_property_accessor(property, value.is_some(), &accessor);
+    let setter = value.is_some();
+    let accessor = module_property_accessor_name(property, setter).map_err(|()| failure)?;
+    let private = private_property_accessor(property, setter, &accessor);
     if let Some(classifier) = property.owner {
         if property.owner_kind.is_none() {
             return Err(failure);
         }
-        if let Some(name) = private.filter(|_| property.owner_kind == Some(IrClassifierKind::Class))
+        if let Some(private) =
+            private.filter(|_| property.owner_kind == Some(IrClassifierKind::Class))
         {
-            // The owner's static accessor takes the instance first.
-            let receiver = crate::types::Ty::obj_name(classifier);
-            let mut physical = vec![receiver];
+            // The owner's static accessor takes the instance first. The instance stays the call's
+            // dispatch receiver, so the declared parameters remain those of the source arguments;
+            // only the descriptor carries the receiver slot.
+            let mut physical = vec![crate::types::Ty::obj_name(classifier)];
             physical.extend(parameters.iter().copied());
-            return Ok((
-                IrExpr::Call {
+            let mangled_accessor = (private.calls_declared_accessor
+                && module_property_written_accessor_name(property, setter)
+                    .map_err(|()| failure)?
+                    .is_none())
+            .then_some(accessor);
+            return Ok(RealizedAccessor {
+                call: IrExpr::Call {
                     callee: Box::new(Callee::Static {
                         owner: classifier,
-                        name,
+                        name: private.name,
                         descriptor: crate::jvm::method_descriptors::ir_method_desc(&physical, &ret),
                         inline: crate::libraries::InlineKind::None,
                     }),
                     dispatch_receiver: Some(dispatch_receiver.ok_or(failure)?),
                     args: arguments,
                 },
-                physical,
+                parameters,
                 semantic,
-            ));
+                private_accessor: Some(crate::ir::PrivatePropertyAccessorCall {
+                    mangled_accessor,
+                    result: if setter { crate::types::Ty::Unit } else { ty },
+                }),
+            });
         }
-        Ok((
-            IrExpr::Call {
+        Ok(RealizedAccessor {
+            call: IrExpr::Call {
                 callee: Box::new(Callee::Virtual {
                     owner: classifier,
                     name: accessor,
@@ -1257,17 +1297,18 @@ fn realize_property(
             },
             parameters,
             semantic,
-        ))
+            private_accessor: None,
+        })
     } else {
         if dispatch_receiver.is_some() {
             return Err(failure);
         }
         let facade = static_owner(property.placement, property.source, facades).ok_or(failure)?;
-        Ok((
-            IrExpr::Call {
+        Ok(RealizedAccessor {
+            call: IrExpr::Call {
                 callee: Box::new(Callee::CrossFile {
                     facade,
-                    name: private.unwrap_or(accessor),
+                    name: private.map_or(accessor, |private| private.name),
                     params: parameters.clone(),
                     ret,
                     module_target: None,
@@ -1277,8 +1318,9 @@ fn realize_property(
                 args: arguments,
             },
             parameters,
-            None,
-        ))
+            semantic: None,
+            private_accessor: None,
+        })
     }
 }
 
@@ -1291,7 +1333,7 @@ fn private_property_accessor(
     property: &IrModuleProperty,
     setter: bool,
     accessor: &str,
-) -> Option<String> {
+) -> Option<PrivateAccessor> {
     use crate::fir::DeclarationFlags;
     let visibility = if setter {
         property.setter_visibility
@@ -1307,7 +1349,17 @@ fn private_property_accessor(
         } else {
             DeclarationFlags::CUSTOM_GETTER
         });
-    Some(crate::jvm::private_static_access::member_property_accessor_name(accessor, declared))
+    Some(PrivateAccessor {
+        name: crate::jvm::private_static_access::member_property_accessor_name(accessor, declared),
+        calls_declared_accessor: declared,
+    })
+}
+
+/// The synthetic accessor of a private module property, and whether it calls a declared accessor
+/// rather than touching the backing field.
+struct PrivateAccessor {
+    name: String,
+    calls_declared_accessor: bool,
 }
 
 /// Resolve each foreign inline template's declaring source unit to its JVM file facade.

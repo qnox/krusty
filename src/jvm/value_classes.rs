@@ -36,6 +36,7 @@ mod member_names;
 mod module_members;
 mod operand_nullness;
 mod parameter_guards;
+mod private_accessor_calls;
 mod property_annotation_markers;
 mod property_references;
 mod reference_returns;
@@ -214,6 +215,7 @@ pub(crate) fn lower_value_classes(
     if under.is_empty() && callable_under.is_empty() {
         return true;
     }
+    private_accessor_calls::realize(ir, &under, &callable_under);
     call_result_boundaries::realize(ir, &callable_under);
     type_operation_roles::record_primitive_array_allocation_carriers(ir, &under);
     // Publish only the distinction the existing unified value-class lookup cannot answer: which

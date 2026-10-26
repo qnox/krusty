@@ -160,7 +160,7 @@ pub use progression::{IrProgressionSource, IrRuntimeFunction};
 pub use properties::{
     IrAccessorLines, IrCheckedProperty, IrInlinePropertySplice, IrInlineTypeSubstitution,
     IrMemberKind, IrModuleProperty, IrProperty, IrPropertyModality, IrPropertyModifiers,
-    MemberExtProp,
+    MemberExtProp, PrivatePropertyAccessorCall,
 };
 pub use property_layouts::IrLocalPropertyLayout;
 pub use references::{
@@ -2360,6 +2360,10 @@ pub struct IrFile {
     /// when it mangles that accessor. Other calls that share a JVM spelling stay bound to
     /// their own declarations.
     pub synthesized_accessor_calls: crate::fx_hash::HashMap<ExprId, SynthesizedAccessorCall>,
+    /// A call realized as a private member property's static accessor, with the facts the
+    /// value-class pass realizes its physical name and descriptor from.
+    pub private_property_accessor_calls:
+        crate::fx_hash::HashMap<ExprId, PrivatePropertyAccessorCall>,
     /// Stable property-operation identity → checker-selected accessor identity and physical return.
     /// This is a semantic selection, distinct from any backend rewrite of its platform spelling.
     pub property_selected_accessors: crate::fx_hash::HashMap<u32, (String, Ty)>,

@@ -10439,9 +10439,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`access$getX$p(Owner)`) for a class member. A `const val` is read as its value. A private
   `lateinit` read through `access$get<X>$p` yields the raw field, so the use site throws while it
   is unset, as its own class's read does. Calling the property's `getX`, which a private property
-  does not publish, failed with `NoSuchMethodError`.
+  does not publish, failed with `NoSuchMethodError`. A member's owner is the call's dispatch
+  receiver, not an argument: the declared parameters of the call stay those of its source
+  arguments (context parameters, extension receiver, setter value), and only the physical
+  descriptor carries the owner slot. Those parameters take their value-class carriers
+  (`access$setTag$p(Holder, String)`), and a declared accessor's bridge carries that accessor's
+  mangled JVM name (`access$getWeight-b--Cat4` for `val Label.weight`); a field bridge stays
+  unmangled.
   Test: `tests/private_property_inline_access_e2e.rs` (field, declared, delegated, `lateinit` and
-  `const` top-level properties and a member, against kotlinc's bytes and run).
+  `const` top-level properties, a member, a value-class member written through its setter, and a
+  member extension over a value class, against kotlinc's bytes and run).
 - **A private member-extension accessor reached from another class calls `access$<name>`.** The
   accessor is an instance method of the declaring class (`getItem(Key)` for `val Key.item`).
   A local class inside the owner is a separate class file, so it cannot call that private method.

@@ -96,3 +96,101 @@ fn a_private_member_property_in_an_inline_body_is_reached_through_its_instance_a
 fn a_private_member_property_in_an_inline_body_inlined_into_another_file_runs() {
     common::expect_box_ok_files_with_stdlib(&MEMBER_SOURCES, "MemberCaller");
 }
+
+/// A private member property of a value-class type, written through its setter from another
+/// file's inline copy and then read. The setter's value is the accessor's only source argument;
+/// the owner is the static accessor's receiver slot, not a value parameter.
+const VALUE_CLASS_DECLARATION: &str = r#"package p
+
+@JvmInline
+value class Tag(val text: String)
+
+class Holder {
+    private var tag = Tag("a")
+
+    internal inline fun retag(next: String): String {
+        tag = Tag(next)
+        return tag.text
+    }
+}
+"#;
+
+const VALUE_CLASS_CALLER: &str = r#"package p
+
+fun box(): String {
+    val retagged = Holder().retag("b")
+    return if (retagged == "b") "OK" else retagged
+}
+"#;
+
+const VALUE_CLASS_SOURCES: [(&str, &str); 2] = [
+    ("Holder.kt", VALUE_CLASS_DECLARATION),
+    ("ValueClassCaller.kt", VALUE_CLASS_CALLER),
+];
+
+#[test]
+fn a_private_value_class_member_property_set_from_an_inline_body_matches_kotlinc() {
+    let holder = common::ModuleClassPair::compile(&VALUE_CLASS_SOURCES, "p/Holder");
+    assert!(
+        holder.kotlinc == holder.krusty,
+        "p/Holder differs from kotlinc's bytes"
+    );
+    let caller = common::ModuleClassPair::compile(&VALUE_CLASS_SOURCES, "p/ValueClassCallerKt");
+    let (reference, krusty) = caller.method_code("p/ValueClassCallerKt", "box");
+    assert_eq!(krusty, reference, "p/ValueClassCallerKt.box");
+}
+
+#[test]
+fn a_private_value_class_member_property_set_from_an_inline_body_runs() {
+    common::expect_box_ok_files_with_stdlib(&VALUE_CLASS_SOURCES, "ValueClassCaller");
+}
+
+/// A private member extension property whose receiver is a value class. The extension receiver
+/// and the setter's value are the accessor's source arguments, in that order, after the owner.
+const EXTENSION_DECLARATION: &str = r#"package p
+
+@JvmInline
+value class Label(val text: String)
+
+class Holder {
+    private var stored = 0
+    private var Label.weight: Int
+        get() = text.length + stored
+        set(value) { stored = value - text.length }
+
+    internal inline fun weigh(label: Label): Int {
+        label.weight = 10
+        return label.weight
+    }
+}
+"#;
+
+const EXTENSION_CALLER: &str = r#"package p
+
+fun box(): String {
+    val weight = Holder().weigh(Label("abc"))
+    return if (weight == 10) "OK" else "weight $weight"
+}
+"#;
+
+const EXTENSION_SOURCES: [(&str, &str); 2] = [
+    ("Holder.kt", EXTENSION_DECLARATION),
+    ("ExtensionCaller.kt", EXTENSION_CALLER),
+];
+
+#[test]
+fn a_private_member_extension_property_in_an_inline_body_matches_kotlinc() {
+    let holder = common::ModuleClassPair::compile(&EXTENSION_SOURCES, "p/Holder");
+    assert!(
+        holder.kotlinc == holder.krusty,
+        "p/Holder differs from kotlinc's bytes"
+    );
+    let caller = common::ModuleClassPair::compile(&EXTENSION_SOURCES, "p/ExtensionCallerKt");
+    let (reference, krusty) = caller.method_code("p/ExtensionCallerKt", "box");
+    assert_eq!(krusty, reference, "p/ExtensionCallerKt.box");
+}
+
+#[test]
+fn a_private_member_extension_property_in_an_inline_body_runs() {
+    common::expect_box_ok_files_with_stdlib(&EXTENSION_SOURCES, "ExtensionCaller");
+}
