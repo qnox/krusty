@@ -15,8 +15,8 @@ use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty::ksp_round::KspLibraries;
 use krusty::source::SourceInput;
 use krusty_plugin_ir::{
-    KspAnnotation, KspClassKind, KspClasspath, KspLibraryClass, KspNameMapping, KspOrigin, KspType,
-    KspTypeArgument, KspTypeDeclaration, KspValue, KspVariance,
+    KspAnnotation, KspClassKind, KspClasspath, KspLibraryClass, KspModifier, KspNameMapping,
+    KspOrigin, KspType, KspTypeArgument, KspTypeDeclaration, KspValue, KspVariance,
 };
 
 fn fixtures() -> PathBuf {
@@ -166,7 +166,7 @@ fn logged_value(value: &KspValue, origin: &str) -> String {
 }
 
 /// `class` in the form the library fixture's processor logs it.
-fn logged(name: &str, library: Option<KspLibraryClass>) -> String {
+fn logged(name: &str, library: Option<KspLibraryClass>, libraries: &KspLibraries) -> String {
     let Some(library) = library else {
         return format!("{name} null");
     };
@@ -218,9 +218,19 @@ fn logged(name: &str, library: Option<KspLibraryClass>) -> String {
             .collect(),
         false => vec!["<refused>".to_string()],
     };
+    // The host projects the classifier with a star for each type parameter, and an inner class
+    // also for each of its enclosing class's.
+    let count = star_count(&library, libraries);
+    let stars = match count {
+        0 => String::new(),
+        count => format!("<{}>", vec!["*"; count].join(", ")),
+    };
+    let star_arguments =
+        vec!["STAR type=null origin=SYNTHETIC parent=null text=STAR null"; count].join(", ");
     format!(
         "{name} -> {kind} {} simple={} package={} parent={} origin={} modifiers={} \
-         typeParameters=[{}] supertypes={} annotations={}",
+         typeParameters=[{}] supertypes={} annotations={} star={}{stars} starText={}{stars} \
+         starArguments=[{star_arguments}]",
         class.qualified_name,
         class.simple_name,
         library.package_name,
@@ -230,7 +240,29 @@ fn logged(name: &str, library: Option<KspLibraryClass>) -> String {
         parameters.join("; "),
         super_types.join(", "),
         annotations.join("; "),
+        class.qualified_name,
+        class.simple_name,
     )
+}
+
+/// The type parameters `library` and, while it is inner, its enclosing classes declare.
+fn star_count(library: &KspLibraryClass, libraries: &KspLibraries) -> usize {
+    let own = library.class.type_parameters.iter().flatten().count();
+    let inner = library
+        .class
+        .modifiers
+        .iter()
+        .flatten()
+        .any(|modifier| *modifier == KspModifier::Inner);
+    match (inner, library.parent.as_deref()) {
+        (true, Some(parent)) => {
+            let parent = libraries
+                .class(parent)
+                .expect("an inner class's parent is on the classpath");
+            own + star_count(&parent, libraries)
+        }
+        _ => own,
+    }
 }
 
 #[test]
@@ -250,7 +282,7 @@ fn library_classes_are_the_headers_ksp2_reports() {
         if line.starts_with('#') || !name.contains('.') {
             continue;
         }
-        let actual = logged(name, libraries.class(name));
+        let actual = logged(name, libraries.class(name), &libraries);
         if actual != line {
             mismatches.push(format!("want {line}\n got {actual}"));
         }

@@ -266,6 +266,11 @@ fn function_enclosure(
                 .map(|class| class.fq_name)
         })
         .map(TypeName::render)
+        // Another file's inline function is a method of that file's facade.
+        .or_else(|| {
+            ir.foreign_template_facade(function)
+                .map(|owner| crate::jvm::names::classfile_internal_name_of(owner).to_owned())
+        })
         .unwrap_or_else(|| facade.to_string());
     let descriptor = function_descriptor(ir, override_results, function);
     Some((owner, Some((declaration.name.clone(), descriptor))))

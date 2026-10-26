@@ -15,6 +15,7 @@ use crate::fx_hash::HashMap;
 use super::*;
 
 mod compiled_module_callee;
+mod compiled_module_classes;
 mod default_bridge;
 mod lambda_node;
 mod lambda_route;
@@ -29,6 +30,7 @@ use crate::jvm::method_node::{
 };
 use crate::jvm::source_map::SourceMap;
 pub(super) use compiled_module_callee::{compile_inline_callees, CompiledInlineCallees};
+pub(super) use compiled_module_classes::{write_class, ModuleClassBodies};
 use default_bridge::CalleeNodes;
 pub(super) use lambda_route::LambdaCallRoute;
 pub(super) use regenerated_objects::{RegeneratedObjectNames, RegenerationSite};

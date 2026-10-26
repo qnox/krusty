@@ -52,6 +52,21 @@ semantic layout when applicable; Java class signatures supply the remaining decl
 class formals come from non-static `InnerClasses` outer edges, with bound hydration before own-first
 capture/shadow renaming. Local or anonymous entries without an outer are not member capture edges.
 
+Inferred exposed anonymous results are approximated before their declaration signatures enter
+metadata. Their authenticated own/captured application supplies the declared parent and bounds;
+ordinary written stars retain their declaration meaning. Function parents keep the complete
+semantic function shape. Private factory and lambda implementation signatures remain exact rather
+than being rewritten to match the exposed declaration's denotable result.
+The retained body view removes solver-local callee parameters through the same lexical formal set;
+ordinary result denotability does not introduce a separate checking context.
+Parent templates are the same alias-expanded compact facts later published in classifier headers;
+metadata and anonymous exposure do not reconstruct arguments from transitional collector shapes.
+
+Complete anonymous-class metadata parity remains tracked by #2653 (own versus lexical-capture
+applications) and #2654 (package-local classifier facts and raw payloads). Their unchanged complete
+fixture oracles remain attached to those issues; ABI publication checks do not establish metadata
+payload parity.
+
 Layout reads use class headers and builtin declaration tables, not the enclosing `LibraryType` or
 its members. Physical mapped Java requests keep invariant formals independently of a Kotlin view's
 declared variance. This changes no metadata wire fields or physical descriptors. Missing lexical
@@ -290,10 +305,11 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   (f100) interns its `d2` strings BEFORE the annotations, while the annotation field serializes first
   (ascending field number). An annotated `suspend fun f(a: Int)` therefore lands
   `…, "a", "(ILkotlin/coroutines/Continuation;)Ljava/lang/Object;", "Lp/Mark;"` in `d2`.
-- The PRIMARY constructor's flags word is the one case where `| HAS_ANNOTATIONS` is not enough.
-  `Constructor.flags` has proto default 6 (visibility PUBLIC) and is omitted at that value, so krusty
-  carries a public primary ctor as 0; the bit forces the field out, and the default has to be
-  materialized on the way (0 → 6 → 7). `class C @Mark constructor(val x: Int)` in kotlinc 2.4.10:
+- The PRIMARY constructor's flags word is written whenever it differs from the proto default 6
+  (visibility PUBLIC). krusty carries the real word (6 for a public primary ctor) and omits it only
+  at 6, so the bit takes a public ctor to an explicit 7, and an `internal constructor`, whose
+  visibility bits are 0, is written as an explicit 0 (1 with annotations), as kotlinc writes it.
+  `class C @Mark constructor(val x: Int)` in kotlinc 2.4.10:
   `08 07 | 12 06 …value parameter… | 1a 02 08 06 (Constructor.annotation, d2[6] = "Lp/Mark;") |
   a2 06 04 …constructorSignature…`, with `Lp/Mark;` interned between `"(I)V"` and `"getX"`. A
   secondary ctor never hits this — its 22 is already explicit, so 22 → 23 is a plain OR.

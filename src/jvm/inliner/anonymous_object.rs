@@ -48,10 +48,8 @@ const ALOAD: u8 = 0x19;
 const GETFIELD: u8 = 0xb4;
 const PUTFIELD: u8 = 0xb5;
 const GETSTATIC: u8 = 0xb2;
-const INVOKESTATIC: u8 = 0xb8;
 const INVOKESPECIAL: u8 = 0xb7;
 const NEW: u8 = 0xbb;
-const INTRINSICS: &str = "kotlin/jvm/internal/Intrinsics";
 
 /// `ACC_SYNTHETIC | ACC_FINAL`, a regenerated captured field's access
 /// (`NO_FLAG_PACKAGE_PRIVATE | ACC_SYNTHETIC | ACC_FINAL`).
@@ -60,6 +58,7 @@ const CAPTURED_FIELD_ACCESS: u16 = 0x1010;
 const METADATA_PUBLIC_ABI_FLAG: i32 = 1 << 7;
 const METADATA_DESC: &str = "Lkotlin/Metadata;";
 const DEBUG_METADATA_DESC: &str = "Lkotlin/coroutines/jvm/internal/DebugMetadata;";
+const SUSPEND_LAMBDA: &str = "kotlin/coroutines/jvm/internal/SuspendLambda";
 const SOURCE_DEBUG_EXTENSION_DESC: &str = "Lkotlin/jvm/internal/SourceDebugExtension;";
 /// The package of the coroutine base classes (`isCoroutineSuperClass`).
 const COROUTINE_BASE_PACKAGE: &str = "kotlin/coroutines/jvm/internal/";
@@ -135,6 +134,9 @@ pub(crate) struct Regeneration<'a> {
     /// The state machine whose continuation this copy is, when it is the continuation of a copied
     /// suspend method (`isContinuation`).
     pub continuation: Option<&'a ContinuationMachine>,
+    /// The inlined callee is the call site's module's, whose nested objects a copy reuses unless
+    /// it must specialize them (kotlinc's `sameModule`).
+    pub same_module: bool,
 }
 
 /// The regenerated class.
@@ -199,6 +201,7 @@ pub(crate) fn regenerate(
         regeneration.classes,
         &continuations,
         regeneration.continuation.is_some(),
+        regeneration.lambdas.is_empty(),
     )?;
     let mut remapper = TypeRemapper::with_type_arguments(regeneration.type_arguments);
     for (original, copy) in regeneration.prior_classes {
@@ -360,6 +363,14 @@ pub(crate) fn regenerate(
         let mut method = method.clone();
         if let Some(code) = &mut method.code {
             reified_parameters_remain |= specialize_copied(code, regeneration.reified)?;
+            if method.name == "<clinit>" {
+                // kotlinc's copy of a class whose own type names a reified parameter initializes
+                // its singleton unguarded: the site that loads it carries the marker when a
+                // parameter remains for an enclosing inline function.
+                code.nodes.retain(|node| {
+                    !matches!(node, Node::Insn(insn) if super::object_regeneration::is_need_class_reification(insn))
+                });
+            }
         }
         check_captured_field_accesses(&method, old, &declared)?;
         // The continuation a `$$forInline` copy builds is regenerated as the copy's next object
@@ -389,7 +400,19 @@ pub(crate) fn regenerate(
                     "a suspend lambda in a method without a $$forInline copy",
                 ));
             }
-            let code = if lambda_inlining::reads_lambda(code, &lambdas) {
+            // kotlinc's `MethodInliner` transforms every method of a copy: one that reads an inlined
+            // lambda, or names an object the copy regenerates in turn (a reified lambda nested in
+            // it), has its objects regenerated as the copy's next ones.
+            let regenerates_objects = lambda_inlining::reads_lambda(code, &lambdas)
+                || code.instructions().any(|insn| {
+                    references_other_regenerated_class(
+                        insn,
+                        regeneration.classes,
+                        old,
+                        &continuations,
+                    )
+                });
+            let code = if regenerates_objects {
                 let mut code = code.clone();
                 remapper.remap_method(&mut code)?;
                 let mut objects = NestedObjects {
@@ -401,6 +424,7 @@ pub(crate) fn regenerate(
                     renamed: Vec::new(),
                     classes: Vec::new(),
                     sam_wrappers: Vec::new(),
+                    reified_parameters_remain: false,
                 };
                 let code = lambda_inlining::inline_into(
                     &code,
@@ -415,18 +439,9 @@ pub(crate) fn regenerate(
                 }
                 nested.extend(objects.classes);
                 sam_wrappers.extend(objects.sam_wrappers);
+                reified_parameters_remain |= objects.reified_parameters_remain;
                 code
             } else {
-                if code.instructions().any(|insn| {
-                    references_other_regenerated_class(
-                        insn,
-                        regeneration.classes,
-                        old,
-                        &continuations,
-                    )
-                }) {
-                    return Err(RegenerationError::Unsupported("a nested anonymous object"));
-                }
                 copy_body(code, &remapper, &mut lines)?
             };
             method.code = Some(code);
@@ -689,12 +704,17 @@ fn check_supported(
     classes: &dyn ClassRoles,
     continuations: &[String],
     continuation: bool,
+    specialization_only: bool,
 ) -> Result<(), RegenerationError> {
-    // A continuation copied for a suspend method's machine is the one coroutine the port
-    // regenerates.
-    let copied_continuation =
-        continuation && original.super_name.as_deref() == Some(CONTINUATION_IMPL);
-    if !copied_continuation
+    // A continuation copied for a suspend method's machine is one coroutine the port regenerates.
+    // A suspend lambda the call passes no lambda to is the other: its copy only specializes its
+    // reified operations, so its machine and `@DebugMetadata` stay as they are.
+    let regenerated_coroutine = (continuation
+        && original.super_name.as_deref() == Some(CONTINUATION_IMPL))
+        || (specialization_only
+            && !continuation
+            && original.super_name.as_deref() == Some(SUSPEND_LAMBDA));
+    if !regenerated_coroutine
         && original
             .super_name
             .as_deref()
@@ -703,7 +723,7 @@ fn check_supported(
         return Err(RegenerationError::Unsupported("a coroutine"));
     }
     // A copied continuation's `@DebugMetadata` is the copy's machine's, written anew.
-    if !copied_continuation
+    if !regenerated_coroutine
         && original
             .visible_annotations
             .iter()
@@ -711,35 +731,13 @@ fn check_supported(
     {
         return Err(RegenerationError::Unsupported("coroutine debug metadata"));
     }
-    if original.source_file.is_none() && !copied_continuation {
+    if original.source_file.is_none() && !regenerated_coroutine {
         return Err(RegenerationError::Unsupported(
             "a class without a source file",
         ));
     }
     for method in &original.methods {
         let Some(code) = &method.code else { continue };
-        // A declaration lambda whose function type mentions a reified parameter guards its own
-        // singleton initialization. Copying that initializer verbatim leaves a throwing
-        // `needClassReification` in the call-site class even after its `invoke` method is
-        // specialized. Until initializer specialization owns that marker, fail the inline call
-        // instead of emitting a class that throws when its INSTANCE is first read.
-        if method.name == "<clinit>"
-            && code.instructions().any(|insn| {
-                matches!(insn, Insn::Method {
-                    op: INVOKESTATIC,
-                    owner,
-                    name,
-                    desc,
-                    interface: false,
-                } if owner == INTRINSICS
-                    && name == "needClassReification"
-                    && desc == "()V")
-            })
-        {
-            return Err(RegenerationError::Unsupported(
-                "a class initializer requiring reification",
-            ));
-        }
         // A method's nested objects are regenerated while its lambdas are inlined into it; a
         // constructor or initializer is copied as it is.
         if matches!(method.name.as_str(), "<init>" | "<clinit>")

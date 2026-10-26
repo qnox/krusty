@@ -74,7 +74,6 @@ pub struct SignatureConstraintExtractor {
     captured_local_classifier_headers: HashSet<DeclarationId>,
     extracting_local_effects: HashSet<DeclarationId>,
     lambda_returns: Vec<CompactLambdaReturnScope>,
-    approximate_anonymous_result: bool,
     /// Nesting of the active `expression` calls; see [`expression_stack`].
     expression_depth: u32,
 }
@@ -405,15 +404,6 @@ impl SignatureConstraintExtractor {
             self.lexical_values.push(parameters);
             self.lexical_callables.push(callables);
             self.lexical_types.push(HashMap::default());
-            // A private inline function still approximates: each call site materializes its own
-            // anonymous class, so the synthetic classifier is not a result type the caller can name.
-            self.approximate_anonymous_result = stub.visibility
-                != crate::types::Visibility::Private
-                || function.is_some_and(|function| {
-                    function.is_inline()
-                        || (function.is_override()
-                            && function.visibility != crate::types::Visibility::Private)
-                });
             match self.expression(file, expression, scope, &mut origin) {
                 Ok(mut result) => {
                     if stub.signature_inference
@@ -623,15 +613,12 @@ impl SignatureConstraintExtractor {
             self.lexical_values.push(bindings);
             self.lexical_types.push(HashMap::default());
             self.local_classifier_stack.push(classifier);
-            // A local-class member keeps an anonymous result regardless of declared visibility.
-            let approximate = std::mem::replace(&mut self.approximate_anonymous_result, false);
             let result = match &method.body {
                 crate::ast::FunBody::Expr(expression) | crate::ast::FunBody::Block(expression) => {
                     self.expression(file, *expression, scope, origin)
                 }
                 crate::ast::FunBody::None => Ok(self.known(Ty::Unit)),
             };
-            self.approximate_anonymous_result = approximate;
             self.local_classifier_stack.pop();
             self.lexical_types.pop();
             self.lexical_values.pop();
@@ -1152,24 +1139,6 @@ impl SignatureConstraintExtractor {
         ))
     }
 
-    /// Evaluate a value that is consumed inside the inferred expression rather than exposed as the
-    /// declaration's result. A public declaration approximates an anonymous object only when that
-    /// object escapes through its signature; its local members remain visible while the expression
-    /// continues (`(object : A() { fun bar() = ... }).bar()`).
-    fn consumed_expression(
-        &mut self,
-        file: &File,
-        expression: ExprId,
-        scope: SignatureScopeId,
-        origin: &mut impl FnMut(crate::diag::Span) -> OriginId,
-    ) -> Result<SigExprId, ExpressionForm> {
-        let approximate = self.approximate_anonymous_result;
-        self.approximate_anonymous_result = false;
-        let result = self.expression(file, expression, scope, origin);
-        self.approximate_anonymous_result = approximate;
-        result
-    }
-
     fn smartcast_bindings_branch(
         &mut self,
         file: &File,
@@ -1349,50 +1318,18 @@ impl SignatureConstraintExtractor {
                 unreachable!("an anonymous-object construction must name its synthetic class")
             };
             let constraint_count = self.graph.constraints().len();
-            // Members set their own approximation; restore the enclosing expression's policy.
-            let approximate = self.approximate_anonymous_result;
-            let registered =
-                self.register_local_classifier_constraints(file, declaration, scope, origin);
-            self.approximate_anonymous_result = approximate;
-            registered?;
+            self.register_local_classifier_constraints(file, declaration, scope, origin)?;
             let demands = self.declaration_demands_since(constraint_count);
-            // Kotlin exposes a non-private anonymous-object result through its single declared
-            // supertype. Keeping the synthetic classifier here leaks an unpublishable local type
-            // into the module signature and also hides the applied generic convention members of
-            // that supertype (a common `provideDelegate` factory shape). An inline function does
-            // the same even when it is private, because the class is copied at each call site.
-            // A private non-inline declaration keeps its anonymous type: its extra members remain
-            // source-visible.
-            let result = if self.approximate_anonymous_result {
-                if let Some(base) = classifier.base_class.as_ref() {
-                    let supertype = TypeRef {
-                        name: base.clone(),
-                        flags: TrFlags::default(),
-                        arg: None,
-                        targs: classifier.base_type_args.clone(),
-                        span: classifier.base_class_span.unwrap_or(classifier.span),
-                        fun_params: Box::new([]),
-                        fun_context_count: 0,
-                        qualifier_arguments: Default::default(),
-                    };
-                    self.compact_type(&supertype, scope, origin)
-                } else if let [supertype] = classifier.supertypes.as_slice() {
-                    self.compact_type(supertype, scope, origin)
-                } else {
-                    // With no single declared supertype to expose, Kotlin's denotable public result
-                    // is `Any`. The synthetic anonymous classifier is a body-local implementation
-                    // detail and must never enter the stable signature graph.
-                    self.known(Ty::obj("kotlin/Any"))
-                }
-            } else {
-                let declaration = self
-                    .source_classifiers
-                    .get(&classifier.span)
-                    .copied()
-                    .ok_or(ExpressionForm::Call)?;
-                self.graph
-                    .add_expr(SigExpr::ClassifierType { declaration, scope })
-            };
+            // Expressions retain the exact anonymous application. Only the declaration publication
+            // boundary may expose it through its parents, after all consumed members are checked.
+            let declaration = self
+                .source_classifiers
+                .get(&classifier.span)
+                .copied()
+                .ok_or(ExpressionForm::Call)?;
+            let result = self
+                .graph
+                .add_expr(SigExpr::ClassifierType { declaration, scope });
             return Ok(if demands.is_empty() {
                 result
             } else {
@@ -1508,7 +1445,7 @@ impl SignatureConstraintExtractor {
                 let receiver =
                     match qualified_calls::value(self, file, *receiver, scope, receiver_origin) {
                         Some(receiver) => receiver,
-                        None => self.consumed_expression(file, *receiver, scope, origin)?,
+                        None => self.expression(file, *receiver, scope, origin)?,
                     };
                 self.member(receiver, name, scope, selector_origin)
             }
@@ -1864,8 +1801,7 @@ impl SignatureConstraintExtractor {
                                 qualified: Some(qualified),
                             })
                         } else {
-                            let receiver =
-                                self.consumed_expression(file, *receiver, scope, origin)?;
+                            let receiver = self.expression(file, *receiver, scope, origin)?;
                             let arguments =
                                 self.call_arguments(file, expression, args, scope, origin)?;
                             let type_arguments =
@@ -2093,7 +2029,7 @@ impl SignatureConstraintExtractor {
                             init,
                             is_var,
                         } => {
-                            let value = self.consumed_expression(file, *init, scope, origin)?;
+                            let value = self.expression(file, *init, scope, origin)?;
                             effects.push(value);
                             if !is_var {
                                 self.record_boolean_val(file, name, *init, scope, origin)?;
@@ -2156,7 +2092,7 @@ impl SignatureConstraintExtractor {
                                 .insert(name.clone().into_boxed_str(), value);
                         }
                         Stmt::Destructure { entries, init } => {
-                            let receiver = self.consumed_expression(file, *init, scope, origin)?;
+                            let receiver = self.expression(file, *init, scope, origin)?;
                             let statement_origin = origin(file.stmt_spans[statement.0 as usize]);
                             for (index, entry) in entries.iter().enumerate() {
                                 if entry.ignored {
@@ -2241,8 +2177,7 @@ impl SignatureConstraintExtractor {
                             body,
                             ..
                         } => {
-                            let iterable =
-                                self.consumed_expression(file, *iterable, scope, origin)?;
+                            let iterable = self.expression(file, *iterable, scope, origin)?;
                             let statement_origin = origin(file.stmt_spans[statement.0 as usize]);
                             let iterator =
                                 self.member_call(iterable, "iterator", [], scope, statement_origin);
@@ -2294,8 +2229,7 @@ impl SignatureConstraintExtractor {
                         } => {
                             let expected =
                                 ty.as_ref().map(|ty| self.compact_type(ty, scope, origin));
-                            let delegate =
-                                self.consumed_expression(file, *delegate, scope, origin)?;
+                            let delegate = self.expression(file, *delegate, scope, origin)?;
                             let diagnostic_owner = self
                                 .graph
                                 .scope(scope)

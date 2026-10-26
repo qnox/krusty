@@ -26,7 +26,7 @@ if [ -z "$row" ]; then
   echo "unknown corpus project: $name" >&2
   exit 2
 fi
-IFS=$'\t' read -r _ url commit gradle_root jdk pin <<<"$row"
+IFS=$'\t' read -r _ url commit gradle_root jdk pin android_variant <<<"$row"
 
 kotlin=$(sed 's/#.*//' "$repo_root/kotlin-versions" | awk 'NF { print $1 }' | sort -V | tail -n 1)
 if [ -z "$kotlin" ]; then
@@ -57,10 +57,14 @@ fi
 java_home_var=JAVA_HOME_${jdk}_X64
 export JAVA_HOME=${!java_home_var:-$JAVA_HOME}
 export LANG=C.UTF-8 LC_ALL=C.UTF-8
+if [ "${android_variant:--}" != - ]; then
+  export CORPUS_ANDROID_VARIANT=$android_variant
+fi
 
 # One build of the Gradle root, then its compile outputs moved to out/<mode>: the directories the
-# build's own compile-task inventory lists, so the next build starts without them. The Gradle exit
-# status is left in `status`; a broken inventory or snapshot fails the run.
+# build's own compile-task inventory lists, so the next build starts without them. The init scripts
+# read every project of the build, so the configuration cache and isolated projects are off. The
+# Gradle exit status is left in `status`; a broken inventory or snapshot fails the run.
 build() {
   local mode=$1
   shift
@@ -72,7 +76,8 @@ build() {
   (
     cd "$root"
     CORPUS_COMPILATIONS=$manifest timeout 5400 ./gradlew --no-daemon -I "$here/corpus.init.gradle" \
-      "$@" corpusCompile --continue --rerun-tasks --no-configure-on-demand
+      "$@" corpusCompile --continue --rerun-tasks --no-configure-on-demand \
+      --no-configuration-cache -Dorg.gradle.isolated-projects=false
   ) >"$logs/$name.$mode.log" 2>&1 || code=$?
   echo "$name $mode exit $code seconds $(($(date +%s) - start))" >>"$logs/STATUS"
   if [ -f "$manifest" ]; then

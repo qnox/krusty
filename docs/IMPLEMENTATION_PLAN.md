@@ -5585,9 +5585,16 @@ regress.
     properties read through their getter in an inline body, and unread delegated-property operands
     passed as `null`: 19 more box files are byte-identical on 2.4.20 (3,832 to 3,851), none
     regresses.
+    ✓ Callee bodies with lambdas (`LambdaInBody`): the classes a callee declares compiled with it
+    (another file's under that file's identity, read but not written), reused at a same-module
+    call unless the call specializes them, `needClassReification` at the instance load instead of
+    the class initializer, objects regenerated in inline functions under their own names, and
+    a reified `when` branch of the join's own class cast again; a copy regenerates the objects its
+    methods name, specializes a suspend lambda and every type argument, and drops its initializer's
+    marker: 6 more box files are byte-identical on 2.4.21 (4,025 to 4,031) and none regresses.
     ☐ `$default` calls, non-public callees of another file, suspend callers and callees,
     `crossinline` parameters, literals with non-local jumps, calls in default arguments, and callee
-    bodies with lambdas, local classes or enum switches.
+    bodies with local classes or enum switches.
 - ☐ 7. Delete `InlineBodyPlan` and its resolver/FIR threading once the coroutine state machine runs
   on inlined bytecode (the plans exist only to reach IR before `lower_suspend`).
 
@@ -6008,6 +6015,18 @@ Constructor exports across support units, qualified class facts across producer/
 direct source construction, inheritance, secondary/default/vararg/generic constructors and imported
 accessor/member dispatch remain required follow-ups. The first slice explicitly declines identity
 collisions before backend emission. It does not close #2621 or change any outcome baseline.
+
+## Anonymous declaration result publication
+
+Anonymous factory results retain exact checked applications until declaration publication. The
+publication owner authenticates anonymous declarations and complete own/captured arguments, applies
+declared bounds and parent/function shapes, and follows generic/function variance. Compact headers
+retain declaration-name spans for exact ambiguous-parent diagnostics. Private and local-member
+results remain exact; shared outcomes and operand ABI ownership are unchanged.
+Canonical compact parent templates, including alias arguments, are computed once before signature
+inference and shared with classifier publication; parent diagnostics retain their publication order.
+Complete anonymous metadata parity stays in #2653/#2654 with its full retained fixture oracles.
+Parameterized alias superclass constructor argument inference remains a separate repair in #2655.
 
 ## Enclosing formal field signatures
 
