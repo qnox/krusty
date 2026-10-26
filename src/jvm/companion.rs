@@ -231,9 +231,6 @@ pub(super) fn lower_companion_properties(
         let Some(companion_name) = outer_class.companion_class else {
             continue;
         };
-        if outer_class.is_value {
-            continue;
-        }
         // Annotation classes are distinct in common IR but are JVM interfaces for storage rules.
         let outer_is_interface = outer_class.is_interface || outer_class.is_annotation;
         let Some(companion) = ir.class_id_by_name(companion_name) else {
@@ -1294,7 +1291,6 @@ fn initializer_needs_companion_instance(
 fn outer_runs_companion_initializer(outer: &crate::ir::IrClass) -> bool {
     !outer.is_interface
         && !outer.is_annotation
-        && !outer.is_value
         && !outer.is_object
         && outer.companion_class.is_some()
 }

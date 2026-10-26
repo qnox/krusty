@@ -54,6 +54,15 @@ fn own_members_row() -> String {
     )
 }
 
+/// A `List<Any>`'s `removeAt` erases like the throwing stub would, but its `String` result is
+/// narrower, so `Object remove(int)` still bridges to the special `String remove(int)`.
+fn narrower_remove_at_row() -> String {
+    format!(
+        "class Row : List<Any> {{\n{}    fun removeAt(index: Int): String = \"removed $index\"\n}}\n",
+        members("Any", "\"\"")
+    )
+}
+
 fn other_result_row() -> String {
     format!(
         "class Row : List<String> {{\n{}    fun set(index: Int, element: String): Int = 1\n}}\n",
@@ -340,5 +349,31 @@ fn an_abstract_primitive_list_iterator_boxes_next_like_kotlinc() {
             "public java.lang.Object next();",
         ],
         &[],
+    );
+}
+
+#[test]
+fn a_narrower_remove_at_keeps_its_erased_remove_bridge_like_kotlinc() {
+    assert_members_match_kotlinc(
+        &narrower_remove_at_row(),
+        &[
+            "public final java.lang.String removeAt(int);",
+            "public final java.lang.String remove(int);",
+            "public java.lang.Object remove(int);",
+        ],
+        // The `Any` spellings of the later realizations.
+        &[
+            "public boolean containsAll(java.util.Collection<? extends java.lang.Object>);",
+            "public void replaceAll(java.util.function.UnaryOperator<java.lang.Object>);",
+            "public void sort(java.util.Comparator<? super java.lang.Object>);",
+        ],
+    );
+    let expected = "add: UnsupportedOperationException; add: UnsupportedOperationException; \
+        remove: UnsupportedOperationException; addAll: UnsupportedOperationException; \
+        set: UnsupportedOperationException; remove=removed 1; \
+        clear: UnsupportedOperationException";
+    common::expect_box_same_as_kotlinc(
+        &box_program(&narrower_remove_at_row(), "\"x\"", expected),
+        "read_only_list_face_narrower_remove_at",
     );
 }

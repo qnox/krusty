@@ -4,7 +4,10 @@
 //! type-safely erased, `addAll(Collection<? extends E>)` with its declaration-site wildcard, and
 //! `removeAll`/`retainAll(Collection<?>)` star-projected. A member the class declares itself
 //! implements its stub, and the erased `add(Object)` bridge forwards to it, among the bridges in
-//! member order. An abstract class gets a throwing `iterator()` stub as well.
+//! member order. An abstract class gets a throwing `iterator()` stub as well. A `remove(element:
+//! String)` the class declares implements the type-safe `remove(Object)`, which becomes kotlinc's
+//! final special bridge testing `instanceof String`, and an inherited `Base<T>.remove(T)` under
+//! `Base<String>` implements it with the erased descriptor itself, so it needs nothing.
 //!
 //! The JDK default `removeIf` is a later realization; these comparisons leave it out by its exact
 //! spelling and compare every other member, the `toArray` pair and the declared `containsAll`
@@ -50,6 +53,41 @@ fn generic_bag() -> String {
 fn own_members_bag() -> String {
     format!(
         "class Bag : Collection<String> {{\n{MEMBERS}    fun add(element: String): Boolean = element.isEmpty()\n    fun clear() {{}}\n}}\n"
+    )
+}
+
+fn own_remove_bag() -> String {
+    format!(
+        "class Bag : Collection<String> {{\n{MEMBERS}    fun remove(element: String): Boolean = element.isEmpty()\n}}\n"
+    )
+}
+
+fn inherited_remove_bag() -> String {
+    format!(
+        "open class Base<T> {{\n    fun remove(element: T): Boolean = element == \"\"\n}}\n\nclass Bag : Base<String>(), Collection<String> {{\n{MEMBERS}}}\n"
+    )
+}
+
+/// Every mutable member throws but `remove`, which the class implements.
+fn implemented_remove() -> String {
+    ["add", "remove", "addAll", "removeAll", "retainAll", "clear"]
+        .map(|name| match name {
+            "remove" => "remove=true".to_string(),
+            _ => format!("{name}: UnsupportedOperationException: {READ_ONLY}"),
+        })
+        .join("; ")
+}
+
+/// A Java caller's `remove` of a non-`String` meets the type-safe bridge's `instanceof`.
+fn foreign_remove_program(source: &str) -> String {
+    format!(
+        "{source}
+fun box(): String {{
+    val bag: Any = Bag()
+    val removed = bag.javaClass.getMethod(\"remove\", Any::class.java).invoke(bag, 1)
+    return if (removed == false) \"OK\" else \"remove(1)=$removed\"
+}}
+"
     )
 }
 
@@ -244,5 +282,37 @@ fn an_abstract_collection_also_gets_an_iterator_stub_like_kotlinc() {
             "public void clear();",
         ],
         ABSTRACT_FAKE_OVERRIDE_BRIDGES,
+    );
+}
+
+#[test]
+fn an_own_remove_implements_the_type_safe_remove_through_its_special_bridge_like_kotlinc() {
+    assert_members_match_kotlinc(
+        &own_remove_bag(),
+        &[
+            "public final boolean remove(java.lang.String);",
+            "public final boolean remove(java.lang.Object);",
+            "public boolean add(java.lang.Object);",
+        ],
+    );
+    common::expect_box_same_as_kotlinc(
+        &box_program(&own_remove_bag(), "Bag()", &implemented_remove()),
+        "read_only_collection_face_own_remove",
+    );
+    common::expect_box_same_as_kotlinc(
+        &foreign_remove_program(&own_remove_bag()),
+        "read_only_collection_face_own_remove_foreign",
+    );
+}
+
+#[test]
+fn an_inherited_generic_remove_implements_the_type_safe_remove_like_kotlinc() {
+    assert_members_match_kotlinc(
+        &inherited_remove_bag(),
+        &["public boolean add(java.lang.Object);"],
+    );
+    common::expect_box_same_as_kotlinc(
+        &box_program(&inherited_remove_bag(), "Bag()", &implemented_remove()),
+        "read_only_collection_face_inherited_remove",
     );
 }
