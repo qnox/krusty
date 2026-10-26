@@ -13750,7 +13750,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`AbstractList.size()` gives `abstract int getSize()` beside `final int size()`). Tests:
   `tests/abstract_builtin_overrides_e2e.rs` (classes byte for byte, and a box run through the JVM
   names), `tests/read_only_collection_face_stubs_e2e.rs`, `tests/read_only_list_face_stubs_e2e.rs`,
-  `tests/read_only_set_face_stubs_e2e.rs`.
+  `tests/read_only_set_face_stubs_e2e.rs`. Not yet like kotlinc: a member implemented by
+  `kotlin.collections.AbstractCollection` (kotlinc writes a concrete `contains(String)` and its
+  bridge), a declared `abstract override fun removeAt(index: Int): String` (kotlinc writes
+  `final String remove(int)` beside `Object remove(int)`), and the order and shortcuts of members a
+  Java collection superclass leaves abstract.
 - **A collection class gets the JDK's `toArray` pair.** As kotlinc's `ToArrayLowering`, every
   non-interface class that implements `Collection` (any face, read-only or mutable, abstract or
   not, enum and anonymous classes included) gets `public <T> T[] toArray(T[])`, which checks its
