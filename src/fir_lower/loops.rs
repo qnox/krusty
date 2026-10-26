@@ -236,26 +236,33 @@ impl BodyLowering<'_> {
             FirProgressionSource::Reversed(nested) => {
                 IrProgressionSource::Reversed(Box::new(self.progression_source(nested)?))
             }
-            FirProgressionSource::Indices {
-                receiver,
-                view,
-                size,
-            } => {
-                let receiver =
-                    self.expression_with_conversion(receiver.value, receiver.conversion)?;
-                let receiver = match view {
-                    Some(view) => self.ir.add_expr(IrExpr::TypeOp {
-                        op: crate::ir::IrTypeOp::Cast,
-                        arg: receiver,
-                        type_operand: *view,
-                    }),
-                    None => receiver,
-                };
-                IrProgressionSource::Indices {
-                    size: self.member_property_read_on(size, receiver)?,
-                }
-            }
+            FirProgressionSource::Indices(indices) => IrProgressionSource::Indices {
+                size: self.indices_size(indices)?,
+            },
         })
+    }
+
+    /// The size an `indices` range ends before: the selected member read on the receiver, cast to
+    /// the class that member is selected on when the receiver's own class is another one.
+    pub(super) fn indices_size(
+        &mut self,
+        indices: &crate::fir::FirIndices,
+    ) -> Result<ExprId, FirLoweringFailure> {
+        let crate::fir::FirIndices {
+            receiver,
+            view,
+            size,
+        } = indices;
+        let receiver = self.expression_with_conversion(receiver.value, receiver.conversion)?;
+        let receiver = match view {
+            Some(view) => self.ir.add_expr(IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::Cast,
+                arg: receiver,
+                type_operand: *view,
+            }),
+            None => receiver,
+        };
+        self.member_property_read_on(size, receiver)
     }
 
     /// `DefaultProgressionHandler`: the progression is read once, into a temporary unless it is a

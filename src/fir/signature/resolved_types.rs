@@ -30,10 +30,22 @@ impl ResolvedTy {
     }
 }
 
+/// The declaration's exposed result and any distinct checking context for its own inferred body.
+/// Both views have removed solver-local parameters; only the exposed view approximates anonymous
+/// implementation types. Callers, metadata and ABI consume `published` exclusively.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeclarationResultTypes {
+    pub published: ResolvedTy,
+    pub inferred_body_result: Option<ResolvedTy>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedSignature {
     pub parameters: Box<[ResolvedTy]>,
     pub result: ResolvedTy,
+    /// Declaration-owned body evidence before anonymous exposure, with solver-local parameters
+    /// removed. This is checking context, never a caller-visible result or emitted ABI slot.
+    pub(super) inferred_body_result: Option<ResolvedTy>,
     /// The typealias an inferred result was reached through, kotlinc's abbreviation attribute on
     /// the result type (`val text = StringBuilder()` has type `java.lang.StringBuilder`
     /// abbreviated as `kotlin.text.StringBuilder`). It never takes part in type identity: only
@@ -54,6 +66,10 @@ pub struct ResolvedTypeAbbreviation {
 }
 
 impl ResolvedSignature {
+    pub(crate) fn inferred_body_result(&self) -> Option<ResolvedTy> {
+        self.inferred_body_result
+    }
+
     pub fn new(
         parameters: impl IntoIterator<Item = Ty>,
         result: Ty,
@@ -66,6 +82,7 @@ impl ResolvedSignature {
         Ok(Self {
             parameters,
             result: ResolvedTy::new(result)?,
+            inferred_body_result: None,
             result_abbreviation: None,
         })
     }

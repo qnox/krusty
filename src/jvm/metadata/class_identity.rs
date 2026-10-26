@@ -51,14 +51,33 @@ pub(super) fn class_flags(ctx: &MetaCtx<'_>) -> u64 {
 /// between package segments and `.` between classes (`lib/Outer.Nested`); the qualified name dots
 /// both, and neither character can occur inside a JVM identifier.
 pub(super) fn class_qualified_name(ctx: &MetaCtx) -> Option<String> {
+    resolve_class_name(ctx.records, ctx.d2, class_name_index(ctx)?)
+        .map(|name| name.replace('/', "."))
+}
+
+pub(super) fn class_declaration_name(
+    ctx: &MetaCtx,
+    string_table: &[u8],
+) -> MetadataResult<Option<crate::types::ClassifierDeclarationName>> {
+    let Some(id) = class_name_index(ctx) else {
+        return Ok(None);
+    };
+    let local = super::string_table::class_name_is_local(string_table, id)
+        .ok_or(MetadataDecodeError::MalformedWire)?;
+    if local || flags_visibility(class_flags(ctx)) == 5 {
+        return Ok(None);
+    }
+    Ok(resolve_class_name(ctx.records, ctx.d2, id)
+        .map(|name| crate::libraries::metadata_declaration_name(&name)))
+}
+
+fn class_name_index(ctx: &MetaCtx) -> Option<usize> {
     let mut pb = Pb::new(ctx.msg);
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
             (3, 0) => {
-                let id = pb.varint()?;
-                return resolve_class_name(ctx.records, ctx.d2, id as usize)
-                    .map(|name| name.replace('/', "."));
+                return usize::try_from(pb.varint()?).ok();
             }
             (_, w) => {
                 if pb.skip(w).is_none() {

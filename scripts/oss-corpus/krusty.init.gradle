@@ -1,16 +1,20 @@
-// Applies the krusty Gradle plugin to every Kotlin/JVM and Kotlin Multiplatform project of the
-// build, from the local Maven repository the corpus workflow unpacked.
-def repo = new File(System.getenv('KRUSTY_PLUGIN_REPOSITORY')).toURI()
+// Applies the krusty Gradle plugin to every Kotlin/JVM, Android and Kotlin Multiplatform project of
+// the build, from the local Maven repository the corpus workflow unpacked.
+// Only the main build: buildSrc and included builds are the project's build logic.
+if (gradle.parent != null) return
 def version = System.getenv('KRUSTY_PLUGIN_VERSION')
-settingsEvaluated { s ->
-    s.pluginManagement.repositories { maven { url = repo } }
-}
+// The plugin jar goes on the root build classpath as a file, with no repository: a build that
+// declares exclusive repository content forbids adding one to `buildscript.repositories`, and the
+// jar has no dependencies of its own.
+def jar = new File(System.getenv('KRUSTY_PLUGIN_REPOSITORY'),
+        "dev/krustythecompiler/krusty-gradle-plugin/$version/krusty-gradle-plugin-${version}.jar")
 gradle.rootProject { p ->
-    p.buildscript.repositories { maven { url = repo } }
-    p.buildscript.dependencies { classpath "dev.krustythecompiler:krusty-gradle-plugin:$version" }
+    p.buildscript.dependencies { classpath p.files(jar) }
 }
 gradle.allprojects { p ->
     p.pluginManager.withPlugin('org.jetbrains.kotlin.jvm') { p.pluginManager.apply('dev.krustythecompiler') }
+    // From AGP 9 the Android plugin compiles Kotlin itself, without `org.jetbrains.kotlin.android`.
+    p.pluginManager.withPlugin('com.android.base') { p.pluginManager.apply('dev.krustythecompiler') }
     p.pluginManager.withPlugin('org.jetbrains.kotlin.multiplatform') {
         // A plugin build without Kotlin Multiplatform support rejects the project. Its compiles
         // then stay with kotlinc, and each is reported the way the plugin reports a fallback, so

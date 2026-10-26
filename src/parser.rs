@@ -1970,6 +1970,9 @@ impl<'a> Parser<'a> {
         };
         let id = self.file.add_decl(Decl::Class(declaration));
         self.file.decls.insert(nested_start, id);
+        self.file
+            .hoisted_classifier_source_names
+            .insert(id, simple_name);
         self.file.adopt_hoisted_classifiers(id, nested_start + 1);
         declaration_modifiers::record_nested_actual(&mut self.file, modifiers, id);
         debug_assert!(self.lexical_type_parameters.names().is_empty());
@@ -6285,6 +6288,12 @@ typealias Box<@Marker T> = List<T>
             _ => unreachable!("companion edge must target a class"),
         };
         assert_eq!(companion.name, "Game.Companion");
+        assert_eq!(
+            file.hoisted_classifier_source_names
+                .get(&g.companion.unwrap())
+                .map(String::as_str),
+            Some("Companion")
+        );
         assert!(companion.is_singleton());
         assert!(companion.methods.iter().any(|method| method.name == "foo"));
         assert!(companion

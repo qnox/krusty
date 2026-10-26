@@ -11,10 +11,20 @@ use crate::ast::{Expr, ExprId, FunBody, FunDecl, Stmt, StmtId};
 use crate::types::Ty;
 
 impl Checker<'_> {
-    pub(super) fn check_fun_body(&mut self, scope: &CheckerScope<'_>, function: &FunDecl) {
+    pub(super) fn check_fun_body(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        function: &FunDecl,
+        declaration: Option<crate::fir::DeclarationId>,
+    ) {
         match &function.body {
             FunBody::Expr(expression) => {
-                let checked = self.expr_declared(scope, *expression, self.ret_ty);
+                let expected = super::expected_expression::declaration_body_type(
+                    self.resolved_index,
+                    declaration.filter(|_| function.ret.is_none()),
+                    self.ret_ty,
+                );
+                let checked = self.expr_declared(scope, *expression, expected);
                 if self.selects_contract_intrinsic(*expression) {
                     self.check_contract_expression_body(*expression);
                 }
