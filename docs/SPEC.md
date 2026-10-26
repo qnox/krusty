@@ -13456,6 +13456,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   interface override's is `describe_impl$lambda$0`. The value-class pass records the `Any`
   override's realization among the functions whose JVM name it chose. Tests:
   `tests/value_class_any_override_e2e.rs`.
+- **A companion initializer run by the outer `<clinit>` is value-class lowered.** With an `init`
+  block the whole companion initializer moves to the outer class's `<clinit>`; it remains the
+  companion's constructor code (over no parameters) for the value-class rewrite, so `Id(0)` there
+  is `Id.constructor-impl(0)` stored as the carrier. krusty left `new Id(0)`, a `VerifyError`.
+  Tests: `tests/companion_initializer_value_class_e2e.rs`.
 - **An owner reads its explicit backing field, typed as the field.** Inside the class that
   declares `val a: Any field = V(1)`, a read whose receiver's static type is exactly that class is
   kotlinc's `IrGetField` of the field, not a call of `getA()`: `a.x` over a value class
