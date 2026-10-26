@@ -839,6 +839,8 @@ mod elvis_newline_continuation_e2e;
 mod elvis_nullability_join_e2e;
 #[path = "elvis_over_safe_call_e2e.rs"]
 mod elvis_over_safe_call_e2e;
+#[path = "elvis_own_line_e2e.rs"]
+mod elvis_own_line_e2e;
 #[path = "elvis_return_smartcast_e2e.rs"]
 mod elvis_return_smartcast_e2e;
 #[path = "elvis_signature_inference_e2e.rs"]

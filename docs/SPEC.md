@@ -6822,6 +6822,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (the same source accepted with the declaration present, refused without it) and the delegate
   ledgers in `tests/delegate_scalar_boundary_e2e.rs`.
 
+- **A core classifier exists whether or not anything has named it.** Without a stdlib artifact,
+  `EmptySymbolSource` declares the scalar and string types, the specialized arrays, `Array`,
+  `Enum`, `Function`, `EqualityBound` and `Suppress`. It publishes the identity of each of these
+  declarations itself. It does not check whether the process-global type-name interner has already
+  seen the name. That check made a declaration's existence depend on the process's history:
+  `IntArray(7).size` compiled with no stdlib only after an earlier compilation had named
+  `kotlin/IntArray`, and the two annotations needed a name-list exception. Tests:
+  `libraries::core_builtins::tests::core_classifiers_are_declared_before_anything_names_them`
+  (a probe in a child process with a fresh interner) and `tests/js_backend_coverage_e2e.rs`
+  (`int_array_size`).
+
 - **Signature finalization names the convention it could not find, and does not suppress the file.**
   A delegated property with NO declared type has nothing to infer its type from once `getValue` is
   missing, so its signature cannot finalize — and the body check that would have reported it never
@@ -10118,6 +10129,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   inlined call, a control-flow entry, and an inlined body's copied line keep their entry. Test:
   `tests/elvis_branch_order_e2e.rs`
   (`a_multi_line_call_on_the_null_path_writes_no_entry_for_the_line_in_effect`).
+
+- **An elvis keeps its own line beside its operands' lines.** kotlinc states an elvis's own line
+  where the elvis begins and again where its value is stored. When the left value's first
+  instruction marks another line at that offset (`val y = foo(\n a) ?: 0` loads `a` on the next
+  line), or the store marks the declaration's line there, both entries stay: `line 4: 0, line 5: 0`.
+  Common lowering records the elvis block as an expression whose start line is kept, and the JVM
+  line table keeps that entry. A chain `a ?: b ?: c` begins only once, at `a`: kotlinc folds it
+  into one chain, so the elvis krusty nests on the first one's right side states no start line of
+  its own. Test: `tests/elvis_own_line_e2e.rs`.
 
 - **A not-null assertion keeps its own line beside its operand's line.** kotlinc states a `!!`'s
   own line before its operand. When the operand's first instruction marks another line at that
@@ -14361,6 +14381,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   array (`unsigned_array_carrier_access`).
   (`tests/unsigned_array_element_access_e2e.rs`, `tests/unsigned_arrays_e2e.rs`.)
 
+- **An unsigned array as an array element or a type argument is signed as its value class.** A
+  value class is carried as its underlying type only where it is a value of its own; an element
+  of `Array<V>` and an argument of a generic class (`List<V>`, `Map<K, Array<V>>`) hold the box,
+  so the generic `Signature` names `V`'s class, as kotlinc's type mapper does. The signature
+  formatter writes a classifier the primitive-array table names as its JVM array only when the
+  IR does not declare it a value class (`is_value_class_name`), so `UIntArray` takes the ordinary
+  classifier path like a user value class: `List<UIntArray>` is `Ljava/util/List<Lkotlin/UIntArray;>;`
+  and `Array<UIntArray>` is `[Lkotlin/UIntArray;`, which equals its descriptor, so no attribute is
+  written. The carrier spelling (`[[I`, `List<[I>`) named another JVM type than the descriptor and
+  the elements the array holds. A top-level `UIntArray` position keeps its carrier `[I`.
+  (`tests/unsigned_array_type_argument_signature_e2e.rs`.)
+
 - **A `checkcast` right before an `aastore` is removed, as kotlinc's
   `RedundantCheckcastsBeforeAastoreMethodTransformer` does.** The pass runs after jump negation and
   before the final dead-code elimination (`bytecode_passes/checkcasts_before_aastore.rs`, step
@@ -16765,6 +16797,32 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   directions (`val name: String` against `stringType`, `String?` against its nullable form), and
   hashes like it; a nullable type hashes apart from its non-null form, as KSP2 2.3.12 reports.
   (`crates/krusty-plugin-host/tests/ksp.rs`, `library_classes_are_what_ksp2_reports`.)
+- **A KSP type source spells without type-use annotations has none.** `KSType.annotations` is
+  empty for a property, parameter, receiver or return type the source spells with no type-use
+  annotation of its own, for each argument whose written spelling has none, and for the
+  classifier type a constructor returns, as KSP2 2.3.12 reports. The answer comes from the
+  frontend's resolved spelling of the declared type: a node is empty only when the source writes
+  no annotation on it and the frontend records neither an annotation nor an alias expansion's
+  annotation there. A type whose spelling carries one, an argument the spelling does not write,
+  an inferred type and a library type are refused for that query. A type that names a source
+  typealias, as a whole or in a type argument (`List<KeptString>` with `typealias KeptString =
+  @Kept String`), is left undescribed: KSP2 resolves it to the alias with the alias's own
+  arguments, which the round does not describe yet, so `KSPropertyDeclaration.type` and its
+  siblings refuse rather than report the expansion. (`crates/krusty-plugin-host/tests/ksp.rs`,
+  `members_and_their_types_are_what_ksp2_reports`, `a_type_naming_an_alias_is_refused`;
+  `src/ksp_round/type_model.rs`.)
+- **A KSP generated file's package is a directory path.** `CodeGenerator.createNewFile` turns
+  each `.` of the package into a directory and does not require a Kotlin package name, so a
+  processor writes a service descriptor to `META-INF.services` (`resources/META-INF/services/`), as
+  KSP2 2.3.12 does. (`crates/krusty-plugin-host/tests/ksp.rs`,
+  `a_processor_sees_generates_and_logs_what_it_does_under_ksp2`.)
+- **`KSType.starProjection()` is the named classifier's star-projected type.** On a classifier
+  type, written in source or built by the host, it gives the classifier applied to a `SYNTHETIC`
+  star per type parameter (`Base<List<E>, String>` gives `Base<*, *>`, `Enum<Color>` gives
+  `Enum<*>`), keeping the type's nullability, and equal to `asStarProjectedType()` of that
+  classifier (made nullable for a nullable type), as KSP2 2.3.12 reports. A type parameter or a
+  type alias is refused for that query.
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `class_headers_are_what_ksp2_reports`.)
 - **A star-projected KSP classifier type is assignable from its subclassifiers.** On a type a
   classifier answers (`asStarProjectedType()`, a builtin), `isAssignableFrom` holds for a type whose
   classifier is that classifier or inherits it through its direct supertypes, transitively and
