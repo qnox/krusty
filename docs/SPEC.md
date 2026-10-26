@@ -1,11 +1,12 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
-## Declaration-name projection
+## Source classifier identity publication
 
-A finalized source classifier keeps its declaration-name fact when projected into a common
-provider shape. Optional-expectation annotations without JVM classfiles keep their raw module
-metadata name through publication. Exact segments and lexical ownership remain snapshot-owned;
-a later declaration with the same flattened identity cannot change an earlier snapshot's fact.
+The compact header inventory publishes non-local classifier identities through their declaration
+owners and exact retained segments. A dollar inside a declaration name never introduces another
+classifier or owner. Publication retains visibility and declaration order, and excludes local and
+anonymous classifiers as before. Header-boundary regressions check the complete published inventory,
+absence of invented prefixes, and exact nesting for literal-dollar owner/member names.
 
 ## JVM member-class table ownership
 
@@ -36,6 +37,13 @@ synthetic payload. Missing declaration ownership does not authorize a classfile-
 visibility and metadata local-name indices both exclude non-local ownership; a public member of a
 local class still carries a local class ID.
 
+## Declaration-name projection
+
+A finalized source classifier keeps its declaration-name fact when projected into a common
+provider shape. Optional-expectation annotations without JVM classfiles keep their raw module
+metadata name through publication. Exact segments and lexical ownership remain snapshot-owned;
+a later declaration with the same flattened identity cannot change an earlier snapshot's fact.
+
 ## JVM generic result consumption
 
 A checked generic call's declaration-result coercion can retain its recorded reference slot until
@@ -50,6 +58,19 @@ assertion's extra nullability coercion retains the same authenticated declaratio
 than materializing an intermediate substituted type. Complete classfile and reference runtime
 controls, including single evaluation, live in
 `tests/consumer_materialized_result_e2e.rs`.
+
+A slot erased to a declared bound follows the same rule as an erased `Object`. For
+`<T : Base> get(): T` read as `Both`, the call leaves `Base`, and kotlinc narrows it only for a
+consumer that needs the narrower type. `===`, `!==`, `== null`, `!= null`, `areEqual`, and an `Any`
+or `Base` consumer take the slot unchanged. A `Marker` consumer casts once to `Marker`, never
+to `Both` first. A property read's substitution is the same declaration-result coercion as a
+call's, so `s.value === b` behaves like `s.get() === b`. A smart cast stays a separate, eagerly
+checked conversion. A dispatch receiver read from an erased result narrows once to the class the
+call names, `Both` for `s.get().base()` when `base` is declared on `Base`. An upcast to the
+declaring class between them does not hide the erased result, so the receiver is never left
+unnarrowed or narrowed only to `Base`. Tests:
+`tests/consumer_materialized_result_e2e.rs` (`bound_results`), for one file, a sibling file, and a
+kotlinc-built dependency.
 
 ## Serialization constructor contract checks
 
@@ -6820,6 +6841,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (the same source accepted with the declaration present, refused without it) and the delegate
   ledgers in `tests/delegate_scalar_boundary_e2e.rs`.
 
+- **A core classifier exists whether or not anything has named it.** Without a stdlib artifact,
+  `EmptySymbolSource` declares the scalar and string types, the specialized arrays, `Array`,
+  `Enum`, `Function`, `EqualityBound` and `Suppress`. It publishes the identity of each of these
+  declarations itself. It does not check whether the process-global type-name interner has already
+  seen the name. That check made a declaration's existence depend on the process's history:
+  `IntArray(7).size` compiled with no stdlib only after an earlier compilation had named
+  `kotlin/IntArray`, and the two annotations needed a name-list exception. Tests:
+  `libraries::core_builtins::tests::core_classifiers_are_declared_before_anything_names_them`
+  (a probe in a child process with a fresh interner) and `tests/js_backend_coverage_e2e.rs`
+  (`int_array_size`).
+
 - **Signature finalization names the convention it could not find, and does not suppress the file.**
   A delegated property with NO declared type has nothing to infer its type from once `getValue` is
   missing, so its signature cannot finalize — and the body check that would have reported it never
@@ -10117,6 +10149,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/elvis_branch_order_e2e.rs`
   (`a_multi_line_call_on_the_null_path_writes_no_entry_for_the_line_in_effect`).
 
+- **An elvis keeps its own line beside its operands' lines.** kotlinc states an elvis's own line
+  where the elvis begins and again where its value is stored. When the left value's first
+  instruction marks another line at that offset (`val y = foo(\n a) ?: 0` loads `a` on the next
+  line), or the store marks the declaration's line there, both entries stay: `line 4: 0, line 5: 0`.
+  Common lowering records the elvis block as an expression whose start line is kept, and the JVM
+  line table keeps that entry. A chain `a ?: b ?: c` begins only once, at `a`: kotlinc folds it
+  into one chain, so the elvis krusty nests on the first one's right side states no start line of
+  its own. Test: `tests/elvis_own_line_e2e.rs`.
+
 - **A not-null assertion keeps its own line beside its operand's line.** kotlinc states a `!!`'s
   own line before its operand. When the operand's first instruction marks another line at that
   offset (`val y = foo(\n a)!!` loads `a` on the next line), both entries stay:
@@ -10317,6 +10358,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   name no declaration in scope declares has no primary bound, and the function does not align. Tests:
   `tests/intersection_bound_metadata_order_e2e.rs`,
   `tests/krusty_roundtrip_class_metadata_e2e.rs`.
+- **A type parameter erases to its declaration's primary bound in every physical slot.** For
+  `class Holder<T>(val value: T) where T : Marker, T : Base`, kotlinc's `erasedUpperBound` is
+  `Base`, though `Marker` is written first. The constructor parameter, the backing field, the
+  getter and setter, an `Array<T>` slot, every member taking or returning `T`, and an inner class's
+  members and fields over its captured `T` all erase to `Base`. A member's own
+  `<R> where R : Marker, R : Base` does the same. A call from another file links those
+  descriptors. Common IR keeps a type parameter's written bounds on the declaration records: the
+  file's own generic functions and classes, the formals a body captures, and each module callable,
+  property and constructor the file calls, which carries its own and its owner's formals. Each
+  occurrence carries only the first written bound. Before any other JVM pass reads an
+  occurrence's carrier, the backend selects the carrier from those complete bounds (the first
+  class bound, else the first bound) and rebinds every occurrence of that semantic identity,
+  keeping the occurrence's nullability. The resolver no longer reorders a top-level callable's
+  bounds class-first; the frontend keeps written order everywhere. An inner class's field over a
+  captured formal also gets its `TT;` generic signature, found in the class's complete
+  type-parameter layout. Tests: `tests/type_parameter_bound_erasure_e2e.rs` (`class_formals`),
+  `tests/intersection_bound_metadata_order_e2e.rs`.
 - **`ClassName.Companion` named explicitly.** The bare `ClassName` already denotes the companion
   singleton in a value position (`val f: Factory = Widget`); both spellings mean the same object, so
   they resolve to the same type and lower to the same `getstatic C.Companion:LC$Companion;`. As in
@@ -13675,6 +13733,33 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   initialized in its `<clinit>` after `Companion`, reached from the companion's accessors through
   `access$getX$cp`/`access$setX$cp`; a companion `init` block runs there in source order. krusty
   kept them as `Companion` instance fields. Tests: `tests/value_class_companion_property_storage_e2e.rs`.
+- **A value class's interface entry is a forwarder of its member.** The box's instance entry for
+  an interface member realized as a static replacement enters on the member's signature line, even
+  when an expression body starts on a later line, and returns on the line the declaration ends on
+  (a block's `}` or an expression body's last line); on a one-line member its single entry covers
+  the return. krusty entered on the body's line and mapped no return. Tests:
+  `tests/value_class_interface_entry_e2e.rs`.
+- **A hoisted companion property's getter is described under its final JVM name.** The companion
+  getter of a property hoisted onto the outer class maps the property's line (its getter's, when
+  one is written) and names `this`. A value-class result mangles its name (`getZero-eEFUqEU`);
+  krusty described it under the property's unmangled spelling, which names no method, so the
+  mangled getter had no tables, in a value class's companion and an ordinary one's. Tests:
+  `tests/value_class_companion_property_storage_e2e.rs`.
+- **A reference to a value class's underlying property reads it with `unbox-impl`.** The
+  underlying property is the carrier, so kotlinc's `get` reads it from the box with `unbox-impl`
+  whatever its visibility, and reports the property's own getter (`getX()I`) to reflection. A
+  private one therefore needs no `access$getX$p` bridge. krusty called `getX()` for a public one
+  and gave a private one a bridge. Tests: `tests/value_class_property_reference_e2e.rs`.
+- **A value class's source `equals` override keeps `other: Any?`.** The box's `equals(Object)`
+  calling `equals-impl` is the override, so its parameter is `@Nullable` like `Any.equals`'s;
+  krusty annotated it `@NotNull`. With such an override, `equals-impl0` compares the carriers
+  through it on their boxes, `box-impl(p1).equals(box-impl(p2))`; krusty called
+  `equals-impl(p1, box-impl(p2))`. Tests: `tests/value_class_any_override_e2e.rs`.
+- **A delegated companion property's metadata names its hoisted `x$delegate`.** The delegate is
+  stored as a static of the outer class, and the companion's `@Metadata` property signature still
+  names that field (`lazyTwo$delegate:Lkotlin/Lazy;`), as it names an ordinary hoisted backing
+  field. krusty wrote no field signature for it. Tests:
+  `tests/value_class_companion_property_storage_e2e.rs`.
 - **An owner reads its explicit backing field, typed as the field.** Inside the class that
   declares `val a: Any field = V(1)`, a read whose receiver's static type is exactly that class is
   kotlinc's `IrGetField` of the field, not a call of `getA()`: `a.x` over a value class
@@ -14358,6 +14443,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   classifier is an unsigned array whose frozen value-class declaration stores a signed primitive
   array (`unsigned_array_carrier_access`).
   (`tests/unsigned_array_element_access_e2e.rs`, `tests/unsigned_arrays_e2e.rs`.)
+
+- **An unsigned array as an array element or a type argument is signed as its value class.** A
+  value class is carried as its underlying type only where it is a value of its own; an element
+  of `Array<V>` and an argument of a generic class (`List<V>`, `Map<K, Array<V>>`) hold the box,
+  so the generic `Signature` names `V`'s class, as kotlinc's type mapper does. The signature
+  formatter writes a classifier the primitive-array table names as its JVM array only when the
+  IR does not declare it a value class (`is_value_class_name`), so `UIntArray` takes the ordinary
+  classifier path like a user value class: `List<UIntArray>` is `Ljava/util/List<Lkotlin/UIntArray;>;`
+  and `Array<UIntArray>` is `[Lkotlin/UIntArray;`, which equals its descriptor, so no attribute is
+  written. The carrier spelling (`[[I`, `List<[I>`) named another JVM type than the descriptor and
+  the elements the array holds. A top-level `UIntArray` position keeps its carrier `[I`.
+  (`tests/unsigned_array_type_argument_signature_e2e.rs`.)
 
 - **A `checkcast` right before an `aastore` is removed, as kotlinc's
   `RedundantCheckcastsBeforeAastoreMethodTransformer` does.** The pass runs after jump negation and
@@ -16763,6 +16860,32 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   directions (`val name: String` against `stringType`, `String?` against its nullable form), and
   hashes like it; a nullable type hashes apart from its non-null form, as KSP2 2.3.12 reports.
   (`crates/krusty-plugin-host/tests/ksp.rs`, `library_classes_are_what_ksp2_reports`.)
+- **A KSP type source spells without type-use annotations has none.** `KSType.annotations` is
+  empty for a property, parameter, receiver or return type the source spells with no type-use
+  annotation of its own, for each argument whose written spelling has none, and for the
+  classifier type a constructor returns, as KSP2 2.3.12 reports. The answer comes from the
+  frontend's resolved spelling of the declared type: a node is empty only when the source writes
+  no annotation on it and the frontend records neither an annotation nor an alias expansion's
+  annotation there. A type whose spelling carries one, an argument the spelling does not write,
+  an inferred type and a library type are refused for that query. A type that names a source
+  typealias, as a whole or in a type argument (`List<KeptString>` with `typealias KeptString =
+  @Kept String`), is left undescribed: KSP2 resolves it to the alias with the alias's own
+  arguments, which the round does not describe yet, so `KSPropertyDeclaration.type` and its
+  siblings refuse rather than report the expansion. (`crates/krusty-plugin-host/tests/ksp.rs`,
+  `members_and_their_types_are_what_ksp2_reports`, `a_type_naming_an_alias_is_refused`;
+  `src/ksp_round/type_model.rs`.)
+- **A KSP generated file's package is a directory path.** `CodeGenerator.createNewFile` turns
+  each `.` of the package into a directory and does not require a Kotlin package name, so a
+  processor writes a service descriptor to `META-INF.services` (`resources/META-INF/services/`), as
+  KSP2 2.3.12 does. (`crates/krusty-plugin-host/tests/ksp.rs`,
+  `a_processor_sees_generates_and_logs_what_it_does_under_ksp2`.)
+- **`KSType.starProjection()` is the named classifier's star-projected type.** On a classifier
+  type, written in source or built by the host, it gives the classifier applied to a `SYNTHETIC`
+  star per type parameter (`Base<List<E>, String>` gives `Base<*, *>`, `Enum<Color>` gives
+  `Enum<*>`), keeping the type's nullability, and equal to `asStarProjectedType()` of that
+  classifier (made nullable for a nullable type), as KSP2 2.3.12 reports. A type parameter or a
+  type alias is refused for that query.
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `class_headers_are_what_ksp2_reports`.)
 - **A star-projected KSP classifier type is assignable from its subclassifiers.** On a type a
   classifier answers (`asStarProjectedType()`, a builtin), `isAssignableFrom` holds for a type whose
   classifier is that classifier or inherits it through its direct supertypes, transitively and
@@ -20891,6 +21014,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests:
   `tests/annotation_class_element_e2e.rs::a_java_class_element_accepts_a_class_literal`,
   `…::the_emitted_class_constants_match_kotlinc`.
+
+- **A Java `@interface` element is a read-only property, never a function.** kotlinc reads
+  `String value()` as `val value: String`: `annotation.value` compiles to `invokeinterface
+  value()`, and `annotation.value()` is rejected with "expression 'value' of type 'String' cannot
+  be invoked as a function". The classpath provider moves each element's method out of the
+  function namespace into a property whose getter is that method and whose type is the element's
+  Kotlin type (`KClass` for `Class`, read through `Reflection.getOrCreateKotlinClass` like a Kotlin
+  annotation member). An element spelled like a bean getter (`getLabel()`) is the property
+  `getLabel` only: a Java annotation declares no synthetic accessor property, so `annotation.label`
+  is unresolved. Tests:
+  `tests/java_annotation_element_property_e2e.rs::a_java_annotation_element_reads_as_a_property_like_kotlinc`,
+  `…::a_java_annotation_element_is_neither_a_function_nor_a_bean_getter_like_kotlinc`.
 
 - **A Kotlin annotation member declared `KClass` is stored and returned as `java.lang.Class`.**
   The interface method's descriptor is `()Ljava/lang/Class;` (or `()[Ljava/lang/Class;` for

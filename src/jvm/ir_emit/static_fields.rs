@@ -250,6 +250,19 @@ pub(super) fn hoisted_static_declaration_for<'a>(
         .map(|storage| (static_id, storage))
 }
 
+/// The HOISTED outer-class static holding the `x$delegate` of delegated companion property
+/// `property` of `c`, if any.
+pub(super) fn hoisted_delegate_static_for(
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    property: usize,
+) -> Option<u32> {
+    if !c.is_companion {
+        return None;
+    }
+    ir.jvm_companion_delegate_static(c.fq_name_id(), property as u32)
+}
+
 /// Whether this companion property's hoisted static is the `@JvmField` realization — a public owner
 /// field with NO companion accessors, so accessor-shaped emission must skip it entirely.
 pub(super) fn jvm_field_static_for(ir: &IrFile, c: &crate::ir::IrClass, property: usize) -> bool {

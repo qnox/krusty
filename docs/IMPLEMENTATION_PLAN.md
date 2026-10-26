@@ -1,10 +1,11 @@
 # krusty — implementation plan
 
-## Preserve classifier name evidence at projection boundaries
+## Source classifier inventory identities
 
-Copy source header declaration names into finalized module provider shapes. Retain optional
-annotation names from decoded module metadata until annotation shape publication. These close two
-producer omissions; the metadata name inventory/query and class-ID consumers remain separate work.
+Replace lookup-spelling splitting in the foreign-source classifier inventory with the existing
+declaration-owned name operation. Preserve exact segments, owner edges, visibility, order and
+non-local exclusions without interning undeclared prefixes. This producer correction is separate
+from the remaining metadata class-ID encoder and dependency/alias-name fact handoff.
 
 ## JVM declaration-owned member rows
 
@@ -37,6 +38,12 @@ Phased, each phase ends in a **green `cargo test`** and a runnable artifact. The
 front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
+
+## Preserve classifier name evidence at projection boundaries
+
+Copy source header declaration names into finalized module provider shapes. Retain optional
+annotation names from decoded module metadata until annotation shape publication. These close two
+producer omissions; the metadata name inventory/query and class-ID consumers remain separate work.
 
 ## Anonymous construction argument scope
 

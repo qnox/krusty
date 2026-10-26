@@ -404,6 +404,8 @@ impl<'a> JvmClassRealization<'a> {
             .delegate_field
             .and_then(|i| c.fields.get(i as usize));
         let hoisted = static_fields::hoisted_static_declaration_for(ir, c, property_index);
+        // A delegated companion property's `x$delegate`, hoisted onto the outer class.
+        let hoisted_delegate = static_fields::hoisted_delegate_static_for(ir, c, property_index);
         let (default_getter, default_setter) = accessor_jvm_names(c, &property.name);
         // A getter's descriptor is its physical one: a scalar getter result over a reference-returning
         // overridden property returns the wrapper (see `jvm::override_results`).
@@ -468,7 +470,10 @@ impl<'a> JvmClassRealization<'a> {
         // hoisted onto its outer class is stored there.
         let has_field = !c.is_annotation
             && !c.is_interface
-            && (backing.is_some() || delegate.is_some() || hoisted.is_some());
+            && (backing.is_some()
+                || delegate.is_some()
+                || hoisted.is_some()
+                || hoisted_delegate.is_some());
         let field = has_field.then(|| JvmFieldSignature {
             // The PHYSICAL field name when the JVM realization mangles it — an instance property
             // beside a same-named hoisted companion static (`result` → `result$1`).
@@ -478,13 +483,20 @@ impl<'a> JvmClassRealization<'a> {
                 .or(property.delegate_field.filter(|_| delegate.is_some()))
                 .map(|index| instance_field_jvm_name(ir, self.run, c, index as usize))
                 .or_else(|| {
-                    hoisted.map(|(static_id, _)| ir.static_field_jvm_name(static_id).to_string())
+                    hoisted
+                        .map(|(static_id, _)| static_id)
+                        .or(hoisted_delegate)
+                        .map(|static_id| ir.static_field_jvm_name(static_id).to_string())
                 })
                 .filter(|physical| *physical != property.name),
             desc: backing
                 .map(|field| jvm_value_ty(&field.ty))
                 .or(delegate.map(|field| jvm_value_ty(&field.ty)))
                 .or_else(|| hoisted.map(|(_, storage)| jvm_value_ty(&storage.ty)))
+                .or_else(|| {
+                    hoisted_delegate
+                        .map(|static_id| jvm_value_ty(&ir.statics[static_id as usize].ty))
+                })
                 .map(desc)
                 .filter(|physical| {
                     record.spellings.ret.actualized_expect

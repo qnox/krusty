@@ -1,12 +1,12 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
-## Source and optional-annotation projection
+## Source inventory publication
 
-The source index already owns each classifier's optional declaration name; its provider projection
-copies that fact without reinterpretation. A `.kotlin_module` optional-annotation class supplies a
-raw qualified class name even though no physical classfile exists. Retain its package/owner and
-exact segment before name-tree normalization, then publish that fact with the annotation shape.
-This preserves literal-dollar and nested names across separate metadata snapshots.
+Compact source headers publish classifier identities from explicit declaration ownership and exact
+segments rather than splitting lookup names on dots and dollars. This avoids creating undeclared
+prefix identities before later consumers run. Metadata class-ID encoding still needs its separate
+snapshot ownership lookup; publication alone does not supply authoritative negative nesting facts
+for every cached or cross-module identity.
 
 ## JVM member-class rows
 
@@ -37,6 +37,14 @@ producer after erasure. Null assertions preserve that producer's slot, and value
 uses the same marked edge to distinguish declaration carriers from generic boxes. The extra
 nullable-to-nonnull coercion retains that declaration boundary. Source metadata types continue
 to describe the selected declaration independently of this JVM representation decision.
+
+## Source and optional-annotation projection
+
+The source index already owns each classifier's optional declaration name; its provider projection
+copies that fact without reinterpretation. A `.kotlin_module` optional-annotation class supplies a
+raw qualified class name even though no physical classfile exists. Retain its package/owner and
+exact segment before name-tree normalization, then publish that fact with the annotation shape.
+This preserves literal-dollar and nested names across separate metadata snapshots.
 
 ## Serialization constructor handoff
 
