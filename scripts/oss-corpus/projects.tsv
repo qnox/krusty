@@ -1,13 +1,16 @@
-# The top-starred Kotlin projects the corpus builds, one per line (tab-separated):
-#   <name>  <git URL>  <commit>  <Gradle root>  <JDK>  <Kotlin version pin>
+# The top-starred Kotlin projects the corpus builds, and Now in Android as the Android sample, one
+# per line (tab-separated):
+#   <name>  <git URL>  <commit>  <Gradle root>  <JDK>  <Kotlin version pin>  [<Android variant>]
 # The Kotlin version pin names the file and key that select the project's Kotlin Gradle plugin;
 # run.sh rewrites it to the newest release in the repository's `kotlin-versions` manifest. "-" means
 # the project already builds with that release. A patches/<name>.patch is applied after checkout.
+# Android modules are compared only for a project that names a variant: its main, unit-test and
+# instrumented-test compiles. Without one ("-" or no column) Android modules are left out.
 okhttp	https://github.com/lysine-dev/okhttp	fb34d4da74628621bb83c5d31a830dc19cf8e833	.	21	gradle/libs.versions.toml:kotlin
 leakcanary	https://github.com/square/leakcanary	eb60b0be53732aa016c79b7774b497770ad1e4f3	.	21	-
 quarkdown	https://github.com/iamgio/quarkdown	5ac1a4d3f3473f87cc06127379317bbb4d88106e	.	17	-
 Maestro	https://github.com/mobile-dev-inc/Maestro	028c18b9ce7441c117f161da4dfe8007e46fa61d	.	21	gradle/libs.versions.toml:kotlin
-mirai	https://github.com/mamoe/mirai	283f8840d4682cc30fbdd87c66fe76f6a71ff8db	.	21	-
+mirai	https://github.com/mamoe/mirai	283f8840d4682cc30fbdd87c66fe76f6a71ff8db	.	17	-
 ktor	https://github.com/ktorio/ktor	d96280165fc9890217196ed0dffd45228e35987d	.	21	gradle/libs.versions.toml:kotlin
 kotlinx.coroutines	https://github.com/Kotlin/kotlinx.coroutines	7e0d1b3e9ca83652427ae00dda7d1673f058a743	.	21	gradle.properties:kotlin_version
 Unciv	https://github.com/yairm210/Unciv	18827b1ffdce84d6f39f7914b27cc43d5234d430	.	21	-
@@ -15,3 +18,4 @@ moshi	https://github.com/square/moshi	889013ec2edb8d8034902662a1dc8c4f3b3f8111	.
 koin	https://github.com/InsertKoinIO/koin	bba2318a63c01d3c8592236b35da89192b4413c9	projects	21	projects/gradle/libs.versions.toml:kotlin
 Exposed	https://github.com/JetBrains/Exposed	09f814c61c22851b76840ccb65c1ac2c4db97452	.	21	gradle/libs.versions.toml:kotlin
 okio	https://github.com/lysine-dev/okio	e84aa17bac2b31e688c8be4f61557779032f7a7c	.	21	gradle/libs.versions.toml:kotlin
+nowinandroid	https://github.com/android/nowinandroid	2982e63cb691ad49cd009aab43dc206fee6699c2	.	21	gradle/libs.versions.toml:kotlin	demoDebug

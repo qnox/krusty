@@ -43,6 +43,7 @@ pub trait BackendClassifierSource {
 /// parser-backed member identities cannot be represented here.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BackendClassifierFact {
+    pub declaration_name: Option<crate::types::ClassifierDeclarationName>,
     pub access: crate::libraries::ClassifierAccess,
     pub is_kotlin: bool,
     pub source: bool,
@@ -114,6 +115,7 @@ struct SourceDeclaration {
 impl BackendClassifierFact {
     fn from_library(classifier: TypeName, shape: &LibraryType) -> Self {
         Self {
+            declaration_name: shape.declaration_name.clone(),
             access: shape.access,
             is_kotlin: shape.is_kotlin,
             source: shape.source_file.is_some(),
@@ -375,6 +377,7 @@ impl BackendModuleFacts {
             let companion = source_companion(index, declaration);
             let qualified_name = source_qualified_name(index, declaration);
             let fact = BackendClassifierFact {
+                declaration_name: classifier.declaration_name.clone(),
                 access: declaration_header.visibility.into(),
                 is_kotlin: true,
                 source: true,
@@ -1048,6 +1051,120 @@ fn visit_inline_plan(plan: &InlineBodyPlan, visit: &mut impl FnMut(Ty)) {
 mod tests {
     use super::*;
     use crate::symbol_source::SymbolSource;
+
+    fn classifier_name_snapshot(source: &str) -> BackendModuleFacts {
+        let mut diagnostics = crate::diag::DiagSink::new();
+        let analysis = crate::frontend::analyze_source_set_with_features(
+            &[crate::frontend::SourceInput::kotlin(source).with_file_stem("Ownership")],
+            crate::frontend::PlatformProvider::jvm(Box::new(crate::libraries::EmptySymbolSource)),
+            &crate::features::LangFeatures::new(),
+            &mut diagnostics,
+        );
+        assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
+        let module = analysis
+            .streamed
+            .as_ref()
+            .expect("streamed module")
+            .module
+            .index();
+        let facts = BackendModuleFacts::from_resolved_index(module).unwrap();
+        let source = crate::module_symbols::ModuleSymbols::new(&analysis.symbols);
+        for (identity, fact) in facts.classifiers() {
+            let shape = source.classifier(identity).expect("source classifier");
+            assert_eq!(fact.declaration_name, shape.declaration_name);
+            let declaration = module.classifier_declaration(identity).unwrap();
+            let header = module.classifier_header(declaration).unwrap();
+            let flags = module.declaration_header(declaration).unwrap().flags;
+            let class = crate::ir::IrClass::source_skeleton(header, flags);
+            assert_eq!(class.declaration_name, fact.declaration_name);
+        }
+        facts
+    }
+
+    #[test]
+    fn classifier_declaration_names_retain_companion_segments() {
+        use crate::types::{type_name, ClassifierDeclarationName};
+        let outer = type_name("ownership/companions/Outer");
+        for (source, name) in [
+            ("package ownership.companions\nclass Outer { companion object { class Child } }", "Companion"),
+            ("package ownership.companions\nclass Outer { companion object `Named$Literal` { class Child } }", "Named$Literal"),
+        ] {
+            let facts = classifier_name_snapshot(source);
+            let companion = outer.nested_child(name);
+            assert_eq!(facts.classifier(companion).unwrap().declaration_name,
+                Some(ClassifierDeclarationName::Nested { owner: outer, name: name.into() }));
+            assert_eq!(facts.classifier(companion.nested_child("Child")).unwrap().declaration_name,
+                Some(ClassifierDeclarationName::Nested { owner: companion, name: "Child".into() }));
+        }
+    }
+
+    #[test]
+    fn classifier_declaration_names_belong_to_each_snapshot() {
+        use crate::types::{type_name, type_name_child, ClassifierDeclarationName};
+        let package = type_name("ownership/snapshot");
+        let outer = type_name_child(package, "Outer");
+        let literal = type_name_child(package, "Outer$Literal");
+        let top = classifier_name_snapshot(
+            "package ownership.snapshot\nclass Outer\nclass `Outer$Literal`\n",
+        );
+        let nested =
+            classifier_name_snapshot("package ownership.snapshot\nclass Outer { class Literal }\n");
+        let top_again = classifier_name_snapshot(
+            "package ownership.snapshot\nclass Outer\nclass `Outer$Literal`\n",
+        );
+        let top_name = Some(ClassifierDeclarationName::TopLevel {
+            package,
+            name: "Outer$Literal".into(),
+        });
+        assert_eq!(top.classifier(literal).unwrap().declaration_name, top_name);
+        assert_eq!(
+            top_again.classifier(literal).unwrap().declaration_name,
+            top_name
+        );
+        assert_eq!(
+            nested.classifier(literal).unwrap().declaration_name,
+            Some(ClassifierDeclarationName::Nested {
+                owner: outer,
+                name: "Literal".into()
+            })
+        );
+    }
+
+    #[test]
+    fn classifier_declaration_names_do_not_imply_outer_instance_capture() {
+        use crate::types::{
+            type_name, type_name_child, type_name_nested_child, ClassifierDeclarationName,
+        };
+        let package = type_name("ownership/capture");
+        let owner = type_name_child(package, "Outer$Literal");
+        let facts = classifier_name_snapshot(
+            "package ownership.capture\nclass `Outer$Literal` { class `Part$Name`; inner class Captured }\n",
+        );
+        for (name, capture) in [("Part$Name", None), ("Captured", Some(owner))] {
+            let fact = facts
+                .classifier(type_name_nested_child(owner, name))
+                .unwrap();
+            assert_eq!(
+                fact.declaration_name,
+                Some(ClassifierDeclarationName::Nested {
+                    owner,
+                    name: name.into()
+                })
+            );
+            assert_eq!(fact.outer_instance, capture);
+        }
+    }
+
+    #[test]
+    fn missing_classifier_declaration_names_stay_unknown() {
+        let owner = crate::types::type_name("ownership/Unknown");
+        let nested = owner.nested_child("Member");
+        let shape = LibraryType::declaration_header();
+        assert_eq!(
+            BackendClassifierFact::from_library(nested, &shape).declaration_name,
+            None
+        );
+    }
 
     #[test]
     fn backend_facts_reject_pending_inside_a_nested_member_type() {

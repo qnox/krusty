@@ -689,6 +689,7 @@ mod tests {
         role: Option<ClassifierRole>,
     ) -> Arc<crate::backend::BackendClassifierFact> {
         Arc::new(crate::backend::BackendClassifierFact {
+            declaration_name: None,
             access: crate::libraries::ClassifierAccess::Public,
             is_kotlin: true,
             source: false,

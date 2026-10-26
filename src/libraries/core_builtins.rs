@@ -140,7 +140,14 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
             member_property(classifier, owner, name, ty, intrinsic);
         }
     }
-    if owner.matches("kotlin/Array") || Ty::primitive_array_element(owner.segment_ref()).is_some() {
+    // An unsigned array is a value class over its carrier. The `size` its library declares is the
+    // class's own member (`UIntArray.getSize-impl` on the JVM), never the carrier's length
+    // operation, so it is kept as declared. Only a classifier no library declares gets the core one.
+    let array_size = owner.matches("kotlin/Array")
+        || crate::types::prim_array_element(owner).is_some_and(|element| {
+            !element.is_unsigned() || !classifier.declared_callables.contains_key("size")
+        });
+    if array_size {
         member_property(
             classifier,
             owner,
@@ -751,5 +758,57 @@ mod tests {
         let mut same_spelling = LibraryType::declaration_header();
         add_core_builtin_declarations(&mut same_spelling, crate::types::type_name("sample/Enum"));
         assert!(!same_spelling.declared_callables.contains_key("name"));
+    }
+
+    #[test]
+    fn array_size_intrinsic_belongs_to_the_exact_array_classifiers() {
+        let size_intrinsic = |classifier: &LibraryType| {
+            let [size] = classifier.declared_callables["size"].properties() else {
+                panic!("one size property");
+            };
+            size.getter.compiler_intrinsic
+        };
+        for owner in [
+            "kotlin/Array",
+            "kotlin/IntArray",
+            "kotlin/BooleanArray",
+            "kotlin/UIntArray",
+        ] {
+            let mut array = LibraryType::declaration_header();
+            add_core_builtin_declarations(&mut array, crate::types::type_name(owner));
+            assert_eq!(
+                size_intrinsic(&array),
+                Some(CompilerIntrinsic::ArraySize),
+                "{owner}"
+            );
+        }
+        // The `size` a library declares on an unsigned array stays its value class's member.
+        let declared = |owner: &str| {
+            let mut classifier = LibraryType::declaration_header();
+            add_core_builtin_declarations(
+                &mut classifier,
+                crate::types::type_name("kotlin/IntArray"),
+            );
+            let mut declared = LibraryType::declaration_header();
+            let mut size = classifier.declared_callables["size"].clone();
+            let (functions, mut properties) = std::mem::take(&mut size).into_parts();
+            for property in &mut properties.overloads {
+                property.getter.compiler_intrinsic = None;
+            }
+            declared.insert_declared_callables(
+                "size".to_string(),
+                Callables::from_parts(functions, properties),
+            );
+            add_core_builtin_declarations(&mut declared, crate::types::type_name(owner));
+            size_intrinsic(&declared)
+        };
+        assert_eq!(declared("kotlin/UByteArray"), None);
+        assert_eq!(
+            declared("kotlin/ShortArray"),
+            Some(CompilerIntrinsic::ArraySize)
+        );
+        let mut user = LibraryType::declaration_header();
+        add_core_builtin_declarations(&mut user, crate::types::type_name("sample/IntArray"));
+        assert!(!user.declared_callables.contains_key("size"));
     }
 }

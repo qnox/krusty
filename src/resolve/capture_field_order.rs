@@ -659,6 +659,10 @@ impl<'w> FirstUses<'w, '_> {
         // Only the local class itself is under construction: an inner class's code reads this
         // class's storage through its outer instance.
         self.construction = declaration.is_some();
+        // The delegate expressions run in the constructor, before the body's initializers.
+        for delegation in &class.interface_delegations {
+            self.expression(delegation.value, uses);
+        }
         for step in &class.init_order {
             match step {
                 ClassInit::PropInit(index) => {
@@ -671,9 +675,6 @@ impl<'w> FirstUses<'w, '_> {
             }
         }
         self.construction = false;
-        for delegation in &class.interface_delegations {
-            self.expression(delegation.value, uses);
-        }
         // The primary constructor is the class's first declaration. Its superclass constructor
         // call includes a local superclass.
         let primary = class
