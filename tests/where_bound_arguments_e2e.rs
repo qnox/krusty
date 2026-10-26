@@ -26,6 +26,17 @@ fun box(): String {
 }
 
 #[test]
+fn explicit_inner_constructor_bounds_use_the_selected_enclosing_arguments() {
+    let source = r#"class Outer<O : Number> {
+    inner class Inner<T : O>(val value: T)
+}
+fun valid(outer: Outer<Int>): Outer<Int>.Inner<Int> = outer.Inner<Int>(1)
+fun box(): String = if (valid(Outer<Int>()).value == 1) "OK" else "wrong value"
+"#;
+    common::expect_box_same_as_kotlinc(source, "inner_constructor_captured_bound");
+}
+
+#[test]
 fn a_local_type_variable_is_an_argument_for_any_of_its_bounds() {
     let src = r#"fun takeCs(c: CharSequence) = c.length
 

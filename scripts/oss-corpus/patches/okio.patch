@@ -1,0 +1,11 @@
+diff --git a/gradle/libs.versions.toml b/gradle/libs.versions.toml
+index cdc1103..da423b2 100644
+--- a/gradle/libs.versions.toml
++++ b/gradle/libs.versions.toml
+@@ -1,5 +1,5 @@
+ [versions]
+-burst = "2.10.2"
++burst = "2.14.0"
+ jmh = "1.37"
+ kotlin = "2.2.21"
+ # Set to lower version than KGP version to maximize compatibility

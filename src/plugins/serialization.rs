@@ -14,6 +14,7 @@
 mod cached_serializer;
 mod constructed_standard_serializers;
 mod custom_serializer_class;
+mod declared_elements;
 mod declared_serializer;
 mod descriptor_element;
 mod deserialization_constructor;
@@ -1163,6 +1164,13 @@ impl IrPlugin for SerializationPlugin {
             ctx,
             self.compiler_plugin,
         ));
+    }
+
+    fn declared_serializable_elements(
+        &self,
+        class: &crate::plugins::FrontendDeclaredClass<'_>,
+    ) -> Option<crate::types::SerializableClassElements> {
+        declared_elements::declared_serializable_elements(class)
     }
 
     fn select_named_class_constructor(

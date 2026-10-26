@@ -592,6 +592,17 @@ fn record_class_function_exports(
             if source.type_params.is_empty() && source.captured_type_params.is_empty() {
                 declarations.record(function, signature.clone(), receiver);
             }
+            if source.is_interface && !declaration.is_static {
+                exports.record_interface_member(
+                    function,
+                    crate::libraries::KlibDependencyCallable {
+                        module: module_name.to_owned(),
+                        declaration: crate::libraries::KlibDeclarationSignature::Public(
+                            signature.clone(),
+                        ),
+                    },
+                );
+            }
             if !crate::backend::has_standalone_dependency_code(ir, function) {
                 continue;
             }
@@ -605,6 +616,105 @@ fn record_class_function_exports(
             if let Some(receiver) = receiver {
                 exports.record_member_receiver(function, receiver);
             }
+        }
+        if source.is_interface {
+            record_interface_property_exports(
+                ir,
+                module_name,
+                source,
+                (record, class),
+                container,
+                exports,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Record the getter identity of every property the interface `source` declares, the identity
+/// another module's class implementing the property names it by, and export the accessor bodies
+/// an implementing class inherits as defaults.
+fn record_interface_property_exports(
+    ir: &IrFile,
+    module_name: &str,
+    source: &IrClass,
+    (record, class): (
+        &crate::metadata::class_declarations::ClassDeclarationRecord,
+        &crate::metadata::semantic::KotlinClass,
+    ),
+    container: MetadataContainer<'_>,
+    exports: &mut DependencyExportSignatures,
+) -> Result<(), String> {
+    let name = source.fq_name_id();
+    if class.properties.len() != record.prop_origins.len() {
+        return Err(format!(
+            "interface {} changed property declaration order ({} decoded, {} recorded)",
+            source.fq_name(),
+            class.properties.len(),
+            record.prop_origins.len()
+        ));
+    }
+    let extensions = ir.member_ext_props.get(&name);
+    for (declaration, origin) in class.properties.iter().zip(&record.prop_origins) {
+        if declaration.visibility == crate::types::Visibility::Private {
+            continue;
+        }
+        let Some((property, getter, setter)) =
+            ir.local_property_layouts
+                .iter()
+                .find_map(|(property, layout)| match (origin, layout) {
+                    (
+                        PropertyOrigin::Declared(index),
+                        crate::ir::IrLocalPropertyLayout::Member {
+                            owner,
+                            property: at,
+                            getter,
+                            setter,
+                            ..
+                        },
+                    ) if *owner == name && *at as usize == *index => {
+                        Some((*property, *getter, *setter))
+                    }
+                    (
+                        PropertyOrigin::MemberExtension(index),
+                        crate::ir::IrLocalPropertyLayout::MemberExtension {
+                            owner,
+                            getter,
+                            setter,
+                            ..
+                        },
+                    ) if *owner == name
+                        && extensions
+                            .and_then(|extensions| extensions.get(*index))
+                            .is_some_and(|extension| extension.getter == *getter) =>
+                    {
+                        Some((*property, Some(*getter), *setter))
+                    }
+                    _ => None,
+                })
+        else {
+            continue;
+        };
+        let accessor = |accessor| {
+            package_property_accessor_signature(container, declaration, accessor)
+                .map(|signature| crate::libraries::KlibDependencyCallable {
+                    module: module_name.to_owned(),
+                    declaration: crate::libraries::KlibDeclarationSignature::Accessor(signature),
+                })
+                .map_err(|error| format!("{}.{}: {error}", source.fq_name(), declaration.name))
+        };
+        exports.record_interface_property(property, accessor(MetadataAccessor::Getter)?);
+        for (function, role) in [
+            (getter, MetadataAccessor::Getter),
+            (setter, MetadataAccessor::Setter),
+        ] {
+            let Some(function) = function
+                .filter(|function| crate::backend::has_standalone_dependency_code(ir, *function))
+            else {
+                continue;
+            };
+            exports.record_callable(function, accessor(role)?);
+            exports.record_member_receiver(function, crate::types::Ty::obj_name(name));
         }
     }
     Ok(())

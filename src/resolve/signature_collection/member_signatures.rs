@@ -329,7 +329,7 @@ pub(in crate::resolve) struct DeclaredMemberHeaderContext<'a> {
     pub(in crate::resolve) symbolic_class_tparams: &'a TParams,
     pub(in crate::resolve) class_type_parameters: &'a [String],
     pub(in crate::resolve) compact_headers: Option<&'a crate::fir::StreamedHeaderModule>,
-    pub(in crate::resolve) resolved_annotations: &'a HashMap<(u32, u32, u32), TypeName>,
+    pub(in crate::resolve) resolved_annotations: &'a BoundAnnotations,
     pub(in crate::resolve) compilation_id: u64,
     pub(in crate::resolve) source_file: u32,
     pub(in crate::resolve) libraries: &'a dyn SymbolSource,

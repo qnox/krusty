@@ -18,16 +18,18 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 use object::read::elf::{ElfFile64, SectionHeader};
-use object::read::{Object, ObjectSection, ObjectSymbol, RelocationTarget};
+use object::read::{Object, ObjectComdat, ObjectSection, ObjectSymbol, RelocationTarget};
 use object::{
     LittleEndian, RelocationFlags, SectionFlags, SectionIndex, SectionKind, SymbolIndex,
     SymbolKind, SymbolSection,
 };
 
+use super::super::interface_calls::is_implementations_section;
 use super::super::prebuilt;
 use super::super::target::{Arch, NativeTarget};
 use super::abi;
 use super::dynamic::{self, Imports, Tables};
+use super::interface_stubs::{InterfaceStubs, Target};
 use super::libraries::ImportLibrary;
 use super::relocate::{relocate, Reloc};
 use super::{ProgramLinkError, RelocationTable};
@@ -218,6 +220,8 @@ struct Placed {
 /// Where everything goes: each input section's place, and the two segments that hold them.
 struct Layout {
     placed: HashMap<(usize, SectionIndex), Placed>,
+    /// The sections of a COMDAT group an earlier input already supplied, which are left out.
+    discarded: HashSet<(usize, SectionIndex)>,
     /// The target's maximum page size ([`Arch::max_page_size`]): both segments' alignment.
     page: u64,
     /// End of the read+execute segment, which is mapped from file offset 0 at `BASE`.
@@ -232,6 +236,10 @@ struct Layout {
     data_mem_size: u64,
     /// Where the import stubs start, as an offset from `BASE` (which is also their file offset).
     stubs_at: u64,
+    /// Where the interface stubs start, likewise.
+    interface_stubs_at: u64,
+    /// Where the interface tables start, likewise.
+    interface_tables_at: u64,
 }
 
 /// Room the layout keeps for what the linker writes itself rather than copies from an input.
@@ -242,11 +250,29 @@ struct Reserve {
     headers: u64,
     /// Import stubs, placed after the program's code.
     stubs: u64,
+    /// Interface stubs, placed after the import stubs.
+    interface_stubs: u64,
+    /// Interface tables, placed after the interface stubs.
+    interface_tables: u64,
     /// The start of the writable segment: `.dynamic` and the offset table.
     writable: u64,
 }
 
 impl Layout {
+    /// Where the bytes of the address `address` sit in the image, for an address the layout gave
+    /// file bytes.
+    fn file_offset(&self, address: u64) -> Option<u64> {
+        if (BASE..BASE + self.text_end).contains(&address) {
+            Some(address - BASE)
+        } else if (self.data_vaddr_start..self.data_vaddr_start + self.data_file_size)
+            .contains(&address)
+        {
+            Some(self.data_file_start + address - self.data_vaddr_start)
+        } else {
+            None
+        }
+    }
+
     fn new(files: &[Elf], page: u64, reserve: Reserve) -> Result<Self, ProgramLinkError> {
         for (file_index, file) in files.iter().enumerate() {
             for section in file.sections() {
@@ -265,7 +291,10 @@ impl Layout {
                 };
                 // Notes and unwind tables are loadable but nothing in a krusty program reads them;
                 // any other loadable section left out would be code or data silently missing.
-                let unread = section.kind() == SectionKind::Note || name == ".eh_frame";
+                // Interface implementation records are read by the link itself.
+                let unread = section.kind() == SectionKind::Note
+                    || name == ".eh_frame"
+                    || is_implementations_section(name);
                 if sh_flags.contains(object::elf::SHF_ALLOC)
                     && placement(section.kind()).is_none()
                     && !unread
@@ -279,6 +308,7 @@ impl Layout {
         }
         let mut layout = Self {
             placed: HashMap::default(),
+            discarded: discarded_groups(files)?,
             page,
             text_end: 0,
             data_file_start: 0,
@@ -286,6 +316,8 @@ impl Layout {
             data_file_size: 0,
             data_mem_size: 0,
             stubs_at: 0,
+            interface_stubs_at: 0,
+            interface_tables_at: 0,
         };
         // Executable segment: headers, then text and the import stubs, then read-only data.
         // Offsets equal virtual addresses minus BASE, since the segment is mapped from file
@@ -296,6 +328,14 @@ impl Layout {
         if reserve.stubs > 0 {
             layout.stubs_at = align_up(end, 16);
             end = layout.stubs_at + reserve.stubs;
+        }
+        if reserve.interface_stubs > 0 {
+            layout.interface_stubs_at = align_up(end, 16);
+            end = layout.interface_stubs_at + reserve.interface_stubs;
+        }
+        if reserve.interface_tables > 0 {
+            layout.interface_tables_at = align_up(end, 8);
+            end = layout.interface_tables_at + reserve.interface_tables;
         }
         end = layout.place(files, Placement::ReadOnly, end, |at| (BASE + at, Some(at)))?;
         layout.text_end = end;
@@ -337,10 +377,13 @@ impl Layout {
     ) -> Result<u64, ProgramLinkError> {
         for (file_index, file) in files.iter().enumerate() {
             for section in file.sections() {
-                if placement(section.kind()) != Some(wanted) {
+                let name = section.name().unwrap_or("?");
+                if placement(section.kind()) != Some(wanted)
+                    || is_implementations_section(name)
+                    || self.discarded.contains(&(file_index, section.index()))
+                {
                     continue;
                 }
-                let name = section.name().unwrap_or("?");
                 let align = section.align().max(1);
                 if !align.is_power_of_two() {
                     return Err(ProgramLinkError::Parse(format!(
@@ -389,6 +432,25 @@ impl Layout {
     }
 }
 
+/// The sections of every COMDAT group whose signature an earlier input's group already carries.
+///
+/// A group stands for one definition every input that needs it emits alike, such as a static
+/// reflection object; the first input's group is kept, as GNU ld and `ld.lld` keep it, and every
+/// later one is left out whole, so its symbols and relocations are as if never emitted.
+fn discarded_groups(files: &[Elf]) -> Result<HashSet<(usize, SectionIndex)>, ProgramLinkError> {
+    let mut kept = HashSet::default();
+    let mut discarded = HashSet::default();
+    for (file_index, file) in files.iter().enumerate() {
+        for group in file.comdats() {
+            let signature = group.name().map_err(parse_error)?;
+            if !kept.insert(signature.to_string()) {
+                discarded.extend(group.sections().map(|section| (file_index, section)));
+            }
+        }
+    }
+    Ok(discarded)
+}
+
 /// `value` rounded up to `align`, a power of two no larger than the maximum page size; `value` is at most
 /// `IMAGE_LIMIT`, so this cannot overflow.
 fn align_up(value: u64, align: u64) -> u64 {
@@ -431,7 +493,9 @@ impl Symbols {
                     }
                     SymbolSection::Section(index) => {
                         let Some(place) = layout.placed.get(&(file_index, index)) else {
-                            if symbol.is_local() {
+                            // A folded group's copy: the input that kept the group defines it.
+                            if symbol.is_local() || layout.discarded.contains(&(file_index, index))
+                            {
                                 continue; // debug info, notes: nothing at run time refers to it
                             }
                             return Err(ProgramLinkError::Unsupported(format!(
@@ -538,6 +602,7 @@ pub(super) fn link(
         .collect::<Result<Vec<_>, _>>()?;
     let e_flags = abi::output_flags(target.arch, &files)?;
     let imports = Imports::collect(&files, libraries)?;
+    let mut interface_stubs = InterfaceStubs::collect(&files, target.arch)?;
     dynamic::refuse_clone_threads(&files, &imports, "_start")?;
     let tables = (!imports.is_empty()).then(|| Tables::new(&imports, target));
     let phdr_count = match tables {
@@ -550,11 +615,15 @@ pub(super) fn link(
         None => Reserve {
             headers,
             stubs: 0,
+            interface_stubs: interface_stubs.size(),
+            interface_tables: interface_stubs.tables().size(),
             writable: 0,
         },
         Some(tables) => Reserve {
             headers: tables_at + tables.read_only_size(),
             stubs: tables.stubs_size(),
+            interface_stubs: interface_stubs.size(),
+            interface_tables: interface_stubs.tables().size(),
             writable: tables.writable_size(),
         },
     };
@@ -575,6 +644,24 @@ pub(super) fn link(
                 .insert(import.name.clone(), tables.stub(placement, index));
         }
     }
+    let recorded = |symbols: &Symbols, target: &Target| match target {
+        Target::Global(name) => symbols
+            .global(name)
+            .ok_or_else(|| ProgramLinkError::UndefinedSymbol(name.clone())),
+        Target::Local(file_index, index) => symbols
+            .locals
+            .get(&(*file_index, *index))
+            .copied()
+            .ok_or_else(|| {
+                ProgramLinkError::Unsupported(format!(
+                    "an interface implementation of input {file_index} is not loaded"
+                ))
+            }),
+    };
+    let bound = interface_stubs.decide(BASE + layout.interface_stubs_at, |target| {
+        recorded(&symbols, target)
+    })?;
+    symbols.strong.extend(bound);
     let entry = symbols
         .global("_start")
         .ok_or_else(|| ProgramLinkError::UndefinedSymbol("_start".into()))?;
@@ -595,6 +682,19 @@ pub(super) fn link(
             image[start..start + data.len()].copy_from_slice(data);
         }
     }
+
+    let stubs_at = layout.interface_stubs_at as usize;
+    let filler = match target.arch {
+        Arch::X86_64 => 0xcc, // int3
+        Arch::Aarch64 | Arch::Riscv64 => 0,
+    };
+    image[stubs_at..stubs_at + interface_stubs.size() as usize].fill(filler);
+    interface_stubs.write(
+        &mut image,
+        layout.interface_stubs_at,
+        BASE + layout.interface_stubs_at,
+        target.arch,
+    )?;
 
     // ---- apply relocations -------------------------------------------------------------------
     // Gathered first, then applied per architecture: RISC-V's `PCREL_LO12` needs the result of the
@@ -653,6 +753,13 @@ pub(super) fn link(
         }
         relocate(target.arch, &mut image, &relocations)?;
     }
+    interface_stubs.tables().write(
+        &mut image,
+        layout.interface_tables_at,
+        BASE + layout.interface_tables_at,
+        |target| recorded(&symbols, target),
+        |address| layout.file_offset(address),
+    )?;
 
     let mut program_headers = Vec::with_capacity(phdr_count as usize);
     let text = ProgramHeader::load(0x5, 0, BASE, layout.text_end, layout.text_end, layout.page);
@@ -1111,6 +1218,33 @@ mod tests {
         assert_eq!(image.bytes(strong_foo, 2), [0xb8, 2]);
         let call = image.u32(TEXT + 1) as i32 as i64;
         assert_eq!(TEXT as i64 + 5 + call, strong_foo as i64);
+    }
+
+    /// Two inputs emitting one COMDAT group keep the first's copy: the second's section takes no
+    /// room, its symbol is not a second definition, and its own references reach the kept copy.
+    #[test]
+    fn a_comdat_group_an_earlier_input_carries_is_left_out() {
+        let mut inputs = Vec::new();
+        for value in [1u8, 2] {
+            let mut object = if value == 1 {
+                x86_64_start(&[0xc3]).0
+            } else {
+                Obj::new(Arch::X86_64)
+            };
+            let data = object.section(".data.rel.ro.shared", SectionKind::Data, &[value; 8], 8);
+            let shared = object.define_weak("shared", data, 0);
+            object.comdat(shared, data);
+            let reference = object.section(".data", SectionKind::Data, &[0; 8], 8);
+            object.reloc(reference, 0, shared, 0, object::elf::R_X86_64_64.0);
+            inputs.push(object);
+        }
+        let bytes = linked(Arch::X86_64, &[&inputs[0], &inputs[1]]);
+        let image = Image(&bytes);
+        // Data: the first input's group, its reference, then the second's reference alone.
+        let kept = 0x40_1000;
+        assert_eq!(image.bytes(kept, 8), [1; 8]);
+        assert_eq!(image.u64(kept + 8), kept);
+        assert_eq!(image.u64(kept + 16), kept);
     }
 
     /// With no definition anywhere, a weak reference is zero (plus its addend), not an error.

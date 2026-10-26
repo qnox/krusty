@@ -2,6 +2,14 @@
 
 use super::*;
 
+mod argument_completion;
+
+#[derive(Clone, Copy)]
+enum ReceiverAdmissionPhase {
+    BeforeArguments,
+    AfterArguments,
+}
+
 fn first_name_use(file: &File, expression: ExprId, name: &str) -> Option<ExprId> {
     match file.expr(expression) {
         Expr::Name(candidate) => (candidate == name).then_some(expression),
@@ -343,6 +351,32 @@ impl Checker<'_> {
             self.diags.sort_source_order_from(checkpoint);
             return Some(Ty::Error);
         }
+        if candidate.constructor_alias.is_some() {
+            if let Some(result) = self.report_extension_receiver_type_mismatch(
+                call,
+                name,
+                candidate,
+                constraints,
+                ReceiverAdmissionPhase::BeforeArguments,
+            ) {
+                if let Some(signature) = candidate.generic_sig.as_ref() {
+                    let bindings = CallConstraints {
+                        expected: None,
+                        ..constraints
+                    }
+                    .bindings(&self.fed_source(), signature);
+                    let mapping = parameters
+                        .iter()
+                        .map(|&parameter| shape.parameter_indices[parameter])
+                        .collect::<Vec<_>>();
+                    self.complete_rejected_lambda_inputs(
+                        scope, call, args, candidate, &mapping, &bindings,
+                    );
+                }
+                self.diags.sort_source_order_from(checkpoint);
+                return Some(result);
+            }
+        }
         if let Some(signature) = candidate.generic_sig.as_ref() {
             let bindings = crate::symbol_resolver::infer_generic_call_bindings(
                 signature,
@@ -392,6 +426,14 @@ impl Checker<'_> {
                 }
             }
         }
+        let formal_owners = candidate
+            .constructor_alias
+            .as_deref()
+            .map(|alias| self.publish_constructor_alias_rigid_formals(alias))
+            .unwrap_or_default();
+        let signature = candidate.semantic_signature();
+        let receiver_bindings = constraints.receiver_bindings(&self.fed_source(), &signature);
+        let whole_arrays = named_whole_array_varargs(parameters, argument_names, &shape.call_sig);
         for (source, &parameter) in parameters.iter().enumerate() {
             let Some((&declared, &actual)) = shape.params.get(parameter).zip(arg_tys.get(source))
             else {
@@ -399,11 +441,46 @@ impl Checker<'_> {
             };
             let expected = if shape.call_sig.vararg_index == Some(parameter)
                 && !self.file.is_spread_arg(args[source])
+                && !whole_arrays[source]
             {
                 declared.array_read_elem().unwrap_or(declared)
             } else {
                 declared
             };
+            let declaration_parameter = shape.parameter_indices[parameter];
+            let raw_input = signature.params[declaration_parameter];
+            let raw_input = if shape.call_sig.vararg_index == Some(parameter)
+                && !self.file.is_spread_arg(args[source])
+                && !whole_arrays[source]
+            {
+                raw_input.array_read_elem().unwrap_or(raw_input)
+            } else {
+                raw_input
+            };
+            let (input, projection) = crate::symbol_resolver::instantiate_input_slot(
+                &self.fed_source(),
+                Some(&signature),
+                raw_input,
+                &receiver_bindings,
+                crate::symbol_resolver::UnboundSpecialization::Preserve,
+            );
+            if let Some(projection) =
+                projection.filter(|_| !self.receiver_is_assignable(actual, input))
+            {
+                let receiver =
+                    self.diagnostic_type_name(constraints.receiver, &[constraints.receiver]);
+                let display = self
+                    .source_callable_display(candidate)
+                    .unwrap_or_else(|| Self::callable_candidate_display(name, candidate));
+                let projection = match projection {
+                    crate::symbol_resolver::InputProjection::Out => "out",
+                    crate::symbol_resolver::InputProjection::Star => "star",
+                };
+                self.diags.error(self.span(args[source]), format!(
+                    "receiver type '{receiver}' contains {projection} projection which prohibits the use of '{display}'."
+                ));
+                continue;
+            }
             if !shape.call_sig.parameter_admits(parameter, expected, actual) {
                 self.report_assignability_error(
                     expected,
@@ -415,6 +492,7 @@ impl Checker<'_> {
                 self.expect_call_arg(scope, expected, args[source], actual);
             }
         }
+        self.restore_type_parameter_owners(formal_owners);
         if self.diags.diags.len() > checkpoint {
             let signature = candidate.semantic_signature();
             let bindings = constraints.bindings(&self.fed_source(), &signature);
@@ -425,9 +503,13 @@ impl Checker<'_> {
             return Some(Ty::Error);
         }
 
-        if let Some(result) =
-            self.report_extension_receiver_type_mismatch(call, name, candidate, constraints)
-        {
+        if let Some(result) = self.report_extension_receiver_type_mismatch(
+            call,
+            name,
+            candidate,
+            constraints,
+            ReceiverAdmissionPhase::AfterArguments,
+        ) {
             return Some(result);
         }
 
@@ -878,12 +960,13 @@ impl Checker<'_> {
     }
 
     /// Report a mapped extension rejected only by its declaration receiver or receiver bounds.
-    pub(super) fn report_extension_receiver_type_mismatch(
+    fn report_extension_receiver_type_mismatch(
         &mut self,
         call: ExprId,
         name: &str,
         candidate: &crate::libraries::FunctionInfo,
         constraints: CallConstraints<'_>,
+        phase: ReceiverAdmissionPhase,
     ) -> Option<Ty> {
         // A single extension candidate whose arguments map cleanly can still be rejected by its
         // declaration receiver or by a bound on a type variable contributed by that receiver. Keep
@@ -899,14 +982,16 @@ impl Checker<'_> {
             && declared_receiver.is_some_and(|declared| {
                 !self.receiver_is_assignable(constraints.receiver, declared)
             });
-        let receiver_bound_mismatch = candidate.is_extension()
+        let receiver_bound_mismatch = matches!(phase, ReceiverAdmissionPhase::AfterArguments)
+            && candidate.is_extension()
             && signature.receiver.is_some_and(|receiver| {
                 signature
                     .formals
                     .iter()
                     .enumerate()
                     .filter(|(_, formal)| {
-                        ty_mentions_param(receiver, std::slice::from_ref(*formal))
+                        candidate.constructor_alias.is_some()
+                            || ty_mentions_param(receiver, std::slice::from_ref(*formal))
                     })
                     .any(|(index, formal)| {
                         let Some(&actual) = bindings.get(formal) else {
@@ -928,9 +1013,42 @@ impl Checker<'_> {
             return None;
         }
 
-        let display = self
-            .source_callable_display(candidate)
-            .unwrap_or_else(|| Self::callable_candidate_display(name, candidate));
+        if receiver_type_mismatch
+            && candidate.constructor_alias.is_some()
+            && constraints.type_args.is_empty()
+        {
+            // An inadmissible alias receiver does not open argument/result inference for its
+            // constructor. Preserve formals already bound by the receiver itself, but report each
+            // remaining alias formal even when an argument or expected result would have solved it.
+            let receiver_bindings = CallConstraints {
+                expected: None,
+                ..constraints
+            }
+            .bindings(&self.fed_source(), &signature);
+            for formal in &signature.formals {
+                if !receiver_bindings.contains_key(formal) {
+                    self.diags.error(
+                        self.call_callee_name_span(call),
+                        format!(
+                            "cannot infer type for type parameter '{}'. Specify it explicitly.",
+                            crate::types::type_parameter_source_name(formal)
+                        ),
+                    );
+                }
+            }
+        }
+
+        let display = self.source_callable_display(candidate).unwrap_or_else(|| {
+            Self::callable_candidate_display_with_alias_constructor(
+                name,
+                candidate,
+                |signature, member| {
+                    Self::generic_constructor_display_with_type(signature, member, &|ty| {
+                        self.declared_function_semantic_type(ty).source_name()
+                    })
+                },
+            )
+        });
         self.diags.error(
             self.call_callee_name_span(call),
             format!("candidate '{display}' is inapplicable because of a receiver type mismatch."),

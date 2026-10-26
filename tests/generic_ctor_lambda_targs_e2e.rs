@@ -147,6 +147,18 @@ fn a_local_generic_constructor_uses_the_same_lambda_substitution() {
 }
 
 #[test]
+fn a_checked_constructor_keeps_its_own_formals_when_named_arguments_are_reordered() {
+    const SOURCE: &str = "class Entry(val id: String)\n\
+        fun <T> render(unused: T): String {\n\
+            class Local<T>(val value: T, val render: (T) -> String)\n\
+            val local = Local(render = { entry -> entry.id }, value = Entry(\"OK\"))\n\
+            return local.render(local.value)\n\
+        }\n\
+        fun box(): String = render(1)\n";
+    common::expect_box_same_as_kotlinc(SOURCE, "checked_constructor_named_arguments");
+}
+
+#[test]
 fn a_value_class_type_argument_remains_a_semantic_lambda_parameter() {
     const MAIN: &str = "package repro\n\
         @JvmInline value class Token(val text: String)\n\

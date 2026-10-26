@@ -389,6 +389,7 @@ fn emit_initialization(
         Ty::Unit,
         std::iter::empty(),
     );
+    emitter.enter_class_initializer(env.signature_symbols);
     let mut code = CodeBuilder::new(0);
     emitter.emit_delegated_property_array(env, class.fq_name, internal, &mut code);
     if delegated_property_array::exists(env, class.fq_name) {

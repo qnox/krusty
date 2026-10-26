@@ -544,6 +544,7 @@ impl LibraryCallable {
         );
         callable.physical_name = member.physical_name.clone();
         callable.reflection_name = Some("<init>".to_string());
+        callable.declared_params = Some(member.constructor_declaration_params().into());
         callable.semantic_role = member.semantic_role;
         callable.physical_params = member.physical_params.clone();
         callable.physical_parameter_plan = member.physical_parameter_plan.clone();

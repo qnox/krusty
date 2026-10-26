@@ -65,6 +65,21 @@ fn klib_constructor_class_contract_survives_declared_and_frozen_views() {
     assert_eq!(contract.module, identity.module);
     assert_eq!(contract.classifier, owner);
     assert_eq!(contract.signature, KlibPublicIdSignature::classifier(owner));
+    assert_eq!(
+        contract
+            .primary_constructor
+            .as_ref()
+            .map(|signature| KlibDeclarationSignature::Public(signature.clone())),
+        Some(identity.declaration.clone()),
+    );
+    assert_eq!(contract.kind, crate::libraries::TypeKind::Class);
+    assert_eq!(
+        contract.modality,
+        crate::metadata::semantic::KotlinModality::Final
+    );
+    assert!(!contract.is_value);
+    assert!(!contract.is_inner);
+    assert!(!contract.is_expect);
     assert_eq!(contract.parameters.own_count, 2);
     assert_eq!(contract.parameters.formals.len(), 2);
     assert_ne!(

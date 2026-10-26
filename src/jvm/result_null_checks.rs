@@ -67,6 +67,54 @@ pub(super) fn check_before_result_coercion(ir: &mut IrFile) {
             ir.declaration_result_coercions.insert(assertion);
         }
     }
+    retain_checked_result_at_non_null_coercion(ir);
+}
+
+/// Common lowering gives `!!` a separate coercion from its nullable input to its non-null
+/// result. After moving the check beneath the declaration conversion, keep that conversion at
+/// this outer edge too, so the consumer can select the checked producer's reference slot.
+fn retain_checked_result_at_non_null_coercion(ir: &mut IrFile) {
+    for index in 0..ir.exprs.len() {
+        let IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: inner,
+            type_operand: target,
+        } = ir.exprs[index]
+        else {
+            continue;
+        };
+        if !ir.declaration_result_coercions.contains(&inner)
+            || !ir_ty_to_jvm(&target).is_reference()
+        {
+            continue;
+        }
+        let IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: checked,
+            type_operand: nullable,
+        } = ir.exprs[inner as usize]
+        else {
+            continue;
+        };
+        if nullable.is_nullable()
+            && target == nullable.non_null()
+            && matches!(
+                ir.expr(checked),
+                IrExpr::NotNullAssert {
+                    check: crate::ir::NullCheck::Source,
+                    ..
+                }
+            )
+        {
+            ir.exprs[index] = IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: checked,
+                type_operand: target,
+            };
+            ir.declaration_result_coercions.remove(&inner);
+            ir.declaration_result_coercions.insert(index as ExprId);
+        }
+    }
 }
 
 /// An unnamed platform check materializes its operand so it can check and then yield the same
@@ -189,6 +237,68 @@ mod tests {
     use super::check_before_result_coercion;
     use crate::ir::{Callee, IrExpr, IrFile, IrFunction, IrTypeOp, NullCheck};
     use crate::types::Ty;
+
+    #[test]
+    fn a_source_assertions_non_null_shell_retains_only_its_exact_result_boundary() {
+        for (marked, target, retained) in [
+            (true, Ty::String, true),
+            (false, Ty::String, false),
+            (true, Ty::obj("java/lang/CharSequence"), false),
+        ] {
+            let mut ir = IrFile::default();
+            let declared = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+            let function = ir.add_fun(IrFunction {
+                name: "produced".to_string(),
+                params: Vec::new(),
+                ret: declared,
+                body: None,
+                is_static: true,
+                dispatch_receiver: None,
+                param_checks: Vec::new(),
+            });
+            let call = ir.add_expr(IrExpr::Call {
+                callee: Box::new(Callee::Local(function)),
+                dispatch_receiver: None,
+                args: Vec::new(),
+            });
+            ir.call_declared_ret.insert(call, declared);
+            let conversion = ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: call,
+                type_operand: Ty::nullable(Ty::String),
+            });
+            if marked {
+                ir.declaration_result_coercions.insert(conversion);
+            }
+            let assertion = ir.add_expr(IrExpr::NotNullAssert {
+                operand: conversion,
+                check: NullCheck::Source,
+            });
+            let outer = ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: assertion,
+                type_operand: target,
+            });
+
+            check_before_result_coercion(&mut ir);
+
+            assert_eq!(ir.declaration_result_coercions.contains(&outer), retained);
+            assert_eq!(
+                ir.declaration_result_coercions.contains(&assertion),
+                marked && !retained
+            );
+            assert!(matches!(
+                ir.expr(conversion),
+                IrExpr::NotNullAssert { operand, check: NullCheck::Source } if *operand == call
+            ));
+            assert!(matches!(
+                ir.expr(outer),
+                IrExpr::TypeOp { arg, type_operand, .. }
+                    if *arg == if retained { conversion } else { assertion }
+                        && *type_operand == target
+            ));
+        }
+    }
 
     #[test]
     fn an_unnamed_check_casts_a_plain_materialized_result_after_the_check() {

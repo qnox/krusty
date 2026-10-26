@@ -40,8 +40,11 @@ mod member_specialization;
 mod overload_selection;
 mod property_candidates;
 mod qualified_classifiers;
+mod raw_member_view;
 pub(crate) use qualified_classifiers::{ClassifierMiss, CompletedClassifierPath};
 mod receiver_mro;
+mod resolved_member;
+pub use resolved_member::ResolvedMember;
 mod resolved_symbol;
 mod sam;
 mod scope_level_callables;
@@ -76,25 +79,29 @@ pub(crate) use hierarchy_projection::{
     ClassifierCompanionInstance, SupertypeProjectionCache,
 };
 use hierarchy_projection::{
-    classifier_type_parameter_bounds, direct_supertypes_from_classifier, receiver_hierarchy,
+    classifier_type_parameter_bounds, projected_supertypes, receiver_hierarchy,
     supertype_with_classifier,
 };
 pub use lambda_call_shape::LambdaCallShape;
 pub(crate) use member_hierarchy::{
-    bound_inner_constructor_candidates, declared_member_callables, declared_member_declarations,
-    function_input_shapes_match, function_override_input_slots_match, function_result_refines,
-    imported_object_member_symbols, inherited_nested_classifier_name,
-    lexical_enclosing_classifier_names, member_declarations_in_hierarchy, member_is_inheritable,
-    members_in_hierarchy, normalize_inherited_member_functions, override_input_shapes_match,
+    apply_inner_alias_outer_in_source, apply_inner_classifier_outer_in_source,
+    bound_inner_classifier_in_source, bound_inner_constructor_candidates,
+    declared_member_callables, declared_member_declarations, function_input_shapes_match,
+    function_override_input_slots_match, function_result_refines, imported_object_member_symbols,
+    inherited_nested_classifier_name, lexical_enclosing_classifier_names,
+    member_declarations_in_hierarchy, member_is_inheritable, members_in_hierarchy,
+    normalize_inherited_member_functions, override_input_shapes_match,
     override_parameter_types_match, property_declaration_identity, specialize_member_function,
-    supertype_preorder, InheritedNestedClassifier, OverrideInputShape,
+    supertype_preorder, BoundInnerConstructorContext, InheritedNestedClassifier,
+    InnerAliasOuterApplication, OverrideInputShape,
 };
 pub(crate) use member_specialization::{
-    apply_property_bindings, instantiate_signature_parameters, instantiate_signature_result,
-    instantiate_slot, instantiate_vararg_element, specialize_inline_collection_transform,
+    apply_property_bindings, compose_position as compose_type_position, instantiate_input_slot,
+    instantiate_signature_parameters, instantiate_signature_result, instantiate_slot,
+    instantiate_vararg_element, specialize_inline_collection_transform,
     specialize_inline_iteration_traversal, specialize_signature_input_type,
-    specialize_signature_output_type, specialize_signature_receiver_type, TypePosition,
-    UnboundSpecialization,
+    specialize_signature_output_type, specialize_signature_receiver_type, InputProjection,
+    TypePosition, UnboundSpecialization,
 };
 use member_specialization::{
     bind_member_return, bind_member_return_from_call_args_tracking,
@@ -125,7 +132,7 @@ pub(crate) use sam::{semantic_sam_signature, SamMethodDeclaration, SamSignature}
 use scope_level_callables::{
     callables_from_symbols, fn_in_scope, function_set_from_symbols, level_functions,
     level_properties, symbol_levels_in_function_scope, symbols_in_function_scope,
-    tagged_symbol_levels_in_function_scope, FunctionScopeLevel, FunctionScopeRef,
+    tagged_symbol_levels_in_function_scope, FunctionScopeRef,
 };
 pub(crate) use scope_level_callables::{CallableImport, FunctionImportScope};
 pub(crate) use statically_known_subtype::{nominal_type, statically_known_subtype};
@@ -141,8 +148,10 @@ impl crate::assignable::TypeOracle for SourceOracle<'_> {
     fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
         direct_supertypes(self.0, ty)
     }
+    // A platform source sees an alias-actualized `expect` class as the alias's target.
     fn same_class_name(&self, a: TypeName, b: TypeName) -> bool {
-        a == b
+        let actualized = |name| self.0.actualized_expect(name).unwrap_or(name);
+        a == b || actualized(a) == actualized(b)
     }
     fn type_param_variance(&self, internal: TypeName, index: usize) -> crate::types::TypeVariance {
         self.0
@@ -714,7 +723,11 @@ fn ranked_extension_candidates<'a>(
             .contains(&crate::types::type_name("kotlin/internal/HidesMembers"));
         (
             !hides_members,
-            if hides_members { 0 } else { o.scope_rank },
+            if hides_members {
+                (0, 0)
+            } else {
+                o.scope_rung.selection_key(o.scope_rank)
+            },
             *rank,
         )
     });
@@ -1043,142 +1056,6 @@ impl<'a> SymbolResolver<'a> {
         self.fn_scope
             .map(|scope| symbol_levels_in_function_scope(&self.src, name, scope))
             .unwrap_or_default()
-    }
-
-    fn tagged_symbol_levels_in_scope(&self, name: &str) -> Vec<FunctionScopeLevel> {
-        self.fn_scope
-            .map(|scope| tagged_symbol_levels_in_function_scope(&self.src, name, scope))
-            .unwrap_or_default()
-    }
-
-    /// Collect the declarations denoted by `receiver.name` exactly once. Member declarations and
-    /// imported extension declarations use the same [`Callables`] shape; overload selection is a
-    /// separate operation over this family.
-    fn collect_receiver_callables(
-        &self,
-        receiver: Ty,
-        name: &str,
-    ) -> candidate_access::ReceiverCallableInventory {
-        // `Nothing` is the bottom value type, but its member scope is still Kotlin's ordinary
-        // `Any` scope. This matters on unreachable/safe selector branches (`x == null; x?.equals(1)`):
-        // the receiver remains `Nothing` for flow typing and extension applicability, while member
-        // inventory comes from the semantic top classifier. No runtime receiver conversion is
-        // implied; checked FIR retains the original bottom-typed expression.
-        let member_scope_receiver = member_scope_receiver(receiver);
-        let members = if !member_scope_receiver.is_nullable()
-            && supports_member_lookup(member_scope_receiver)
-        {
-            members_in_hierarchy(&self.src, member_scope_receiver, name)
-        } else {
-            Callables::default()
-        };
-        let mut functions = members
-            .functions()
-            .iter()
-            .filter(|function| function.kind == FnKind::Member)
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut properties = members
-            .properties()
-            .iter()
-            .filter(|property| property.kind == PropKind::Member)
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut inaccessible_extensions = Vec::new();
-        if self.fn_scope.is_some() {
-            let levels = self.tagged_symbol_levels_in_scope(name);
-            // `@kotlin.internal.HidesMembers` declarations are NOT part of the tower: they resolve
-            // above all of it. The nearest-level rule below stops at the first level holding an
-            // applicable extension, which would hide the default-imported `kotlin.collections`
-            // level behind a same-file / imported / local `forEach` — so lift every annotated
-            // declaration applicable to this receiver out of EVERY level first. Selection, not
-            // lookup, then decides whether the promotion actually takes the call (see the priority
-            // tiers in `select_overload_tracking_with_functions`); an annotated declaration that
-            // does not fit falls through to the ordinary candidates collected below.
-            for level in &levels {
-                let mut ranked = ranked_extension_candidates(
-                    &self.src,
-                    receiver,
-                    self.type_variables,
-                    level_functions(&level.symbols),
-                );
-                self.retain_accessible_extensions(&mut ranked, &mut inaccessible_extensions, true);
-                functions.extend(ranked.into_iter().map(|(rank, _, function)| {
-                    let mut function = function.clone();
-                    function.receiver_rank = rank;
-                    function.scope_rung = level.kind.callable_scope_rung();
-                    function
-                }));
-            }
-            let mut extension_property_level_found = false;
-            for (scope_rank, level) in levels.into_iter().enumerate() {
-                crate::trace_compiler!(
-                    "resolve",
-                    "receiver scope level name={name} receiver={receiver:?} functions={:?}",
-                    level_functions(&level.symbols)
-                        .map(|function| (function.kind, function.semantic_receiver()))
-                        .collect::<Vec<_>>()
-                );
-                // Annotated declarations were already lifted above the tower; collecting them a second
-                // time here would put two copies of one declaration in the same priority bucket and
-                // read as an ambiguity. A level holding ONLY annotated declarations is therefore
-                // empty for tower purposes and the walk continues past it.
-                let mut extensions = ranked_extension_candidates(
-                    &self.src,
-                    receiver,
-                    self.type_variables,
-                    level_functions(&level.symbols),
-                );
-                self.retain_accessible_extensions(
-                    &mut extensions,
-                    &mut inaccessible_extensions,
-                    false,
-                );
-                crate::trace_compiler!(
-                    "resolve",
-                    "receiver scope applicable name={name} receiver={receiver:?} extensions={:?}",
-                    extensions
-                        .iter()
-                        .map(|(rank, binding, function)| (
-                            rank,
-                            binding,
-                            function.semantic_receiver()
-                        ))
-                        .collect::<Vec<_>>()
-                );
-                let extension_properties = if extension_property_level_found {
-                    Vec::new()
-                } else {
-                    level_properties(&level.symbols)
-                        .filter(|property| property.kind == PropKind::Extension)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                };
-                if extensions.is_empty() && extension_properties.is_empty() {
-                    continue;
-                }
-                functions.extend(extensions.into_iter().map(|(rank, _, function)| {
-                    let mut function = function.clone();
-                    function.receiver_rank = rank;
-                    function.scope_rank = u32::try_from(scope_rank).unwrap_or(u32::MAX);
-                    function.scope_rung = level.kind.callable_scope_rung();
-                    function
-                }));
-                extension_property_level_found |= !extension_properties.is_empty();
-                properties.extend(extension_properties);
-            }
-        }
-        candidate_access::ReceiverCallableInventory {
-            accessible: Callables::from_parts(
-                FunctionSet {
-                    overloads: functions,
-                },
-                PropertySet {
-                    overloads: properties,
-                },
-            ),
-            inaccessible_extensions,
-        }
     }
 
     /// `Any` members precede visible extensions on an error receiver.
@@ -3322,102 +3199,6 @@ fn build_property_reference_from_declaration(
         stable_declaration: property.stable_declaration,
         extension_facade: None,
     })
-}
-
-#[derive(Clone, Debug)]
-pub struct ResolvedMember {
-    /// Semantic dispatch receiver selected with this overload. It is part of the call target rather
-    /// than a lowering-side reconstruction, and is identical for module and dependency providers.
-    pub receiver: Ty,
-    pub member: LibraryMember,
-    /// Declaration/ABI parameter types before call-site generic substitution. Checking uses
-    /// `member.params`; module linking and argument realization use this parallel physical shape.
-    pub physical_params: Vec<Ty>,
-    /// One entry per leading context parameter. `Some` is supplied from scope; `None` is an
-    /// explicitly named source argument. Ordinary members have an empty vector.
-    pub context_args: Vec<Option<crate::resolve::ResolvedContextArgument>>,
-    pub ret: Ty,
-    pub projected_return_hazard: bool,
-    /// A `suspend fun`: the caller threads a `Continuation` and reads the erased result as `ret`.
-    pub suspend: bool,
-    /// Declaration origin, which affects linkage only; it keeps local lifted functions apart.
-    pub origin: Origin,
-}
-
-impl ResolvedMember {
-    pub(crate) fn from_member(
-        receiver: Ty,
-        member: LibraryMember,
-        ret: Ty,
-        projected_return_hazard: bool,
-        origin: Origin,
-    ) -> Self {
-        let physical_params = member.physical_params.clone();
-        let suspend = member.suspend();
-        Self {
-            receiver,
-            member,
-            physical_params,
-            context_args: Vec::new(),
-            ret,
-            projected_return_hazard,
-            suspend,
-            origin,
-        }
-    }
-
-    pub(crate) fn from_callable(
-        receiver: Ty,
-        callable: LibraryCallable,
-        projected_return_hazard: bool,
-    ) -> Self {
-        let origin = callable.origin.clone();
-        let suspend = callable.suspend;
-        let physical_params = callable.physical_params.clone();
-        let mut member = LibraryMember::new(
-            callable.name,
-            callable.params,
-            callable.ret,
-            callable.descriptor,
-        );
-        member.physical_name = callable.physical_name;
-        member.external_identity = callable.external_identity;
-        member.external_property_identity = callable.external_property_identity;
-        member.physical_params = callable.physical_params.clone();
-        member.physical_parameter_plan = callable.physical_parameter_plan.clone();
-        member.owner = Some(callable.owner);
-        member.physical_ret = callable.physical_ret;
-        member.signature = callable.signature;
-        member.generic_sig = callable.generic_sig.map(|signature| *signature);
-        member.set_is_interface(callable.owner_is_interface);
-        member.set_is_abstract(callable.is_abstract);
-        member.set_suspend(callable.suspend);
-        member.realization = callable
-            .compiler_intrinsic
-            .map(crate::libraries::MemberRealization::Intrinsic)
-            .unwrap_or(callable.member_realization);
-        member.context_count = callable.context_count;
-        member.inline = callable.inline;
-        member.inline_body_plan = callable.inline_body_plan;
-        member.declared_ret = callable.declared_ret;
-        member.overridden_results = callable.overridden_results;
-        member.enhanced_result = callable.enhanced_result;
-        member.contract = callable.contract;
-        member.default_realization = callable.default_realization;
-        member.nonvirtual_realization = callable.nonvirtual_realization;
-        member.plugin_expression = callable.plugin_expression;
-        member.deprecation = callable.deprecation;
-        Self {
-            receiver,
-            ret: member.ret,
-            member,
-            physical_params,
-            context_args: Vec::new(),
-            projected_return_hazard,
-            suspend,
-            origin,
-        }
-    }
 }
 
 pub struct SelectedMemberProperty {

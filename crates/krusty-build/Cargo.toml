@@ -20,3 +20,6 @@ krusty = { path = "../.." }
 [lib]
 name = "krusty_build"
 path = "src/lib.rs"
+
+[dev-dependencies]
+krusty-test-support = { path = "../krusty-test-support" }

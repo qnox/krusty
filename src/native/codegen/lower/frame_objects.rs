@@ -163,8 +163,11 @@ impl BodyLowering<'_, '_, '_> {
         {
             return None;
         }
-        let through_slot = model::local_property_target(self.file.ir, class, index)
-            .and_then(|target| self.file.model.slot(class, &model::SlotKey::Getter(target)));
+        let through_slot =
+            model::local_property_target(self.file.ir, class, index).and_then(|target| {
+                self.file
+                    .dispatch_of(class, &model::SlotKey::Getter(target))
+            });
         if through_slot.is_some() {
             return None;
         }

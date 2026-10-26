@@ -19,6 +19,11 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 # four-module build from 31.7 s to 26.4 s for about 35 MB more peak memory, with identical output.
 mimalloc = { version = "0.1", default-features = false }
 
+[target.'cfg(all(unix, not(target_os = "linux")))'.dependencies]
+# `getrusage`: `krusty verify-compile` records the compilation's peak resident memory (Linux reads
+# `/proc/self/status` instead).
+libc = "0.2"
+
 [[bin]]
 name = "krusty"
 path = "src/main.rs"
