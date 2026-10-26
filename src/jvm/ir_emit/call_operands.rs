@@ -407,6 +407,11 @@ impl Emitter<'_> {
         });
         physical.extend_from_slice(physical_params);
         self.mark_generated_operand_start(call_expression, ops.first().copied(), code);
+        // An upcast to the member's declaring class over an erased generic result changes nothing
+        // the JVM sees; that result narrows once, to the class the call names.
+        if let Some(erased) = self.erased_dispatch_receiver(receiver) {
+            ops[0] = erased;
+        }
         let ops = self.slot_operands(
             &ops,
             KeptSmartCasts::CallReceivers {

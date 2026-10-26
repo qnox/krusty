@@ -2321,8 +2321,8 @@ pub struct IrFile {
     /// classifying as a value class. Only NON-NULL declared returns are recorded: a nullable value
     /// class really is boxed.
     pub call_declared_ret: crate::fx_hash::HashMap<u32, Ty>,
-    /// The `ImplicitCoercion`s FIR lowering places between a call's declared result and its
-    /// call-site substitution (`fun <T> f(): T` read as `Int`). Which coercion a node is comes from
+    /// The `ImplicitCoercion`s FIR lowering places between a call's or property read's declared
+    /// result and its use-site substitution (`fun <T> f(): T` read as `Int`). Which coercion a node is comes from
     /// where it was lowered, not from its shape: an adaptation or widening over the same call is
     /// another coercion. A target decides whether the conversion crosses a physical result slot.
     pub declaration_result_coercions: crate::fx_hash::HashSet<ExprId>,

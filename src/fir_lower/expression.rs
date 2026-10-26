@@ -237,15 +237,7 @@ impl BodyLowering<'_> {
                         .map(|signature| signature.result.get()),
                     crate::fir::FirPropertyTarget::External { result, .. } => Some(result.get()),
                 };
-                if declared.is_some_and(|declared| declared != expression.ty.get()) {
-                    self.ir.add_expr(IrExpr::TypeOp {
-                        op: IrTypeOp::ImplicitCoercion,
-                        arg: lowered,
-                        type_operand: expression.ty.get(),
-                    })
-                } else {
-                    lowered
-                }
+                self.declaration_result(lowered, declared, expression.ty.get())
             }
             FirExprKind::PropertyWrite {
                 target,
