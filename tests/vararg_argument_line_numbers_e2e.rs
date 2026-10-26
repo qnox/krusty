@@ -75,6 +75,23 @@ fun box(): String {
 }
 "#;
 
+const BOXED_SPREAD: &str = r#"fun g(vararg xs: Any): String = xs.joinToString(",")
+fun gn(vararg xs: Any?): String = xs.joinToString(",")
+fun num(vararg xs: Number): String = xs.joinToString(",")
+
+@OptIn(ExperimentalUnsignedTypes::class)
+fun box(): String {
+    val a = g(*arrayOf<Int>(1, 2), "x")
+    val b = gn(*arrayOf<Int?>(3, null), "y")
+    val c = g(*arrayOf<UInt>(4u, 5u), "z")
+    val d = num(*arrayOf<Int>(6, 7), 8L)
+    val e = g(*arrayOf<Long>(9L), *arrayOf<Char>('c'), 1.5)
+    val f = g(*arrayOf(*arrayOf<Int>(10)), "w")
+    val r = "$a|$b|$c|$d|$e|$f"
+    return if (r == "1,2,x|3,null,y|4,5,z|6,7,8|9,c,1.5|10,w") "OK" else r
+}
+"#;
+
 #[test]
 fn multiline_varargs_and_array_factories_match_kotlinc_classes() {
     common::assert_classes_identical_to_kotlinc("VarargLines", PACKED, &["VarargLinesKt", "Box"]);
@@ -85,4 +102,12 @@ fn multiline_varargs_and_array_factories_match_kotlinc_classes() {
 fn multiline_spreads_and_spread_array_literals_match_kotlinc_classes() {
     common::assert_classes_identical_to_kotlinc("SpreadLines", SPREAD, &["SpreadLinesKt"]);
     common::expect_box_same_as_kotlinc(SPREAD, "SpreadLines");
+}
+
+/// A spread literal's elements join a wider vararg as that literal stored them: `*arrayOf<Int>(1)`
+/// boxes to `Integer` (an unsigned element through its `box-impl`) before it joins `Object[]`.
+#[test]
+fn flattened_spread_literal_elements_keep_their_own_boxing() {
+    common::assert_classes_identical_to_kotlinc("BoxedSpread", BOXED_SPREAD, &["BoxedSpreadKt"]);
+    common::expect_box_same_as_kotlinc(BOXED_SPREAD, "BoxedSpread");
 }

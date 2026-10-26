@@ -65,6 +65,7 @@ impl Emitter<'_> {
                 source: None,
             },
             elements,
+            &[],
             code,
         );
         let reference = self.cw.fieldref(

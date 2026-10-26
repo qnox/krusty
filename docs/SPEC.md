@@ -5100,8 +5100,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   its vararg, so it opens on its first element's line and the call's own line never opens; an
   empty factory call keeps its own position. An array literal spread into a vararg
   (`g(*arrayOf(a, b), c)`, or `xs = arrayOf(…)` for a named vararg) is not copied: its elements
-  join the enclosing array in place, under the enclosing vararg's line. The spread builder of a
-  reference vararg is parked in a local like a primitive one's. Test:
+  join the enclosing array in place, under the enclosing vararg's line. Each joined element is
+  still adapted to its literal's own element type, as that literal's array would store it:
+  `g(*arrayOf<Int>(1), "x")` into `vararg xs: Any` boxes through `Integer.valueOf`, and an
+  `arrayOf<UInt>` element through `UInt.box-impl`, before the `Object[]` store. The spread
+  builder of a reference vararg is parked in a local like a primitive one's. Test:
   `tests/vararg_argument_line_numbers_e2e.rs`.
 - **An enum entry's class body has the same lines as a class body.** Its methods and
   properties are members of the entry's own class, so the parser's line pass walks them as it walks

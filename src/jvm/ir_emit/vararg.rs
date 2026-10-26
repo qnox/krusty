@@ -69,11 +69,19 @@ pub(super) fn emit(
     }
     let ir = emitter.ir;
     let mut flat = Vec::with_capacity(elements.len());
-    flatten_spread_literals(ir, elements, spreads, &mut flat);
-    let (elements, spreads): (Vec<u32>, Vec<bool>) = flat.into_iter().unzip();
+    flatten_spread_literals(ir, elements, spreads, None, &mut flat);
+    let elements = flat.iter().map(|element| element.value).collect::<Vec<_>>();
+    let spreads = flat
+        .iter()
+        .map(|element| element.spread)
+        .collect::<Vec<_>>();
+    let components = flat
+        .iter()
+        .map(|element| element.component)
+        .collect::<Vec<_>>();
     let (elements, spreads) = (elements.as_slice(), spreads.as_slice());
     if !spreads.iter().any(|&spread| spread) {
-        emit_packed_array(emitter, array, elements, code);
+        emit_packed_array(emitter, array, elements, &components, code);
         return;
     }
 
@@ -119,8 +127,11 @@ pub(super) fn emit(
             emitter,
             array,
             element_type,
-            elements,
-            spreads,
+            Elements {
+                values: elements,
+                spreads,
+                components: &components,
+            },
             temps.as_deref(),
             code,
         );
@@ -128,6 +139,23 @@ pub(super) fn emit(
     if let Some(temps) = temps {
         emitter.release_operand_spills(&temps);
     }
+}
+
+/// One element of a vararg array after spread literals are flattened into it.
+struct FlatElement {
+    value: u32,
+    spread: bool,
+    /// The element type of the spread literal the value was written in, when it was. The value is
+    /// adapted to that type, as the literal's own array would have stored it: an `Int` from
+    /// `*arrayOf<Int>(1)` is boxed to `Integer` before it joins an `Object[]`.
+    component: Option<Ty>,
+}
+
+/// The elements of a reference vararg array, with the type each one is adapted to.
+struct Elements<'a> {
+    values: &'a [u32],
+    spreads: &'a [bool],
+    components: &'a [Option<Ty>],
 }
 
 /// kotlinc's `VarargLowering` does not copy an array literal spread into a vararg
@@ -138,20 +166,33 @@ fn flatten_spread_literals(
     ir: &IrFile,
     elements: &[u32],
     spreads: &[bool],
-    flat: &mut Vec<(u32, bool)>,
+    component: Option<Ty>,
+    flat: &mut Vec<FlatElement>,
 ) {
     for (&element, &spread) in elements.iter().zip(spreads) {
         match ir.expr(element) {
             IrExpr::Vararg {
+                array_type,
                 elements: literal,
                 spreads: literal_spreads,
-                ..
             } if spread && !literal.is_empty() && literal.len() == literal_spreads.len() => {
-                flatten_spread_literals(ir, literal, literal_spreads, flat);
+                let literal_component = Some(array_jvm_element(array_type));
+                flatten_spread_literals(ir, literal, literal_spreads, literal_component, flat);
             }
-            _ => flat.push((element, spread)),
+            _ => flat.push(FlatElement {
+                value: element,
+                spread,
+                component,
+            }),
         }
     }
+}
+
+/// The scalar a reference array boxes element `index` to: the type of the literal it was
+/// flattened from, or the array's own element type.
+fn element_box_adapter(components: &[Option<Ty>], index: usize, element_type: Ty) -> Option<Ty> {
+    let component = components.get(index).copied().flatten();
+    reference_array_scalar_adapter(component.unwrap_or(element_type))
 }
 
 /// `Arrays.copyOf(array, array.length)` for one existing reference array. The erased overload
@@ -332,11 +373,15 @@ fn emit_reference_spread(
     emitter: &mut Emitter<'_>,
     array: NewArray<'_>,
     element_type: Ty,
-    elements: &[u32],
-    spreads: &[bool],
+    elements: Elements<'_>,
     temps: Option<&[(u16, Ty, super::backend_temporaries::TemporaryLease)]>,
     code: &mut CodeBuilder,
 ) {
+    let Elements {
+        values: elements,
+        spreads,
+        components,
+    } = elements;
     let builder = "kotlin/jvm/internal/SpreadBuilder";
     let class = emitter.cw.class_ref(builder);
     code.new_obj(class);
@@ -351,7 +396,6 @@ fn emit_reference_spread(
     let builder_slot = held.slot();
     store(builder_ty, builder_slot, code);
     let builder_lease = emitter.lease_frame_temporary(held, builder_ty);
-    let box_element = reference_array_scalar_adapter(element_type);
     for (index, &element) in elements.iter().enumerate() {
         mark_array_line(emitter, array, code);
         load(builder_ty, builder_slot, code);
@@ -367,6 +411,7 @@ fn emit_reference_spread(
                 .cw
                 .methodref(builder, "addSpread", "(Ljava/lang/Object;)V")
         } else {
+            let box_element = element_box_adapter(components, index, element_type);
             box_reference_scalar(emitter, box_element, produced, code);
             emitter
                 .cw
@@ -399,6 +444,7 @@ pub(super) fn emit_packed_array(
     emitter: &mut Emitter<'_>,
     array: NewArray<'_>,
     elements: &[u32],
+    components: &[Option<Ty>],
     code: &mut CodeBuilder,
 ) {
     let array_type = array.ty;
@@ -412,7 +458,7 @@ pub(super) fn emit_packed_array(
         .iter()
         .any(|&element| emitter.spills_operand_prefix(element))
     {
-        emit_packed_array_through_temps(emitter, array, elements, code);
+        emit_packed_array_through_temps(emitter, array, elements, components, code);
         return;
     }
     code.push_int(elements.len() as i32, emitter.cw);
@@ -435,10 +481,10 @@ pub(super) fn emit_packed_array(
     let array_lease = emitter.lease_frame_temporary(temporary, array_type);
 
     let (store_op, width) = array_store_op(element_type, reference_array);
-    let box_element = reference_array
-        .then(|| reference_array_scalar_adapter(element_type))
-        .flatten();
     for (index, &element) in elements.iter().enumerate() {
+        let box_element = reference_array
+            .then(|| element_box_adapter(components, index, element_type))
+            .flatten();
         mark_array_line(emitter, array, code);
         load(array_type, slot, code);
         code.push_int(index as i32, emitter.cw);
@@ -460,6 +506,7 @@ fn emit_packed_array_through_temps(
     emitter: &mut Emitter<'_>,
     array: NewArray<'_>,
     elements: &[u32],
+    components: &[Option<Ty>],
     code: &mut CodeBuilder,
 ) {
     let array_type = array.ty;
@@ -484,10 +531,10 @@ fn emit_packed_array_through_temps(
     let array_lease = emitter.lease_frame_temporary(temporary, jvm_array_type);
 
     let (store_op, width) = array_store_op(element_type, reference_array);
-    let box_element = reference_array
-        .then(|| reference_array_scalar_adapter(element_type))
-        .flatten();
     for (index, &(temp_slot, temp_ty, _)) in temps.iter().enumerate() {
+        let box_element = reference_array
+            .then(|| element_box_adapter(components, index, element_type))
+            .flatten();
         mark_array_line(emitter, array, code);
         load(jvm_array_type, slot, code);
         code.push_int(index as i32, emitter.cw);
