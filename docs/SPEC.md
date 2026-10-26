@@ -15,6 +15,19 @@ than materializing an intermediate substituted type. Complete classfile and refe
 controls, including single evaluation, live in
 `tests/consumer_materialized_result_e2e.rs`.
 
+A slot erased to a declared bound follows the same rule as an erased `Object`. For
+`<T : Base> get(): T` read as `Both`, the call leaves `Base`, and kotlinc narrows it only for a
+consumer that needs the narrower type. `===`, `!==`, `== null`, `!= null`, `areEqual`, and an `Any`
+or `Base` consumer take the slot unchanged. A `Marker` consumer casts once to `Marker`, never
+to `Both` first. A property read's substitution is the same declaration-result coercion as a
+call's, so `s.value === b` behaves like `s.get() === b`. A smart cast stays a separate, eagerly
+checked conversion. A dispatch receiver read from an erased result narrows once to the class the
+call names, `Both` for `s.get().base()` when `base` is declared on `Base`. An upcast to the
+declaring class between them does not hide the erased result, so the receiver is never left
+unnarrowed or narrowed only to `Base`. Tests:
+`tests/consumer_materialized_result_e2e.rs` (`bound_results`), for one file, a sibling file, and a
+kotlinc-built dependency.
+
 ## Class application header ownership
 
 A classpath classifier's generic layout is read from declaration headers before its members are
