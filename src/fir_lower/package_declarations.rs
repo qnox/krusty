@@ -44,11 +44,9 @@ fn type_parameters(
                 .type_parameter_semantic_name(parameter)
                 .expect("a published type parameter must retain its semantic name")
                 .to_owned(),
-            bounds: index
-                .type_parameter_bound_order(declaration, ordinal)
-                .into_iter()
-                .map(|bound| header.bounds[bound].ty.get())
-                .collect(),
+            // Metadata keeps the bounds in written order; only the JVM erasure picks a primary
+            // class bound.
+            bounds: header.bounds.iter().map(|bound| bound.ty.get()).collect(),
             reified: header.flags.is_reified(),
         });
     }
@@ -167,7 +165,10 @@ pub(super) fn publish(
                     context_count: callable.shape.context_parameter_count as usize,
                     vararg_index,
                     visibility: header.visibility,
-                    spellings: index.declaration_spellings_primary_bound_first(declaration),
+                    spellings: index
+                        .declaration_spellings(declaration)
+                        .cloned()
+                        .unwrap_or_default(),
                     source_order,
                     signature_span: package_function_signature_span(
                         index.package_function_signature_span(declaration),
@@ -242,7 +243,10 @@ pub(super) fn publish(
                         .into_boxed_slice(),
                     suppressed_source_annotation_application: false,
                     flags: header.flags,
-                    spellings: index.declaration_spellings_primary_bound_first(declaration),
+                    spellings: index
+                        .declaration_spellings(declaration)
+                        .cloned()
+                        .unwrap_or_default(),
                     has_backing_field: value_receiver.is_none()
                         && (!header.flags.has(DeclarationFlags::CUSTOM_GETTER)
                             || header
