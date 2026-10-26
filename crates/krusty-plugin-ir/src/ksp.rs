@@ -239,6 +239,8 @@ pub struct KspProperty {
     pub getter: Option<KspAccessor>,
     /// A `var`'s setter.
     pub setter: Option<KspAccessor>,
+    /// Whether it has a backing field; `None` when the round cannot say.
+    pub has_backing_field: Option<bool>,
     /// What `Resolver.mapToJvmSignature` answers; `None` when the round cannot say.
     pub jvm_signature: Option<String>,
 }

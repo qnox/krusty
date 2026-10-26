@@ -457,7 +457,7 @@ impl Checker<'_> {
         // inapplicable built-in does not hide a user operator extension such as
         // `operator fun IntArray.set(Long, Int)`.
         let builtin_array_element = matches!(indices.as_slice(), [_])
-            .then(|| at.array_elem())
+            .then(|| self.builtin_array_store_element(at))
             .flatten()
             .filter(|_| self.receiver_is_assignable(its[0], Ty::Int));
         let vt = if selected_receiver.is_some() {

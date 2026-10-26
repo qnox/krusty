@@ -253,6 +253,9 @@ final class Symbols {
             setter.jvmName = readOptionalString(in);
             property.setter = setter;
         }
+        if (Wire.readBoolean(in)) {
+            property.hasBackingField = Wire.readBoolean(in);
+        }
         property.jvmSignature = readOptionalString(in);
         return property;
     }

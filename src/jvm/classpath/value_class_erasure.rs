@@ -57,29 +57,61 @@ pub(super) fn meta_param_exact(
     }
 }
 
-/// JVM carrier of a metadata type parameter whose primary class bound is a value class.
-pub(super) fn metadata_value_class_bound_carrier(
+/// The type-parameter declarations a metadata callable's types may name: the callable's own,
+/// which shadow, then those of its enclosing classifiers, as the declaring class's metadata scope
+/// lists them. Only the callable's own declare explicit type arguments; the enclosing ones are
+/// bound evidence here and nothing else.
+#[derive(Clone, Copy)]
+pub(super) struct MetadataFormals<'a> {
+    pub(super) callable: &'a crate::libraries::GenericSig,
+    pub(super) enclosing: &'a [crate::jvm::metadata::ScopedTypeParameter],
+}
+
+impl MetadataFormals<'_> {
+    /// The written bounds of the declaration `name` refers to, `None` when no declaration in
+    /// scope has that name.
+    fn bounds(&self, name: &str) -> Option<&[Ty]> {
+        let callable = self.callable;
+        callable
+            .formals
+            .iter()
+            .position(|formal| formal == name)
+            .map(|index| {
+                callable
+                    .formal_bounds
+                    .get(index)
+                    .map_or(&[][..], Vec::as_slice)
+            })
+            .or_else(|| {
+                self.enclosing
+                    .iter()
+                    .find(|parameter| parameter.name == name)
+                    .map(|parameter| parameter.bounds.as_slice())
+            })
+    }
+}
+
+/// The bound a metadata type parameter erases to on the JVM, kotlinc's `erasedUpperBound`: the
+/// first written bound that is a class rather than an interface or a type parameter, else the
+/// first written bound, followed through type-parameter bounds, an enclosing classifier's
+/// included, to a classifier. Metadata keeps the written order, so the class bound need not lead.
+/// An unbounded parameter's implicit bound is `Any?`. `None` for a parameter no declaration in
+/// scope declares, or a cycle.
+pub(super) fn metadata_primary_bound(
     ty: Ty,
-    signature: &crate::libraries::GenericSig,
+    formals: MetadataFormals<'_>,
     is_interface: &dyn Fn(TypeName) -> bool,
-    value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
 ) -> Option<Ty> {
     let mut current = ty;
     let mut seen = crate::fx_hash::HashSet::default();
-    let class_bound = loop {
+    loop {
         let TyKind::TyParam(name, _) = current.non_null().kind() else {
-            break current;
+            return Some(current);
         };
         if !seen.insert(name) {
             return None;
         }
-        let bounds = signature
-            .formals
-            .iter()
-            .position(|formal| formal == name)
-            .and_then(|index| signature.formal_bounds.get(index))
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
+        let bounds = formals.bounds(name.as_str())?;
         let next = bounds
             .iter()
             .copied()
@@ -92,19 +124,50 @@ pub(super) fn metadata_value_class_bound_carrier(
                         .is_none_or(|classifier| !is_interface(classifier)),
                 }
             })
-            .or_else(|| {
-                bounds
-                    .iter()
-                    .copied()
-                    .find(|bound| bound.non_null().is_ty_param())
-            })?;
+            .or_else(|| bounds.first().copied())
+            .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
         let nullable = current.is_nullable() || next.is_nullable();
         current = if nullable {
             Ty::nullable(next.non_null())
         } else {
             next.non_null()
         };
-    };
+    }
+}
+
+/// The classifier a metadata parameter's JVM descriptor names: its own class, or for a type
+/// parameter the primary bound it erases to.
+pub(super) fn metadata_parameter_class(
+    parameter: Option<Ty>,
+    function: &crate::jvm::metadata::MetaFn,
+    enclosing: &[crate::jvm::metadata::ScopedTypeParameter],
+    is_interface: &dyn Fn(TypeName) -> bool,
+) -> Option<TypeName> {
+    let parameter = parameter?;
+    if !parameter.non_null().is_ty_param() {
+        return parameter.non_null().obj_internal();
+    }
+    let callable = function.generic_sig.as_ref()?;
+    metadata_primary_bound(
+        parameter,
+        MetadataFormals {
+            callable,
+            enclosing,
+        },
+        is_interface,
+    )?
+    .non_null()
+    .obj_internal()
+}
+
+/// JVM carrier of a metadata type parameter whose primary class bound is a value class.
+pub(super) fn metadata_value_class_bound_carrier(
+    ty: Ty,
+    formals: MetadataFormals<'_>,
+    is_interface: &dyn Fn(TypeName) -> bool,
+    value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
+) -> Option<Ty> {
+    let class_bound = metadata_primary_bound(ty, formals, is_interface)?;
     let nullable = class_bound.is_nullable();
     let classifier = class_bound.non_null().obj_internal()?;
     let projected = metadata_value_class_underlying(classifier, nullable, value_underlying)?;
@@ -292,4 +355,121 @@ pub(super) fn value_class_return_type(
     } else {
         recovered
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jvm::metadata::ScopedTypeParameter;
+
+    fn signature(formals: &[(&str, Vec<Ty>)]) -> crate::libraries::GenericSig {
+        crate::libraries::GenericSig {
+            formals: formals.iter().map(|(name, _)| (*name).to_owned()).collect(),
+            formal_bounds: formals.iter().map(|(_, bounds)| bounds.clone()).collect(),
+            receiver: None,
+            params: Vec::new(),
+            ret: Ty::Unit,
+            return_policy: Default::default(),
+        }
+    }
+
+    fn enclosing(name: &str, bounds: Vec<Ty>) -> ScopedTypeParameter {
+        ScopedTypeParameter {
+            id: 0,
+            name: name.to_owned(),
+            bounds,
+        }
+    }
+
+    fn interfaces(name: TypeName) -> bool {
+        name == crate::types::type_name("owner/Marker")
+    }
+
+    /// The occurrence's carried bound is not evidence: `T` and `U` erase to their enclosing
+    /// declarations' bounds even when every occurrence carries `Any`.
+    #[test]
+    fn an_enclosing_class_parameter_erases_to_its_declared_bound() {
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let callable = signature(&[]);
+        let scope = [
+            enclosing("T", vec![Ty::obj("owner/A")]),
+            enclosing("U", vec![Ty::obj("owner/B")]),
+        ];
+        let formals = MetadataFormals {
+            callable: &callable,
+            enclosing: &scope,
+        };
+
+        assert_eq!(
+            metadata_primary_bound(Ty::ty_param("T", any), formals, &interfaces),
+            Some(Ty::obj("owner/A"))
+        );
+        assert_eq!(
+            metadata_primary_bound(Ty::ty_param("U", any), formals, &interfaces),
+            Some(Ty::obj("owner/B"))
+        );
+    }
+
+    #[test]
+    fn a_callable_bound_on_an_enclosing_parameter_erases_through_it() {
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let callable = signature(&[("R", vec![Ty::ty_param("T", any)])]);
+        let scope = [enclosing(
+            "T",
+            vec![Ty::obj("owner/Marker"), Ty::obj("owner/A")],
+        )];
+        let formals = MetadataFormals {
+            callable: &callable,
+            enclosing: &scope,
+        };
+
+        assert_eq!(
+            metadata_primary_bound(Ty::ty_param("R", any), formals, &interfaces),
+            Some(Ty::obj("owner/A"))
+        );
+    }
+
+    #[test]
+    fn a_callable_parameter_shadows_an_enclosing_one_of_the_same_name() {
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let callable = signature(&[("T", vec![Ty::obj("owner/Marker"), Ty::obj("owner/B")])]);
+        let scope = [enclosing("T", vec![Ty::obj("owner/A")])];
+        let formals = MetadataFormals {
+            callable: &callable,
+            enclosing: &scope,
+        };
+
+        assert_eq!(
+            metadata_primary_bound(Ty::ty_param("T", any), formals, &interfaces),
+            Some(Ty::obj("owner/B"))
+        );
+    }
+
+    #[test]
+    fn an_unbounded_parameter_erases_to_nullable_any() {
+        let callable = signature(&[("T", vec![])]);
+        let formals = MetadataFormals {
+            callable: &callable,
+            enclosing: &[],
+        };
+
+        assert_eq!(
+            metadata_primary_bound(Ty::ty_param("T", Ty::obj("owner/A")), formals, &interfaces),
+            Some(Ty::nullable(Ty::obj("kotlin/Any")))
+        );
+    }
+
+    #[test]
+    fn an_undeclared_parameter_has_no_primary_bound() {
+        let callable = signature(&[]);
+        let formals = MetadataFormals {
+            callable: &callable,
+            enclosing: &[],
+        };
+
+        assert_eq!(
+            metadata_primary_bound(Ty::ty_param("T", Ty::obj("owner/A")), formals, &interfaces),
+            None
+        );
+    }
 }

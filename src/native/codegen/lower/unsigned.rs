@@ -57,18 +57,90 @@ impl BodyLowering<'_, '_, '_> {
         self.runtime_call(&symbol, &[operand, operand], operand, &[left, right])
     }
 
-    /// Whether `target` is an array's `size`, by its getter's provider realization.
+    /// Whether `target` is an array's `size`, by its getter's provider realization, or the `size`
+    /// an unsigned array declares. That one is an ordinary member of the value class, but this
+    /// target stores an unsigned array as its signed carrier, so it is the carrier's length.
     pub(super) fn is_array_size(&self, target: crate::fir::ExternalPropertyId) -> bool {
+        let Some(property) = self.file.callables.property(target) else {
+            return false;
+        };
+        self.is_unsigned_array_carrier_size(property)
+            || self
+                .file
+                .callables
+                .callable(property.getter)
+                .is_some_and(|getter| {
+                    getter
+                        .compiler_intrinsic
+                        .or(getter.member_realization.compiler_intrinsic())
+                        == Some(crate::backend::BackendCompilerIntrinsic::ArraySize)
+                })
+    }
+
+    /// Whether `property` is the `size` an unsigned array declares over its carrier.
+    ///
+    /// The owner is the getter's declaring classifier, so an inherited or extension `size` is never
+    /// this one. The name is the property's own, as the other dependency-member tables read it,
+    /// so any other member of the class keeps its ordinary path.
+    fn is_unsigned_array_carrier_size(
+        &self,
+        property: &crate::backend::BackendPropertyFact,
+    ) -> bool {
+        &*property.name == "size"
+            && property.result == Ty::Int
+            && self
+                .unsigned_array_carrier_element(property.owner)
+                .is_some()
+    }
+
+    /// The carrier array operation an unsigned array's own `get`/`set` operator is on this target.
+    ///
+    /// `xs[i]` and `xs[i] = v` select the value class's members, as kotlinc does. This target
+    /// stores the unsigned array as its signed carrier, so `get(Int): E` is the carrier's element
+    /// load and `set(Int, E): Unit` its store, with the declaring classifier decided as for `size`.
+    pub(super) fn unsigned_array_carrier_access(
+        &self,
+        callable: &crate::backend::BackendCallableFact,
+    ) -> Option<crate::backend::BackendCompilerIntrinsic> {
+        let Some(crate::types::SemanticCallableOwner::Classifier(owner)) =
+            callable.declaration_owner
+        else {
+            return None;
+        };
+        let element = self.unsigned_array_carrier_element(owner)?;
+        match (callable.name.as_str(), callable.params.as_slice()) {
+            ("get", [Ty::Int]) if callable.ret == element => {
+                Some(crate::backend::BackendCompilerIntrinsic::ArrayGet)
+            }
+            ("set", [Ty::Int, value]) if *value == element && callable.ret == Ty::Unit => {
+                Some(crate::backend::BackendCompilerIntrinsic::ArraySet)
+            }
+            _ => None,
+        }
+    }
+
+    /// The unsigned element of `owner` when it is an unsigned array stored as a signed carrier.
+    ///
+    /// That classifier's frozen value-class declaration must store a signed primitive array: the
+    /// declaration, not the classifier's spelling, is what makes the carrier's operation the
+    /// answer to the class's own member.
+    fn unsigned_array_carrier_element(&self, owner: crate::types::TypeName) -> Option<Ty> {
+        let element = Ty::obj_name(owner)
+            .array_elem()
+            .filter(|ty| ty.is_unsigned())?;
         self.file
-            .callables
-            .property(target)
-            .and_then(|property| self.file.callables.callable(property.getter))
-            .is_some_and(|getter| {
-                getter
-                    .compiler_intrinsic
-                    .or(getter.member_realization.compiler_intrinsic())
-                    == Some(crate::backend::BackendCompilerIntrinsic::ArraySize)
+            .classifiers
+            .classifier(owner)
+            .and_then(|fact| fact.value_declaration.clone())
+            .is_some_and(|declaration| {
+                matches!(
+                    declaration.underlying.kind(),
+                    crate::types::TyKind::Obj(carrier, _)
+                        if crate::types::prim_array_element(carrier)
+                            .is_some_and(|element| !element.is_unsigned())
+                )
             })
+            .then_some(element)
     }
 
     /// Whether `target` reads the value an unsigned type wraps — the property its value-class

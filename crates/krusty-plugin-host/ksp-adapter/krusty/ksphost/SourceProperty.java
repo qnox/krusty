@@ -40,6 +40,7 @@ final class SourceProperty implements KSPropertyDeclaration {
     List<KSTypeParameter> typeParameters;
     KSTypeReference type;
     String jvmSignature;
+    Boolean hasBackingField;
     // The extension receiver; `receiverUndescribed` when it has one krusty could not describe.
     KSTypeReference extensionReceiver;
     boolean receiverUndescribed;
@@ -101,7 +102,10 @@ final class SourceProperty implements KSPropertyDeclaration {
 
     @Override
     public boolean getHasBackingField() {
-        throw Nodes.notImplemented("KSPropertyDeclaration.hasBackingField");
+        if (hasBackingField == null) {
+            throw Nodes.notImplemented("KSPropertyDeclaration.hasBackingField");
+        }
+        return hasBackingField;
     }
 
     @Override
