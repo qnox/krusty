@@ -13611,8 +13611,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `set(Object)` bridge. `fun set(e: String): Nothing` does implement it, and its bridge calls the
   member's `Void` descriptor and pops the result. A Kotlin dependency superclass's member, generic
   or not, is compared by its metadata result, so a separately compiled `NBase.set(e: String):
-  Nothing` implements it too; its physical `Void` result only names the call. Tests:
-  `tests/read_only_stub_override_return_e2e.rs` (class bytes and box runs against kotlinc).
+  Nothing` implements it too; its physical `Void` result only names the call. Whether an
+  implemented member needs that adapter depends on its complete physical descriptor, the result
+  included, against the mutable member's erased one. So `fun set(e: Any): Nothing` under
+  `ListIterator<Any>` and an inherited `Base<T>.set(e: T): Nothing` under `Base<String>` already
+  take `Object`, yet the class still gets `set(Object)V`, which calls `set(Object)Void` and pops.
+  The inherited adapter casts nothing, so `java.util.ListIterator.set(1)` reaches the member.
+  Tests: `tests/read_only_stub_override_return_e2e.rs` (class bytes and box runs against kotlinc,
+  with calls through `java.util.ListIterator.set`).
 - **A nested value class over a reference carrier is read as its carrier.** In `ZN(val z: Z1?)`
   with `Z1(val x: En)`, `Z1?` is carried as `En?`, so `zn.z` and `zn.z!!` already are `Z1`'s
   carrier and `.x` of them is that carrier itself, with no cast. krusty took the unboxed property

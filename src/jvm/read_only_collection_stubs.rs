@@ -79,7 +79,9 @@ pub(super) struct ReadOnlyStub {
     pub(super) parameter_names: Vec<String>,
     pub(super) result: Ty,
     /// The erased JVM parameters and result of the mutable declaration, when they differ from the
-    /// stub's own descriptor: kotlinc's bridge lowering gives the stub a throwing bridge there.
+    /// stub's own descriptor: kotlinc's bridge lowering gives the stub a throwing bridge there. An
+    /// implemented member has it whenever its own physical descriptor differs from the erased one,
+    /// so a `Nothing` member's `Void` result alone also takes an adapter.
     pub(super) bridge: Option<(Vec<Ty>, Ty)>,
 }
 
@@ -232,9 +234,17 @@ fn class_stubs(
             else {
                 return Some(stub);
             };
-            // A generic implementation can already have the erased descriptor itself.
-            let (erased, _) = stub.bridge.as_ref()?;
-            if parameter_descriptor(&implementation.parameters) == parameter_descriptor(erased) {
+            // The mutable declaration's erased descriptor needs an adapter unless the
+            // implementation's complete physical descriptor is that descriptor: a generic
+            // implementation can already have it, while `set(e: Any): Nothing` matches its
+            // parameters but returns its physical `Void`.
+            let (erased_parameters, erased_result) = stub
+                .bridge
+                .clone()
+                .unwrap_or_else(|| (jvm_tys(&stub.parameters), jvm_declared_ty(&stub.result)));
+            if method_descriptor(&implementation.parameters, implementation.physical_result)
+                == method_descriptor(&erased_parameters, erased_result)
+            {
                 return None;
             }
             let order = own_order
@@ -247,6 +257,7 @@ fn class_stubs(
                     target: implementation.parameters.clone(),
                     target_result: implementation.physical_result,
                 },
+                bridge: Some((erased_parameters, erased_result)),
                 ..stub
             })
         })
