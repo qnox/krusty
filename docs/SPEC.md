@@ -20777,6 +20777,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the whole signature whenever it had no descriptor, so the mangled name vanished from `d2`
   (`metadata/builder.rs`). Test:
   `tests/value_class_mangled_names_e2e.rs::a_derivable_mangled_signature_records_only_its_name`.
+- **A private constructor over a value class names its erased `<init>` in `@Metadata`.** kotlinc
+  hides a constructor with value-class parameters behind the public marker overload only when it is
+  not private; a private one is called directly from its own class and its marker overload is just
+  the synthetic accessor a nested class uses. So `class Outer private constructor(val s: S)` records
+  `<init>(Ljava/lang/String;)V`, not the marker signature (`jvm/ir_emit/class_metadata.rs`). Test:
+  `tests/value_class_private_constructor_access_e2e.rs::a_private_constructor_over_a_value_class_names_its_erased_init`.
+  Corpus: `inlineClasses/privateConstructor`.
 - **A facade extension property over a value class records its accessors' erased descriptors.**
   The accessor of `val Z.xx` takes the receiver's carrier (`getXx-IQRRRT4(I)I`), and the
   property's `JvmPropertySignature` names it with that descriptor, as kotlinc's does. krusty
