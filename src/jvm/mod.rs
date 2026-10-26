@@ -21,6 +21,7 @@ pub mod classfile;
 pub mod classpath;
 pub mod classreader;
 mod collection_barriers;
+mod collection_to_array;
 mod common_metadata;
 pub mod companion;
 pub mod compilation_inputs;

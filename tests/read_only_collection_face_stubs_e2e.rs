@@ -6,9 +6,9 @@
 //! implements its stub, and the erased `add(Object)` bridge forwards to it, among the bridges in
 //! member order. An abstract class gets a throwing `iterator()` stub as well.
 //!
-//! The JDK default `removeIf` and the `toArray` pair are later realizations, and so is the
-//! signature of a declared `containsAll` override; these comparisons leave those members out by
-//! their exact spelling and compare every other member byte for byte.
+//! The JDK default `removeIf` is a later realization, and so is the signature of a declared
+//! `containsAll` override; these comparisons leave those members out by their exact spelling and
+//! compare every other member, the `toArray` pair included, byte for byte.
 
 use super::common;
 
@@ -64,8 +64,6 @@ const LATER_REALIZATIONS: &[&str] = &[
     "public boolean removeIf(java.util.function.Predicate<? super java.lang.String>);",
     "public boolean removeIf(java.util.function.Predicate<? super java.lang.Integer>);",
     "public boolean removeIf(java.util.function.Predicate<? super T>);",
-    "public <T> T[] toArray(T[]);",
-    "public java.lang.Object[] toArray();",
 ];
 
 /// The fake-override bridges an abstract class's unimplemented `contains` and `size` get, a later
