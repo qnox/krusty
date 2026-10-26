@@ -607,6 +607,8 @@ mod construction_default_arg_e2e;
 #[path = "constructor_argument_specificity_e2e.rs"]
 mod constructor_argument_specificity_e2e;
 mod constructor_continuation_e2e;
+#[path = "constructor_default_expression_lines_e2e.rs"]
+mod constructor_default_expression_lines_e2e;
 #[path = "constructor_initialization_order_e2e.rs"]
 mod constructor_initialization_order_e2e;
 #[path = "constructor_locals_pool_e2e.rs"]

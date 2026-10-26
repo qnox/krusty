@@ -2365,7 +2365,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   stores each masked default as a statement at its expression's position, so the fill opens on
   the expression's first line even when its first operand marks another line at that same offset
   (`k(` above an argument on the next line): the table keeps both entries. Test:
-  `tests/default_argument_fill_lines_e2e.rs`. A call with
+  `tests/default_argument_fill_lines_e2e.rs`. A constructor's synthetic `$default` `<init>` is
+  generated the same way: it enters on the constructor's line (the class declaration's for a
+  primary, the `constructor` keyword's for a secondary), and so do each mask test and the
+  delegation; each fill runs on the lines its default expression marks, nested calls included;
+  the `return` is on the declaration's closing line. krusty set a primary's table by hand from the
+  class field at the parameter's index (another parameter's line once one is no property) and a
+  secondary's from each default's first line only. Test:
+  `tests/constructor_default_expression_lines_e2e.rs`. A call with
   holes passes the computed mask + null marker. Byte-identical to kotlinc
   for data-class `copy` and instance methods. **Mask bits are LOGICAL**: kotlinc numbers them over
   the DECLARED value parameters, so an EXTENSION's receiver — physically the leading parameter of

@@ -76,7 +76,6 @@ impl Parser<'_> {
             decl_line: 0,
             delegation_line: delegation_offset,
             decl_end_line: 0,
-            default_lines: Vec::new(),
             visibility: visibility_of(modifiers),
         }
     }
