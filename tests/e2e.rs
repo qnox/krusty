@@ -839,6 +839,8 @@ mod elvis_newline_continuation_e2e;
 mod elvis_nullability_join_e2e;
 #[path = "elvis_over_safe_call_e2e.rs"]
 mod elvis_over_safe_call_e2e;
+#[path = "elvis_own_line_e2e.rs"]
+mod elvis_own_line_e2e;
 #[path = "elvis_return_smartcast_e2e.rs"]
 mod elvis_return_smartcast_e2e;
 #[path = "elvis_signature_inference_e2e.rs"]
@@ -1298,6 +1300,8 @@ mod is_nullable_primitive_e2e;
 mod is_primitive_smartcast_e2e;
 #[path = "java_abstract_override_e2e.rs"]
 mod java_abstract_override_e2e;
+#[path = "java_annotation_element_property_e2e.rs"]
+mod java_annotation_element_property_e2e;
 #[path = "java_array_covariance_e2e.rs"]
 mod java_array_covariance_e2e;
 #[path = "java_bridge_members_e2e.rs"]
