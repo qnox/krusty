@@ -120,7 +120,9 @@ fun <T> choose(value: T): String where T : Comparable<T>, T : Number = "number"
         [
             Vec::<String>::new(),
             vec!["Comparable<T>".to_string()],
-            vec!["Number".to_string(), "Comparable<T>".to_string()],
+            // Written order (`where T : Comparable<T>, T : Number`), as kotlinc records it; only
+            // the JVM signature and erasure lead with the class bound.
+            vec!["Comparable<T>".to_string(), "Number".to_string()],
         ]
     );
 

@@ -4,7 +4,8 @@
 //! the class declares it, inherits it from a Kotlin or Java superclass, or inherits a generic one
 //! whose result substitutes to `String`. The class then keeps the throwing `set(String)` stub and
 //! `set(Object)` bridge. A `Nothing` member does implement it. Its bridge calls the member's
-//! `Void` descriptor and pops the result.
+//! `Void` descriptor and pops the result, also when a separately compiled, non-generic Kotlin
+//! superclass declares it: its metadata, not its physical `Void`, gives the `Nothing` result.
 
 use super::common;
 
@@ -36,6 +37,18 @@ fn nothing_member() -> String {
     format!(
         "class Walk : ListIterator<String> {{\n{MEMBERS}    fun set(e: String): Nothing = throw IllegalStateException(\"set \" + e)\n}}\n"
     )
+}
+
+/// A separately compiled, non-generic Kotlin superclass with a `Nothing` member.
+const NOTHING_DEPENDENCY: &str = "package dep
+
+open class NBase {
+    fun set(e: String): Nothing = throw IllegalStateException(\"set \" + e)
+}
+";
+
+fn nothing_dependency_member() -> String {
+    format!("class Walk : dep.NBase(), ListIterator<String> {{\n{MEMBERS}}}\n")
 }
 
 const JAVA_SUPERCLASS: &str = "package jl;
@@ -117,6 +130,28 @@ fn a_nothing_member_implements_the_member_and_its_bridge_pops_the_result_like_ko
     common::expect_box_same_as_kotlinc(
         &box_program(&nothing_member(), "IllegalStateException: set x"),
         "read_only_nothing_member",
+    );
+}
+
+#[test]
+fn a_nothing_dependency_member_implements_the_member_like_kotlinc() {
+    let library = common::kotlinc_lib_out(&[("NBase.kt", NOTHING_DEPENDENCY)])
+        .expect("reference kotlinc compiles the dependency");
+    assert_classes_match_kotlinc(&nothing_dependency_member(), std::slice::from_ref(&library));
+
+    let program = box_program(&nothing_dependency_member(), "IllegalStateException: set x");
+    let reference =
+        common::kotlinc_box_result_with_classpath(&program, std::slice::from_ref(&library));
+    assert_eq!(reference, "OK", "kotlinc fixture must succeed");
+    let jdk = common::jdk_modules();
+    assert_eq!(
+        common::expect_box_run(
+            &program,
+            "read_only_nothing_dependency_member",
+            &[library, common::stdlib_jar()],
+            Some(jdk.as_path()),
+        ),
+        reference,
     );
 }
 
