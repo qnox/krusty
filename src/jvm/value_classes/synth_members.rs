@@ -29,6 +29,9 @@ pub(super) struct SynthesizedValueMembers {
     /// Exact generated instance methods that delegate Kotlin `Any` members to their static
     /// carrier implementations. A same-spelled source overload is not one of these functions.
     pub(super) any_delegators: HashSet<u32>,
+    /// Source `Any` overrides realized as the static `toString-impl`/`hashCode-impl`/`equals-impl`
+    /// over the carrier. kotlinc names what it lifts out of one after that realized name.
+    pub(super) any_impls: HashSet<u32>,
 }
 
 impl SynthesizedValueMembers {
@@ -95,7 +98,8 @@ pub(super) fn enclose_in_constructor_impls(ir: &mut IrFile, realized: &Synthesiz
 }
 
 /// Record every function whose JVM name the value-class pass chose: one it mangled or renamed
-/// `-impl`, a static accessor implementation, and each `constructor-impl`.
+/// `-impl`, a static accessor implementation, a source `Any` override's static `-impl`, and each
+/// `constructor-impl`.
 pub(super) fn record_renamed_functions(
     ir: &mut IrFile,
     realized: &SynthesizedValueMembers,
@@ -105,6 +109,7 @@ pub(super) fn record_renamed_functions(
         renamed
             .iter()
             .chain(realized.accessors.keys())
+            .chain(&realized.any_impls)
             .chain(realized.constructor_impls.values()),
     );
 }
@@ -281,6 +286,7 @@ pub(super) fn synth_value_members(
             function.name = name.to_string();
             super::parameter_guards::prepend_carrier(function, u_ir);
             function.is_static = true;
+            realized.any_impls.insert(fid);
             custom_carrier_functions.push((fid, declared));
         }
     }

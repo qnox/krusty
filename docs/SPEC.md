@@ -13451,6 +13451,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   declared member with no line. krusty appended the box method of a source override after every
   declared member with no line. Tests:
   `tests/value_class_any_override_e2e.rs`.
+- **What a value class's `Any` override lifts is named after its static `-impl`.** kotlinc renames
+  the override to `toString-impl` before lifting, so its lambda is `toString_impl$lambda$0`, as an
+  interface override's is `describe_impl$lambda$0`. The value-class pass records the `Any`
+  override's realization among the functions whose JVM name it chose. Tests:
+  `tests/value_class_any_override_e2e.rs`.
 - **An owner reads its explicit backing field, typed as the field.** Inside the class that
   declares `val a: Any field = V(1)`, a read whose receiver's static type is exactly that class is
   kotlinc's `IrGetField` of the field, not a call of `getA()`: `a.x` over a value class
