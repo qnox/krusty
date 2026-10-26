@@ -15289,10 +15289,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   entry's declaration name, so the read does not initialize the enum. A name read through a value
   stays a call of `name()` and does initialize it.
   (`tests/enum_name_const_e2e.rs`. Corpus: `evaluate/intrinsicConst/enumNameWithInit.kt`.)
-  kotlinc's interpreter also folds the
-  remaining `@IntrinsicConstEvaluation` library calls, which the checker publishes as ordinary calls
-  and krusty does not fold yet: `toString()`, `floorDiv`/`mod`, and unsigned arithmetic and
-  comparison (`1u + 2u` is `iconst_3` boxed to `UInt`). Neither folds an `if`/`when` over constants.
+  A builtin's `toString()`, `equals` and `compareTo` are `@IntrinsicConstEvaluation` too:
+  `(1 == 2).toString()` is `ldc "false"`, not `iconst_0; String.valueOf(Z)`. The checker records
+  on an external call whether its selected declaration carries the annotation (read from Kotlin
+  metadata), and the operation is the one its override role names: `toString()` is the value's
+  string conversion (also `Any?.toString()` on `null` and an unsigned value's text), `equals` is the
+  boxed value's (`1.equals(1L)` and `1.0.equals(-0.0)` are false, a NaN equals itself),
+  `String.compareTo` is Java's UTF-16 unit difference (`"b".compareTo("abc")` is 1), and an unsigned
+  `compareTo` orders the unsigned values. `<`, `<=`, `>`, `>=` over a selected `compareTo` fold with
+  it (`"a" < "b"`). `hashCode` is not intrinsic-const and stays a call.
+  (`constant_evaluation_e2e::builtin_member_calls_over_constants_fold`.)
+  kotlinc's interpreter also folds the remaining `@IntrinsicConstEvaluation` library calls, which
+  krusty does not fold yet: `floorDiv`/`mod`, and unsigned arithmetic and conversions (`1u + 2u` is
+  `iconst_3` boxed to `UInt`). Neither folds an `if`/`when` over constants.
   An overflowing constant expression wraps without a diagnostic, as in kotlinc.
   (`tests/constant_evaluation_e2e.rs`.)
   A safe call's selector does not fold over a constant receiver: kotlinc's safe-call lowering puts
