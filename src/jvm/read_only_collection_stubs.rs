@@ -95,8 +95,9 @@ pub(super) struct ReadOnlyStub {
     pub(super) declaration_site_wildcards: bool,
     /// The erased JVM parameters and result of the mutable declaration, when they differ from the
     /// stub's own descriptor: kotlinc's bridge lowering gives the stub a throwing bridge there. An
-    /// implemented member's bridge is the descriptor it is reached at, when that differs from the
-    /// implementation's.
+    /// implemented member's bridge is the descriptor it is reached at, whenever the
+    /// implementation's own complete physical descriptor differs from it, so a `Nothing` member's
+    /// `Void` result alone also takes an adapter.
     pub(super) bridge: Option<(Vec<Ty>, Ty)>,
     /// The type-safe declaration's barrier (`MutableCollection.remove`): the bridge to a member
     /// that implements it with a narrower parameter first tests each checked argument.
@@ -265,13 +266,17 @@ fn class_stubs(
                 return Some(stub);
             };
             // The member is reached at the mutable declaration's erased descriptor, or at the
-            // stub's own when they agree (a type-safe `remove(Object)`). A generic implementation
-            // can already have that descriptor itself.
+            // stub's own when they agree (a type-safe `remove(Object)`). It needs an adapter there
+            // unless its complete physical descriptor is that one: a generic implementation can
+            // already have it, while `set(e: Any): Nothing` matches its parameters but returns its
+            // physical `Void`.
             let erased = stub
                 .bridge
                 .clone()
                 .unwrap_or_else(|| (jvm_tys(&stub.parameters), jvm_declared_ty(&stub.result)));
-            if parameter_descriptor(&implementation.parameters) == parameter_descriptor(&erased.0) {
+            if method_descriptor(&implementation.parameters, implementation.physical_result)
+                == method_descriptor(&erased.0, erased.1)
+            {
                 return None;
             }
             let order = own_order
