@@ -9862,6 +9862,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   remainder resolves to none
   (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_resolves_java_setter_backed_property_write`,
   `java_fluent_setter_e2e::java_setter_is_a_var_whatever_it_returns`).
+  "Matches the getter's type" is type equality, under which a platform type `T!` equals both `T`
+  and `T?`: a `@NotNull` setter parameter (an override narrowing an inherited `setX`, or a class
+  that annotates one accessor only) still pairs with an unannotated getter, while a `@Nullable`
+  setter of a `@NotNull` getter does not, and assigning that property is a `val` reassignment
+  (`tests/java_not_null_setter_pairing_e2e.rs`).
 
 - **Member types of a Java interface or annotation are implicitly public (JLS §9.5).** The Java
   signature stubs emit `interface Registry { final class Handler {…} }` with `ACC_PUBLIC` on

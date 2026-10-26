@@ -9,6 +9,7 @@
 
 use crate::fx_hash::{HashMap, HashSet};
 
+use crate::libraries::SemanticPlatform;
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 
@@ -65,6 +66,26 @@ pub(super) fn setter_name_for_getter(getter: &str) -> String {
         getter.strip_prefix("get").unwrap_or(getter)
     };
     format!("set{stem}")
+}
+
+impl super::JvmLibraries {
+    /// Whether a `set` method with `parameters` is the setter of a getter returning `getter`.
+    ///
+    /// Java synthetic-property pairing is declaration-shape matching, not call overload selection.
+    /// The setter takes one value parameter whose type equals the getter's, and a platform type
+    /// `T!` equals both `T` and `T?`: a `@NotNull` setter parameter still pairs with an unannotated
+    /// getter. Both sides compare in the provider's value form, which erases type arguments. The
+    /// method's return type is not part of the shape: a fluent or otherwise non-void Java setter
+    /// is still a `var`, and the assignment discards the result.
+    pub(super) fn pairs_java_setter(&self, getter: Ty, parameters: &[Ty]) -> bool {
+        let [parameter] = *parameters else {
+            return false;
+        };
+        if !getter.is_platform_nullable() && !parameter.is_platform_nullable() {
+            return self.library_value_form(getter) == self.library_value_form(parameter);
+        }
+        self.library_value_form(getter.non_null()) == self.library_value_form(parameter.non_null())
+    }
 }
 
 /// The accessor methods of one declaration scope, indexed by the synthetic property each declares.

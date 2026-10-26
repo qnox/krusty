@@ -1338,6 +1338,8 @@ java_member_modules::declare!();
 mod java_nested_static_e2e;
 #[path = "java_not_null_null_argument_e2e.rs"]
 mod java_not_null_null_argument_e2e;
+#[path = "java_not_null_setter_pairing_e2e.rs"]
+mod java_not_null_setter_pairing_e2e;
 #[path = "java_parameters_attribute_e2e.rs"]
 mod java_parameters_attribute_e2e;
 #[path = "java_platform_type_publication_e2e.rs"]
