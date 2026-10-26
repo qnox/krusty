@@ -843,6 +843,7 @@ name = "krusty-build"
 version = "0.0.1"
 dependencies = [
  "krusty",
+ "krusty-test-support",
 ]
 
 [[package]]
@@ -890,9 +891,14 @@ name = "krusty-plugin-ir"
 version = "0.0.1"
 
 [[package]]
+name = "krusty-test-support"
+version = "0.0.1"
+
+[[package]]
 name = "krusty-toolchain"
 version = "0.0.1"
 dependencies = [
+ "krusty-test-support",
  "libc",
  "roxmltree",
  "saphyr-parser",

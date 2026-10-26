@@ -162,6 +162,10 @@ pub enum CompilerIntrinsic {
     /// destructuring the `IndexedValue` it yields iterates the receiver and counts the index itself
     /// (kotlinc's `WithIndexHandler`). Anywhere else it is an ordinary call.
     WithIndex,
+    /// The `indices` extension property of an array, a `Collection` or a `CharSequence`. A `for`
+    /// loop over it counts from 0 to the receiver's size instead of building the `IntRange`
+    /// (kotlinc's `IndicesHandler`). Anywhere else it is an ordinary read.
+    Indices(IndicesReceiver),
     /// The stdlib's unsigned comparison over the carrier of an unsigned value class
     /// (`uintCompare(Int, Int): Int`, `ulongCompare(Long, Long): Int`). kotlinc's counted loops
     /// call it to order unsigned bounds; a source call of it is an ordinary call.
@@ -174,6 +178,11 @@ pub enum CompilerIntrinsic {
     },
     /// The corresponding unsigned remainder helper.
     UnsignedRemainder {
+        operand: crate::types::Ty,
+    },
+    /// Native's runtime rendering of an `Int` or `Long` in a radix the stdlib already checked
+    /// (`kotlin.text.intToString`/`longToString`, `@GCUnsafeCall` externals without a body).
+    RadixToString {
         operand: crate::types::Ty,
     },
     /// A fully normalized `Result` helper reached from an expanded library inline body.
@@ -192,4 +201,13 @@ impl CompilerIntrinsic {
     pub fn replaces_its_body(self) -> bool {
         matches!(self, Self::TypeOf | Self::EnumEntries)
     }
+}
+
+/// The receiver class of an `indices` property, which names the member kotlinc's `IndicesHandler`
+/// bounds the loop with: an array's or a `Collection`'s `size`, a `CharSequence`'s `length`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndicesReceiver {
+    Array,
+    Collection,
+    CharSequence,
 }

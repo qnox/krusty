@@ -50,8 +50,8 @@ final class LibraryClass implements KSClassDeclaration {
     KSFunctionDeclaration primaryConstructor;
     // The properties and functions the classifier has with the inherited ones, each null when
     // krusty does not describe them.
-    List<KSDeclaration> allProperties;
-    List<KSDeclaration> allFunctions;
+    Members allProperties;
+    Members allFunctions;
     // The entries of a library enum class an annotation argument named, by name, so that each is
     // one declaration.
     private final java.util.Map<String, LibraryClass> entries = new java.util.HashMap<>();
@@ -121,11 +121,7 @@ final class LibraryClass implements KSClassDeclaration {
         if (allFunctions == null) {
             throw library("getAllFunctions");
         }
-        List<KSFunctionDeclaration> functions = new ArrayList<>(allFunctions.size());
-        for (KSDeclaration function : allFunctions) {
-            functions.add((KSFunctionDeclaration) function);
-        }
-        return Nodes.sequence(functions);
+        return Nodes.sequence(allFunctions.as(KSFunctionDeclaration.class));
     }
 
     @Override
@@ -133,11 +129,7 @@ final class LibraryClass implements KSClassDeclaration {
         if (allProperties == null) {
             throw library("getAllProperties");
         }
-        List<KSPropertyDeclaration> properties = new ArrayList<>(allProperties.size());
-        for (KSDeclaration property : allProperties) {
-            properties.add((KSPropertyDeclaration) property);
-        }
-        return Nodes.sequence(properties);
+        return Nodes.sequence(allProperties.as(KSPropertyDeclaration.class));
     }
 
     @Override
@@ -147,7 +139,7 @@ final class LibraryClass implements KSClassDeclaration {
 
     @Override
     public KSType asStarProjectedType() {
-        throw library("asStarProjectedType");
+        return ClassType.starProjected(this);
     }
 
     @Override

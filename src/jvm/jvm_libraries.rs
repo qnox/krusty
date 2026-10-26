@@ -2405,6 +2405,9 @@ impl JvmLibraries {
             let own_type_parameter_count = application_header.own_count;
             let type_parameters = application_header.parameters;
             Some(LibraryType {
+                declaration_name: (ci.this_class == internal_name)
+                    .then(|| classifier_facts::classifier_declaration_name(&ci))
+                    .flatten(),
                 is_kotlin: has_kotlin_metadata,
                 is_data: ci.meta.is_data,
                 access: if let Some(visibility) = ci.meta.class_visibility {
@@ -3286,16 +3289,9 @@ impl JvmLibraries {
                 function_renames,
             ));
         }
-        const ACC_STATIC: u16 = 0x0008;
-        const ACC_PUBLIC: u16 = 0x0001;
-        let declares_instance_field = self.cp.find_name(cn).is_some_and(|class| {
-            class.fields.iter().any(|field| {
-                field.name == name
-                    && field.access & ACC_STATIC == 0
-                    && field.access & ACC_PUBLIC != 0
-            })
-        });
-        if !declares_instance_field {
+        let class = self.cp.find_name(cn);
+        let declares_field = |class: &_| synthetic_properties::declares_field(class, name);
+        if !class.as_deref().is_some_and(declares_field) {
             // The getters come from this classifier's own method inventory: each one declares
             // `name` by its spelling, and its arity and return type are checked below.
             for getter_name in accessors.getters(name) {
@@ -3379,6 +3375,10 @@ impl JvmLibraries {
                 }
             }
         }
+        if let Some(class) = class.as_deref() {
+            use classpath_annotation_classes::java_annotation_element_properties as elements;
+            overloads.extend(elements(class, cn, recv, name, &mut functions));
+        }
         if let Some(mapping) = mapped_property {
             // A mapped builtin property and its JVM getter are one property declaration, not a
             // second source function. Keep the exact realization above, but do not publish the
@@ -3456,7 +3456,8 @@ impl JvmLibraries {
                         .collect::<Vec<_>>();
                     let member_names =
                         self.member_scope_names(internal_name, &classifier, &mapped_members);
-                    let accessors = if classifier.is_kotlin {
+                    // A Java `@interface` element is a property already, never an accessor.
+                    let accessors = if classifier.is_kotlin || classifier.is_annotation() {
                         AccessorInventory::default()
                     } else {
                         AccessorInventory::from_methods(

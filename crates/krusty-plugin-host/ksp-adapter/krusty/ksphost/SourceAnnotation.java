@@ -2,6 +2,7 @@ package krusty.ksphost;
 
 import com.google.devtools.ksp.symbol.AnnotationUseSiteTarget;
 import com.google.devtools.ksp.symbol.KSAnnotation;
+import com.google.devtools.ksp.symbol.KSDeclaration;
 import com.google.devtools.ksp.symbol.KSName;
 import com.google.devtools.ksp.symbol.KSNode;
 import com.google.devtools.ksp.symbol.KSTypeReference;
@@ -70,8 +71,9 @@ final class SourceAnnotation implements KSAnnotation {
 
     @Override
     public Origin getOrigin() {
-        // An annotation a library declaration states shares the declaration's origin; a default
-        // nested in one is the compiler's.
+        // An annotation a library declaration states shares the declaration's origin, except that
+        // one a Java library member's accessor states is JAVA; a default nested in one is the
+        // compiler's.
         if (synthetic) {
             return Origin.SYNTHETIC;
         }
@@ -79,6 +81,18 @@ final class SourceAnnotation implements KSAnnotation {
             Origin origin = parent.getOrigin();
             if (origin == Origin.KOTLIN_LIB || origin == Origin.JAVA_LIB) {
                 return origin;
+            }
+        }
+        if (parent instanceof SourceAccessor) {
+            KSDeclaration owner = ((SourceAccessor) parent).property.getParentDeclaration();
+            if (owner instanceof LibraryClass) {
+                Origin origin = owner.getOrigin();
+                if (origin == Origin.JAVA_LIB) {
+                    return Origin.JAVA;
+                }
+                if (origin == Origin.KOTLIN_LIB) {
+                    return origin;
+                }
             }
         }
         return Origin.KOTLIN;

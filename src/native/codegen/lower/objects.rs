@@ -64,6 +64,11 @@ const CLASS_NAMES_ANONYMOUS: u32 = 3;
 
 /// Where an object keeps its type: the header is one pointer.
 pub(super) const TYPE_OFFSET: i32 = 0;
+// The link's interface stubs read the same two fields.
+const _: () = {
+    assert!(TYPE_OFFSET as u32 == super::super::super::interface_calls::RECEIVER_TYPE_OFFSET);
+    assert!(ktype::ITABLE == super::super::super::interface_calls::ITABLE_OFFSET);
+};
 
 /// The emitted items of one class.
 pub(super) struct ClassItems {
@@ -127,6 +132,10 @@ pub(super) struct DescriptorShape<'s> {
     /// Indexed by interface member number; empty for a type implementing no interface of the
     /// program.
     pub(super) itable: &'s [FuncId],
+    /// Whether objects of exactly this type are made. An interface's or an abstract class's
+    /// descriptor is only ever a supertype, so the link counts none of its table's functions among
+    /// a member's implementations.
+    pub(super) instantiable: bool,
     pub(super) superclass: DataId,
     /// Every interface the type implements, transitively.
     pub(super) interfaces: &'s [DataId],
@@ -437,8 +446,9 @@ impl<'a> FileLowering<'a> {
         self.ir.classes[class as usize].fq_name().replace('/', ".")
     }
 
-    /// Define a `KType` and the two tables it points at, byte for byte as `krusty_rt.h` declares
-    /// the struct. Every emitted type goes through here — a class, a lambda, a captured-variable
+    /// Define a `KType` and the tables it points at, byte for byte as `krusty_rt.h` declares the
+    /// struct, except its interface table, which the link writes from the implementation records
+    /// (see `native::interface_calls`). Every emitted type goes through here — a class, a lambda, a captured-variable
     /// holder — so the descriptor the collector reads and the layout the code uses are written by
     /// one piece of code.
     pub(super) fn define_type_descriptor(
@@ -453,6 +463,7 @@ impl<'a> FileLowering<'a> {
             reference_offsets,
             vtable,
             itable,
+            instantiable,
             superclass,
             interfaces,
             reference_target,
@@ -492,24 +503,9 @@ impl<'a> FileLowering<'a> {
             .define_data(table, &description)
             .map_err(|error| format!("defining `kt_vtable_{base}` ({error})"))?;
 
-        let interface_table = if itable.is_empty() {
-            None
-        } else {
-            let id = self.declare_local_data(&format!("kt_itable_{base}"), false)?;
-            let mut description = DataDescription::new();
-            description.define(vec![0; itable.len() * 8].into_boxed_slice());
-            description.set_align(8);
-            for (index, function) in itable.iter().enumerate() {
-                let func_ref = self
-                    .module
-                    .declare_func_in_data(*function, &mut description);
-                description.write_function_addr(index as u32 * 8, func_ref);
-            }
-            self.module
-                .define_data(id, &description)
-                .map_err(|error| format!("defining `kt_itable_{base}` ({error})"))?;
-            Some(id)
-        };
+        if instantiable {
+            self.record_interface_implementations(descriptor, base, itable)?;
+        }
 
         // The interfaces this type implements, transitively. An interface is not on the super
         // chain — that chain is single inheritance — so `is` finds it here instead.
@@ -589,7 +585,6 @@ impl<'a> FileLowering<'a> {
             (ktype::REFERENCE_OFFSETS, references),
             (ktype::SUPER, Some(superclass)),
             (ktype::VTABLE, Some(table)),
-            (ktype::ITABLE, interface_table),
             (ktype::INTERFACES, implemented),
             (
                 ktype::REFERENCE_TARGET,
@@ -694,6 +689,8 @@ impl<'a> FileLowering<'a> {
         let base = self.class_base(class).to_string();
 
         let vtable = self.table_functions(&layout.vtable)?;
+        let declared = &self.ir.classes[class as usize];
+        let instantiable = !(declared.is_interface || declared.is_abstract || declared.is_sealed);
         let itable = if self.ir.classes[class as usize].is_interface {
             // An interface has no instances; its own table is the template a lambda converted to
             // it starts from, and is read there rather than through this descriptor.
@@ -747,6 +744,9 @@ impl<'a> FileLowering<'a> {
         }
         let walk = self.define_walk_members(class, &base)?;
         let (qualified_name, simple_name, class_names) = self.reflection_names(class);
+        if instantiable {
+            self.record_dependency_implementations(descriptor, &base, class, (&vtable, &itable))?;
+        }
         self.define_type_descriptor(
             descriptor,
             &base,
@@ -756,6 +756,7 @@ impl<'a> FileLowering<'a> {
                 reference_offsets: &layout.reference_offsets,
                 vtable: &vtable,
                 itable: &itable,
+                instantiable,
                 superclass,
                 interfaces: &interfaces,
                 reference_target: None,

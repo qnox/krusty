@@ -48,6 +48,18 @@ pub struct IterationPlans {
     /// The `index` and `value` properties of `kotlin.collections.IndexedValue`, selected once a
     /// loop destructures a `withIndex()` call.
     indexed_value: Option<IndexedValueProperties>,
+    /// The size member each `indices` read is bounded with, keyed by the read, for a counted loop
+    /// over it or membership in it.
+    indices: HashMap<ExprId, IndicesSize>,
+}
+
+/// The member kotlinc's `IndicesHandler` bounds a loop over `receiver.indices` with, selected on
+/// the class the `indices` declaration receives (`view`): `Collection.size`,
+/// `CharSequence.length` or the array's `size`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IndicesSize {
+    pub view: Ty,
+    pub size: LoopMemberProperty,
 }
 
 /// The properties a name-based destructuring entry of a `withIndex()` loop may read
@@ -123,6 +135,11 @@ impl super::TypeInfo {
 
     pub fn indexed_value_properties(&self) -> Option<IndexedValueProperties> {
         self.iteration_plans.indexed_value()
+    }
+
+    /// The size member the `indices` read `read` is bounded with.
+    pub fn indices_size(&self, read: ExprId) -> Option<IndicesSize> {
+        self.iteration_plans.indices.get(&read).copied()
     }
 }
 
@@ -438,6 +455,51 @@ impl Checker<'_> {
     ) {
         self.record_progression_plans();
         self.record_with_index_iteration(scope, statement, iterable);
+    }
+
+    /// Publish the selected extension property read `expression`. kotlinc's `IndicesHandler`
+    /// counts a loop over an `indices` read, and compares membership in one, from 0 to the
+    /// receiver's size: select that size on the class the `indices` declaration receives.
+    pub(super) fn record_extension_property_get(
+        &mut self,
+        expression: ExprId,
+        access: Box<super::ResolvedPropertyAccess>,
+    ) {
+        let size = self.indices_size_plan(&access);
+        self.expr_lowers.insert(
+            expression,
+            super::ExprLowering::ExtensionPropertyGet { access },
+        );
+        match size {
+            Some(size) => self.iteration_plans.indices.insert(expression, size),
+            None => self.iteration_plans.indices.remove(&expression),
+        };
+    }
+
+    fn indices_size_plan(&self, access: &super::ResolvedPropertyAccess) -> Option<IndicesSize> {
+        let crate::libraries::CompilerIntrinsic::Indices(kind) =
+            access.property.getter.compiler_intrinsic?
+        else {
+            return None;
+        };
+        let view = access.property.receiver?;
+        let name = match kind {
+            crate::libraries::IndicesReceiver::Array
+            | crate::libraries::IndicesReceiver::Collection => wk::SIZE,
+            crate::libraries::IndicesReceiver::CharSequence => wk::CHAR_SEQUENCE_LENGTH,
+        };
+        let size = self
+            .resolver()
+            .select_member_property(view, name)
+            .and_then(|selected| {
+                Some(LoopMemberProperty {
+                    property: selected.property?.getter.external_property_identity?,
+                    ty: selected.ty,
+                })
+            })
+            .filter(|size| size.ty == Ty::Int)?;
+        crate::trace_compiler!("resolve", "indices read on {view:?} bounded by {size:?}");
+        Some(IndicesSize { view, size })
     }
 
     /// kotlinc's `WithIndexHandler` iterates the receiver of a `withIndex()` call whose

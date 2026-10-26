@@ -53,6 +53,12 @@ pub struct KspClass {
     /// What `Resolver.mapToJvmSignature` answers, or `None` when the round cannot say, in which
     /// case the host refuses the query.
     pub jvm_signature: Option<String>,
+    /// What `KSClassDeclaration.getAllProperties` lists, or `None` when the round cannot say, in
+    /// which case the host refuses the query.
+    pub all_properties: Option<Vec<KspMember>>,
+    /// What `KSClassDeclaration.getAllFunctions` lists, constructors last, or `None` when the round
+    /// cannot say, in which case the host refuses the query.
+    pub all_functions: Option<Vec<KspMember>>,
 }
 
 impl KspClass {
@@ -109,12 +115,6 @@ pub struct KspLibraryClass {
     /// Whether `class.annotations` lists every annotation the declaration states; when not, the
     /// host refuses the query.
     pub annotations_complete: bool,
-    /// What `KSClassDeclaration.getAllProperties` lists, or `None` when the round cannot say, in
-    /// which case the host refuses the query.
-    pub all_properties: Option<Vec<KspMember>>,
-    /// What `KSClassDeclaration.getAllFunctions` lists, constructors last, or `None` when the round
-    /// cannot say, in which case the host refuses the query.
-    pub all_functions: Option<Vec<KspMember>>,
 }
 
 /// A member `getAllProperties` or `getAllFunctions` lists.
@@ -122,7 +122,11 @@ pub struct KspLibraryClass {
 pub enum KspMember {
     /// The declaration at this index of the classifier's own [`KspClass::declarations`].
     Declared(u32),
-    /// A member the classifier inherits, which the classifier `owner` (a qualified name) declares.
+    /// The declaration at index `index` of the [`KspClass::declarations`] of the module's own
+    /// classifier `owner` (a qualified name), which the classifier inherits.
+    Source { owner: String, index: u32 },
+    /// A member described here, which the classifier `owner` (a qualified name) declares: one the
+    /// classifier inherits from a library, or one the compiler generates for the classifier.
     Inherited {
         owner: String,
         declaration: Box<KspDeclaration>,
@@ -235,10 +239,12 @@ pub struct KspProperty {
     pub extension_receiver: KspTypeSlot,
     /// `None` when the round cannot describe the type.
     pub ty: Option<KspType>,
-    /// Every property has a getter.
-    pub getter: KspAccessor,
+    /// Its getter; a Java field has none.
+    pub getter: Option<KspAccessor>,
     /// A `var`'s setter.
     pub setter: Option<KspAccessor>,
+    /// Whether it has a backing field; `None` when the round cannot say.
+    pub has_backing_field: Option<bool>,
     /// What `Resolver.mapToJvmSignature` answers; `None` when the round cannot say.
     pub jvm_signature: Option<String>,
 }
@@ -501,6 +507,10 @@ pub struct KspType {
     pub declaration: KspTypeDeclaration,
     pub nullable: bool,
     pub arguments: Vec<KspTypeArgument>,
+    /// Whether KSP reports the type with no annotations: source spells it with no type-use
+    /// annotation, or it is the classifier type a constructor returns. Otherwise its annotations
+    /// are not described.
+    pub unannotated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

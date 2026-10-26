@@ -58,6 +58,9 @@ pub(super) fn realize(
                 .and_then(|function| lowered_member_targets.get(&function))
                 .cloned();
             let logical_concrete_params = b.concrete_params.clone();
+            // The supertype member's own parameters, before erasure to carriers: a slot it already
+            // declares as the value class receives that class's carrier, not its box.
+            let logical_erased_params = b.erased_params.clone();
             let target = b.target_name.clone().unwrap_or_else(|| b.name.clone());
             if let Some(m) = mangle_map.get(&(c.fq_name, target.clone(), b.concrete_params.len())) {
                 b.target_name = Some(m.clone());
@@ -199,17 +202,25 @@ pub(super) fn realize(
                     adapter.result = Some(BridgeResultAdapter::Unbox(plan));
                     b.erased_ret = erase(&b.erased_ret, callable_under);
                 }
-            } else if !owner_is_value && bridge_mentions_vc {
+            } else if bridge_mentions_vc {
                 // A bridge (mangled `f-<hash>` OR same-name) delegating to a concrete method with a
                 // VALUE-CLASS PARAM, where the bridge's OWN param is the erased-generic `Object`: a
                 // generic supertype method (`I<Result>.foo(T)`) keeps its `foo(Object)` bridge signature,
                 // but the incoming arg is a BOXED `X` (the generic call site boxes). Record each such
                 // param to `checkcast` + `unbox-impl`, then erase the concrete param to its underlying for
                 // the delegated call. A param already AT its underlying (bridge param not a reference —
-                // a primitive-underlying value class) needs no unbox.
-                if let Some(parameters) = bridge_parameters::unbox_arguments(b, callable_under) {
-                    adapter.parameters = parameters;
+                // a primitive-underlying value class) needs no unbox. A value class's own member plans
+                // its arguments from its lowered static below.
+                if !owner_is_value || lowered_member_target.is_none() {
+                    if let Some(parameters) = bridge_parameters::unbox_arguments(b, callable_under)
+                    {
+                        adapter.parameters = parameters;
+                    }
                 }
+                // The supertype member's own value-class parameter (`put(id: Id, value: T)`) mangles
+                // its name and arrives as the carrier, on a box exactly as on any other class: the
+                // bridge answers to `put-<hash>(ILjava/lang/Object;)`, and only the erased `T` slot
+                // is unboxed for the target.
                 naming.answer_to_value_class_parameters(b, &target);
             }
             if let Some((target_name, target_params, target_ret)) = lowered_member_target {
@@ -223,7 +234,7 @@ pub(super) fn realize(
                 );
                 adapter.parameters = logical_concrete_params
                     .iter()
-                    .zip(&b.erased_params)
+                    .zip(&logical_erased_params)
                     .zip(physical_params)
                     .map(|((logical, erased), physical)| {
                         logical
@@ -232,6 +243,10 @@ pub(super) fn realize(
                             .filter(|classifier| {
                                 under.contains_key(classifier)
                                     && is_ref(erased)
+                                    && bridge_parameters::carried_value_class(
+                                        erased,
+                                        callable_under,
+                                    ) != Some(*classifier)
                                     && physical.non_null().obj_internal() != Some(*classifier)
                             })
                             .map(|classifier| {

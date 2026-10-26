@@ -1,3 +1,4 @@
+use crate::ast::{Expr, ExprId, File};
 use crate::libraries::{CallSig, SemanticPlatform};
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TyKind};
@@ -6,6 +7,44 @@ use super::{
     call_argument_parameter_indices, generic_member_lambda_params, module_member_lambda_params,
     ContextualCallShape, GenericMemberPlan,
 };
+
+/// The source parameter layout of one expected function shape.
+pub(super) struct FunctionLambdaInputLayout<'a> {
+    pub(super) contexts: &'a [Ty],
+    pub(super) receiver: Option<Ty>,
+    pub(super) values: &'a [Ty],
+}
+
+impl<'a> FunctionLambdaInputLayout<'a> {
+    pub(super) fn new(
+        file: &File,
+        expression: ExprId,
+        parameters: &'a [Ty],
+        context_count: usize,
+        has_receiver: bool,
+    ) -> Self {
+        let contexts = context_count.min(parameters.len());
+        let remaining = &parameters[contexts..];
+        // A regular anonymous function may spell an extension receiver as its first parameter.
+        // A literal or a function with its own written receiver keeps that receiver implicit.
+        let physical_parameters = file.anon_fun_lambdas.contains(&expression.0)
+            && !file.anon_fun_receivers.contains_key(&expression.0)
+            && matches!(file.expr(expression), Expr::Lambda { params, .. } if params.len() == remaining.len());
+        let (receiver, values) = if has_receiver && !physical_parameters {
+            match remaining.split_first() {
+                Some((&receiver, values)) => (Some(receiver), values),
+                None => (None, remaining),
+            }
+        } else {
+            (None, remaining)
+        };
+        Self {
+            contexts: &parameters[..contexts],
+            receiver,
+            values,
+        }
+    }
+}
 
 /// Contextual lambda shapes supplied by one selected module member, in source-argument order.
 pub(super) struct MemberLambdaShape {

@@ -3,16 +3,19 @@
 //! described yet: an annotation class's, `kotlin.Any`'s, and an empty interface's; another
 //! classifier's follow ordering and override rules not pinned yet.
 //!
-//! KSP2 lists a library classifier's functions, properties, constructors, then nested classifiers,
-//! each in declaration order, and the inherited members after the classifier's own, constructors
-//! last. It derives a library declaration's modifiers from its facts: the visibility, the modality
-//! (an accessor's only when it is not `open`), `infix`, and `operator` together with `override`.
+//! KSP2 lists a library classifier's functions, properties, constructors, static properties, then
+//! nested classifiers, each in declaration order, and the inherited members after the classifier's
+//! own, constructors last and static properties left out. It derives a library declaration's
+//! modifiers from its facts: the visibility, the modality (an accessor's only when it is not
+//! `open`), `infix`, and `operator` together with `override`.
 
 use krusty_plugin_ir::{
-    KspAccessor, KspDeclaration, KspDeclarationOrigin, KspFunction, KspFunctionKind, KspMember,
-    KspModifier, KspOrigin, KspParameter, KspProperty, KspType, KspTypeArgument, KspTypeSlot,
+    KspAccessor, KspAnnotation, KspDeclaration, KspDeclarationOrigin, KspFunction, KspFunctionKind,
+    KspMember, KspModifier, KspOrigin, KspParameter, KspProperty, KspType, KspTypeArgument,
+    KspTypeSlot,
 };
 
+use super::super::annotations::Annotations;
 use super::super::type_model::{class_type, qualified_name, TypeParameterIds, TypeParameterScope};
 use super::KspLibraries;
 use crate::fx_hash::HashSet;
@@ -46,10 +49,12 @@ impl KspLibraries<'_> {
         if !ordering_is_pinned(class, header, &declared) {
             return LibraryMembers::default();
         }
+        let annotations = Annotations::new(self.analysis);
         let view = MemberView {
             class,
             origin: origin(header),
             scope,
+            annotations: &annotations,
         };
         let mut declarations = Vec::new();
         let mut own_functions = Vec::new();
@@ -69,6 +74,12 @@ impl KspLibraries<'_> {
                 view.constructor(constructor, declared.constructors.len() == 1),
             ));
         }
+        declarations.extend(
+            declared
+                .static_properties
+                .iter()
+                .map(|property| KspDeclaration::Property(Box::new(view.static_property(property)))),
+        );
         declarations.extend(
             declared
                 .nested
@@ -102,6 +113,7 @@ impl KspLibraries<'_> {
             || declared
                 .properties
                 .iter()
+                .chain(&declared.static_properties)
                 .any(|property| property.annotated);
         (!annotated).then_some(declared)
     }
@@ -127,6 +139,7 @@ impl KspLibraries<'_> {
             property_names.insert(&property.name);
         }
         let ids = TypeParameterIds::default();
+        let annotations = Annotations::new(self.analysis);
         let mut supertypes = Vec::new();
         let mut current = single_supertype(class, header)?;
         while let Some(supertype) = current {
@@ -146,6 +159,7 @@ impl KspLibraries<'_> {
                 class: *supertype,
                 origin: origin(header),
                 scope: &scope,
+                annotations: &annotations,
             };
             for function in &members.functions {
                 if function.visibility == Visibility::Private {
@@ -188,6 +202,7 @@ fn ordering_is_pinned(
     let declares_nothing = declared.functions.is_empty()
         && declared.properties.is_empty()
         && declared.constructors.is_empty()
+        && declared.static_properties.is_empty()
         && declared.nested.is_empty();
     match header.kind {
         TypeKind::Annotation => true,
@@ -221,6 +236,7 @@ struct MemberView<'a> {
     class: TypeName,
     origin: KspOrigin,
     scope: &'a TypeParameterScope,
+    annotations: &'a Annotations<'a>,
 }
 
 impl MemberView<'_> {
@@ -261,7 +277,9 @@ impl MemberView<'_> {
             true => KotlinModality::Abstract,
             false => property.modality,
         };
-        let accessor = |modality: KotlinModality, parameter: Option<(String, Vec<_>)>| {
+        let accessor = |modality: KotlinModality,
+                        annotations: Vec<KspAnnotation>,
+                        parameter: Option<(String, Vec<_>)>| {
             let mut modifiers = visibility_modifier(property.visibility)
                 .into_iter()
                 .collect::<Vec<_>>();
@@ -271,7 +289,7 @@ impl MemberView<'_> {
             KspAccessor {
                 origin,
                 modifiers: Some(modifiers),
-                annotations: Vec::new(),
+                annotations,
                 parameter,
                 jvm_name: None,
             }
@@ -289,10 +307,49 @@ impl MemberView<'_> {
             type_parameters: Some(Vec::new()),
             extension_receiver: KspTypeSlot::Absent,
             ty: self.scope.ty(property.ty),
-            getter: accessor(getter_modality, None),
-            setter: property
-                .is_var
-                .then(|| accessor(property.modality, Some(("value".to_string(), Vec::new())))),
+            getter: Some(accessor(
+                getter_modality,
+                property
+                    .getter_annotations
+                    .iter()
+                    .map(|annotation| {
+                        self.annotations
+                            .ksp_annotation(annotation, false, true, false)
+                    })
+                    .collect(),
+                None,
+            )),
+            setter: property.is_var.then(|| {
+                accessor(
+                    property.modality,
+                    Vec::new(),
+                    Some(("value".to_string(), Vec::new())),
+                )
+            }),
+            // KSP2 reads a Java annotation element as a property with a field; a Kotlin library
+            // property's answer depends on what its metadata records, which is not read yet.
+            has_backing_field: property.from_java_method.then_some(true),
+            jvm_signature: None,
+        }
+    }
+
+    /// A static property, a Java field, which has no accessors.
+    fn static_property(&self, property: &DeclaredProperty) -> KspProperty {
+        let mut modifiers = declaration_modifiers(property.visibility, property.modality);
+        modifiers.push(KspModifier::JavaStatic);
+        KspProperty {
+            name: property.name.clone(),
+            is_mutable: property.is_var,
+            origin: KspDeclarationOrigin::Library(self.origin),
+            line: None,
+            annotations: Vec::new(),
+            modifiers: Some(modifiers),
+            type_parameters: Some(Vec::new()),
+            extension_receiver: KspTypeSlot::Absent,
+            ty: self.scope.ty(property.ty),
+            getter: None,
+            setter: None,
+            has_backing_field: Some(true),
             jvm_signature: None,
         }
     }

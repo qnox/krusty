@@ -39,6 +39,7 @@ mod enum_entries;
 mod enum_reflection;
 mod failure;
 mod for_each;
+mod indices_membership;
 mod inline_body_plan;
 #[cfg(test)]
 mod invoke_tests;
@@ -688,6 +689,7 @@ impl BodyFirChecker<'_> {
             | FirExprKind::NullablePrimitiveComparison { .. }
             | FirExprKind::NullableNumericComparison { .. }
             | FirExprKind::InRange { .. }
+            | FirExprKind::IndicesContainment { .. }
             | FirExprKind::IndexedRead { .. }
             | FirExprKind::IndexedWrite { .. }
             | FirExprKind::SafeCall { .. }
@@ -1930,7 +1932,10 @@ impl BodyFirChecker<'_> {
                 }
                 Expr::Call { callee, args } => match self.file.expr(*callee) {
                     Expr::Member { receiver, .. } => {
-                        self.qualified_call(expression, *receiver, args)?
+                        match self.indices_membership(expression, *receiver, args)? {
+                            Some(membership) => membership,
+                            None => self.qualified_call(expression, *receiver, args)?,
+                        }
                     }
                     Expr::IntLit(_)
                     | Expr::LongLit(_)

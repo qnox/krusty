@@ -341,10 +341,8 @@ module=6:stdlib public package=2[6:kotlin,4:math] declaration=1[8:withSign] memb
 module=6:stdlib public package=2[6:kotlin,4:test] declaration=2[19:AsserterContributor,10:contribute] member=5291997857330358466 mask=0
 module=6:stdlib public package=2[6:kotlin,4:test] declaration=2[8:Asserter,4:fail] member=11016648256636109101 mask=0
 module=6:stdlib public package=2[6:kotlin,4:test] declaration=2[8:Asserter,4:fail] member=13268130985060033788 mask=0
-module=6:stdlib public package=2[6:kotlin,4:text] declaration=1[11:intToString] member=10764939732364834189 mask=0
 module=6:stdlib public package=2[6:kotlin,4:text] declaration=1[12:insertString] member=1389012328624175106 mask=0
 module=6:stdlib public package=2[6:kotlin,4:text] declaration=1[12:isISOControl] member=17943489282247053696 mask=0
-module=6:stdlib public package=2[6:kotlin,4:text] declaration=1[12:longToString] member=8646438622416355284 mask=0
 module=6:stdlib public package=2[6:kotlin,4:text] declaration=1[13:nativeIndexOf] member=14534778597091083938 mask=0
 module=6:stdlib public package=2[6:kotlin,4:text] declaration=1[13:nativeIndexOf] member=9700176685769910949 mask=0
 module=6:stdlib public package=2[6:kotlin,4:text] declaration=1[14:isLowSurrogate] member=15076346129281003515 mask=0

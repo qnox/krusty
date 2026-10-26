@@ -19,7 +19,7 @@ use crate::fir::FirRangeOperation;
 use crate::ir::{Callee, ExprId, IrBinOp, IrConst, IrExpr, IrIntrinsic, IrTypeOp};
 use crate::types::Ty;
 
-use super::header::{moved_bound, Direction};
+use super::header::Direction;
 use super::{constant_bound, integral_value, CounterLoopStyle, HeaderInlining, Realizer};
 
 /// A checked membership test in a range literal, compared in `comparison`.
@@ -217,7 +217,7 @@ impl Realizer<'_> {
             FirRangeOperation::Through => {
                 let exclusive = (self.style == CounterLoopStyle::JavaLike
                     && !matches!(comparison, Ty::Float | Ty::Double))
-                .then(|| moved_bound(self.ir, end, Direction::Increasing))
+                .then(|| self.moved_bound(end, Direction::Increasing))
                 .flatten();
                 Bounds {
                     lower: start,
@@ -281,7 +281,8 @@ impl Realizer<'_> {
         }
         if let Some(constant) = constant_bound(self.ir, operand) {
             if let Some(converted) = converted_constant(&constant, target) {
-                return self.add_checked(IrExpr::Const(converted), target);
+                let converted = self.add_checked(IrExpr::Const(converted), target);
+                return self.derived_constant(operand, converted);
             }
         }
         self.add_checked(

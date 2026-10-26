@@ -20,6 +20,24 @@ pub(super) fn terminal_call(exprs: &[IrExpr], mut expression: ExprId) -> Option<
     }
 }
 
+/// Find the declaration producer through operations that retain its value. A null assertion
+/// checks the same slot; an expanded inline region has replaced the declaration producer.
+pub(super) fn declaration_result_call(ir: &IrFile, mut expression: ExprId) -> Option<ExprId> {
+    loop {
+        if ir.inline_regions.contains(&expression) {
+            return None;
+        }
+        match ir.exprs.get(expression as usize)? {
+            IrExpr::Call { .. } | IrExpr::MethodCall { .. } => return Some(expression),
+            IrExpr::Block {
+                value: Some(value), ..
+            } => expression = *value,
+            IrExpr::NotNullAssert { operand, .. } => expression = *operand,
+            _ => return None,
+        }
+    }
+}
+
 fn realized_call_result(ir: &IrFile, call: ExprId) -> Option<Ty> {
     let expression = ir.exprs.get(call as usize)?;
     let IrExpr::Call { callee, .. } = expression else {
@@ -99,10 +117,7 @@ pub(super) fn realize_call_result_boundaries(ir: &mut IrFile) {
             _ => None,
         })
         .filter_map(|(coercion, expression, target)| {
-            if ir.inline_regions.contains(&expression) {
-                return None;
-            }
-            let call = terminal_call(&ir.exprs, expression)?;
+            let call = declaration_result_call(ir, expression)?;
             let declared = *ir.call_declared_ret.get(&call)?;
             let physical = erased_result_slot(ir, call, declared)?;
             let physical_jvm = crate::jvm::physical_type::ir_ty_to_jvm(&physical);
@@ -251,5 +266,89 @@ fn check_enhanced_result_before_unbox(ir: &mut IrFile) {
         if let IrExpr::NotNullAssert { operand, .. } = &mut ir.exprs[coercion as usize] {
             *operand = produced;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{IrFunction, NullCheck};
+
+    fn producer() -> (IrFile, ExprId) {
+        let mut ir = IrFile::default();
+        let function = ir.add_fun(IrFunction {
+            name: "produced".to_string(),
+            params: Vec::new(),
+            ret: Ty::obj("java/lang/Object"),
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        let call = ir.add_expr(IrExpr::Call {
+            callee: Box::new(Callee::Local(function)),
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+        ir.call_declared_ret
+            .insert(call, Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any"))));
+        (ir, call)
+    }
+
+    #[test]
+    fn only_the_marked_checked_result_retains_its_declaration_slot() {
+        let (mut ir, call) = producer();
+        let assertions = [0, 1].map(|_| {
+            ir.add_expr(IrExpr::NotNullAssert {
+                operand: call,
+                check: NullCheck::Source,
+            })
+        });
+        for (index, assertion) in assertions.into_iter().enumerate() {
+            let coercion = ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: assertion,
+                type_operand: Ty::String,
+            });
+            if index == 0 {
+                ir.declaration_result_coercions.insert(coercion);
+            }
+        }
+        realize_call_result_boundaries(&mut ir);
+        assert_eq!(
+            ir.physical_types.get(&assertions[0]),
+            Some(&Ty::nullable(Ty::obj("java/lang/Object")))
+        );
+        assert!(!ir.physical_types.contains_key(&assertions[1]));
+        for assertion in assertions {
+            assert!(
+                matches!(ir.expr(assertion), IrExpr::NotNullAssert { operand, .. } if *operand == call)
+            );
+        }
+    }
+
+    #[test]
+    fn a_checked_inline_region_keeps_its_replacement_producer_boundary() {
+        let (mut ir, call) = producer();
+        let region = ir.add_expr(IrExpr::Block {
+            stmts: Vec::new(),
+            value: Some(call),
+        });
+        ir.inline_regions.insert(region);
+        let assertion = ir.add_expr(IrExpr::NotNullAssert {
+            operand: region,
+            check: NullCheck::Source,
+        });
+        let coercion = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: assertion,
+            type_operand: Ty::String,
+        });
+        ir.declaration_result_coercions.insert(coercion);
+        realize_call_result_boundaries(&mut ir);
+        assert!(!ir.physical_types.contains_key(&assertion));
+        assert!(
+            matches!(ir.expr(assertion), IrExpr::NotNullAssert { operand, .. } if *operand == region)
+        );
     }
 }

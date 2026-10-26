@@ -95,12 +95,14 @@ fn expression_dag_clone_preserves_source_when_origin() {
         branches: vec![(Some(condition), one), (None, two)],
     });
     file.whens.source_lines.insert(when, 7);
+    file.whens.elvises.insert(when, 3);
 
     let (copy, _) = clone_expression_dag(&mut file, when);
 
     assert_ne!(copy, when);
     assert_eq!(file.whens.source_lines.get(&when), Some(&7));
     assert_eq!(file.whens.source_lines.get(&copy), Some(&7));
+    assert_eq!(file.whens.elvises.get(&copy), Some(&3));
 }
 
 #[test]
