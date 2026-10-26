@@ -407,26 +407,80 @@ fn independent_capture_holders(
 /// a call-site template. kotlinc generates a class declared there from that file's own classes, so
 /// no class of this file declares it.
 fn foreign_scope(ir: &IrFile, scope: crate::ir::IrEnclosure) -> bool {
+    scope_within(ir, scope, &|function| {
+        ir.foreign_inline_templates.contains(&function)
+    })
+}
+
+/// The inline function of another source file whose code declares `class`. That file writes the
+/// class; this one compiles it only when it inlines the function from its compiled body. A copy
+/// a call in this file specialized from such a class is this file's own.
+pub(crate) fn foreign_declaration(
+    ir: &IrFile,
+    class: &crate::ir::IrClass,
+) -> Option<crate::ir::FunId> {
+    let call_site_copy = class
+        .lambda
+        .as_ref()
+        .is_some_and(|lambda| ir.specialized_functions.contains_key(&lambda.invoke))
+        || ir
+            .class_id_by_name(class.fq_name)
+            .is_some_and(|id| ir.specialized_anonymous_classes.contains_key(&id));
+    if call_site_copy {
+        return None;
+    }
+    enclosing_function(ir, class.enclosure?, &|function| {
+        ir.foreign_inline_templates.contains(&function)
+    })
+}
+
+/// Whether `class` is declared in another source file's code, which writes it.
+pub(crate) fn declared_by_another_file(ir: &IrFile, class: &crate::ir::IrClass) -> bool {
+    foreign_declaration(ir, class).is_some()
+}
+
+/// Whether `scope` is code of a function `declares` selects, or is nested in one through
+/// enclosing lambdas and classes.
+pub(crate) fn scope_within(
+    ir: &IrFile,
+    scope: crate::ir::IrEnclosure,
+    declares: &dyn Fn(crate::ir::FunId) -> bool,
+) -> bool {
+    enclosing_function(ir, scope, declares).is_some()
+}
+
+/// The function `declares` selects whose code `scope` is, or is nested in.
+fn enclosing_function(
+    ir: &IrFile,
+    scope: crate::ir::IrEnclosure,
+    declares: &dyn Fn(crate::ir::FunId) -> bool,
+) -> Option<crate::ir::FunId> {
     use crate::ir::IrEnclosure;
-    match scope {
-        IrEnclosure::Function(function) => ir.foreign_inline_templates.contains(&function),
-        IrEnclosure::Lambda(function) => ir
-            .lambda_enclosures
-            .get(&function)
-            .is_some_and(|&outer| foreign_scope(ir, outer)),
+    let function = match scope {
+        IrEnclosure::Function(function) if !declares(function) => {
+            // A method of a local, anonymous or lambda class is code of the scope its class is
+            // declared in.
+            let class = ir
+                .classes
+                .iter()
+                .find(|class| class.methods.contains(&function))?;
+            return enclosing_function(ir, class.enclosure?, declares);
+        }
+        IrEnclosure::Function(function) => function,
+        IrEnclosure::Lambda(function) => {
+            return enclosing_function(ir, *ir.lambda_enclosures.get(&function)?, declares);
+        }
         IrEnclosure::ClassInitializer(class)
         | IrEnclosure::Classifier(class)
-        | IrEnclosure::Constructor { class, .. } => ir.classes[class as usize]
-            .enclosure
-            .is_some_and(|outer| foreign_scope(ir, outer)),
-        IrEnclosure::PropertyAccessor { property, setter } => {
-            ir.foreign_inline_templates
-                .contains(&crate::jvm::ir_emit::property_accessor_function(
-                    ir, property, setter,
-                ))
+        | IrEnclosure::Constructor { class, .. } => {
+            return enclosing_function(ir, ir.classes[class as usize].enclosure?, declares);
         }
-        IrEnclosure::File => false,
-    }
+        IrEnclosure::PropertyAccessor { property, setter } => {
+            crate::jvm::ir_emit::property_accessor_function(ir, property, setter)
+        }
+        IrEnclosure::File => return None,
+    };
+    declares(function).then_some(function)
 }
 
 /// The source name of a named local class: the last segment of its checked naming provenance.

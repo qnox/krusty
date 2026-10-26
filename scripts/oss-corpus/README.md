@@ -1,8 +1,8 @@
 # Top-projects conformance corpus
 
-The `oss corpus` workflow (`.github/workflows/oss-corpus.yml`, manual trigger only) builds the
-most-starred Kotlin projects listed in `projects.tsv`, each from a pinned commit with its own
-Gradle build:
+The `oss corpus` workflow (`.github/workflows/oss-corpus.yml`, nightly on master and on demand,
+never on pull requests) builds the most-starred Kotlin projects listed in `projects.tsv`, and Now
+in Android as the Android sample, each from a pinned commit with its own Gradle build:
 
 1. **Reference:** a plain build, which compiles with kotlinc.
 2. **krusty:** the same build with the krusty Gradle plugin applied by `krusty.init.gradle`. The
@@ -18,21 +18,40 @@ listed out of the checkout, wherever a task writes them, after checking that eac
 task inside the Gradle root; the next build therefore starts without them. `compare.py` compares
 the class files of every compile task the reference build listed, byte for byte, and reports apart
 a listed task kotlinc wrote no class for. A compile task the plugin leaves to kotlinc (an
-unsupported compiler plugin or option) counts as a miss, with the plugin's reason. `summarize.py`
-turns the per-project results into the run's summary table.
+unsupported compiler plugin or option) counts as a miss, with the plugin's reason; a compile krusty
+fails counts as a miss with the first error it logged. Android modules take part only in a project
+that names a variant in `projects.tsv`, and then only that variant's compiles.
+
+`summarize.py` turns the per-project results into the run's report: stars, Kotlin and Java lines,
+compilations built, identical classes, the reason for every miss, and the Gradle and compiler
+plugins the corpus uses. The nightly run, and a manual run with `publish` set, records the results
+on the `corpus-results` branch with `publish.py`: `README.md` is the scoreboard, `projects/<name>/`
+holds each project's latest result (a project a run could not measure keeps its previous one), and
+`history.tsv` gets one line per project per run.
 
 Setup fails fast: a failed fetch, a checkout that is not the pinned commit, a patch that does not
 apply, or a Kotlin version pin that does not match exactly one assignment (`pin.py`) stops the run
-before either build. `test_compare.py` and `test_setup.py` cover the comparison, the output
-inventory, the pin rewrite and the setup failures.
+before either build. `test_compare.py`, `test_setup.py`, `test_summarize.py` and `test_publish.py`
+cover the comparison, the output inventory, the pin rewrite, the setup failures, the report and the
+results branch.
 
 `run.sh` rewrites each project's Kotlin version pin to the newest release in `kotlin-versions`.
-Two projects carry a patch for that bump:
+These projects carry a patch for that bump:
 
 - `Maestro`: `JvmTarget` moved to `org.jetbrains.kotlin.gradle.dsl`, and the Android app module is
   left out of the build.
 - `moshi`: kotlinc 2.4 warns that `-Xannotation-default-target=param-property` is redundant, and
   the build treats warnings as errors.
+- `kotlinx.coroutines` and `ktor`: Kotlin 2.4 removed the ABI validation DSL their build logic
+  uses, so ABI validation is left out. kotlinx.coroutines also stops treating Kotlin 2.4
+  deprecation warnings as errors, and ktor drops an override of the removed `withWasm()`.
+- `okhttp`: Kotlin 2.4 infers `kotlin-test-junit5` beside the declared `kotlin-test-junit`; the
+  inference is turned off.
+- `okhttp` and `okio`: the Burst compiler plugin moves to a release built for Kotlin 2.4.
+
+Only the main build is measured: buildSrc and included builds are build logic, and the init scripts
+leave them alone. Gradle runs without the configuration cache and isolated projects, since the init
+scripts read every project of the build.
 
 Run one project locally with:
 
