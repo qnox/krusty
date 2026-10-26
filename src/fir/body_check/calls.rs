@@ -2491,13 +2491,14 @@ impl BodyFirChecker<'_> {
                 operands,
             );
         }
-        self.source_member_operator_call_on_value(
+        let mut call = self.source_member_operator_call_on_value(
             expression,
             convention,
             dispatch_receiver,
             operands,
-        )
-        .map(FirExprKind::Call)
+        )?;
+        self.guard_operator_extension_receiver(receiver, &mut call)?;
+        Ok(FirExprKind::Call(call))
     }
 
     pub(super) fn source_member_operator_call_on_value(
@@ -2731,6 +2732,7 @@ impl BodyFirChecker<'_> {
                 }
             }
         }
+        let receiver_source = receiver;
         let receiver = FirReceiver {
             value: self.expression(receiver)?,
             conversion: None,
@@ -2763,23 +2765,27 @@ impl BodyFirChecker<'_> {
             let dispatch_receiver = self
                 .materialize_implicit_receiver(cause, span, &dispatch)?
                 .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?;
-            return Ok(FirCall {
+            let mut call = FirCall {
                 target: selected.target,
                 dispatch_receiver: Some(dispatch_receiver),
                 extension_receiver: Some(receiver),
                 parameter_types,
                 arguments: arguments.into_boxed_slice(),
                 substitutions: Box::new([]),
-            });
+            };
+            self.guard_operator_extension_receiver(receiver_source, &mut call)?;
+            return Ok(call);
         }
-        Ok(FirCall {
+        let mut call = FirCall {
             target: selected.target,
             dispatch_receiver: (!selected.extension).then_some(receiver),
             extension_receiver: selected.extension.then_some(receiver),
             parameter_types,
             arguments: arguments.into_boxed_slice(),
             substitutions: Box::new([]),
-        })
+        };
+        self.guard_operator_extension_receiver(receiver_source, &mut call)?;
+        Ok(call)
     }
 
     pub(super) fn source_member_statement_operator_on_value(

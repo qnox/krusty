@@ -85,6 +85,44 @@ impl Checker<'_> {
         }
     }
 
+    /// An operator convention's explicit receiver (`map[k] = v`, `list += x`, `map + pair`) is the
+    /// argument of the selected extension's receiver parameter, guarded like a written call's.
+    pub(super) fn narrow_operator_receiver(
+        &mut self,
+        receiver: ExprId,
+        call: &super::ResolvedCall,
+    ) {
+        let (declared, applied) = match call {
+            super::ResolvedCall::Extension(extension) => (
+                extension
+                    .callable
+                    .generic_sig
+                    .as_ref()
+                    .and_then(|signature| signature.receiver),
+                extension.receiver,
+            ),
+            super::ResolvedCall::MemberExtension {
+                generic_sig,
+                extension_receiver,
+                ..
+            } => (
+                generic_sig
+                    .as_ref()
+                    .and_then(|signature| signature.receiver),
+                *extension_receiver,
+            ),
+            _ => return,
+        };
+        // The receiver an operator convention records is the operand as written; a declared
+        // receiver that rejects `null` commits a Java operand to its non-null face.
+        self.narrow_extension_receiver(
+            receiver,
+            receiver,
+            declared,
+            applied.platform_lower_bound(),
+        );
+    }
+
     /// An enhanced Java result initializing a declaration whose type is inferred from it.
     ///
     /// kotlinc's expected type there is the declaration's own type, which is the initializer's
