@@ -4526,6 +4526,9 @@ pub(crate) fn finalized_streamed_signature_index(
             {
                 skip_classifier!(stub.id);
             }
+            if let Some(name) = &classifier.declaration_name {
+                index.publish_classifier_declaration_name(stub.id, name.clone());
+            }
             continue;
         }
         let declaration = headers
@@ -4663,6 +4666,9 @@ pub(crate) fn finalized_streamed_signature_index(
                 stub.id,
             );
             skip_classifier!(stub.id);
+        }
+        if let Some(name) = &classifier.declaration_name {
+            index.publish_classifier_declaration_name(stub.id, name.clone());
         }
     }
     type_parameter_publication::publish_source_declarations(

@@ -695,6 +695,7 @@ mod tests {
 
     fn type_shape(is_public: bool) -> LibraryType {
         LibraryType {
+            declaration_name: None,
             is_kotlin: true,
             is_data: false,
             access: if is_public {

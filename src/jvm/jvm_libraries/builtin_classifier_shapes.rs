@@ -17,6 +17,7 @@ pub(super) fn mapped_builtin_signature(internal: TypeName) -> Option<LibraryType
         })
         .collect();
     Some(LibraryType {
+        declaration_name: None,
         is_kotlin: true,
         is_data: false,
         access: crate::libraries::ClassifierAccess::Public,
@@ -168,6 +169,7 @@ pub(super) fn builtin_library_type(
         .collect::<Vec<_>>();
     let callable_signature = callable_signatures.first().copied();
     LibraryType {
+        declaration_name: None,
         is_kotlin: true,
         is_data: false,
         access,

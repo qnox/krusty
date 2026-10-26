@@ -1,5 +1,14 @@
 # krusty — implementation plan
 
+## Classifier declaration-name handoff
+
+Retain an optional declaration-owned package/owner and exact segment across source bootstrap,
+resolved headers, normalized dependency shapes, module symbols, common IR and backend freezing.
+Unknown, known top-level and known nested declarations stay distinct; lexical ownership does not
+imply enclosing-instance capture. Snapshot and provider tests constrain the handoff. Consuming this
+fact in JVM `InnerClasses`, cross-file owner tables and metadata class IDs is a separate follow-up;
+this phase leaves emission unchanged.
+
 JVM return consumers now use authenticated declaration-result slots across reference-preserving
 null assertions. Value-class refinement shares that producer boundary, while inline and suspension
 owners keep their existing result materialization. Full classfile/runtime controls cover ordinary
@@ -5576,6 +5585,10 @@ regress.
     a reified `when` branch of the join's own class cast again; a copy regenerates the objects its
     methods name, specializes a suspend lambda and every type argument, and drops its initializer's
     marker: 6 more box files are byte-identical on 2.4.21 (4,025 to 4,031) and none regresses.
+    ✓ Non-public callees of another file (`NonPublicCallee`): the body reaches its file's private
+    functions through its class's accessors, and another file's internal member template takes
+    its module-mangled JVM name for the frame marker: 17 more box files are byte-identical on
+    2.4.21 (4,031 to 4,048) and none regresses.
     ✓ Literals with non-local jumps (`NonLocalJumpInLambda`): a lambda that returns from its caller
     or breaks or continues a loop around the call is inlined from the compiled body through the
     MethodInliner port's marked returns, and a `tailrec` self-call returned from such a lambda
@@ -5583,9 +5596,8 @@ regress.
     are byte-identical on 2.4.21 (the four `inlinedBreakContinue` shapes and
     `secondaryConstructors/withNonLocalReturn`), none regresses, and all 7,184 applicable files
     run.
-    ☐ `$default` calls, non-public callees of another file, suspend callers and callees,
-    `crossinline` parameters, calls in default arguments, and callee bodies with local classes or
-    enum switches.
+    ☐ `$default` calls, suspend callers and callees, `crossinline` parameters, calls in default
+    arguments, and callee bodies with local classes or enum switches.
 - ☐ 7. Delete `InlineBodyPlan` and its resolver/FIR threading once the coroutine state machine runs
   on inlined bytecode (the plans exist only to reach IR before `lower_suspend`).
 
@@ -6045,6 +6057,13 @@ checked argument types nor callable selection are rewritten to obtain a JVM cast
 reference controls cover source dependent bounds and independently bounded dependency slots,
 with width, Object, exact-wrapper and runtime controls. The dependency inner-constructor frontend
 prerequisite landed in #2593; its declaration normalization remains separate from this representation fix (#2590).
+
+## Callable applicability ownership
+
+Syntax-aware callable applicability lives in `resolve/call_applicability`: source argument slots,
+candidate ranks and selected SAM adaptations share one operation across the existing call paths.
+The resolver facade delegates to that owner, preserving parameter mapping and scoring policy.
+Captured input constraints remain tracked separately in #2648 and #2649.
 
 ## Direct projected input diagnostics
 
