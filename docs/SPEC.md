@@ -14272,7 +14272,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   declaration's class as a loop reads it, and the operands ordered and stored as for a range
   literal (`make().indices` is read before a value with side effects). `!in` keeps its negation of
   the test, as kotlinc keeps its `not()` call. A nullable value (`IntRange.contains(Int?)`) and a
-  user `indices` property call `contains`. (`tests/indices_contains_e2e.rs`.)
+  user `indices` property call `contains`. An unsigned array's `indices` has the same role, so
+  `i in uints.indices` reads its bound through the value class's own `size`
+  (`UIntArray.getSize-impl`), as kotlinc does. (`tests/indices_contains_e2e.rs`,
+  `tests/unsigned_array_indices_e2e.rs`.)
 
   kotlinc's `ArrayIndicesHandler` matches `isUnsignedArray()` on the JVM
   (`optimizeLoopsOverUnsignedArrays`) and reads the bound once through
@@ -14291,10 +14294,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `getSize([I)I` that no class declares, which is a missing dependency realization. The Native
   backend stores an unsigned array as its signed carrier, so it realizes that member as the
   carrier's length when the getter's declaring classifier is an unsigned array whose frozen
-  value-class declaration stores a signed primitive array (`is_unsigned_array_carrier_size`). Not yet ported: `xs[i]` and
-  `xs[i] = v` on an unsigned array, which krusty still realizes as the carrier's
-  `iaload`/`iastore` where kotlinc calls `get-pVg5ArA`/`set-VXSXFK8`.
+  value-class declaration stores a signed primitive array (`is_unsigned_array_carrier_size`).
   (`tests/unsigned_array_indices_e2e.rs`.)
+
+- **A subscript on an unsigned array is its value class's own `get`/`set` operator.** Kotlin
+  resolves `xs[i]` to the `get` operator and `xs[i] = v` to the `set` operator of the receiver's
+  class. Only an array classifier's element access is the built-in array operation: the checker
+  takes that rung for a single `Int` index only when the receiver is not declared a value class
+  (`builtin_array_read_element`, `builtin_array_store_element`, through `ty_is_value_class`).
+  `UIntArray`, `UByteArray`, `UShortArray` and `ULongArray` are value classes over the signed
+  arrays, so their subscripts select the stdlib's members and the JVM backend calls them as
+  value-class statics, as kotlinc does: `UIntArray.get-pVg5ArA([II)I` and
+  `UIntArray.set-VXSXFK8([III)V`, and the mangled pair of each other width. The carrier's
+  `iaload`/`iastore` would store the same bits, but is not kotlinc's class file. Compound
+  assignment (`xs[i] += v`), increment and decrement, and a safe-call receiver (`h?.xs[i]`) read
+  and store through the same two members. Without a stdlib an unsigned array has no value-class
+  declaration and keeps the built-in element access. An `Array<UIntArray>` stores each element
+  as its box and its element load leaves the box: the value-class pass unboxes it once where the
+  class's member needs the carrier and keeps it where a reference is wanted, so
+  `back[1][0]` is `aaload`, `unbox-impl`, `get-pVg5ArA` and `val a: Any = back[1]` stays the box.
+  The Native backend stores an unsigned array as its signed carrier, so it realizes that `get`
+  as the carrier's element load and that `set` as its store when the callable's declaring
+  classifier is an unsigned array whose frozen value-class declaration stores a signed primitive
+  array (`unsigned_array_carrier_access`).
+  (`tests/unsigned_array_element_access_e2e.rs`, `tests/unsigned_arrays_e2e.rs`.)
 
 - **A `checkcast` right before an `aastore` is removed, as kotlinc's
   `RedundantCheckcastsBeforeAastoreMethodTransformer` does.** The pass runs after jump negation and
