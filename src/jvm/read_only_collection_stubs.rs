@@ -636,6 +636,8 @@ fn superclass_chain(
                 // A member a generic Kotlin class declares implements its member in the class's
                 // substitution context, so `DBase<T>.set(e: T)` under `DBase<String>` implements
                 // `set(String)`. A generated member has no declaration and only its descriptor.
+                // A suspend declaration's continuation is a real parameter its metadata signature
+                // omits, so it keeps its physical key and implements no non-suspend member.
                 let declaration = (is_kotlin
                     && !info.meta.class_type_parameters.type_params().is_empty()
                     && candidates.iter().any(|stub| stub.name == method.name))
@@ -646,6 +648,7 @@ fn superclass_chain(
                     })
                 })
                 .flatten()
+                .filter(|declaration| !declaration.is_suspend())
                 .and_then(|declaration| declaration.generic_sig.as_ref());
                 let (key, result) = match declaration {
                     Some(signature) => {

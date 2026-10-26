@@ -81,6 +81,15 @@ open class DBase<T> {
 }
 ";
 
+/// A suspend member's continuation is a real JVM parameter, so it implements no `set(String)`.
+const SUSPEND_DEPENDENCY: &str = "package dep
+
+open class DBase<T> {
+    var last: Any? = null
+    suspend fun set(e: T) { last = e }
+}
+";
+
 fn dependency_superclass() -> String {
     format!("class Walk : dep.DBase<String>(), ListIterator<String> {{\n{STRING_MEMBERS}}}\n")
 }
@@ -166,6 +175,41 @@ fn a_generic_dependency_superclass_member_implements_the_member_like_kotlinc() {
         common::expect_box_run(
             &program,
             "read_only_dependency_superclass_member",
+            &[library, common::stdlib_jar()],
+            Some(jdk.as_path()),
+        ),
+        reference,
+    );
+}
+
+#[test]
+fn a_suspend_dependency_superclass_member_leaves_the_throwing_stub_like_kotlinc() {
+    let library = common::kotlinc_lib_out(&[("Dep.kt", SUSPEND_DEPENDENCY)])
+        .expect("reference kotlinc compiles the dependency");
+    assert_classes_match_kotlinc(&dependency_superclass(), std::slice::from_ref(&library));
+
+    let program = format!(
+        "{}
+fun box(): String {{
+    val walk = Walk()
+    return try {{
+        walk.javaClass.getMethod(\"set\", Any::class.java).invoke(walk, \"x\")
+        \"no throw\"
+    }} catch (e: java.lang.reflect.InvocationTargetException) {{
+        if (e.cause is UnsupportedOperationException) \"OK\" else \"${{e.cause}}\"
+    }}
+}}
+",
+        dependency_superclass()
+    );
+    let reference =
+        common::kotlinc_box_result_with_classpath(&program, std::slice::from_ref(&library));
+    assert_eq!(reference, "OK", "kotlinc fixture must succeed");
+    let jdk = common::jdk_modules();
+    assert_eq!(
+        common::expect_box_run(
+            &program,
+            "read_only_suspend_dependency_superclass_member",
             &[library, common::stdlib_jar()],
             Some(jdk.as_path()),
         ),
