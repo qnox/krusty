@@ -13624,6 +13624,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (a block's `}` or an expression body's last line); on a one-line member its single entry covers
   the return. krusty entered on the body's line and mapped no return. Tests:
   `tests/value_class_interface_entry_e2e.rs`.
+- **A hoisted companion property's getter is described under its final JVM name.** The companion
+  getter of a property hoisted onto the outer class maps the property's line (its getter's, when
+  one is written) and names `this`. A value-class result mangles its name (`getZero-eEFUqEU`);
+  krusty described it under the property's unmangled spelling, which names no method, so the
+  mangled getter had no tables, in a value class's companion and an ordinary one's. Tests:
+  `tests/value_class_companion_property_storage_e2e.rs`.
 - **An owner reads its explicit backing field, typed as the field.** Inside the class that
   declares `val a: Any field = V(1)`, a read whose receiver's static type is exactly that class is
   kotlinc's `IrGetField` of the field, not a call of `getA()`: `a.x` over a value class
