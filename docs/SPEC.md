@@ -14372,6 +14372,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   array (`unsigned_array_carrier_access`).
   (`tests/unsigned_array_element_access_e2e.rs`, `tests/unsigned_arrays_e2e.rs`.)
 
+- **An unsigned array as an array element or a type argument is signed as its value class.** A
+  value class is carried as its underlying type only where it is a value of its own; an element
+  of `Array<V>` and an argument of a generic class (`List<V>`, `Map<K, Array<V>>`) hold the box,
+  so the generic `Signature` names `V`'s class, as kotlinc's type mapper does. The signature
+  formatter writes a classifier the primitive-array table names as its JVM array only when the
+  IR does not declare it a value class (`is_value_class_name`), so `UIntArray` takes the ordinary
+  classifier path like a user value class: `List<UIntArray>` is `Ljava/util/List<Lkotlin/UIntArray;>;`
+  and `Array<UIntArray>` is `[Lkotlin/UIntArray;`, which equals its descriptor, so no attribute is
+  written. The carrier spelling (`[[I`, `List<[I>`) named another JVM type than the descriptor and
+  the elements the array holds. A top-level `UIntArray` position keeps its carrier `[I`.
+  (`tests/unsigned_array_type_argument_signature_e2e.rs`.)
+
 - **A `checkcast` right before an `aastore` is removed, as kotlinc's
   `RedundantCheckcastsBeforeAastoreMethodTransformer` does.** The pass runs after jump negation and
   before the final dead-code elimination (`bytecode_passes/checkcasts_before_aastore.rs`, step
