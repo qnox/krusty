@@ -1,5 +1,13 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Source classifier identity publication
+
+The compact header inventory publishes non-local classifier identities through their declaration
+owners and exact retained segments. A dollar inside a declaration name never introduces another
+classifier or owner. Publication retains visibility and declaration order, and excludes local and
+anonymous classifiers as before. Header-boundary regressions check the complete published inventory,
+absence of invented prefixes, and exact nesting for literal-dollar owner/member names.
+
 ## JVM member-class table ownership
 
 Non-local `InnerClasses` rows consume the classifier's retained declaration owner and exact
