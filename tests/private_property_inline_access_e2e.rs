@@ -194,3 +194,50 @@ fn a_private_member_extension_property_in_an_inline_body_matches_kotlinc() {
 fn a_private_member_extension_property_in_an_inline_body_runs() {
     common::expect_box_ok_files_with_stdlib(&EXTENSION_SOURCES, "ExtensionCaller");
 }
+
+/// A private top-level property of a value-class type, read and written from another file's
+/// inline copy through the facade's field accessors. kotlinc does not mangle a `$p` accessor:
+/// `access$setStamp$p(String)` takes the carrier under its plain name.
+const TOP_LEVEL_VALUE_CLASS_DECLARATION: &str = r#"package p
+
+@JvmInline
+value class Stamp(val text: String)
+
+private var stamp = Stamp("a")
+
+internal inline fun restamp(next: String): String {
+    stamp = Stamp(next)
+    return stamp.text
+}
+"#;
+
+const TOP_LEVEL_VALUE_CLASS_CALLER: &str = r#"package p
+
+fun box(): String {
+    val restamped = restamp("b")
+    return if (restamped == "b") "OK" else restamped
+}
+"#;
+
+const TOP_LEVEL_VALUE_CLASS_SOURCES: [(&str, &str); 2] = [
+    ("Stamps.kt", TOP_LEVEL_VALUE_CLASS_DECLARATION),
+    ("StampCaller.kt", TOP_LEVEL_VALUE_CLASS_CALLER),
+];
+
+#[test]
+fn a_private_top_level_value_class_property_in_an_inline_body_matches_kotlinc() {
+    let facade = common::ModuleClassPair::compile(&TOP_LEVEL_VALUE_CLASS_SOURCES, "p/StampsKt");
+    assert!(
+        facade.kotlinc == facade.krusty,
+        "p/StampsKt differs from kotlinc's bytes"
+    );
+    let caller =
+        common::ModuleClassPair::compile(&TOP_LEVEL_VALUE_CLASS_SOURCES, "p/StampCallerKt");
+    let (reference, krusty) = caller.method_code("p/StampCallerKt", "box");
+    assert_eq!(krusty, reference, "p/StampCallerKt.box");
+}
+
+#[test]
+fn a_private_top_level_value_class_property_in_an_inline_body_runs() {
+    common::expect_box_ok_files_with_stdlib(&TOP_LEVEL_VALUE_CLASS_SOURCES, "StampCaller");
+}

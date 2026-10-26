@@ -1249,11 +1249,8 @@ fn realize_property(
             // only the descriptor carries the receiver slot.
             let mut physical = vec![crate::types::Ty::obj_name(classifier)];
             physical.extend(parameters.iter().copied());
-            let mangled_accessor = (private.calls_declared_accessor
-                && module_property_written_accessor_name(property, setter)
-                    .map_err(|()| failure)?
-                    .is_none())
-            .then_some(accessor);
+            let private_accessor =
+                private_accessor_call(property, setter, &private, accessor, failure)?;
             return Ok(RealizedAccessor {
                 call: IrExpr::Call {
                     callee: Box::new(Callee::Static {
@@ -1267,10 +1264,7 @@ fn realize_property(
                 },
                 parameters,
                 semantic,
-                private_accessor: Some(crate::ir::PrivatePropertyAccessorCall {
-                    mangled_accessor,
-                    result: if setter { crate::types::Ty::Unit } else { ty },
-                }),
+                private_accessor: Some(private_accessor),
             });
         }
         Ok(RealizedAccessor {
@@ -1304,11 +1298,18 @@ fn realize_property(
             return Err(failure);
         }
         let facade = static_owner(property.placement, property.source, facades).ok_or(failure)?;
+        let (name, private_accessor) = match private {
+            Some(private) => {
+                let call = private_accessor_call(property, setter, &private, accessor, failure)?;
+                (private.name, Some(call))
+            }
+            None => (accessor, None),
+        };
         Ok(RealizedAccessor {
             call: IrExpr::Call {
                 callee: Box::new(Callee::CrossFile {
                     facade,
-                    name: private.map_or(accessor, |private| private.name),
+                    name,
                     params: parameters.clone(),
                     ret,
                     module_target: None,
@@ -1319,7 +1320,7 @@ fn realize_property(
             },
             parameters,
             semantic: None,
-            private_accessor: None,
+            private_accessor,
         })
     }
 }
@@ -1360,6 +1361,28 @@ fn private_property_accessor(
 struct PrivateAccessor {
     name: String,
     calls_declared_accessor: bool,
+}
+
+/// The facts the value-class pass realizes a private accessor call's JVM name from. A field
+/// accessor (`access$get<X>$p`) keeps its plain name, as kotlinc's does; one that calls a declared
+/// accessor embeds that accessor's mangled name unless `@JvmName` writes it.
+fn private_accessor_call(
+    property: &IrModuleProperty,
+    setter: bool,
+    private: &PrivateAccessor,
+    accessor: String,
+    failure: ModuleRealizationTarget,
+) -> Result<crate::ir::PrivatePropertyAccessorCall, ModuleRealizationTarget> {
+    let written = module_property_written_accessor_name(property, setter).map_err(|()| failure)?;
+    Ok(crate::ir::PrivatePropertyAccessorCall {
+        mangled_accessor: (private.calls_declared_accessor && written.is_none())
+            .then_some(accessor),
+        result: if setter {
+            crate::types::Ty::Unit
+        } else {
+            property.ty
+        },
+    })
 }
 
 /// Resolve each foreign inline template's declaring source unit to its JVM file facade.

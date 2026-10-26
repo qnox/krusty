@@ -1198,7 +1198,13 @@ pub(crate) fn lower_value_classes(
                 ir.declaration_argument_boundaries
                     .contains_key(&(index as ExprId))
             } else {
-                *name = vc_mangle(name, params, ret, &callable_under, true, false);
+                // `private_accessor_calls` already named a private property's accessor.
+                if !ir
+                    .private_property_accessor_calls
+                    .contains_key(&(index as ExprId))
+                {
+                    *name = vc_mangle(name, params, ret, &callable_under, true, false);
+                }
                 false
             };
             for parameter in params.iter_mut() {
